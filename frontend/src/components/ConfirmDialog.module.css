@@ -1,0 +1,80 @@
+/* ConfirmDialog — stacks above other modals (z-index 400) */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.dialog {
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.22);
+  width: 100%;
+  max-width: 400px;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+.message {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #4b5563;
+  line-height: 1.55;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding-top: 0.5rem;
+}
+
+.btnCancel {
+  padding: 0.45rem 1rem;
+  background: #fff;
+  color: #374151;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s;
+  font-family: inherit;
+}
+.btnCancel:hover:not(:disabled) { background: #f9fafb; }
+.btnCancel:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.btnConfirm {
+  padding: 0.45rem 1.1rem;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s;
+  font-family: inherit;
+}
+.btnConfirm:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.btnPrimary { background: #2563eb; color: #fff; }
+.btnPrimary:hover:not(:disabled) { background: #1d4ed8; }
+
+.btnDanger { background: #dc2626; color: #fff; }
+.btnDanger:hover:not(:disabled) { background: #b91c1c; }

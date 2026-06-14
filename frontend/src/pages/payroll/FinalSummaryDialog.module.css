@@ -1,0 +1,292 @@
+/* ── Backdrop ── */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 300;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2vh 1rem;
+  overflow-y: auto;
+}
+
+/* ── Dialog ── */
+.dialog {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.22);
+  width: min(960px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.dialogHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 1rem 1.35rem 0.85rem;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f0fdfa;
+  flex-shrink: 0;
+}
+
+.dialogTitle {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
+  line-height: 1.3;
+}
+
+.dialogSubtitle {
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.headerMeta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.metaSep { color: #d1d5db; }
+
+.statusPill {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #f0fdfa;
+  color: #0f766e;
+  border: 1px solid #99f6e4;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  color: #6b7280;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.closeBtn:hover { background: #ccfbf1; color: #134e4a; }
+
+/* ── Body ── */
+.dialogBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* ── KPI row ── */
+.kpiRow {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.kpiCard {
+  flex: 1;
+  min-width: 110px;
+  padding: 0.65rem 0.85rem;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.kpiValue {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #111827;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpiLabel {
+  font-size: 0.73rem;
+  color: #6b7280;
+  margin-top: 0.2rem;
+}
+
+/* ── Collapsible section ── */
+.section {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.sectionHeader {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  background: #f9fafb;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #111827;
+  border-bottom: 1px solid #e5e7eb;
+}
+.sectionHeader:hover { background: #f3f4f6; }
+
+.sectionToggle {
+  font-size: 0.75rem;
+  color: #6b7280;
+  width: 0.9rem;
+  flex-shrink: 0;
+}
+
+.sectionTitle { flex: 1; }
+
+.sectionBadge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: #e5e7eb;
+  color: #374151;
+  padding: 0.1rem 0.45rem;
+  border-radius: 99px;
+}
+
+.sectionBody {
+  padding: 0.75rem 0.9rem;
+  overflow-x: auto;
+}
+
+/* ── Table ── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  min-width: 400px;
+}
+
+.table th,
+.table td {
+  border: 1px solid #e5e7eb;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #374151;
+  font-size: 0.78rem;
+}
+
+.numCol {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.nameCell { font-weight: 500; }
+.dateCell { color: #6b7280; }
+.finalPayCell { font-weight: 600; color: #111827; }
+.adjCell { color: #065f46; }
+
+/* ── Type pills ── */
+.typePill {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.topupPill {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.capPill {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+/* ── Footer ── */
+.dialogFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 1.35rem;
+  border-top: 1px solid #e5e7eb;
+  background: #f9fafb;
+  flex-shrink: 0;
+  gap: 0.75rem;
+}
+
+.readOnlyLabel {
+  font-size: 0.78rem;
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.closeFooterBtn {
+  padding: 0.4rem 1.1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #374151;
+}
+.closeFooterBtn:hover { background: #f3f4f6; }
+
+/* ── State messages ── */
+.stateMsg {
+  padding: 3rem;
+  text-align: center;
+  color: #6b7280;
+}
+
+.errorBox {
+  padding: 0.75rem 1rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.emptyBox {
+  padding: 2rem;
+  text-align: center;
+  color: #6b7280;
+  border: 2px dashed #e5e7eb;
+  border-radius: 8px;
+}
+
+.emptyHint {
+  font-size: 0.82rem;
+  color: #9ca3af;
+  margin: 0.4rem 0 0;
+}
+
+.emptyMsg {
+  padding: 1rem;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.82rem;
+  font-style: italic;
+}

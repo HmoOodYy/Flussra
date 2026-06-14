@@ -1,0 +1,202 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* ── Header ── */
+.headerRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.pageTitle {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.readOnlyTag {
+  font-size: 0.78rem;
+  color: #9ca3af;
+  font-style: italic;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 99px;
+  background: #f9fafb;
+}
+
+/* ── Filters ── */
+.filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.filterLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+.filterSelect {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  background: #fff;
+}
+
+.fixedBranch {
+  font-size: 0.85rem;
+  color: #6b7280;
+  align-self: flex-end;
+  padding-bottom: 0.1rem;
+}
+
+/* ── Card list ── */
+.cardList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* ── Card ── */
+.card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  flex-wrap: wrap;
+}
+
+.card:hover {
+  border-color: #99f6e4;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.07);
+}
+
+/* ── Card info ── */
+.cardInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  flex: 1;
+  min-width: 200px;
+}
+
+.cardNameRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cardName {
+  font-size: 0.97rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.cardMeta {
+  font-size: 0.8rem;
+  color: #6b7280;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.metaSep { color: #d1d5db; }
+
+.cardStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.statChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 5px;
+  font-size: 0.75rem;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  color: #134e4a;
+}
+
+.statLabel {
+  font-weight: 500;
+  color: #4b5563;
+}
+
+.statValue {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Card actions ── */
+.cardActions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.viewBtn {
+  padding: 0.38rem 0.9rem;
+  background: #0f766e;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.83rem;
+  white-space: nowrap;
+}
+.viewBtn:hover { background: #0d5f59; }
+
+/* ── States ── */
+.stateMsg {
+  color: #6b7280;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.errorMsg {
+  color: #dc2626;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.emptyState {
+  padding: 3rem 1rem;
+  text-align: center;
+  border: 2px dashed #e5e7eb;
+  border-radius: 8px;
+}
+
+.emptyTitle {
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: 0.875rem;
+  color: #9ca3af;
+}

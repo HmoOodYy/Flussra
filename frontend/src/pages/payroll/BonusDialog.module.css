@@ -1,0 +1,226 @@
+/* ── Backdrop ── */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2vh 1rem;
+  overflow-y: auto;
+}
+
+/* ── Dialog ── */
+.dialog {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  width: min(640px, 95vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.dialogHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+  flex-shrink: 0;
+}
+
+.dialogTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.addBtn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+.addBtn:hover { background: #dbeafe; }
+
+.closeBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  color: #6b7280;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  line-height: 1;
+}
+.closeBtn:hover { background: #f3f4f6; color: #111827; }
+
+/* ── Body ── */
+.dialogBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.85rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* ── Summary ── */
+.summary {
+  font-size: 0.82rem;
+  color: #6b7280;
+}
+
+/* ── Table ── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.table th,
+.table td {
+  border: 1px solid #e5e7eb;
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+}
+.table th { background: #f9fafb; font-weight: 600; }
+.driverCell { font-weight: 500; white-space: nowrap; }
+.amtCol { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.actionsCell { white-space: nowrap; }
+
+/* ── Void confirm ── */
+.voidConfirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+}
+
+/* ── Add form ── */
+.addForm {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  background: #f9fafb;
+}
+
+.addFormTitle {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+.addFormFields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: flex-end;
+}
+
+.addFormActions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.1rem;
+}
+
+.formLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+.formSelect,
+.formInput {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.formInput { width: 130px; }
+
+.formError {
+  font-size: 0.82rem;
+  color: #dc2626;
+  margin: 0;
+  width: 100%;
+}
+
+/* ── Buttons ── */
+.primaryBtn {
+  padding: 0.4rem 1rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.primaryBtn:disabled { opacity: 0.5; cursor: default; }
+.primaryBtn:not(:disabled):hover { background: #1d4ed8; }
+
+.cancelBtn {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.cancelBtn:hover { background: #f3f4f6; }
+
+.dangerBtn {
+  padding: 0.25rem 0.55rem;
+  border: 1px solid #fca5a5;
+  border-radius: 4px;
+  background: #fef2f2;
+  color: #dc2626;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.dangerBtn:hover { background: #fee2e2; }
+
+/* ── States ── */
+.stateMsg {
+  padding: 2rem;
+  text-align: center;
+  color: #6b7280;
+}
+
+.errorMsg {
+  padding: 0.75rem 1rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+}
+
+.emptyMsg {
+  padding: 1.25rem;
+  text-align: center;
+  color: #6b7280;
+  font-size: 0.85rem;
+  border: 1px dashed #e5e7eb;
+  border-radius: 8px;
+}

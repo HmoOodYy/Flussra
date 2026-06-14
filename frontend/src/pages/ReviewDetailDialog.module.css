@@ -1,0 +1,323 @@
+/* ReviewDetailDialog — overlay review dialog for InReview payroll periods */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1rem;
+  overflow-y: auto;
+}
+
+.dialog {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+  width: 100%;
+  max-width: 860px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.header {
+  padding: 1.2rem 1.5rem 1rem;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.headerLeft {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.dialogTitle {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.headerMeta {
+  font-size: 0.82rem;
+  color: #6b7280;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.metaSep { color: #d1d5db; }
+
+.closeBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #9ca3af;
+  padding: 0.2rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.closeBtn:hover { color: #374151; background: #f3f4f6; }
+
+/* ── Status badge ── */
+.statusBadge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.15rem 0.55rem;
+  border-radius: 99px;
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+  white-space: nowrap;
+}
+
+/* ── Body ── */
+.body {
+  padding: 1.25rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+/* ── KPI row ── */
+.kpiRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.kpiChip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: 7px;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  min-width: 90px;
+}
+
+.kpiLabel {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: #4b5563;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.kpiValue {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #134e4a;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Section ── */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+/* ── Blockers ── */
+.blockerBox {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  padding: 0.7rem 0.9rem;
+}
+
+.blockerTitle {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #dc2626;
+  margin: 0 0 0.4rem;
+}
+
+.blockerList {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.82rem;
+  color: #7f1d1d;
+}
+
+.blockerList li { margin-bottom: 0.2rem; }
+
+/* ── Driver totals table ── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.table th {
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  white-space: nowrap;
+}
+
+.table th.right, .table td.right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table td {
+  padding: 0.3rem 0.5rem;
+  color: #374151;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.table tr:last-child td { border-bottom: none; }
+.table tr:hover td { background: #f9fafb; }
+
+/* ── NMR line pills ── */
+.nmrLine {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 5px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-size: 0.8rem;
+  color: #78350f;
+}
+
+.nmrLineType {
+  font-weight: 700;
+  font-family: monospace;
+}
+
+/* ── Period-pay rows ── */
+.payRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.3rem 0;
+  font-size: 0.83rem;
+  color: #374151;
+  border-bottom: 1px solid #f3f4f6;
+}
+.payRow:last-child { border-bottom: none; }
+.payAmount { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ── Loading / empty ── */
+.loadingMsg, .emptyMsg {
+  font-size: 0.84rem;
+  color: #9ca3af;
+  text-align: center;
+  padding: 0.75rem;
+}
+
+/* ── Error ── */
+.errorMsg {
+  font-size: 0.84rem;
+  color: #dc2626;
+  padding: 0.5rem 0.75rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 5px;
+}
+
+/* ── Footer ── */
+.footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: #f9fafb;
+}
+
+.footerLeft {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.reasonInput {
+  flex: 1;
+  min-width: 180px;
+  max-width: 320px;
+  padding: 0.38rem 0.6rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  color: #374151;
+}
+.reasonInput:focus { outline: 2px solid #3b82f6; border-color: transparent; }
+.reasonInput::placeholder { color: #9ca3af; }
+
+.footerRight {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.btnClose {
+  padding: 0.42rem 1rem;
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  color: #374151;
+  cursor: pointer;
+  font-weight: 500;
+}
+.btnClose:hover { background: #f3f4f6; }
+
+.btnReturn {
+  padding: 0.42rem 1rem;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  color: #9a3412;
+  cursor: pointer;
+  font-weight: 600;
+}
+.btnReturn:hover:not(:disabled) { background: #ffedd5; }
+.btnReturn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btnApprove {
+  padding: 0.42rem 1.1rem;
+  background: #0f766e;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+.btnApprove:hover:not(:disabled) { background: #0d5f59; }
+.btnApprove:disabled { opacity: 0.5; cursor: not-allowed; }

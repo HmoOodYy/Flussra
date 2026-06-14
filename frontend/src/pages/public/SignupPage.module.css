@@ -1,0 +1,133 @@
+.page {
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 50% 10%, rgba(11, 113, 131, 0.08), transparent 340px),
+    linear-gradient(180deg, #f8fbff 0%, #ffffff 48%, #f5f9fc 100%);
+  color: #102033;
+  padding: clamp(1.25rem, 4vw, 3rem);
+}
+
+.card {
+  display: flex;
+  width: min(100%, 520px);
+  flex-direction: column;
+  gap: 1.25rem;
+  border: 1px solid #dbe8ef;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 24px 70px rgba(25, 58, 82, 0.12);
+  padding: clamp(1.5rem, 4vw, 2.4rem);
+}
+
+.brandLink {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  text-decoration: none;
+}
+
+.wordmark {
+  width: 176px;
+  height: auto;
+  object-fit: contain;
+}
+
+.heading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+  border-top: 1px solid #e3edf3;
+  padding-top: 1.35rem;
+}
+
+.mark {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+}
+
+.heading h1 {
+  margin: 0;
+  color: #102033;
+  font-size: clamp(2rem, 6vw, 3rem);
+  font-weight: 850;
+  line-height: 1;
+}
+
+.heading p {
+  margin: 0;
+  color: #607486;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.form {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.form label {
+  display: grid;
+  gap: 0.38rem;
+}
+
+.form span {
+  color: #1e293b;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.form input {
+  width: 100%;
+  border: 1.5px solid #dce7ef;
+  border-radius: 8px;
+  background: #f7fafc;
+  color: #8a9cab;
+  font: inherit;
+  font-size: 0.95rem;
+  padding: 0.84rem 1rem;
+}
+
+.form input::placeholder {
+  color: #9aabba;
+}
+
+.form button {
+  display: inline-flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d7e5eb;
+  border-radius: 8px;
+  background: #edf5f8;
+  color: #708494;
+  cursor: not-allowed;
+  font: inherit;
+  font-size: 0.96rem;
+  font-weight: 760;
+  padding: 0 1rem;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem 1rem;
+  border-top: 1px solid #e3edf3;
+  color: #607486;
+  font-size: 0.9rem;
+  padding-top: 1rem;
+}
+
+.links a {
+  color: #0b7183;
+  font-weight: 760;
+  text-decoration: none;
+}
+
+.links a:hover {
+  color: #075d6e;
+}

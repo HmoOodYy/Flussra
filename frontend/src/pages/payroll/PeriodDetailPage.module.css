@@ -1,0 +1,423 @@
+/* ── Page ── */
+.page {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* ── Header ── */
+.headerRow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.backLink {
+  font-size: 0.85rem;
+  color: #2563eb;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0;
+  flex: 1;
+}
+
+.statusBadge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  color: #374151;
+}
+
+/* ── Meta grid ── */
+.metaGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+.metaCell { display: flex; gap: 0.25rem; }
+.metaLabel { font-weight: 500; color: #374151; }
+.metaValue { color: #111827; }
+
+/* ── Read-only banner ── */
+.readOnlyBanner {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  color: #92400e;
+}
+
+/* ── Day navigation ── */
+.dayNav {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.dayNavBtn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.dayNavBtn:disabled { opacity: 0.4; cursor: default; }
+.dayNavBtn:not(:disabled):hover { background: #f3f4f6; }
+
+.dayNavLabel {
+  font-weight: 600;
+  font-size: 0.95rem;
+  min-width: 180px;
+  text-align: center;
+}
+
+/* ── Quick actions bar ── */
+.quickActions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.driversOffBtn {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.driversOffBtn:hover { background: #fef3c7; border-color: #fde68a; }
+
+.offCount {
+  display: inline-block;
+  background: #ef4444;
+  color: #fff;
+  border-radius: 999px;
+  padding: 0 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  margin-left: 0.25rem;
+}
+
+/* ── Summary bar ── */
+.summaryBar {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+.summaryItem { display: flex; gap: 0.3rem; align-items: center; }
+.summaryLabel { color: #6b7280; }
+.summaryValue { font-weight: 600; color: #111827; }
+
+/* ── Grid ── */
+.gridWrapper {
+  overflow-x: auto;
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.grid th {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  padding: 0.4rem 0.5rem;
+  text-align: center;
+  font-weight: 600;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.grid th.driverCol {
+  text-align: left;
+  min-width: 140px;
+}
+
+.grid td {
+  border: 1px solid #e5e7eb;
+  padding: 0.3rem 0.4rem;
+  vertical-align: middle;
+  text-align: center;
+}
+
+.grid td.driverName {
+  text-align: left;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.qtyInput {
+  width: 72px;
+  padding: 0.2rem 0.3rem;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 0.82rem;
+  text-align: right;
+}
+.qtyInput:focus { outline: 2px solid #3b82f6; border-color: transparent; }
+.qtyInput:disabled { background: #f3f4f6; color: #9ca3af; }
+
+.statusSelect {
+  padding: 0.2rem 0.25rem;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  max-width: 110px;
+}
+.statusSelect:disabled { background: #f3f4f6; color: #9ca3af; }
+
+.notesBtn {
+  padding: 0.15rem 0.4rem;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+.notesBtn:hover { background: #eff6ff; }
+.notesBtnActive { border-color: #3b82f6; background: #eff6ff; }
+
+.attentionIcon {
+  color: #f59e0b;
+  font-size: 0.9rem;
+}
+
+.offRow td { background: #fef2f2; }
+
+/* ── Save bar ── */
+.saveBar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid #e5e7eb;
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+}
+
+.saveBtn {
+  padding: 0.45rem 1.25rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+.saveBtn:disabled { opacity: 0.5; cursor: default; }
+.saveBtn:not(:disabled):hover { background: #1d4ed8; }
+
+.dirtyCount {
+  font-size: 0.82rem;
+  color: #6b7280;
+}
+
+.saveError {
+  font-size: 0.82rem;
+  color: #dc2626;
+}
+
+/* ── Drivers Off overlay ── */
+.driversOffOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.driversOffPanel {
+  background: #fff;
+  width: min(500px, 95vw);
+  height: 100%;
+  overflow-y: auto;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+}
+
+.driversOffHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.driversOffHeader h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.driversOffCloseBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  color: #6b7280;
+  padding: 0.25rem;
+}
+.driversOffCloseBtn:hover { color: #111827; }
+
+.driversOffTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.driversOffTable th,
+.driversOffTable td {
+  border: 1px solid #e5e7eb;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+.driversOffTable th { background: #f9fafb; font-weight: 600; }
+.driversOffEmpty {
+  padding: 1rem 1.25rem;
+  color: #6b7280;
+  font-size: 0.85rem;
+}
+
+/* ── Loading / error ── */
+.loading {
+  padding: 2rem;
+  text-align: center;
+  color: #6b7280;
+}
+.error {
+  padding: 1rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+}
+
+/* ── Workflow controls (CP-2) ── */
+.workflowSection {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.workflowBtnPrimary {
+  padding: 0.45rem 1.25rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+.workflowBtnPrimary:disabled { opacity: 0.5; cursor: default; }
+.workflowBtnPrimary:not(:disabled):hover { background: #1d4ed8; }
+
+.workflowMsg {
+  font-size: 0.88rem;
+  color: #374151;
+  font-style: italic;
+}
+
+.workflowError {
+  font-size: 0.82rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+}
+
+/* ── Readiness box (submit warnings) ── */
+.readinessBox {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  min-width: 220px;
+}
+.readinessTitle {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 0.35rem;
+}
+.readinessList {
+  margin: 0;
+  padding-left: 1rem;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.readinessOk   { color: #166534; }
+.readinessWarn { color: #92400e; }
+.readinessInfo { color: #1e40af; }
+
+/* ── Legacy classes kept so other imports don't break ── */
+.stateMsg  { color: #6b7280; padding: 1rem; }
+.errorMsg  { color: #dc2626; }
+.section   { display: flex; flex-direction: column; gap: 0.75rem; }
+.sectionHeader { display: flex; align-items: center; gap: 0.5rem; }
+.sectionTitle  { font-size: 1rem; font-weight: 600; margin: 0; }
+.addBtn        { padding: 0.3rem 0.75rem; border: 1px solid #2563eb; border-radius: 6px; background: #eff6ff; color: #1d4ed8; cursor: pointer; font-size: 0.85rem; }
+.tableWrap     { overflow-x: auto; }
+.table         { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.table th, .table td { border: 1px solid #e5e7eb; padding: 0.4rem 0.5rem; }
+.table th      { background: #f9fafb; font-weight: 600; }
+.driverCell    { font-weight: 500; white-space: nowrap; }
+.dateCell      { white-space: nowrap; }
+.numCell       { text-align: right; font-variant-numeric: tabular-nums; }
+.actionsCell   { white-space: nowrap; display: flex; gap: 0.4rem; }
+.actionBtn     { padding: 0.2rem 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; font-size: 0.8rem; }
+.actionBtnDanger { padding: 0.2rem 0.5rem; border: 1px solid #fca5a5; border-radius: 4px; background: #fef2f2; color: #dc2626; cursor: pointer; font-size: 0.8rem; }
+.reviewFlag    { background: #fde68a; border-radius: 4px; padding: 0.1rem 0.35rem; font-size: 0.75rem; font-weight: 600; }
+.voidedRow     { opacity: 0.45; }
+.emptyLines    { padding: 1.5rem; text-align: center; color: #6b7280; border: 1px dashed #e5e7eb; border-radius: 8px; }
+.addForm       { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; background: #f9fafb; }
+.addFormRow    { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }
+.formLabel     { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.82rem; font-weight: 500; }
+.formSelect    { padding: 0.3rem 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; font-size: 0.85rem; }
+.formInput     { padding: 0.3rem 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; font-size: 0.85rem; width: 140px; }
+.formInputSm   { padding: 0.2rem 0.35rem; border: 1px solid #d1d5db; border-radius: 4px; font-size: 0.82rem; width: 90px; }
+.formError     { color: #dc2626; font-size: 0.82rem; margin: 0; }
+.editRow       { background: #f0f9ff; }
+.editForm      { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; padding: 0.5rem; }
+.editMeta      { font-size: 0.8rem; color: #6b7280; }
+.cancelBtn     { padding: 0.3rem 0.75rem; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.85rem; }
+.inlineError   { color: #dc2626; font-size: 0.8rem; }
+.voidConfirm   { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; }

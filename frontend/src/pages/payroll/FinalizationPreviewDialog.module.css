@@ -1,0 +1,460 @@
+/* ── Backdrop ── */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 300;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2vh 1rem;
+  overflow-y: auto;
+}
+
+/* ── Dialog — large workbench ── */
+.dialog {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.22);
+  width: min(960px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Header ── */
+.dialogHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 1rem 1.35rem 0.85rem;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+  flex-shrink: 0;
+}
+
+.dialogTitle {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
+  line-height: 1.3;
+}
+
+.dialogSubtitle {
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.headerMeta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-top: 0.25rem;
+}
+
+.metaSep { color: #d1d5db; }
+
+.statusPill {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  color: #6b7280;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.closeBtn:hover { background: #f3f4f6; color: #111827; }
+.closeBtn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Body ── */
+.dialogBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 1.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* ── KPI row ── */
+.kpiRow {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.kpiCard {
+  flex: 1;
+  min-width: 120px;
+  padding: 0.65rem 0.85rem;
+  background: #f8faff;
+  border: 1px solid #e0e7ff;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.kpiValue {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #111827;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpiLabel {
+  font-size: 0.73rem;
+  color: #6b7280;
+  margin-top: 0.2rem;
+}
+
+/* ── Alerts ── */
+.alertsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.blockersBox,
+.warningsBox {
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.blockersBox {
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+}
+
+.warningsBox {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.alertHeader {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.4rem;
+}
+
+.alertIcon { font-size: 0.9rem; }
+
+.blockersBox .alertHeader { color: #991b1b; }
+.warningsBox .alertHeader { color: #92400e; }
+
+.alertList {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.82rem;
+  color: #374151;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.blockersBox .alertList { color: #7f1d1d; }
+.warningsBox .alertList { color: #78350f; }
+
+/* ── Collapsible section ── */
+.section {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.sectionHeader {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  background: #f9fafb;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #111827;
+  border-bottom: 1px solid #e5e7eb;
+}
+.sectionHeader:hover { background: #f3f4f6; }
+
+.sectionToggle {
+  font-size: 0.75rem;
+  color: #6b7280;
+  width: 0.9rem;
+  flex-shrink: 0;
+}
+
+.sectionTitle { flex: 1; }
+
+.sectionBadge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: #e5e7eb;
+  color: #374151;
+  padding: 0.1rem 0.45rem;
+  border-radius: 99px;
+}
+
+.sectionBody {
+  padding: 0.75rem 0.9rem;
+  overflow-x: auto;
+}
+
+/* ── Table ── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  min-width: 480px;
+}
+
+.table th,
+.table td {
+  border: 1px solid #e5e7eb;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #374151;
+  font-size: 0.78rem;
+}
+
+.numCol {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.nameCell { font-weight: 500; }
+.dateCell { color: #6b7280; }
+
+.finalPayCell {
+  font-weight: 600;
+  color: #111827;
+}
+
+.adjCell { color: #065f46; }
+
+.reviewRow { background: #fffbeb; }
+.reviewFlag { color: #b45309; font-size: 0.85rem; }
+
+/* ── Type pills (SYS adjustments) ── */
+.typePill {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.topupPill {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.capPill {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+/* ── Footer ── */
+.dialogFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.35rem;
+  border-top: 1px solid #e5e7eb;
+  background: #f9fafb;
+  flex-shrink: 0;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.footerLeft {
+  flex: 1;
+}
+
+.footerRight {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.blockerHint {
+  font-size: 0.8rem;
+  color: #dc2626;
+  font-weight: 500;
+}
+
+/* ── Buttons ── */
+.cancelBtn {
+  padding: 0.4rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #374151;
+}
+.cancelBtn:hover:not(:disabled) { background: #f3f4f6; }
+.cancelBtn:disabled { opacity: 0.5; cursor: default; }
+
+.finalizeBtn {
+  padding: 0.45rem 1.25rem;
+  background: #059669;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+.finalizeBtn:not(:disabled):hover { background: #047857; }
+.finalizeBtn:disabled { opacity: 0.5; cursor: default; }
+
+.doneBtn {
+  padding: 0.45rem 1.5rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.88rem;
+  margin-top: 1rem;
+}
+.doneBtn:hover { background: #1d4ed8; }
+
+/* ── Confirm overlay ── */
+.confirmOverlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.confirmBox {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.22);
+  padding: 1.5rem 1.75rem;
+  width: min(440px, 95%);
+}
+
+.confirmTitle {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 0.75rem;
+}
+
+.confirmText {
+  font-size: 0.88rem;
+  color: #374151;
+  margin: 0 0 0.5rem;
+}
+
+.confirmList {
+  font-size: 0.85rem;
+  color: #374151;
+  padding-left: 1.25rem;
+  margin: 0 0 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.confirmWarning {
+  font-size: 0.82rem;
+  color: #dc2626;
+  font-weight: 600;
+  margin: 0 0 1rem;
+}
+
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* ── State messages ── */
+.stateMsg {
+  padding: 3rem;
+  text-align: center;
+  color: #6b7280;
+}
+
+.errorBox {
+  padding: 0.75rem 1rem;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.successBox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 3rem 2rem;
+  text-align: center;
+}
+
+.successIcon {
+  font-size: 2.5rem;
+  color: #059669;
+  margin-bottom: 0.75rem;
+}
+
+.successTitle {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 0.5rem;
+}
+
+.successText {
+  font-size: 0.88rem;
+  color: #374151;
+  margin: 0;
+}
+
+.emptyMsg {
+  padding: 1rem;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.82rem;
+  font-style: italic;
+}
