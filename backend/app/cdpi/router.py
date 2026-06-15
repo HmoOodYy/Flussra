@@ -4,10 +4,13 @@ CDPI (Custom Daily Pay Item) -- HTTP router.
 Mounted at /settings/cdpi via main.py.
 
 Routes:
-  POST   /requests            -- create a new Draft
-  GET    /requests            -- list requests visible to the caller
-  GET    /requests/{id}       -- read a single request
-  PATCH  /requests/{id}       -- update a Draft (optimistic concurrency)
+  POST   /requests                    -- create a new Draft
+  GET    /requests                    -- list requests visible to the caller
+  GET    /requests/{id}               -- read a single request
+  PATCH  /requests/{id}               -- update a Draft (optimistic concurrency)
+  POST   /requests/{id}/submit        -- submit Draft -> PendingCompanyApproval
+  POST   /requests/{id}/decide        -- return or reject a Pending request
+  POST   /requests/{id}/copy          -- copy a Rejected request to a new Draft
 """
 from typing import Annotated
 from uuid import UUID
@@ -16,7 +19,13 @@ from fastapi import APIRouter, Depends, Query
 
 from app.dependencies import get_db, get_current_user
 from app.cdpi import service
-from app.cdpi.schemas import CdpiRequestCreate, CdpiRequestSummary, CdpiRequestUpdate
+from app.cdpi.schemas import (
+    CdpiRequestCreate,
+    CdpiRequestSummary,
+    CdpiRequestUpdate,
+    CdpiSubmitRequest,
+    CdpiDecideRequest,
+)
 
 router = APIRouter()
 
@@ -91,3 +100,51 @@ async def update_draft(
     company_id: int = token["cid"]
     user_id:    int = token["sub"]
     return await service.update_draft(company_id, user_id, request_id, body, db)
+
+
+@router.post(
+    "/requests/{request_id}/submit",
+    response_model=CdpiRequestSummary,
+    summary="Submit CDPI Draft",
+)
+async def submit_draft(
+    token:      TokenDep,
+    db:         DbDep,
+    request_id: UUID,
+    body:       CdpiSubmitRequest,
+) -> CdpiRequestSummary:
+    company_id: int = token["cid"]
+    user_id:    int = token["sub"]
+    return await service.submit_draft(company_id, user_id, request_id, body, db)
+
+
+@router.post(
+    "/requests/{request_id}/decide",
+    response_model=CdpiRequestSummary,
+    summary="Decide CDPI request (ReturnToDraft or Reject)",
+)
+async def decide_request(
+    token:      TokenDep,
+    db:         DbDep,
+    request_id: UUID,
+    body:       CdpiDecideRequest,
+) -> CdpiRequestSummary:
+    company_id: int = token["cid"]
+    user_id:    int = token["sub"]
+    return await service.decide_request(company_id, user_id, request_id, body, db)
+
+
+@router.post(
+    "/requests/{request_id}/copy",
+    response_model=CdpiRequestSummary,
+    status_code=201,
+    summary="Copy Rejected CDPI request to new Draft",
+)
+async def copy_rejected(
+    token:      TokenDep,
+    db:         DbDep,
+    request_id: UUID,
+) -> CdpiRequestSummary:
+    company_id: int = token["cid"]
+    user_id:    int = token["sub"]
+    return await service.copy_rejected(company_id, user_id, request_id, db)

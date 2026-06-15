@@ -214,3 +214,49 @@ class CdpiRequestUpdate(CdpiRequestDraftFields):
     optional so a caller can update a single field without re-sending the rest.
     """
     expected_revision: int
+
+
+# ---------------------------------------------------------------------------
+# Task 4 write-side contracts
+# ---------------------------------------------------------------------------
+
+class CdpiSubmitRequest(BaseModel):
+    """
+    Body for POST /settings/cdpi/requests/{id}/submit.
+
+    expected_revision is required for optimistic concurrency.
+    Completeness (ItemName, InputType, CalcMethodKey) is validated by the
+    service against the persisted Draft fields -- callers do not re-send
+    definition content here.
+    """
+    expected_revision: int
+
+
+class CdpiDecideAction(str, Enum):
+    """
+    Permitted decision actions for POST /settings/cdpi/requests/{id}/decide.
+
+    Approve is intentionally absent -- it is not implemented until Task 5.
+    """
+    ReturnToDraft = "ReturnToDraft"
+    Reject = "Reject"
+
+
+class CdpiDecideRequest(BaseModel):
+    """
+    Body for POST /settings/cdpi/requests/{id}/decide.
+
+    action    -- one of CdpiDecideAction (ReturnToDraft or Reject).
+    reason    -- required, non-empty; stored in the event log.
+    expected_revision -- optimistic concurrency guard.
+    """
+    action: CdpiDecideAction
+    expected_revision: int
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("reason must not be empty")
+        return v

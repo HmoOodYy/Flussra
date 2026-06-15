@@ -24,8 +24,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access
-from app.cdpi.guards import require_cdpi_branch_edit
-from app.cdpi.schemas import CdpiRequestCreate, CdpiRequestSummary, CdpiRequestUpdate
+from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
+from app.cdpi.schemas import (
+    CdpiRequestCreate,
+    CdpiRequestSummary,
+    CdpiRequestUpdate,
+    CdpiSubmitRequest,
+    CdpiDecideRequest,
+    CdpiDecideAction,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -373,3 +380,409 @@ async def update_draft(
             f"current is {diag['revision']}. Reload and retry."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Submit Draft
+# ---------------------------------------------------------------------------
+
+# CalcMethodKeys that may be submitted in Task 4.
+# Others are structurally valid in Draft but require method-specific config
+# rows that are not implemented until later tasks.
+_SUBMITTABLE_METHODS = frozenset(["PerUnit"])
+
+
+async def submit_draft(
+    company_id: int,
+    user_id: int,
+    request_id: UUID,
+    data: CdpiSubmitRequest,
+    db: AsyncConnection,
+) -> CdpiRequestSummary:
+    """
+    Transition a Draft request to PendingCompanyApproval.
+
+    Flow:
+      1. Pre-read: load company, branch, and current definition fields
+         needed for completeness validation and the event type decision.
+      2. Verify existence and company scope.
+      3. Branch-edit permission check.
+      4. Validate completeness: ItemName, InputType, CalcMethodKey all required.
+      5. Validate CalcMethodKey is a submittable method (PerUnit only for Task 4).
+      6. Determine event type: Submitted (first time) vs Resubmitted (returned
+         request re-submitted -- detected by non-null SubmittedAtUtc in Draft).
+      7. Atomic conditional UPDATE:
+           WHERE requestid, companyid, status='Draft', revision=expected
+         Sets Status='PendingCompanyApproval', SubmittedByUserID, SubmittedAtUtc,
+         revision+1.  Race: only one concurrent caller wins.
+      8. Diagnose 0-row result (stale revision or not Draft).
+      9. Insert Submitted/Resubmitted event (same transaction; rolled back on failure).
+     10. Return updated row.
+
+    Raises:
+      404 -- not found.
+      403 -- no branch-edit permission.
+      422 -- not Draft, incomplete definition, or unsupported calc method.
+      409 -- stale revision.
+    """
+    # Step 1: pre-read.
+    pre = (await db.execute(
+        text("""
+            SELECT companyid, requestingbranchid,
+                   itemname, inputtype, calcmethodkey,
+                   submittedatutc
+            FROM   payroll.cdpirequests
+            WHERE  requestid = :rid
+        """),
+        {"rid": str(request_id)},
+    )).mappings().first()
+
+    if pre is None or pre["companyid"] != company_id:
+        raise HTTPException(status_code=404, detail="CDPI request not found.")
+
+    # Step 3: permission check.
+    await require_cdpi_branch_edit(company_id, user_id, pre["requestingbranchid"], db)
+
+    # Step 4: completeness checks (validated against the stored draft fields).
+    missing = []
+    if not pre["itemname"] or not str(pre["itemname"]).strip():
+        missing.append("ItemName")
+    if not pre["inputtype"]:
+        missing.append("InputType")
+    if not pre["calcmethodkey"]:
+        missing.append("CalcMethodKey")
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot submit: missing required fields: {', '.join(missing)}.",
+        )
+
+    # Step 5: method support gate.
+    if pre["calcmethodkey"] not in _SUBMITTABLE_METHODS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"CalcMethodKey '{pre['calcmethodkey']}' is not yet supported for "
+                "submission. Only PerUnit requests may be submitted at this time."
+            ),
+        )
+
+    # Step 6: first submit vs resubmit.
+    event_type = "Resubmitted" if pre["submittedatutc"] is not None else "Submitted"
+
+    # Step 7: atomic conditional UPDATE.
+    updated = (await db.execute(
+        text("""
+            UPDATE payroll.cdpirequests
+            SET    status            = 'PendingCompanyApproval',
+                   submittedbyuserid = :uid,
+                   submittedatutc    = now(),
+                   revision          = revision + 1,
+                   updatedbyuserid   = :uid,
+                   updatedatutc      = now()
+            WHERE  requestid = :rid
+              AND  companyid = :cid
+              AND  status    = 'Draft'
+              AND  revision  = :expected_revision
+            RETURNING revision
+        """),
+        {
+            "rid":               str(request_id),
+            "cid":               company_id,
+            "expected_revision": data.expected_revision,
+            "uid":               user_id,
+        },
+    )).scalar_one_or_none()
+
+    if updated is None:
+        diag = (await db.execute(
+            text("""
+                SELECT status, revision
+                FROM   payroll.cdpirequests
+                WHERE  requestid = :rid AND companyid = :cid
+            """),
+            {"rid": str(request_id), "cid": company_id},
+        )).mappings().first()
+        if diag is None:
+            raise HTTPException(status_code=404, detail="CDPI request not found.")
+        if diag["status"] != "Draft":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Only Draft requests can be submitted. "
+                    f"Current status: {diag['status']}."
+                ),
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Revision mismatch: expected {data.expected_revision}, "
+                f"current is {diag['revision']}. Reload and retry."
+            ),
+        )
+
+    # Step 9: insert event (same transaction).
+    await db.execute(
+        text("""
+            INSERT INTO payroll.cdpirequestevents (
+                requestid, eventtype, fromstatus, tostatus,
+                actoruserid, requestrevision
+            ) VALUES (
+                :rid, :etype, 'Draft', 'PendingCompanyApproval',
+                :uid, :rev
+            )
+        """),
+        {
+            "rid":   str(request_id),
+            "etype": event_type,
+            "uid":   user_id,
+            "rev":   updated,
+        },
+    )
+
+    return await _load_request(request_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Decide: ReturnToDraft or Reject
+# ---------------------------------------------------------------------------
+
+async def decide_request(
+    company_id: int,
+    user_id: int,
+    request_id: UUID,
+    data: CdpiDecideRequest,
+    db: AsyncConnection,
+) -> CdpiRequestSummary:
+    """
+    Company reviewer action: return a Pending request to Draft or reject it.
+
+    Approve is not implemented in Task 4 and is rejected with 422.
+
+    Flow:
+      1. Pre-read for existence/company check.
+      2. Company-wide edit permission (AllCompanyBranches scope required).
+      3. Atomic conditional UPDATE:
+           WHERE requestid, companyid, status='PendingCompanyApproval', revision=expected
+         Sets new status, UpdatedByUserID, UpdatedAtUtc, revision+1.
+      4. Diagnose 0-row result.
+      5. Insert event with reason.
+      6. Return updated row.
+
+    Raises:
+      404 -- not found.
+      403 -- caller is not a company-wide reviewer.
+      422 -- not PendingCompanyApproval, or Approve action sent (not implemented).
+      409 -- stale revision.
+    """
+    if data.action == CdpiDecideAction.ReturnToDraft:
+        new_status = "Draft"
+        event_type = "ReturnedToDraft"
+        from_status = "PendingCompanyApproval"
+    elif data.action == CdpiDecideAction.Reject:
+        new_status = "Rejected"
+        event_type = "Rejected"
+        from_status = "PendingCompanyApproval"
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Action '{data.action}' is not supported in this task.",
+        )
+
+    # Step 1: pre-read for existence.
+    pre = (await db.execute(
+        text("""
+            SELECT companyid FROM payroll.cdpirequests WHERE requestid = :rid
+        """),
+        {"rid": str(request_id)},
+    )).mappings().first()
+
+    if pre is None or pre["companyid"] != company_id:
+        raise HTTPException(status_code=404, detail="CDPI request not found.")
+
+    # Step 2: company-wide permission (AllCompanyBranches scope required).
+    await require_cdpi_company_edit(company_id, user_id, db)
+
+    # Step 3: atomic conditional UPDATE.
+    updated = (await db.execute(
+        text(f"""
+            UPDATE payroll.cdpirequests
+            SET    status           = :new_status,
+                   updatedbyuserid  = :uid,
+                   updatedatutc     = now(),
+                   revision         = revision + 1
+            WHERE  requestid = :rid
+              AND  companyid = :cid
+              AND  status    = 'PendingCompanyApproval'
+              AND  revision  = :expected_revision
+            RETURNING revision
+        """),
+        {
+            "rid":               str(request_id),
+            "cid":               company_id,
+            "expected_revision": data.expected_revision,
+            "uid":               user_id,
+            "new_status":        new_status,
+        },
+    )).scalar_one_or_none()
+
+    if updated is None:
+        diag = (await db.execute(
+            text("""
+                SELECT status, revision
+                FROM   payroll.cdpirequests
+                WHERE  requestid = :rid AND companyid = :cid
+            """),
+            {"rid": str(request_id), "cid": company_id},
+        )).mappings().first()
+        if diag is None:
+            raise HTTPException(status_code=404, detail="CDPI request not found.")
+        if diag["status"] != "PendingCompanyApproval":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Only PendingCompanyApproval requests can be decided. "
+                    f"Current status: {diag['status']}."
+                ),
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Revision mismatch: expected {data.expected_revision}, "
+                f"current is {diag['revision']}. Reload and retry."
+            ),
+        )
+
+    # Step 5: insert event with reason.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.cdpirequestevents (
+                requestid, eventtype, fromstatus, tostatus,
+                actoruserid, reason, requestrevision
+            ) VALUES (
+                :rid, :etype, :from_status, :to_status,
+                :uid, :reason, :rev
+            )
+        """),
+        {
+            "rid":         str(request_id),
+            "etype":       event_type,
+            "from_status": from_status,
+            "to_status":   new_status,
+            "uid":         user_id,
+            "reason":      data.reason,
+            "rev":         updated,
+        },
+    )
+
+    return await _load_request(request_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Copy Rejected request to new Draft
+# ---------------------------------------------------------------------------
+
+async def copy_rejected(
+    company_id: int,
+    user_id: int,
+    request_id: UUID,
+    db: AsyncConnection,
+) -> CdpiRequestSummary:
+    """
+    Create a new Draft from a Rejected request.
+
+    The new request gets a fresh UUID, Revision=1, and CopiedFromRequestID set
+    to the source.  Only editable definition fields are copied; approval/
+    submission metadata is not.  The original rejected request is not modified.
+
+    A CopiedFromRejected event is inserted for the new request in the same
+    transaction.
+
+    Raises:
+      404 -- source not found or wrong company.
+      403 -- no branch-edit permission on source's branch.
+      422 -- source is not Rejected.
+    """
+    # Load source.
+    src = (await db.execute(
+        text("""
+            SELECT companyid, requestingbranchid, status,
+                   itemname, inputtype, unit, calcmethodkey, notes
+            FROM   payroll.cdpirequests
+            WHERE  requestid = :rid
+        """),
+        {"rid": str(request_id)},
+    )).mappings().first()
+
+    if src is None or src["companyid"] != company_id:
+        raise HTTPException(status_code=404, detail="CDPI request not found.")
+
+    if src["status"] != "Rejected":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Only Rejected requests can be copied. "
+                f"Current status: {src['status']}."
+            ),
+        )
+
+    await require_cdpi_branch_edit(company_id, user_id, src["requestingbranchid"], db)
+
+    # Insert new request.
+    new_id = (await db.execute(
+        text("""
+            INSERT INTO payroll.cdpirequests (
+                companyid,
+                requestingbranchid,
+                itemname,
+                inputtype,
+                unit,
+                calcmethodkey,
+                notes,
+                status,
+                revision,
+                copiedfromrequestid,
+                createdbyuserid
+            ) VALUES (
+                :cid,
+                :branch_id,
+                :item_name,
+                :input_type,
+                :unit,
+                :calc_method_key,
+                :notes,
+                'Draft',
+                1,
+                :source_id,
+                :uid
+            )
+            RETURNING requestid
+        """),
+        {
+            "cid":             company_id,
+            "branch_id":       src["requestingbranchid"],
+            "item_name":       src["itemname"],
+            "input_type":      src["inputtype"],
+            "unit":            src["unit"],
+            "calc_method_key": src["calcmethodkey"],
+            "notes":           src["notes"],
+            "source_id":       str(request_id),
+            "uid":             user_id,
+        },
+    )).scalar_one()
+
+    # Insert CopiedFromRejected event for the new request.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.cdpirequestevents (
+                requestid, eventtype, fromstatus, tostatus,
+                actoruserid, requestrevision
+            ) VALUES (
+                :rid, 'CopiedFromRejected', NULL, 'Draft',
+                :uid, 1
+            )
+        """),
+        {"rid": str(new_id), "uid": user_id},
+    )
+
+    return await _load_request(new_id, db)
