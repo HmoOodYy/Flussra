@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access
 from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
+from app.cdpi.methods import get_adapter
 from app.cdpi.schemas import (
     CdpiRequestCreate,
     CdpiRequestSummary,
@@ -386,11 +387,6 @@ async def update_draft(
 # Submit Draft
 # ---------------------------------------------------------------------------
 
-# CalcMethodKeys that may be submitted in Task 4.
-# Others are structurally valid in Draft but require method-specific config
-# rows that are not implemented until later tasks.
-_SUBMITTABLE_METHODS = frozenset(["PerUnit"])
-
 
 async def submit_draft(
     company_id: int,
@@ -443,28 +439,33 @@ async def submit_draft(
     # Step 3: permission check.
     await require_cdpi_branch_edit(company_id, user_id, pre["requestingbranchid"], db)
 
-    # Step 4: completeness checks (validated against the stored draft fields).
-    missing = []
-    if not pre["itemname"] or not str(pre["itemname"]).strip():
-        missing.append("ItemName")
-    if not pre["inputtype"]:
-        missing.append("InputType")
+    # Step 4: CalcMethodKey presence check -- must be set before adapter lookup.
     if not pre["calcmethodkey"]:
-        missing.append("CalcMethodKey")
-    if missing:
         raise HTTPException(
             status_code=422,
-            detail=f"Cannot submit: missing required fields: {', '.join(missing)}.",
+            detail="Cannot submit: missing required fields: CalcMethodKey.",
         )
 
-    # Step 5: method support gate.
-    if pre["calcmethodkey"] not in _SUBMITTABLE_METHODS:
+    # Step 5: method adapter gate -- delegates completeness and support checks.
+    adapter = get_adapter(pre["calcmethodkey"])
+    if adapter is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown CalcMethodKey: '{pre['calcmethodkey']}'.",
+        )
+    if not adapter.is_implemented():
         raise HTTPException(
             status_code=422,
             detail=(
                 f"CalcMethodKey '{pre['calcmethodkey']}' is not yet supported for "
                 "submission. Only PerUnit requests may be submitted at this time."
             ),
+        )
+    missing = adapter.validate_submit(pre["itemname"], pre["inputtype"])
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot submit: missing required fields: {', '.join(missing)}.",
         )
 
     # Step 6: first submit vs resubmit.
