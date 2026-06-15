@@ -596,3 +596,269 @@ class TestUpdateDraft:
             await _cleanup_requests(direct_db, created.request_id)
             await _cleanup_user(direct_db, no_perm_id)
             await _cleanup_role(direct_db, role_id)
+
+    # -----------------------------------------------------------------------
+    # Race-safe concurrency regression
+    # -----------------------------------------------------------------------
+
+    async def test_same_revision_second_update_rejected(self, direct_db):
+        """
+        Regression for the atomic conditional UPDATE pattern.
+
+        Two sequential updates both supply expected_revision=1.
+        The first must succeed (Revision -> 2).
+        The second must be rejected with HTTP 409.
+        The final row must reflect exactly one successful update.
+        """
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        created = await cdpi_service.create_draft(
+            company_id, admin_id,
+            CdpiRequestCreate(requesting_branch_id=hq_id, item_name="Original"),
+            direct_db,
+        )
+        try:
+            # First update with revision=1 -- must succeed.
+            first = await cdpi_service.update_draft(
+                company_id, admin_id, created.request_id,
+                CdpiRequestUpdate(expected_revision=1, item_name="Winner"),
+                direct_db,
+            )
+            assert first.revision == 2
+            assert first.item_name == "Winner"
+
+            # Second update with the same revision=1 -- must be rejected.
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.update_draft(
+                    company_id, admin_id, created.request_id,
+                    CdpiRequestUpdate(expected_revision=1, item_name="Loser"),
+                    direct_db,
+                )
+            assert exc_info.value.status_code == 409
+
+            # Row must reflect only the first update.
+            final = await cdpi_service.get_request(
+                company_id, admin_id, created.request_id, direct_db
+            )
+            assert final.revision == 2
+            assert final.item_name == "Winner"
+        finally:
+            await _cleanup_requests(direct_db, created.request_id)
+
+    # -----------------------------------------------------------------------
+    # Non-Draft status rejection
+    # -----------------------------------------------------------------------
+
+    async def test_update_pending_approval_rejected_422(self, direct_db):
+        """
+        update_draft on a PendingCompanyApproval request raises HTTP 422.
+        Row must not be modified.
+        """
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        created = await cdpi_service.create_draft(
+            company_id, admin_id,
+            CdpiRequestCreate(requesting_branch_id=hq_id, item_name="PreSubmit"),
+            direct_db,
+        )
+        try:
+            # Force status to PendingCompanyApproval via direct DB write.
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.cdpirequests
+                    SET status = 'PendingCompanyApproval'
+                    WHERE requestid = :rid
+                """),
+                {"rid": str(created.request_id)},
+            )
+
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.update_draft(
+                    company_id, admin_id, created.request_id,
+                    CdpiRequestUpdate(expected_revision=1, item_name="Changed"),
+                    direct_db,
+                )
+            assert exc_info.value.status_code == 422
+            assert "PendingCompanyApproval" in exc_info.value.detail
+
+            # Row must be unmodified (status still PendingCompanyApproval, revision still 1).
+            row = (await direct_db.execute(
+                _text("SELECT status, revision, itemname FROM payroll.cdpirequests WHERE requestid = :rid"),
+                {"rid": str(created.request_id)},
+            )).mappings().first()
+            assert row["status"] == "PendingCompanyApproval"
+            assert row["revision"] == 1
+            assert row["itemname"] == "PreSubmit"
+        finally:
+            await _cleanup_requests(direct_db, created.request_id)
+
+    async def test_update_rejected_status_raises_422(self, direct_db):
+        """
+        update_draft on a Rejected request raises HTTP 422.
+        Row must not be modified.
+        """
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        created = await cdpi_service.create_draft(
+            company_id, admin_id,
+            CdpiRequestCreate(requesting_branch_id=hq_id, item_name="WasRejected"),
+            direct_db,
+        )
+        try:
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.cdpirequests
+                    SET status = 'Rejected'
+                    WHERE requestid = :rid
+                """),
+                {"rid": str(created.request_id)},
+            )
+
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.update_draft(
+                    company_id, admin_id, created.request_id,
+                    CdpiRequestUpdate(expected_revision=1),
+                    direct_db,
+                )
+            assert exc_info.value.status_code == 422
+            assert "Rejected" in exc_info.value.detail
+
+            row = (await direct_db.execute(
+                _text("SELECT status, revision FROM payroll.cdpirequests WHERE requestid = :rid"),
+                {"rid": str(created.request_id)},
+            )).mappings().first()
+            assert row["status"] == "Rejected"
+            assert row["revision"] == 1
+        finally:
+            await _cleanup_requests(direct_db, created.request_id)
+
+    async def test_update_approved_status_raises_422(self, direct_db):
+        """
+        update_draft on an Approved request raises HTTP 422.
+
+        Forcing Approved status in the test DB requires both:
+          - ApprovedPayItemID IS NOT NULL  (lifecycle CHECK constraint)
+          - (ApprovedPayItemID, CompanyID) must reference payroll.PayItems  (composite FK)
+
+        Seed PayItems have companyid=NULL so the composite FK always rejects
+        company-scoped requests.  We use SET session_replication_role = replica
+        to suppress FK trigger enforcement for this one setup UPDATE while keeping
+        the CHECK constraint active, then restore the default role.
+
+        Row must not be modified by update_draft.
+        """
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        created = await cdpi_service.create_draft(
+            company_id, admin_id,
+            CdpiRequestCreate(requesting_branch_id=hq_id, item_name="WasApproved"),
+            direct_db,
+        )
+        try:
+            # Suppress FK triggers for the forced-status setup only.
+            await direct_db.execute(_text("SET session_replication_role = replica"))
+            try:
+                await direct_db.execute(
+                    _text("""
+                        UPDATE payroll.cdpirequests
+                        SET status = 'Approved', approvedpayitemid = 1
+                        WHERE requestid = :rid
+                    """),
+                    {"rid": str(created.request_id)},
+                )
+            finally:
+                await direct_db.execute(_text("SET session_replication_role = DEFAULT"))
+
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.update_draft(
+                    company_id, admin_id, created.request_id,
+                    CdpiRequestUpdate(expected_revision=1),
+                    direct_db,
+                )
+            assert exc_info.value.status_code == 422
+            assert "Approved" in exc_info.value.detail
+
+            row = (await direct_db.execute(
+                _text("SELECT status, revision FROM payroll.cdpirequests WHERE requestid = :rid"),
+                {"rid": str(created.request_id)},
+            )).mappings().first()
+            assert row["status"] == "Approved"
+            assert row["revision"] == 1
+        finally:
+            # Suppress FK triggers again for cleanup (approvedpayitemid is set).
+            await direct_db.execute(_text("SET session_replication_role = replica"))
+            await _cleanup_requests(direct_db, created.request_id)
+            await direct_db.execute(_text("SET session_replication_role = DEFAULT"))
+
+
+# ===========================================================================
+# No-legacy-write coverage
+# ===========================================================================
+
+@pytest.mark.asyncio
+class TestNoLegacyWrites:
+    """
+    Create and update Draft requests must remain isolated from approved
+    Pay Item infrastructure.  Each test verifies that a CDPI Draft CRUD
+    operation inserts zero rows into the listed legacy tables.
+    """
+
+    async def _counts(self, db) -> dict:
+        tables = [
+            ("payroll", "payitems"),
+            ("payroll", "cdpidefinitions"),
+            ("payroll", "branchpayitemconfig"),
+            ("payroll", "payitemsettings"),
+            ("payroll", "ratetypes"),
+            ("payroll", "payitemratetypemap"),
+        ]
+        counts = {}
+        for schema, table in tables:
+            counts[table] = (await db.execute(
+                _text(f"SELECT COUNT(*) FROM {schema}.{table}")
+            )).scalar_one()
+        return counts
+
+    async def test_create_draft_touches_no_legacy_tables(self, direct_db):
+        """
+        POST (create_draft) must not insert rows into PayItems,
+        CdpiDefinitions, BranchPayItemConfig, PayItemSettings,
+        RateTypes, or PayItemRateTypeMap.
+        """
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        before = await self._counts(direct_db)
+        body = CdpiRequestCreate(requesting_branch_id=hq_id)
+        result = await cdpi_service.create_draft(company_id, admin_id, body, direct_db)
+        try:
+            after = await self._counts(direct_db)
+            for table, count in before.items():
+                assert after[table] == count, (
+                    f"create_draft unexpectedly inserted rows into {table}"
+                )
+        finally:
+            await _cleanup_requests(direct_db, result.request_id)
+
+    async def test_update_draft_touches_no_legacy_tables(self, direct_db):
+        """
+        PATCH (update_draft) must not insert rows into PayItems,
+        CdpiDefinitions, BranchPayItemConfig, PayItemSettings,
+        RateTypes, or PayItemRateTypeMap.
+        """
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        body = CdpiRequestCreate(requesting_branch_id=hq_id)
+        created = await cdpi_service.create_draft(company_id, admin_id, body, direct_db)
+        before = await self._counts(direct_db)
+        try:
+            await cdpi_service.update_draft(
+                company_id, admin_id, created.request_id,
+                CdpiRequestUpdate(
+                    expected_revision=1,
+                    item_name="Updated",
+                    input_type="Number",
+                    calc_method_key="PerUnit",
+                ),
+                direct_db,
+            )
+            after = await self._counts(direct_db)
+            for table, count in before.items():
+                assert after[table] == count, (
+                    f"update_draft unexpectedly inserted rows into {table}"
+                )
+        finally:
+            await _cleanup_requests(direct_db, created.request_id)

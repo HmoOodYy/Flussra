@@ -257,63 +257,57 @@ async def update_draft(
     db: AsyncConnection,
 ) -> CdpiRequestSummary:
     """
-    Apply a partial update to a Draft CdpiRequest.
+    Apply a partial update to a Draft CdpiRequest using race-safe optimistic
+    concurrency.
 
-    Rules:
-      1. Request must exist and belong to company_id.
-      2. Request must be in Draft status (HTTP 422 otherwise).
-      3. Caller must hold payitems.edit on the request's branch (HTTP 403).
-      4. data.expected_revision must match the current Revision (HTTP 409 if stale).
-      5. On success: Revision += 1, UpdatedByUserID set, UpdatedAtUtc = now().
-      6. No event is written for ordinary Draft edits.
+    Flow:
+      1. Pre-read: load company_id + requestingbranchid for existence and
+         permission checks (branch cannot change, so a pre-read is safe here).
+      2. Permission check against requestingbranchid (HTTP 403 if denied).
+      3. Atomic conditional UPDATE:
+           WHERE requestid = :rid
+             AND companyid = :cid
+             AND status    = 'Draft'
+             AND revision  = :expected_revision
+         with RETURNING requestid.
+         If two concurrent callers both pass step 1-2 with the same revision,
+         exactly one UPDATE wins; the other returns 0 rows and is rejected.
+      4. If 0 rows returned, diagnose with a second SELECT to distinguish
+         not-found, non-Draft, and stale-revision cases and return the
+         appropriate HTTP error.
+      5. On success return the updated row. No event is written.
 
-    Only the fields explicitly provided in data (non-None) are written.
-    Fields omitted (None) are left unchanged in the database.
+    Only fields explicitly provided in data (non-None) are written; omitted
+    fields are left unchanged.
     """
-    result = await db.execute(
+    # Step 1: pre-read for existence + permission check.
+    pre = (await db.execute(
         text("""
-            SELECT
-                companyid,
-                requestingbranchid,
-                status,
-                revision
-            FROM payroll.cdpirequests
-            WHERE requestid = :rid
+            SELECT companyid, requestingbranchid
+            FROM   payroll.cdpirequests
+            WHERE  requestid = :rid
         """),
         {"rid": str(request_id)},
-    )
-    current = result.mappings().first()
-    if current is None or current["companyid"] != company_id:
+    )).mappings().first()
+
+    if pre is None or pre["companyid"] != company_id:
         raise HTTPException(status_code=404, detail="CDPI request not found.")
 
-    if current["status"] != "Draft":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Only Draft requests can be updated. "
-                f"Current status: {current['status']}."
-            ),
-        )
+    # Step 2: permission check uses branch from pre-read (branch is immutable).
+    await require_cdpi_branch_edit(company_id, user_id, pre["requestingbranchid"], db)
 
-    await require_cdpi_branch_edit(
-        company_id, user_id, current["requestingbranchid"], db
-    )
-
-    if current["revision"] != data.expected_revision:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Revision mismatch: expected {data.expected_revision}, "
-                f"current is {current['revision']}. Reload and retry."
-            ),
-        )
-
+    # Step 3: build the SET clause for the conditional atomic UPDATE.
     set_parts = [
-        "revision       = revision + 1",
+        "revision        = revision + 1",
         "updatedbyuserid = :uid",
-        "updatedatutc   = now()",
+        "updatedatutc    = now()",
     ]
-    params: dict = {"rid": str(request_id), "uid": user_id}
+    params: dict = {
+        "rid":              str(request_id),
+        "cid":              company_id,
+        "expected_revision": data.expected_revision,
+        "uid":              user_id,
+    }
 
     if data.item_name is not None:
         set_parts.append("itemname = :item_name")
@@ -332,13 +326,50 @@ async def update_draft(
         params["notes"] = data.notes
 
     set_sql = ", ".join(set_parts)
-    await db.execute(
+    updated = (await db.execute(
         text(f"""
             UPDATE payroll.cdpirequests
             SET    {set_sql}
             WHERE  requestid = :rid
+              AND  companyid = :cid
+              AND  status    = 'Draft'
+              AND  revision  = :expected_revision
+            RETURNING requestid
         """),
         params,
-    )
+    )).scalar_one_or_none()
 
-    return await _load_request(request_id, db)
+    if updated is not None:
+        return await _load_request(request_id, db)
+
+    # Step 4: 0 rows updated -- diagnose why.
+    diag = (await db.execute(
+        text("""
+            SELECT status, revision
+            FROM   payroll.cdpirequests
+            WHERE  requestid = :rid AND companyid = :cid
+        """),
+        {"rid": str(request_id), "cid": company_id},
+    )).mappings().first()
+
+    if diag is None:
+        # Deleted between pre-read and UPDATE (extremely rare).
+        raise HTTPException(status_code=404, detail="CDPI request not found.")
+
+    if diag["status"] != "Draft":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Only Draft requests can be updated. "
+                f"Current status: {diag['status']}."
+            ),
+        )
+
+    # Status is Draft but revision did not match -- concurrent update won.
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Revision mismatch: expected {data.expected_revision}, "
+            f"current is {diag['revision']}. Reload and retry."
+        ),
+    )
