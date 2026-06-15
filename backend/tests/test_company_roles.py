@@ -844,11 +844,16 @@ class TestPermissionDependencyNormalization:
         assert "payroll.view" in codes, "payroll.view must be auto-added when payroll.period.create is saved"
 
     @pytest.mark.asyncio
-    async def test_review_decide_auto_adds_payroll_view(self, client, auth_token):
+    async def test_review_decide_does_not_auto_add_payroll_view(self, client, auth_token):
+        """review.decide is a standalone permission; payroll.view is NOT implied.
+        A user who can only decide review items must not gain payroll_ops dashboard access."""
         rid = await self._make_role(client, auth_token, "Dep review.decide")
         codes = await self._set_perms(client, auth_token, rid, ["review.decide"])
         assert "review.decide" in codes
-        assert "payroll.view" in codes, "payroll.view must be auto-added when review.decide is saved"
+        assert "payroll.view" not in codes, (
+            "payroll.view must NOT be auto-added when review.decide is saved — "
+            "this would grant unintended payroll_ops dashboard access"
+        )
 
     @pytest.mark.asyncio
     async def test_payroll_approve_auto_adds_payroll_view(self, client, auth_token):

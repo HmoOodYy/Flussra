@@ -1153,7 +1153,6 @@ _PERM_DEPS: dict[str, str] = {
     'payroll.period.create': 'payroll.view',
     'payroll.approve':       'payroll.view',
     'payroll.finalize':      'payroll.view',
-    'review.decide':         'payroll.view',
     'payitems.edit':    'payitems.view',
     'payrates.edit':    'payrates.view',
     'drivers.create':   'drivers.view',

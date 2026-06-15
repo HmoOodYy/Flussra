@@ -883,33 +883,22 @@ async def _create_period_scope_item(
     code_suffix: str,
 ) -> tuple[int, str]:
     """
-    Create a custom Period-scope pay item and activate it on the given branch.
-    Returns (item_id, pay_item_code).  Caller must clean up with
-    _cleanup_period_scope_item().
+    Return the system BONUS item activated for the given branch.
+    Custom Period-scope items are no longer supported; BONUS (Period-scope,
+    Fixed behavior) is used instead.  Returns (item_id, "Bonus").
     """
-    code = f"TST_PER_{code_suffix}"
-    r = await client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_code": code,
-            "pay_item_name": f"Test Period Item {code_suffix}",
-            "category":      "Bonus",
-            "item_scope":    "Period",
-            "rate_behavior": "EnteredAmount",
-        },
-        headers=_auth(auth_token),
-    )
-    assert r.status_code == 201, f"Failed to create Period-scope pay item: {r.text}"
-    item_id = r.json()["pay_item_id"]
+    r = await client.get(f"/settings/branches/{branch_id}/pay-items", headers=_auth(auth_token))
+    assert r.status_code == 200
+    bonus = next(i for i in r.json() if i.get("pay_item_code") == "BONUS")
+    item_id = bonus["pay_item_id"]
 
-    # Activate on branch
     r2 = await client.patch(
         f"/settings/branches/{branch_id}/pay-items/{item_id}",
         json={"is_active": True},
         headers=_auth(auth_token),
     )
-    assert r2.status_code == 200, f"Failed to activate Period-scope pay item: {r2.text}"
-    return item_id, code
+    assert r2.status_code == 200, f"Failed to activate BONUS pay item: {r2.text}"
+    return item_id, "Bonus"
 
 
 async def _cleanup_period_scope_item(
@@ -917,11 +906,8 @@ async def _cleanup_period_scope_item(
     auth_token: str,
     item_id: int,
 ) -> None:
-    """Delete (or retire) a custom pay item created by _create_period_scope_item."""
-    await client.delete(
-        f"/settings/pay-items/{item_id}",
-        headers=_auth(auth_token),
-    )
+    """No-op: system BONUS item cannot be deleted."""
+    pass
 
 
 class TestPeriodPayAuditLogging:

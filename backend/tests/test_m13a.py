@@ -216,22 +216,11 @@ async def m13_period_item(
     auth_token: str,
 ) -> dict:
     """
-    Create a custom Period EnteredAmount item (M13A_BONUS).
-    Used to test that Period items are blocked from daily entry.
+    Stub: system BONUS (Period-scope) is always seeded — no DB fetch needed.
+    Custom Period-scope items are no longer creatable; tests now use the
+    system BONUS item to verify Period items are blocked from daily entry.
     """
-    item_resp = await session_client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_code": "M13A_BONUS",
-            "pay_item_name": "Safety Bonus (M13 test)",
-            "item_scope":    "Period",
-            "rate_behavior": "EnteredAmount",
-            "category":      "Bonus",
-        },
-        headers=auth(auth_token),
-    )
-    assert item_resp.status_code == 201, f"create failed: {item_resp.text}"
-    return item_resp.json()
+    return {"pay_item_code": "BONUS"}
 
 
 # ---------------------------------------------------------------------------
@@ -399,14 +388,15 @@ class TestM13aValidation:
         m13_period_item: dict,
     ):
         """
-        Custom Period (EnteredAmount) item → 422 with 'Period-scope' message.
-        Period items have their own endpoint (M14+).
+        Period-scope item (system BONUS) → 422 with 'Period-scope' message.
+        Period items have their own endpoint (M14+). Custom Period-scope items
+        are no longer creatable; the system BONUS item exercises the same guard.
         """
         pid = m13_open_period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                  "line_type": "M13A_BONUS", "quantity": "1.00"},
+                  "line_type": "Bonus", "quantity": "1.00"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422

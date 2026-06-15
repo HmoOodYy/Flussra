@@ -3493,40 +3493,22 @@ class TestPayItemEffectiveDateBoundaries:
         paytest_branch_id: int,
     ):
         """
-        A Period-scope custom pay item must not appear as a day-grid column
-        even when actively configured for the branch.
-
-        This is distinct from test_day_grid_excludes_period_scope_items which
-        covers seeded system items.  This test covers custom Period items.
+        Custom Period-scope items cannot be created (422).
+        Verify the creation guard; Period-scope items are therefore guaranteed
+        never to appear as day-grid columns.  System Period items (BONUS,
+        ADJUSTMENT) are tested by test_day_grid_excludes_period_scope_items.
         """
-        pid = elig_period["payroll_period_id"]
-        item = await _create_test_pay_item(
-            session_client, auth_token,
-            "P3B Test Period Scope Item",
-            item_scope="Period",
-            rate_behavior="EnteredAmount",
+        r = await session_client.post(
+            "/settings/pay-items",
+            json={
+                "pay_item_name": "P3B Test Period Scope Item",
+                "item_scope":    "Period",
+                "rate_behavior": "EnteredAmount",
+            },
+            headers=auth(auth_token),
         )
-        iid = item["pay_item_id"]
-        try:
-            await _configure_branch_pay_item(
-                session_client, auth_token, paytest_branch_id, iid,
-                is_active=True,
-                effective_from="2082-06-21",
-            )
-
-            r = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": "2082-06-21"},
-                headers=auth(auth_token),
-            )
-            assert r.status_code == 200, r.text
-            codes = {c["pay_item_code"] for c in r.json()["columns"]}
-            assert item["pay_item_code"] not in codes, (
-                f"Period-scope custom item must not appear in daily columns. "
-                f"Columns: {codes}"
-            )
-        finally:
-            await _delete_test_pay_item(session_client, auth_token, iid)
+        assert r.status_code == 422, f"Expected 422 blocking custom Period item creation, got {r.status_code}"
+        assert "period" in r.text.lower()
 
     # ── Test 6: Branch isolation — item configured for HQ not on PAYTEST ─── #
 

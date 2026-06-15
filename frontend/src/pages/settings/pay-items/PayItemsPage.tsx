@@ -532,9 +532,16 @@ export function PayItemsPage() {
   // ── Drag-to-reorder state ──────────────────────────────────────────────────
   // localOrder is held in singleSt.localOrder (reducer) so FETCH_START resets it.
   // dragOverId and orderSaving are UI-only, never set inside effects.
-  const [dragOverId, setDragOverId]   = useState<number | null>(null);
-  const [orderSaving, setOrderSaving] = useState<'Daily' | 'Period' | null>(null);
+  const [dragOverId, setDragOverId]       = useState<number | null>(null);
+  const [orderSaving, setOrderSaving]     = useState<'Daily' | 'Period' | null>(null);
+  const [isDraggingCursor, setIsDraggingCursor] = useState(false);
   const dragItemIdRef = useRef<number | null>(null);
+
+  // ── Drag cursor (lifecycle-safe: DOM side-effect lives in an effect) ───────
+  useEffect(() => {
+    document.body.style.cursor = isDraggingCursor ? 'grabbing' : '';
+    return () => { document.body.style.cursor = ''; };
+  }, [isDraggingCursor]);
 
   // ── Load branches ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -815,8 +822,8 @@ export function PayItemsPage() {
   function handleDragStart(e: DragEvent<HTMLTableRowElement>, id: number) {
     dragItemIdRef.current = id;
     e.dataTransfer.effectAllowed = 'move';
-    document.body.style.cursor = 'grabbing';
-    const reset = () => { document.body.style.cursor = ''; document.removeEventListener('mouseup', reset); };
+    setIsDraggingCursor(true);
+    const reset = () => { setIsDraggingCursor(false); document.removeEventListener('mouseup', reset); };
     document.addEventListener('mouseup', reset);
   }
 
@@ -850,7 +857,7 @@ export function PayItemsPage() {
   function handleDragEnd() {
     dragItemIdRef.current = null;
     setDragOverId(null);
-    document.body.style.cursor = '';
+    setIsDraggingCursor(false);
   }
 
   // ── Save order (scope-specific) ────────────────────────────────────────────

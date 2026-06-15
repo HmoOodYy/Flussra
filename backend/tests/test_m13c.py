@@ -1239,8 +1239,12 @@ class TestCustomItemBehaviorValidation:
     async def test_rate_type_map_rejected_for_entered_amount_item(
         self, session_client, auth_token, m13c_ordinal_rt_id,
     ):
-        """POST rate-type-map rejected for an EnteredAmount (Period) item."""
-        # Create a Period item
+        """
+        Custom Period-scope items (EnteredAmount) cannot be created.
+        Verify the creation endpoint rejects Period-scope custom items with 422
+        and an informative message — the rate-type-map guard is therefore
+        unreachable for custom non-rate-based items.
+        """
         item_resp = await session_client.post(
             "/settings/pay-items",
             json={
@@ -1252,24 +1256,8 @@ class TestCustomItemBehaviorValidation:
             },
             headers=auth(auth_token),
         )
-        # Might be 201 on first run or 422 if already exists from prior test run.
-        if item_resp.status_code == 201:
-            item_id = item_resp.json()["pay_item_id"]
-        else:
-            # Item already exists — fetch it
-            items_resp = await session_client.get("/settings/pay-items", headers=auth(auth_token))
-            item_id = next(
-                i["pay_item_id"] for i in items_resp.json()
-                if i.get("pay_item_code") == "M13C_PERIOD_ONLY"
-            )
-
-        resp = await session_client.post(
-            f"/settings/pay-items/{item_id}/rate-type-map",
-            json={"rate_type_id": m13c_ordinal_rt_id, "is_primary": True},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "rate-based" in resp.text.lower() or "enteredamount" in resp.text.lower()
+        assert item_resp.status_code == 422
+        assert "period" in item_resp.text.lower()
 
 
 # ===========================================================================

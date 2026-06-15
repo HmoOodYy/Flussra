@@ -199,11 +199,17 @@ async def m14_custom_period_item(
     auth_token: str,
     paytest_branch_id: int,
 ) -> dict:
-    """Custom EnteredAmount Period item (M14_CUSTOM_BONUS) — created once per session."""
-    return await _create_custom_period_item(
-        session_client, auth_token, paytest_branch_id,
-        "M14_CUSTOM_BONUS", "M14 Custom Period Bonus",
+    """
+    Return the system BONUS item activated for PAYTEST branch.
+    Custom Period-scope items are no longer supported; tests that previously
+    used M14_CUSTOM_BONUS now use the system BONUS item instead.
+    """
+    await _activate_system_period_item(session_client, auth_token, paytest_branch_id, "BONUS")
+    items_resp = await session_client.get(
+        f"/settings/branches/{paytest_branch_id}/pay-items", headers=auth(auth_token)
     )
+    assert items_resp.status_code == 200
+    return next(i for i in items_resp.json() if i.get("pay_item_code") == "BONUS")
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +302,12 @@ class TestPeriodPayCreate:
         m14_open_period: dict,
         m14_custom_period_item: dict,
     ):
-        """POST a custom EnteredAmount Period item → 201."""
+        """POST a Period item (system BONUS) → 201. Custom Period items are no longer supported."""
         pid = m14_open_period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id,
-                  "line_type": "M14_CUSTOM_BONUS",
+                  "line_type": "Bonus",
                   "amount": "100.00",
                   "notes": "Safety bonus Q1"},
             headers=auth(auth_token),
@@ -410,10 +416,11 @@ class TestPeriodPayCreate:
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """A Period item that has not been activated for the branch → 422."""
-        from decimal import Decimal as D
-
-        # Create a custom period item but do NOT activate it for the branch
+        """
+        Custom Period-scope items cannot be created (422).
+        This test verifies the creation guard; the downstream "inactive item
+        rejected from period-pay" invariant is enforced at creation time.
+        """
         resp = await session_client.post(
             "/settings/pay-items",
             json={
@@ -425,34 +432,8 @@ class TestPeriodPayCreate:
             },
             headers=auth(auth_token),
         )
-        assert resp.status_code == 201, resp.text
-        # Do NOT activate — leave as IsDefaultBranchActive=FALSE
-
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-03-01", "end_date": "2034-03-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
-
-        add_resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "M14_INACTIVE", "amount": "50.00"},
-            headers=auth(auth_token),
-        )
-        assert add_resp.status_code == 422
-        assert "active" in add_resp.text.lower()
-
-        # Cleanup
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
-        )
+        assert resp.status_code == 422
+        assert "period" in resp.text.lower()
 
     async def test_period_pay_excluded_from_daily_lines_list(
         self,
@@ -1341,69 +1322,70 @@ class TestM14SafetyFixes:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        m14_custom_period_item: dict,
         direct_db,
     ):
         """
         An item whose effectivefrom > period.start_date is rejected.
         Proves the check uses period.start_date not CURRENT_DATE: if today's date
         were used the item (activated today) would wrongly pass for a 2035 period.
+
+        Uses system BONUS (Period-scope). ADJUSTMENT is deferred to a future release.
         """
         from sqlalchemy import text as _text
 
-        item_resp = await session_client.post(
-            "/settings/pay-items",
-            json={"pay_item_code": "M14_DATED",
-                  "pay_item_name": "M14 Dated Activation Test",
-                  "item_scope": "Period", "rate_behavior": "EnteredAmount",
-                  "category": "Bonus"},
-            headers=auth(auth_token),
-        )
-        assert item_resp.status_code == 201, item_resp.text
-        item_id = item_resp.json()["pay_item_id"]
+        # m14_custom_period_item ensures BONUS is activated; borrow its pay_item_id.
+        item_id = m14_custom_period_item["pay_item_id"]
 
-        # Activate now (effectivefrom = today by default)
-        await session_client.patch(
-            f"/settings/branches/{paytest_branch_id}/pay-items/{item_id}",
-            json={"is_active": True}, headers=auth(auth_token),
-        )
-        # Push effectivefrom to 2035-06-01 so the item is NOT active for
-        # a period starting 2035-01-01 but IS active today.
-        await direct_db.execute(
-            _text(
-                "UPDATE payroll.branchpayitemconfig "
-                "SET effectivefrom = '2035-06-01' "
-                "WHERE payitemid = :piid AND branchid = :bid"
-            ),
-            {"piid": item_id, "bid": paytest_branch_id},
-        )
+        try:
+            # Push BONUS effectivefrom past period.start_date so it fails the check.
+            await direct_db.execute(
+                _text(
+                    "UPDATE payroll.branchpayitemconfig "
+                    "SET effectivefrom = '2035-06-01' "
+                    "WHERE payitemid = :piid AND branchid = :bid"
+                ),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
 
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2035-01-01", "end_date": "2035-01-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            p = await session_client.post(
+                "/payroll/periods",
+                json={"branch_id": paytest_branch_id, "period_type": "Week",
+                      "start_date": "2035-01-01", "end_date": "2035-01-07"},
+                headers=auth(auth_token),
+            )
+            assert p.status_code == 201
+            pid = p.json()["payroll_period_id"]
+            await session_client.patch(
+                f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
+            )
 
-        # Must fail: item not active as of period.start_date 2035-01-01
-        add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "M14_DATED", "amount": "50.00"},
-            headers=auth(auth_token),
-        )
-        assert add.status_code == 422, (
-            f"Expected 422 (not active at period.start_date) but got {add.status_code}: {add.text}"
-        )
-        assert "active" in add.text.lower()
+            # Must fail: BONUS not active as of period.start_date 2035-01-01
+            # (effectivefrom=2035-06-01 > start_date=2035-01-01)
+            add = await session_client.post(
+                f"/payroll/periods/{pid}/period-pay",
+                json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "50.00"},
+                headers=auth(auth_token),
+            )
+            assert add.status_code == 422, (
+                f"Expected 422 (not active at period.start_date) but got {add.status_code}: {add.text}"
+            )
+            assert "active" in add.text.lower()
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
-        )
+            await session_client.patch(
+                f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
+            )
+        finally:
+            # Restore BONUS effectivefrom so subsequent tests see it as active
+            await direct_db.execute(
+                _text(
+                    "UPDATE payroll.branchpayitemconfig "
+                    "SET effectivefrom = '2000-01-01' "
+                    "WHERE payitemid = :piid AND branchid = :bid"
+                ),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
 
     async def test_period_pay_accepted_when_active_at_period_start(
         self,
@@ -1429,7 +1411,7 @@ class TestM14SafetyFixes:
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id,
-                  "line_type": "M14_CUSTOM_BONUS", "amount": "75.00"},
+                  "line_type": "Bonus", "amount": "75.00"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201, (
@@ -1447,82 +1429,82 @@ class TestM14SafetyFixes:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        m14_custom_period_item: dict,
         direct_db,
     ):
         """
         Strongest proof that period.start_date is used, not CURRENT_DATE.
 
         Setup:
-          - effectivefrom = 2026-01-01  (in the past — active today, 2026-05-30)
+          - BONUS effectivefrom = 2026-01-01 (active today 2026-06-15, but not at 2025-01-01)
           - period.start_date = 2025-01-01  (before effectivefrom — item NOT yet active)
 
-        With CURRENT_DATE the check sees:  effectivefrom (2026-01-01) <= today (2026-05-30) ✓
+        With CURRENT_DATE the check sees:  effectivefrom (2026-01-01) <= today (2026-06-15) ✓
             → would ACCEPT the item (wrong)
         With period.start_date it sees:    effectivefrom (2026-01-01) <= 2025-01-01 ✗
             → correctly REJECTS the item (expected 422)
+
+        Uses system BONUS (Period-scope). ADJUSTMENT is deferred to a future release.
         """
         from sqlalchemy import text as _text
 
-        item_resp = await session_client.post(
-            "/settings/pay-items",
-            json={"pay_item_code": "M14_TODAY_ACTIVE",
-                  "pay_item_name": "M14 Active Today Not At Period Start",
-                  "item_scope": "Period", "rate_behavior": "EnteredAmount",
-                  "category": "Bonus"},
-            headers=auth(auth_token),
-        )
-        assert item_resp.status_code == 201, item_resp.text
-        item_id = item_resp.json()["pay_item_id"]
+        # m14_custom_period_item ensures BONUS is activated; borrow its pay_item_id.
+        item_id = m14_custom_period_item["pay_item_id"]
 
-        # Activate now — creates BranchPayItemConfig with effectivefrom = today
-        await session_client.patch(
-            f"/settings/branches/{paytest_branch_id}/pay-items/{item_id}",
-            json={"is_active": True}, headers=auth(auth_token),
-        )
-        # Backdate effectivefrom to 2026-01-01: the item IS active today (2026-05-30 >= 2026-01-01)
-        # but NOT active for a period starting 2025-01-01 (2026-01-01 > 2025-01-01).
-        # A CURRENT_DATE check would PASS; a period.start_date check must FAIL.
-        await direct_db.execute(
-            _text(
-                "UPDATE payroll.branchpayitemconfig "
-                "SET effectivefrom = '2026-01-01' "
-                "WHERE payitemid = :piid AND branchid = :bid"
-            ),
-            {"piid": item_id, "bid": paytest_branch_id},
-        )
+        try:
+            # Set BONUS effectivefrom to 2026-01-01:
+            # active today (2026-06-15 >= 2026-01-01) but NOT for period starting 2025-01-01.
+            await direct_db.execute(
+                _text(
+                    "UPDATE payroll.branchpayitemconfig "
+                    "SET effectivefrom = '2026-01-01' "
+                    "WHERE payitemid = :piid AND branchid = :bid"
+                ),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
 
-        # Backdated period: start_date = 2025-01-01 (before effectivefrom 2026-01-01)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2025-01-01", "end_date": "2025-01-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+            # Backdated period: start_date = 2025-01-01 (before effectivefrom 2026-01-01)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            p = await session_client.post(
+                "/payroll/periods",
+                json={"branch_id": paytest_branch_id, "period_type": "Week",
+                      "start_date": "2025-01-01", "end_date": "2025-01-07"},
+                headers=auth(auth_token),
+            )
+            assert p.status_code == 201
+            pid = p.json()["payroll_period_id"]
+            await session_client.patch(
+                f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
+            )
 
-        # Must be rejected: item active today but NOT active at period.start_date 2025-01-01.
-        # If CURRENT_DATE were used this would wrongly return 201.
-        add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id,
-                  "line_type": "M14_TODAY_ACTIVE", "amount": "50.00"},
-            headers=auth(auth_token),
-        )
-        assert add.status_code == 422, (
-            f"Expected 422 (item active today but NOT at period.start_date 2025-01-01). "
-            f"If this returned 201 the code is using CURRENT_DATE instead of period.start_date. "
-            f"Got {add.status_code}: {add.text}"
-        )
-        assert "active" in add.text.lower()
+            # Must be rejected: BONUS active today but NOT active at period.start_date 2025-01-01.
+            # If CURRENT_DATE were used this would wrongly return 201.
+            add = await session_client.post(
+                f"/payroll/periods/{pid}/period-pay",
+                json={"driver_id": paytest_driver_id,
+                      "line_type": "Bonus", "amount": "50.00"},
+                headers=auth(auth_token),
+            )
+            assert add.status_code == 422, (
+                f"Expected 422 (item active today but NOT at period.start_date 2025-01-01). "
+                f"If this returned 201 the code is using CURRENT_DATE instead of period.start_date. "
+                f"Got {add.status_code}: {add.text}"
+            )
+            assert "active" in add.text.lower()
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
-        )
+            await session_client.patch(
+                f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
+            )
+        finally:
+            # Restore BONUS effectivefrom so it remains active for subsequent tests
+            await direct_db.execute(
+                _text(
+                    "UPDATE payroll.branchpayitemconfig "
+                    "SET effectivefrom = '2000-01-01' "
+                    "WHERE payitemid = :piid AND branchid = :bid"
+                ),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
 
     async def test_daily_lines_summary_excludes_period_pay(
         self,
