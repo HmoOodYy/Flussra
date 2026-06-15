@@ -183,3 +183,34 @@ class CdpiRequestDraftFields(BaseModel):
                 f"item_name must not exceed {_MAX_ITEM_NAME_LENGTH} characters"
             )
         return v
+
+
+# ---------------------------------------------------------------------------
+# Task 3 write-side contracts
+# ---------------------------------------------------------------------------
+
+class CdpiRequestCreate(CdpiRequestDraftFields):
+    """
+    Body for POST /settings/cdpi/requests (create a new Draft).
+
+    requesting_branch_id is required; the branch must belong to the caller's
+    company and the caller must hold payitems.edit on it.
+
+    All content fields are inherited from CdpiRequestDraftFields and remain
+    optional so a caller can create an empty draft and fill it in later.
+    """
+    requesting_branch_id: int
+
+
+class CdpiRequestUpdate(CdpiRequestDraftFields):
+    """
+    Body for PATCH /settings/cdpi/requests/{id} (update an existing Draft).
+
+    expected_revision is required for optimistic concurrency: the service
+    compares it against the current Revision in the database and rejects the
+    update with HTTP 409 if they do not match.
+
+    All content fields are inherited from CdpiRequestDraftFields and remain
+    optional so a caller can update a single field without re-sending the rest.
+    """
+    expected_revision: int
