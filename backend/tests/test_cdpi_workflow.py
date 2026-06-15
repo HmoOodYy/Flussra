@@ -783,8 +783,12 @@ class TestCopyRejected:
         finally:
             await _cleanup_requests(direct_db, new_req.request_id, original.request_id)
 
-    async def test_copy_non_rejected_raises_422(self, direct_db):
-        """Copying a Draft or PendingCompanyApproval request raises 422."""
+    async def test_copy_non_rejected_same_branch_raises_422(self, direct_db):
+        """
+        Same-branch user copying a Draft (non-Rejected) gets the expected 422.
+        Permission passes first because they own the branch; the wrong-status
+        error is correct and non-leaking.
+        """
         company_id, hq_id, _, admin_id = await _get_ids(direct_db)
         draft = await _create_complete_draft(direct_db, company_id, hq_id, admin_id)
         try:
@@ -795,6 +799,87 @@ class TestCopyRejected:
             assert exc_info.value.status_code == 422
         finally:
             await _cleanup_requests(direct_db, draft.request_id)
+
+    async def test_copy_same_branch_rejected_succeeds(self, direct_db):
+        """Same-branch user can still copy a Rejected request."""
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        original = await self._reject_request(direct_db, company_id, admin_id, hq_id)
+        new_req = await cdpi_service.copy_rejected(
+            company_id, admin_id, original.request_id, direct_db
+        )
+        try:
+            assert new_req.status == "Draft"
+        finally:
+            await _cleanup_requests(direct_db, new_req.request_id, original.request_id)
+
+    async def test_cross_branch_copy_of_draft_is_403_not_422(self, direct_db):
+        """
+        State-leak regression: a branch-scoped user copying another branch's
+        Draft must be denied by permission (403), not status error (422).
+        Without the fix, the old order returned 422 revealing the request status.
+        """
+        company_id, hq_id, paytest_id, admin_id = await _get_ids(direct_db)
+        suffix = uuid.uuid4().hex[:6]
+        hq_user_id = await _create_test_user(
+            direct_db, company_id=company_id, username=f"lkd_{suffix}"
+        )
+        role_id = await _create_company_role(
+            direct_db, company_id=company_id,
+            role_code=f"LKD_{suffix}", perms=["payitems.edit"],
+        )
+        await _assign_role(
+            direct_db, user_id=hq_user_id, company_id=company_id,
+            role_id=role_id, scope="SpecificBranch", branch_id=hq_id,
+        )
+        # Create a Draft on PAYTEST (not the user's branch).
+        draft = await _create_complete_draft(
+            direct_db, company_id, paytest_id, admin_id
+        )
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.copy_rejected(
+                    company_id, hq_user_id, draft.request_id, direct_db
+                )
+            # Must be 403 (permission denied), not 422 (wrong status leak).
+            assert exc_info.value.status_code == 403
+        finally:
+            await _cleanup_requests(direct_db, draft.request_id)
+            await _cleanup_user(direct_db, hq_user_id)
+            await _cleanup_role(direct_db, role_id)
+
+    async def test_cross_branch_copy_of_pending_is_403_not_422(self, direct_db):
+        """
+        State-leak regression: a branch-scoped user copying another branch's
+        PendingCompanyApproval request must receive 403, not 422.
+        """
+        company_id, hq_id, paytest_id, admin_id = await _get_ids(direct_db)
+        suffix = uuid.uuid4().hex[:6]
+        hq_user_id = await _create_test_user(
+            direct_db, company_id=company_id, username=f"lkp_{suffix}"
+        )
+        role_id = await _create_company_role(
+            direct_db, company_id=company_id,
+            role_code=f"LKP_{suffix}", perms=["payitems.edit"],
+        )
+        await _assign_role(
+            direct_db, user_id=hq_user_id, company_id=company_id,
+            role_id=role_id, scope="SpecificBranch", branch_id=hq_id,
+        )
+        draft = await _create_complete_draft(
+            direct_db, company_id, paytest_id, admin_id
+        )
+        try:
+            pending = await _submit(direct_db, company_id, admin_id, draft.request_id)
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.copy_rejected(
+                    company_id, hq_user_id, draft.request_id, direct_db
+                )
+            # Must be 403 (permission denied), not 422 (wrong status leak).
+            assert exc_info.value.status_code == 403
+        finally:
+            await _cleanup_requests(direct_db, draft.request_id)
+            await _cleanup_user(direct_db, hq_user_id)
+            await _cleanup_role(direct_db, role_id)
 
     async def test_copy_creates_no_legacy_rows(self, direct_db):
         """Copy must not touch PayItems, CdpiDefinitions, or any legacy table."""

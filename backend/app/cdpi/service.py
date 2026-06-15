@@ -717,6 +717,11 @@ async def copy_rejected(
     if src is None or src["companyid"] != company_id:
         raise HTTPException(status_code=404, detail="CDPI request not found.")
 
+    # Permission enforced before status check to prevent cross-branch state leaks.
+    # A scoped user must not learn that a request exists or what status it has
+    # before their branch access is verified.
+    await require_cdpi_branch_edit(company_id, user_id, src["requestingbranchid"], db)
+
     if src["status"] != "Rejected":
         raise HTTPException(
             status_code=422,
@@ -725,8 +730,6 @@ async def copy_rejected(
                 f"Current status: {src['status']}."
             ),
         )
-
-    await require_cdpi_branch_edit(company_id, user_id, src["requestingbranchid"], db)
 
     # Insert new request.
     new_id = (await db.execute(
