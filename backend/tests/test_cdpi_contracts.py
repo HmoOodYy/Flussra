@@ -12,7 +12,6 @@ Part B — permission guard tests (integration, uses direct_db):
 """
 import uuid
 import pytest
-import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import text as _text
@@ -29,8 +28,6 @@ from app.cdpi.schemas import (
     _MAX_UNIT_LENGTH,
 )
 from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
-
-pytestmark = pytest.mark.asyncio
 
 
 # ===========================================================================
@@ -307,6 +304,7 @@ async def _cleanup_company_role(db, role_id: int) -> None:
 # Branch guard tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
 class TestRequireCdpiBranchEdit:
 
     async def test_admin_passes_for_hq(self, direct_db):
@@ -454,6 +452,7 @@ class TestRequireCdpiBranchEdit:
 # Company guard tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
 class TestRequireCdpiCompanyEdit:
 
     async def test_admin_passes(self, direct_db):
