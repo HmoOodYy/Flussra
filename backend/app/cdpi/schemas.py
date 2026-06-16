@@ -233,13 +233,10 @@ class CdpiSubmitRequest(BaseModel):
 
 
 class CdpiDecideAction(str, Enum):
-    """
-    Permitted decision actions for POST /settings/cdpi/requests/{id}/decide.
-
-    Approve is intentionally absent -- it is not implemented until Task 5.
-    """
+    """Permitted decision actions for POST /settings/cdpi/requests/{id}/decide."""
     ReturnToDraft = "ReturnToDraft"
     Reject = "Reject"
+    Approve = "Approve"
 
 
 class CdpiDecideRequest(BaseModel):
@@ -260,3 +257,71 @@ class CdpiDecideRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("reason must not be empty")
         return v
+
+
+# ---------------------------------------------------------------------------
+# Task 6 write-side contracts (direct company creation)
+# ---------------------------------------------------------------------------
+
+class CdpiDirectCreateRequest(BaseModel):
+    """
+    Body for POST /settings/cdpi/direct-company-items.
+
+    Creates a PayItem + CdpiDefinition directly (no CDPI request workflow).
+    All three required content fields must be provided; unit and notes are
+    optional display metadata.
+
+    Requires AllCompanyBranches scope + payitems.edit.
+    """
+    item_name: str
+    input_type: str
+    calc_method_key: str
+    unit: str | None = None
+    notes: str | None = None
+
+    @field_validator("item_name")
+    @classmethod
+    def item_name_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("item_name must not be empty")
+        if len(v) > _MAX_ITEM_NAME_LENGTH:
+            raise ValueError(f"item_name must not exceed {_MAX_ITEM_NAME_LENGTH} characters")
+        return v
+
+    @field_validator("input_type")
+    @classmethod
+    def input_type_valid(cls, v: str) -> str:
+        validate_input_type(v)
+        return v
+
+    @field_validator("calc_method_key")
+    @classmethod
+    def calc_method_key_valid(cls, v: str) -> str:
+        validate_calc_method_key(v)
+        return v
+
+    @field_validator("unit")
+    @classmethod
+    def unit_length(cls, v: str | None) -> str | None:
+        return validate_unit(v)
+
+
+class CdpiDirectCreateSummary(BaseModel):
+    """
+    Read-side response for a directly created CDPI company item.
+
+    Returned by POST /settings/cdpi/direct-company-items.
+    No CdpiRequest row exists for these items; the response surfaces the
+    created PayItem and CdpiDefinition identifiers instead.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    pay_item_id: int
+    pay_item_code: str
+    company_id: int
+    item_name: str
+    input_type: str
+    unit: str | None
+    calc_method_key: str
+    notes: str | None
+    created_by_user_id: int

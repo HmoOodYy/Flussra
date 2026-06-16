@@ -230,11 +230,10 @@ class TestCdpiDecideRequest:
                 action="ReturnToDraft", expected_revision=1, reason="   "
             )
 
-    def test_approve_action_not_in_schema(self):
-        with pytest.raises(ValidationError):
-            CdpiDecideRequest(
-                action="Approve", expected_revision=1, reason="ok"
-            )
+    def test_approve_action_is_valid_in_schema(self):
+        """Approve was added in Task 6; it must now be accepted by the schema."""
+        body = CdpiDecideRequest(action="Approve", expected_revision=1, reason="ok")
+        assert body.action == CdpiDecideAction.Approve
 
     def test_valid_return_to_draft(self):
         body = CdpiDecideRequest(

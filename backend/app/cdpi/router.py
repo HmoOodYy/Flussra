@@ -9,8 +9,9 @@ Routes:
   GET    /requests/{id}               -- read a single request
   PATCH  /requests/{id}               -- update a Draft (optimistic concurrency)
   POST   /requests/{id}/submit        -- submit Draft -> PendingCompanyApproval
-  POST   /requests/{id}/decide        -- return or reject a Pending request
+  POST   /requests/{id}/decide        -- return, reject, or approve a Pending request
   POST   /requests/{id}/copy          -- copy a Rejected request to a new Draft
+  POST   /direct-company-items        -- create PayItem directly (no request workflow)
 """
 from typing import Annotated
 from uuid import UUID
@@ -25,6 +26,8 @@ from app.cdpi.schemas import (
     CdpiRequestUpdate,
     CdpiSubmitRequest,
     CdpiDecideRequest,
+    CdpiDirectCreateRequest,
+    CdpiDirectCreateSummary,
 )
 
 router = APIRouter()
@@ -148,3 +151,19 @@ async def copy_rejected(
     company_id: int = token["cid"]
     user_id:    int = token["sub"]
     return await service.copy_rejected(company_id, user_id, request_id, db)
+
+
+@router.post(
+    "/direct-company-items",
+    response_model=CdpiDirectCreateSummary,
+    status_code=201,
+    summary="Create CDPI company item directly (no request workflow)",
+)
+async def create_direct_company_item(
+    token: TokenDep,
+    db:    DbDep,
+    body:  CdpiDirectCreateRequest,
+) -> CdpiDirectCreateSummary:
+    company_id: int = token["cid"]
+    user_id:    int = token["sub"]
+    return await service.create_direct_company_item(company_id, user_id, body, db)

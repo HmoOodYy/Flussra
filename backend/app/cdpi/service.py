@@ -1,22 +1,11 @@
 """
-CDPI (Custom Daily Pay Item) -- Draft CRUD service layer.
-
-Covers: create draft, read request, list requests, update draft.
+CDPI (Custom Daily Pay Item) -- service layer.
 
 All functions use raw parameterized SQL via sqlalchemy.text().
 Transactions are managed by the get_db() dependency (engine.begin()),
 which auto-commits on success and rolls back on exception.
-
-Scope model:
-  - AllCompanyBranches users see all requests for the company.
-  - SpecificBranch users see only requests for their own branch(es).
-
-Optimistic concurrency (update_draft):
-  - Caller supplies expected_revision.
-  - Service reads current Revision from the DB.
-  - If they do not match, raises HTTP 409 (stale data).
-  - On match, increments Revision by 1 and updates UpdatedByUserID/UpdatedAtUtc.
 """
+import uuid as _uuid
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -33,6 +22,8 @@ from app.cdpi.schemas import (
     CdpiSubmitRequest,
     CdpiDecideRequest,
     CdpiDecideAction,
+    CdpiDirectCreateRequest,
+    CdpiDirectCreateSummary,
 )
 
 
@@ -545,7 +536,7 @@ async def submit_draft(
 
 
 # ---------------------------------------------------------------------------
-# Decide: ReturnToDraft or Reject
+# Decide: ReturnToDraft, Reject, or Approve
 # ---------------------------------------------------------------------------
 
 async def decide_request(
@@ -556,57 +547,42 @@ async def decide_request(
     db: AsyncConnection,
 ) -> CdpiRequestSummary:
     """
-    Company reviewer action: return a Pending request to Draft or reject it.
-
-    Approve is not implemented in Task 4 and is rejected with 422.
-
-    Flow:
-      1. Pre-read for existence/company check.
-      2. Company-wide edit permission (AllCompanyBranches scope required).
-      3. Atomic conditional UPDATE:
-           WHERE requestid, companyid, status='PendingCompanyApproval', revision=expected
-         Sets new status, UpdatedByUserID, UpdatedAtUtc, revision+1.
-      4. Diagnose 0-row result.
-      5. Insert event with reason.
-      6. Return updated row.
+    Company reviewer action on a PendingCompanyApproval request.
 
     Raises:
       404 -- not found.
       403 -- caller is not a company-wide reviewer.
-      422 -- not PendingCompanyApproval, or Approve action sent (not implemented).
+      422 -- not PendingCompanyApproval, incomplete definition, or unsupported method.
       409 -- stale revision.
     """
+    if data.action == CdpiDecideAction.Approve:
+        return await _approve_request(company_id, user_id, request_id, data, db)
+
     if data.action == CdpiDecideAction.ReturnToDraft:
         new_status = "Draft"
         event_type = "ReturnedToDraft"
-        from_status = "PendingCompanyApproval"
     elif data.action == CdpiDecideAction.Reject:
         new_status = "Rejected"
         event_type = "Rejected"
-        from_status = "PendingCompanyApproval"
     else:
         raise HTTPException(
             status_code=422,
-            detail=f"Action '{data.action}' is not supported in this task.",
+            detail=f"Unsupported action: '{data.action}'.",
         )
 
-    # Step 1: pre-read for existence.
+    # Pre-read for existence.
     pre = (await db.execute(
-        text("""
-            SELECT companyid FROM payroll.cdpirequests WHERE requestid = :rid
-        """),
+        text("SELECT companyid FROM payroll.cdpirequests WHERE requestid = :rid"),
         {"rid": str(request_id)},
     )).mappings().first()
 
     if pre is None or pre["companyid"] != company_id:
         raise HTTPException(status_code=404, detail="CDPI request not found.")
 
-    # Step 2: company-wide permission (AllCompanyBranches scope required).
     await require_cdpi_company_edit(company_id, user_id, db)
 
-    # Step 3: atomic conditional UPDATE.
     updated = (await db.execute(
-        text(f"""
+        text("""
             UPDATE payroll.cdpirequests
             SET    status           = :new_status,
                    updatedbyuserid  = :uid,
@@ -630,9 +606,8 @@ async def decide_request(
     if updated is None:
         diag = (await db.execute(
             text("""
-                SELECT status, revision
-                FROM   payroll.cdpirequests
-                WHERE  requestid = :rid AND companyid = :cid
+                SELECT status, revision FROM payroll.cdpirequests
+                WHERE requestid = :rid AND companyid = :cid
             """),
             {"rid": str(request_id), "cid": company_id},
         )).mappings().first()
@@ -654,29 +629,354 @@ async def decide_request(
             ),
         )
 
-    # Step 5: insert event with reason.
     await db.execute(
         text("""
             INSERT INTO payroll.cdpirequestevents (
                 requestid, eventtype, fromstatus, tostatus,
                 actoruserid, reason, requestrevision
             ) VALUES (
-                :rid, :etype, :from_status, :to_status,
+                :rid, :etype, 'PendingCompanyApproval', :to_status,
                 :uid, :reason, :rev
             )
         """),
         {
-            "rid":         str(request_id),
-            "etype":       event_type,
-            "from_status": from_status,
-            "to_status":   new_status,
-            "uid":         user_id,
-            "reason":      data.reason,
-            "rev":         updated,
+            "rid":      str(request_id),
+            "etype":    event_type,
+            "to_status": new_status,
+            "uid":      user_id,
+            "reason":   data.reason,
+            "rev":      updated,
         },
     )
 
     return await _load_request(request_id, db)
+
+
+async def _approve_request(
+    company_id: int,
+    user_id: int,
+    request_id: UUID,
+    data: CdpiDecideRequest,
+    db: AsyncConnection,
+) -> CdpiRequestSummary:
+    """
+    Atomically approve a PendingCompanyApproval request.
+
+    Within a single transaction:
+      1. Pre-read: load branch + item fields.
+      2. Company-wide permission check.
+      3. Validate via adapter (must be implemented + complete).
+      4. Atomic UPDATE: status='Approved', revision+1.
+      5. INSERT PayItems (company-level Daily PerUnit item).
+      6. INSERT CdpiDefinitions (SourceRequestID = request UUID).
+      7. INSERT BranchPayItemConfig (requesting branch, IsActive=TRUE).
+      8. UPDATE CdpiRequests.ApprovedPayItemID.
+      9. INSERT Approved event.
+    """
+    # Step 1: pre-read.
+    pre = (await db.execute(
+        text("""
+            SELECT companyid, requestingbranchid,
+                   itemname, inputtype, calcmethodkey, unit, notes
+            FROM   payroll.cdpirequests
+            WHERE  requestid = :rid
+        """),
+        {"rid": str(request_id)},
+    )).mappings().first()
+
+    if pre is None or pre["companyid"] != company_id:
+        raise HTTPException(status_code=404, detail="CDPI request not found.")
+
+    # Step 2: company-wide permission.
+    await require_cdpi_company_edit(company_id, user_id, db)
+
+    # Step 3: adapter validation.
+    if not pre["calcmethodkey"]:
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot approve: missing required fields: CalcMethodKey.",
+        )
+    adapter = get_adapter(pre["calcmethodkey"])
+    if adapter is None or not adapter.is_implemented():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"CalcMethodKey '{pre['calcmethodkey']}' is not supported for approval. "
+                "Only PerUnit requests may be approved at this time."
+            ),
+        )
+    missing = adapter.validate_submit(pre["itemname"], pre["inputtype"])
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot approve: missing required fields: {', '.join(missing)}.",
+        )
+
+    # Step 4 (early validation): confirm the request is still in the expected state
+    # before doing expensive inserts.  If we are in engine.begin() mode (production),
+    # the inserts below are rolled back on any error, so correctness is guaranteed.
+    diag_pre = (await db.execute(
+        text("""
+            SELECT status, revision FROM payroll.cdpirequests
+            WHERE requestid = :rid AND companyid = :cid
+        """),
+        {"rid": str(request_id), "cid": company_id},
+    )).mappings().first()
+    if diag_pre is None:
+        raise HTTPException(status_code=404, detail="CDPI request not found.")
+    if diag_pre["status"] != "PendingCompanyApproval":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Only PendingCompanyApproval requests can be approved. "
+                f"Current status: {diag_pre['status']}."
+            ),
+        )
+    if diag_pre["revision"] != data.expected_revision:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Revision mismatch: expected {data.expected_revision}, "
+                f"current is {diag_pre['revision']}. Reload and retry."
+            ),
+        )
+
+    # Step 5: INSERT PayItems (must precede the status UPDATE so we can include
+    # ApprovedPayItemID in the same statement — the check constraint requires
+    # Status='Approved' and ApprovedPayItemID IS NOT NULL to be set together).
+    pay_item_code = f"CDPI{_uuid.uuid4().hex[:12].upper()}"
+    pay_item_id: int = (await db.execute(
+        text("""
+            INSERT INTO payroll.payitems (
+                companyid, branchid, payitemcode, displaylabel, payitemname,
+                category, datatype, unit, status, sortorder,
+                appearsinpayrollentry, appearsinledger, appearsinreports,
+                requiresrate, issystemstandard,
+                itemscope, ratebehavior, isdefaultbranchactive,
+                requestingbranchid, createdbyuserid, notes
+            ) VALUES (
+                :cid, NULL, :code, :label, :name,
+                'Custom', 'Decimal', :unit, 'Active', 0,
+                TRUE, TRUE, TRUE,
+                FALSE, FALSE,
+                'Daily', 'PerUnit', FALSE,
+                :req_branch_id, :uid, :notes
+            )
+            RETURNING payitemid
+        """),
+        {
+            "cid":           company_id,
+            "code":          pay_item_code,
+            "label":         pre["itemname"],
+            "name":          pre["itemname"],
+            "unit":          pre["unit"],
+            "req_branch_id": pre["requestingbranchid"],
+            "uid":           user_id,
+            "notes":         pre["notes"],
+        },
+    )).scalar_one()
+
+    # Step 6: INSERT CdpiDefinitions.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.cdpidefinitions (
+                payitemid, definitionschemaversion, lockedatutc, createdbyuserid
+            ) VALUES (
+                :pid, 1, now(), :uid
+            )
+        """),
+        {"pid": pay_item_id, "uid": user_id},
+    )
+
+    # Step 7: INSERT BranchPayItemConfig (requesting branch, active).
+    await db.execute(
+        text("""
+            INSERT INTO payroll.branchpayitemconfig (
+                companyid, branchid, payitemid,
+                isactive, effectivefrom, createdbyuserid
+            ) VALUES (
+                :cid, :bid, :pid,
+                TRUE, CURRENT_DATE, :uid
+            )
+        """),
+        {
+            "cid": company_id,
+            "bid": pre["requestingbranchid"],
+            "pid": pay_item_id,
+            "uid": user_id,
+        },
+    )
+
+    # Step 8: Atomic UPDATE — sets Status='Approved' and ApprovedPayItemID together
+    # (check constraint ck_cdpirequests_approvallink requires both non-null simultaneously).
+    new_rev = (await db.execute(
+        text("""
+            UPDATE payroll.cdpirequests
+            SET    status            = 'Approved',
+                   approvedpayitemid = :pid,
+                   updatedbyuserid   = :uid,
+                   updatedatutc      = now(),
+                   revision          = revision + 1
+            WHERE  requestid = :rid
+              AND  companyid = :cid
+              AND  status    = 'PendingCompanyApproval'
+              AND  revision  = :expected_revision
+            RETURNING revision
+        """),
+        {
+            "rid":               str(request_id),
+            "cid":               company_id,
+            "expected_revision": data.expected_revision,
+            "uid":               user_id,
+            "pid":               pay_item_id,
+        },
+    )).scalar_one_or_none()
+
+    if new_rev is None:
+        # In engine.begin() mode the transaction rolls back the PayItem inserts above.
+        # Diagnose the conflict for the caller.
+        diag = (await db.execute(
+            text("""
+                SELECT status, revision FROM payroll.cdpirequests
+                WHERE requestid = :rid AND companyid = :cid
+            """),
+            {"rid": str(request_id), "cid": company_id},
+        )).mappings().first()
+        if diag is None:
+            raise HTTPException(status_code=404, detail="CDPI request not found.")
+        if diag["status"] != "PendingCompanyApproval":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Only PendingCompanyApproval requests can be approved. "
+                    f"Current status: {diag['status']}."
+                ),
+            )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Revision mismatch: expected {data.expected_revision}, "
+                f"current is {diag['revision']}. Reload and retry."
+            ),
+        )
+
+    # Step 9: INSERT Approved event.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.cdpirequestevents (
+                requestid, eventtype, fromstatus, tostatus,
+                actoruserid, reason, requestrevision
+            ) VALUES (
+                :rid, 'Approved', 'PendingCompanyApproval', 'Approved',
+                :uid, :reason, :rev
+            )
+        """),
+        {
+            "rid":    str(request_id),
+            "uid":    user_id,
+            "reason": data.reason,
+            "rev":    new_rev,
+        },
+    )
+
+    return await _load_request(request_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Direct company item creation (no request workflow)
+# ---------------------------------------------------------------------------
+
+async def create_direct_company_item(
+    company_id: int,
+    user_id: int,
+    data: CdpiDirectCreateRequest,
+    db: AsyncConnection,
+) -> CdpiDirectCreateSummary:
+    """
+    Admin-direct creation of a CDPI PayItem without the request workflow.
+
+    Creates a PayItem + CdpiDefinition in one transaction.
+    No CdpiRequest row is created.  No BranchPayItemConfig rows are created —
+    the item starts inactive for all branches.
+
+    Raises:
+      403 -- caller lacks AllCompanyBranches scope + payitems.edit.
+      422 -- calc_method_key is not yet supported (only PerUnit).
+    """
+    await require_cdpi_company_edit(company_id, user_id, db)
+
+    # Validate via adapter.
+    adapter = get_adapter(data.calc_method_key)
+    if adapter is None or not adapter.is_implemented():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"CalcMethodKey '{data.calc_method_key}' is not supported for direct creation. "
+                "Only PerUnit items may be created at this time."
+            ),
+        )
+    missing = adapter.validate_submit(data.item_name, data.input_type)
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot create: missing required fields: {', '.join(missing)}.",
+        )
+
+    # INSERT PayItems (no requesting branch — company-level direct create).
+    pay_item_code = f"CDPI{_uuid.uuid4().hex[:12].upper()}"
+    pay_item_id: int = (await db.execute(
+        text("""
+            INSERT INTO payroll.payitems (
+                companyid, branchid, payitemcode, displaylabel, payitemname,
+                category, datatype, unit, status, sortorder,
+                appearsinpayrollentry, appearsinledger, appearsinreports,
+                requiresrate, issystemstandard,
+                itemscope, ratebehavior, isdefaultbranchactive,
+                requestingbranchid, createdbyuserid, notes
+            ) VALUES (
+                :cid, NULL, :code, :label, :name,
+                'Custom', 'Decimal', :unit, 'Active', 0,
+                TRUE, TRUE, TRUE,
+                FALSE, FALSE,
+                'Daily', 'PerUnit', FALSE,
+                NULL, :uid, :notes
+            )
+            RETURNING payitemid
+        """),
+        {
+            "cid":   company_id,
+            "code":  pay_item_code,
+            "label": data.item_name,
+            "name":  data.item_name,
+            "unit":  data.unit,
+            "uid":   user_id,
+            "notes": data.notes,
+        },
+    )).scalar_one()
+
+    # INSERT CdpiDefinitions.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.cdpidefinitions (
+                payitemid, definitionschemaversion, lockedatutc, createdbyuserid
+            ) VALUES (
+                :pid, 1, now(), :uid
+            )
+        """),
+        {"pid": pay_item_id, "uid": user_id},
+    )
+
+    return CdpiDirectCreateSummary(
+        pay_item_id=pay_item_id,
+        pay_item_code=pay_item_code,
+        company_id=company_id,
+        item_name=data.item_name,
+        input_type=data.input_type,
+        unit=data.unit,
+        calc_method_key=data.calc_method_key,
+        notes=data.notes,
+        created_by_user_id=user_id,
+    )
 
 
 # ---------------------------------------------------------------------------
