@@ -531,26 +531,40 @@ class TestCdpiPerUnitBackfill:
         )
         return pid
 
+    async def _run_backfill(self, db):
+        """Execute the 0047 backfill DO block against the live test DB."""
+        from pathlib import Path
+        import sys
+        migrations_dir = Path(__file__).parent.parent.parent / "migrations"
+        if str(migrations_dir) not in sys.path:
+            sys.path.insert(0, str(migrations_dir))
+        from utils import statements_from_file
+        sql_file = migrations_dir / "sql" / "0047_cdpi_perunit_rate_slot_backfill.sql"
+        for stmt in statements_from_file(sql_file):
+            await db.execute(_text(stmt))
+
+    async def _cleanup_legacy(self, db, pid: int) -> None:
+        """Tear down a manually-inserted legacy PayItem and all its CDPI rows."""
+        await _cleanup_cdpi_rate_rows(db, pid)
+        await db.execute(
+            _text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+            {"pid": pid},
+        )
+        await db.execute(
+            _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+            {"pid": pid},
+        )
+
     async def test_backfill_repairs_legacy_item(self, direct_db):
-        """0047 backfill DO block creates the triple for a legacy CDPI PerUnit item."""
+        """0047 backfill DO block creates the full triple for a fully-missing legacy item."""
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
         pid = await self._make_legacy_cdpi_item(
             direct_db, company_id=cid, branch_id=hq_id, user_id=admin_id,
             item_name="Legacy Bonus Loads",
         )
         try:
-            # Run the backfill DO block directly.
-            from pathlib import Path
-            import sys
-            migrations_dir = Path(__file__).parent.parent.parent / "migrations"
-            if str(migrations_dir) not in sys.path:
-                sys.path.insert(0, str(migrations_dir))
-            from utils import statements_from_file
-            sql_file = migrations_dir / "sql" / "0047_cdpi_perunit_rate_slot_backfill.sql"
-            for stmt in statements_from_file(sql_file):
-                await direct_db.execute(_text(stmt))
+            await self._run_backfill(direct_db)
 
-            # Verify the triple was created.
             map_count = (await direct_db.execute(
                 _text("SELECT COUNT(*) FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
                 {"pid": pid},
@@ -567,15 +581,7 @@ class TestCdpiPerUnitBackfill:
             assert slot_count == 1
             assert requiresrate is True
         finally:
-            await _cleanup_cdpi_rate_rows(direct_db, pid)
-            await direct_db.execute(
-                _text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
-                {"pid": pid},
-            )
+            await self._cleanup_legacy(direct_db, pid)
 
     async def test_backfill_is_idempotent(self, direct_db):
         """Re-running the backfill DO block does not create duplicate rows."""
@@ -585,20 +591,8 @@ class TestCdpiPerUnitBackfill:
             item_name="Idempotency Legacy",
         )
         try:
-            from pathlib import Path
-            import sys
-            migrations_dir = Path(__file__).parent.parent.parent / "migrations"
-            if str(migrations_dir) not in sys.path:
-                sys.path.insert(0, str(migrations_dir))
-            from utils import statements_from_file
-            sql_file = migrations_dir / "sql" / "0047_cdpi_perunit_rate_slot_backfill.sql"
-            stmts = list(statements_from_file(sql_file))
-
-            # Run twice.
-            for stmt in stmts:
-                await direct_db.execute(_text(stmt))
-            for stmt in stmts:
-                await direct_db.execute(_text(stmt))
+            await self._run_backfill(direct_db)
+            await self._run_backfill(direct_db)
 
             map_count = (await direct_db.execute(
                 _text("SELECT COUNT(*) FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
@@ -611,12 +605,179 @@ class TestCdpiPerUnitBackfill:
             assert map_count == 1
             assert slot_count == 1
         finally:
-            await _cleanup_cdpi_rate_rows(direct_db, pid)
-            await direct_db.execute(
-                _text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+            await self._cleanup_legacy(direct_db, pid)
+
+    async def test_backfill_repairs_missing_slot_only(self, direct_db):
+        """
+        Partial state: RateType + active PayItemRateTypeMap exist, slot missing.
+
+        Backfill must create the slot without duplicating the RateType or map.
+        """
+        import uuid as _uuid
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+
+        code = f"CDPI_PS_{_uuid.uuid4().hex[:8].upper()}"
+        pid = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payitems
+                    (payitemcode, payitemname, companyid, branchid,
+                     category, datatype, itemscope, ratebehavior, status,
+                     issystemstandard, isdefaultbranchactive, appearsinpayrollentry,
+                     requiresrate, unit)
+                VALUES
+                    (:code, 'Partial Slot Test', :cid, NULL,
+                     'Custom', 'Decimal', 'Daily', 'PerUnit', 'Active',
+                     FALSE, FALSE, TRUE, FALSE, 'trip')
+                RETURNING payitemid
+            """),
+            {"code": code, "cid": cid},
+        )).scalar_one()
+
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.cdpidefinitions
+                    (payitemid, definitionschemaversion, lockedatutc, createdbyuserid)
+                VALUES (:pid, 1, NOW(), :uid)
+            """),
+            {"pid": pid, "uid": admin_id},
+        )
+
+        rt_id = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.ratetypes
+                    (ratecode, ratename, unitname, isactive, companyid)
+                VALUES (:code, 'Partial Slot Test Rate', 'trip', TRUE, :cid)
+                RETURNING ratetypeid
+            """),
+            {"code": f"CDPI_{pid}_PER_UNIT", "cid": cid},
+        )).scalar_one()
+
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payitemratetypemap
+                    (payitemid, ratetypeid, isprimary, status)
+                VALUES (:pid, :rtid, TRUE, 'Active')
+            """),
+            {"pid": pid, "rtid": rt_id},
+        )
+
+        try:
+            await self._run_backfill(direct_db)
+
+            slot_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemrateslots WHERE payitemid = :pid AND status = 'Active'"),
                 {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+            )).scalar_one()
+            rt_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.ratetypes WHERE ratecode = :code"),
+                {"code": f"CDPI_{pid}_PER_UNIT"},
+            )).scalar_one()
+            map_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemratetypemap WHERE payitemid = :pid AND status = 'Active'"),
                 {"pid": pid},
-            )
+            )).scalar_one()
+            requiresrate = (await direct_db.execute(
+                _text("SELECT requiresrate FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": pid},
+            )).scalar_one()
+
+            assert slot_count == 1, "must create the missing slot"
+            assert rt_count == 1, "must not duplicate the RateType"
+            assert map_count == 1, "must not duplicate the map row"
+            assert requiresrate is True
+
+            # Idempotency.
+            await self._run_backfill(direct_db)
+            assert (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemrateslots WHERE payitemid = :pid AND status = 'Active'"),
+                {"pid": pid},
+            )).scalar_one() == 1
+        finally:
+            await self._cleanup_legacy(direct_db, pid)
+
+    async def test_backfill_repairs_missing_map_only(self, direct_db):
+        """
+        Partial state: deterministic RateType exists, PayItemRateTypeMap and
+        PayItemRateSlots are both missing.
+
+        Backfill must reuse the existing RateType, create map + slot.
+        """
+        import uuid as _uuid
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+
+        code = f"CDPI_PM_{_uuid.uuid4().hex[:8].upper()}"
+        pid = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payitems
+                    (payitemcode, payitemname, companyid, branchid,
+                     category, datatype, itemscope, ratebehavior, status,
+                     issystemstandard, isdefaultbranchactive, appearsinpayrollentry,
+                     requiresrate, unit)
+                VALUES
+                    (:code, 'Partial Map Test', :cid, NULL,
+                     'Custom', 'Decimal', 'Daily', 'PerUnit', 'Active',
+                     FALSE, FALSE, TRUE, FALSE, 'km')
+                RETURNING payitemid
+            """),
+            {"code": code, "cid": cid},
+        )).scalar_one()
+
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.cdpidefinitions
+                    (payitemid, definitionschemaversion, lockedatutc, createdbyuserid)
+                VALUES (:pid, 1, NOW(), :uid)
+            """),
+            {"pid": pid, "uid": admin_id},
+        )
+
+        rt_id = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.ratetypes
+                    (ratecode, ratename, unitname, isactive, companyid)
+                VALUES (:code, 'Partial Map Test Rate', 'km', TRUE, :cid)
+                RETURNING ratetypeid
+            """),
+            {"code": f"CDPI_{pid}_PER_UNIT", "cid": cid},
+        )).scalar_one()
+
+        try:
+            await self._run_backfill(direct_db)
+
+            rt_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.ratetypes WHERE ratecode = :code"),
+                {"code": f"CDPI_{pid}_PER_UNIT"},
+            )).scalar_one()
+            map_rt_id = (await direct_db.execute(
+                _text("""
+                    SELECT ratetypeid FROM payroll.payitemratetypemap
+                    WHERE payitemid = :pid AND status = 'Active'
+                """),
+                {"pid": pid},
+            )).scalar_one_or_none()
+            slot_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemrateslots WHERE payitemid = :pid AND status = 'Active'"),
+                {"pid": pid},
+            )).scalar_one()
+            requiresrate = (await direct_db.execute(
+                _text("SELECT requiresrate FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": pid},
+            )).scalar_one()
+
+            assert rt_count == 1, "must not create a duplicate RateType"
+            assert map_rt_id == rt_id, "must reuse the existing RateType"
+            assert slot_count == 1, "must create the missing slot"
+            assert requiresrate is True
+
+            # Idempotency.
+            await self._run_backfill(direct_db)
+            assert (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemratetypemap WHERE payitemid = :pid AND status = 'Active'"),
+                {"pid": pid},
+            )).scalar_one() == 1
+            assert (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemrateslots WHERE payitemid = :pid AND status = 'Active'"),
+                {"pid": pid},
+            )).scalar_one() == 1
+        finally:
+            await self._cleanup_legacy(direct_db, pid)
