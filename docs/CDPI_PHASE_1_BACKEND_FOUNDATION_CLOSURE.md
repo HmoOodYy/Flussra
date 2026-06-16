@@ -111,7 +111,7 @@ All writes use `sqlalchemy.text()` parameterized queries. Optimistic concurrency
 | | |
 |---|---|
 | Commit | `993ac54` |
-| Files | `backend/app/cdpi/methods.py` (adapter registry), `backend/app/cdpi/adapters/per_unit.py` |
+| Files | `backend/app/cdpi/methods.py`, `backend/app/cdpi/service.py`, `backend/tests/test_cdpi_methods.py` |
 
 Defined `CdpiMethodAdapter` protocol. Registered PerUnit adapter: validates completeness (item_name, input_type='Time'|'Number', calc_method_key='PerUnit'), validates submit readiness. Future methods (OrdinalTier, Block, RangeBracket, RangeProgressive) are registered as stubs that raise NotImplementedError.
 
@@ -367,7 +367,7 @@ The following were explicitly excluded from Phase 1 and do not exist in any form
 - **Stale SourceRequestID comments** — cleaned in hygiene commit `0d3d358`. No further stale references remain in service or test files.
 - **pytest cache warning** — non-blocking; arises from test runner environment, not from CDPI code.
 - **git LF/CRLF warning** — environmental; Windows line-ending normalization on commit. Non-blocking.
-- **`test_driver_transfer_workflow` pre-existing failure** — duplicate drivercode collision in an unrelated test; excluded from closure suite count. Not caused by CDPI changes.
+- **Driver transfer test** — a previously observed unrelated driver transfer test issue was rechecked during Phase 1 closure; the final full backend suite passed.
 
 ---
 
