@@ -685,7 +685,7 @@ async def _approve_request(
       3. Validate via adapter (must be implemented + complete).
       4. Atomic UPDATE: status='Approved', revision+1.
       5. INSERT PayItems (company-level Daily PerUnit item).
-      6. INSERT CdpiDefinitions (SourceRequestID = request UUID).
+      6. INSERT CdpiDefinitions (no SourceRequestID — removed in migration 0044).
       7. INSERT BranchPayItemConfig (requesting branch, IsActive=TRUE).
       8. UPDATE CdpiRequests.ApprovedPayItemID.
       9. INSERT Approved event.

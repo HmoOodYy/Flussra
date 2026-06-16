@@ -11,7 +11,7 @@ Coverage:
 
   Part B -- Direct Company Creation (12 tests):
     POST /settings/cdpi/direct-company-items creates PayItems + CdpiDefinitions
-    with SourceRequestID=NULL, no BranchPayItemConfig, no CdpiRequest.
+    (no SourceRequestID — removed in migration 0044), no BranchPayItemConfig, no CdpiRequest.
 
   Part C -- Regression (4 tests):
     Existing ReturnToDraft/Reject/submit/copy paths still work with the
