@@ -3,7 +3,7 @@ import type { FormEvent, DragEvent } from 'react';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
-import { createCdpiRequest, submitCdpiRequest, createDirectCdpiCompanyItem } from '../../../lib/cdpiApi';
+import { createCdpiRequest, submitCdpiRequest, createDirectCdpiCompanyItem, listCdpiRequests, decideCdpiRequest } from '../../../lib/cdpiApi';
 import { canManageCdpiForBranch, canDirectCreateCdpiCompanyItem } from '../../../lib/permissions';
 import type {
   BranchAdmin,
@@ -17,6 +17,10 @@ import type {
   PayItemOrderUpdate,
   WizardValueType,
   WizardRateMethod,
+  CdpiRequestSummary,
+  CdpiDecideAction,
+  CdpiStatus,
+  CdpiRequestListParams,
 } from '../../../types/settings';
 import styles from './PayItemsPage.module.css';
 
@@ -466,6 +470,23 @@ function buildAggregates(byBranch: Record<number, BranchPayItemState[]>, branche
   );
 }
 
+// ─── CDPI request list state ──────────────────────────────────────────────────
+
+type CdpiReqsState = { requests: CdpiRequestSummary[]; loading: boolean; error: string };
+type CdpiReqsAction =
+  | { type: 'FETCH_START' }
+  | { type: 'FETCH_OK';    requests: CdpiRequestSummary[] }
+  | { type: 'FETCH_ERROR'; error:    string };
+
+function cdpiReqsReducer(s: CdpiReqsState, a: CdpiReqsAction): CdpiReqsState {
+  switch (a.type) {
+    case 'FETCH_START': return { requests: [], loading: true,  error: '' };
+    case 'FETCH_OK':    return { requests: a.requests, loading: false, error: '' };
+    case 'FETCH_ERROR': return { requests: [], loading: false, error: a.error };
+    default:            return s;
+  }
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function PayItemsPage() {
@@ -519,6 +540,17 @@ export function PayItemsPage() {
   const [createSaving, setCreateSaving] = useState(false);
   const [createError, setCreateError]   = useState('');
   const [wizard, dispatchWizard]        = useReducer(wizardReducer, WIZARD_INITIAL);
+
+  // ── CDPI request review ───────────────────────────────────────────────────
+  const [cdpiSt, dispatchCdpi] = useReducer(cdpiReqsReducer, { requests: [], loading: false, error: '' });
+  const [cdpiFilter, setCdpiFilter]         = useState<CdpiStatus | 'all'>('PendingCompanyApproval');
+  const [cdpiKey, setCdpiKey]               = useState(0);
+  const [decideOpen, setDecideOpen]         = useState(false);
+  const [decideTarget, setDecideTarget]     = useState<CdpiRequestSummary | null>(null);
+  const [decideAction, setDecideAction]     = useState<CdpiDecideAction | null>(null);
+  const [decideReason, setDecideReason]     = useState('');
+  const [decideSaving, setDecideSaving]     = useState(false);
+  const [decideError, setDecideError]       = useState('');
 
   // ── Delete flow ───────────────────────────────────────────────────────────
   const [usageData, setUsageData]         = useState<CustomPayItemUsage | null>(null);
@@ -601,6 +633,26 @@ export function PayItemsPage() {
       }
     });
   }, [branchMode, branchSt.branches, allBranchKey]);
+
+  // ── Load CDPI requests ────────────────────────────────────────────────────
+  // Inline permission check because the derived constants are declared later in the
+  // component body (they depend on selectedBranchId which is state).
+  useEffect(() => {
+    const canDirectCreate = canDirectCreateCdpiCompanyItem(user);
+    const canBranchCreate = !canDirectCreate && selectedBranchId !== null
+      && canManageCdpiForBranch(user, selectedBranchId);
+    if (!canDirectCreate && !canBranchCreate) return;
+    dispatchCdpi({ type: 'FETCH_START' });
+    const params: CdpiRequestListParams = {};
+    if (cdpiFilter !== 'all') params.status = cdpiFilter;
+    // Branch users see only their own branch's requests.
+    if (!canDirectCreate && selectedBranchId) params.branch_id = selectedBranchId;
+    listCdpiRequests(params)
+      .then(data => dispatchCdpi({ type: 'FETCH_OK', requests: data }))
+      .catch(e => dispatchCdpi({ type: 'FETCH_ERROR', error: apiError(e) }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cdpiFilter, cdpiKey, selectedBranchId]);
+  // user is stable for the session; selectedBranchId covers userCanBranchCreate changes.
 
   // ── Aggregates ────────────────────────────────────────────────────────────
   const aggregates = useMemo(() => {
@@ -822,6 +874,52 @@ export function PayItemsPage() {
     finally { setDeleteWorking(false); }
   }
 
+  // ── CDPI decide action ────────────────────────────────────────────────────
+  function openDecide(req: CdpiRequestSummary, action: CdpiDecideAction) {
+    setDecideTarget(req);
+    setDecideAction(action);
+    setDecideReason('');
+    setDecideError('');
+    setDecideOpen(true);
+  }
+
+  async function executeDecide() {
+    if (!decideTarget || !decideAction) return;
+    setDecideSaving(true);
+    setDecideError('');
+    try {
+      await decideCdpiRequest(decideTarget.request_id, {
+        action:            decideAction,
+        expected_revision: decideTarget.revision,
+        reason:            decideReason.trim(),
+      });
+      setDecideOpen(false);
+      setDecideTarget(null);
+      setDecideAction(null);
+      setDecideReason('');
+      const label = decideAction === 'Approve' ? 'approved'
+        : decideAction === 'Reject'       ? 'rejected'
+        : 'returned to draft';
+      showToast(`Request ${label}.`);
+      setCdpiKey(k => k + 1);
+      // Refresh pay items list when a request is approved — the backend creates the PayItem.
+      if (decideAction === 'Approve') {
+        if (branchMode === 'single' && selectedBranchId) {
+          dispatchSingle({ type: 'FETCH_START' });
+          apiClient.get<BranchPayItemState[]>(`/settings/branches/${selectedBranchId}/pay-items`)
+            .then(({ data }) => dispatchSingle({ type: 'FETCH_OK', items: data }))
+            .catch(e2 => dispatchSingle({ type: 'FETCH_ERROR', error: apiError(e2) }));
+        } else if (branchMode === 'all') {
+          setAllBranchKey(k => k + 1);
+        }
+      }
+    } catch (e) {
+      setDecideError(apiError(e));
+    } finally {
+      setDecideSaving(false);
+    }
+  }
+
   // ─── Derived ───────────────────────────────────────────────────────────────
 
   // ── CDPI permission derivation ────────────────────────────────────────────
@@ -833,6 +931,8 @@ export function PayItemsPage() {
     && canManageCdpiForBranch(user, selectedBranchId);
   // Show "+ Add Custom Item" when either CDPI path is available.
   const showAddButton = userCanDirectCreate || userCanBranchCreate;
+  // Show CDPI request section to reviewers and branch-scoped submitters.
+  const showCdpiRequests = userCanDirectCreate || userCanBranchCreate;
 
   const activeBranchCount = branchSt.branches.filter(b => b.status === 'Active').length;
   const loading   = branchMode === 'single' ? singleSt.loading : allSt.loading;
@@ -1207,6 +1307,144 @@ export function PayItemsPage() {
           ) : null}
         </div>
       </div>
+
+      {/* ── CDPI Request Review Section ── */}
+      {showCdpiRequests && (
+        <div className={styles.cdpiSection}>
+          <div className={styles.cdpiSectionHeader}>
+            <h3 className={styles.cdpiSectionTitle}>Custom Item Requests</h3>
+            <div className={styles.cdpiFilterRow}>
+              {(['PendingCompanyApproval', 'Draft', 'Approved', 'Rejected', 'all'] as const).map(f => (
+                <button key={f}
+                  className={`${styles.filterPill}${cdpiFilter === f ? ` ${styles.filterPillActive}` : ''}`}
+                  onClick={() => setCdpiFilter(f)}>
+                  {f === 'all' ? 'All'
+                    : f === 'PendingCompanyApproval' ? 'Pending'
+                    : f}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {cdpiSt.loading && (
+            <div className={styles.cdpiEmpty}><SpinnerIcon /> Loading requests…</div>
+          )}
+          {cdpiSt.error && !cdpiSt.loading && (
+            <div className={styles.errorAlert} style={{ margin: '0.5rem 0' }}>
+              <AlertIcon /> {cdpiSt.error}
+            </div>
+          )}
+          {!cdpiSt.loading && !cdpiSt.error && cdpiSt.requests.length === 0 && (
+            <div className={styles.cdpiEmpty}>No requests found.</div>
+          )}
+
+          {!cdpiSt.loading && cdpiSt.requests.length > 0 && (
+            <div className={styles.cdpiRequestList}>
+              {cdpiSt.requests.map(req => {
+                const branchLabel = branchSt.branches.find(b => b.branch_id === req.requesting_branch_id)?.branch_name
+                  ?? `Branch ${req.requesting_branch_id}`;
+                return (
+                  <div key={req.request_id} className={`${styles.cdpiRequestCard} ${styles[`cdpiStatus${req.status}`] ?? ''}`}>
+                    <div className={styles.cdpiCardRow}>
+                      <span className={`${styles.cdpiStatusBadge} ${styles[`cdpiStatusBadge${req.status}`] ?? ''}`}>
+                        {req.status === 'PendingCompanyApproval' ? 'Pending' : req.status}
+                      </span>
+                      <span className={styles.cdpiCardName}>{req.item_name ?? '(unnamed)'}</span>
+                      <span className={styles.cdpiCardMeta}>
+                        {branchLabel}
+                        {' · '}{req.input_type ?? '—'}
+                        {' · '}{req.calc_method_key ?? '—'}
+                        {req.unit ? ` · ${req.unit}` : ''}
+                      </span>
+                    </div>
+                    {req.notes && (
+                      <div className={styles.cdpiCardNotes}>{req.notes}</div>
+                    )}
+                    <div className={styles.cdpiCardDates}>
+                      rev {req.revision}
+                      {req.submitted_at_utc && ` · submitted ${fmtDate(req.submitted_at_utc)}`}
+                      {!req.submitted_at_utc && req.updated_at_utc && ` · updated ${fmtDate(req.updated_at_utc)}`}
+                    </div>
+                    {/* Reviewer actions — only for company-wide reviewers on pending requests */}
+                    {userCanDirectCreate && req.status === 'PendingCompanyApproval' && (
+                      <div className={styles.cdpiCardActions}>
+                        <button className={styles.btnPrimary}
+                          onClick={() => openDecide(req, 'Approve')}>
+                          Approve
+                        </button>
+                        <button className={styles.btnSecondary}
+                          onClick={() => openDecide(req, 'ReturnToDraft')}>
+                          Return to Draft
+                        </button>
+                        <button className={styles.btnDanger}
+                          onClick={() => openDecide(req, 'Reject')}>
+                          Reject
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Decide modal (Approve / ReturnToDraft / Reject) ── */}
+      {decideOpen && decideTarget && (
+        <div className={styles.modalOverlay} onClick={e => { if (e.target === e.currentTarget && !decideSaving) setDecideOpen(false); }}>
+          <div className={styles.modal}>
+            <div className={styles.modalHeader}>
+              <h2 className={styles.modalTitle}>
+                {decideAction === 'Approve' ? 'Approve Request'
+                  : decideAction === 'Reject' ? 'Reject Request'
+                  : 'Return to Draft'}
+              </h2>
+              <button className={styles.modalCloseBtn} onClick={() => setDecideOpen(false)} disabled={decideSaving}><CloseIcon /></button>
+            </div>
+            <div className={styles.modalBody}>
+              <div className={styles.infoBanner}>
+                <InfoIcon />
+                <span>
+                  <strong>{decideTarget.item_name ?? '(unnamed)'}</strong> from {
+                    branchSt.branches.find(b => b.branch_id === decideTarget.requesting_branch_id)?.branch_name
+                    ?? `Branch ${decideTarget.requesting_branch_id}`
+                  }
+                </span>
+              </div>
+              {(decideAction === 'ReturnToDraft' || decideAction === 'Reject') && (
+                <div className={styles.formGroup} style={{ marginTop: '0.75rem' }}>
+                  <label className={styles.label}>
+                    Reason <span className={styles.optional}>(optional)</span>
+                  </label>
+                  <textarea className={styles.textarea} maxLength={500}
+                    value={decideReason}
+                    onChange={e => setDecideReason(e.target.value)}
+                    placeholder={decideAction === 'Reject'
+                      ? 'Explain why this request is rejected…'
+                      : 'Explain what needs to be changed before resubmitting…'}
+                    disabled={decideSaving} />
+                </div>
+              )}
+              {decideError && <div className={styles.errorAlert}><AlertIcon /> {decideError}</div>}
+            </div>
+            <div className={styles.modalFooter}>
+              <button
+                className={decideAction === 'Reject' ? styles.btnDanger : styles.btnPrimary}
+                disabled={decideSaving}
+                onClick={() => void executeDecide()}>
+                {decideSaving ? <><SpinnerIcon /> Working…</>
+                  : decideAction === 'Approve' ? 'Approve'
+                  : decideAction === 'Reject'  ? 'Reject'
+                  : 'Return to Draft'}
+              </button>
+              <button className={styles.btnSecondary} onClick={() => setDecideOpen(false)} disabled={decideSaving}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Edit config modal ── */}
       {editOpen && (
