@@ -846,6 +846,107 @@ class TestDirectCreateGuards:
         assert "PerUnit" in exc.value.detail
 
 
+# ===========================================================================
+# Part B-extra -- DataType persistence (Task 6 correction)
+# ===========================================================================
+
+@pytest.mark.asyncio
+class TestDataTypePersistence:
+    """
+    Verify that InputType is correctly mapped to PayItems.DataType for both
+    the approval path and the direct company creation path.
+
+      InputType='Time'   -> DataType='Time'
+      InputType='Number' -> DataType='Decimal'
+    """
+
+    async def test_approve_time_input_creates_pay_item_with_datatype_time(self, direct_db):
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        req = await _make_pending_request(direct_db, company_id=cid, branch_id=hq_id,
+                                          user_id=admin_id, input_type="Time")
+        result = await cdpi_service.decide_request(
+            cid, admin_id, req.request_id,
+            CdpiDecideRequest(
+                action=CdpiDecideAction.Approve,
+                expected_revision=req.revision,
+                reason="Time item approval",
+            ),
+            direct_db,
+        )
+        try:
+            datatype = (await direct_db.execute(
+                _text("SELECT datatype FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": result.approved_pay_item_id},
+            )).scalar_one()
+            assert datatype == "Time"
+        finally:
+            await _cleanup_approved_request(direct_db, request_id=req.request_id,
+                                            pay_item_id=result.approved_pay_item_id)
+
+    async def test_approve_number_input_creates_pay_item_with_datatype_decimal(self, direct_db):
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        req = await _make_pending_request(direct_db, company_id=cid, branch_id=hq_id,
+                                          user_id=admin_id, input_type="Number")
+        result = await cdpi_service.decide_request(
+            cid, admin_id, req.request_id,
+            CdpiDecideRequest(
+                action=CdpiDecideAction.Approve,
+                expected_revision=req.revision,
+                reason="Number item approval",
+            ),
+            direct_db,
+        )
+        try:
+            datatype = (await direct_db.execute(
+                _text("SELECT datatype FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": result.approved_pay_item_id},
+            )).scalar_one()
+            assert datatype == "Decimal"
+        finally:
+            await _cleanup_approved_request(direct_db, request_id=req.request_id,
+                                            pay_item_id=result.approved_pay_item_id)
+
+    async def test_direct_create_time_input_creates_pay_item_with_datatype_time(self, direct_db):
+        cid, _, _, admin_id = await _get_ids(direct_db)
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(
+                item_name="Travel Time",
+                input_type="Time",
+                calc_method_key="PerUnit",
+            ),
+            direct_db,
+        )
+        try:
+            datatype = (await direct_db.execute(
+                _text("SELECT datatype FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": result.pay_item_id},
+            )).scalar_one()
+            assert datatype == "Time"
+        finally:
+            await _cleanup_pay_item(direct_db, pay_item_id=result.pay_item_id)
+
+    async def test_direct_create_number_input_creates_pay_item_with_datatype_decimal(self, direct_db):
+        cid, _, _, admin_id = await _get_ids(direct_db)
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(
+                item_name="Load Count",
+                input_type="Number",
+                calc_method_key="PerUnit",
+            ),
+            direct_db,
+        )
+        try:
+            datatype = (await direct_db.execute(
+                _text("SELECT datatype FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": result.pay_item_id},
+            )).scalar_one()
+            assert datatype == "Decimal"
+        finally:
+            await _cleanup_pay_item(direct_db, pay_item_id=result.pay_item_id)
+
+
 @pytest.mark.asyncio
 class TestDirectCreateSchema:
 

@@ -31,6 +31,20 @@ from app.cdpi.schemas import (
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# Maps CdpiRequests.InputType to the corresponding PayItems.DataType value.
+# InputType='Time' items store time-based quantities; InputType='Number' items
+# store dimensionless decimal quantities.
+_INPUT_TYPE_TO_DATATYPE: dict[str, str] = {
+    "Time":   "Time",
+    "Number": "Decimal",
+}
+
+
+def _datatype_for_input_type(input_type: str) -> str:
+    """Return the PayItems.DataType value for a CDPI InputType string."""
+    return _INPUT_TYPE_TO_DATATYPE.get(input_type, "Decimal")
+
+
 _SELECT_COLS = """
     r.requestid            AS request_id,
     r.companyid            AS company_id,
@@ -745,6 +759,7 @@ async def _approve_request(
     # ApprovedPayItemID in the same statement — the check constraint requires
     # Status='Approved' and ApprovedPayItemID IS NOT NULL to be set together).
     pay_item_code = f"CDPI{_uuid.uuid4().hex[:12].upper()}"
+    pay_item_datatype = _datatype_for_input_type(pre["inputtype"] or "")
     pay_item_id: int = (await db.execute(
         text("""
             INSERT INTO payroll.payitems (
@@ -756,7 +771,7 @@ async def _approve_request(
                 requestingbranchid, createdbyuserid, notes
             ) VALUES (
                 :cid, NULL, :code, :label, :name,
-                'Custom', 'Decimal', :unit, 'Active', 0,
+                'Custom', :datatype, :unit, 'Active', 0,
                 TRUE, TRUE, TRUE,
                 FALSE, FALSE,
                 'Daily', 'PerUnit', FALSE,
@@ -769,6 +784,7 @@ async def _approve_request(
             "code":          pay_item_code,
             "label":         pre["itemname"],
             "name":          pre["itemname"],
+            "datatype":      pay_item_datatype,
             "unit":          pre["unit"],
             "req_branch_id": pre["requestingbranchid"],
             "uid":           user_id,
@@ -924,6 +940,7 @@ async def create_direct_company_item(
 
     # INSERT PayItems (no requesting branch — company-level direct create).
     pay_item_code = f"CDPI{_uuid.uuid4().hex[:12].upper()}"
+    pay_item_datatype = _datatype_for_input_type(data.input_type)
     pay_item_id: int = (await db.execute(
         text("""
             INSERT INTO payroll.payitems (
@@ -935,7 +952,7 @@ async def create_direct_company_item(
                 requestingbranchid, createdbyuserid, notes
             ) VALUES (
                 :cid, NULL, :code, :label, :name,
-                'Custom', 'Decimal', :unit, 'Active', 0,
+                'Custom', :datatype, :unit, 'Active', 0,
                 TRUE, TRUE, TRUE,
                 FALSE, FALSE,
                 'Daily', 'PerUnit', FALSE,
@@ -944,13 +961,14 @@ async def create_direct_company_item(
             RETURNING payitemid
         """),
         {
-            "cid":   company_id,
-            "code":  pay_item_code,
-            "label": data.item_name,
-            "name":  data.item_name,
-            "unit":  data.unit,
-            "uid":   user_id,
-            "notes": data.notes,
+            "cid":      company_id,
+            "code":     pay_item_code,
+            "label":    data.item_name,
+            "name":     data.item_name,
+            "datatype": pay_item_datatype,
+            "unit":     data.unit,
+            "uid":      user_id,
+            "notes":    data.notes,
         },
     )).scalar_one()
 
