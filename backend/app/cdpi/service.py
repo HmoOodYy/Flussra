@@ -6,6 +6,7 @@ Transactions are managed by the get_db() dependency (engine.begin()),
 which auto-commits on success and rolls back on exception.
 """
 import uuid as _uuid
+from datetime import date as _date, timedelta as _timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -24,6 +25,8 @@ from app.cdpi.schemas import (
     CdpiDecideAction,
     CdpiDirectCreateRequest,
     CdpiDirectCreateSummary,
+    CdpiBranchItemState,
+    CdpiBranchItemUpdate,
 )
 
 
@@ -1108,3 +1111,330 @@ async def copy_rejected(
     )
 
     return await _load_request(new_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: Branch-level CDPI controls
+# ---------------------------------------------------------------------------
+
+
+def _build_branch_item_state(
+    *,
+    payitemid: int,
+    payitemcode: str,
+    payitemname: str,
+    datatype: str,
+    unit: "str | None",
+    ratebehavior: str,
+    isdefaultbranchactive: bool,
+    cfg_isactive: "bool | None",
+    cfg_branchdisplayname: "str | None",
+) -> CdpiBranchItemState:
+    is_active = bool(cfg_isactive) if cfg_isactive is not None else bool(isdefaultbranchactive)
+    override = cfg_branchdisplayname or None
+    return CdpiBranchItemState(
+        pay_item_id=payitemid,
+        pay_item_code=payitemcode,
+        item_name=payitemname,
+        branch_display_name_override=override,
+        effective_display_name=override if override else payitemname,
+        is_active=is_active,
+        data_type=datatype,
+        unit=unit,
+        rate_behavior=ratebehavior,
+        is_cdpi=True,
+    )
+
+
+async def _cdpi_get_open_period_end(
+    branch_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> "_date | None":
+    today = _date.today()
+    r = await db.execute(
+        text("""
+            SELECT MAX(enddate)
+            FROM   payroll.payrollperiods
+            WHERE  branchid   = :bid
+              AND  companyid  = :cid
+              AND  status    IN ('Draft', 'Open', 'InReview', 'Approved')
+              AND  startdate <= :today
+              AND  enddate   >= :today
+        """),
+        {"bid": branch_id, "cid": company_id, "today": today},
+    )
+    return r.scalar_one()
+
+
+async def _load_branch_cdpi_item(
+    company_id: int,
+    branch_id: int,
+    pay_item_id: int,
+    db: AsyncConnection,
+) -> CdpiBranchItemState:
+    today = _date.today()
+    row = (await db.execute(
+        text("""
+            SELECT
+                pi.payitemid, pi.payitemcode, pi.payitemname,
+                pi.datatype, pi.unit, pi.ratebehavior, pi.isdefaultbranchactive,
+                cfg.isactive           AS cfg_isactive,
+                cfg.branchdisplayname  AS cfg_branchdisplayname
+            FROM  payroll.payitems pi
+            JOIN  payroll.cdpidefinitions cd ON cd.payitemid = pi.payitemid
+            LEFT JOIN LATERAL (
+                SELECT isactive, branchdisplayname
+                FROM   payroll.branchpayitemconfig
+                WHERE  payitemid      = pi.payitemid
+                  AND  companyid      = :cid
+                  AND  branchid       = :bid
+                  AND  effectivefrom <= :today
+                  AND  (effectiveto IS NULL OR effectiveto >= :today)
+                ORDER  BY effectivefrom DESC
+                LIMIT  1
+            ) cfg ON TRUE
+            WHERE pi.payitemid = :pid
+              AND pi.companyid = :cid
+              AND pi.status   != 'Retired'
+        """),
+        {"pid": pay_item_id, "cid": company_id, "bid": branch_id, "today": today},
+    )).mappings().first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="CDPI pay item not found for this company.")
+
+    return _build_branch_item_state(
+        payitemid=row["payitemid"],
+        payitemcode=row["payitemcode"],
+        payitemname=row["payitemname"],
+        datatype=row["datatype"],
+        unit=row["unit"],
+        ratebehavior=row["ratebehavior"],
+        isdefaultbranchactive=row["isdefaultbranchactive"],
+        cfg_isactive=row["cfg_isactive"],
+        cfg_branchdisplayname=row["cfg_branchdisplayname"],
+    )
+
+
+async def list_branch_cdpi_items(
+    company_id: int,
+    user_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+) -> list[CdpiBranchItemState]:
+    br = (await db.execute(
+        text("SELECT 1 FROM core.branches WHERE branchid = :bid AND companyid = :cid"),
+        {"bid": branch_id, "cid": company_id},
+    )).first()
+    if br is None:
+        raise HTTPException(status_code=404, detail=f"Branch {branch_id} not found.")
+
+    await require_cdpi_branch_edit(company_id, user_id, branch_id, db)
+
+    today = _date.today()
+    rows = (await db.execute(
+        text("""
+            SELECT
+                pi.payitemid, pi.payitemcode, pi.payitemname,
+                pi.datatype, pi.unit, pi.ratebehavior, pi.isdefaultbranchactive,
+                cfg.isactive           AS cfg_isactive,
+                cfg.branchdisplayname  AS cfg_branchdisplayname
+            FROM  payroll.payitems pi
+            JOIN  payroll.cdpidefinitions cd ON cd.payitemid = pi.payitemid
+            LEFT JOIN LATERAL (
+                SELECT isactive, branchdisplayname
+                FROM   payroll.branchpayitemconfig
+                WHERE  payitemid      = pi.payitemid
+                  AND  companyid      = :cid
+                  AND  branchid       = :bid
+                  AND  effectivefrom <= :today
+                  AND  (effectiveto IS NULL OR effectiveto >= :today)
+                ORDER  BY effectivefrom DESC
+                LIMIT  1
+            ) cfg ON TRUE
+            WHERE pi.companyid = :cid
+              AND pi.status   != 'Retired'
+            ORDER BY pi.payitemname
+        """),
+        {"cid": company_id, "bid": branch_id, "today": today},
+    )).mappings().all()
+
+    return [
+        _build_branch_item_state(
+            payitemid=r["payitemid"],
+            payitemcode=r["payitemcode"],
+            payitemname=r["payitemname"],
+            datatype=r["datatype"],
+            unit=r["unit"],
+            ratebehavior=r["ratebehavior"],
+            isdefaultbranchactive=r["isdefaultbranchactive"],
+            cfg_isactive=r["cfg_isactive"],
+            cfg_branchdisplayname=r["cfg_branchdisplayname"],
+        )
+        for r in rows
+    ]
+
+
+async def update_branch_cdpi_item(
+    company_id: int,
+    user_id: int,
+    branch_id: int,
+    pay_item_id: int,
+    data: CdpiBranchItemUpdate,
+    db: AsyncConnection,
+) -> CdpiBranchItemState:
+    br = (await db.execute(
+        text("SELECT 1 FROM core.branches WHERE branchid = :bid AND companyid = :cid"),
+        {"bid": branch_id, "cid": company_id},
+    )).first()
+    if br is None:
+        raise HTTPException(status_code=404, detail=f"Branch {branch_id} not found.")
+
+    await require_cdpi_branch_edit(company_id, user_id, branch_id, db)
+
+    pi = (await db.execute(
+        text("""
+            SELECT pi.payitemid
+            FROM   payroll.payitems pi
+            JOIN   payroll.cdpidefinitions cd ON cd.payitemid = pi.payitemid
+            WHERE  pi.payitemid = :pid
+              AND  pi.companyid = :cid
+              AND  pi.status   != 'Retired'
+        """),
+        {"pid": pay_item_id, "cid": company_id},
+    )).first()
+    if pi is None:
+        raise HTTPException(
+            status_code=404,
+            detail="CDPI pay item not found for this company.",
+        )
+
+    update_is_active    = "is_active" in data.model_fields_set
+    update_display_name = "branch_display_name_override" in data.model_fields_set
+
+    if not update_is_active and not update_display_name:
+        return await _load_branch_cdpi_item(company_id, branch_id, pay_item_id, db)
+
+    period_max_end = await _cdpi_get_open_period_end(branch_id, company_id, db)
+    effective_from: _date = (
+        period_max_end + _timedelta(days=1) if period_max_end is not None else _date.today()
+    )
+
+    await _write_cdpi_branch_config(
+        pay_item_id=pay_item_id,
+        branch_id=branch_id,
+        company_id=company_id,
+        user_id=user_id,
+        effective_from=effective_from,
+        update_is_active=update_is_active,
+        new_is_active=data.is_active,
+        update_display_name=update_display_name,
+        new_display_name=data.branch_display_name_override,
+        db=db,
+    )
+
+    return await _load_branch_cdpi_item(company_id, branch_id, pay_item_id, db)
+
+
+async def _write_cdpi_branch_config(
+    pay_item_id: int,
+    branch_id: int,
+    company_id: int,
+    user_id: int,
+    effective_from: _date,
+    *,
+    update_is_active: bool,
+    new_is_active: "bool | None",
+    update_display_name: bool,
+    new_display_name: "str | None",
+    db: AsyncConnection,
+) -> None:
+    open_row = (await db.execute(
+        text("""
+            SELECT configid, isactive, branchdisplayname, effectivefrom
+            FROM   payroll.branchpayitemconfig
+            WHERE  payitemid   = :pid
+              AND  companyid   = :cid
+              AND  branchid    = :bid
+              AND  effectiveto IS NULL
+            FOR UPDATE
+        """),
+        {"pid": pay_item_id, "cid": company_id, "bid": branch_id},
+    )).mappings().first()
+
+    today = _date.today()
+
+    if open_row is None:
+        # No existing config row — INSERT fresh.
+        is_active_val    = bool(new_is_active) if (update_is_active and new_is_active is not None) else False
+        display_name_val = new_display_name if update_display_name else None
+        await db.execute(
+            text("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, payitemid, isactive, branchdisplayname,
+                     effectivefrom, createdbyuserid)
+                VALUES
+                    (:cid, :bid, :pid, :active, :dname, :eff_from, :uid)
+            """),
+            {
+                "cid": company_id, "bid": branch_id, "pid": pay_item_id,
+                "active": is_active_val, "dname": display_name_val,
+                "eff_from": effective_from, "uid": user_id,
+            },
+        )
+
+    elif open_row["effectivefrom"] >= today:
+        # Same-day or pending row — UPDATE in place.
+        set_parts: list[str] = []
+        params: dict = {"cid_row": open_row["configid"]}
+
+        if update_is_active and new_is_active is not None:
+            set_parts.append("isactive = :active")
+            params["active"] = bool(new_is_active)
+
+        if update_display_name:
+            set_parts.append("branchdisplayname = :dname")
+            params["dname"] = new_display_name
+
+        if set_parts:
+            await db.execute(
+                text(f"UPDATE payroll.branchpayitemconfig SET {', '.join(set_parts)} WHERE configid = :cid_row"),
+                params,
+            )
+
+    else:
+        # effectivefrom < today — close existing and INSERT new open row.
+        await db.execute(
+            text("""
+                UPDATE payroll.branchpayitemconfig
+                SET    effectiveto = :close_date
+                WHERE  configid    = :cid_row
+            """),
+            {
+                "close_date": effective_from - _timedelta(days=1),
+                "cid_row":    open_row["configid"],
+            },
+        )
+        is_active_val = (
+            bool(new_is_active) if (update_is_active and new_is_active is not None)
+            else bool(open_row["isactive"])
+        )
+        display_name_val = (
+            new_display_name if update_display_name
+            else open_row["branchdisplayname"]
+        )
+        await db.execute(
+            text("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, payitemid, isactive, branchdisplayname,
+                     effectivefrom, createdbyuserid)
+                VALUES
+                    (:cid, :bid, :pid, :active, :dname, :eff_from, :uid)
+            """),
+            {
+                "cid": company_id, "bid": branch_id, "pid": pay_item_id,
+                "active": is_active_val, "dname": display_name_val,
+                "eff_from": effective_from, "uid": user_id,
+            },
+        )

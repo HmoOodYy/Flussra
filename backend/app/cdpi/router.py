@@ -4,14 +4,16 @@ CDPI (Custom Daily Pay Item) -- HTTP router.
 Mounted at /settings/cdpi via main.py.
 
 Routes:
-  POST   /requests                    -- create a new Draft
-  GET    /requests                    -- list requests visible to the caller
-  GET    /requests/{id}               -- read a single request
-  PATCH  /requests/{id}               -- update a Draft (optimistic concurrency)
-  POST   /requests/{id}/submit        -- submit Draft -> PendingCompanyApproval
-  POST   /requests/{id}/decide        -- return, reject, or approve a Pending request
-  POST   /requests/{id}/copy          -- copy a Rejected request to a new Draft
-  POST   /direct-company-items        -- create PayItem directly (no request workflow)
+  POST   /requests                              -- create a new Draft
+  GET    /requests                              -- list requests visible to the caller
+  GET    /requests/{id}                         -- read a single request
+  PATCH  /requests/{id}                         -- update a Draft (optimistic concurrency)
+  POST   /requests/{id}/submit                  -- submit Draft -> PendingCompanyApproval
+  POST   /requests/{id}/decide                  -- return, reject, or approve a Pending request
+  POST   /requests/{id}/copy                    -- copy a Rejected request to a new Draft
+  POST   /direct-company-items                  -- create PayItem directly (no request workflow)
+  GET    /branches/{branch_id}/items            -- list CDPI items with branch state
+  PATCH  /branches/{branch_id}/items/{pay_item_id} -- activate/deactivate and/or set display-name
 """
 from typing import Annotated
 from uuid import UUID
@@ -28,6 +30,8 @@ from app.cdpi.schemas import (
     CdpiDecideRequest,
     CdpiDirectCreateRequest,
     CdpiDirectCreateSummary,
+    CdpiBranchItemState,
+    CdpiBranchItemUpdate,
 )
 
 router = APIRouter()
@@ -167,3 +171,35 @@ async def create_direct_company_item(
     company_id: int = token["cid"]
     user_id:    int = token["sub"]
     return await service.create_direct_company_item(company_id, user_id, body, db)
+
+
+@router.get(
+    "/branches/{branch_id}/items",
+    response_model=list[CdpiBranchItemState],
+    summary="List CDPI items with branch state",
+)
+async def list_branch_items(
+    token:     TokenDep,
+    db:        DbDep,
+    branch_id: int,
+) -> list[CdpiBranchItemState]:
+    company_id: int = token["cid"]
+    user_id:    int = token["sub"]
+    return await service.list_branch_cdpi_items(company_id, user_id, branch_id, db)
+
+
+@router.patch(
+    "/branches/{branch_id}/items/{pay_item_id}",
+    response_model=CdpiBranchItemState,
+    summary="Update branch CDPI item (active state and/or display-name override)",
+)
+async def update_branch_item(
+    token:       TokenDep,
+    db:          DbDep,
+    branch_id:   int,
+    pay_item_id: int,
+    body:        CdpiBranchItemUpdate,
+) -> CdpiBranchItemState:
+    company_id: int = token["cid"]
+    user_id:    int = token["sub"]
+    return await service.update_branch_cdpi_item(company_id, user_id, branch_id, pay_item_id, body, db)

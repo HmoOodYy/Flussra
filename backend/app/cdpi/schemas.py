@@ -325,3 +325,61 @@ class CdpiDirectCreateSummary(BaseModel):
     calc_method_key: str
     notes: str | None
     created_by_user_id: int
+
+
+# ---------------------------------------------------------------------------
+# Task 7 branch-control contracts
+# ---------------------------------------------------------------------------
+
+_MAX_BRANCH_DISPLAY_NAME_LENGTH = 200  # mirrors BranchPayItemConfig.BranchDisplayName
+
+
+class CdpiBranchItemState(BaseModel):
+    """
+    Read-side view of a single CDPI PayItem as seen from a specific branch.
+
+    Returned by:
+      GET  /settings/cdpi/branches/{branch_id}/items
+      PATCH /settings/cdpi/branches/{branch_id}/items/{pay_item_id}
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    pay_item_id: int
+    pay_item_code: str
+    item_name: str
+    branch_display_name_override: str | None
+    effective_display_name: str
+    is_active: bool
+    data_type: str
+    unit: str | None
+    rate_behavior: str
+    is_cdpi: bool = True
+
+
+class CdpiBranchItemUpdate(BaseModel):
+    """
+    Body for PATCH /settings/cdpi/branches/{branch_id}/items/{pay_item_id}.
+
+    Both fields are optional.  Send only the fields you want to change.
+    Omitted fields are left unchanged.
+
+    branch_display_name_override:
+      - Omit altogether  → do not touch the current override.
+      - null or ""       → clear the override (fall back to company PayItem name).
+      - non-empty string → set the override (whitespace is trimmed).
+    """
+    is_active: bool | None = None
+    branch_display_name_override: str | None = None
+
+    @field_validator("branch_display_name_override")
+    @classmethod
+    def display_name_length(cls, v: str | None) -> str | None:
+        if v is not None:
+            v = v.strip()
+            if len(v) > _MAX_BRANCH_DISPLAY_NAME_LENGTH:
+                raise ValueError(
+                    f"branch_display_name_override must not exceed "
+                    f"{_MAX_BRANCH_DISPLAY_NAME_LENGTH} characters"
+                )
+            return v or None  # empty string after strip → None (clear)
+        return None
