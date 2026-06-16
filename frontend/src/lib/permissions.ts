@@ -186,3 +186,51 @@ export function canViewTransfers(user: UserProfile): boolean {
 export function canEditTransfers(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAny(user, ['drivers.edit', 'settings.manage', 'setup.manage']);
 }
+
+// ── CDPI (Custom Daily Pay Item) helpers ──────────────────────────────────────
+//
+// Mirror backend authorization rules from app/cdpi/guards.py.
+// Backend remains the authoritative security boundary — these helpers drive
+// UI visibility only.  A 403 from the backend is always authoritative.
+//
+// Permission required for all CDPI write actions: payitems.edit
+// Branch actions: payitems.edit + branch access (SpecificBranch or AllCompanyBranches)
+// Company actions: payitems.edit + AllCompanyBranches scope only
+
+/** True when the user holds payitems.edit. Required for all CDPI write actions. */
+export function hasPayItemsEdit(user: UserProfile): boolean {
+  return user.active_permissions.includes('payitems.edit');
+}
+
+/**
+ * True when the user can manage CDPI items for the given branch.
+ *
+ * Requires payitems.edit AND branch access to the target branch.
+ * Access is satisfied by AllCompanyBranches scope or a SpecificBranch
+ * assignment that includes the target branch_id.
+ */
+export function canManageCdpiForBranch(user: UserProfile, branchId: number): boolean {
+  if (!hasPayItemsEdit(user)) return false;
+  if (user.scope_type === 'AllCompanyBranches') return true;
+  return user.branch_ids.includes(branchId);
+}
+
+/**
+ * True when the user can review CDPI requests company-wide.
+ *
+ * Requires payitems.edit AND AllCompanyBranches scope.
+ * This gates: approve, return-to-draft, reject actions on pending requests.
+ */
+export function canReviewCdpiCompanyWide(user: UserProfile): boolean {
+  return hasPayItemsEdit(user) && user.scope_type === 'AllCompanyBranches';
+}
+
+/**
+ * True when the user can directly create CDPI company items (bypassing the
+ * request workflow).
+ *
+ * Same gate as canReviewCdpiCompanyWide — requires AllCompanyBranches + payitems.edit.
+ */
+export function canDirectCreateCdpiCompanyItem(user: UserProfile): boolean {
+  return canReviewCdpiCompanyWide(user);
+}

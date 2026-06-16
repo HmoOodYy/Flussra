@@ -327,3 +327,128 @@ export interface CustomPayItemDeleteResult {
   deletion_type: 'physical' | 'retired';
   cleaned_draft_lines: number;
 }
+
+// ─── CDPI (Custom Daily Pay Item) ─────────────────────────────────────────────
+
+export type CdpiStatus =
+  | 'Draft'
+  | 'PendingCompanyApproval'
+  | 'Rejected'
+  | 'Approved';
+
+export type CdpiInputType = 'Time' | 'Number';
+
+export type CdpiCalcMethodKey =
+  | 'PerUnit'
+  | 'OrdinalTier'
+  | 'Block'
+  | 'RangeBracket'
+  | 'RangeProgressive';
+
+export type CdpiDecideAction = 'ReturnToDraft' | 'Reject' | 'Approve';
+
+/** Read-side representation of a CDPI request row (backend: CdpiRequestSummary). */
+export interface CdpiRequestSummary {
+  request_id: string;                    // UUID
+  company_id: number;
+  requesting_branch_id: number;
+  item_name: string | null;
+  input_type: CdpiInputType | null;
+  unit: string | null;
+  calc_method_key: CdpiCalcMethodKey | null;
+  notes: string | null;
+  status: CdpiStatus;
+  revision: number;
+  approved_pay_item_id: number | null;
+  copied_from_request_id: string | null; // UUID
+  submitted_by_user_id: number | null;
+  submitted_at_utc: string | null;
+  created_by_user_id: number;
+  created_at_utc: string;
+  updated_by_user_id: number | null;
+  updated_at_utc: string | null;
+}
+
+/** Body for POST /settings/cdpi/requests. */
+export interface CdpiRequestCreatePayload {
+  requesting_branch_id: number;
+  item_name?: string | null;
+  input_type?: CdpiInputType | null;
+  unit?: string | null;
+  calc_method_key?: CdpiCalcMethodKey | null;
+  notes?: string | null;
+}
+
+/** Body for PATCH /settings/cdpi/requests/{id}. */
+export interface CdpiRequestUpdatePayload {
+  expected_revision: number;
+  item_name?: string | null;
+  input_type?: CdpiInputType | null;
+  unit?: string | null;
+  calc_method_key?: CdpiCalcMethodKey | null;
+  notes?: string | null;
+}
+
+/** Body for POST /settings/cdpi/requests/{id}/submit. */
+export interface CdpiSubmitPayload {
+  expected_revision: number;
+}
+
+/** Body for POST /settings/cdpi/requests/{id}/decide. */
+export interface CdpiDecidePayload {
+  action: CdpiDecideAction;
+  expected_revision: number;
+  reason: string;
+}
+
+/** Body for POST /settings/cdpi/direct-company-items. */
+export interface CdpiDirectCreatePayload {
+  item_name: string;
+  input_type: CdpiInputType;
+  calc_method_key: CdpiCalcMethodKey;
+  unit?: string | null;
+  notes?: string | null;
+}
+
+/** Response from POST /settings/cdpi/direct-company-items. */
+export interface CdpiDirectCreateSummary {
+  pay_item_id: number;
+  pay_item_code: string;
+  company_id: number;
+  item_name: string;
+  input_type: CdpiInputType;
+  unit: string | null;
+  calc_method_key: CdpiCalcMethodKey;
+  notes: string | null;
+  created_by_user_id: number;
+}
+
+/**
+ * Branch-level view of a single CDPI PayItem.
+ * Returned by GET /settings/cdpi/branches/{id}/items
+ * and PATCH /settings/cdpi/branches/{id}/items/{pay_item_id}.
+ */
+export interface CdpiBranchItem {
+  pay_item_id: number;
+  pay_item_code: string;
+  item_name: string;
+  branch_display_name_override: string | null;
+  effective_display_name: string;
+  is_active: boolean;
+  data_type: string;
+  unit: string | null;
+  rate_behavior: string;
+  is_cdpi: boolean;
+}
+
+/** Body for PATCH /settings/cdpi/branches/{id}/items/{pay_item_id}. */
+export interface CdpiBranchItemUpdatePayload {
+  is_active?: boolean | null;
+  branch_display_name_override?: string | null;
+}
+
+/** Query params for GET /settings/cdpi/requests. */
+export interface CdpiRequestListParams {
+  status?: CdpiStatus;
+  branch_id?: number;
+}
