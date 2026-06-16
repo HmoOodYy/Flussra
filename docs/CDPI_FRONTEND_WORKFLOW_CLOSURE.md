@@ -233,19 +233,22 @@ All checks were run at final commit `4574ae0`:
 
 ## 10. Recommended Next Phase
 
-**Pay Rates slots / PerUnit rate assignment for CDPI items**
+**PerUnit rate-slot architecture and payroll entry integration**
 
-Approved CDPI items currently have no rate configured — they start inactive on
-all branches and become visible in payroll entry only after branch activation,
-but entering a value generates `$0` until a Pay Rate is attached.
+FE-1 through FE-5 cover the setup and workflow layer only: request creation,
+company review, approval, and branch activation/deactivation with display-name
+override. Approved CDPI items are not yet connected to Pay Rates, Payroll
+Entry, or the calculation engine — these are explicitly out of scope for the
+accepted frontend phases.
 
-Suggested scope:
+The next phase should:
 
-- Backend: expose a rate-slot creation endpoint for CDPI `PayItem` records
-  (a PerUnit `RateType` + `PayItemRateTypeMap` entry)
-- Frontend: after a branch activates a CDPI item, surface a prompt or section
-  in Pay Rates to configure the PerUnit rate for that item / branch
-- Keep PerUnit as the only enabled method until the architecture for advanced
-  methods (OrdinalTier, Block, ranges) is decided
+1. Define the generic PerUnit rate-slot architecture (RateType /
+   PayItemRateTypeMap / PayItemSettings) for CDPI items.
+2. Connect approved and active CDPI items to Pay Rates so a PerUnit rate can
+   be configured per item / branch.
+3. Wire active CDPI items with a configured rate into Payroll Entry and the
+   calculation engine.
 
-This unblocks drivers from having non-zero pay from CDPI items in payroll entry.
+Until this phase is complete, CDPI items exist in setup only and do not appear
+in payroll entry or affect pay calculations.
