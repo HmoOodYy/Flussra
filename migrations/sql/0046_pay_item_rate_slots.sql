@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 0046: Generic PayItemRateSlots foundation
 --
--- Adds payroll.PayItemRateSlots — a generic slot-definition layer that sits
+-- Adds payroll.PayItemRateSlots - a generic slot-definition layer that sits
 -- between PayItems and the existing RateTypes + PayItemRateTypeMap layer.
 --
 -- Purpose:
@@ -119,19 +119,19 @@ CREATE INDEX ix_PayItemRateSlots_PayItem_SortOrder
 -- conservative defaults that make no business claims about what the rate does.
 --
 -- Slot key derivation:
---   'legacy_rate_<RateTypeID>' — deterministic, stable, independent of any
+--   'legacy_rate_<RateTypeID>' - deterministic, stable, independent of any
 --   mutable display name.  RateTypeID is immutable (SERIAL PK, never reused).
 --
 -- Slot role:
---   'legacy_primary' — for IsPrimary = TRUE rows (the main/only rate type).
---   'legacy_rate'    — for IsPrimary = FALSE rows (supplementary types).
+--   'legacy_primary' - for IsPrimary = TRUE rows (the main/only rate type).
+--   'legacy_rate'    - for IsPrimary = FALSE rows (supplementary types).
 --
 -- SortOrder:
 --   Derived by PARTITION BY PayItemID ORDER BY IsPrimary DESC, RateTypeID ASC.
 --   This places the primary rate first and is deterministic across reruns.
 --
 -- IsRequired / IsSystemGenerated / SourceKind:
---   All TRUE / TRUE / 'LegacyBackfill' — conservative; represents the fact that
+--   All TRUE / TRUE / 'LegacyBackfill' - conservative; represents the fact that
 --   these slots existed before this layer was introduced.
 --
 -- Idempotency guard:
