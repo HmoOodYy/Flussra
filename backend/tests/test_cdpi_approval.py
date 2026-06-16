@@ -144,16 +144,58 @@ async def _cleanup_requests(db, *request_ids) -> None:
         )
 
 
+async def _cleanup_cdpi_rate_rows(db, pay_item_id: int) -> None:
+    """
+    Remove PayItemRateSlots, PayItemRateTypeMap, and the company-scoped
+    RateType created by PR-1B for a CDPI PerUnit PayItem.
+
+    Called before deleting the PayItem itself so FK constraints are satisfied.
+    """
+    # Remove slot rows first (FK -> PayItems and RateTypes).
+    await db.execute(
+        _text("DELETE FROM payroll.payitemrateslots WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    # Capture the rate_type_id before removing the map row.
+    rt_id = (await db.execute(
+        _text("""
+            SELECT ratetypeid FROM payroll.payitemratetypemap
+            WHERE payitemid = :pid
+            LIMIT 1
+        """),
+        {"pid": pay_item_id},
+    )).scalar_one_or_none()
+
+    await db.execute(
+        _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    # Remove the company-scoped RateType (identified by 'CDPI_{id}_PER_UNIT' code).
+    # Guard: only delete if no other PayItemRateTypeMap rows reference this RateType,
+    # and no DriverRates reference it — safe since these are brand-new test items.
+    if rt_id is not None:
+        rate_code = f"CDPI_{pay_item_id}_PER_UNIT"
+        await db.execute(
+            _text("""
+                DELETE FROM payroll.ratetypes
+                WHERE  ratetypeid = :rtid
+                  AND  ratecode   = :code
+            """),
+            {"rtid": rt_id, "code": rate_code},
+        )
+
+
 async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None:
     """
     Remove an approved CDPI request and its associated PayItem.
 
     Deletion order satisfies FK and check constraints:
       1. CdpiRequestEvents (immutability trigger bypassed)
-      2. BranchPayItemConfig (FK -> PayItems)
-      3. CdpiDefinitions (FK -> PayItems)
-      4. CdpiRequests (FK -> PayItems via ApprovedPayItemID; check requires both or neither)
-      5. PayItems
+      2. PayItemRateSlots / PayItemRateTypeMap / RateType (PR-1B rows)
+      3. BranchPayItemConfig (FK -> PayItems)
+      4. CdpiDefinitions (FK -> PayItems)
+      5. CdpiRequests (FK -> PayItems via ApprovedPayItemID; check requires both or neither)
+      6. PayItems
 
     We delete CdpiRequests before PayItems to avoid nulling ApprovedPayItemID while
     Status='Approved' (the check constraint forbids that intermediate state).
@@ -170,6 +212,7 @@ async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None
         await db.execute(
             _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
         )
+    await _cleanup_cdpi_rate_rows(db, pay_item_id)
     await db.execute(
         _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
         {"pid": pay_item_id},
@@ -190,7 +233,8 @@ async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None
 
 
 async def _cleanup_pay_item(db, *, pay_item_id: int) -> None:
-    """Remove a directly-created PayItem and its CdpiDefinition row."""
+    """Remove a directly-created CDPI PayItem and all associated rows."""
+    await _cleanup_cdpi_rate_rows(db, pay_item_id)
     await db.execute(
         _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
         {"pid": pay_item_id},
@@ -326,6 +370,7 @@ class TestApproveHappyPath:
             assert row["isdefaultbranchactive"] is False
             assert row["appearsinpayrollentry"] is True
             assert row["requestingbranchid"] == hq_id
+            assert row["requiresrate"] is True
         finally:
             await _cleanup_approved_request(direct_db, request_id=req.request_id,
                                                 pay_item_id=result.approved_pay_item_id)
@@ -411,8 +456,8 @@ class TestApproveHappyPath:
             await _cleanup_approved_request(direct_db, request_id=req.request_id,
                                                 pay_item_id=result.approved_pay_item_id)
 
-    async def test_approve_creates_no_rate_rows(self, direct_db):
-        """No PayItemRateTypeMap rows must be created (RateTypes are not CDPI's concern)."""
+    async def test_approve_creates_rate_slot_triple(self, direct_db):
+        """Approval must create exactly 1 PayItemRateTypeMap and 1 PayItemRateSlots row."""
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
         req = await _make_pending_request(direct_db, company_id=cid, branch_id=hq_id,
                                           user_id=admin_id)
@@ -431,7 +476,12 @@ class TestApproveHappyPath:
                 _text("SELECT COUNT(*) FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
                 {"pid": pid},
             )).scalar_one()
-            assert map_count == 0
+            slot_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemrateslots WHERE payitemid = :pid"),
+                {"pid": pid},
+            )).scalar_one()
+            assert map_count == 1
+            assert slot_count == 1
         finally:
             await _cleanup_approved_request(direct_db, request_id=req.request_id,
                                             pay_item_id=result.approved_pay_item_id)
@@ -713,6 +763,7 @@ class TestDirectCreateHappyPath:
             assert row["isdefaultbranchactive"] is False
             assert row["unit"] == "trips"
             assert row["notes"] == "Per trip bonus"
+            assert row["requiresrate"] is True
         finally:
             await _cleanup_pay_item(direct_db, pay_item_id=result.pay_item_id)
 
@@ -759,8 +810,8 @@ class TestDirectCreateHappyPath:
         finally:
             await _cleanup_pay_item(direct_db, pay_item_id=result.pay_item_id)
 
-    async def test_direct_create_no_rate_rows(self, direct_db):
-        """No PayItemRateTypeMap rows must be created."""
+    async def test_direct_create_creates_rate_slot_triple(self, direct_db):
+        """Direct create must create exactly 1 PayItemRateTypeMap and 1 PayItemRateSlots row."""
         cid, _, _, admin_id = await _get_ids(direct_db)
         result = await cdpi_service.create_direct_company_item(
             cid, admin_id,
@@ -772,11 +823,17 @@ class TestDirectCreateHappyPath:
             direct_db,
         )
         try:
-            rm = (await direct_db.execute(
+            pid = result.pay_item_id
+            map_count = (await direct_db.execute(
                 _text("SELECT COUNT(*) FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
-                {"pid": result.pay_item_id},
+                {"pid": pid},
             )).scalar_one()
-            assert rm == 0
+            slot_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payitemrateslots WHERE payitemid = :pid"),
+                {"pid": pid},
+            )).scalar_one()
+            assert map_count == 1
+            assert slot_count == 1
         finally:
             await _cleanup_pay_item(direct_db, pay_item_id=result.pay_item_id)
 

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.core.service import _check_branch_access
 from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
 from app.cdpi.methods import get_adapter
+from app.pay_item_rate_slots import ensure_cdpi_per_unit_rate_slot
 from app.cdpi.schemas import (
     CdpiRequestCreate,
     CdpiRequestSummary,
@@ -776,7 +777,7 @@ async def _approve_request(
                 :cid, NULL, :code, :label, :name,
                 'Custom', :datatype, :unit, 'Active', 0,
                 TRUE, TRUE, TRUE,
-                FALSE, FALSE,
+                TRUE, FALSE,
                 'Daily', 'PerUnit', FALSE,
                 :req_branch_id, :uid, :notes
             )
@@ -805,6 +806,18 @@ async def _approve_request(
             )
         """),
         {"pid": pay_item_id, "uid": user_id},
+    )
+
+    # Step 6b: Create PerUnit rate-slot triple (RateType + PayItemRateTypeMap +
+    # PayItemRateSlots).  Failure rolls back the entire approval transaction.
+    await ensure_cdpi_per_unit_rate_slot(
+        db,
+        pay_item_id=pay_item_id,
+        item_name=pre["itemname"],
+        input_type=pre["inputtype"] or "Number",
+        unit=pre["unit"],
+        company_id=company_id,
+        created_by_user_id=user_id,
     )
 
     # Step 7: INSERT BranchPayItemConfig (requesting branch, active).
@@ -957,7 +970,7 @@ async def create_direct_company_item(
                 :cid, NULL, :code, :label, :name,
                 'Custom', :datatype, :unit, 'Active', 0,
                 TRUE, TRUE, TRUE,
-                FALSE, FALSE,
+                TRUE, FALSE,
                 'Daily', 'PerUnit', FALSE,
                 NULL, :uid, :notes
             )
@@ -985,6 +998,18 @@ async def create_direct_company_item(
             )
         """),
         {"pid": pay_item_id, "uid": user_id},
+    )
+
+    # Create PerUnit rate-slot triple (RateType + PayItemRateTypeMap +
+    # PayItemRateSlots).  Failure rolls back the entire create transaction.
+    await ensure_cdpi_per_unit_rate_slot(
+        db,
+        pay_item_id=pay_item_id,
+        item_name=data.item_name,
+        input_type=data.input_type,
+        unit=data.unit,
+        company_id=company_id,
+        created_by_user_id=user_id,
     )
 
     return CdpiDirectCreateSummary(
