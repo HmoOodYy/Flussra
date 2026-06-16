@@ -633,11 +633,20 @@ class TestUpdateBranchCdpiItem:
     async def test_non_cdpi_payitem_raises_404(self, direct_db):
         """Test 21: PayItem without CdpiDefinitions row raises 404 from PATCH and is not in list.
 
-        Creates its own non-CDPI PayItem to avoid dependency on fixture data.
-        Verifies that neither the list endpoint nor the PATCH endpoint exposes non-CDPI items.
-        Confirms no BranchPayItemConfig or CdpiDefinitions rows are created on rejection.
+        Creates its own non-CDPI PayItem. Verifies:
+          - PATCH returns 404
+          - Item is excluded from list results
+          - Zero writes across all guarded tables (BranchPayItemConfig, CdpiDefinitions,
+            CdpiRequests, CdpiRequestEvents, PayItemSettings, RateTypes, PayItemRateTypeMap)
         """
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
+
+        async def _count(table: str, col: str, val: int) -> int:
+            return (await direct_db.execute(
+                _text(f"SELECT COUNT(*) FROM {table} WHERE {col} = :v"),
+                {"v": val},
+            )).scalar_one()
+
         # Create a plain (non-CDPI) PayItem directly — no CdpiDefinitions row.
         non_cdpi_pid = (await direct_db.execute(
             _text("""
@@ -651,14 +660,40 @@ class TestUpdateBranchCdpiItem:
                      FALSE, FALSE, 'Active')
                 RETURNING payitemid
             """),
-            {
-                "cid": cid,
-                "code": "NCDPI-T21-TEST",
-                "name": "T21NonCdpiItem",
-            },
+            {"cid": cid, "code": "NCDPI-T21-TEST", "name": "T21NonCdpiItem"},
         )).scalar_one()
         try:
-            # 1. PATCH must return 404 (no CdpiDefinitions row).
+            # Snapshot counts before the rejected PATCH attempt.
+            before = {
+                "branchpayitemconfig": await _count("payroll.branchpayitemconfig", "payitemid", non_cdpi_pid),
+                "cdpidefinitions":      await _count("payroll.cdpidefinitions",      "payitemid", non_cdpi_pid),
+                "payitemsettings":      await _count("payroll.payitemsettings",      "payitemid", non_cdpi_pid),
+                "payitemratetypemap":   await _count("payroll.payitemratetypemap",   "payitemid", non_cdpi_pid),
+                # ratetypes links via payitemratetypemap; count entries in that map for this item.
+                "ratetypes_via_map": (await direct_db.execute(
+                    _text("""
+                        SELECT COUNT(*) FROM payroll.ratetypes rt
+                        JOIN payroll.payitemratetypemap m ON m.ratetypeid = rt.ratetypeid
+                        WHERE m.payitemid = :pid
+                    """),
+                    {"pid": non_cdpi_pid},
+                )).scalar_one(),
+                # CdpiRequests and CdpiRequestEvents have no payitemid FK; count by company scope.
+                "cdpirequests_cid": (await direct_db.execute(
+                    _text("SELECT COUNT(*) FROM payroll.cdpirequests WHERE companyid = :cid"),
+                    {"cid": cid},
+                )).scalar_one(),
+                "cdpirequestevents_cid": (await direct_db.execute(
+                    _text("""
+                        SELECT COUNT(*) FROM payroll.cdpirequestevents e
+                        JOIN payroll.cdpirequests r ON r.requestid = e.requestid
+                        WHERE r.companyid = :cid
+                    """),
+                    {"cid": cid},
+                )).scalar_one(),
+            }
+
+            # PATCH must return 404.
             with pytest.raises(HTTPException) as exc_info:
                 await cdpi_service.update_branch_cdpi_item(
                     cid, admin_id, hq_id, non_cdpi_pid,
@@ -667,27 +702,42 @@ class TestUpdateBranchCdpiItem:
                 )
             assert exc_info.value.status_code == 404
 
-            # 2. Confirm no BranchPayItemConfig row was created.
-            cfg_count = (await direct_db.execute(
-                _text("SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
-                {"pid": non_cdpi_pid},
-            )).scalar_one()
-            assert cfg_count == 0
+            # Snapshot counts after — must be identical to before.
+            after = {
+                "branchpayitemconfig": await _count("payroll.branchpayitemconfig", "payitemid", non_cdpi_pid),
+                "cdpidefinitions":      await _count("payroll.cdpidefinitions",      "payitemid", non_cdpi_pid),
+                "payitemsettings":      await _count("payroll.payitemsettings",      "payitemid", non_cdpi_pid),
+                "payitemratetypemap":   await _count("payroll.payitemratetypemap",   "payitemid", non_cdpi_pid),
+                "ratetypes_via_map": (await direct_db.execute(
+                    _text("""
+                        SELECT COUNT(*) FROM payroll.ratetypes rt
+                        JOIN payroll.payitemratetypemap m ON m.ratetypeid = rt.ratetypeid
+                        WHERE m.payitemid = :pid
+                    """),
+                    {"pid": non_cdpi_pid},
+                )).scalar_one(),
+                "cdpirequests_cid": (await direct_db.execute(
+                    _text("SELECT COUNT(*) FROM payroll.cdpirequests WHERE companyid = :cid"),
+                    {"cid": cid},
+                )).scalar_one(),
+                "cdpirequestevents_cid": (await direct_db.execute(
+                    _text("""
+                        SELECT COUNT(*) FROM payroll.cdpirequestevents e
+                        JOIN payroll.cdpirequests r ON r.requestid = e.requestid
+                        WHERE r.companyid = :cid
+                    """),
+                    {"cid": cid},
+                )).scalar_one(),
+            }
+            assert after == before, (
+                f"Rejected non-CDPI PATCH created unexpected rows: {after} vs {before}"
+            )
 
-            # 3. Confirm no CdpiDefinitions row was created.
-            cd_count = (await direct_db.execute(
-                _text("SELECT COUNT(*) FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
-                {"pid": non_cdpi_pid},
-            )).scalar_one()
-            assert cd_count == 0
-
-            # 4. list_branch_cdpi_items must not include the non-CDPI item.
+            # list_branch_cdpi_items must not include the non-CDPI item.
             result = await cdpi_service.list_branch_cdpi_items(cid, admin_id, hq_id, direct_db)
-            listed_ids = {r.pay_item_id for r in result}
-            assert non_cdpi_pid not in listed_ids
+            assert non_cdpi_pid not in {r.pay_item_id for r in result}
 
         finally:
-            # Clean up: only PayItems row (no CdpiDefinitions, no BranchPayItemConfig).
             await direct_db.execute(
                 _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
                 {"pid": non_cdpi_pid},
@@ -1148,6 +1198,159 @@ class TestEffectiveDating:
                     _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                     {"pid": period_id},
                 )
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_pending_row_after_effective_from_resets_effectivefrom_active(self, direct_db):
+        """Test 28f: pending row with effectivefrom > resolved effective_from is updated in place
+        AND its effectivefrom is reset to the resolved effective_from (active-state change).
+
+        Example: approval created a config row starting next week (effectivefrom = today+7).
+        No open period. Resolved effective_from = today. The pending row must be pulled
+        forward to today, not left at today+7.
+        """
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28fPendingReset")
+        today = datetime.date.today()
+        future_date = today + datetime.timedelta(days=7)
+        try:
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, FALSE, :eff, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id,
+                 "uid": admin_id, "eff": future_date},
+            )
+            original_config_id = (await direct_db.execute(
+                _text("""
+                    SELECT configid FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+
+            # No open period — effective_from resolves to today.
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(is_active=True),
+                direct_db,
+            )
+
+            # Same row must be updated (no new row).
+            updated_row = (await direct_db.execute(
+                _text("""
+                    SELECT configid, isactive, effectivefrom
+                    FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).mappings().first()
+            assert updated_row is not None
+            assert updated_row["configid"] == original_config_id  # same row
+            assert updated_row["isactive"] is True                # field updated
+            assert updated_row["effectivefrom"] == today          # pulled forward to today
+
+            # Still exactly one row total.
+            total = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE payitemid=:pid AND branchid=:bid"),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+            assert total == 1
+        finally:
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_pending_row_after_effective_from_resets_effectivefrom_display_name(self, direct_db):
+        """Test 28g: pending row effectivefrom is reset when updating display-name override."""
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28gPendingDisplayReset")
+        today = datetime.date.today()
+        future_date = today + datetime.timedelta(days=5)
+        try:
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, branchdisplayname,
+                         effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, TRUE, 'OldPending', :eff, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id,
+                 "uid": admin_id, "eff": future_date},
+            )
+
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(branch_display_name_override="NewPending"),
+                direct_db,
+            )
+
+            row = (await direct_db.execute(
+                _text("""
+                    SELECT branchdisplayname, effectivefrom, isactive
+                    FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).mappings().first()
+            assert row is not None
+            assert row["branchdisplayname"] == "NewPending"  # updated
+            assert row["isactive"] is True                   # carried forward
+            assert row["effectivefrom"] == today             # reset to today (no period)
+
+            total = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE payitemid=:pid AND branchid=:bid"),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+            assert total == 1
+        finally:
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_exact_effectivefrom_equal_keeps_same_row_and_date(self, direct_db):
+        """Test 28h: open row with effectivefrom == resolved effective_from → UPDATE in place,
+        effectivefrom is NOT changed (already on the right date).
+        """
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28hExactEqual")
+        today = datetime.date.today()
+        try:
+            # Row starts exactly today; no open period → effective_from = today.
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, FALSE, CURRENT_DATE, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id, "uid": admin_id},
+            )
+            original_config_id = (await direct_db.execute(
+                _text("""
+                    SELECT configid FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(is_active=True),
+                direct_db,
+            )
+
+            row = (await direct_db.execute(
+                _text("""
+                    SELECT configid, isactive, effectivefrom
+                    FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).mappings().first()
+            assert row["configid"] == original_config_id  # same row
+            assert row["isactive"] is True
+            assert row["effectivefrom"] == today          # unchanged
+        finally:
             await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
 
 

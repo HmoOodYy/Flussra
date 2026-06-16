@@ -1384,8 +1384,9 @@ async def _write_cdpi_branch_config(
 
     elif open_row["effectivefrom"] >= effective_from:
         # Open row starts on or after the resolved effective date — safe to UPDATE in place.
-        # This covers both same-day edits (no period protection) and future-dated pending rows
-        # that are already beyond the period boundary.
+        # Case A (equal):  row starts exactly on effective_from → update fields, keep effectivefrom.
+        # Case B (after):  row is a pending future row → update fields AND reset effectivefrom to
+        #                  resolved effective_from (matches settings/_apply_pay_item_config_to_branch).
         set_parts: list[str] = []
         params: dict = {"cid_row": open_row["configid"]}
 
@@ -1396,6 +1397,11 @@ async def _write_cdpi_branch_config(
         if update_display_name:
             set_parts.append("branchdisplayname = :dname")
             params["dname"] = new_display_name
+
+        if open_row["effectivefrom"] > effective_from:
+            # Pending row: pull the effective date forward to the resolved date.
+            set_parts.append("effectivefrom = :eff_from")
+            params["eff_from"] = effective_from
 
         if set_parts:
             await db.execute(
