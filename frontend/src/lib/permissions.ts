@@ -162,6 +162,21 @@ export function canManageSettingsAdmin(user: UserProfile): boolean {
   return user.has_setup_manage;
 }
 
+/**
+ * True when the user should be able to reach the Daily Pay Items page.
+ *
+ * Two paths:
+ *   1. Full settings admin (has_setup_manage) — existing behavior, unchanged.
+ *   2. Any user with payitems.edit somewhere — needed to browse CDPI-approved
+ *      items.  Note: this is a flat union check (see hasPayItemsEdit docs).
+ *      Legacy mutation actions on the page remain gated behind isAdmin (which
+ *      requires has_setup_manage + AllCompanyBranches) and are unaffected.
+ */
+export function canViewDailyPayItems(user: UserProfile | null | undefined): boolean {
+  if (!user) return false;
+  return canManageSettingsAdmin(user) || hasPayItemsEdit(user);
+}
+
 // ── Driver Transfer helpers ───────────────────────────────────────────────────
 
 const TRANSFER_READ = [

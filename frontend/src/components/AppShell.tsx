@@ -12,6 +12,7 @@ import {
   canViewPeople,
   canViewPayRates,
   canViewSettings,
+  canViewDailyPayItems,
 } from '../lib/permissions';
 import styles from './AppShell.module.css';
 
@@ -44,6 +45,7 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
     groups.push({ label: 'People', items: peopleItems });
 
   if (canViewSettings(user)) {
+    // Full settings access: show all four settings pages unchanged.
     groups.push({
       label: 'Settings',
       items: [
@@ -51,6 +53,15 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
         { to: '/settings/pay-items',        label: 'Daily Pay Items',     icon: <TagIcon />,      end: false },
         { to: '/settings/roles',            label: 'Roles & Permissions', icon: <ShieldIcon />,   end: false },
         { to: '/settings/company-branches', label: 'Company & Branches',  icon: <BuildingIcon />, end: false },
+      ],
+    });
+  } else if (canViewDailyPayItems(user)) {
+    // payitems.edit-only users: show Settings group with Daily Pay Items only.
+    // Other settings pages remain inaccessible — individual route gates hold.
+    groups.push({
+      label: 'Settings',
+      items: [
+        { to: '/settings/pay-items', label: 'Daily Pay Items', icon: <TagIcon />, end: false },
       ],
     });
   }

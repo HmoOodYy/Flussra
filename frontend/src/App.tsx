@@ -31,6 +31,7 @@ import {
   canViewSettings,
   canManageSettingsAdmin,
   canManageRoles,
+  canViewDailyPayItems,
 } from './lib/permissions';
 
 /**
@@ -56,10 +57,11 @@ function Gate({
 /** Redirect /settings to the first sub-page the user can access. */
 function SettingsDefaultRedirect() {
   const { user } = useAuth();
-  if (user && canManageSettingsAdmin(user)) {
-    return <Navigate to="/settings/company-branches" replace />;
-  }
-  return <Navigate to="/settings/roles" replace />;
+  if (!user) return <Navigate to="/settings/pay-items" replace />;
+  if (canManageSettingsAdmin(user)) return <Navigate to="/settings/company-branches" replace />;
+  if (canViewSettings(user))        return <Navigate to="/settings/roles" replace />;
+  // payitems.edit-only users have no roles/company access — send to pay-items.
+  return <Navigate to="/settings/pay-items" replace />;
 }
 
 function ProtectedShell() {
@@ -120,14 +122,14 @@ export default function App() {
             {/* Settings — outer gate, inner pages gated individually */}
             <Route
               path="/settings"
-              element={<Gate check={canViewSettings}><SettingsShell /></Gate>}
+              element={<Gate check={(u) => canViewSettings(u) || canViewDailyPayItems(u)}><SettingsShell /></Gate>}
             >
               <Route index element={<SettingsDefaultRedirect />} />
               <Route path="company-branches" element={<Gate check={canManageSettingsAdmin}><CompanyBranchesPage /></Gate>} />
               <Route path="company"  element={<Navigate to="/settings/company-branches" replace />} />
               <Route path="branches" element={<Navigate to="/settings/company-branches" replace />} />
               <Route path="payroll"   element={<Gate check={canManageSettingsAdmin}><PayrollSetupPage /></Gate>} />
-              <Route path="pay-items" element={<Gate check={canManageSettingsAdmin}><PayItemsPage /></Gate>} />
+              <Route path="pay-items" element={<Gate check={canViewDailyPayItems}><PayItemsPage /></Gate>} />
               <Route path="roles"     element={<Gate check={canManageRoles}><RolesPage /></Gate>} />
               <Route path="users"     element={<Navigate to="/settings/roles" replace />} />
             </Route>
