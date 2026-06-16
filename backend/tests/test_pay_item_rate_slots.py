@@ -272,12 +272,19 @@ class TestPayItemRateSlotsBackfill:
     async def test_all_migration_mappings_have_slots(self, direct_db):
         """
         Every active PayItemRateTypeMap row whose pay item is NOT a test-only
-        anchor (M13C_*, INACTIVE_SYS) must have a corresponding active
-        PayItemRateSlots row.
+        anchor must have a corresponding active PayItemRateSlots row.
 
-        Test-only pay items are excluded because conftest inserts their
-        PayItemRateTypeMap rows AFTER migration 0046 runs, so the backfill
-        cannot cover them.
+        The following pay item code patterns are excluded because their
+        PayItemRateTypeMap rows are inserted AFTER migration 0046 runs, so the
+        backfill cannot cover them — same rationale for all exclusions:
+
+          M13C_%      — conftest system-scope anchors (M13C_SYS_*)
+          INACTIVE_SYS — conftest INACTIVE rate-type anchor
+          M13A_%      — test_m13a.py session-scoped PerUnit items (M13A_STOP,
+                        M13A_INACT, etc.) created via the legacy
+                        /settings/pay-items endpoint (Phase 3E auto-creates a
+                        PayItemRateTypeMap but not a PayItemRateSlots); these
+                        are test fixtures, not pre-migration production data
         """
         uncovered = (await direct_db.execute(
             _text("""
@@ -286,6 +293,7 @@ class TestPayItemRateSlotsBackfill:
                 JOIN   payroll.payitems pi ON pi.payitemid = m.payitemid
                 WHERE  m.status = 'Active'
                   AND  pi.payitemcode NOT LIKE 'M13C_%'
+                  AND  pi.payitemcode NOT LIKE 'M13A_%'
                   AND  pi.payitemcode != 'INACTIVE_SYS'
                   AND  NOT EXISTS (
                       SELECT 1

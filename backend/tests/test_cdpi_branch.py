@@ -152,6 +152,40 @@ async def _cleanup_role(db, role_id: int) -> None:
     )
 
 
+async def _cleanup_cdpi_rate_rows(db, pay_item_id: int) -> None:
+    """
+    Remove PayItemRateSlots, PayItemRateTypeMap, and the company-scoped
+    RateType created by PR-1B for a CDPI PerUnit PayItem.
+
+    Must run before deleting the PayItem itself (FK constraints).
+    """
+    await db.execute(
+        _text("DELETE FROM payroll.payitemrateslots WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    rt_id = (await db.execute(
+        _text("""
+            SELECT ratetypeid FROM payroll.payitemratetypemap
+            WHERE payitemid = :pid
+            LIMIT 1
+        """),
+        {"pid": pay_item_id},
+    )).scalar_one_or_none()
+    await db.execute(
+        _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    if rt_id is not None:
+        await db.execute(
+            _text("""
+                DELETE FROM payroll.ratetypes
+                WHERE  ratetypeid = :rtid
+                  AND  ratecode   = :code
+            """),
+            {"rtid": rt_id, "code": f"CDPI_{pay_item_id}_PER_UNIT"},
+        )
+
+
 async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None:
     await db.execute(_text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL"))
     try:
@@ -161,6 +195,7 @@ async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None
         )
     finally:
         await db.execute(_text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL"))
+    await _cleanup_cdpi_rate_rows(db, pay_item_id)
     await db.execute(
         _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
         {"pid": pay_item_id},
@@ -180,6 +215,7 @@ async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None
 
 
 async def _cleanup_pay_item(db, *, pay_item_id: int) -> None:
+    await _cleanup_cdpi_rate_rows(db, pay_item_id)
     await db.execute(
         _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
         {"pid": pay_item_id},
