@@ -885,6 +885,10 @@ export function PayItemsPage() {
 
   async function executeDecide() {
     if (!decideTarget || !decideAction) return;
+    if (!decideReason.trim()) {
+      setDecideError('A reason is required before proceeding.');
+      return;
+    }
     setDecideSaving(true);
     setDecideError('');
     try {
@@ -1412,26 +1416,35 @@ export function PayItemsPage() {
                   }
                 </span>
               </div>
-              {(decideAction === 'ReturnToDraft' || decideAction === 'Reject') && (
-                <div className={styles.formGroup} style={{ marginTop: '0.75rem' }}>
-                  <label className={styles.label}>
-                    Reason <span className={styles.optional}>(optional)</span>
-                  </label>
-                  <textarea className={styles.textarea} maxLength={500}
-                    value={decideReason}
-                    onChange={e => setDecideReason(e.target.value)}
-                    placeholder={decideAction === 'Reject'
-                      ? 'Explain why this request is rejected…'
-                      : 'Explain what needs to be changed before resubmitting…'}
-                    disabled={decideSaving} />
-                </div>
-              )}
+              <div className={styles.formGroup} style={{ marginTop: '0.75rem' }}>
+                <label className={styles.label}>
+                  {decideAction === 'Approve' ? 'Approval note'
+                    : decideAction === 'Reject' ? 'Reject reason'
+                    : 'Return reason'} <span className={styles.required}>*</span>
+                </label>
+                <p className={styles.inputNote} style={{ marginBottom: '0.4rem' }}>
+                  {decideAction === 'Approve'
+                    ? 'Add a short approval note before approving this request.'
+                    : decideAction === 'Reject'
+                    ? 'Explain why this request is being rejected.'
+                    : 'Explain what the branch should change before resubmitting.'}
+                </p>
+                <textarea className={styles.textarea} maxLength={500}
+                  value={decideReason}
+                  onChange={e => setDecideReason(e.target.value)}
+                  placeholder={decideAction === 'Approve'
+                    ? 'e.g. Approved — item meets company standards.'
+                    : decideAction === 'Reject'
+                    ? 'e.g. This item duplicates an existing company pay item.'
+                    : 'e.g. Please clarify the unit and calculation method before resubmitting.'}
+                  disabled={decideSaving} />
+              </div>
               {decideError && <div className={styles.errorAlert}><AlertIcon /> {decideError}</div>}
             </div>
             <div className={styles.modalFooter}>
               <button
                 className={decideAction === 'Reject' ? styles.btnDanger : styles.btnPrimary}
-                disabled={decideSaving}
+                disabled={decideSaving || !decideReason.trim()}
                 onClick={() => void executeDecide()}>
                 {decideSaving ? <><SpinnerIcon /> Working…</>
                   : decideAction === 'Approve' ? 'Approve'
