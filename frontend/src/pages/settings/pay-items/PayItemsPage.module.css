@@ -1453,6 +1453,18 @@
   background: #eff6ff;
 }
 
+.rateMethodCardDisabled {
+  border-color: #e5e7eb;
+  background: #f9fafb;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.rateMethodCardDisabled:hover {
+  border-color: #e5e7eb;
+  background: #f9fafb;
+}
+
 .rateMethodCardTop {
   display: flex;
   align-items: center;
@@ -1617,6 +1629,20 @@
   font-size: 0.68rem;
   font-weight: 600;
   color: #854d0e;
+  line-height: 1.4;
+  width: fit-content;
+}
+
+.rateMethodBadgeComingSoon {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #64748b;
   line-height: 1.4;
   width: fit-content;
 }

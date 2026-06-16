@@ -3,6 +3,8 @@ import type { FormEvent, DragEvent } from 'react';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
+import { createCdpiRequest, submitCdpiRequest, createDirectCdpiCompanyItem } from '../../../lib/cdpiApi';
+import { canManageCdpiForBranch, canDirectCreateCdpiCompanyItem } from '../../../lib/permissions';
 import type {
   BranchAdmin,
   BranchPayItemState,
@@ -10,7 +12,6 @@ import type {
   PayItemConfigUpdate,
   BulkPayItemConfigUpdate,
   BulkPayItemConfigResult,
-  CustomPayItem,
   CustomPayItemUsage,
   CustomPayItemDeleteResult,
   PayItemOrderUpdate,
@@ -192,12 +193,13 @@ interface WizardState {
   rate_names:    string[];
   item_name:     string;
   display_label: string;
+  unit:          string;
   notes:         string;
 }
 
 const WIZARD_INITIAL: WizardState = {
   step: 1, scope: 'Daily', value_type: null, rate_method: null,
-  rate_names: [], item_name: '', display_label: '', notes: '',
+  rate_names: [], item_name: '', display_label: '', unit: '', notes: '',
 };
 
 type WizardAction =
@@ -211,6 +213,7 @@ type WizardAction =
   | { type: 'REMOVE_RATE_NAME'; idx:    number }
   | { type: 'SET_ITEM_NAME';    name:   string }
   | { type: 'SET_DISPLAY_LABEL'; label: string }
+  | { type: 'SET_UNIT';         unit:   string }
   | { type: 'SET_NOTES';        notes:  string };
 
 function wizardReducer(s: WizardState, a: WizardAction): WizardState {
@@ -240,6 +243,7 @@ function wizardReducer(s: WizardState, a: WizardAction): WizardState {
     case 'REMOVE_RATE_NAME': return { ...s, rate_names: s.rate_names.filter((_, i) => i !== a.idx) };
     case 'SET_ITEM_NAME':     return { ...s, item_name: a.name };
     case 'SET_DISPLAY_LABEL': return { ...s, display_label: a.label };
+    case 'SET_UNIT':          return { ...s, unit: a.unit };
     case 'SET_NOTES':         return { ...s, notes: a.notes };
     default: return s;
   }
@@ -715,53 +719,70 @@ export function PayItemsPage() {
     }
   }
 
-  // ── Custom item: create ────────────────────────────────────────────────────
+  // ── Custom item: create (CDPI flow) ───────────────────────────────────────
   async function saveCreate(e: FormEvent) {
     e.preventDefault();
     if (!wizardStep3Complete) {
       setCreateError('Pay item name is required.');
       return;
     }
+    if (wizard.rate_method !== 'PerUnit') {
+      setCreateError('Only "Same rate" (PerUnit) is supported at this time. Please select it in Step 2.');
+      return;
+    }
+    // input_type is always Time or Number in this wizard (Money card not shown in step 1)
+    const input_type = wizard.value_type === 'Time' ? 'Time' as const : 'Number' as const;
+
     setCreateSaving(true);
     setCreateError('');
 
-    // Map wizard state → backend payload
-    const rate_behavior = wizard.value_type === 'Money' ? 'EnteredAmount'
-      : (wizard.rate_method ?? 'PerUnit');
-    const rate_names = wizard.rate_names.map(n => n.trim()).filter(Boolean);
-
     try {
-      await apiClient.post<CustomPayItem>('/settings/pay-items', {
-        pay_item_name: wizard.item_name.trim(),
-        display_label: wizard.display_label.trim() || null,
-        item_scope:    wizard.scope,
-        rate_behavior,
-        value_type:    wizard.value_type,
-        rate_names,
-        notes:         wizard.notes.trim() || null,
-      });
-      setCreateOpen(false);
-      dispatchWizard({ type: 'RESET' });
-      showToast('Custom pay item created. Activate it per branch from the list.');
-      if (branchMode === 'single' && selectedBranchId) {
-        dispatchSingle({ type: 'FETCH_START' });
-        apiClient.get<BranchPayItemState[]>(`/settings/branches/${selectedBranchId}/pay-items`)
-          .then(({ data }) => dispatchSingle({ type: 'FETCH_OK', items: data }))
-          .catch(e2 => dispatchSingle({ type: 'FETCH_ERROR', error: apiError(e2) }));
-      } else if (branchMode === 'all') {
-        setAllBranchKey(k => k + 1);
+      if (userCanDirectCreate) {
+        // ── Company-wide direct create ─────────────────────────────────────
+        await createDirectCdpiCompanyItem({
+          item_name:       wizard.item_name.trim(),
+          input_type,
+          calc_method_key: 'PerUnit',
+          unit:            wizard.unit.trim() || null,
+          notes:           wizard.notes.trim() || null,
+        });
+        setCreateOpen(false);
+        dispatchWizard({ type: 'RESET' });
+        showToast('Pay item created at company level. It starts inactive on all branches — activate per branch after setup.');
+      } else {
+        // ── Branch-scoped request flow ─────────────────────────────────────
+        if (!selectedBranchId) {
+          setCreateError('No branch selected. Please select a branch before submitting.');
+          return;
+        }
+        // Step 1: create draft
+        const draft = await createCdpiRequest({
+          requesting_branch_id: selectedBranchId,
+          item_name:            wizard.item_name.trim(),
+          input_type,
+          calc_method_key:      'PerUnit',
+          unit:                 wizard.unit.trim() || null,
+          notes:                wizard.notes.trim() || null,
+        });
+        // Step 2: submit for approval
+        try {
+          await submitCdpiRequest(draft.request_id, { expected_revision: draft.revision });
+          setCreateOpen(false);
+          dispatchWizard({ type: 'RESET' });
+          showToast('Request submitted for company approval.');
+        } catch (submitErr) {
+          // Draft created but submit failed — inform user of partial state
+          setCreateError(
+            `Draft was saved (ref: ${draft.request_id.slice(0, 8)}…) but could not be submitted: ` +
+            `${apiError(submitErr)}. You can submit it later once the issue is resolved.`
+          );
+        }
       }
     } catch (e) {
-      const msg = apiError(e);
-      // Convert technical backend errors to user-friendly messages
-      const friendly = msg.includes('rate_behavior') || msg.includes('Daily custom')
-        ? 'Daily items must use a valid rate setup. Please choose a supported rate method.'
-        : msg.includes('value_type')
-        ? 'Daily items cannot be money-type. Please choose a different item type.'
-        : msg;
-      setCreateError(friendly);
+      setCreateError(apiError(e));
+    } finally {
+      setCreateSaving(false);
     }
-    finally { setCreateSaving(false); }
   }
 
   // ── Custom item: delete ────────────────────────────────────────────────────
@@ -802,6 +823,17 @@ export function PayItemsPage() {
   }
 
   // ─── Derived ───────────────────────────────────────────────────────────────
+
+  // ── CDPI permission derivation ────────────────────────────────────────────
+  // Company-wide direct create: AllCompanyBranches + payitems.edit (all assignments same scope).
+  const userCanDirectCreate = canDirectCreateCdpiCompanyItem(user);
+  // Branch-scoped request flow: mutually exclusive with direct create; requires a concrete branch.
+  // selectedBranchId may be null while branches are loading — conservative: hide button until known.
+  const userCanBranchCreate = !userCanDirectCreate && selectedBranchId !== null
+    && canManageCdpiForBranch(user, selectedBranchId);
+  // Show "+ Add Custom Item" when either CDPI path is available.
+  const showAddButton = userCanDirectCreate || userCanBranchCreate;
+
   const activeBranchCount = branchSt.branches.filter(b => b.status === 'Active').length;
   const loading   = branchMode === 'single' ? singleSt.loading : allSt.loading;
   const loadError = branchMode === 'single' ? singleSt.error   : allSt.error;
@@ -952,8 +984,8 @@ export function PayItemsPage() {
         <div style={{ flex: 1 }} />
         <p className={styles.pageSubtitle} style={{ margin: 0 }}>Set which pay items each branch can use. Changes take effect from a chosen date.</p>
         <div className={styles.pageActions}>
-          {!isAdmin && <span className={styles.readonlyNote}><LockIcon /> Read-only</span>}
-          {isAdmin && (
+          {!showAddButton && <span className={styles.readonlyNote}><LockIcon /> Read-only</span>}
+          {showAddButton && (
             <button className={styles.btnPrimary} onClick={() => { dispatchWizard({ type: 'RESET' }); setCreateError(''); setCreateOpen(true); }}>
               <PlusIcon /> Add Custom Item
             </button>
@@ -1350,9 +1382,8 @@ export function PayItemsPage() {
                     value_type={wizard.value_type!}
                     rate_method={wizard.rate_method}
                     item_name={wizard.item_name}
-                    display_label={wizard.display_label}
+                    unit={wizard.unit}
                     notes={wizard.notes}
-                    rate_names={wizard.rate_names}
                     dispatch={dispatchWizard}
                   />
                 )}
@@ -1379,7 +1410,12 @@ export function PayItemsPage() {
                 ) : (
                   <button type="submit" className={styles.btnPrimary}
                     disabled={createSaving || !wizardStep3Complete}>
-                    {createSaving ? <><SpinnerIcon /> Creating…</> : 'Create Pay Item'}
+                    {createSaving
+                      ? <><SpinnerIcon /> Submitting…</>
+                      : userCanDirectCreate
+                        ? 'Create Company Item'
+                        : 'Submit for Approval'
+                    }
                   </button>
                 )}
                 <button type="button" className={styles.btnSecondary}
@@ -1782,6 +1818,7 @@ function WizardStep2({
             config={m}
             selected={rate_method === m.value}
             onSelect={() => dispatch({ type: 'SET_RATE_METHOD', method: m.value })}
+            disabled={m.value !== 'PerUnit'}
           />
         ))}
       </div>
@@ -1804,8 +1841,9 @@ function WizardStep2({
                 <MethodCard
                   key={m.value}
                   config={m}
-                  selected={rate_method === m.value}
-                  onSelect={() => dispatch({ type: 'SET_RATE_METHOD', method: m.value })}
+                  selected={false}
+                  onSelect={() => {/* disabled — not selectable */}}
+                  disabled
                 />
               ))}
             </div>
@@ -1817,11 +1855,12 @@ function WizardStep2({
 }
 
 function MethodCard({
-  config, selected, onSelect,
+  config, selected, onSelect, disabled,
 }: {
   config: MethodDisplayConfig;
   selected: boolean;
   onSelect: () => void;
+  disabled?: boolean;
 }) {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const wrapperRef  = useRef<HTMLDivElement>(null);
@@ -1851,31 +1890,35 @@ function MethodCard({
     >
       {/* Card — div with role=button so info <button> can be nested inside */}
       <div
-        role="button"
-        tabIndex={0}
-        className={`${styles.rateMethodCard}${selected ? ` ${styles.rateMethodCardSelected}` : ''}`}
-        onClick={onSelect}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+        role={disabled ? 'presentation' : 'button'}
+        tabIndex={disabled ? -1 : 0}
+        className={`${styles.rateMethodCard}${selected ? ` ${styles.rateMethodCardSelected}` : ''}${disabled ? ` ${styles.rateMethodCardDisabled}` : ''}`}
+        onClick={disabled ? undefined : onSelect}
+        onKeyDown={disabled ? undefined : e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+        aria-disabled={disabled}
       >
         <div className={styles.rateMethodCardTop}>
           <div className={styles.rateMethodCardLeft}>
             <span className={styles.rateMethodLabel}>{config.label}</span>
-            {config.badge && (
-              <span className={styles.rateMethodBadge}>{config.badge}</span>
-            )}
+            {disabled
+              ? <span className={styles.rateMethodBadgeComingSoon}>Coming later</span>
+              : config.badge && <span className={styles.rateMethodBadge}>{config.badge}</span>
+            }
           </div>
           <div className={styles.rateMethodCardRight}>
-            {selected && <span className={styles.rateMethodCheck}><CheckIcon /></span>}
-            <button
-              ref={infoBtnRef}
-              type="button"
-              className={styles.rateMethodInfoBtn}
-              aria-label={`Learn more about ${config.label}`}
-              aria-expanded={popoverOpen}
-              onClick={e => { e.stopPropagation(); setPopoverOpen(o => !o); }}
-            >
-              <InfoCircleIcon />
-            </button>
+            {selected && !disabled && <span className={styles.rateMethodCheck}><CheckIcon /></span>}
+            {!disabled && (
+              <button
+                ref={infoBtnRef}
+                type="button"
+                className={styles.rateMethodInfoBtn}
+                aria-label={`Learn more about ${config.label}`}
+                aria-expanded={popoverOpen}
+                onClick={e => { e.stopPropagation(); setPopoverOpen(o => !o); }}
+              >
+                <InfoCircleIcon />
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1894,26 +1937,23 @@ function MethodCard({
 }
 
 function WizardStep3({
-  value_type, rate_method, item_name, display_label, notes, rate_names, dispatch,
+  value_type, rate_method, item_name, unit, notes, dispatch,
 }: {
   value_type: WizardValueType;
   rate_method: WizardRateMethod | null;
   item_name: string;
-  display_label: string;
+  unit: string;
   notes: string;
-  rate_names: string[];
   dispatch: React.Dispatch<WizardAction>;
 }) {
   const methodDef = RATE_METHODS.find(m => m.value === rate_method);
-  const isFixed   = methodDef?.fixedCount !== undefined;
-  const isDynamic = !isFixed && rate_method !== null && value_type !== 'Money';
 
   return (
     <div className={styles.wizardStep}>
       {/* Summary chip */}
       <div className={styles.wizardSummaryChip}>
         <span className={styles.wizardSummaryChipPart}>
-          {value_type === 'Time' ? 'Time / Hours' : value_type === 'Number' ? 'Quantity / Number' : 'Money'}
+          {value_type === 'Time' ? 'Time / Hours' : 'Quantity / Number'}
         </span>
         {rate_method && (
           <>
@@ -1933,78 +1973,18 @@ function WizardStep3({
         <span className={styles.inputNote}>The official name shown in payroll reports and screens.</span>
       </div>
 
-      {/* Short label */}
+      {/* Unit — optional display metadata */}
       <div className={styles.formGroup}>
-        <label className={styles.label}>Short Label <span className={styles.optional}>(optional)</span></label>
+        <label className={styles.label}>Unit <span className={styles.optional}>(optional)</span></label>
         <input className={styles.input} maxLength={60}
-          value={display_label}
-          onChange={e => dispatch({ type: 'SET_DISPLAY_LABEL', label: e.target.value })}
-          placeholder="e.g. Loads Bonus" />
-        <span className={styles.inputNote}>Used in compact places like column headers. Defaults to Pay Item Name if blank.</span>
+          value={unit}
+          onChange={e => dispatch({ type: 'SET_UNIT', unit: e.target.value })}
+          placeholder={value_type === 'Time' ? 'e.g. hours' : 'e.g. loads, miles, stops'} />
+        <span className={styles.inputNote}>Display label for what is being measured. Does not affect calculations.</span>
       </div>
 
-      {/* Rate names — shown when a rate method was selected */}
-      {rate_method && value_type !== 'Money' && (
-        <div className={styles.rateNamesSection}>
-          <p className={styles.rateNamesSectionTitle}>
-            Pay Rate Names
-            <span className={styles.rateNamesSectionHint}> — what these rate columns will be called in Pay Rates</span>
-          </p>
-          {isFixed && methodDef?.rateLabels
-            ? methodDef.rateLabels.map((lbl, idx) => (
-                <div key={idx} className={styles.rateNameRow}>
-                  <label className={styles.rateNameLabel}>{lbl}</label>
-                  <input className={styles.input}
-                    value={rate_names[idx] ?? ''}
-                    onChange={e => dispatch({ type: 'SET_RATE_NAME', idx, name: e.target.value })}
-                    placeholder={`e.g. ${lbl}`} maxLength={80} />
-                </div>
-              ))
-            : isFixed
-            ? (
-                <div className={styles.rateNameRow}>
-                  <label className={styles.rateNameLabel}>Rate name</label>
-                  <input className={styles.input}
-                    value={rate_names[0] ?? ''}
-                    onChange={e => dispatch({ type: 'SET_RATE_NAME', idx: 0, name: e.target.value })}
-                    placeholder="e.g. Miles Pay" maxLength={80} />
-                </div>
-              )
-            : null}
-
-          {isDynamic && rate_names.map((rn, idx) => (
-            <div key={idx} className={styles.rateNameRow}>
-              <label className={styles.rateNameLabel}>Rate {idx + 1}</label>
-              <input className={styles.input}
-                value={rn}
-                onChange={e => dispatch({ type: 'SET_RATE_NAME', idx, name: e.target.value })}
-                placeholder={`e.g. Tier ${idx + 1} Rate`} maxLength={80} />
-              {rate_names.length > 2 && (
-                <button type="button" className={styles.rateNameRemove}
-                  onClick={() => dispatch({ type: 'REMOVE_RATE_NAME', idx })}
-                  title="Remove this rate">×</button>
-              )}
-            </div>
-          ))}
-          {isDynamic && rate_names.length < 10 && (
-            <button type="button" className={styles.rateNameAddBtn}
-              onClick={() => dispatch({ type: 'ADD_RATE_NAME' })}>
-              + Add rate
-            </button>
-          )}
-
-          <div className={styles.rateNamesNote}>
-            <InfoIcon />
-            <span>
-              Rate names define the columns that will appear in Pay Rates setup.
-              The actual rate amounts are configured per driver in Pay Rates — not here.
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Notes */}
-      <div className={styles.formGroup} style={{ marginTop: '0.75rem' }}>
+      <div className={styles.formGroup}>
         <label className={styles.label}>Notes <span className={styles.optional}>(optional)</span></label>
         <textarea className={styles.textarea} maxLength={500}
           value={notes}
@@ -2015,9 +1995,9 @@ function WizardStep3({
       <div className={styles.infoBanner} style={{ marginTop: '0.5rem' }}>
         <InfoIcon />
         <span>
-          Item type and rate calculation method are <strong>immutable</strong> after creation.
-          A unique system code is auto-generated. The item starts <strong>inactive</strong> on all
-          branches — activate it per branch from the list.
+          Pay rates will be configured in <strong>Pay Rates</strong> after this item is approved.
+          The item starts <strong>inactive</strong> on all branches — your company admin will
+          review and approve this request before it becomes available.
         </span>
       </div>
     </div>
