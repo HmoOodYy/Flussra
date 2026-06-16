@@ -193,44 +193,119 @@ export function canEditTransfers(user: UserProfile): boolean {
 // Backend remains the authoritative security boundary — these helpers drive
 // UI visibility only.  A 403 from the backend is always authoritative.
 //
-// Permission required for all CDPI write actions: payitems.edit
-// Branch actions: payitems.edit + branch access (SpecificBranch or AllCompanyBranches)
-// Company actions: payitems.edit + AllCompanyBranches scope only
+// ── Auth model gap ────────────────────────────────────────────────────────────
+// BranchAccess (from /auth/me) exposes: scope, role_code, role_name — but NOT
+// a per-assignment permission code list.  active_permissions on UserProfile is a
+// flat union across ALL active role assignments, so it is impossible to prove
+// "this specific AllCompanyBranches assignment has payitems.edit" vs "some
+// SpecificBranch assignment has payitems.edit."
+//
+// To avoid overgrant, helpers below return false in any ambiguous mixed-scope
+// case.  They return true only when per-assignment scope can be inferred safely:
+//   • All assignments are AllCompanyBranches → any permission in active_permissions
+//     must have come from an AllCompanyBranches assignment.
+//   • Exactly one SpecificBranch assignment matching the target branch → all
+//     permissions come from that one assignment.
+//
+// When the auth model is extended to include per-assignment permission codes,
+// these helpers should be updated to use that data instead.
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** True when the user holds payitems.edit. Required for all CDPI write actions. */
-export function hasPayItemsEdit(user: UserProfile): boolean {
+/**
+ * True when the user holds `payitems.edit` somewhere across their assignments.
+ *
+ * IMPORTANT: this is a flat union check — it does NOT prove which assignment
+ * scope holds the permission.  Do NOT use this alone to grant branch-scoped or
+ * company-scoped CDPI actions; use canManageCdpiForBranch / canReviewCdpiCompanyWide
+ * which perform the additional scope safety check.
+ */
+export function hasPayItemsEdit(user: UserProfile | null | undefined): boolean {
+  if (!user) return false;
   return user.active_permissions.includes('payitems.edit');
 }
 
 /**
- * True when the user can manage CDPI items for the given branch.
+ * Private: returns true only when EVERY branch assignment is AllCompanyBranches
+ * AND active_permissions includes payitems.edit.
  *
- * Requires payitems.edit AND branch access to the target branch.
- * Access is satisfied by AllCompanyBranches scope or a SpecificBranch
- * assignment that includes the target branch_id.
+ * When all assignments are AllCompanyBranches, payitems.edit cannot come from a
+ * SpecificBranch row, so the flat union check is safe.
  */
-export function canManageCdpiForBranch(user: UserProfile, branchId: number): boolean {
-  if (!hasPayItemsEdit(user)) return false;
-  if (user.scope_type === 'AllCompanyBranches') return true;
-  return user.branch_ids.includes(branchId);
+function _allBranchesAllCompanyWithPayItemsEdit(user: UserProfile): boolean {
+  return (
+    user.branches.length > 0 &&
+    user.branches.every((b) => b.scope === 'AllCompanyBranches') &&
+    user.active_permissions.includes('payitems.edit')
+  );
 }
 
 /**
- * True when the user can review CDPI requests company-wide.
+ * True when the frontend can prove the user holds payitems.edit from an
+ * assignment that covers the given branch.
  *
- * Requires payitems.edit AND AllCompanyBranches scope.
- * This gates: approve, return-to-draft, reject actions on pending requests.
+ * Safe cases (provable without per-assignment permission codes):
+ *   1. All assignments are AllCompanyBranches and active_permissions includes
+ *      payitems.edit — payitems.edit must come from an AllCompanyBranches row.
+ *   2. User has exactly one assignment, it is SpecificBranch for this branchId,
+ *      and active_permissions includes payitems.edit — the single assignment
+ *      uniquely determines the permission source.
+ *
+ * All other cases (mixed scope, multiple SpecificBranch rows) are ambiguous and
+ * return false conservatively.  The backend will enforce the real boundary.
+ *
+ * Auth model gap: BranchAccess lacks per-assignment permission codes.
+ * Multi-branch SpecificBranch users with payitems.edit will see false here until
+ * the auth model exposes per-assignment permissions.
  */
-export function canReviewCdpiCompanyWide(user: UserProfile): boolean {
-  return hasPayItemsEdit(user) && user.scope_type === 'AllCompanyBranches';
+export function canManageCdpiForBranch(
+  user: UserProfile | null | undefined,
+  branchId: number,
+): boolean {
+  if (!user) return false;
+
+  // Case 1: every assignment is AllCompanyBranches → permission source is proven.
+  if (_allBranchesAllCompanyWithPayItemsEdit(user)) return true;
+
+  // Case 2: exactly one SpecificBranch assignment for this branch → unambiguous.
+  if (
+    user.branches.length === 1 &&
+    user.branches[0].scope === 'SpecificBranch' &&
+    user.branches[0].branch_id === branchId &&
+    user.active_permissions.includes('payitems.edit')
+  ) {
+    return true;
+  }
+
+  // All other cases: mixed assignments or multiple SpecificBranch rows.
+  // Cannot safely attribute payitems.edit to the target branch → false.
+  return false;
+}
+
+/**
+ * True when the frontend can prove the user holds payitems.edit from an
+ * AllCompanyBranches assignment.
+ *
+ * Safe only when every branch row is AllCompanyBranches — then the flat
+ * active_permissions check cannot be contaminated by a SpecificBranch permission.
+ * Returns false when any SpecificBranch assignments exist (ambiguous).
+ *
+ * Gates: company review queue (approve / return / reject), direct company item creation.
+ *
+ * Auth model gap: BranchAccess lacks per-assignment permission codes.
+ */
+export function canReviewCdpiCompanyWide(
+  user: UserProfile | null | undefined,
+): boolean {
+  if (!user) return false;
+  return _allBranchesAllCompanyWithPayItemsEdit(user);
 }
 
 /**
  * True when the user can directly create CDPI company items (bypassing the
- * request workflow).
- *
- * Same gate as canReviewCdpiCompanyWide — requires AllCompanyBranches + payitems.edit.
+ * request workflow).  Same gate as canReviewCdpiCompanyWide.
  */
-export function canDirectCreateCdpiCompanyItem(user: UserProfile): boolean {
+export function canDirectCreateCdpiCompanyItem(
+  user: UserProfile | null | undefined,
+): boolean {
   return canReviewCdpiCompanyWide(user);
 }
