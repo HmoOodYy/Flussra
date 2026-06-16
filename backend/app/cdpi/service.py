@@ -1363,8 +1363,6 @@ async def _write_cdpi_branch_config(
         {"pid": pay_item_id, "cid": company_id, "bid": branch_id},
     )).mappings().first()
 
-    today = _date.today()
-
     if open_row is None:
         # No existing config row — INSERT fresh.
         is_active_val    = bool(new_is_active) if (update_is_active and new_is_active is not None) else False
@@ -1384,8 +1382,10 @@ async def _write_cdpi_branch_config(
             },
         )
 
-    elif open_row["effectivefrom"] >= today:
-        # Same-day or pending row — UPDATE in place.
+    elif open_row["effectivefrom"] >= effective_from:
+        # Open row starts on or after the resolved effective date — safe to UPDATE in place.
+        # This covers both same-day edits (no period protection) and future-dated pending rows
+        # that are already beyond the period boundary.
         set_parts: list[str] = []
         params: dict = {"cid_row": open_row["configid"]}
 
@@ -1404,7 +1404,10 @@ async def _write_cdpi_branch_config(
             )
 
     else:
-        # effectivefrom < today — close existing and INSERT new open row.
+        # Open row starts before the resolved effective date — close it and INSERT a new open row.
+        # This handles both the normal "row started yesterday" case and the period-protected case
+        # where effective_from is pushed to the future: a row starting today must not be mutated
+        # in place while it belongs to a protected open payroll period.
         await db.execute(
             text("""
                 UPDATE payroll.branchpayitemconfig

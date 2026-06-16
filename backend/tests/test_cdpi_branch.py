@@ -631,33 +631,67 @@ class TestUpdateBranchCdpiItem:
             await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
 
     async def test_non_cdpi_payitem_raises_404(self, direct_db):
-        """Test 21: PayItem without CdpiDefinitions row raises 404."""
+        """Test 21: PayItem without CdpiDefinitions row raises 404 from PATCH and is not in list.
+
+        Creates its own non-CDPI PayItem to avoid dependency on fixture data.
+        Verifies that neither the list endpoint nor the PATCH endpoint exposes non-CDPI items.
+        Confirms no BranchPayItemConfig or CdpiDefinitions rows are created on rejection.
+        """
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
-        # Find a non-CDPI PayItem for this company.
+        # Create a plain (non-CDPI) PayItem directly — no CdpiDefinitions row.
         non_cdpi_pid = (await direct_db.execute(
             _text("""
-                SELECT pi.payitemid
-                FROM   payroll.payitems pi
-                WHERE  pi.companyid = :cid
-                  AND  pi.status   != 'Retired'
-                  AND  NOT EXISTS (
-                      SELECT 1 FROM payroll.cdpidefinitions cd WHERE cd.payitemid = pi.payitemid
-                  )
-                LIMIT 1
+                INSERT INTO payroll.payitems
+                    (companyid, branchid, payitemcode, payitemname, category,
+                     itemscope, datatype, ratebehavior,
+                     isdefaultbranchactive, issystemstandard, status)
+                VALUES
+                    (:cid, NULL, :code, :name, 'Custom',
+                     'Daily', 'Decimal', 'PerUnit',
+                     FALSE, FALSE, 'Active')
+                RETURNING payitemid
             """),
-            {"cid": cid},
-        )).scalar_one_or_none()
+            {
+                "cid": cid,
+                "code": "NCDPI-T21-TEST",
+                "name": "T21NonCdpiItem",
+            },
+        )).scalar_one()
+        try:
+            # 1. PATCH must return 404 (no CdpiDefinitions row).
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.update_branch_cdpi_item(
+                    cid, admin_id, hq_id, non_cdpi_pid,
+                    CdpiBranchItemUpdate(is_active=True),
+                    direct_db,
+                )
+            assert exc_info.value.status_code == 404
 
-        if non_cdpi_pid is None:
-            pytest.skip("No non-CDPI PayItems available for this test.")
+            # 2. Confirm no BranchPayItemConfig row was created.
+            cfg_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
+                {"pid": non_cdpi_pid},
+            )).scalar_one()
+            assert cfg_count == 0
 
-        with pytest.raises(HTTPException) as exc_info:
-            await cdpi_service.update_branch_cdpi_item(
-                cid, admin_id, hq_id, non_cdpi_pid,
-                CdpiBranchItemUpdate(is_active=True),
-                direct_db,
+            # 3. Confirm no CdpiDefinitions row was created.
+            cd_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+                {"pid": non_cdpi_pid},
+            )).scalar_one()
+            assert cd_count == 0
+
+            # 4. list_branch_cdpi_items must not include the non-CDPI item.
+            result = await cdpi_service.list_branch_cdpi_items(cid, admin_id, hq_id, direct_db)
+            listed_ids = {r.pay_item_id for r in result}
+            assert non_cdpi_pid not in listed_ids
+
+        finally:
+            # Clean up: only PayItems row (no CdpiDefinitions, no BranchPayItemConfig).
+            await direct_db.execute(
+                _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": non_cdpi_pid},
             )
-        assert exc_info.value.status_code == 404
 
     async def test_wrong_company_payitem_raises_404(self, direct_db):
         """Test 22: pay_item_id from different company raises 404."""
@@ -837,6 +871,277 @@ class TestEffectiveDating:
                 {"pid": summary.pay_item_id, "bid": hq_id},
             )).scalar_one()
             assert new_eff == period_end + datetime.timedelta(days=1)
+        finally:
+            if period_id is not None:
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                    {"pid": period_id},
+                )
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_period_protection_does_not_mutate_current_row_in_place(self, direct_db):
+        """Test 28b: period-blocked update must not mutate the existing open row in place.
+
+        When a payroll period is open and the effective_from is pushed to a future date,
+        an existing config row (effectivefrom = today, within the protected period) must
+        be CLOSED and a NEW row must be inserted after the period — not updated in place.
+        This is the key correctness guarantee: protected-period rows must remain immutable.
+        """
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28bProtectedRow")
+        today = datetime.date.today()
+        period_end = today + datetime.timedelta(days=6)
+        expected_new_eff = period_end + datetime.timedelta(days=1)
+        period_id = None
+        try:
+            # Insert a config row with effectivefrom = today (inside the period that is about to be opened).
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, FALSE, CURRENT_DATE, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id, "uid": admin_id},
+            )
+            original_config_id = (await direct_db.execute(
+                _text("""
+                    SELECT configid FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+
+            # Open a payroll period covering today.
+            period_id = (await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, periodcode, periodname, periodtype,
+                         startdate, enddate, status)
+                    VALUES (:cid, :bid, :pcode, :pname, 'Week', :start, :end, 'Open')
+                    RETURNING payrollperiodid
+                """),
+                {
+                    "cid": cid, "bid": hq_id,
+                    "pcode": "T28b-CDPI-PERIOD", "pname": "T28b Protected Row",
+                    "start": today, "end": period_end,
+                },
+            )).scalar_one()
+
+            # PATCH while the period is open.
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(is_active=True),
+                direct_db,
+            )
+
+            # The original row must now be CLOSED (effectiveto set), not mutated.
+            original_eff_to = (await direct_db.execute(
+                _text("SELECT effectiveto FROM payroll.branchpayitemconfig WHERE configid = :cid_r"),
+                {"cid_r": original_config_id},
+            )).scalar_one()
+            assert original_eff_to is not None, (
+                "Original config row must be closed (effectiveto set) — must not be mutated in place."
+            )
+
+            # A new open row must exist starting after the period.
+            new_row = (await direct_db.execute(
+                _text("""
+                    SELECT isactive, effectivefrom FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).mappings().first()
+            assert new_row is not None
+            assert new_row["isactive"] is True
+            assert new_row["effectivefrom"] == expected_new_eff
+
+            # Only exactly 2 rows should exist: the closed original + the new open row.
+            total_rows = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE payitemid=:pid AND branchid=:bid"),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+            assert total_rows == 2
+        finally:
+            if period_id is not None:
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                    {"pid": period_id},
+                )
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_period_protection_display_name_also_versions_row(self, direct_db):
+        """Test 28c: period-blocked display-name update also closes existing row, does not patch it."""
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28cDisplayProtected")
+        today = datetime.date.today()
+        period_end = today + datetime.timedelta(days=4)
+        period_id = None
+        try:
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, branchdisplayname,
+                         effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, TRUE, 'OldName', CURRENT_DATE, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id, "uid": admin_id},
+            )
+            original_config_id = (await direct_db.execute(
+                _text("""
+                    SELECT configid FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+
+            period_id = (await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, periodcode, periodname, periodtype,
+                         startdate, enddate, status)
+                    VALUES (:cid, :bid, :pcode, :pname, 'Week', :start, :end, 'Open')
+                    RETURNING payrollperiodid
+                """),
+                {
+                    "cid": cid, "bid": hq_id,
+                    "pcode": "T28c-CDPI-PERIOD", "pname": "T28c Display Protected",
+                    "start": today, "end": period_end,
+                },
+            )).scalar_one()
+
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(branch_display_name_override="NewName"),
+                direct_db,
+            )
+
+            # Original row must be closed.
+            original_eff_to = (await direct_db.execute(
+                _text("SELECT effectiveto FROM payroll.branchpayitemconfig WHERE configid = :cid_r"),
+                {"cid_r": original_config_id},
+            )).scalar_one()
+            assert original_eff_to is not None
+
+            # New row carries forward is_active=TRUE (unchanged) and has new display name.
+            new_row = (await direct_db.execute(
+                _text("""
+                    SELECT isactive, branchdisplayname, effectivefrom
+                    FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).mappings().first()
+            assert new_row is not None
+            assert new_row["branchdisplayname"] == "NewName"
+            assert new_row["isactive"] is True  # carried forward
+            assert new_row["effectivefrom"] == period_end + datetime.timedelta(days=1)
+        finally:
+            if period_id is not None:
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                    {"pid": period_id},
+                )
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_same_day_no_period_still_updates_in_place(self, direct_db):
+        """Test 28d: same-day update with no open period still updates the row in place.
+
+        Regression guard: the effective_from fix must not break the no-period same-day path.
+        """
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28dSameDayNoPeriod")
+        try:
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, FALSE, CURRENT_DATE, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id, "uid": admin_id},
+            )
+            original_config_id = (await direct_db.execute(
+                _text("""
+                    SELECT configid FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+
+            # No payroll period open — effective_from resolves to today.
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(is_active=True),
+                direct_db,
+            )
+
+            # Must still be the same row (UPDATE in place, no new row).
+            current_config_id = (await direct_db.execute(
+                _text("""
+                    SELECT configid FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+            assert current_config_id == original_config_id
+
+            total_rows = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE payitemid=:pid AND branchid=:bid"),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+            assert total_rows == 1
+        finally:
+            await _cleanup_pay_item(direct_db, pay_item_id=summary.pay_item_id)
+
+    async def test_open_version_uniqueness_respected_after_period_version(self, direct_db):
+        """Test 28e: after period-protected versioning, only one open config row exists (no dupe)."""
+        cid, hq_id, _, admin_id = await _get_ids(direct_db)
+        summary = await _direct_create(direct_db, company_id=cid, user_id=admin_id,
+                                        item_name="T28eUniqueOpen")
+        today = datetime.date.today()
+        period_end = today + datetime.timedelta(days=3)
+        period_id = None
+        try:
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.branchpayitemconfig
+                        (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
+                    VALUES (:cid, :bid, :pid, FALSE, CURRENT_DATE, :uid)
+                """),
+                {"cid": cid, "bid": hq_id, "pid": summary.pay_item_id, "uid": admin_id},
+            )
+            period_id = (await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, periodcode, periodname, periodtype,
+                         startdate, enddate, status)
+                    VALUES (:cid, :bid, :pcode, :pname, 'Week', :start, :end, 'Open')
+                    RETURNING payrollperiodid
+                """),
+                {
+                    "cid": cid, "bid": hq_id,
+                    "pcode": "T28e-CDPI-PERIOD", "pname": "T28e Unique Open",
+                    "start": today, "end": period_end,
+                },
+            )).scalar_one()
+
+            await cdpi_service.update_branch_cdpi_item(
+                cid, admin_id, hq_id, summary.pay_item_id,
+                CdpiBranchItemUpdate(is_active=True),
+                direct_db,
+            )
+
+            # Exactly one open row (effectiveto IS NULL).
+            open_count = (await direct_db.execute(
+                _text("""
+                    SELECT COUNT(*) FROM payroll.branchpayitemconfig
+                    WHERE payitemid=:pid AND branchid=:bid AND effectiveto IS NULL
+                """),
+                {"pid": summary.pay_item_id, "bid": hq_id},
+            )).scalar_one()
+            assert open_count == 1
         finally:
             if period_id is not None:
                 await direct_db.execute(
