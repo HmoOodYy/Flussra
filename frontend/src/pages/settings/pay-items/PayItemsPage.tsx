@@ -965,13 +965,23 @@ export function PayItemsPage() {
   }
 
   // ── CDPI branch: toggle active ────────────────────────────────────────────
+  // Backend config is effective-dated — if a protected period is open the change
+  // is scheduled rather than immediately applied.  We refetch from backend after
+  // the PATCH so the displayed state is always the true current effective value,
+  // then inspect whether the returned state matches what we requested.
   async function toggleCdpiBranchActive(item: CdpiBranchItem) {
     if (!selectedBranchId || togglingId !== null) return;
+    const requested = !item.is_active;
     setTogglingId(item.pay_item_id);
     try {
-      const updated = await updateCdpiBranchItem(selectedBranchId, item.pay_item_id, { is_active: !item.is_active });
-      dispatchCdpiBranch({ type: 'ITEM_UPDATED', updated });
-      showToast(`"${item.item_name}" ${updated.is_active ? 'activated' : 'deactivated'} for this branch.`);
+      const updated = await updateCdpiBranchItem(selectedBranchId, item.pay_item_id, { is_active: requested });
+      // Refetch the list so we display the backend's authoritative current state.
+      setCdpiBranchKey(k => k + 1);
+      if (updated.is_active === requested) {
+        showToast(requested ? 'Custom item activated for this branch.' : 'Custom item deactivated for this branch.');
+      } else {
+        showToast('Change saved and scheduled. It will apply after the current protected payroll period.');
+      }
     } catch (e) {
       showToast(apiError(e));
     } finally {
@@ -980,19 +990,27 @@ export function PayItemsPage() {
   }
 
   // ── CDPI branch: save display-name override ───────────────────────────────
+  // Same effective-dating caveat as the active toggle: the change may be
+  // scheduled if a protected period is open.  We refetch and compare.
   async function saveCdpiBranchDisplayName() {
     if (editNameId === null || !selectedBranchId) return;
     setEditNameSaving(true);
     setEditNameError('');
     const value = editNameValue.trim();
+    const requestedOverride = value || null;
     try {
       const updated = await updateCdpiBranchItem(selectedBranchId, editNameId, {
         // Send null to clear the override; non-empty string to store it.
-        branch_display_name_override: value || null,
+        branch_display_name_override: requestedOverride,
       });
-      dispatchCdpiBranch({ type: 'ITEM_UPDATED', updated });
       setEditNameId(null);
-      showToast(value ? 'Display name override saved.' : 'Display name override cleared.');
+      // Refetch so the list reflects the backend's authoritative current state.
+      setCdpiBranchKey(k => k + 1);
+      if (updated.branch_display_name_override === requestedOverride) {
+        showToast(value ? 'Branch display name saved.' : 'Branch display name cleared.');
+      } else {
+        showToast('Display-name change saved and scheduled. It will apply after the current protected payroll period.');
+      }
     } catch (e) {
       setEditNameError(apiError(e));
     } finally {
@@ -1486,6 +1504,7 @@ export function PayItemsPage() {
           </div>
           <p className={styles.cdpiBranchHint}>
             CDPI items available for this branch. Activate items to make them visible in payroll entry and set a branch-specific display name if needed.
+            Changes may be scheduled for a future date if a payroll period is currently protected.
           </p>
 
           {cdpiBranchSt.loading && (
@@ -1522,7 +1541,7 @@ export function PayItemsPage() {
 
                     {/* Active toggle */}
                     <div className={styles.cdpiBranchActiveRow}>
-                      <span className={styles.cdpiBranchControlLabel}>Active for this branch</span>
+                      <span className={styles.cdpiBranchControlLabel}>Current branch status</span>
                       <label className={styles.switch}>
                         <input type="checkbox"
                           checked={item.is_active}
@@ -1535,7 +1554,7 @@ export function PayItemsPage() {
 
                     {/* Branch display-name override */}
                     <div className={styles.cdpiBranchNameRow}>
-                      <span className={styles.cdpiBranchControlLabel}>Branch display name</span>
+                      <span className={styles.cdpiBranchControlLabel}>Current display name</span>
                       {isEditingName ? (
                         <div className={styles.cdpiBranchNameEdit}>
                           <input
