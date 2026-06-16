@@ -3,7 +3,7 @@ import type { FormEvent, DragEvent } from 'react';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
-import { createCdpiRequest, submitCdpiRequest, createDirectCdpiCompanyItem, listCdpiRequests, decideCdpiRequest } from '../../../lib/cdpiApi';
+import { createCdpiRequest, submitCdpiRequest, createDirectCdpiCompanyItem, listCdpiRequests, decideCdpiRequest, listCdpiBranchItems, updateCdpiBranchItem } from '../../../lib/cdpiApi';
 import { canManageCdpiForBranch, canDirectCreateCdpiCompanyItem } from '../../../lib/permissions';
 import type {
   BranchAdmin,
@@ -21,6 +21,7 @@ import type {
   CdpiDecideAction,
   CdpiStatus,
   CdpiRequestListParams,
+  CdpiBranchItem,
 } from '../../../types/settings';
 import styles from './PayItemsPage.module.css';
 
@@ -487,6 +488,25 @@ function cdpiReqsReducer(s: CdpiReqsState, a: CdpiReqsAction): CdpiReqsState {
   }
 }
 
+// ─── CDPI branch item controls state ─────────────────────────────────────────
+
+type CdpiBranchState = { items: CdpiBranchItem[]; loading: boolean; error: string };
+type CdpiBranchAction =
+  | { type: 'FETCH_START' }
+  | { type: 'FETCH_OK';     items:   CdpiBranchItem[] }
+  | { type: 'FETCH_ERROR';  error:   string }
+  | { type: 'ITEM_UPDATED'; updated: CdpiBranchItem };
+
+function cdpiBranchReducer(s: CdpiBranchState, a: CdpiBranchAction): CdpiBranchState {
+  switch (a.type) {
+    case 'FETCH_START':   return { items: [], loading: true,  error: '' };
+    case 'FETCH_OK':      return { items: a.items, loading: false, error: '' };
+    case 'FETCH_ERROR':   return { items: [], loading: false, error: a.error };
+    case 'ITEM_UPDATED':  return { ...s, items: s.items.map(i => i.pay_item_id === a.updated.pay_item_id ? a.updated : i) };
+    default:              return s;
+  }
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function PayItemsPage() {
@@ -551,6 +571,15 @@ export function PayItemsPage() {
   const [decideReason, setDecideReason]     = useState('');
   const [decideSaving, setDecideSaving]     = useState(false);
   const [decideError, setDecideError]       = useState('');
+
+  // ── CDPI branch controls ─────────────────────────────────────────────────
+  const [cdpiBranchSt, dispatchCdpiBranch] = useReducer(cdpiBranchReducer, { items: [], loading: false, error: '' });
+  const [cdpiBranchKey, setCdpiBranchKey]   = useState(0);
+  const [togglingId, setTogglingId]         = useState<number | null>(null);
+  const [editNameId, setEditNameId]         = useState<number | null>(null);
+  const [editNameValue, setEditNameValue]   = useState('');
+  const [editNameSaving, setEditNameSaving] = useState(false);
+  const [editNameError, setEditNameError]   = useState('');
 
   // ── Delete flow ───────────────────────────────────────────────────────────
   const [usageData, setUsageData]         = useState<CustomPayItemUsage | null>(null);
@@ -653,6 +682,17 @@ export function PayItemsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cdpiFilter, cdpiKey, selectedBranchId]);
   // user is stable for the session; selectedBranchId covers userCanBranchCreate changes.
+
+  // ── Load CDPI branch items ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!selectedBranchId || !canManageCdpiForBranch(user, selectedBranchId)) return;
+    dispatchCdpiBranch({ type: 'FETCH_START' });
+    listCdpiBranchItems(selectedBranchId)
+      .then(data => dispatchCdpiBranch({ type: 'FETCH_OK', items: data }))
+      .catch(e => dispatchCdpiBranch({ type: 'FETCH_ERROR', error: apiError(e) }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBranchId, cdpiBranchKey]);
+  // user is stable for the session; selectedBranchId change re-evaluates permission inline.
 
   // ── Aggregates ────────────────────────────────────────────────────────────
   const aggregates = useMemo(() => {
@@ -924,6 +964,42 @@ export function PayItemsPage() {
     }
   }
 
+  // ── CDPI branch: toggle active ────────────────────────────────────────────
+  async function toggleCdpiBranchActive(item: CdpiBranchItem) {
+    if (!selectedBranchId || togglingId !== null) return;
+    setTogglingId(item.pay_item_id);
+    try {
+      const updated = await updateCdpiBranchItem(selectedBranchId, item.pay_item_id, { is_active: !item.is_active });
+      dispatchCdpiBranch({ type: 'ITEM_UPDATED', updated });
+      showToast(`"${item.item_name}" ${updated.is_active ? 'activated' : 'deactivated'} for this branch.`);
+    } catch (e) {
+      showToast(apiError(e));
+    } finally {
+      setTogglingId(null);
+    }
+  }
+
+  // ── CDPI branch: save display-name override ───────────────────────────────
+  async function saveCdpiBranchDisplayName() {
+    if (editNameId === null || !selectedBranchId) return;
+    setEditNameSaving(true);
+    setEditNameError('');
+    const value = editNameValue.trim();
+    try {
+      const updated = await updateCdpiBranchItem(selectedBranchId, editNameId, {
+        // Send null to clear the override; non-empty string to store it.
+        branch_display_name_override: value || null,
+      });
+      dispatchCdpiBranch({ type: 'ITEM_UPDATED', updated });
+      setEditNameId(null);
+      showToast(value ? 'Display name override saved.' : 'Display name override cleared.');
+    } catch (e) {
+      setEditNameError(apiError(e));
+    } finally {
+      setEditNameSaving(false);
+    }
+  }
+
   // ─── Derived ───────────────────────────────────────────────────────────────
 
   // ── CDPI permission derivation ────────────────────────────────────────────
@@ -937,6 +1013,9 @@ export function PayItemsPage() {
   const showAddButton = userCanDirectCreate || userCanBranchCreate;
   // Show CDPI request section to reviewers and branch-scoped submitters.
   const showCdpiRequests = userCanDirectCreate || userCanBranchCreate;
+  // Show CDPI branch controls when the user can manage CDPI for the selected branch.
+  const userCanManageCdpiBranch = selectedBranchId !== null && canManageCdpiForBranch(user, selectedBranchId);
+  const showCdpiBranchControls = branchMode === 'single' && userCanManageCdpiBranch;
 
   const activeBranchCount = branchSt.branches.filter(b => b.status === 'Active').length;
   const loading   = branchMode === 'single' ? singleSt.loading : allSt.loading;
@@ -1386,6 +1465,123 @@ export function PayItemsPage() {
                         </button>
                       </div>
                     )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── CDPI Branch Controls Section ── */}
+      {showCdpiBranchControls && (
+        <div className={styles.cdpiSection}>
+          <div className={styles.cdpiSectionHeader}>
+            <h3 className={styles.cdpiSectionTitle}>Approved Custom Daily Items</h3>
+            <button className={styles.btnGhost}
+              onClick={() => { setEditNameId(null); setCdpiBranchKey(k => k + 1); }}
+              disabled={cdpiBranchSt.loading || togglingId !== null}>
+              Refresh
+            </button>
+          </div>
+          <p className={styles.cdpiBranchHint}>
+            CDPI items available for this branch. Activate items to make them visible in payroll entry and set a branch-specific display name if needed.
+          </p>
+
+          {cdpiBranchSt.loading && (
+            <div className={styles.cdpiEmpty}><SpinnerIcon /> Loading custom items…</div>
+          )}
+          {cdpiBranchSt.error && !cdpiBranchSt.loading && (
+            <div className={styles.errorAlert} style={{ margin: '0.5rem 0' }}>
+              <AlertIcon /> {cdpiBranchSt.error}
+            </div>
+          )}
+          {!cdpiBranchSt.loading && !cdpiBranchSt.error && cdpiBranchSt.items.length === 0 && (
+            <div className={styles.cdpiEmpty}>No approved custom daily items for this branch yet.</div>
+          )}
+
+          {!cdpiBranchSt.loading && cdpiBranchSt.items.length > 0 && (
+            <div className={styles.cdpiBranchItemList}>
+              {cdpiBranchSt.items.map(item => {
+                const isToggling    = togglingId === item.pay_item_id;
+                const isEditingName = editNameId  === item.pay_item_id;
+                return (
+                  <div key={item.pay_item_id} className={styles.cdpiBranchItemCard}>
+                    {/* Header row */}
+                    <div className={styles.cdpiCardRow}>
+                      <span className={`${styles.cdpiStatusBadge} ${item.is_active ? styles.cdpiStatusBadgeApproved : styles.cdpiStatusBadgeDraft}`}>
+                        {item.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                      <span className={styles.cdpiCardName}>{item.item_name}</span>
+                      <span className={styles.cdpiCardMeta}>
+                        {item.data_type}
+                        {item.unit ? ` · ${item.unit}` : ''}
+                        {' · '}{RATE_BEHAVIOR_LABELS[item.rate_behavior] ?? item.rate_behavior}
+                      </span>
+                    </div>
+
+                    {/* Active toggle */}
+                    <div className={styles.cdpiBranchActiveRow}>
+                      <span className={styles.cdpiBranchControlLabel}>Active for this branch</span>
+                      <label className={styles.switch}>
+                        <input type="checkbox"
+                          checked={item.is_active}
+                          disabled={isToggling || togglingId !== null}
+                          onChange={() => void toggleCdpiBranchActive(item)} />
+                        <span className={styles.switchTrack} />
+                      </label>
+                      {isToggling && <SpinnerIcon />}
+                    </div>
+
+                    {/* Branch display-name override */}
+                    <div className={styles.cdpiBranchNameRow}>
+                      <span className={styles.cdpiBranchControlLabel}>Branch display name</span>
+                      {isEditingName ? (
+                        <div className={styles.cdpiBranchNameEdit}>
+                          <input
+                            className={styles.input}
+                            style={{ flex: 1, minWidth: 0 }}
+                            value={editNameValue}
+                            maxLength={120}
+                            placeholder="Leave blank to use company name"
+                            onChange={e => setEditNameValue(e.target.value)}
+                            disabled={editNameSaving}
+                            autoFocus
+                          />
+                          <button className={styles.btnPrimary}
+                            onClick={() => void saveCdpiBranchDisplayName()}
+                            disabled={editNameSaving}>
+                            {editNameSaving ? <><SpinnerIcon /> Saving…</> : 'Save'}
+                          </button>
+                          <button className={styles.btnSecondary}
+                            onClick={() => { setEditNameId(null); setEditNameError(''); }}
+                            disabled={editNameSaving}>
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <div className={styles.cdpiBranchNameDisplay}>
+                          <span className={item.branch_display_name_override ? styles.cdpiCardName : styles.cdpiCardMeta}>
+                            {item.branch_display_name_override
+                              ? item.branch_display_name_override
+                              : `Using company name: ${item.effective_display_name}`}
+                          </span>
+                          <button className={styles.btnGhost}
+                            onClick={() => {
+                              setEditNameId(item.pay_item_id);
+                              setEditNameValue(item.branch_display_name_override ?? '');
+                              setEditNameError('');
+                            }}>
+                            Edit
+                          </button>
+                        </div>
+                      )}
+                      {isEditingName && editNameError && (
+                        <div className={styles.errorAlert} style={{ marginTop: '0.3rem', width: '100%' }}>
+                          <AlertIcon /> {editNameError}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })}
