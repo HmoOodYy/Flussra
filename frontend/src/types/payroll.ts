@@ -284,6 +284,13 @@ export interface FinalLineSummary {
   approved_at_utc: string;
   locked_at_utc: string | null;
   notes: string | null;
+  // CP-4 CDPI audit fields (present when backend returns them)
+  pay_item_id: number | null;
+  rate_type_id: number | null;
+  driver_rate_id: number | null;
+  resolved_rate_amount: string | null;
+  rate_behavior: string | null;
+  source_snapshot: Record<string, unknown> | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -218,9 +218,16 @@ function LineDetailsTable({ lines }: { lines: FinalLineSummary[] }) {
           <tr key={l.final_line_id}>
             <td className={styles.nameCell}>{l.driver_name}</td>
             <td className={styles.dateCell}>{l.work_date ?? '—'}</td>
-            <td>{l.line_type}</td>
+            <td>
+              {l.line_type}
+              {l.rate_behavior && (
+                <span style={{ fontSize: '0.7rem', color: '#64748b', marginLeft: 4 }}>
+                  ({l.rate_behavior})
+                </span>
+              )}
+            </td>
             <td className={styles.numCol}>{fmtQty(l.quantity)}</td>
-            <td className={styles.numCol}>{fmt(l.rate_amount)}</td>
+            <td className={styles.numCol}>{fmt(l.resolved_rate_amount ?? l.rate_amount)}</td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount)}</td>
           </tr>
         ))}

@@ -840,6 +840,15 @@ export function PayItemsPage() {
         });
         setCreateOpen(false);
         dispatchWizard({ type: 'RESET' });
+        // Refresh pay items list so the new item appears immediately
+        if (branchMode === 'single' && selectedBranchId) {
+          dispatchSingle({ type: 'FETCH_START' });
+          apiClient.get<BranchPayItemState[]>(`/settings/branches/${selectedBranchId}/pay-items`)
+            .then(({ data: d }) => dispatchSingle({ type: 'FETCH_OK', items: d }))
+            .catch(e2 => dispatchSingle({ type: 'FETCH_ERROR', error: apiError(e2) }));
+        } else if (branchMode === 'all') {
+          setAllBranchKey(k => k + 1);
+        }
         showToast('Pay item created at company level. It starts inactive on all branches — activate per branch after setup.');
       } else {
         // ── Branch-scoped request flow ─────────────────────────────────────
@@ -861,6 +870,7 @@ export function PayItemsPage() {
           await submitCdpiRequest(draft.request_id, { expected_revision: draft.revision });
           setCreateOpen(false);
           dispatchWizard({ type: 'RESET' });
+          setCdpiKey(k => k + 1);
           showToast('Request submitted for company approval.');
         } catch (submitErr) {
           // Draft created but submit failed — inform user of partial state
@@ -1850,6 +1860,7 @@ export function PayItemsPage() {
                     item_name={wizard.item_name}
                     unit={wizard.unit}
                     notes={wizard.notes}
+                    userCanDirectCreate={userCanDirectCreate}
                     dispatch={dispatchWizard}
                   />
                 )}
@@ -2403,13 +2414,14 @@ function MethodCard({
 }
 
 function WizardStep3({
-  value_type, rate_method, item_name, unit, notes, dispatch,
+  value_type, rate_method, item_name, unit, notes, userCanDirectCreate, dispatch,
 }: {
   value_type: WizardValueType;
   rate_method: WizardRateMethod | null;
   item_name: string;
   unit: string;
   notes: string;
+  userCanDirectCreate: boolean;
   dispatch: React.Dispatch<WizardAction>;
 }) {
   const methodDef = RATE_METHODS.find(m => m.value === rate_method);
@@ -2460,11 +2472,19 @@ function WizardStep3({
 
       <div className={styles.infoBanner} style={{ marginTop: '0.5rem' }}>
         <InfoIcon />
-        <span>
-          Pay rates will be configured in <strong>Pay Rates</strong> after this item is approved.
-          The item starts <strong>inactive</strong> on all branches — your company admin will
-          review and approve this request before it becomes available.
-        </span>
+        {userCanDirectCreate ? (
+          <span>
+            This creates the item at company level. It starts <strong>inactive on all branches</strong> —
+            activate it per branch in <strong>Pay Items</strong> settings after setup.
+            Pay rates are configured in <strong>Pay Rates</strong> once the item is active.
+          </span>
+        ) : (
+          <span>
+            This submits the item for <strong>company approval</strong>. Once approved, it will be
+            added to all branches starting inactive — your branch can activate it in Pay Items settings.
+            Pay rates are configured in <strong>Pay Rates</strong> after approval.
+          </span>
+        )}
       </div>
     </div>
   );

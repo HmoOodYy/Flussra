@@ -113,12 +113,47 @@ export function PeriodDetailPage() {
       setGrid(resp);
       setDirtyRows(new Map());
     } catch (e: unknown) {
-      const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Save failed.';
+      const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      let msg = 'Save failed.';
+      if (typeof detail === 'string' && detail.trim()) {
+        msg = detail;
+      } else if (Array.isArray(detail)) {
+        msg = (detail as Array<{ msg?: string }>)
+          .map((i) => i.msg ?? String(i))
+          .filter(Boolean)
+          .join(' ');
+      }
       setSaveError(msg);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ── Time-format parser ──────────────────────────────────────────────────── //
+  function parseTimeInput(v: string): string {
+    const s = v.trim();
+    if (!s) return '';
+    // H:MM or H:MM:SS
+    const colonMatch = /^(\d+):(\d{1,2})(?::\d{1,2})?$/.exec(s);
+    if (colonMatch) {
+      const hrs = parseInt(colonMatch[1], 10);
+      const mins = parseInt(colonMatch[2], 10);
+      return String(hrs + mins / 60);
+    }
+    // 1h 30m / 1h30m / 90m / 1h
+    const hmMatch = /^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$/i.exec(s);
+    if (hmMatch && (hmMatch[1] || hmMatch[2])) {
+      const hrs = parseInt(hmMatch[1] ?? '0', 10);
+      const mins = parseInt(hmMatch[2] ?? '0', 10);
+      return String(hrs + mins / 60);
+    }
+    return s;
+  }
+
+  function handleTimeCellBlur(driverId: number, code: string, raw: string) {
+    const parsed = parseTimeInput(raw);
+    if (parsed !== raw) {
+      handleCellChange(driverId, code, parsed);
     }
   }
 
@@ -336,6 +371,7 @@ export function PeriodDetailPage() {
                     {columns.map((col) => {
                       const val = row.values[col.pay_item_code];
                       const nmr = val?.needs_manager_review ?? false;
+                      const cellVal = getCellValue(row, col.pay_item_code);
                       return (
                         <td key={col.pay_item_code}>
                           {nmr && (
@@ -343,17 +379,34 @@ export function PeriodDetailPage() {
                               &#9888;
                             </span>
                           )}
-                          <input
-                            className={styles.qtyInput}
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            value={getCellValue(row, col.pay_item_code)}
-                            disabled={!canEdit}
-                            onChange={(e) =>
-                              handleCellChange(row.driver_id, col.pay_item_code, e.target.value)
-                            }
-                          />
+                          {col.is_time ? (
+                            <input
+                              className={styles.qtyInput}
+                              type="text"
+                              inputMode="decimal"
+                              placeholder="e.g. 1:30"
+                              value={cellVal}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                handleCellChange(row.driver_id, col.pay_item_code, e.target.value)
+                              }
+                              onBlur={(e) =>
+                                handleTimeCellBlur(row.driver_id, col.pay_item_code, e.target.value)
+                              }
+                            />
+                          ) : (
+                            <input
+                              className={styles.qtyInput}
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={cellVal}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                handleCellChange(row.driver_id, col.pay_item_code, e.target.value)
+                              }
+                            />
+                          )}
                         </td>
                       );
                     })}
