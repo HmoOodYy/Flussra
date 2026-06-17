@@ -104,19 +104,27 @@ export function PeriodDetailPage() {
   async function handleSave() {
     if (dirtyRows.size === 0 || !grid || !selectedDate) return;
 
-    // Guard: reject any dirty time-column values that didn't pass through onBlur
+    // Normalize time-column values to decimal strings before sending to backend.
+    // If any value is invalid, block the save and surface the error.
     const timeCodes = new Set(
       grid.columns.filter((c) => c.is_time).map((c) => c.pay_item_code),
     );
+    const normalizedRows: DayGridSaveRow[] = [];
     for (const row of dirtyRows.values()) {
+      const normalizedValues: Record<string, string> = { ...row.values };
       for (const [code, val] of Object.entries(row.values)) {
-        if (timeCodes.has(code) && val !== '' && parseTimeInput(val) === null) {
+        if (!timeCodes.has(code)) continue;
+        if (val === '') continue;
+        const parsed = parseTimeInput(val);
+        if (parsed === null) {
           setSaveError(
             `"${val}" is not a valid time. Use formats like 1.5, 1:30, 1h 30m, or 90m.`,
           );
           return;
         }
+        normalizedValues[code] = parsed;
       }
+      normalizedRows.push({ ...row, values: normalizedValues });
     }
 
     setSaving(true);
@@ -124,7 +132,7 @@ export function PeriodDetailPage() {
     try {
       const resp = await saveDayGrid(numericPeriodId, {
         work_date: selectedDate,
-        rows: Array.from(dirtyRows.values()),
+        rows: normalizedRows,
       });
       setGrid(resp);
       setDirtyRows(new Map());
