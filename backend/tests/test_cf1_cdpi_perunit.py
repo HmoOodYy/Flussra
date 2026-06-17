@@ -2,7 +2,12 @@
 CF-1: CDPI PerUnit Calculation / Finalization Backend Integration Tests.
 
 Verifies that the existing generic calculation and finalization paths correctly
-handle company-owned Daily PerUnit pay items (CDPI) created via PR-1B.
+handle real CDPI PerUnit PayItems produced by the PR-1B direct-create workflow
+(cdpi_service.create_direct_company_item).
+
+Each test creates a genuine CDPI item via the same service path used in
+production and PR-1B tests, so PayItems.RequiresRate=TRUE, CdpiDefinitions,
+PayItemRateTypeMap, and PayItemRateSlots are all present.
 
 Tests
 -----
@@ -14,15 +19,16 @@ CF5  Branch-inactive CDPI item is rejected when adding a draft line (422)
 CF6  Standard HOURS calculation is unaffected (regression)
 
 Year slots: all periods use 2090 dates (unused by other test files).
-All CDPI items are seeded directly via SQL and cleaned up in finally blocks.
 """
 import pytest
-import pytest_asyncio
 import httpx
 from decimal import Decimal
 import json
 from datetime import date as _date
 from sqlalchemy import text as _text
+
+from app.cdpi import service as cdpi_service
+from app.cdpi.schemas import CdpiDirectCreateRequest
 
 # ---------------------------------------------------------------------------
 # Year slot constants
@@ -97,7 +103,6 @@ async def _advance_to_approved(client, token, pid, driver_id, work_date,
         "line_type": line_type, "quantity": quantity,
     }, headers=headers)
     assert r.status_code == 201, f"add_line: {r.text}"
-    line_id = r.json()["draft_line_id"]
 
     r = await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -115,7 +120,6 @@ async def _advance_to_approved(client, token, pid, driver_id, work_date,
     dec = await client.post(f"/review/items/{item['review_item_id']}/decide",
                             json={"decision": "Approved"}, headers=headers)
     assert dec.status_code == 200
-    return line_id
 
 
 async def _finalize(client, token, pid):
@@ -125,7 +129,7 @@ async def _finalize(client, token, pid):
 
 
 async def _force_cleanup_period(direct_db, pid):
-    """Disable immutability triggers, delete all period rows, re-enable triggers."""
+    """Disable immutability triggers, delete all period rows, re-enable."""
     triggers = [
         "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable",
         "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert",
@@ -153,77 +157,76 @@ async def _force_cleanup_period(direct_db, pid):
             await direct_db.execute(_text(sql))
 
 
-# ---------------------------------------------------------------------------
-# CDPI seed helpers (inline — no shared test helpers)
-# ---------------------------------------------------------------------------
-
-async def _seed_cdpi_perunit(
-    db,
-    *,
-    company_id: int,
-    code: str,
-    name: str,
-    datatype: str = "Decimal",
-) -> tuple[int, int]:
+async def _cleanup_cdpi_item(db, *, pay_item_id: int):
     """
-    Insert a minimal CDPI PerUnit pay item + its company-scoped RateType +
-    PayItemRateTypeMap row (mirrors what PR-1B approval creates).
-
-    Returns (pay_item_id, rate_type_id).
+    Remove a directly-created CDPI PayItem and all associated rows.
+    Mirrors _cleanup_pay_item from test_cdpi_approval.py.
+    Deletion order satisfies all FK and trigger constraints.
     """
-    # 1. PayItem
-    pi_result = await db.execute(
-        _text("""
-            INSERT INTO payroll.payitems
-                (companyid, payitemcode, payitemname, datatype, ratebehavior,
-                 unit, category, itemscope, issystemstandard, requiresrate,
-                 isdefaultbranchactive, status)
-            VALUES (:cid, :code, :name, :dtype, 'PerUnit',
-                    'Unit', 'Custom', 'Daily', FALSE, FALSE,
-                    FALSE, 'Active')
-            ON CONFLICT (payitemcode, companyid) WHERE companyid IS NOT NULL
-                DO UPDATE SET status = 'Active', datatype = EXCLUDED.datatype
-            RETURNING payitemid
-        """),
-        {"cid": company_id, "code": code, "name": name, "dtype": datatype},
-    )
-    pay_item_id: int = pi_result.scalar_one()
-
-    rate_code = f"CDPI_{pay_item_id}_PER_UNIT"
-
-    # 2. Company-scoped RateType (mirrors PR-1B)
-    rt_result = await db.execute(
-        _text("""
-            INSERT INTO payroll.ratetypes
-                (ratecode, ratename, unitname, isactive, companyid)
-            VALUES (:code, :name, 'unit', TRUE, :cid)
-            ON CONFLICT DO NOTHING
-            RETURNING ratetypeid
-        """),
-        {"code": rate_code, "name": f"CDPI {name} Per Unit", "cid": company_id},
-    )
-    rate_type_id = rt_result.scalar_one_or_none()
-    if rate_type_id is None:
-        rate_type_id = (await db.execute(
-            _text("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = :code"),
-            {"code": rate_code},
-        )).scalar_one()
-
-    # 3. PayItemRateTypeMap
+    # PayItemRateSlots (FK -> PayItems and RateTypes)
     await db.execute(
+        _text("DELETE FROM payroll.payitemrateslots WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    # Capture RateType before removing map row
+    rt_id = (await db.execute(
         _text("""
-            INSERT INTO payroll.payitemratetypemap
-                (payitemid, ratetypeid, isprimary, status)
-            VALUES (:pid, :rtid, TRUE, 'Active')
-            ON CONFLICT (payitemid, ratetypeid) DO NOTHING
+            SELECT ratetypeid FROM payroll.payitemratetypemap
+            WHERE payitemid = :pid LIMIT 1
         """),
-        {"pid": pay_item_id, "rtid": rate_type_id},
+        {"pid": pay_item_id},
+    )).scalar_one_or_none()
+    await db.execute(
+        _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    if rt_id is not None:
+        # Delete any DriverRates for this RateType before deleting the RateType
+        await db.execute(
+            _text("DELETE FROM payroll.driverrates WHERE ratetypeid = :rtid"),
+            {"rtid": rt_id},
+        )
+        await db.execute(
+            _text("""
+                DELETE FROM payroll.ratetypes
+                WHERE ratetypeid = :rtid
+                  AND ratecode   = :code
+            """),
+            {"rtid": rt_id, "code": f"CDPI_{pay_item_id}_PER_UNIT"},
+        )
+    await db.execute(
+        _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    await db.execute(
+        _text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    await db.execute(
+        _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
     )
 
-    return pay_item_id, rate_type_id
+
+async def _get_ids(db):
+    """Return (company_id, hq_branch_id, paytest_branch_id, admin_user_id)."""
+    company_id = (await db.execute(
+        _text("SELECT companyid FROM core.companies WHERE companycode = 'DEMO'")
+    )).scalar_one()
+    hq_id = (await db.execute(
+        _text("SELECT branchid FROM core.branches WHERE branchcode = 'HQ'")
+    )).scalar_one()
+    paytest_id = (await db.execute(
+        _text("SELECT branchid FROM core.branches WHERE branchcode = 'PAYTEST'")
+    )).scalar_one()
+    admin_id = (await db.execute(
+        _text("SELECT userid FROM sec.users WHERE username = 'admin'")
+    )).scalar_one()
+    return company_id, hq_id, paytest_id, admin_id
 
 
 async def _activate_branch(db, *, pay_item_id: int, company_id: int, branch_id: int):
+    """Insert BranchPayItemConfig with isactive=TRUE (direct-create leaves none)."""
     await db.execute(
         _text("""
             DELETE FROM payroll.branchpayitemconfig
@@ -241,44 +244,6 @@ async def _activate_branch(db, *, pay_item_id: int, company_id: int, branch_id: 
     )
 
 
-async def _cleanup_cdpi(db, *, pay_item_id: int):
-    """Remove all CDPI-related rows in FK-safe order."""
-    await db.execute(
-        _text("DELETE FROM payroll.payitemrateslots WHERE payitemid = :pid"),
-        {"pid": pay_item_id},
-    )
-    rt_id = (await db.execute(
-        _text("SELECT ratetypeid FROM payroll.payitemratetypemap WHERE payitemid = :pid LIMIT 1"),
-        {"pid": pay_item_id},
-    )).scalar_one_or_none()
-    await db.execute(
-        _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
-        {"pid": pay_item_id},
-    )
-    if rt_id is not None:
-        # Delete DriverRates before deleting the RateType (FK constraint)
-        await db.execute(
-            _text("DELETE FROM payroll.driverrates WHERE ratetypeid = :rtid"),
-            {"rtid": rt_id},
-        )
-        await db.execute(
-            _text("""
-                DELETE FROM payroll.ratetypes
-                WHERE ratetypeid = :rtid
-                  AND ratecode = :code
-            """),
-            {"rtid": rt_id, "code": f"CDPI_{pay_item_id}_PER_UNIT"},
-        )
-    await db.execute(
-        _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
-        {"pid": pay_item_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
-        {"pid": pay_item_id},
-    )
-
-
 async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
                                     effective_from, amount):
     headers = _tok(token)
@@ -293,10 +258,51 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
     return rid
 
 
-async def _get_company_id(db) -> int:
-    return (await db.execute(
-        _text("SELECT companyid FROM core.companies WHERE companycode = 'DEMO'")
+async def _assert_real_cdpi_shape(db, *, pay_item_id: int, company_id: int):
+    """
+    Assert the PR-1B runtime shape is present for this PayItem:
+      - RequiresRate = TRUE
+      - CdpiDefinitions row exists
+      - One active PayItemRateTypeMap row
+      - One active PayItemRateSlots row with slot_key='per_unit_rate', slot_role='per_unit'
+    """
+    pi_row = (await db.execute(
+        _text("SELECT requiresrate FROM payroll.payitems WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )).mappings().first()
+    assert pi_row is not None, f"PayItem {pay_item_id} not found"
+    assert pi_row["requiresrate"] is True, "RequiresRate must be TRUE for CDPI PerUnit"
+
+    def_count = (await db.execute(
+        _text("SELECT COUNT(*) FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
     )).scalar_one()
+    assert def_count == 1, f"Expected 1 CdpiDefinitions row, got {def_count}"
+
+    map_count = (await db.execute(
+        _text("""
+            SELECT COUNT(*) FROM payroll.payitemratetypemap
+            WHERE payitemid = :pid AND status = 'Active'
+        """),
+        {"pid": pay_item_id},
+    )).scalar_one()
+    assert map_count == 1, f"Expected 1 active PayItemRateTypeMap row, got {map_count}"
+
+    slot_row = (await db.execute(
+        _text("""
+            SELECT slotkey, slotrole FROM payroll.payitemrateslots
+            WHERE payitemid = :pid AND status = 'Active'
+            LIMIT 1
+        """),
+        {"pid": pay_item_id},
+    )).mappings().first()
+    assert slot_row is not None, "Expected active PayItemRateSlots row"
+    assert slot_row["slotkey"] == "per_unit_rate", (
+        f"SlotKey: expected 'per_unit_rate', got '{slot_row['slotkey']}'"
+    )
+    assert slot_row["slotrole"] == "per_unit", (
+        f"SlotRole: expected 'per_unit', got '{slot_row['slotrole']}'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -311,10 +317,10 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
     direct_db,
 ):
     """
-    CF1: Adding a draft line for a CDPI Number PerUnit item computes
-    calculatedamount = quantity * driver_rate_amount.
+    CF1: A real CDPI Number PerUnit item (created via PR-1B direct-create path)
+    produces calculatedamount = quantity * driver_rate in a draft line.
     """
-    cid = await _get_company_id(direct_db)
+    cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
     driver_id = None
     pid = None
@@ -322,10 +328,23 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-        pay_item_id, rate_type_id = await _seed_cdpi_perunit(
-            direct_db, company_id=cid,
-            code="CF1_NUM_PERUNIT", name="CF1 Number PerUnit", datatype="Decimal",
+        # Create via real PR-1B service path
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(item_name="CF1 Number PerUnit",
+                                    input_type="Number", calc_method_key="PerUnit"),
+            direct_db,
         )
+        pay_item_id = result.pay_item_id
+
+        # Assert full PR-1B runtime shape before testing calculation
+        await _assert_real_cdpi_shape(direct_db, pay_item_id=pay_item_id, company_id=cid)
+
+        rate_type_id = (await direct_db.execute(
+            _text("SELECT ratetypeid FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+            {"pid": pay_item_id},
+        )).scalar_one()
+
         await _activate_branch(
             direct_db, pay_item_id=pay_item_id,
             company_id=cid, branch_id=paytest_branch_id,
@@ -334,7 +353,7 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "CF1NUM",
         )
-        rate_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
             effective_from=CF1_START, amount="7.50",
         )
@@ -343,18 +362,17 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
             session_client, auth_token, paytest_branch_id, CF1_START, CF1_END,
         )
 
-        item_code = f"CF1_NUM_PERUNIT"
         r = await session_client.post(f"/payroll/periods/{pid}/lines", json={
             "driver_id": driver_id,
             "work_date": CF1_WORK,
-            "line_type": item_code,
+            "line_type": result.pay_item_code,
             "quantity": "4",
         }, headers=_tok(auth_token))
         assert r.status_code == 201, f"add_line: {r.text}"
         line = r.json()
 
         # calculatedamount = 4 * 7.50 = 30.00
-        assert line["calculated_amount"] is not None, "calculated_amount should not be None"
+        assert line["calculated_amount"] is not None, "calculated_amount must not be None"
         assert Decimal(str(line["calculated_amount"])) == Decimal("30.00"), (
             f"Expected 30.00, got {line['calculated_amount']}"
         )
@@ -366,7 +384,7 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
-            await _cleanup_cdpi(direct_db, pay_item_id=pay_item_id)
+            await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +399,9 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
     direct_db,
 ):
     """
-    CF2: A CDPI Time-datatype PerUnit item computes calculatedamount correctly.
-    The quantity is a decimal hour value; calculatedamount = hours * driver_rate.
+    CF2: A real CDPI Time PerUnit item produces calculatedamount = hours * driver_rate.
     """
-    cid = await _get_company_id(direct_db)
+    cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
     driver_id = None
     pid = None
@@ -392,10 +409,21 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-        pay_item_id, rate_type_id = await _seed_cdpi_perunit(
-            direct_db, company_id=cid,
-            code="CF1_TIME_PERUNIT", name="CF1 Time PerUnit", datatype="Time",
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(item_name="CF1 Time PerUnit",
+                                    input_type="Time", calc_method_key="PerUnit"),
+            direct_db,
         )
+        pay_item_id = result.pay_item_id
+
+        await _assert_real_cdpi_shape(direct_db, pay_item_id=pay_item_id, company_id=cid)
+
+        rate_type_id = (await direct_db.execute(
+            _text("SELECT ratetypeid FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+            {"pid": pay_item_id},
+        )).scalar_one()
+
         await _activate_branch(
             direct_db, pay_item_id=pay_item_id,
             company_id=cid, branch_id=paytest_branch_id,
@@ -404,7 +432,7 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "CF1TME",
         )
-        rate_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
             effective_from=CF2_START, amount="12.00",
         )
@@ -416,7 +444,7 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
         r = await session_client.post(f"/payroll/periods/{pid}/lines", json={
             "driver_id": driver_id,
             "work_date": CF2_WORK,
-            "line_type": "CF1_TIME_PERUNIT",
+            "line_type": result.pay_item_code,
             "quantity": "2.5",
         }, headers=_tok(auth_token))
         assert r.status_code == 201, f"add_line: {r.text}"
@@ -435,11 +463,11 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
-            await _cleanup_cdpi(direct_db, pay_item_id=pay_item_id)
+            await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
 
 # ---------------------------------------------------------------------------
-# CF3: Finalization includes CDPI PerUnit final line with correct amounts
+# CF3: Finalization includes correct CDPI PerUnit final line
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -451,10 +479,10 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
 ):
     """
     CF3: After finalization, PayrollFinalLines contains a row for the CDPI
-    PerUnit item with the correct finalamount, driverrateid, ratetypeid,
+    PerUnit item with correct finalamount, driverrateid, ratetypeid,
     resolvedrateamount, and SourceSnapshot fields.
     """
-    cid = await _get_company_id(direct_db)
+    cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
     driver_id = None
     pid = None
@@ -462,10 +490,21 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-        pay_item_id, rate_type_id = await _seed_cdpi_perunit(
-            direct_db, company_id=cid,
-            code="CF1_FIN_PERUNIT", name="CF1 Fin PerUnit", datatype="Decimal",
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(item_name="CF1 Fin PerUnit",
+                                    input_type="Number", calc_method_key="PerUnit"),
+            direct_db,
         )
+        pay_item_id = result.pay_item_id
+
+        await _assert_real_cdpi_shape(direct_db, pay_item_id=pay_item_id, company_id=cid)
+
+        rate_type_id = (await direct_db.execute(
+            _text("SELECT ratetypeid FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+            {"pid": pay_item_id},
+        )).scalar_one()
+
         await _activate_branch(
             direct_db, pay_item_id=pay_item_id,
             company_id=cid, branch_id=paytest_branch_id,
@@ -484,7 +523,7 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
         )
         await _advance_to_approved(
             session_client, auth_token, pid, driver_id, CF3_WORK,
-            line_type="CF1_FIN_PERUNIT", quantity="3",
+            line_type=result.pay_item_code, quantity="3",
         )
         await _finalize(session_client, auth_token, pid)
 
@@ -502,13 +541,11 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
         assert len(rows) == 1, f"Expected 1 final line, got {len(rows)}"
         row = rows[0]
 
-        # Scalar columns
         assert row["driverrateid"] == rate_id
         assert row["ratetypeid"] == rate_type_id
         assert Decimal(str(row["resolvedrateamount"])) == Decimal("5.00")
         assert Decimal(str(row["finalamount"])) == Decimal("15.00")  # 3 * 5.00
 
-        # SourceSnapshot
         snap = row["sourcesnapshot"]
         if isinstance(snap, str):
             snap = json.loads(snap)
@@ -524,7 +561,7 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
-            await _cleanup_cdpi(direct_db, pay_item_id=pay_item_id)
+            await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
 
 # ---------------------------------------------------------------------------
@@ -539,11 +576,11 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
     direct_db,
 ):
     """
-    CF4: When a driver has no approved DriverRate for a CDPI PerUnit item's
-    RateType, add_draft_line succeeds but needs_manager_review=True and
-    calculated_amount is None.
+    CF4: When a driver has no approved DriverRate for the CDPI item's RateType,
+    add_draft_line succeeds but needs_manager_review=True and calculated_amount
+    is None.
     """
-    cid = await _get_company_id(direct_db)
+    cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
     driver_id = None
     pid = None
@@ -551,16 +588,22 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-        pay_item_id, rate_type_id = await _seed_cdpi_perunit(
-            direct_db, company_id=cid,
-            code="CF1_NMR_PERUNIT", name="CF1 NMR PerUnit", datatype="Decimal",
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(item_name="CF1 NMR PerUnit",
+                                    input_type="Number", calc_method_key="PerUnit"),
+            direct_db,
         )
+        pay_item_id = result.pay_item_id
+
+        await _assert_real_cdpi_shape(direct_db, pay_item_id=pay_item_id, company_id=cid)
+
         await _activate_branch(
             direct_db, pay_item_id=pay_item_id,
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        # No driver rate created for this item
+        # No driver rate created — intentional
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "CF1NMR",
         )
@@ -572,7 +615,7 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
         r = await session_client.post(f"/payroll/periods/{pid}/lines", json={
             "driver_id": driver_id,
             "work_date": CF4_WORK,
-            "line_type": "CF1_NMR_PERUNIT",
+            "line_type": result.pay_item_code,
             "quantity": "2",
         }, headers=_tok(auth_token))
         assert r.status_code == 201, f"add_line: {r.text}"
@@ -591,7 +634,7 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
-            await _cleanup_cdpi(direct_db, pay_item_id=pay_item_id)
+            await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
 
 # ---------------------------------------------------------------------------
@@ -606,10 +649,10 @@ async def test_cf5_branch_inactive_cdpi_rejected(
     direct_db,
 ):
     """
-    CF5: Attempting to add a draft line for a CDPI item that has no active
-    BranchPayItemConfig for the period's branch returns 422.
+    CF5: A real CDPI item with no BranchPayItemConfig (isdefaultbranchactive=FALSE)
+    is rejected with 422 when adding a draft line.
     """
-    cid = await _get_company_id(direct_db)
+    cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
     driver_id = None
     pid = None
@@ -617,11 +660,16 @@ async def test_cf5_branch_inactive_cdpi_rejected(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-        pay_item_id, _ = await _seed_cdpi_perunit(
-            direct_db, company_id=cid,
-            code="CF1_INACTIVE_PU", name="CF1 Inactive PerUnit", datatype="Decimal",
+        result = await cdpi_service.create_direct_company_item(
+            cid, admin_id,
+            CdpiDirectCreateRequest(item_name="CF1 Inactive PerUnit",
+                                    input_type="Number", calc_method_key="PerUnit"),
+            direct_db,
         )
-        # Deliberately NOT activating for the branch (isdefaultbranchactive=FALSE)
+        pay_item_id = result.pay_item_id
+
+        await _assert_real_cdpi_shape(direct_db, pay_item_id=pay_item_id, company_id=cid)
+        # Deliberately NOT activating for the branch — isdefaultbranchactive=FALSE
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "CF1INA",
@@ -634,7 +682,7 @@ async def test_cf5_branch_inactive_cdpi_rejected(
         r = await session_client.post(f"/payroll/periods/{pid}/lines", json={
             "driver_id": driver_id,
             "work_date": CF5_WORK,
-            "line_type": "CF1_INACTIVE_PU",
+            "line_type": result.pay_item_code,
             "quantity": "1",
         }, headers=_tok(auth_token))
         assert r.status_code == 422, (
@@ -647,7 +695,7 @@ async def test_cf5_branch_inactive_cdpi_rejected(
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
-            await _cleanup_cdpi(direct_db, pay_item_id=pay_item_id)
+            await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
 
 # ---------------------------------------------------------------------------
@@ -664,8 +712,6 @@ async def test_cf6_standard_hours_calculation_unaffected(
 ):
     """
     CF6: CDPI changes do not affect the standard HOURS/HOURLY calculation path.
-    A draft line for HOURS with an approved HOURLY rate produces the expected
-    calculatedamount and finalizes correctly.
     """
     pid = None
     rate_id = None
@@ -673,7 +719,6 @@ async def test_cf6_standard_hours_calculation_unaffected(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-        # Get HOURLY rate type and create a rate for the standard test driver
         r = await session_client.get("/payroll/rate-types", headers=_tok(auth_token))
         assert r.status_code == 200
         hourly_rt_id = next(
@@ -688,8 +733,7 @@ async def test_cf6_standard_hours_calculation_unaffected(
             session_client, auth_token, paytest_branch_id, CF6_START, CF6_END,
         )
 
-        # Add draft line, verify calculation, then advance and finalize
-        line_id = await _advance_to_approved(
+        await _advance_to_approved(
             session_client, auth_token, pid, paytest_driver_id, CF6_WORK,
             line_type="HOURS", quantity="8",
         )
@@ -701,9 +745,9 @@ async def test_cf6_standard_hours_calculation_unaffected(
                 SELECT calculatedamount, needsmanagerreview
                 FROM   payroll.payrolldraftlines
                 WHERE  payrollperiodid = :pid
-                  AND  driverid = :did
-                  AND  workdate = :wdate
-                  AND  linetype = 'HOURS'
+                  AND  driverid        = :did
+                  AND  workdate        = :wdate
+                  AND  linetype        = 'HOURS'
             """),
             {"pid": pid, "did": paytest_driver_id, "wdate": wdate},
         )).mappings().first()
@@ -715,17 +759,17 @@ async def test_cf6_standard_hours_calculation_unaffected(
 
         await _finalize(session_client, auth_token, pid)
 
-        rows = (await direct_db.execute(
+        final_rows = (await direct_db.execute(
             _text("""
-                SELECT fl.finalamount, fl.driverrateid, fl.ratetypeid
+                SELECT fl.finalamount
                 FROM   payroll.payrollfinallines fl
                 WHERE  fl.payrollperiodid = :pid
                   AND  fl.driverrateid    = :rid
             """),
             {"pid": pid, "rid": rate_id},
         )).mappings().all()
-        assert len(rows) >= 1, "No final lines for HOURLY rate"
-        assert Decimal(str(rows[0]["finalamount"])) == Decimal("160.00")
+        assert len(final_rows) >= 1, "No final lines for HOURLY rate"
+        assert Decimal(str(final_rows[0]["finalamount"])) == Decimal("160.00")
 
     finally:
         if pid:
