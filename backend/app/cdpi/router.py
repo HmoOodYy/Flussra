@@ -51,8 +51,8 @@ async def create_draft(
     db:    DbDep,
     body:  CdpiRequestCreate,
 ) -> CdpiRequestSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.create_draft(company_id, user_id, body, db)
 
 
@@ -67,8 +67,8 @@ async def list_requests(
     status_filter: str | None = Query(None, alias="status"),
     branch_id:     int | None = Query(None),
 ) -> list[CdpiRequestSummary]:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.list_requests(
         company_id,
         user_id,
@@ -88,8 +88,8 @@ async def get_request(
     db:         DbDep,
     request_id: UUID,
 ) -> CdpiRequestSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.get_request(company_id, user_id, request_id, db)
 
 
@@ -104,8 +104,8 @@ async def update_draft(
     request_id: UUID,
     body:       CdpiRequestUpdate,
 ) -> CdpiRequestSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.update_draft(company_id, user_id, request_id, body, db)
 
 
@@ -120,8 +120,8 @@ async def submit_draft(
     request_id: UUID,
     body:       CdpiSubmitRequest,
 ) -> CdpiRequestSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.submit_draft(company_id, user_id, request_id, body, db)
 
 
@@ -136,8 +136,8 @@ async def decide_request(
     request_id: UUID,
     body:       CdpiDecideRequest,
 ) -> CdpiRequestSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.decide_request(company_id, user_id, request_id, body, db)
 
 
@@ -152,8 +152,8 @@ async def copy_rejected(
     db:         DbDep,
     request_id: UUID,
 ) -> CdpiRequestSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.copy_rejected(company_id, user_id, request_id, db)
 
 
@@ -168,8 +168,8 @@ async def create_direct_company_item(
     db:    DbDep,
     body:  CdpiDirectCreateRequest,
 ) -> CdpiDirectCreateSummary:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.create_direct_company_item(company_id, user_id, body, db)
 
 
@@ -183,8 +183,8 @@ async def list_branch_items(
     db:        DbDep,
     branch_id: int,
 ) -> list[CdpiBranchItemState]:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.list_branch_cdpi_items(company_id, user_id, branch_id, db)
 
 
@@ -200,6 +200,6 @@ async def update_branch_item(
     pay_item_id: int,
     body:        CdpiBranchItemUpdate,
 ) -> CdpiBranchItemState:
-    company_id: int = token["cid"]
-    user_id:    int = token["sub"]
+    company_id = int(token["cid"])
+    user_id    = int(token["sub"])
     return await service.update_branch_cdpi_item(company_id, user_id, branch_id, pay_item_id, body, db)
