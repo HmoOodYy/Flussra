@@ -233,32 +233,34 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     assert resp_b_drv.status_code == 201, f"Driver B creation failed: {resp_b_drv.text}"
     driver_b_id = resp_b_drv.json()["driver_id"]
 
-    # ── Company B custom PayItem via settings API ────────────────────────────
-    # This creates Company B's own PayItem + its own auto-generated RateType + mapping.
-    resp_pi_b = await client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_code": "CPI_P4B_B",
-            "pay_item_name": "P4B Custom Item B",
-            "item_scope":    "Daily",
-            "rate_behavior": "PerUnit",
-            "unit":          "Unit",
-            "category":      "Count",
-        },
-        headers={"Authorization": f"Bearer {token_b_setup}"},
-    )
-    assert resp_pi_b.status_code == 201, f"Company B PayItem creation failed: {resp_pi_b.text}"
-    pi_b_id = resp_pi_b.json()["pay_item_id"]
+    # ── Company B custom PayItem via direct DB (LLR-A blocks HTTP creation) ──
+    pi_b_row = (await direct_db.execute(_text("""
+        INSERT INTO payroll.payitems
+            (companyid, payitemcode, payitemname, ratebehavior,
+             requiresrate, isdefaultbranchactive, status,
+             category, datatype, itemscope, unit)
+        VALUES
+            (:cid, 'CPI_P4B_B', 'P4B Custom Item B', 'PerUnit',
+             TRUE, FALSE, 'Active', 'Count', 'Decimal', 'Daily', 'Unit')
+        ON CONFLICT (companyid, payitemcode) WHERE companyid IS NOT NULL
+            DO UPDATE SET status = 'Active'
+        RETURNING payitemid
+    """), {"cid": cid_b})).mappings().first()
+    pi_b_id = pi_b_row["payitemid"]
 
-    # Look up the auto-generated RateType created by create_custom_pay_item
-    # (ratecode = CPI_{pi_b_id}_1, mapped to Company B's PayItem)
     rt_b_row = (await direct_db.execute(_text("""
-        SELECT rt.ratetypeid FROM payroll.ratetypes rt
-        JOIN   payroll.payitemratetypemap pirm ON pirm.ratetypeid = rt.ratetypeid
-        WHERE  pirm.payitemid = :piid AND pirm.status = 'Active'
-        LIMIT 1
-    """), {"piid": pi_b_id})).mappings().first()
-    rt_b_own_id = rt_b_row["ratetypeid"] if rt_b_row else None
+        INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
+        VALUES (:code, :name, 'Unit', TRUE, :cid)
+        ON CONFLICT (ratecode) DO UPDATE SET isactive = TRUE, companyid = :cid
+        RETURNING ratetypeid
+    """), {"code": f"CPI_{pi_b_id}_1", "name": "P4B Custom Item B Rate", "cid": cid_b})).mappings().first()
+    rt_b_own_id = rt_b_row["ratetypeid"]
+
+    await direct_db.execute(_text("""
+        INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
+        VALUES (:piid, :rtid, TRUE, 'Active')
+        ON CONFLICT DO NOTHING
+    """), {"piid": pi_b_id, "rtid": rt_b_own_id})
 
     # Activate Company B's PayItem on Branch B
     await direct_db.execute(_text("""
@@ -935,34 +937,37 @@ async def test_t10_orphaned_cpi_after_physical_delete(
     token_b = await _get_token_b(client)
     pi_b_id = p4b_env["pi_b_id"]
 
-    # Step 1: Company A creates a throw-away custom PayItem
-    resp_create = await client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_name": "T10 Throwaway Item",
-            "item_scope":    "Daily",
-            "rate_behavior": "PerUnit",
-            "unit":          "Unit",
-            "category":      "Count",
-        },
-        headers=_auth(token_a),
-    )
-    assert resp_create.status_code == 201, f"PayItem creation failed: {resp_create.text}"
-    throwaway_pi_id = resp_create.json()["pay_item_id"]
+    # Step 1: Company A seeds a throw-away custom PayItem via direct DB (LLR-A blocks HTTP)
+    cid_a = p4b_env["cid_a"]
+    pi_throw_row = (await direct_db.execute(_text("""
+        INSERT INTO payroll.payitems
+            (companyid, payitemcode, payitemname, ratebehavior,
+             requiresrate, isdefaultbranchactive, status,
+             category, datatype, itemscope, unit)
+        VALUES (:cid, 'CPI_P4B_T10', 'T10 Throwaway Item', 'PerUnit',
+                TRUE, FALSE, 'Active', 'Count', 'Decimal', 'Daily', 'Unit')
+        ON CONFLICT (companyid, payitemcode) WHERE companyid IS NOT NULL
+            DO UPDATE SET status = 'Active'
+        RETURNING payitemid
+    """), {"cid": cid_a})).mappings().first()
+    throwaway_pi_id = pi_throw_row["payitemid"]
 
-    # Find the auto-generated CPI_ RateType for this PayItem
-    rt_throwaway_row = (await direct_db.execute(_text("""
-        SELECT rt.ratetypeid, rt.ratecode
-        FROM   payroll.ratetypes rt
-        JOIN   payroll.payitemratetypemap pirm ON pirm.ratetypeid = rt.ratetypeid
-        WHERE  pirm.payitemid = :piid AND pirm.status = 'Active'
-        LIMIT  1
-    """), {"piid": throwaway_pi_id})).mappings().first()
-    assert rt_throwaway_row is not None, "Auto-generated CPI_ RateType must exist"
-    rt_throwaway_id   = rt_throwaway_row["ratetypeid"]
-    rt_throwaway_code = rt_throwaway_row["ratecode"]
+    rt_throw_ins = (await direct_db.execute(_text("""
+        INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
+        VALUES (:code, 'T10 Throwaway Rate', 'Unit', TRUE, :cid)
+        ON CONFLICT (ratecode) DO UPDATE SET isactive = TRUE, companyid = :cid
+        RETURNING ratetypeid, ratecode
+    """), {"code": f"CPI_{throwaway_pi_id}_1", "cid": cid_a})).mappings().first()
+    rt_throwaway_id   = rt_throw_ins["ratetypeid"]
+    rt_throwaway_code = rt_throw_ins["ratecode"]
+
+    await direct_db.execute(_text("""
+        INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
+        VALUES (:piid, :rtid, TRUE, 'Active')
+        ON CONFLICT DO NOTHING
+    """), {"piid": throwaway_pi_id, "rtid": rt_throwaway_id})
     assert rt_throwaway_code.startswith("CPI_"), (
-        f"Auto-generated rate code must start with CPI_, got {rt_throwaway_code!r}"
+        f"Seeded rate code must start with CPI_, got {rt_throwaway_code!r}"
     )
 
     # Step 2: Company A physically deletes the PayItem (no DriverRates → physical delete)

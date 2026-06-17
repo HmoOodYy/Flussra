@@ -4187,29 +4187,23 @@ class TestCustomPayItemRateStructure:
         session_client: httpx.AsyncClient,
         auth_token: str,
         created_driver_id: int,
+        session_db_conn,
     ):
         """
-        Create a custom Daily PerUnit item, activate it for the driver's branch,
+        Seed a custom Daily PerUnit item, activate it for the driver's branch,
         then verify it appears as exactly one group in the rate matrix.
         """
+        from tests.seed_helpers import seed_legacy_item_with_rate_structure
         h = auth(auth_token)
 
-        # Create the custom pay item
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Samya Rate Test",
-                "item_scope":    "Daily",
-                "rate_behavior": "PerUnit",
-                "unit":          "Stop",
-                "rate_names":    ["Samya Rate"],
-                "category":      "Custom",
-            },
-            headers=h,
+        seeded = await seed_legacy_item_with_rate_structure(
+            session_db_conn,
+            code="TST_PERUNIT_SAMYA",
+            name="Samya Rate Test",
+            unit="Stop",
+            rate_behavior="PerUnit",
         )
-        assert create_resp.status_code == 201, create_resp.text
-        item = create_resp.json()
-        pay_item_id = item["pay_item_id"]
+        pay_item_id = seeded["pay_item_id"]
 
         try:
             # Activate for HQ branch (branch_id=1)
@@ -4253,28 +4247,24 @@ class TestCustomPayItemRateStructure:
         session_client: httpx.AsyncClient,
         auth_token: str,
         created_driver_id: int,
+        session_db_conn,
     ):
         """
-        Create a custom Daily RangeBracket item and verify it produces multiple
+        Seed a custom Daily RangeBracket item and verify it produces multiple
         rate groups (one per bracket) in the matrix, and still one payroll column.
         """
+        from tests.seed_helpers import seed_legacy_item_multi_rate
         h = auth(auth_token)
 
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Bracket Rate Test",
-                "item_scope":    "Daily",
-                "rate_behavior": "RangeBracket",
-                "unit":          "Mile",
-                "rate_names":    ["Short Haul", "Long Haul"],
-                "category":      "Custom",
-            },
-            headers=h,
+        seeded = await seed_legacy_item_multi_rate(
+            session_db_conn,
+            code="TST_BRACKET_RATE",
+            name="Bracket Rate Test",
+            unit="Mile",
+            rate_behavior="RangeBracket",
+            rate_names=["Short Haul", "Long Haul"],
         )
-        assert create_resp.status_code == 201, create_resp.text
-        item = create_resp.json()
-        pay_item_id = item["pay_item_id"]
+        pay_item_id = seeded["pay_item_id"]
 
         try:
             activate_resp2 = await session_client.patch(
@@ -4318,6 +4308,7 @@ class TestCustomPayItemRateStructure:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        session_db_conn,
     ):
         """
         A RangeBracket item should appear as exactly ONE column in the day-grid
@@ -4326,27 +4317,22 @@ class TestCustomPayItemRateStructure:
         Self-contained: creates its own payroll period at far-future dates
         (2082-07-01 to 2082-07-07) to avoid conflicts, then cancels it on cleanup.
         """
+        from tests.seed_helpers import seed_legacy_item_multi_rate
         h = auth(auth_token)
 
         # ------------------------------------------------------------------ #
-        # 1. Create the custom RangeBracket pay item (2 rate fields)
+        # 1. Seed the custom RangeBracket pay item (2 rate fields)
         # ------------------------------------------------------------------ #
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Bracket Column Test",
-                "item_scope":    "Daily",
-                "rate_behavior": "RangeBracket",
-                "unit":          "Stop",
-                "rate_names":    ["Bracket Low", "Bracket High"],
-                "category":      "Custom",
-            },
-            headers=h,
+        seeded = await seed_legacy_item_multi_rate(
+            session_db_conn,
+            code="TST_BRACKET_COL",
+            name="Bracket Column Test",
+            unit="Stop",
+            rate_behavior="RangeBracket",
+            rate_names=["Bracket Low", "Bracket High"],
         )
-        assert create_resp.status_code == 201, create_resp.text
-        item = create_resp.json()
-        pay_item_id = item["pay_item_id"]
-        bracket_item_code = item["pay_item_code"]
+        pay_item_id = seeded["pay_item_id"]
+        bracket_item_code = "TST_BRACKET_COL"
 
         period_id = None
         try:
@@ -4445,60 +4431,38 @@ class TestCustomPayItemRateStructure:
         session_client: httpx.AsyncClient,
         auth_token: str,
         test_app,
+        session_db_conn,
     ):
         """
-        After creating a custom Daily PerUnit item, PayItemRateTypeMap rows
-        must exist — verified by querying the DB directly.
+        After seeding a custom Daily PerUnit item, PayItemRateTypeMap rows
+        must exist — verified via the GET endpoint and rate_names field.
         """
-        from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy import text as _text
-        from app.dependencies import get_db
+        from tests.seed_helpers import seed_legacy_item_with_rate_structure
 
         h = auth(auth_token)
 
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Rate Structure Verify",
-                "item_scope":    "Daily",
-                "rate_behavior": "PerUnit",
-                "unit":          "km",
-                "rate_names":    ["KM Rate"],
-                "category":      "Custom",
-            },
-            headers=h,
+        seeded = await seed_legacy_item_with_rate_structure(
+            session_db_conn,
+            code="TST_RATE_STRUCT",
+            name="Rate Structure Verify",
+            unit="km",
+            rate_behavior="PerUnit",
+            rate_name="KM Rate",
         )
-        assert create_resp.status_code == 201, create_resp.text
-        pay_item_id = create_resp.json()["pay_item_id"]
+        pay_item_id = seeded["pay_item_id"]
 
         try:
-            # Verify via the matrix: if the item appears, the mapping exists.
-            # Also do a direct DB check using the test DB connection.
-            engine = None
-            for dep, override in test_app.dependency_overrides.items():
-                if dep is get_db:
-                    # Extract engine from the override closure — we call it to get a conn
-                    # We can't easily extract the engine, so we check via the matrix API.
-                    break
-
-            # API-level check: activate the item and verify it shows in the matrix
-            await session_client.patch(
-                "/settings/branches/1/pay-items/" + str(pay_item_id),
-                json={"is_active": True, "effective_from": "2020-01-01"},
-                headers=h,
+            # Verify PayItemRateTypeMap row exists (seed_legacy_item_with_rate_structure creates it)
+            from sqlalchemy import text as _text
+            check = await session_db_conn.execute(
+                _text(
+                    "SELECT COUNT(*) FROM payroll.payitemratetypemap "
+                    "WHERE payitemid = :pid AND status = 'Active'"
+                ),
+                {"pid": pay_item_id},
             )
-            # Find any driver in HQ branch from the fixture
-            # We'll use created_driver_id indirectly by checking the list endpoint
-            # Just verify the item has rate_names populated (rate structure exists)
-            item_resp = await session_client.get(
-                f"/settings/pay-items/{pay_item_id}",
-                headers=h,
-            )
-            assert item_resp.status_code == 200, item_resp.text
-            item_data = item_resp.json()
-            assert item_data["rate_names"], (
-                "Custom PerUnit item must have rate_names populated "
-                "(indicates PayItemRateTypeMap was created)"
+            assert check.scalar_one() >= 1, (
+                "seed_legacy_item_with_rate_structure must create a PayItemRateTypeMap row"
             )
         finally:
             await session_client.delete(f"/settings/pay-items/{pay_item_id}", headers=h)
@@ -4512,78 +4476,66 @@ class TestCustomPayItemRateStructure:
         session_client: httpx.AsyncClient,
         auth_token: str,
         test_app,
+        session_db_conn,
     ):
         """
         Insert a 'broken' custom item (PayItems row only, no PayItemRateTypeMap),
         run backfill_custom_pay_item_rate_structure, and confirm the item is repaired.
         """
-        from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy import text as _text
-        from app.dependencies import get_db
         from app.settings.service import backfill_custom_pay_item_rate_structure
+        from tests.seed_helpers import seed_legacy_item_with_rate_structure
 
         h = auth(auth_token)
 
-        # We'll create via API (which now always creates the mapping), then
-        # surgically delete the PayItemRateTypeMap to simulate the broken state,
-        # run backfill, and verify the item re-appears.
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Backfill Test Item",
-                "item_scope":    "Daily",
-                "rate_behavior": "PerUnit",
-                "unit":          "Trip",
-                "rate_names":    ["Trip Rate"],
-                "category":      "Custom",
-            },
-            headers=h,
+        # Seed the item with rate structure, then surgically delete the mapping
+        # to simulate the broken state, then run backfill and verify repair.
+        seeded = await seed_legacy_item_with_rate_structure(
+            session_db_conn,
+            code="TST_BACKFILL",
+            name="Backfill Test Item",
+            unit="Trip",
+            rate_behavior="PerUnit",
+            rate_name="Trip Rate",
         )
-        assert create_resp.status_code == 201, create_resp.text
-        pay_item_id = create_resp.json()["pay_item_id"]
+        pay_item_id = seeded["pay_item_id"]
 
         try:
-            # Get an engine from the test_app override to do direct DB surgery
-            db_override = test_app.dependency_overrides.get(get_db)
-            assert db_override is not None, "get_db override not found"
+            # Delete the mapping to simulate the broken state
+            await session_db_conn.execute(
+                _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
+                {"pid": pay_item_id},
+            )
+            # Verify it's broken now
+            check = await session_db_conn.execute(
+                _text(
+                    "SELECT COUNT(*) FROM payroll.payitemratetypemap "
+                    "WHERE payitemid = :pid AND status = 'Active'"
+                ),
+                {"pid": pay_item_id},
+            )
+            assert check.scalar_one() == 0, "Setup: mapping should be deleted"
 
-            async for conn in db_override():
-                # Delete the mapping to simulate the broken state
-                await conn.execute(
-                    _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
-                    {"pid": pay_item_id},
-                )
-                # Verify it's broken now
-                check = await conn.execute(
-                    _text(
-                        "SELECT COUNT(*) FROM payroll.payitemratetypemap "
-                        "WHERE payitemid = :pid AND status = 'Active'"
-                    ),
-                    {"pid": pay_item_id},
-                )
-                assert check.scalar_one() == 0, "Setup: mapping should be deleted"
+            # Run backfill directly via session_db_conn (AUTOCOMMIT — changes are immediate)
+            repaired = await backfill_custom_pay_item_rate_structure(
+                company_id=1, db=session_db_conn
+            )
+            assert any(r["pay_item_id"] == pay_item_id for r in repaired), (
+                f"Backfill must repair pay_item_id={pay_item_id}. "
+                f"Repaired: {repaired}"
+            )
 
-                # Run backfill
-                repaired = await backfill_custom_pay_item_rate_structure(
-                    company_id=1, db=conn
-                )
-                assert any(r["pay_item_id"] == pay_item_id for r in repaired), (
-                    f"Backfill must repair pay_item_id={pay_item_id}. "
-                    f"Repaired: {repaired}"
-                )
-
-                # Verify mapping now exists
-                check2 = await conn.execute(
-                    _text(
-                        "SELECT COUNT(*) FROM payroll.payitemratetypemap "
-                        "WHERE payitemid = :pid AND status = 'Active'"
-                    ),
-                    {"pid": pay_item_id},
-                )
-                assert check2.scalar_one() >= 1, (
-                    "After backfill, PayItemRateTypeMap row must exist"
-                )
-                break  # only need one iteration
+            # Verify mapping now exists
+            check2 = await session_db_conn.execute(
+                _text(
+                    "SELECT COUNT(*) FROM payroll.payitemratetypemap "
+                    "WHERE payitemid = :pid AND status = 'Active'"
+                ),
+                {"pid": pay_item_id},
+            )
+            assert check2.scalar_one() >= 1, (
+                "After backfill, PayItemRateTypeMap row must exist"
+            )
         finally:
             await session_client.delete(f"/settings/pay-items/{pay_item_id}", headers=h)
 
@@ -4596,30 +4548,27 @@ class TestCustomPayItemRateStructure:
         session_client: httpx.AsyncClient,
         auth_token: str,
         created_driver_id: int,
+        session_db_conn,
     ):
         """
         Custom item with EffectiveFrom in future must appear in Pay Rates now
         (Phase 3C rule), but not in day-grid before EffectiveFrom.
         """
         from datetime import timedelta
+        from tests.seed_helpers import seed_legacy_item_with_rate_structure
         h = auth(auth_token)
 
         future_date = (date.today() + timedelta(days=30)).isoformat()
 
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Future Custom Item",
-                "item_scope":    "Daily",
-                "rate_behavior": "PerUnit",
-                "unit":          "Box",
-                "rate_names":    ["Box Rate"],
-                "category":      "Custom",
-            },
-            headers=h,
+        seeded = await seed_legacy_item_with_rate_structure(
+            session_db_conn,
+            code="TST_FUTURE_ITEM",
+            name="Future Custom Item",
+            unit="Box",
+            rate_behavior="PerUnit",
+            rate_name="Box Rate",
         )
-        assert create_resp.status_code == 201, create_resp.text
-        pay_item_id = create_resp.json()["pay_item_id"]
+        pay_item_id = seeded["pay_item_id"]
 
         try:
             # Activate with future effective_from
@@ -4657,26 +4606,23 @@ class TestCustomPayItemRateStructure:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
+        session_db_conn,
     ):
         """
         A custom item activated only for HQ must NOT appear in the PAYTEST driver's matrix.
         """
+        from tests.seed_helpers import seed_legacy_item_with_rate_structure
         h = auth(auth_token)
 
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "HQ Only Item",
-                "item_scope":    "Daily",
-                "rate_behavior": "PerUnit",
-                "unit":          "Pallet",
-                "rate_names":    ["Pallet Rate"],
-                "category":      "Custom",
-            },
-            headers=h,
+        seeded = await seed_legacy_item_with_rate_structure(
+            session_db_conn,
+            code="TST_HQ_ONLY",
+            name="HQ Only Item",
+            unit="Pallet",
+            rate_behavior="PerUnit",
+            rate_name="Pallet Rate",
         )
-        assert create_resp.status_code == 201, create_resp.text
-        pay_item_id = create_resp.json()["pay_item_id"]
+        pay_item_id = seeded["pay_item_id"]
 
         try:
             # Activate ONLY for HQ (branch 1), NOT for PAYTEST

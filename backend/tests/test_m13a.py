@@ -149,30 +149,24 @@ async def m13_open_period(
 @pytest_asyncio.fixture(scope="session")
 async def m13_daily_item(
     session_client: httpx.AsyncClient,
+    session_db_conn,
     auth_token: str,
     paytest_branch_id: int,
 ) -> dict:
     """
-    Create a custom Daily PerUnit item (M13A_STOP) and activate it on PAYTEST.
+    Seed a custom Daily PerUnit item (M13A_STOP) and activate it on PAYTEST.
 
     No PayItemRateTypeMap entry is seeded for this item, so calculation will
     return (None, True) — correct behaviour for M13b with unlinked custom items.
     """
-    item_resp = await session_client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_code": "M13A_STOP",
-            "pay_item_name": "Stop Pay (M13 test)",
-            "item_scope":    "Daily",
-            "rate_behavior": "PerUnit",
-            "unit":          "Stop",
-            "category":      "Count",
-        },
-        headers=auth(auth_token),
+    from tests.seed_helpers import seed_legacy_item
+    item_id = await seed_legacy_item(
+        session_db_conn,
+        code="M13A_STOP",
+        name="Stop Pay (M13 test)",
+        unit="Stop",
+        category="Count",
     )
-    assert item_resp.status_code == 201, f"custom item create failed: {item_resp.text}"
-    item = item_resp.json()
-    item_id = item["pay_item_id"]
 
     # Activate on PAYTEST via M11 PATCH (creates BranchPayItemConfig, EffectiveFrom = today).
     patch_resp = await session_client.patch(
@@ -181,33 +175,27 @@ async def m13_daily_item(
         headers=auth(auth_token),
     )
     assert patch_resp.status_code == 200, f"activate failed: {patch_resp.text}"
-    return item
+    return {"pay_item_id": item_id, "pay_item_code": "M13A_STOP"}
 
 
 @pytest_asyncio.fixture(scope="session")
 async def m13_inactive_item(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
+    session_db_conn,
 ) -> dict:
     """
-    Create a custom Daily PerUnit item (M13A_INACT) but do NOT activate it on
+    Seed a custom Daily PerUnit item (M13A_INACT) but do NOT activate it on
     any branch.  Used to test the 'inactive on branch' rejection path.
     """
-    item_resp = await session_client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_code": "M13A_INACT",
-            "pay_item_name": "Inactive Item (M13 test)",
-            "item_scope":    "Daily",
-            "rate_behavior": "PerUnit",
-            "unit":          "Unit",
-            "category":      "Count",
-        },
-        headers=auth(auth_token),
+    from tests.seed_helpers import seed_legacy_item
+    item_id = await seed_legacy_item(
+        session_db_conn,
+        code="M13A_INACT",
+        name="Inactive Item (M13 test)",
+        unit="Unit",
+        category="Count",
     )
-    assert item_resp.status_code == 201, f"create failed: {item_resp.text}"
     # IsDefaultBranchActive = FALSE and no config row → inactive everywhere.
-    return item_resp.json()
+    return {"pay_item_id": item_id, "pay_item_code": "M13A_INACT"}
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -405,6 +393,7 @@ class TestM13aValidation:
     async def test_retired_custom_item_rejected(
         self, session_client: httpx.AsyncClient, auth_token: str,
         m13_open_period: dict, paytest_driver_id: int,
+        db_conn,
     ):
         """
         A retired custom item code → 422 'retired'.
@@ -413,27 +402,21 @@ class TestM13aValidation:
         if tests run in order that item is retired.  We use a fresh item here
         to be self-contained.
         """
-        # Create a temporary item and immediately retire it via smart-delete
+        # Seed a temporary item and immediately retire it via smart-delete
         # (force the retire path by mocking meaningful usage).
         from unittest.mock import AsyncMock, patch
         from app.payroll import service as payroll_service
         from app.settings import service as settings_service
         from app.settings.schemas import CustomPayItemUsage
+        from tests.seed_helpers import seed_legacy_item
 
-        item_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "M13A_RETD",
-                "pay_item_name": "Retire Me (M13 test)",
-                "item_scope":    "Daily",
-                "rate_behavior": "PerUnit",
-                "unit":          "Unit",
-                "category":      "Count",
-            },
-            headers=auth(auth_token),
+        item_id = await seed_legacy_item(
+            db_conn,
+            code="M13A_RETD",
+            name="Retire Me (M13 test)",
+            unit="Unit",
+            category="Count",
         )
-        assert item_resp.status_code == 201
-        item_id = item_resp.json()["pay_item_id"]
 
         # Retire via forced meaningful-usage mock
         mock_usage = CustomPayItemUsage(
@@ -1384,7 +1367,7 @@ class TestM13bCodexFixes:
     async def test_update_line_with_retired_item_fails_clearly(
         self, session_client: httpx.AsyncClient, auth_token: str,
         m13_open_period: dict, paytest_branch_id: int, paytest_driver_id: int,
-        m13_daily_item: dict, m13_no_rates,
+        m13_daily_item: dict, m13_no_rates, db_conn,
     ):
         """
         After a custom pay item is retired, updating a draft line that uses
@@ -1397,20 +1380,18 @@ class TestM13bCodexFixes:
         from unittest.mock import AsyncMock, patch as mock_patch
         from app.settings import service as settings_service
         from app.settings.schemas import CustomPayItemUsage
+        from tests.seed_helpers import seed_legacy_item
 
         pid = m13_open_period["payroll_period_id"]
 
-        # Create a fresh item to retire (avoid touching session-scoped M13A_STOP).
-        item_resp = await session_client.post(
-            "/settings/pay-items",
-            json={"pay_item_code": "M13A_RETIRE2",
-                  "pay_item_name": "Retire Me 2 (M13 test)",
-                  "item_scope": "Daily", "rate_behavior": "PerUnit",
-                  "unit": "Unit", "category": "Count"},
-            headers=auth(auth_token),
+        # Seed a fresh item to retire (avoid touching session-scoped M13A_STOP).
+        retire_id = await seed_legacy_item(
+            db_conn,
+            code="M13A_RETIRE2",
+            name="Retire Me 2 (M13 test)",
+            unit="Unit",
+            category="Count",
         )
-        assert item_resp.status_code == 201
-        retire_id = item_resp.json()["pay_item_id"]
 
         # Issue 6 fix: use paytest_branch_id (branch ID), not paytest_driver_id.
         act_resp = await session_client.patch(
@@ -1480,32 +1461,30 @@ class TestM13bCodexFixes:
     async def test_custom_perunit_item_with_rate_map_calculates(
         self, session_client: httpx.AsyncClient, auth_token: str,
         m13_open_period: dict, paytest_driver_id: int,
-        paytest_rate_type_id: int,
+        paytest_rate_type_id: int, db_conn,
     ):
         """
         A custom Daily PerUnit item with a PayItemRateTypeMap entry and an
         approved driver rate for that rate type produces a correct calculatedamount.
 
         Flow:
-          1. Create custom item M13A_MAPPED (PerUnit, Daily)
+          1. Seed custom item M13A_MAPPED (PerUnit, Daily)
           2. Activate it on PAYTEST
           3. Assign rate type HOURLY via POST /settings/pay-items/{id}/rate-type-map
           4. Approve an HOURLY driver rate $25.00 (effective from 2032-01-01)
           5. Add a draft line: qty=4 → calculatedamount must be 4 × 25 = 100.0000
         """
+        from tests.seed_helpers import seed_legacy_item
         await _void_all_rates(session_client, auth_token)
         try:
-            # 1. Create custom item
-            item_resp = await session_client.post(
-                "/settings/pay-items",
-                json={"pay_item_code": "M13A_MAPPED",
-                      "pay_item_name": "Mapped Stop (M13 test)",
-                      "item_scope": "Daily", "rate_behavior": "PerUnit",
-                      "unit": "Stop", "category": "Count"},
-                headers=auth(auth_token),
+            # 1. Seed custom item
+            item_id = await seed_legacy_item(
+                db_conn,
+                code="M13A_MAPPED",
+                name="Mapped Stop (M13 test)",
+                unit="Stop",
+                category="Count",
             )
-            assert item_resp.status_code == 201, f"item create: {item_resp.text}"
-            item_id = item_resp.json()["pay_item_id"]
 
             # 2. Activate on PAYTEST
             act_resp = await session_client.patch(
@@ -1690,7 +1669,7 @@ class TestM13bCodexFixes:
 
     async def test_rate_type_map_requires_setup_manage_branch_user_denied(
         self, session_client: httpx.AsyncClient, auth_token: str,
-        branch_user_token: str, paytest_rate_type_id: int,
+        branch_user_token: str, paytest_rate_type_id: int, db_conn,
     ):
         """
         POST /settings/pay-items/{id}/rate-type-map must require
@@ -1699,17 +1678,15 @@ class TestM13bCodexFixes:
         branch_user has SpecificBranch scope + PAYROLL_VIEWER role (no write
         permissions) and must receive 403.
         """
-        # Create a custom PerUnit item as admin so we have a valid item_id.
-        item_resp = await session_client.post(
-            "/settings/pay-items",
-            json={"pay_item_code": "M13A_PERM_TEST",
-                  "pay_item_name": "Permission Test Item (M13)",
-                  "item_scope": "Daily", "rate_behavior": "PerUnit",
-                  "unit": "Unit", "category": "Count"},
-            headers=auth(auth_token),
+        from tests.seed_helpers import seed_legacy_item
+        # Seed a custom PerUnit item as admin so we have a valid item_id.
+        item_id = await seed_legacy_item(
+            db_conn,
+            code="M13A_PERM_TEST",
+            name="Permission Test Item (M13)",
+            unit="Unit",
+            category="Count",
         )
-        assert item_resp.status_code == 201
-        item_id = item_resp.json()["pay_item_id"]
 
         # branch_user attempts to assign a rate type -> must be denied.
         deny_resp = await session_client.post(
@@ -1724,7 +1701,7 @@ class TestM13bCodexFixes:
 
     async def test_rate_type_map_admin_can_assign(
         self, session_client: httpx.AsyncClient, auth_token: str,
-        paytest_rate_type_id: int,
+        paytest_rate_type_id: int, db_conn,
     ):
         """
         Admin (AllCompanyBranches + setup.manage) must be able to call
@@ -1732,7 +1709,8 @@ class TestM13bCodexFixes:
 
         Positive counterpart to the denial test above.
         """
-        # Reuse M13A_PERM_TEST created by the denial test (or create if not yet).
+        from tests.seed_helpers import seed_legacy_item
+        # Reuse M13A_PERM_TEST created by the denial test (or seed if not yet).
         items_resp = await session_client.get(
             "/settings/pay-items", headers=auth(auth_token),
         )
@@ -1743,16 +1721,13 @@ class TestM13bCodexFixes:
             None,
         )
         if item_id is None:
-            create_resp = await session_client.post(
-                "/settings/pay-items",
-                json={"pay_item_code": "M13A_PERM_TEST",
-                      "pay_item_name": "Permission Test Item (M13)",
-                      "item_scope": "Daily", "rate_behavior": "PerUnit",
-                      "unit": "Unit", "category": "Count"},
-                headers=auth(auth_token),
+            item_id = await seed_legacy_item(
+                db_conn,
+                code="M13A_PERM_TEST",
+                name="Permission Test Item (M13)",
+                unit="Unit",
+                category="Count",
             )
-            assert create_resp.status_code == 201
-            item_id = create_resp.json()["pay_item_id"]
 
         ok_resp = await session_client.post(
             f"/settings/pay-items/{item_id}/rate-type-map",

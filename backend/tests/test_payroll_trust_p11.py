@@ -205,7 +205,7 @@ async def _force_cleanup_locked_period(direct_db, pid):
         ))
 
 
-async def _ensure_ordinal_item_active(client, token, branch_id) -> int:
+async def _ensure_ordinal_item_active(client, token, branch_id, db_conn) -> int:
     """
     Ensure a custom OrdinalTier pay item (P11_ORD) linked to M13C_ORDINAL
     exists and is active on branch_id. Returns the pay_item_id.
@@ -228,14 +228,13 @@ async def _ensure_ordinal_item_active(client, token, branch_id) -> int:
             assert r2.status_code == 200, f"activate P11_ORD: {r2.text}"
             return item_id
 
-    # Create it
-    r = await client.post("/settings/pay-items", json={
-        "pay_item_code": "P11_ORD", "pay_item_name": "P11 Ordinal Test Item",
-        "item_scope": "Daily", "rate_behavior": "OrdinalTier",
-        "unit": "Load", "category": "Count",
-    }, headers=_tok(token))
-    assert r.status_code == 201, f"create P11_ORD: {r.text}"
-    item_id = r.json()["pay_item_id"]
+    # Create it via DB seed (HTTP creation of Daily items is blocked by LLR-A)
+    from tests.seed_helpers import seed_legacy_item
+    item_id = await seed_legacy_item(
+        db_conn,
+        code="P11_ORD", name="P11 Ordinal Test Item",
+        rate_behavior="OrdinalTier", unit="Load", category="Count",
+    )
 
     # Link rate type
     r = await client.post(f"/settings/pay-items/{item_id}/rate-type-map",
@@ -252,7 +251,7 @@ async def _ensure_ordinal_item_active(client, token, branch_id) -> int:
     return item_id
 
 
-async def _ensure_block_item_active(client, token, branch_id) -> int:
+async def _ensure_block_item_active(client, token, branch_id, db_conn) -> int:
     """
     Ensure a custom Block pay item (P11_BLK) linked to M13C_BLOCK
     exists and is active on branch_id. Returns the pay_item_id.
@@ -271,13 +270,13 @@ async def _ensure_block_item_active(client, token, branch_id) -> int:
             assert r2.status_code == 200
             return item_id
 
-    r = await client.post("/settings/pay-items", json={
-        "pay_item_code": "P11_BLK", "pay_item_name": "P11 Block Test Item",
-        "item_scope": "Daily", "rate_behavior": "Block",
-        "unit": "Mile", "category": "Count",
-    }, headers=_tok(token))
-    assert r.status_code == 201, f"create P11_BLK: {r.text}"
-    item_id = r.json()["pay_item_id"]
+    # Create via DB seed (HTTP creation of Daily items is blocked by LLR-A)
+    from tests.seed_helpers import seed_legacy_item
+    item_id = await seed_legacy_item(
+        db_conn,
+        code="P11_BLK", name="P11 Block Test Item",
+        rate_behavior="Block", unit="Mile", category="Count",
+    )
 
     r = await client.post(f"/settings/pay-items/{item_id}/rate-type-map",
                           json={"rate_type_id": rt_id, "is_primary": True},
@@ -309,6 +308,7 @@ async def test_p11_t1_ordinal_tier_snapshot_includes_tiers(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T1: After finalizing a period that used an OrdinalTier rate, the final line's
@@ -324,7 +324,7 @@ async def test_p11_t1_ordinal_tier_snapshot_includes_tiers(
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T1TIER", hire_date="2111-01-01")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
         rate_id = await _create_rate(
             session_client, auth_token, driver_id, rt_id, T1_START,
             amount="1.00", ordinal_tiers=_ORDINAL_3_TIERS,
@@ -384,6 +384,7 @@ async def test_p11_t2_used_tier_update_blocked(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T2: After finalization references an OrdinalTier DriverRate, a direct SQL
@@ -399,7 +400,7 @@ async def test_p11_t2_used_tier_update_blocked(
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T2TIERUPD", hire_date="2112-01-01")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
         rate_id = await _create_rate(
             session_client, auth_token, driver_id, rt_id, T2_START,
             amount="1.00", ordinal_tiers=_ORDINAL_3_TIERS,
@@ -457,6 +458,7 @@ async def test_p11_t3_used_tier_delete_blocked(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T3: After finalization references an OrdinalTier DriverRate, a direct SQL
@@ -471,7 +473,7 @@ async def test_p11_t3_used_tier_delete_blocked(
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T3TIERDEL", hire_date="2113-01-01")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
         rate_id = await _create_rate(
             session_client, auth_token, driver_id, rt_id, T3_START,
             amount="1.00", ordinal_tiers=_ORDINAL_3_TIERS,
@@ -528,6 +530,7 @@ async def test_p11_t4_used_block_fields_update_blocked(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T4: After finalization references a Block DriverRate, direct SQL UPDATE of
@@ -544,7 +547,7 @@ async def test_p11_t4_used_block_fields_update_blocked(
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T4BLKUPD", hire_date="2114-01-01")
         # Activate M13C_SYS_BLOCK on the branch before creating the rate (rate type check)
-        await _ensure_block_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_block_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
         rate_id = await _create_rate(
             session_client, auth_token, driver_id, rt_id, T4_START,
             amount="10.00", block_size="4", rounding_rule="Floor",
@@ -615,6 +618,7 @@ async def test_p11_t5_unused_tier_rows_mutable(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T5: An OrdinalTier DriverRate that has NOT been referenced in any finalized
@@ -628,7 +632,7 @@ async def test_p11_t5_unused_tier_rows_mutable(
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T5UNUSED", hire_date="2115-01-01")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
         rate_id = await _create_rate(
             session_client, auth_token, driver_id, rt_id, T5_START,
             amount="1.00", ordinal_tiers=_ORDINAL_3_TIERS,
@@ -685,6 +689,7 @@ async def test_p11_t6_advanced_rate_supersession_after_finalization(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T6: After an OrdinalTier rate is used in finalized payroll, creating and
@@ -700,7 +705,7 @@ async def test_p11_t6_advanced_rate_supersession_after_finalization(
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T6SUPER", hire_date="2116-01-01")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
         old_rate_id = await _create_rate(
             session_client, auth_token, driver_id, rt_id, T6A_START,
             amount="1.00", ordinal_tiers=_ORDINAL_3_TIERS,

@@ -847,28 +847,27 @@ class TestPayItemDeleteSafety:
 
     async def _create_custom_item(
         self,
-        client: httpx.AsyncClient,
-        auth_token: str,
+        db_conn,
         *,
         name: str = "Delete Safety Test Item",
         code: str | None = None,
     ) -> dict:
-        payload = {
-            "pay_item_name": name,
-            "item_scope": "Daily",
-            "rate_behavior": "PerUnit",
-            "category": "Wage",
-            "unit": "Stop",
-        }
-        if code:
-            payload["pay_item_code"] = code
-        resp = await client.post(
-            "/settings/pay-items",
-            json=payload,
-            headers=auth(auth_token),
+        """Seed a legacy custom item directly (LLR-A: legacy HTTP creation is blocked)."""
+        from tests.seed_helpers import seed_legacy_item_with_rate_structure
+        import random, string
+        actual_code = code or "DS_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        result = await seed_legacy_item_with_rate_structure(
+            db_conn,
+            code=actual_code,
+            name=name,
+            unit="Stop",
+            category="Wage",
         )
-        assert resp.status_code == 201, resp.text
-        return resp.json()
+        return {
+            "pay_item_id":   result["pay_item_id"],
+            "pay_item_code": actual_code,
+            "rate_type_id":  result["rate_type_id"],
+        }
 
     # -------------------------------------------------------------------------
     # Helper: assign a rate type to the custom item
@@ -898,10 +897,11 @@ class TestPayItemDeleteSafety:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
     ):
         """A custom item with no draft lines, final lines, or driver rates → physical delete."""
         item = await self._create_custom_item(
-            client, auth_token, name="No-Usage Delete Test"
+            db_conn, name="No-Usage Delete Test"
         )
         item_id = item["pay_item_id"]
 
@@ -931,6 +931,7 @@ class TestPayItemDeleteSafety:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
         direct_db,
         paytest_branch_id: int,
         paytest_driver_id: int,
@@ -946,11 +947,11 @@ class TestPayItemDeleteSafety:
         from sqlalchemy import text as _text
 
         item = await self._create_custom_item(
-            client, auth_token, name="Has Driver Rates Test"
+            db_conn, name="Has Driver Rates Test"
         )
         item_id = item["pay_item_id"]
 
-        # Map this custom item to the HOURLY rate type
+        # Map this custom item to the HOURLY rate type (legacy endpoint still works for existing items)
         await self._assign_rate_type(client, auth_token, item_id, paytest_rate_type_id)
 
         # Insert a DriverRate directly (bypasses branch-activation check which would
@@ -1018,6 +1019,7 @@ class TestPayItemDeleteSafety:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
         direct_db,
         paytest_driver_id: int,
         paytest_rate_type_id: int,
@@ -1029,7 +1031,7 @@ class TestPayItemDeleteSafety:
         from sqlalchemy import text as _text
 
         item = await self._create_custom_item(
-            client, auth_token, name="Usage Count Test"
+            db_conn, name="Usage Count Test"
         )
         item_id = item["pay_item_id"]
 
@@ -1123,6 +1125,7 @@ class TestPayItemDeleteSafety:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
         direct_db,
         paytest_driver_id: int,
         paytest_rate_type_id: int,
@@ -1135,7 +1138,7 @@ class TestPayItemDeleteSafety:
         from sqlalchemy import text as _text
 
         item = await self._create_custom_item(
-            client, auth_token, name="Preservation Test"
+            db_conn, name="Preservation Test"
         )
         item_id = item["pay_item_id"]
         await self._assign_rate_type(client, auth_token, item_id, paytest_rate_type_id)

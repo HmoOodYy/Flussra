@@ -244,7 +244,7 @@ async def _force_cleanup_locked_period(direct_db, pid):
             await direct_db.execute(_text(trigger_sql))
 
 
-async def _ensure_ordinal_item_active(client, token, branch_id) -> int:
+async def _ensure_ordinal_item_active(client, token, branch_id, db_conn) -> int:
     """Return or create+activate the P12_ORD pay item (OrdinalTier)."""
     rt_id = await _get_rate_type_id(client, token, "M13C_ORDINAL")
     r = await client.get("/settings/pay-items", headers=_tok(token))
@@ -257,13 +257,13 @@ async def _ensure_ordinal_item_active(client, token, branch_id) -> int:
                 json={"is_active": True}, headers=_tok(token),
             )
             return item_id
-    r = await client.post("/settings/pay-items", json={
-        "pay_item_code": "P12_ORD", "pay_item_name": "P12 Ordinal Test Item",
-        "item_scope": "Daily", "rate_behavior": "OrdinalTier",
-        "unit": "Load", "category": "Count",
-    }, headers=_tok(token))
-    assert r.status_code == 201, f"create P12_ORD: {r.text}"
-    item_id = r.json()["pay_item_id"]
+    # Create via DB seed (HTTP creation of Daily items is blocked by LLR-A)
+    from tests.seed_helpers import seed_legacy_item
+    item_id = await seed_legacy_item(
+        db_conn,
+        code="P12_ORD", name="P12 Ordinal Test Item",
+        rate_behavior="OrdinalTier", unit="Load", category="Count",
+    )
     r = await client.post(f"/settings/pay-items/{item_id}/rate-type-map",
                           json={"rate_type_id": rt_id, "is_primary": True},
                           headers=_tok(token))
@@ -564,6 +564,7 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T4: For an OrdinalTier finalized line, the SourceSnapshot must contain a
@@ -581,7 +582,7 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T4ADVSNAP", hire_date="2135-01-01")
@@ -669,6 +670,7 @@ async def test_p12_t5_phase11_tier_immutability_regression(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T5: Phase 11 regression — after finalization (which now acquires the Phase 12
@@ -681,7 +683,7 @@ async def test_p12_t5_phase11_tier_immutability_regression(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
 
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
                                          "T5PHASE11", hire_date="2136-01-01")
@@ -1405,6 +1407,7 @@ async def test_p12c_t4_tier_replacement_blocked_after_approval(
     auth_token: str,
     paytest_branch_id: int,
     direct_db,
+    session_db_conn,
 ):
     """
     T12C_T4: Phase 12C Fix D — tier SELECT FOR UPDATE with status predicate prevents
@@ -1429,7 +1432,7 @@ async def test_p12c_t4_tier_replacement_blocked_after_approval(
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id)
+        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,

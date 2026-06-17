@@ -3172,33 +3172,23 @@ class TestDriverEligibilityBoundaries:
 # ===========================================================================
 
 async def _create_test_pay_item(
-    client: httpx.AsyncClient,
-    token: str,
+    db_conn,
     name: str,
     item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
 ) -> dict:
     """
-    Create a custom pay item via POST /settings/pay-items.
-    Returns the full CustomPayItem dict.
-    item_scope   : 'Daily' or 'Period'
-    rate_behavior: 'PerUnit' (Daily), 'EnteredAmount' (Period only)
+    Seed a custom Daily pay item directly into the DB (bypasses LLR-A guard).
+    Returns a dict with pay_item_id, pay_item_code, and pay_item_name.
+    item_scope   : 'Daily' only (Period-scope items are blocked; tests expecting 422 use HTTP)
     """
-    # Daily+PerUnit requires a unit; Period+EnteredAmount does not.
-    body: dict = {
-        "pay_item_name": name,
-        "item_scope":    item_scope,
-        "rate_behavior": rate_behavior,
-    }
-    if item_scope == "Daily":
-        body["unit"] = "Unit"
-    resp = await client.post(
-        "/settings/pay-items",
-        json=body,
-        headers=auth(token),
+    import hashlib
+    from tests.seed_helpers import seed_legacy_item_with_rate_structure
+    code = "P3B_" + hashlib.md5(name.encode()).hexdigest()[:8].upper()
+    result = await seed_legacy_item_with_rate_structure(
+        db_conn, code=code, name=name, unit="Unit", rate_behavior=rate_behavior,
     )
-    assert resp.status_code == 201, f"create pay item failed: {resp.text}"
-    return resp.json()
+    return {"pay_item_id": result["pay_item_id"], "pay_item_code": code, "pay_item_name": name}
 
 
 async def _delete_test_pay_item(
@@ -3260,6 +3250,7 @@ class TestPayItemEffectiveDateBoundaries:
         auth_token: str,
         elig_period: dict,
         paytest_branch_id: int,
+        session_db_conn,
     ):
         """
         BranchPayItemConfig.EffectiveFrom = 2082-06-21 (= period.start_date).
@@ -3268,7 +3259,7 @@ class TestPayItemEffectiveDateBoundaries:
         """
         pid = elig_period["payroll_period_id"]
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Item EffFrom EqStart",
         )
         iid = item["pay_item_id"]
@@ -3316,6 +3307,7 @@ class TestPayItemEffectiveDateBoundaries:
         auth_token: str,
         elig_period: dict,
         paytest_branch_id: int,
+        session_db_conn,
     ):
         """
         BranchPayItemConfig.EffectiveFrom = 2082-06-22 (> period.start_date).
@@ -3324,7 +3316,7 @@ class TestPayItemEffectiveDateBoundaries:
         """
         pid = elig_period["payroll_period_id"]
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Item EffFrom PlusOne",
         )
         iid = item["pay_item_id"]
@@ -3373,6 +3365,7 @@ class TestPayItemEffectiveDateBoundaries:
         elig_period: dict,
         paytest_branch_id: int,
         direct_db,
+        session_db_conn,
     ):
         """
         BranchPayItemConfig.EffectiveFrom=2082-06-21, EffectiveTo=2082-06-23.
@@ -3384,7 +3377,7 @@ class TestPayItemEffectiveDateBoundaries:
 
         pid = elig_period["payroll_period_id"]
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Item EffTo Inclusive",
         )
         iid = item["pay_item_id"]
@@ -3448,6 +3441,7 @@ class TestPayItemEffectiveDateBoundaries:
         auth_token: str,
         elig_period: dict,
         paytest_branch_id: int,
+        session_db_conn,
     ):
         """
         BranchPayItemConfig.IsActive=False.
@@ -3456,7 +3450,7 @@ class TestPayItemEffectiveDateBoundaries:
         """
         pid = elig_period["payroll_period_id"]
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Item Inactive Config",
         )
         iid = item["pay_item_id"]
@@ -3520,6 +3514,7 @@ class TestPayItemEffectiveDateBoundaries:
         elig_period: dict,
         paytest_branch_id: int,
         hq_branch_id: int,
+        session_db_conn,
     ):
         """
         A custom Daily item configured ONLY for HQ (is_active=True on HQ,
@@ -3531,7 +3526,7 @@ class TestPayItemEffectiveDateBoundaries:
         """
         pid = elig_period["payroll_period_id"]
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Item HQ Only",
         )
         iid = item["pay_item_id"]
@@ -3568,6 +3563,7 @@ class TestPayItemEffectiveDateBoundaries:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        session_db_conn,
     ):
         """
         Custom Daily item with EffectiveFrom=2082-06-22.
@@ -3591,7 +3587,7 @@ class TestPayItemEffectiveDateBoundaries:
         """
         # Create a custom Daily item
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Rate Matrix EffFrom",
         )
         iid = item["pay_item_id"]
@@ -3655,6 +3651,7 @@ class TestPayItemEffectiveDateBoundaries:
         paytest_branch_id: int,
         paytest_driver_id: int,
         hq_branch_id: int,
+        session_db_conn,
     ):
         """
         Custom Daily item configured for HQ only.
@@ -3666,7 +3663,7 @@ class TestPayItemEffectiveDateBoundaries:
         item won't appear.
         """
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Rate Matrix Branch Iso",
         )
         iid = item["pay_item_id"]
@@ -3750,6 +3747,7 @@ class TestPayItemEffectiveDateBoundaries:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        session_db_conn,
     ):
         """
         Documents whether physical delete of a custom pay item with existing
@@ -3769,7 +3767,7 @@ class TestPayItemEffectiveDateBoundaries:
         Current behavior for zero-usage custom item: physical delete (can_physical_delete=True).
         """
         item = await _create_test_pay_item(
-            session_client, auth_token,
+            session_db_conn,
             "P3B Test Delete Behavior",
         )
         iid = item["pay_item_id"]

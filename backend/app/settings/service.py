@@ -2892,6 +2892,16 @@ async def create_custom_pay_item(
     """
     await _ensure_company_admin(company_id, user_id, db)
 
+    # LLR-A: New Custom Daily PayItems must be created through the CDPI workflow.
+    if data.item_scope == "Daily":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Custom Daily PayItems must be created through the CDPI workflow. "
+                "Use POST /settings/cdpi/direct-company-items instead."
+            ),
+        )
+
     # Resolve pay_item_code: use supplied value or auto-generate.
     if data.pay_item_code is None:
         # Auto-generation with collision retry.
@@ -3552,6 +3562,16 @@ async def create_pay_item_request(
     # Permission gate
     await _check_permission(company_id, user_id, data.branch_id, "payroll.entry", db)
 
+    # LLR-A: New Custom Daily requests must use the CDPI workflow.
+    if data.item_scope == "Daily":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Custom Daily PayItems must be requested through the CDPI workflow. "
+                "Use POST /settings/cdpi/requests instead."
+            ),
+        )
+
     # Duplicate / conflict checks (service-level; DB index is the race backstop)
     await _block_if_code_taken(company_id, data.pay_item_code, db)
 
@@ -3767,6 +3787,16 @@ async def decide_pay_item_request(
         )
 
     if data.decision == "Approved":
+        # LLR-A: Approving legacy Daily requests is disabled; CDPI must be used.
+        if req["itemscope"] == "Daily":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Approving legacy Daily custom pay item requests is disabled. "
+                    "Create Custom Daily PayItems through the CDPI workflow instead."
+                ),
+            )
+
         # Race-condition guard: re-check code availability
         await _block_if_code_taken(
             company_id, req["payitemcode"], db,

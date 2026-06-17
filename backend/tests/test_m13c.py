@@ -68,27 +68,18 @@ async def _get_rate_type_id(client: httpx.AsyncClient, token: str, code: str) ->
 
 
 async def _create_custom_item(
-    client: httpx.AsyncClient,
-    token: str,
+    db_conn,
     code: str,
     name: str,
     behavior: str,
     unit: str = "Unit",
 ) -> dict:
-    resp = await client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_code": code,
-            "pay_item_name": name,
-            "item_scope":    "Daily",
-            "rate_behavior": behavior,
-            "unit":          unit,
-            "category":      "Count",
-        },
-        headers=auth(token),
+    """Seed a legacy custom Daily pay item directly into the DB (bypasses LLR-A guard)."""
+    from tests.seed_helpers import seed_legacy_item
+    item_id = await seed_legacy_item(
+        db_conn, code=code, name=name, rate_behavior=behavior, unit=unit, category="Count",
     )
-    assert resp.status_code == 201, f"create item failed: {resp.text}"
-    return resp.json()
+    return {"pay_item_id": item_id, "pay_item_code": code, "pay_item_name": name}
 
 
 async def _link_rate_type(
@@ -179,12 +170,13 @@ _RANGE_3_TIERS = [
 @pytest_asyncio.fixture(scope="session")
 async def m13c_ordinal_item(
     session_client: httpx.AsyncClient,
+    session_db_conn,
     auth_token: str,
     paytest_branch_id: int,
 ) -> dict:
     """M13C_LOADS — OrdinalTier custom item linked to M13C_ORDINAL rate type."""
     item = await _create_custom_item(
-        session_client, auth_token, "M13C_LOADS", "Load Tier Test", "OrdinalTier", "Load"
+        session_db_conn, "M13C_LOADS", "Load Tier Test", "OrdinalTier", "Load"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
     await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
@@ -195,12 +187,13 @@ async def m13c_ordinal_item(
 @pytest_asyncio.fixture(scope="session")
 async def m13c_rbrkt_item(
     session_client: httpx.AsyncClient,
+    session_db_conn,
     auth_token: str,
     paytest_branch_id: int,
 ) -> dict:
     """M13C_RBRKT — RangeBracket custom item linked to M13C_RBRKT rate type."""
     item = await _create_custom_item(
-        session_client, auth_token, "M13C_RBRKT", "Range Bracket Test", "RangeBracket", "Mile"
+        session_db_conn, "M13C_RBRKT", "Range Bracket Test", "RangeBracket", "Mile"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_RBRKT")
     await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
@@ -211,12 +204,13 @@ async def m13c_rbrkt_item(
 @pytest_asyncio.fixture(scope="session")
 async def m13c_rprog_item(
     session_client: httpx.AsyncClient,
+    session_db_conn,
     auth_token: str,
     paytest_branch_id: int,
 ) -> dict:
     """M13C_RPROG — RangeProgressive custom item linked to M13C_RPROG rate type."""
     item = await _create_custom_item(
-        session_client, auth_token, "M13C_RPROG", "Range Progressive Test", "RangeProgressive", "Mile"
+        session_db_conn, "M13C_RPROG", "Range Progressive Test", "RangeProgressive", "Mile"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_RPROG")
     await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
@@ -227,12 +221,13 @@ async def m13c_rprog_item(
 @pytest_asyncio.fixture(scope="session")
 async def m13c_block_item(
     session_client: httpx.AsyncClient,
+    session_db_conn,
     auth_token: str,
     paytest_branch_id: int,
 ) -> dict:
     """M13C_BLOCK — Block custom item linked to M13C_BLOCK rate type."""
     item = await _create_custom_item(
-        session_client, auth_token, "M13C_BLOCK", "Block Rate Test", "Block", "Mile"
+        session_db_conn, "M13C_BLOCK", "Block Rate Test", "Block", "Mile"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_BLOCK")
     await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)

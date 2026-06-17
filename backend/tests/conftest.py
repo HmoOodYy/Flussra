@@ -348,6 +348,30 @@ async def test_app(test_database_url) -> FastAPI:
 
 
 @pytest_asyncio.fixture
+async def db_conn(test_database_url) -> AsyncGenerator[AsyncConnection, None]:
+    """Function-scoped raw AsyncConnection for direct DB seeding (bypasses HTTP layer).
+    Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+    engine = create_async_engine(test_database_url, echo=False)
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        yield conn
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def session_db_conn(test_database_url) -> AsyncGenerator[AsyncConnection, None]:
+    """Session-scoped raw AsyncConnection for seeding in session-scoped tests.
+    Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+    engine = create_async_engine(test_database_url, echo=False)
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        yield conn
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
 async def client(test_app) -> AsyncGenerator[httpx.AsyncClient, None]:
     """Async HTTP client for each test function."""
     # httpx >= 0.20 removed the app= shorthand; use ASGITransport instead.

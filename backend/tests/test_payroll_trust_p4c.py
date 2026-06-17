@@ -181,31 +181,35 @@ async def p4c_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     assert resp_login_b.status_code == 200, f"Company B login failed: {resp_login_b.text}"
     token_b = resp_login_b.json()["access_token"]
 
-    # Company B creates a custom PayItem via API (sets companyid, creates CPI_ with companyid=cid_b)
-    resp_pi_b = await client.post(
-        "/settings/pay-items",
-        json={
-            "pay_item_name": "P4C Custom Item B",
-            "item_scope":    "Daily",
-            "rate_behavior": "PerUnit",
-            "unit":          "Unit",
-            "category":      "Count",
-        },
-        headers=_auth(token_b),
-    )
-    assert resp_pi_b.status_code == 201, f"Company B PayItem creation failed: {resp_pi_b.text}"
-    pi_b_id = resp_pi_b.json()["pay_item_id"]
+    # Company B's custom PayItem via direct DB (LLR-A blocks HTTP creation)
+    pi_b_row = (await direct_db.execute(_text("""
+        INSERT INTO payroll.payitems
+            (companyid, payitemcode, payitemname, ratebehavior,
+             requiresrate, isdefaultbranchactive, status,
+             category, datatype, itemscope, unit)
+        VALUES
+            (:cid, 'CPI_P4C_B', 'P4C Custom Item B', 'PerUnit',
+             TRUE, FALSE, 'Active', 'Count', 'Decimal', 'Daily', 'Unit')
+        ON CONFLICT (companyid, payitemcode) WHERE companyid IS NOT NULL
+            DO UPDATE SET status = 'Active'
+        RETURNING payitemid
+    """), {"cid": cid_b})).mappings().first()
+    pi_b_id = pi_b_row["payitemid"]
 
-    # Find Company B's auto-generated CPI_ RateType
     rt_b_row = (await direct_db.execute(_text("""
-        SELECT rt.ratetypeid, rt.companyid
-        FROM payroll.ratetypes rt
-        JOIN payroll.payitemratetypemap pirm ON pirm.ratetypeid = rt.ratetypeid
-        WHERE pirm.payitemid = :piid AND pirm.status = 'Active'
-        LIMIT 1
-    """), {"piid": pi_b_id})).mappings().first()
-    rt_b_id = rt_b_row["ratetypeid"] if rt_b_row else None
-    rt_b_companyid = rt_b_row["companyid"] if rt_b_row else None
+        INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
+        VALUES (:code, :name, 'Unit', TRUE, :cid)
+        ON CONFLICT (ratecode) DO UPDATE SET isactive = TRUE, companyid = :cid
+        RETURNING ratetypeid, companyid
+    """), {"code": f"CPI_{pi_b_id}_1", "name": "P4C Custom Item B Rate", "cid": cid_b})).mappings().first()
+    rt_b_id = rt_b_row["ratetypeid"]
+    rt_b_companyid = rt_b_row["companyid"]
+
+    await direct_db.execute(_text("""
+        INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
+        VALUES (:piid, :rtid, TRUE, 'Active')
+        ON CONFLICT DO NOTHING
+    """), {"piid": pi_b_id, "rtid": rt_b_id})
 
     yield {
         "cid_a":       cid_a,
