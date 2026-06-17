@@ -103,6 +103,22 @@ export function PeriodDetailPage() {
 
   async function handleSave() {
     if (dirtyRows.size === 0 || !grid || !selectedDate) return;
+
+    // Guard: reject any dirty time-column values that didn't pass through onBlur
+    const timeCodes = new Set(
+      grid.columns.filter((c) => c.is_time).map((c) => c.pay_item_code),
+    );
+    for (const row of dirtyRows.values()) {
+      for (const [code, val] of Object.entries(row.values)) {
+        if (timeCodes.has(code) && val !== '' && parseTimeInput(val) === null) {
+          setSaveError(
+            `"${val}" is not a valid time. Use formats like 1.5, 1:30, 1h 30m, or 90m.`,
+          );
+          return;
+        }
+      }
+    }
+
     setSaving(true);
     setSaveError(null);
     try {
@@ -130,28 +146,57 @@ export function PeriodDetailPage() {
   }
 
   // ── Time-format parser ──────────────────────────────────────────────────── //
-  function parseTimeInput(v: string): string {
+  // Returns the decimal-hours string on success, or null if the input is invalid.
+  // Empty string returns empty string (clears the cell).
+  function parseTimeInput(v: string): string | null {
     const s = v.trim();
     if (!s) return '';
-    // H:MM or H:MM:SS
-    const colonMatch = /^(\d+):(\d{1,2})(?::\d{1,2})?$/.exec(s);
+
+    // Plain decimal / integer — must be non-negative
+    if (/^\d*\.?\d+$/.test(s)) {
+      const n = parseFloat(s);
+      return n >= 0 ? s : null;
+    }
+
+    // H:MM or H:MM:SS — minutes and seconds must each be 0–59
+    const colonMatch = /^(\d+):(\d{1,2})(?::(\d{1,2}))?$/.exec(s);
     if (colonMatch) {
-      const hrs = parseInt(colonMatch[1], 10);
-      const mins = parseInt(colonMatch[2], 10);
-      return String(hrs + mins / 60);
+      const h = parseInt(colonMatch[1], 10);
+      const m = parseInt(colonMatch[2], 10);
+      const sec = colonMatch[3] !== undefined ? parseInt(colonMatch[3], 10) : 0;
+      if (m > 59 || sec > 59) return null;
+      const total = h + m / 60 + sec / 3600;
+      return String(Math.round(total * 1_000_000) / 1_000_000);
     }
-    // 1h 30m / 1h30m / 90m / 1h
-    const hmMatch = /^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$/i.exec(s);
+
+    // Word format: "1h 30m", "1hr 30min", "1 hour 30 minutes", "90m", "30mins", …
+    // Hours: h | hr | hrs | hour | hours
+    // Minutes: m | min | mins | minute | minutes
+    // Minutes may exceed 59 (e.g. "90m" = 1.5 h); this is deliberate.
+    const hmMatch =
+      /^(?:(\d+)\s*(?:hours|hour|hrs|hr|h))?(?:\s*(\d+)\s*(?:minutes|minute|mins|min|m))?$/i.exec(s);
     if (hmMatch && (hmMatch[1] || hmMatch[2])) {
-      const hrs = parseInt(hmMatch[1] ?? '0', 10);
-      const mins = parseInt(hmMatch[2] ?? '0', 10);
-      return String(hrs + mins / 60);
+      const h = parseInt(hmMatch[1] ?? '0', 10);
+      const m = parseInt(hmMatch[2] ?? '0', 10);
+      const total = h + m / 60;
+      return String(Math.round(total * 1_000_000) / 1_000_000);
     }
-    return s;
+
+    return null;
   }
 
   function handleTimeCellBlur(driverId: number, code: string, raw: string) {
     const parsed = parseTimeInput(raw);
+    if (parsed === null) {
+      // Invalid — revert to the last saved server value and surface the error
+      const serverVal =
+        grid?.rows.find((r) => r.driver_id === driverId)?.values[code]?.quantity ?? '';
+      handleCellChange(driverId, code, serverVal);
+      setSaveError(
+        `"${raw}" is not a valid time. Use formats like 1.5, 1:30, 1h 30m, or 90m.`,
+      );
+      return;
+    }
     if (parsed !== raw) {
       handleCellChange(driverId, code, parsed);
     }

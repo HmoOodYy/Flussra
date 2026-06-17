@@ -849,6 +849,9 @@ export function PayItemsPage() {
         } else if (branchMode === 'all') {
           setAllBranchKey(k => k + 1);
         }
+        // Refresh CDPI branch-controls list — direct-created items surface through
+        // listCdpiBranchItems, not the legacy pay-items endpoint
+        setCdpiBranchKey(k => k + 1);
         showToast('Pay item created at company level. It starts inactive on all branches — activate per branch after setup.');
       } else {
         // ── Branch-scoped request flow ─────────────────────────────────────
@@ -2480,8 +2483,9 @@ function WizardStep3({
           </span>
         ) : (
           <span>
-            This submits the item for <strong>company approval</strong>. Once approved, it will be
-            added to all branches starting inactive — your branch can activate it in Pay Items settings.
+            This submits the item for <strong>company approval</strong>. Once approved, it becomes
+            active for the requesting branch automatically — activate it per branch in
+            <strong> Pay Items</strong> settings for any other branch.
             Pay rates are configured in <strong>Pay Rates</strong> after approval.
           </span>
         )}
