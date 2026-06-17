@@ -3804,3 +3804,474 @@ class TestPayItemEffectiveDateBoundaries:
             # KNOWN GAP — Phase 3D: if DriverRates are not counted in usage,
             # can_physical_delete would be True even when rates exist, leading
             # to a physical delete that orphans the DriverRate records.
+
+
+# ===========================================================================
+# DG-1 — CDPI Daily PayItems in Day Grid
+# ===========================================================================
+#
+# All tests use dates in 2081-03 to avoid collision with other test classes.
+# CDPI items are seeded via direct DB (payitems + branchpayitemconfig) so
+# these tests are self-contained and do not depend on the CDPI workflow API.
+# Each test cleans up its own items in try/finally.
+
+DG1_PERIOD_START = "2081-03-01"
+DG1_PERIOD_END   = "2081-03-28"
+DG1_WORK_DATE    = "2081-03-05"
+
+
+async def _seed_payitem(
+    db,
+    *,
+    code: str,
+    name: str,
+    company_id: int,
+    datatype: str = "Decimal",
+    rate_behavior: str = "PerUnit",
+) -> int:
+    """Insert a Daily PayItem row and return payitemid. Idempotent via ON CONFLICT."""
+    from sqlalchemy import text as _text
+    pid = (await db.execute(
+        _text("""
+            INSERT INTO payroll.payitems (
+                companyid, payitemcode, payitemname, datatype, ratebehavior,
+                unit, category, itemscope, issystemstandard, requiresrate,
+                isdefaultbranchactive, status
+            ) VALUES (
+                :cid, :code, :name, :dt, :rb,
+                'Unit', 'Custom', 'Daily', FALSE, FALSE,
+                FALSE, 'Active'
+            )
+            ON CONFLICT (payitemcode, companyid) WHERE companyid IS NOT NULL
+            DO UPDATE SET status = 'Active', datatype = EXCLUDED.datatype
+            RETURNING payitemid
+        """),
+        {"cid": company_id, "code": code, "name": name, "dt": datatype, "rb": rate_behavior},
+    )).scalar_one()
+    return pid
+
+
+async def _activate_for_branch(db, *, pay_item_id: int, company_id: int, branch_id: int) -> None:
+    """Create a BranchPayItemConfig row with isactive=TRUE (replaces any existing row)."""
+    from sqlalchemy import text as _text
+    await db.execute(
+        _text("""
+            DELETE FROM payroll.branchpayitemconfig
+            WHERE payitemid = :pid AND companyid = :cid AND branchid = :bid
+        """),
+        {"cid": company_id, "bid": branch_id, "pid": pay_item_id},
+    )
+    await db.execute(
+        _text("""
+            INSERT INTO payroll.branchpayitemconfig
+                (companyid, branchid, payitemid, isactive, effectivefrom)
+            VALUES (:cid, :bid, :pid, TRUE, '2000-01-01')
+        """),
+        {"cid": company_id, "bid": branch_id, "pid": pay_item_id},
+    )
+
+
+async def _delete_cdpi_item(db, *, pay_item_id: int) -> None:
+    from sqlalchemy import text as _text
+    await db.execute(
+        _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    await db.execute(
+        _text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+
+
+@pytest_asyncio.fixture
+async def dg1_period(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    dg_clean: int,
+) -> dict:
+    """Open payroll period on PAYTEST for 2081-03-01 to 2081-03-28."""
+    resp = await session_client.post(
+        "/payroll/periods",
+        json={
+            "branch_id":   dg_clean,
+            "period_type": "Custom",
+            "start_date":  DG1_PERIOD_START,
+            "end_date":    DG1_PERIOD_END,
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"dg1 period create failed: {resp.text}"
+    pid = resp.json()["payroll_period_id"]
+    resp2 = await session_client.patch(
+        f"/payroll/periods/{pid}/status",
+        json={"status": "Open"},
+        headers=auth(auth_token),
+    )
+    assert resp2.status_code == 200, f"dg1 period open failed: {resp2.text}"
+    return resp2.json()
+
+
+class TestDayGridCDPI:
+    """
+    DG-1: CDPI Daily PayItems appear in and can be saved via the day grid.
+    """
+
+    @pytest.mark.asyncio
+    async def test_branch_active_cdpi_number_item_appears(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_branch_id: int,
+        direct_db,
+    ):
+        """Test 1: branch-active CDPI Number item appears as a day-grid column."""
+        from sqlalchemy import text as _text
+
+        cid = (await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+            {"bid": paytest_branch_id},
+        )).scalar_one()
+
+        pid = dg1_period["payroll_period_id"]
+        item_code = "DG1_NUM_T1"
+        pay_item_id = await _seed_payitem(
+            direct_db, code=item_code, name="DG1 Number Item",
+            company_id=cid, datatype="Decimal",
+        )
+        try:
+            await _activate_for_branch(
+                direct_db, pay_item_id=pay_item_id,
+                company_id=cid, branch_id=paytest_branch_id,
+            )
+
+            resp = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": DG1_WORK_DATE},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200, resp.text
+            columns = resp.json()["columns"]
+            codes = {c["pay_item_code"] for c in columns}
+
+            assert item_code in codes, f"{item_code} not in columns: {codes}"
+            assert "HOURS" in codes, "Standard HOURS column missing"
+
+            col = next(c for c in columns if c["pay_item_code"] == item_code)
+            assert col["is_time"] is False
+            assert col["pay_item_code"] == item_code
+        finally:
+            await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
+
+    @pytest.mark.asyncio
+    async def test_branch_inactive_cdpi_item_hidden(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_branch_id: int,
+        direct_db,
+    ):
+        """Test 2: CDPI item without BranchPayItemConfig does not appear."""
+        from sqlalchemy import text as _text
+
+        cid = (await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+            {"bid": paytest_branch_id},
+        )).scalar_one()
+
+        pid = dg1_period["payroll_period_id"]
+        item_code = "DG1_NUM_T2"
+        pay_item_id = await _seed_payitem(
+            direct_db, code=item_code, name="DG1 Hidden Item",
+            company_id=cid, datatype="Decimal",
+        )
+        try:
+            # No BranchPayItemConfig → isdefaultbranchactive=FALSE → hidden
+            resp = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": DG1_WORK_DATE},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200, resp.text
+            codes = {c["pay_item_code"] for c in resp.json()["columns"]}
+            assert item_code not in codes
+        finally:
+            await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
+
+    @pytest.mark.asyncio
+    async def test_save_number_cdpi_value(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_branch_id: int,
+        paytest_driver_id: int,
+        direct_db,
+    ):
+        """Test 3: saving a Number CDPI value creates a draft line; no DriverRates."""
+        from sqlalchemy import text as _text
+
+        cid = (await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+            {"bid": paytest_branch_id},
+        )).scalar_one()
+
+        pid = dg1_period["payroll_period_id"]
+        item_code = "DG1_NUM_T3"
+        wdate_str = "2081-03-06"
+        from datetime import date as _date
+        wdate = _date(2081, 3, 6)
+        pay_item_id = await _seed_payitem(
+            direct_db, code=item_code, name="DG1 Save Number Item",
+            company_id=cid, datatype="Decimal",
+        )
+        try:
+            await _activate_for_branch(
+                direct_db, pay_item_id=pay_item_id,
+                company_id=cid, branch_id=paytest_branch_id,
+            )
+
+            resp = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                json={
+                    "work_date": wdate_str,
+                    "rows": [{
+                        "driver_id": paytest_driver_id,
+                        "values": {item_code: "3"},
+                    }],
+                },
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200, resp.text
+
+            # Draft line exists with correct quantity
+            line_row = (await direct_db.execute(
+                _text("""
+                    SELECT quantity FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid
+                      AND driverid        = :did
+                      AND workdate        = :dt
+                      AND linetype        = :lt
+                      AND status         != 'Void'
+                """),
+                {"pid": pid, "did": paytest_driver_id, "dt": wdate, "lt": item_code},
+            )).mappings().first()
+            assert line_row is not None, "draft line not found"
+            assert float(line_row["quantity"]) == 3.0
+
+            # No DriverRate rows were created for this pay item's rate types
+            rate_count = (await direct_db.execute(
+                _text("""
+                    SELECT COUNT(*) FROM payroll.driverrates dr
+                    JOIN payroll.payitemratetypemap pm ON pm.ratetypeid = dr.ratetypeid
+                    WHERE pm.payitemid = :pid
+                """),
+                {"pid": pay_item_id},
+            )).scalar_one()
+            assert rate_count == 0
+        finally:
+            await direct_db.execute(
+                _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid AND linetype = :lt"),
+                {"pid": pid, "lt": item_code},
+            )
+            await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
+
+    @pytest.mark.asyncio
+    async def test_save_time_cdpi_value(  # noqa: too-many-locals
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_branch_id: int,
+        paytest_driver_id: int,
+        direct_db,
+    ):
+        """Test 4: Time CDPI item gets is_time=True; saving a decimal hours value works."""
+        from sqlalchemy import text as _text
+
+        cid = (await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+            {"bid": paytest_branch_id},
+        )).scalar_one()
+
+        pid = dg1_period["payroll_period_id"]
+        item_code = "DG1_TIM_T4"
+        wdate_str = "2081-03-07"
+        from datetime import date as _date
+        wdate = _date(2081, 3, 7)
+        pay_item_id = await _seed_payitem(
+            direct_db, code=item_code, name="DG1 Time Item",
+            company_id=cid, datatype="Time",
+        )
+        try:
+            await _activate_for_branch(
+                direct_db, pay_item_id=pay_item_id,
+                company_id=cid, branch_id=paytest_branch_id,
+            )
+
+            # GET: is_time must be True for Time DataType items
+            get_resp = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": wdate_str},
+                headers=auth(auth_token),
+            )
+            assert get_resp.status_code == 200, get_resp.text
+            col = next(
+                (c for c in get_resp.json()["columns"] if c["pay_item_code"] == item_code),
+                None,
+            )
+            assert col is not None, f"{item_code} not in columns"
+            assert col["is_time"] is True
+
+            # POST: save a time value (4.5 hours as decimal)
+            resp = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                json={
+                    "work_date": wdate_str,
+                    "rows": [{"driver_id": paytest_driver_id, "values": {item_code: "4.5"}}],
+                },
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200, resp.text
+
+            line_row = (await direct_db.execute(
+                _text("""
+                    SELECT quantity FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND driverid = :did
+                      AND workdate = :dt AND linetype = :lt AND status != 'Void'
+                """),
+                {"pid": pid, "did": paytest_driver_id, "dt": wdate, "lt": item_code},
+            )).mappings().first()
+            assert line_row is not None
+            assert float(line_row["quantity"]) == 4.5  # noqa: PLR2004
+        finally:
+            await direct_db.execute(
+                _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid AND linetype = :lt"),
+                {"pid": pid, "lt": item_code},
+            )
+            await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
+
+    @pytest.mark.asyncio
+    async def test_unknown_and_inactive_codes_rejected(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_branch_id: int,
+        paytest_driver_id: int,
+        direct_db,
+    ):
+        """Test 5: unknown PayItemCode → 422; inactive CDPI code → 422."""
+        from sqlalchemy import text as _text
+
+        cid = (await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+            {"bid": paytest_branch_id},
+        )).scalar_one()
+
+        pid = dg1_period["payroll_period_id"]
+        wdate = "2081-03-08"
+
+        # Unknown code rejected
+        resp_unknown = await session_client.post(
+            f"/payroll/periods/{pid}/day-grid",
+            json={"work_date": wdate, "rows": [{"driver_id": paytest_driver_id, "values": {"TOTALLY_UNKNOWN": "5"}}]},
+            headers=auth(auth_token),
+        )
+        assert resp_unknown.status_code == 422, resp_unknown.text
+
+        # Inactive (no BranchPayItemConfig) CDPI code rejected
+        item_code = "DG1_INACT_T5"
+        pay_item_id = await _seed_payitem(
+            direct_db, code=item_code, name="DG1 Inactive Item",
+            company_id=cid, datatype="Decimal",
+        )
+        try:
+            # Do NOT activate → isdefaultbranchactive=FALSE means not in active_col_codes
+            resp_inactive = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                json={"work_date": wdate, "rows": [{"driver_id": paytest_driver_id, "values": {item_code: "2"}}]},
+                headers=auth(auth_token),
+            )
+            assert resp_inactive.status_code == 422, resp_inactive.text
+        finally:
+            await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
+
+    @pytest.mark.asyncio
+    async def test_direct_created_item_hidden_until_branch_activation(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_branch_id: int,
+        direct_db,
+    ):
+        """Test 6: direct-created CDPI item is hidden until activated for the branch."""
+        from sqlalchemy import text as _text
+
+        cid = (await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+            {"bid": paytest_branch_id},
+        )).scalar_one()
+
+        pid = dg1_period["payroll_period_id"]
+        item_code = "DG1_DIRECT_T6"
+        pay_item_id = await _seed_payitem(
+            direct_db, code=item_code, name="DG1 Direct Item",
+            company_id=cid, datatype="Decimal",
+        )
+        try:
+            # Before activation: not in columns
+            resp1 = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": DG1_WORK_DATE},
+                headers=auth(auth_token),
+            )
+            assert resp1.status_code == 200
+            codes_before = {c["pay_item_code"] for c in resp1.json()["columns"]}
+            assert item_code not in codes_before
+
+            # Activate via branch config
+            await _activate_for_branch(
+                direct_db, pay_item_id=pay_item_id,
+                company_id=cid, branch_id=paytest_branch_id,
+            )
+
+            # After activation: appears in columns
+            resp2 = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": DG1_WORK_DATE},
+                headers=auth(auth_token),
+            )
+            assert resp2.status_code == 200
+            codes_after = {c["pay_item_code"] for c in resp2.json()["columns"]}
+            assert item_code in codes_after
+        finally:
+            await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
+
+    @pytest.mark.asyncio
+    async def test_existing_day_grid_behavior_unchanged(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        dg1_period: dict,
+        paytest_driver_id: int,
+    ):
+        """Test 7: standard HOURS/MILES save still works after DG-1 changes."""
+        pid = dg1_period["payroll_period_id"]
+        wdate = "2081-03-09"
+        resp = await session_client.post(
+            f"/payroll/periods/{pid}/day-grid",
+            json={
+                "work_date": wdate,
+                "rows": [{"driver_id": paytest_driver_id, "values": {"HOURS": "8", "MILES": "120"}}],
+            },
+            headers=auth(auth_token),
+        )
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()["rows"]
+        drv_row = next((r for r in rows if r["driver_id"] == paytest_driver_id), None)
+        assert drv_row is not None
+        assert "HOURS" in drv_row["values"]
+        assert drv_row["values"]["HOURS"]["quantity"] == "8.0000"

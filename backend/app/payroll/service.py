@@ -8593,7 +8593,7 @@ async def get_day_grid(
     # ── Load active Daily columns for the branch ─────────────────────────── #
     cols_result = await db.execute(
         text("""
-            SELECT pi.payitemcode, pi.payitemname, pi.ratebehavior
+            SELECT pi.payitemcode, pi.payitemname, pi.ratebehavior, pi.datatype
             FROM   payroll.payitems pi
             LEFT JOIN payroll.branchpayitemconfig bpic
                    ON bpic.payitemid  = pi.payitemid
@@ -8618,7 +8618,7 @@ async def get_day_grid(
             pay_item_code=code,
             label=row["payitemname"] or code,
             rate_behavior=row["ratebehavior"] or "None",
-            is_time=(code in ("HOURS", "WAIT_TIME")),
+            is_time=(code in ("HOURS", "WAIT_TIME")) or (row["datatype"] == "Time"),
         ))
 
     # ── Load status keys for the branch ──────────────────────────────────── #
@@ -8857,6 +8857,31 @@ async def save_day_grid(
 
     branch_id = period.branch_id
 
+    # ── Load active Daily columns for this branch/date ───────────────────── #
+    # Used in Phase 1 to reject unknown or branch-inactive PayItemCodes before
+    # any DB writes, preserving all-or-nothing atomicity for the batch.
+    _active_cols_result = await db.execute(
+        text("""
+            SELECT pi.payitemcode
+            FROM   payroll.payitems pi
+            LEFT JOIN payroll.branchpayitemconfig bpic
+                   ON bpic.payitemid  = pi.payitemid
+                  AND bpic.companyid  = :cid
+                  AND bpic.branchid   = :bid
+                  AND bpic.effectivefrom <= :dt
+                  AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
+            WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
+              AND  pi.itemscope  = 'Daily'
+              AND  pi.status    != 'Retired'
+              AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+        """),
+        {"cid": company_id, "bid": branch_id, "dt": work_date},
+    )
+    active_col_codes: set[str] = {
+        _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])
+        for r in _active_cols_result.mappings().all()
+    }
+
     # ── Phase 1: validate ALL inputs before any DB writes ────────────────── #
     # P1 #2: strict quantity parsing (non-numeric → 422 before writes)
     # P1 #3: status key validation (invalid/inactive → 422 before writes)
@@ -8882,10 +8907,19 @@ async def save_day_grid(
                 detail=f"Driver {driver_id} is not eligible for this branch or work date.",
             )
 
-        # P1 #2: parse all quantities — raises 422 on any non-numeric value
+        # P1 #2: parse all quantities; reject unknown or branch-inactive codes
+        # before any writes so the batch is rejected atomically.
         parsed_values: dict[str, "Decimal | None"] = {}
         for pay_item_code, raw_val in save_row.values.items():
             canonical = _LEGACY_TO_CANONICAL.get(pay_item_code, pay_item_code)
+            if canonical not in active_col_codes:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Pay item '{canonical}' is not an active daily column "
+                        "for this period branch and date."
+                    ),
+                )
             parsed_values[canonical] = _parse_quantity(raw_val, canonical)
 
         # P1 #3: validate status key — raises 422 for invalid/inactive.
