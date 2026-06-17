@@ -163,3 +163,80 @@ async def test_direct_create_no_auth(client):
         json={"item_name": "x", "input_type": "Number", "calc_method_key": "PerUnit"},
     )
     assert resp.status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# 6. Pay Items page filter regression — all status filter values used by UI
+#    (root cause: stale pre-50e5e93 server on 127.0.0.1:8000 returned 500;
+#     fresh server returns 200 for all these variants)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_list_requests_filter_pending(client, auth_token, hq_branch_id):
+    """GET requests?status=PendingCompanyApproval (Pay Items page default filter) → 200."""
+    resp = await client.get(
+        "/settings/cdpi/requests",
+        params={"status": "PendingCompanyApproval"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 200, f"Expected 200; got {resp.status_code}: {resp.text}"
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_list_requests_filter_approved(client, auth_token):
+    """GET requests?status=Approved → 200."""
+    resp = await client.get(
+        "/settings/cdpi/requests",
+        params={"status": "Approved"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_list_requests_filter_rejected(client, auth_token):
+    """GET requests?status=Rejected → 200."""
+    resp = await client.get(
+        "/settings/cdpi/requests",
+        params={"status": "Rejected"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_list_requests_filter_all(client, auth_token):
+    """GET requests (no status filter) → 200, returns list."""
+    resp = await client.get(
+        "/settings/cdpi/requests",
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_list_requests_with_branch_filter(client, auth_token, hq_branch_id):
+    """GET requests?branch_id=<id> → 200 (branch scope filter used by branch users)."""
+    resp = await client.get(
+        "/settings/cdpi/requests",
+        params={"branch_id": hq_branch_id},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_list_requests_combined_filter(client, auth_token, hq_branch_id):
+    """GET requests?status=PendingCompanyApproval&branch_id=<id> → 200."""
+    resp = await client.get(
+        "/settings/cdpi/requests",
+        params={"status": "PendingCompanyApproval", "branch_id": hq_branch_id},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
