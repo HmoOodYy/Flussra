@@ -668,6 +668,7 @@ async def test_cf6_standard_hours_calculation_unaffected(
     calculatedamount and finalizes correctly.
     """
     pid = None
+    rate_id = None
 
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
@@ -729,3 +730,11 @@ async def test_cf6_standard_hours_calculation_unaffected(
     finally:
         if pid:
             await _force_cleanup_period(direct_db, pid)
+        if rate_id:
+            # Delete the HOURLY rate created for the shared paytest_driver_id so
+            # subsequent tests that create an HOURLY rate for this driver are not
+            # blocked by the "approved rate already exists" guard.
+            await direct_db.execute(
+                _text("DELETE FROM payroll.driverrates WHERE driverrateid = :rid"),
+                {"rid": rate_id},
+            )
