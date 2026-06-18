@@ -30,6 +30,7 @@
   --color-success-light: #F0FDF4;
   --color-warning: #D97706;
   --color-warning-light: #FFFBEB;
+  --color-warning-border: #FDE68A;
   --color-danger: #DC2626;
   --color-danger-light: #FEF2F2;
   --color-info: #2563EB;
@@ -92,6 +93,7 @@
   --font-weight-bold: 700;
 
   /* Z-index */
+  --z-action-bar: 100;
   --z-dropdown: 200;
   --z-modal: 300;
   --z-confirm: 400;

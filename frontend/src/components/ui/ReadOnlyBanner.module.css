@@ -44,7 +44,7 @@
 
 .toneWarning {
   background: var(--color-warning-light);
-  border-color: #fde68a;
+  border-color: var(--color-warning-border);
   color: var(--color-warning);
 }
 

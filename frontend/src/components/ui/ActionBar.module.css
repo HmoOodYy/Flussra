@@ -24,7 +24,7 @@
   background: var(--surface-card);
   border-top: 1px solid var(--border-default);
   padding: var(--space-3) var(--space-6);
-  z-index: var(--z-dropdown);
+  z-index: var(--z-action-bar);
 }
 
 @media (max-width: 600px) {
