@@ -1,8 +1,29 @@
+---
+name: flussra-ui-implementation-guard
+description: Use before any frontend implementation for Flussra. Enforces scoped, safe changes that preserve payroll behavior, permissions, branch scoping, route protection, and existing API/form behavior.
+---
+
 # Skill: Flussra UI Implementation Guard
 
 **Invoke this skill before any frontend implementation for Flussra.**
 
 This skill enforces safe, scoped implementation behavior. It prevents accidental breakage of payroll behavior, permissions, branch scoping, or route protection when making frontend changes.
+
+---
+
+## Always Ask First — Stop and Get Approval Before Implementing
+
+Stop and explicitly ask the user for approval before writing any code if the task meets any of the following conditions:
+
+- **The task affects more than one page** — multi-page changes must be reviewed individually; do not implement them together without explicit approval for each page
+- **The task requires touching shared components used across multiple pages** — changes to `AppShell`, `ConfirmDialog`, `StatusBadge`, `PermissionGate`, or any future shared primitive component affect every page that uses them; these require explicit confirmation
+- **The task may change permissions, branch scoping, API payloads, routing, form submission, or validation behavior** — even if the change appears cosmetic, stop if any of these paths are in scope
+- **The task may touch PayItemsPage files** — `PayItemsPage.tsx` and `PayItemsPage.module.css` have pre-existing uncommitted modifications; touching them without explicit instruction would corrupt in-progress work
+- **The task introduces a new visual pattern that should become shared** — if the implementation requires a new component that will be needed on other pages, stop and propose it as a shared primitive before building it inline
+- **The implementation requires more than 3 unrelated files** — touching many unrelated files is a scope-creep signal; confirm the full file list with the user before proceeding
+- **The task conflicts with the local Flussra skills or canonical handoff** — if the requested implementation would violate `AI_FRONTEND_HANDOFF_PAYROLL_APP.md` constraints or the Flussra local skills, stop and surface the conflict explicitly rather than proceeding
+
+When stopping, clearly state **which condition was triggered** and what specific approval or clarification is needed before proceeding.
 
 ---
 
@@ -78,7 +99,7 @@ These constraints are in effect for all frontend work unless **explicitly lifted
 
 ## Required Pre-Implementation Checklist
 
-Before writing the first line of code for any frontend task, confirm:
+Before writing the first line of code for any frontend task, confirm every item:
 
 - [ ] The task is scoped to a specific page or component — not "all pages"
 - [ ] No payroll calculation paths are in scope
@@ -88,8 +109,12 @@ Before writing the first line of code for any frontend task, confirm:
 - [ ] `PayItemsPage.tsx` and `PayItemsPage.module.css` are out of scope
 - [ ] The change does not alter form submission or API payload behavior (unless task explicitly requires it)
 - [ ] DAC is not being implemented
+- [ ] The task does not affect more than one page (or multi-page scope has been explicitly approved)
+- [ ] No shared component used across multiple pages is being changed (or the change has been explicitly approved)
+- [ ] The number of files to be changed is ≤ 3, or the full file list has been confirmed with the user
+- [ ] The task does not conflict with `AI_FRONTEND_HANDOFF_PAYROLL_APP.md` or the Flussra local skills
 
-If any item cannot be confirmed, stop and ask the user to clarify scope before proceeding.
+If any item cannot be confirmed, **stop and ask the user to clarify scope before proceeding**.
 
 ---
 
