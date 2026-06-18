@@ -47,5 +47,11 @@ migrations/__pycache__/
 # Dev tunnel scratch dir (temp scripts + cloudflared logs)
 .dev-tunnel/
 
-# Claude Code editor settings
-.claude/
+# Claude Code editor settings — keep local/runtime files ignored
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/flussra-ui-product-designer/
+!.claude/skills/flussra-ui-product-designer/SKILL.md
+!.claude/skills/flussra-ui-implementation-guard/
+!.claude/skills/flussra-ui-implementation-guard/SKILL.md
