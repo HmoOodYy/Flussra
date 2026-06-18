@@ -5,6 +5,7 @@ import { useAuth } from '../../../store/authStore';
 import type { CompanyProfile, CompanyUpdate, BranchAdmin } from '../../../types/settings';
 import { CompanyStatusBadge, BranchStatusBadge } from '../../../components/StatusBadge';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
+import { EmptyState, ErrorState, ReadOnlyBanner } from '../../../components/ui';
 import styles from './CompanyBranchesPage.module.css';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -275,11 +276,19 @@ export function CompanyBranchesPage() {
         </div>
       )}
 
+      {!canEdit && (
+        <ReadOnlyBanner
+          tone="locked"
+          title="View only"
+          message="You don't have permission to edit company or branch settings."
+        />
+      )}
+
       {/* ── Company card ── */}
       {companyLoading ? (
         <div className={styles.companyCard}><SkeletonBlock /></div>
       ) : companyError ? (
-        <div className={styles.errorAlert}><AlertIcon /> {companyError}</div>
+        <ErrorState message={companyError} />
       ) : company && (
         <div className={styles.companyCard}>
           <div className={styles.companyCardTop}>
@@ -300,7 +309,6 @@ export function CompanyBranchesPage() {
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              {!canEdit && <span className={styles.readonlyNote}><LockIcon /> Read-only</span>}
               {canEdit && (
                 <button className={styles.btnSecondary} onClick={startEditCo}>
                   <EditIcon /> Edit Company
@@ -437,14 +445,16 @@ export function CompanyBranchesPage() {
               <div style={{ padding: '1.5rem' }}><SkeletonBlock /></div>
             </div>
           ) : branchesError ? (
-            <div className={styles.errorAlert}><AlertIcon /> {branchesError}</div>
+            <ErrorState message={branchesError} />
           ) : filtered.length === 0 ? (
             <div className={styles.tableWrap}>
-              <div className={styles.emptyState}>
-                {searchQuery.trim()
-                  ? `No branches match "${searchQuery.trim()}".`
-                  : `No ${filter !== 'All' ? filter.toLowerCase() + ' ' : ''}branches found.`}
-              </div>
+              <EmptyState
+                title={
+                  searchQuery.trim()
+                    ? `No branches match "${searchQuery.trim()}".`
+                    : `No ${filter !== 'All' ? filter.toLowerCase() + ' ' : ''}branches found.`
+                }
+              />
             </div>
           ) : (
             <div className={styles.tableWrap}>
@@ -968,9 +978,6 @@ function WarnIcon() {
 }
 function StarIcon() {
   return <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>;
-}
-function LockIcon() {
-  return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>;
 }
 function CloseIcon() {
   return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>;

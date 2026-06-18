@@ -710,13 +710,7 @@
 .btnSetDefault:hover:not(:disabled) { background: #fffbeb; border-color: #f59e0b; }
 .btnSetDefault:disabled { opacity: 0.55; cursor: not-allowed; }
 
-/* ── Empty / loading ── */
-.emptyState {
-  padding: 3rem 1.5rem;
-  text-align: center;
-  color: #94a3b8;
-  font-size: 0.875rem;
-}
+/* .emptyState removed — replaced by EmptyState primitive */
 
 /* ═══════════════════════════════════════════════════════
    KPI COLUMN — modern metrics panel
@@ -957,13 +951,7 @@
   font-size: 0.84rem;
 }
 
-.readonlyNote {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.78rem;
-  color: #94a3b8;
-}
+/* .readonlyNote removed — replaced by ReadOnlyBanner primitive */
 
 /* ── Skeleton ── */
 .skeleton {
