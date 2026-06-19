@@ -86,7 +86,10 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
     #   POST /review/items/{id}/decide with decision='EditRequested' → period Open
     # InReview → Open is kept for manual return / payroll admin override.
     "InReview": {"Open", "Cancelled"},
-    "Approved": {"InReview", "Cancelled"},
+    # CP-0C: "InReview" removed — Approved→InReview left a period in InReview
+    # with no active Pending PeriodApproval item and no review path forward.
+    # The only valid exit from Approved is Cancelled (admin) or Locked (finalize).
+    "Approved": {"Cancelled"},
     "Locked":   {"Archived"},
     "Cancelled": set(),
     "Archived":  set(),

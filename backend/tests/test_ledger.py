@@ -608,6 +608,7 @@ class TestFinalLines:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """GET final-lines for an Approved (not yet finalized) period returns 422.
 
@@ -649,21 +650,11 @@ class TestFinalLines:
                 f"got {resp.status_code}: {resp.text}"
             )
         finally:
-            # Approved → InReview (no review item) → Open → Cancelled
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "InReview"},
-                headers=headers,
-            )
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Open"},
-                headers=headers,
-            )
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
+            # CP-0C: Approved→InReview is now blocked. Force directly to Cancelled.
+            from sqlalchemy import text as _text
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                {"pid": pid},
             )
 
     @pytest.mark.asyncio

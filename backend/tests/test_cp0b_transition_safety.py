@@ -8,7 +8,9 @@ silently overwrite the current state.
 
 Safe paths verified here:
   - All 'else-branch' transitions (Draft→Open, Open→Cancelled, InReview→Open,
-    InReview→Cancelled, Approved→InReview, Approved→Cancelled, Locked→Archived)
+    InReview→Cancelled, Approved→Cancelled, Locked→Archived)
+  - Approved→InReview was removed from _VALID_TRANSITIONS (CP-0C); its test was
+    updated to expect 422 rejection.
     now use WHERE ... AND status = :old_status RETURNING (CP-0B fix).
   - Open→InReview already had WHERE status='Open' RETURNING (CP-0A era, safe).
   - Finalization (Approved→Locked) already had WHERE status='Approved' RETURNING.
@@ -194,15 +196,17 @@ class TestTransitionPredicates:
         assert r.status_code == 200, f"InReview→Cancelled failed: {r.text}"
         assert r.json()["status"] == "Cancelled"
 
-    async def test_approved_to_inreview_manual_succeeds(
+    async def test_approved_to_inreview_now_rejected(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
-        # Approved→InReview is product-wrong (CP-0C scope) but still protected by
-        # the expected-status predicate in CP-0B.
+        # CP-0C: Approved→InReview is now blocked at the schema level.
+        # It was removed from _VALID_TRANSITIONS because it left the period in
+        # InReview with no active Pending PeriodApproval item — no review path
+        # forward existed, and any concurrent decide_review_item call would fail.
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "Approved")
         r = await client.patch(
@@ -210,10 +214,11 @@ class TestTransitionPredicates:
             json={"status": "InReview"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"Approved→InReview failed: {r.text}"
-        assert r.json()["status"] == "InReview"
+        assert r.status_code == 422, (
+            f"Expected 422 for Approved→InReview (now blocked), got {r.status_code}: {r.text}"
+        )
 
-        # cleanup
+        # cleanup — period is still Approved; cancel it directly
         await _force_status(direct_db, pid, "Cancelled")
 
     async def test_approved_to_cancelled_succeeds(

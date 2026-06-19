@@ -54,12 +54,13 @@ from app.payroll.schemas import (
 # these are irreversible or senior-level decisions.
 _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     ("Draft",    "Open"):       "payroll.entry",
+    ("Draft",    "Cancelled"):  "payroll.finalize",   # CP-0C: was missing — any user could cancel Draft
     ("Open",     "InReview"):   "payroll.entry",
     ("Open",     "Cancelled"):  "payroll.finalize",
     ("InReview", "Open"):       "payroll.finalize",
     # M16: ("InReview", "Approved") removed — now exclusively via review decision.
     ("InReview", "Cancelled"):  "payroll.finalize",
-    ("Approved", "InReview"):   "payroll.finalize",
+    # CP-0C: ("Approved", "InReview") removed — transition blocked at schema level.
     ("Approved", "Cancelled"):  "payroll.finalize",
     ("Locked",   "Archived"):   "payroll.finalize",
 }
@@ -978,6 +979,50 @@ async def change_period_status(
     notes_set = ", notes = :notes" if change.notes is not None else ""
     notes_params = {"notes": change.notes} if change.notes is not None else {}
 
+    # CP-0C: Deadlock-safe review item lock acquisition for InReview exits.
+    #
+    # Lock ordering requirement:
+    #   decide_review_item() acquires: ReviewItem (FOR UPDATE) → Period (UPDATE)
+    #   This path must use the same order:  ReviewItem (FOR UPDATE) → Period (UPDATE)
+    #
+    # If we updated the period first and then cancelled the review item we would
+    # hold Period and then wait for ReviewItem — the opposite of decide_review_item's
+    # order — and the two transactions could deadlock.
+    #
+    # Solution: for the two transitions that must cancel a Pending PeriodApproval
+    # item (InReview→Open, InReview→Cancelled), SELECT the matching item FOR UPDATE
+    # here, BEFORE the period UPDATE.  If another transaction already holds the item
+    # row lock (e.g. a concurrent review decision), we wait on it.  Once we acquire
+    # it the period UPDATE follows under the same lock order as decide_review_item.
+    #
+    # If no Pending item exists (period was force-set without going through the
+    # API submit path) we record None and the period still transitions; there is
+    # no item to orphan so the later UPDATE is simply skipped.
+    _pending_review_item_id: int | None = None
+    if existing.status == "InReview" and change.status in {"Open", "Cancelled"}:
+        ri_lock_result = await db.execute(
+            text("""
+                SELECT reviewitemid FROM review.managerreviewitems
+                WHERE  companyid    = :cid
+                  AND  branchid     = :bid
+                  AND  entityschema = 'payroll'
+                  AND  entityname   = 'PayrollPeriods'
+                  AND  entityid     = :eid
+                  AND  requesttype  = 'PeriodApproval'
+                  AND  status       = 'Pending'
+                LIMIT 1
+                FOR UPDATE
+            """),
+            {
+                "cid": company_id,
+                "bid": existing.branch_id,
+                "eid": str(period_id),
+            },
+        )
+        ri_row = ri_lock_result.first()
+        if ri_row is not None:
+            _pending_review_item_id = ri_row[0]
+
     # For Open→InReview use an atomic UPDATE WHERE status='Open' RETURNING to
     # prevent a double-submit race.  Two concurrent requests that both passed the
     # duplicate-Pending guard could both try to update; only the first succeeds.
@@ -1042,6 +1087,30 @@ async def change_period_status(
                     "Please refresh and try again."
                 ),
             )
+
+    # CP-0C: Resolve the already-locked Pending review item (if one was found above).
+    # This runs only after the period UPDATE has committed its intent — if the period
+    # UPDATE raised above, we never reach this line and the transaction rolls back,
+    # leaving the review item untouched.
+    if _pending_review_item_id is not None:
+        await db.execute(
+            text("""
+                UPDATE review.managerreviewitems
+                SET    status                = 'Cancelled',
+                       finaldecisionbyuserid = :uid,
+                       finaldecisionatutc    = NOW(),
+                       finaldecisionreason   = :reason
+                WHERE  reviewitemid = :riid
+            """),
+            {
+                "uid":    user_id,
+                "reason": (
+                    f"Period manually transitioned to '{change.status}' "
+                    f"by user {user_id} — review item auto-cancelled."
+                ),
+                "riid":   _pending_review_item_id,
+            },
+        )
 
     # Audit: write inside the same transaction so a failure rolls back the UPDATE.
     await _write_period_status_audit(

@@ -144,29 +144,29 @@ async def _add_line_to_approved_period(
     token: str,
     period_id: int,
     driver_id: int,
+    direct_db,
     *,
     line_type: str = "PTO_STATUS",
     quantity: str = "1.00",
     work_date: str = "2085-01-07",
 ) -> dict:
     """
-    Steps period Approved→InReview→Open, adds a draft line, then re-approves.
+    Force period Open (bypassing the blocked Approved→InReview→Open API path),
+    add a draft line, then re-approve via the normal review flow.
     Returns the created draft line dict.
+
+    CP-0C: Approved→InReview is a blocked transition (left InReview with no
+    active PeriodApproval review item).  Use direct_db to force Open instead.
 
     Phase 4C: manual rate_amount is blocked for PerUnit lines.
     PerUnit line types (Hours, Miles, etc.) require an approved DriverRate.
     Use PTO_STATUS for lines that need no rate, or set up an approved rate first.
     """
     headers = auth(token)
-    await client.patch(
-        f"/payroll/periods/{period_id}/status",
-        json={"status": "InReview"},
-        headers=headers,
-    )
-    await client.patch(
-        f"/payroll/periods/{period_id}/status",
-        json={"status": "Open"},
-        headers=headers,
+    # Force to Open via direct DB — Approved→InReview is now blocked in production.
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
+        {"pid": period_id},
     )
     payload: dict = {
         "driver_id": driver_id,
@@ -423,6 +423,7 @@ class TestFinalizationPreview:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Locked period â†’ 422."""
         headers = auth(auth_token)
@@ -430,7 +431,7 @@ class TestFinalizationPreview:
 
         # Add a line and finalize to reach Locked (PTO_STATUS needs no approved rate)
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
         fin = await session_client.post(
@@ -463,7 +464,7 @@ class TestFinalizationPreview:
 
         # Add a normal line so period is not empty
         line = await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
         line_id = line["draft_line_id"]
@@ -509,7 +510,7 @@ class TestFinalizationPreview:
         )
         try:
             line = await _add_line_to_approved_period(
-                session_client, auth_token, pid, preview_driver_id,
+                session_client, auth_token, pid, preview_driver_id, direct_db,
                 line_type="Miles", quantity="10.00",
             )
             line_id = line["draft_line_id"]
@@ -544,6 +545,7 @@ class TestFinalizationPreview:
         auth_token: str,
         cp3a_approved_period: dict,
         preview_driver_id: int,
+        direct_db,
     ):
         """HOURS line appears in lines list and amount is reflected in driver_totals."""
         pid = cp3a_approved_period["payroll_period_id"]
@@ -556,7 +558,7 @@ class TestFinalizationPreview:
         )
         try:
             await _add_line_to_approved_period(
-                session_client, auth_token, pid, preview_driver_id,
+                session_client, auth_token, pid, preview_driver_id, direct_db,
                 line_type="Hours", quantity="8.00",
             )
 
@@ -585,6 +587,7 @@ class TestFinalizationPreview:
         cp3a_approved_period: dict,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        direct_db,
     ):
         """BONUS period-scope line appears in lines and is counted in period_pay."""
         pid = cp3a_approved_period["payroll_period_id"]
@@ -604,14 +607,10 @@ class TestFinalizationPreview:
                     headers=headers,
                 )
 
-        # Step down to open and add a period-pay BONUS line
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "InReview"}, headers=headers,
-        )
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"}, headers=headers,
+        # CP-0C: Approved→InReview is now blocked. Force directly to Open.
+        await direct_db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
+            {"pid": pid},
         )
         bonus_resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -660,11 +659,11 @@ class TestFinalizationPreview:
 
         # Add two lines: one valid, one we'll void
         line_keep = await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00", work_date="2085-01-07",
         )
         line_void = await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00", work_date="2085-01-08",
         )
 
@@ -698,12 +697,13 @@ class TestFinalizationPreview:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Clean Approved period with lines â†’ can_finalize=True, blockers=[]."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -868,7 +868,7 @@ class TestFinalizationPreview:
         headers = auth(auth_token)
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -910,12 +910,13 @@ class TestFinalizationPreview:
         cp3a_approved_period: dict,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """ODA user â†’ 403."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -945,12 +946,13 @@ class TestFinalizationPreview:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """User with only payroll.entry (no payroll.finalize) â†’ 403."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -1007,12 +1009,12 @@ class TestFinalizationPreview:
         )
         try:
             await _add_line_to_approved_period(
-                session_client, auth_token, pid, paytest_driver_id,
+                session_client, auth_token, pid, paytest_driver_id, direct_db,
                 line_type="Hours", quantity="8.00",
                 work_date="2085-01-07",
             )
             await _add_line_to_approved_period(
-                session_client, auth_token, pid, paytest_driver_id,
+                session_client, auth_token, pid, paytest_driver_id, direct_db,
                 line_type="Miles", quantity="100.00",
                 work_date="2085-01-08",
             )
@@ -1101,12 +1103,13 @@ class TestFinalizeODABlock:
         cp3a_approved_period: dict,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """ODA user with payroll.finalize gets 403 on POST finalize."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -1144,7 +1147,7 @@ class TestFinalizeODABlock:
         headers = auth(auth_token)
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -1192,12 +1195,13 @@ class TestFinalizeODABlock:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """User with payroll.entry but no payroll.finalize gets 403 on POST finalize."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -1225,12 +1229,13 @@ class TestFinalizeODABlock:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Operational user (AllCompanyBranches + payroll.finalize) can finalize."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -1261,12 +1266,13 @@ class TestFinalizeODABlock:
         cp3a_approved_period: dict,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Regression: preview ODA block still works after finalize guard addition."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
         )
 
@@ -1303,6 +1309,7 @@ class TestPreviewResponseShape:
         auth_token: str,
         cp3a_approved_period: dict,
         preview_driver_id: int,
+        direct_db,
     ):
         """Each preview line must have a backend-computed final_amount."""
         pid = cp3a_approved_period["payroll_period_id"]
@@ -1316,7 +1323,7 @@ class TestPreviewResponseShape:
         )
         try:
             await _add_line_to_approved_period(
-                session_client, auth_token, pid, preview_driver_id,
+                session_client, auth_token, pid, preview_driver_id, direct_db,
                 line_type="Hours", quantity="8.00",
                 work_date="2085-01-07",
             )
@@ -1348,13 +1355,14 @@ class TestPreviewResponseShape:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Without SYS rows: draft_line_count==N, sys_adjustment_count==0, final_line_count_estimate==N."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
             work_date="2085-01-08",
         )
@@ -1382,6 +1390,7 @@ class TestPreviewResponseShape:
         cp3a_approved_period: dict,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        direct_db,
     ):
         """With a SYS_MIN_TOPUP: final_line_count_estimate == draft_line_count + 1."""
         pid = cp3a_approved_period["payroll_period_id"]
@@ -1389,7 +1398,7 @@ class TestPreviewResponseShape:
 
         # Add a PTO_STATUS line (finalamount=$0) so driver is below any minimum pay rule
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
             work_date="2085-01-09",
         )
@@ -1444,6 +1453,7 @@ class TestPreviewResponseShape:
         auth_token: str,
         cp3a_approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         Preview SYS_MIN_TOPUP adjustment_amount = min_pay - gross_pay.
@@ -1455,7 +1465,7 @@ class TestPreviewResponseShape:
         headers = auth(auth_token)
 
         await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id,
+            session_client, auth_token, pid, paytest_driver_id, direct_db,
             line_type="PTO_STATUS", quantity="1.00",
             work_date="2085-01-10",
         )

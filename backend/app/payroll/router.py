@@ -176,8 +176,9 @@ async def create_period(
         "Allowed transitions:\n"
         "- **Draft** → Open | Cancelled\n"
         "- **Open** → InReview | Cancelled\n"
-        "- **InReview** → Approved | Open | Cancelled\n"
-        "- **Approved** → InReview | Cancelled\n"
+        "- **InReview** → Open | Cancelled\n"
+        "  *(InReview → Approved uses POST /review/items/{id}/decide)*\n"
+        "- **Approved** → Cancelled\n"
         "  *(Approved → Locked uses POST /periods/{id}/finalize)*\n"
         "- **Locked** → Archived\n"
     ),

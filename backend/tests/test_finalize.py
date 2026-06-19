@@ -251,6 +251,7 @@ async def _add_line(
     token: str,
     period_id: int,
     driver_id: int,
+    direct_db,
     *,
     line_type: str = "PTO_STATUS",
     quantity: str = "1.00",
@@ -271,18 +272,15 @@ async def _add_line(
     Phase 4C: manual rate_amount is blocked for PerUnit lines.
     PerUnit line types (Hours, Miles, Wait, etc.) require an approved DriverRate.
     """
+    from sqlalchemy import text as _text
     headers = auth(token)
 
-    # Approved -> InReview (no review item created for Approved→InReview) -> Open
-    await client.patch(
-        f"/payroll/periods/{period_id}/status",
-        json={"status": "InReview"},
-        headers=headers,
-    )
-    await client.patch(
-        f"/payroll/periods/{period_id}/status",
-        json={"status": "Open"},
-        headers=headers,
+    # CP-0C: Approved→InReview is now a blocked transition (removed from valid transitions
+    # because it left InReview with no active PeriodApproval review item).
+    # Force directly to Open via direct_db bypass instead.
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
+        {"pid": period_id},
     )
 
     payload: dict = {
@@ -355,9 +353,10 @@ class TestFinalizePeriod:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         pid = approved_period["payroll_period_id"]
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
         resp = await client.post(
             f"/payroll/periods/{pid}/finalize",
             headers=auth(auth_token),
@@ -373,12 +372,13 @@ class TestFinalizePeriod:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         pid = approved_period["payroll_period_id"]
 
         # Seed two non-Void draft lines (PTO_STATUS requires no approved rate)
-        await _add_line(client, auth_token, pid, paytest_driver_id)
-        await _add_line(client, auth_token, pid, paytest_driver_id, work_date="2032-01-08")
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db, work_date="2032-01-08")
 
         resp = await client.post(
             f"/payroll/periods/{pid}/finalize",
@@ -403,25 +403,22 @@ class TestFinalizePeriod:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Voided draft lines must be excluded from FinalLines."""
+        from sqlalchemy import text as _text
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
         # Seed one non-voided PTO_STATUS line so finalization has something to lock.
         # _add_line steps the period: Approved -> Open -> (add line) -> Approved.
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
 
-        # Step down to Open again: Approved→InReview (no new review item created)→Open
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "InReview"},
-            headers=headers,
-        )
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=headers,
+        # CP-0C: Approved→InReview is now a blocked transition.
+        # Force directly to Open via direct_db to add the to-be-voided line.
+        await direct_db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
+            {"pid": pid},
         )
         r = await client.post(
             f"/payroll/periods/{pid}/lines",
@@ -461,6 +458,7 @@ class TestFinalizePeriod:
         approved_period: dict,
         paytest_driver_id: int,
         paytest_mileage_rate_type_id: int,
+        direct_db,
     ):
         """FinalAmount = quantity * approved_rate when calculatedamount is set."""
         pid = approved_period["payroll_period_id"]
@@ -470,7 +468,7 @@ class TestFinalizePeriod:
         )
         try:
             await _add_line(
-                client, auth_token, pid, paytest_driver_id,
+                client, auth_token, pid, paytest_driver_id, direct_db,
                 line_type="Miles", quantity="100.00",
             )
 
@@ -555,12 +553,13 @@ class TestFinalizePeriod:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Calling finalize a second time on a now-Locked period must return 422."""
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
 
         # First finalization
         r1 = await client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
@@ -671,11 +670,12 @@ class TestGetFinalLines:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Check that every expected field is present and typed correctly."""
         pid = approved_period["payroll_period_id"]
         await _add_line(
-            client, auth_token, pid, paytest_driver_id,
+            client, auth_token, pid, paytest_driver_id, direct_db,
         )
         await client.post(
             f"/payroll/periods/{pid}/finalize",
@@ -706,9 +706,10 @@ class TestGetFinalLines:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         pid = approved_period["payroll_period_id"]
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
         await client.post(
             f"/payroll/periods/{pid}/finalize",
             headers=auth(auth_token),
@@ -749,11 +750,12 @@ class TestGetFinalLines:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """draft_line_id on the FinalLine must reference the original DraftLine."""
         pid = approved_period["payroll_period_id"]
         draft = await _add_line(
-            client, auth_token, pid, paytest_driver_id,
+            client, auth_token, pid, paytest_driver_id, direct_db,
         )
         await client.post(
             f"/payroll/periods/{pid}/finalize",
@@ -782,6 +784,7 @@ class TestFinalizationSafety:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         If _write_finalization_audit raises after the main writes, the entire
@@ -797,7 +800,7 @@ class TestFinalizationSafety:
         headers = auth(auth_token)
 
         # Seed one draft line so the INSERT step has something to copy.
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
 
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure — rollback expected")
@@ -882,6 +885,7 @@ class TestFinalizationSafety:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         After finalization, editing or voiding a draft line must return 422.
@@ -890,7 +894,7 @@ class TestFinalizationSafety:
         headers = auth(auth_token)
 
         # Add a line (helper steps through Approved → Open → Approved)
-        draft = await _add_line(client, auth_token, pid, paytest_driver_id)
+        draft = await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
         lid = draft["draft_line_id"]
 
         # Finalize → Locked
@@ -919,12 +923,13 @@ class TestFinalizationSafety:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """From Locked the only permitted PATCH transition is → Archived."""
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
         await client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
 
         # Attempt an illegal backward move
@@ -952,6 +957,7 @@ class TestFinalizationSafety:
         auth_token: str,
         approved_period: dict,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         ux_PayrollFinalLines_Period_DraftLine enforces that each DraftLineID
@@ -965,7 +971,7 @@ class TestFinalizationSafety:
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        await _add_line(client, auth_token, pid, paytest_driver_id)
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
 
         # First finalization — must succeed
         r1 = await client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
