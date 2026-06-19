@@ -1040,8 +1040,45 @@ async def change_period_status(
 # Draft lines — entry service
 # ===========================================================================
 
-# Periods frozen to all writes (status change or finalization required first).
-_WRITE_BLOCKED_STATUSES = {"Draft", "Approved", "Locked", "Archived", "Cancelled"}
+# CP-0A: Periods frozen to all source mutations.
+# InReview is now included: once a period enters review it must not be
+# mutated.  Open is the only editable status.
+_WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"}
+
+async def _lock_period_for_mutation(
+    period_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    CP-0A: Lock the PayrollPeriods row FOR UPDATE and verify it is still Open.
+
+    Must be called immediately before the first DML write in every source
+    mutation path.  The lock ensures that a concurrent status transition
+    (e.g. Open→InReview) cannot commit after this mutation has already passed
+    the upfront status check but before it writes.
+
+    Raises HTTP 409 Conflict when the current status is not Open.
+    """
+    result = await db.execute(
+        text(
+            "SELECT status FROM payroll.payrollperiods "
+            "WHERE payrollperiodid = :pid AND companyid = :cid "
+            "FOR UPDATE"
+        ),
+        {"pid": period_id, "cid": company_id},
+    )
+    row = result.mappings().first()
+    current_status = row["status"] if row else "unknown"
+    if current_status != "Open":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Period is no longer Open (current status: '{current_status}'). "
+                "The mutation was rejected to preserve payroll data integrity."
+            ),
+        )
+
 
 _LINE_SELECT = """
     SELECT
@@ -1933,7 +1970,7 @@ async def add_draft_line(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Draft lines can only be added to Open or InReview periods "
+                f"Draft lines can only be added to Open periods "
                 f"(current status: '{period.status}')."
             ),
         )
@@ -2055,6 +2092,9 @@ async def add_draft_line(
                 "Update the existing line instead."
             ),
         )
+
+    # CP-0A: Recheck period status under a row-level lock before writing.
+    await _lock_period_for_mutation(period_id, company_id, db)
 
     insert_result = await db.execute(
         text("""
@@ -2276,6 +2316,8 @@ async def update_draft_line(
             )
 
     if fields:
+        # CP-0A: Recheck period status under a row-level lock before writing.
+        await _lock_period_for_mutation(period_id, company_id, db)
         set_clause = ", ".join(f"{col} = :{col}" for col in fields)
         await db.execute(
             text(f"UPDATE payroll.payrolldraftlines SET {set_clause} WHERE draftlineid = :line_id"),
@@ -2322,6 +2364,9 @@ async def void_draft_line(
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
     if line.status == "Void":
         return  # Idempotent
+
+    # CP-0A: Recheck period status under a row-level lock before writing.
+    await _lock_period_for_mutation(period_id, company_id, db)
 
     await db.execute(
         text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :line_id"),
@@ -6045,7 +6090,7 @@ async def add_period_pay_line(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Period Pay lines can only be added to Open or InReview periods "
+                f"Period Pay lines can only be added to Open periods "
                 f"(current status: '{period.status}')."
             ),
         )
@@ -6073,6 +6118,9 @@ async def add_period_pay_line(
     await _validate_period_line_type(
         canonical_period_lt, period.branch_id, company_id, period.start_date, db
     )
+
+    # CP-0A: Recheck period status under a row-level lock before writing.
+    await _lock_period_for_mutation(period_id, company_id, db)
 
     # Insert with the M14 storage contract:
     #   WorkDate         = NULL      (period pay discriminator)
@@ -6222,6 +6270,8 @@ async def update_period_pay_line(
         # No changes — return as-is
         return line
 
+    # CP-0A: Recheck period status under a row-level lock before writing.
+    await _lock_period_for_mutation(period_id, company_id, db)
     set_clause = ", ".join(f"{col} = :{col}" for col in fields)
     await db.execute(
         text(
@@ -6256,7 +6306,7 @@ async def void_period_pay_line(
     Void a Period Pay line (sets status = 'Void').
 
     Idempotent: voiding an already-voided line succeeds without error.
-    The period must be Open or InReview.
+    The period must be Open (CP-0A).
     ODA/Driver users are blocked unconditionally (P1 #2 security boundary).
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
@@ -6283,6 +6333,8 @@ async def void_period_pay_line(
 
     # Idempotent: already voided → return as-is
     if line.status != "Void":
+        # CP-0A: Recheck period status under a row-level lock before writing.
+        await _lock_period_for_mutation(period_id, company_id, db)
         await db.execute(
             text(
                 "UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :lid"
@@ -8837,7 +8889,7 @@ async def save_day_grid(
             status_code=403,
             detail=(
                 f"Period is not editable (status: '{period.status}'). "
-                "Only Open or InReview periods accept entry."
+                "Only Open periods accept entry."
             ),
         )
 
@@ -8957,6 +9009,11 @@ async def save_day_grid(
         )
 
     # ── Phase 2: execute DB writes (all validations passed) ──────────────── #
+    # CP-0A: Recheck period status under a row-level lock before any writes.
+    # This prevents a concurrent Open→InReview transition from slipping through
+    # between Phase 1 validation and Phase 2 writes.
+    await _lock_period_for_mutation(period_id, company_id, db)
+
     for save_row, driver_id, parsed_values, validated_status_key, _ in parsed_rows:
 
         # ── Pay item lines ────────────────────────────────────────────────── #

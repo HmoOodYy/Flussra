@@ -165,7 +165,9 @@ _VALID_SOURCE_TYPES   = {"Manual", "Import", "System"}
 _VALID_LINE_STATUSES  = {"Active", "NeedsReview", "Rejected", "Void"}
 
 # Periods must be in one of these statuses to accept new/modified entries.
-ENTRY_ALLOWED_STATUSES = {"Open", "InReview"}
+# CP-0A: Only Open periods accept source mutations.
+# InReview and all later/terminal statuses are read-only for operational data.
+ENTRY_ALLOWED_STATUSES = {"Open"}
 
 
 class DraftLineSummary(BaseModel):
