@@ -1080,6 +1080,86 @@ async def _lock_period_for_mutation(
         )
 
 
+async def _lock_pay_item_for_source_write(
+    line_type: str,
+    company_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    CP-0A: Acquire a FOR UPDATE row lock on the company-owned PayItems catalog
+    row before inserting a DraftLine reference.
+
+    Serializes with the physical-delete path's own FOR UPDATE on the same row,
+    preventing the first-reference race:
+      1. Deletion reads zero usage (no DraftLines yet).
+      2. Source creation validates the item via a plain read (no lock).
+      3. Source creation inserts the first DraftLine reference.
+      4. Deletion physically removes the catalog row → DraftLine orphaned.
+
+    Call order: acquire this lock BEFORE _lock_period_for_mutation so both
+    paths lock PayItem then Period (same order as the deletion path), avoiding
+    deadlock.
+
+    System items (companyid IS NULL) cannot be physically deleted; no lock
+    needed.  Informational-only items (DailyStatus, DailyNote) have no catalog
+    row and are skipped.
+
+    Raises HTTP 422 if the custom row is absent when the lock is attempted,
+    meaning a concurrent deletion committed between validation and this call.
+    """
+    if line_type in _INFORMATIONAL_ONLY:
+        return  # no PayItems catalog row
+
+    # Try to lock the custom (company-specific) row and read its status.
+    # Selecting status here means the retirement race is caught: if a concurrent
+    # deletion/retirement committed while this call was waiting for the lock, we
+    # see the committed 'Retired' status and reject rather than inserting a
+    # DraftLine for a no-longer-Active item.
+    result = await db.execute(
+        text("""
+            SELECT payitemid, status FROM payroll.payitems
+            WHERE  payitemcode = :code AND companyid = :cid
+            FOR UPDATE
+        """),
+        {"code": line_type, "cid": company_id},
+    )
+    row = result.mappings().first()
+    if row is not None:
+        if row["status"] != "Active":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Pay item '{line_type}' is no longer active "
+                    f"(status: '{row['status']}'). "
+                    "Refresh and try again."
+                ),
+            )
+        # Custom row locked and Active — held until this transaction commits.
+        return
+
+    # No custom row.  Check whether a system row exists (system items can't
+    # be deleted, so no lock is needed for them).
+    sys_result = await db.execute(
+        text("""
+            SELECT payitemid FROM payroll.payitems
+            WHERE  payitemcode = :code AND companyid IS NULL
+        """),
+        {"code": line_type},
+    )
+    if sys_result.mappings().first() is not None:
+        return  # system item — safe without a lock
+
+    # Neither custom nor system — item was concurrently deleted between the
+    # initial _validate_line_type read and this lock attempt.
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"Pay item '{line_type}' is no longer available. "
+            "It may have been deleted concurrently. Refresh and try again."
+        ),
+    )
+
+
 _LINE_SELECT = """
     SELECT
         dl.draftlineid,
@@ -2093,6 +2173,10 @@ async def add_draft_line(
             ),
         )
 
+    # CP-0A: Lock custom PayItem catalog row before period lock so both this path
+    # and the physical-delete path acquire locks in the same order (PayItem then
+    # Period), preventing deadlock while serializing against concurrent deletion.
+    await _lock_pay_item_for_source_write(canonical_line_type, company_id, db)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
 
@@ -2316,12 +2400,20 @@ async def update_draft_line(
             )
 
     if fields:
+        # CP-0A: Lock custom PayItem catalog row before period lock (same order as
+        # deletion path) to prevent the zero-to-meaningful race: deletion reads zero
+        # usage, update changes a line to meaningful, deletion physically deletes.
+        await _lock_pay_item_for_source_write(canonical_existing_lt, company_id, db)
         # CP-0A: Recheck period status under a row-level lock before writing.
         await _lock_period_for_mutation(period_id, company_id, db)
         set_clause = ", ".join(f"{col} = :{col}" for col in fields)
         await db.execute(
-            text(f"UPDATE payroll.payrolldraftlines SET {set_clause} WHERE draftlineid = :line_id"),
-            {**fields, "line_id": draft_line_id},
+            text(
+                f"UPDATE payroll.payrolldraftlines SET {set_clause} "
+                "WHERE draftlineid = :line_id "
+                "  AND payrollperiodid = :period_id AND companyid = :company_id"
+            ),
+            {**fields, "line_id": draft_line_id, "period_id": period_id, "company_id": company_id},
         )
         await _write_line_audit(
             db,
@@ -2369,8 +2461,12 @@ async def void_draft_line(
     await _lock_period_for_mutation(period_id, company_id, db)
 
     await db.execute(
-        text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :line_id"),
-        {"line_id": draft_line_id},
+        text(
+            "UPDATE payroll.payrolldraftlines SET status = 'Void' "
+            "WHERE draftlineid = :line_id "
+            "  AND payrollperiodid = :period_id AND companyid = :company_id"
+        ),
+        {"line_id": draft_line_id, "period_id": period_id, "company_id": company_id},
     )
     await _write_line_audit(
         db,
@@ -6119,6 +6215,9 @@ async def add_period_pay_line(
         canonical_period_lt, period.branch_id, company_id, period.start_date, db
     )
 
+    # CP-0A: Lock custom PayItem catalog row before period lock (same order as the
+    # physical-delete path) to prevent the first-reference orphan race.
+    await _lock_pay_item_for_source_write(canonical_period_lt, company_id, db)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
 
@@ -6270,14 +6369,20 @@ async def update_period_pay_line(
         # No changes — return as-is
         return line
 
+    # CP-0A: Lock custom PayItem catalog row before period lock to prevent the
+    # zero-to-meaningful race on period-pay lines (same lock ordering as deletion).
+    canonical_period_pay_lt = _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type)
+    await _lock_pay_item_for_source_write(canonical_period_pay_lt, company_id, db)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
     set_clause = ", ".join(f"{col} = :{col}" for col in fields)
     await db.execute(
         text(
-            f"UPDATE payroll.payrolldraftlines SET {set_clause} WHERE draftlineid = :line_id"
+            f"UPDATE payroll.payrolldraftlines SET {set_clause} "
+            "WHERE draftlineid = :line_id "
+            "  AND payrollperiodid = :period_id AND companyid = :company_id"
         ),
-        {**fields, "line_id": line_id},
+        {**fields, "line_id": line_id, "period_id": period_id, "company_id": company_id},
     )
     await _write_line_audit(
         db,
@@ -6337,9 +6442,11 @@ async def void_period_pay_line(
         await _lock_period_for_mutation(period_id, company_id, db)
         await db.execute(
             text(
-                "UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :lid"
+                "UPDATE payroll.payrolldraftlines SET status = 'Void' "
+                "WHERE draftlineid = :lid "
+                "  AND payrollperiodid = :period_id AND companyid = :company_id"
             ),
-            {"lid": line_id},
+            {"lid": line_id, "period_id": period_id, "company_id": company_id},
         )
         await _write_line_audit(
             db,
@@ -9009,10 +9116,28 @@ async def save_day_grid(
         )
 
     # ── Phase 2: execute DB writes (all validations passed) ──────────────── #
-    # CP-0A: Recheck period status under a row-level lock before any writes.
-    # This prevents a concurrent Open→InReview transition from slipping through
-    # between Phase 1 validation and Phase 2 writes.
-    await _lock_period_for_mutation(period_id, company_id, db)
+    # CP-0A lock ordering: pre-lock ALL distinct custom PayItems in the batch in
+    # sorted (deterministic) order BEFORE acquiring the Period lock.
+    #
+    # Without batch pre-locking, a multi-item transaction can interleave:
+    #   save_day_grid: PayItem A → Period → (tries) PayItem B
+    #   deletion:      PayItem B → (tries) Period
+    # → deadlock.
+    #
+    # With batch pre-locking the order is always:
+    #   PayItem codes (sorted) → Period
+    # which matches the deletion path (PayItem → Period), so no deadlock is possible.
+    #
+    # Re-locking an already-held row in the same transaction is a no-op in
+    # PostgreSQL, so the per-line calls inside add_draft_line / update_draft_line
+    # are safe duplicates of these batch locks.
+    all_canonical_codes: set[str] = set()
+    for _, _, pv, _, _ in parsed_rows:
+        all_canonical_codes.update(pv.keys())
+    all_canonical_codes.discard("DailyStatus")
+    all_canonical_codes.discard("DailyNote")
+    for code in sorted(all_canonical_codes):
+        await _lock_pay_item_for_source_write(code, company_id, db)
 
     for save_row, driver_id, parsed_values, validated_status_key, _ in parsed_rows:
 
@@ -9087,6 +9212,14 @@ async def save_day_grid(
                     db=db,
                 )
 
+        # ── Period lock for DailyStatus / DailyNote writes ───────────────── #
+        # CP-0A: If this row had no pay-item writes (empty parsed_values or all
+        # zeroes/voids), add_draft_line was never called so the period lock has
+        # not been acquired yet.  Lock now before any DML.  If the period lock
+        # was already acquired by a preceding add_draft_line call this is a
+        # no-op (same transaction already holds the lock).
+        await _lock_period_for_mutation(period_id, company_id, db)
+
         # ── DailyStatus upsert ────────────────────────────────────────────── #
         # P1 #4: write audit via _write_line_audit for all DailyStatus mutations
         status_val = validated_status_key  # None = clear
@@ -9107,19 +9240,29 @@ async def save_day_grid(
         if status_val:
             if es_row:
                 # Update notes (status code stored in notes)
-                await db.execute(
-                    text("UPDATE payroll.payrolldraftlines SET notes = :n WHERE draftlineid = :lid"),
-                    {"n": status_val, "lid": es_row["draftlineid"]},
+                upd = await db.execute(
+                    text(
+                        "UPDATE payroll.payrolldraftlines SET notes = :n "
+                        "WHERE draftlineid = :lid "
+                        "  AND payrollperiodid = :period_id AND companyid = :company_id"
+                    ),
+                    {
+                        "n": status_val,
+                        "lid": es_row["draftlineid"],
+                        "period_id": period_id,
+                        "company_id": company_id,
+                    },
                 )
-                await _write_line_audit(
-                    db,
-                    company_id=company_id,
-                    branch_id=branch_id,
-                    user_id=user_id,
-                    line_id=es_row["draftlineid"],
-                    action_code="DRAFT_LINE_UPDATED",
-                    new_value={"status_key": status_val},
-                )
+                if upd.rowcount:
+                    await _write_line_audit(
+                        db,
+                        company_id=company_id,
+                        branch_id=branch_id,
+                        user_id=user_id,
+                        line_id=es_row["draftlineid"],
+                        action_code="DRAFT_LINE_UPDATED",
+                        new_value={"status_key": status_val},
+                    )
             else:
                 # Insert new DailyStatus line
                 ins_result = await db.execute(
@@ -9152,20 +9295,29 @@ async def save_day_grid(
                 )
         elif es_row:
             # Clear status: void the line (with audit)
-            await db.execute(
-                text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :lid"),
-                {"lid": es_row["draftlineid"]},
+            upd = await db.execute(
+                text(
+                    "UPDATE payroll.payrolldraftlines SET status = 'Void' "
+                    "WHERE draftlineid = :lid "
+                    "  AND payrollperiodid = :period_id AND companyid = :company_id"
+                ),
+                {
+                    "lid": es_row["draftlineid"],
+                    "period_id": period_id,
+                    "company_id": company_id,
+                },
             )
-            await _write_line_audit(
-                db,
-                company_id=company_id,
-                branch_id=branch_id,
-                user_id=user_id,
-                line_id=es_row["draftlineid"],
-                action_code="DRAFT_LINE_VOIDED",
-                old_value={"line_type": "DailyStatus"},
-                new_value={"status": "Void"},
-            )
+            if upd.rowcount:
+                await _write_line_audit(
+                    db,
+                    company_id=company_id,
+                    branch_id=branch_id,
+                    user_id=user_id,
+                    line_id=es_row["draftlineid"],
+                    action_code="DRAFT_LINE_VOIDED",
+                    old_value={"line_type": "DailyStatus"},
+                    new_value={"status": "Void"},
+                )
 
         # ── DailyNote upsert ──────────────────────────────────────────────── #
         # P1 #4: write audit via _write_line_audit for all DailyNote mutations
@@ -9186,19 +9338,29 @@ async def save_day_grid(
 
         if notes_val:
             if en_row:
-                await db.execute(
-                    text("UPDATE payroll.payrolldraftlines SET notes = :n WHERE draftlineid = :lid"),
-                    {"n": notes_val, "lid": en_row["draftlineid"]},
+                upd = await db.execute(
+                    text(
+                        "UPDATE payroll.payrolldraftlines SET notes = :n "
+                        "WHERE draftlineid = :lid "
+                        "  AND payrollperiodid = :period_id AND companyid = :company_id"
+                    ),
+                    {
+                        "n": notes_val,
+                        "lid": en_row["draftlineid"],
+                        "period_id": period_id,
+                        "company_id": company_id,
+                    },
                 )
-                await _write_line_audit(
-                    db,
-                    company_id=company_id,
-                    branch_id=branch_id,
-                    user_id=user_id,
-                    line_id=en_row["draftlineid"],
-                    action_code="DRAFT_LINE_UPDATED",
-                    new_value={"notes": notes_val},
-                )
+                if upd.rowcount:
+                    await _write_line_audit(
+                        db,
+                        company_id=company_id,
+                        branch_id=branch_id,
+                        user_id=user_id,
+                        line_id=en_row["draftlineid"],
+                        action_code="DRAFT_LINE_UPDATED",
+                        new_value={"notes": notes_val},
+                    )
             else:
                 ins_result2 = await db.execute(
                     text("""
@@ -9229,20 +9391,29 @@ async def save_day_grid(
                     new_value={"line_type": "DailyNote", "notes": notes_val},
                 )
         elif en_row:
-            await db.execute(
-                text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :lid"),
-                {"lid": en_row["draftlineid"]},
+            upd = await db.execute(
+                text(
+                    "UPDATE payroll.payrolldraftlines SET status = 'Void' "
+                    "WHERE draftlineid = :lid "
+                    "  AND payrollperiodid = :period_id AND companyid = :company_id"
+                ),
+                {
+                    "lid": en_row["draftlineid"],
+                    "period_id": period_id,
+                    "company_id": company_id,
+                },
             )
-            await _write_line_audit(
-                db,
-                company_id=company_id,
-                branch_id=branch_id,
-                user_id=user_id,
-                line_id=en_row["draftlineid"],
-                action_code="DRAFT_LINE_VOIDED",
-                old_value={"line_type": "DailyNote"},
-                new_value={"status": "Void"},
-            )
+            if upd.rowcount:
+                await _write_line_audit(
+                    db,
+                    company_id=company_id,
+                    branch_id=branch_id,
+                    user_id=user_id,
+                    line_id=en_row["draftlineid"],
+                    action_code="DRAFT_LINE_VOIDED",
+                    old_value={"line_type": "DailyNote"},
+                    new_value={"status": "Void"},
+                )
 
     # Return the refreshed grid
     return await get_day_grid(

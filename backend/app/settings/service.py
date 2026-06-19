@@ -3337,7 +3337,79 @@ async def delete_custom_pay_item(
         # --- PHYSICAL DELETE ---
         cleaned = usage.non_meaningful_draft_line_count
 
-        # 1. Clean empty/voided draft lines
+        # CP-0A: Lock all periods that have DraftLines referencing this pay item, then
+        # verify none are non-Open.  Using SELECT FOR UPDATE means any concurrent
+        # period-status transition must wait for this transaction to commit, so the
+        # status we read is guaranteed to be the committed final state at decision time.
+        # This prevents the race where a period transitions from Open → InReview between
+        # our safety check and the physical deletion.
+        locked_periods = await db.execute(
+            text("""
+                SELECT pp.payrollperiodid, pp.status
+                FROM   payroll.payrollperiods pp
+                WHERE  pp.companyid = :cid
+                  AND  pp.payrollperiodid IN (
+                           SELECT DISTINCT dl.payrollperiodid
+                           FROM   payroll.payrolldraftlines dl
+                           WHERE  dl.companyid = :cid
+                             AND  dl.linetype  = :code
+                       )
+                FOR UPDATE
+            """),
+            {"cid": company_id, "code": pay_item_code},
+        )
+        locked_rows = locked_periods.mappings().all()
+        non_open_count = sum(1 for r in locked_rows if r["status"] != "Open")
+        if non_open_count > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot physically delete pay item '{pay_item_code}': "
+                    f"{non_open_count} payroll source row(s) reference it in non-Open "
+                    "periods (InReview, Approved, Locked, Archived, or Cancelled). "
+                    "Deactivate or retire the item instead to preserve historical records."
+                ),
+            )
+
+        # CP-0A: Recompute usage after holding both the PayItem lock and all
+        # referenced Period locks.  Any concurrent zero→meaningful update or new
+        # DraftLine insert would have had to acquire the PayItem lock first; since
+        # we hold it, no such change can commit between our initial usage check and
+        # here.  The recompute is defence-in-depth: if usage changed while we were
+        # waiting to acquire the period locks (which also serialise via FOR UPDATE),
+        # we re-evaluate and route to retire instead of physical delete.
+        usage = await _compute_usage(item_id, company_id, pay_item_code, db)
+        if usage.deletion_would_retire:
+            await db.execute(
+                text("""
+                    UPDATE payroll.payitems
+                    SET    status = 'Retired', updatedatutc = NOW(), updatedbyuserid = :uid
+                    WHERE  payitemid = :iid
+                """),
+                {"uid": user_id, "iid": item_id},
+            )
+            await _write_settings_audit(
+                db,
+                company_id=company_id,
+                branch_id=None,
+                user_id=user_id,
+                action_code="CUSTOM_PAY_ITEM_RETIRED",
+                entity_name="PayItems",
+                entity_id=str(item_id),
+                old_value={"status": row["status"]},
+                new_value={"status": "Retired"},
+            )
+            return CustomPayItemDeleteResult(
+                pay_item_id=item_id,
+                pay_item_code=pay_item_code,
+                deletion_type="retired",
+                cleaned_draft_lines=0,
+            )
+
+        # 1. Clean empty/voided draft lines in Open periods only.
+        # After all locks and the recomputed usage check we know all remaining
+        # references are non-meaningful rows in Open periods.
+        cleaned = usage.non_meaningful_draft_line_count
         if cleaned > 0:
             await db.execute(
                 text("""
@@ -3348,6 +3420,11 @@ async def delete_custom_pay_item(
                             OR (quantity = 0
                                 AND rateamount IS NULL
                                 AND (calculatedamount IS NULL OR calculatedamount = 0)))
+                      AND  payrollperiodid IN (
+                               SELECT payrollperiodid
+                               FROM   payroll.payrollperiods
+                               WHERE  companyid = :cid AND status = 'Open'
+                           )
                 """),
                 {"cid": company_id, "code": pay_item_code},
             )
