@@ -1187,7 +1187,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 
 | Phase | Goal | Status | Owner | Review Gate |
 | --- | --- | --- | --- | --- |
-| Phase 0 | Workflow integrity lockdown | Pending | Claude | Codex P0 review |
+| Phase 0 | Workflow integrity lockdown | In Progress | Claude | Codex P0 review |
 | Phase 1 | Lifecycle slots, Returned state, smart creation | Pending | Claude | Codex lifecycle review |
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Pending | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
@@ -1204,12 +1204,36 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 
 ### Phase 0 — Workflow Integrity Lockdown
 
-**Status:** `Pending`
+**Status:** `In Progress`
 
-- [ ] P0A: make InReview and later source data read-only.
+- [x] P0A: make InReview and later source data read-only. — **Done with Notes**
 - [ ] P0B: make lifecycle transitions expected-state safe.
 - [ ] P0C: repair cancellation/action permissions.
 - [ ] P0D: add concurrency regression tests.
+
+### CP-0A completion note
+
+**Status:** Done with Notes  
+**Codex verdict:** PASS WITH NOTES  
+**Backend commit:** 38abcb9  
+**Review result:** No P0/P1 blockers remain.
+
+**Validation reported by Codex:**
+- CP-0A focused tests: 74 passed.
+- Broader payroll/day-grid/settings/security/schema regression selection: 350 passed.
+- Alembic head: 0047.
+- Alembic current: 0047 (head).
+- `git diff --check`: passed.
+
+**Remaining notes to revisit later:**
+- P2: The update-wins test does not independently prove the recomputation branch.
+- P2: No dedicated deterministic multi-item day-grid deadlock regression test exists.
+- P3: Some historical service docstrings still mention Open or InReview editing.
+
+**Environment warnings observed during review:**
+- Pytest cache creation warning: WinError 183.
+- Temporary PostgreSQL automatic shutdown reported possible leaked processes/files.
+- Git could not read the user-level global ignore file due permissions.
 
 **Objective**
 
