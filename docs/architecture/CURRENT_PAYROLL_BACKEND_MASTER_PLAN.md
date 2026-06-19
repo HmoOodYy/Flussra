@@ -1207,9 +1207,45 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 **Status:** `In Progress`
 
 - [x] P0A: make InReview and later source data read-only. — **Done with Notes**
-- [ ] P0B: make lifecycle transitions expected-state safe.
+- [x] P0B: make lifecycle transitions expected-state safe. — **Done with Notes**
 - [ ] P0C: repair cancellation/action permissions.
 - [ ] P0D: add concurrency regression tests.
+
+### CP-0B completion note
+
+**Status:** Done with Notes  
+**Codex verdict:** PASS WITH NOTES  
+**Backend commit:** 72fc222  
+**Review result:** No P0/P1 blockers remain.
+
+**Validation reported by Codex:**
+- CP-0B focused tests: 27 passed.
+- Relevant regression bundle: 304 passed, 1 unrelated order-dependent failure.
+- Two isolated failing cases: 2 passed.
+- Alembic current/head: 0047.
+- `git diff --check`: passed.
+
+**What CP-0B completed:**
+- Generic payroll period transitions now require expected old status at the write boundary.
+- Stale transition requests return conflict instead of overwriting newer statuses.
+- Audit writes happen only after successful transitions.
+- Existing safe paths remained intact:
+  - Open → InReview
+  - Review writeback from InReview
+  - Finalization Approved → Locked
+
+**Remaining notes to revisit later:**
+- P2: Full-suite fixture contamination.
+- P2: Submit/finalization tests do not prove their atomic write boundary.
+- P2: Review test does not verify transactional rollback invariants.
+- P2: Cancelled is terminal in services but lacks DB-trigger protection.
+- P3: Open→InReview should include `companyid` for predicate consistency.
+- P3: Existing comments incorrectly claim `get_period_by_id` holds `FOR UPDATE`.
+
+**Environment warnings observed during review:**
+- Pytest cache warning: WinError 183.
+- Temporary PostgreSQL automatic shutdown reported possible leaked processes/files.
+- Git global-ignore permission warning.
 
 ### CP-0A completion note
 
