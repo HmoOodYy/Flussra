@@ -6,6 +6,9 @@ import { canCreatePeriod, canEntryPayroll, canFinalizePayroll } from '../../lib/
 import type { Branch } from '../../types/core';
 import type { PeriodSummary } from '../../types/payroll';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
+import { SectionCard } from '../../components/ui/SectionCard';
+import { EmptyState } from '../../components/ui/EmptyState';
+import { ErrorState } from '../../components/ui/ErrorState';
 import { CreatePeriodModal } from '../../components/CreatePeriodModal';
 import { PayrollEntryDialog } from './PayrollEntryDialog';
 import { DriversOffDialog } from './DriversOffDialog';
@@ -284,8 +287,6 @@ export function PeriodsListPage() {
     (p) => p.status === 'Approved'
   );
 
-  const hasAnyPeriods = activePeriods.length > 0 || approvedPeriods.length > 0;
-
   // ── Render ────────────────────────────────────────────────────────────────
 
   function renderCard(p: PeriodSummary) {
@@ -304,12 +305,48 @@ export function PeriodsListPage() {
     );
   }
 
+  const filterControls = (
+    <div className={styles.filterControls}>
+      <label className={styles.filterInline}>
+        <span>Show</span>
+        <select
+          className={styles.filterSelect}
+          value={filterStatus}
+          onChange={(e) => setFilterStatus(e.target.value as ActiveFilter)}
+        >
+          <option value="">Draft &amp; Open</option>
+          <option value="Draft">Draft only</option>
+          <option value="Open">Open only</option>
+        </select>
+      </label>
+
+      {isAllBranches ? (
+        <label className={styles.filterInline}>
+          <span>Branch</span>
+          <select
+            className={styles.filterSelect}
+            value={filterBranchId}
+            onChange={(e) => setFilterBranchId(e.target.value)}
+          >
+            <option value="">All branches</option>
+            {branchesSt.branches.map((b) => (
+              <option key={b.branch_id} value={b.branch_id}>{b.branch_name}</option>
+            ))}
+          </select>
+        </label>
+      ) : fixedBranch ? (
+        <span className={styles.fixedBranch}>
+          Branch: <strong>{fixedBranch.branch_name}</strong>
+        </span>
+      ) : null}
+    </div>
+  );
+
   return (
     <div className={styles.page}>
       {/* ── Header ───────────────────────────────────────────────────── */}
-      <div className={styles.headerRow}>
-        <h2 className={styles.pageTitle}>Current Payroll</h2>
-        {userCanCreate && (
+      {userCanCreate && (
+        <div className={styles.headerRow}>
           <button
             className={styles.createBtn}
             onClick={() => setShowCreateModal(true)}
@@ -317,94 +354,52 @@ export function PeriodsListPage() {
           >
             + Create Period
           </button>
-        )}
-      </div>
-
-      {/* ── Filters ──────────────────────────────────────────────────── */}
-      <div className={styles.filters}>
-        <label className={styles.filterLabel}>
-          Show
-          <select
-            className={styles.filterSelect}
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value as ActiveFilter)}
-          >
-            <option value="">Draft &amp; Open</option>
-            <option value="Draft">Draft only</option>
-            <option value="Open">Open only</option>
-          </select>
-        </label>
-
-        {isAllBranches ? (
-          <label className={styles.filterLabel}>
-            Branch
-            <select
-              className={styles.filterSelect}
-              value={filterBranchId}
-              onChange={(e) => setFilterBranchId(e.target.value)}
-            >
-              <option value="">All branches</option>
-              {branchesSt.branches.map((b) => (
-                <option key={b.branch_id} value={b.branch_id}>{b.branch_name}</option>
-              ))}
-            </select>
-          </label>
-        ) : fixedBranch ? (
-          <span className={styles.fixedBranch}>
-            Branch: <strong>{fixedBranch.branch_name}</strong>
-          </span>
-        ) : null}
-      </div>
-
-      {/* ── Content ──────────────────────────────────────────────────── */}
-      {periodsSt.loading ? (
-        <p className={styles.stateMsg}>Loading periods…</p>
-      ) : periodsSt.error ? (
-        <p className={styles.errorMsg}>{periodsSt.error}</p>
-      ) : !hasAnyPeriods ? (
-        <div className={styles.emptyState}>
-          <p className={styles.emptyTitle}>No payroll periods found</p>
-          <p className={styles.emptyHint}>
-            {filterStatus || filterBranchId
-              ? 'Try adjusting the filters.'
-              : userCanCreate
-                ? 'No active periods. Create one to get started.'
-                : 'No active payroll periods for this branch.'}
-          </p>
         </div>
-      ) : (
-        <>
-          {/* Active entry work — Draft and Open */}
-          {activePeriods.length > 0 && (
-            <div className={styles.periodList}>
-              {activePeriods.map(renderCard)}
-            </div>
-          )}
+      )}
 
-          {activePeriods.length === 0 && !periodsSt.loading && (
-            <div className={styles.emptyState}>
-              <p className={styles.emptyTitle}>
-                No {filterStatus || 'Draft or Open'} periods
-              </p>
-              <p className={styles.emptyHint}>Try adjusting the filter.</p>
-            </div>
-          )}
+      {/* ── Active Payroll Periods ────────────────────────────────────── */}
+      <SectionCard
+        title="Active Payroll Periods"
+        actions={filterControls}
+        padded={false}
+      >
+        {periodsSt.loading ? (
+          <p className={styles.stateMsg}>Loading periods…</p>
+        ) : periodsSt.error ? (
+          <div className={styles.sectionPad}>
+            <ErrorState message={periodsSt.error} />
+          </div>
+        ) : activePeriods.length === 0 ? (
+          <div className={styles.sectionPad}>
+            <EmptyState
+              title={filterStatus ? `No ${filterStatus} periods` : 'No active payroll periods'}
+              message={
+                filterStatus || filterBranchId
+                  ? 'Try adjusting the filters.'
+                  : userCanCreate
+                    ? 'No active periods. Create one to get started.'
+                    : 'No active payroll periods for this branch.'
+              }
+            />
+          </div>
+        ) : (
+          <div className={styles.periodListScroll}>
+            {activePeriods.map(renderCard)}
+          </div>
+        )}
+      </SectionCard>
 
-          {/* Ready to Finalize — Approved periods in a distinct section */}
-          {approvedPeriods.length > 0 && (
-            <div className={styles.sectionBlock}>
-              <div className={styles.sectionHeader}>
-                <span className={styles.sectionTitle}>Ready to Finalize</span>
-                <span className={styles.sectionHint}>
-                  {approvedPeriods.length} approved period{approvedPeriods.length !== 1 ? 's' : ''} awaiting finalization
-                </span>
-              </div>
-              <div className={styles.periodList}>
-                {approvedPeriods.map(renderCard)}
-              </div>
-            </div>
-          )}
-        </>
+      {/* ── Ready to Finalize ─────────────────────────────────────────── */}
+      {!periodsSt.loading && !periodsSt.error && approvedPeriods.length > 0 && (
+        <SectionCard
+          title="Ready to Finalize"
+          subtitle={`${approvedPeriods.length} approved period${approvedPeriods.length !== 1 ? 's' : ''} awaiting finalization`}
+          padded={false}
+        >
+          <div className={styles.periodList}>
+            {approvedPeriods.map(renderCard)}
+          </div>
+        </SectionCard>
       )}
 
       {/* ── Create modal ─────────────────────────────────────────────── */}

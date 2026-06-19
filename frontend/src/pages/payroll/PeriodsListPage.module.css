@@ -8,14 +8,7 @@
 .headerRow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-}
-
-.pageTitle {
-  margin: 0;
-  font-size: 1.2rem;
-  font-weight: 700;
-  color: #111827;
+  justify-content: flex-end;
 }
 
 .createBtn {
@@ -31,43 +24,57 @@
 
 .createBtn:hover { background: #1d4ed8; }
 
-/* ── Filters ── */
-.filters {
+/* ── Filter controls (inside SectionCard header actions slot) ── */
+.filterControls {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
 }
 
-.filterLabel {
+.filterInline {
   display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
+  align-items: center;
+  gap: 0.4rem;
   font-size: 0.82rem;
   font-weight: 500;
   color: #374151;
 }
 
 .filterSelect {
-  padding: 0.4rem 0.6rem;
+  padding: 0.3rem 0.5rem;
   border: 1px solid #d1d5db;
   border-radius: 6px;
-  font-size: 0.875rem;
+  font-size: 0.82rem;
   background: #fff;
 }
 
 .fixedBranch {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: #6b7280;
-  align-self: flex-end;
-  padding-bottom: 0.1rem;
 }
 
-/* ── Period list (hub layout) ── */
+/* ── Period list (base, used by Ready to Finalize) ── */
 .periodList {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  padding: 0.75rem 1rem;
+}
+
+/* ── Active periods scrollable list ── */
+.periodListScroll {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  max-height: 392px;
+  overflow-y: auto;
+}
+
+/* ── Padding wrapper for loading / empty / error inside SectionCard ── */
+.sectionPad {
+  padding: 1.5rem 1.5rem;
 }
 
 /* ── Period card ── */
@@ -216,63 +223,7 @@
 .stateMsg {
   color: #6b7280;
   font-size: 0.9rem;
-  margin: 0;
-}
-
-.errorMsg {
-  color: #dc2626;
-  font-size: 0.9rem;
-  margin: 0;
-}
-
-.emptyState {
-  padding: 3rem 1rem;
-  text-align: center;
-  border: 2px dashed #e5e7eb;
-  border-radius: 8px;
-}
-
-.emptyTitle {
-  margin: 0 0 0.4rem;
-  font-weight: 600;
-  color: #374151;
-}
-
-.emptyHint {
-  margin: 0;
-  font-size: 0.875rem;
-  color: #9ca3af;
-}
-
-/* ── "Ready to Finalize" section block ── */
-.sectionBlock {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  padding-top: 0.5rem;
-  border-top: 2px solid #d1fae5;
-  margin-top: 0.25rem;
-}
-
-.sectionHeader {
-  display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-}
-
-.sectionTitle {
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: #065f46;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.sectionHint {
-  font-size: 0.78rem;
-  color: #6b7280;
-  font-style: italic;
+  margin: 0.75rem 1rem;
 }
 
 /* ── Finished period card (Locked / Cancelled / Archived) ── */
