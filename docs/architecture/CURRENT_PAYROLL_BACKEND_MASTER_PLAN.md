@@ -1187,7 +1187,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 
 | Phase | Goal | Status | Owner | Review Gate |
 | --- | --- | --- | --- | --- |
-| Phase 0 | Workflow integrity lockdown | In Progress | Claude | Codex P0 review |
+| Phase 0 | Workflow integrity lockdown | Done with Notes | Claude | Codex P0 review |
 | Phase 1 | Lifecycle slots, Returned state, smart creation | Pending | Claude | Codex lifecycle review |
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Pending | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
@@ -1204,12 +1204,76 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 
 ### Phase 0 — Workflow Integrity Lockdown
 
-**Status:** `In Progress`
+**Status:** `Done with Notes`
 
 - [x] P0A: make InReview and later source data read-only. — **Done with Notes**
 - [x] P0B: make lifecycle transitions expected-state safe. — **Done with Notes**
 - [x] P0C: repair transition permissions/review resolution. — **Done with Notes**
-- [ ] P0D: add concurrency regression tests.
+- [x] P0D: add concurrency regression tests. — **Done with Notes**
+
+### Phase 0 completion note
+
+**Status:** Done with Notes  
+**Completed units:** CP-0A, CP-0B, CP-0C, CP-0D  
+**Review result:** Phase 0 may be marked Done with Notes after CP-0D commit.
+
+**Phase 0 completed:**
+- Source mutations are blocked outside Open periods.
+- Source mutations are protected against period transition races.
+- PayItem deletion/retirement cannot orphan meaningful source rows.
+- Lifecycle transitions are expected-state safe.
+- Stale transition requests fail instead of overwriting newer statuses.
+- Terminal-state revival protections are covered.
+- Review/manual InReview exit concurrency is deadlock-safe.
+- Transition permissions and review item resolution were repaired.
+- Phase 0 concurrency regression tests now cover both transition-wins and source-write-wins outcomes.
+
+**Phase 0 remaining debt:** See CP-0A, CP-0B, CP-0C, and CP-0D completion notes.
+
+### CP-0D completion note
+
+**Status:** Done with Notes  
+**Codex verdict:** PASS WITH NOTES  
+**Backend/test commit:** f57c63d  
+**Review result:** No P0/P1 blockers remain.
+
+**Validation reported by Codex:**
+- CP-0D focused tests: 3 passed.
+- CP-0A through CP-0D: 114 passed.
+- Broad review/finalization/ledger/security/schema bundle: 192 passed, 1 failed.
+- Failing case passed in isolation.
+- Alembic current/head: 0047 / 0047.
+- `git diff --check`: clean.
+
+**What CP-0D completed:**
+- Added Phase 0 concurrency regression coverage without production code changes.
+- Added transition-wins coverage for source mutation vs Open -> Cancelled.
+- Added concurrent double-submit stale predicate coverage.
+- Added mutation-first serialization coverage proving a source mutation holds the real period row lock before submit can transition the period.
+- Proved source-write-wins outcome:
+  - source mutation acquires the Open-period lock first;
+  - submit cannot complete while the source lock is held;
+  - source commits first;
+  - submit subsequently succeeds;
+  - period ends InReview;
+  - the racing source line remains Active and associated with the period;
+  - Pending PeriodApproval item exists;
+  - later source mutation is rejected after InReview.
+
+**Remaining notes to revisit later:**
+- P2: Order-dependent finalization-preview fixture contamination: `test_preview_gross_matches_finalize` fails in the broader order but passes in isolation.
+- P2: Double-submit test does not run two complete submit APIs.
+- P2: Transition permission mapping remains fail-open.
+- P2: Automatic review cancellation lacks a dedicated review audit event.
+- P2: Cancelled terminal behavior lacks equivalent database-trigger protection.
+- P2: Approved cancellation policy remains unresolved.
+- P2/P3: Temporary database shutdown and pytest-cache warnings.
+- P3: Mutation-first test failure cleanup can reference an unassigned task.
+
+**Environment warnings observed during review:**
+- Pytest cache WinError 183.
+- Temporary PostgreSQL shutdown/leak warning.
+- Git global-ignore permission warning.
 
 ### CP-0C completion note
 
