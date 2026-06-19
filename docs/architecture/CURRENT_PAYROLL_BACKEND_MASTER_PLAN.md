@@ -1208,8 +1208,46 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 
 - [x] P0A: make InReview and later source data read-only. — **Done with Notes**
 - [x] P0B: make lifecycle transitions expected-state safe. — **Done with Notes**
-- [ ] P0C: repair cancellation/action permissions.
+- [x] P0C: repair transition permissions/review resolution. — **Done with Notes**
 - [ ] P0D: add concurrency regression tests.
+
+### CP-0C completion note
+
+**Status:** Done with Notes  
+**Codex verdict:** PASS WITH NOTES  
+**Backend commit:** aa7ae8b  
+**Review result:** No P0/P1 blockers remain.
+
+**Validation reported by Codex:**
+- CP-0A + CP-0B + CP-0C: 111 passed.
+- Finalization-preview + ledger + finalize: 70 passed.
+- Review + workflow + security + schema: 130 passed.
+- Total: 311 passed, 0 failed.
+- Alembic current/head: 0047 / 0047.
+- `git diff --check`: clean apart from line-ending warnings.
+
+**What CP-0C completed:**
+- Fixed Draft -> Cancelled permission gap.
+- Blocked Approved -> InReview because it created an InReview period with no active Pending PeriodApproval review item.
+- Removed Approved -> InReview from valid transitions and permission mapping.
+- Updated backend router transition description so it no longer advertises Approved -> InReview.
+- Resolved Pending PeriodApproval review items safely when InReview periods exit through allowed manual Open/Cancelled paths.
+- Standardized lock ordering for payroll manual InReview exits and review decisions as ReviewItem -> Period.
+- Added deterministic deadlock regression coverage proving the payroll PATCH attempts the review-item lock before the period lock.
+- Updated finalization-preview, ledger, and finalize tests so test setup no longer depends on the blocked Approved -> InReview transition.
+
+**Remaining notes to revisit later:**
+- P2: Transition permission lookup remains fail-open for future unmapped transitions.
+- P2: Automatic review cancellation lacks a dedicated review-domain audit event.
+- P2: Approved cancellation policy remains unresolved.
+- P3: No explicit decoy-review-item non-interference test.
+- P2/P3: Test database shutdown, fixture-order, and line-ending hygiene remain.
+
+**Environment warnings observed during review:**
+- Pytest cache WinError 183.
+- Temporary PostgreSQL automatic-shutdown/leak warning.
+- Git global-ignore permission warnings.
+- CRLF conversion warnings for three files.
 
 ### CP-0B completion note
 
