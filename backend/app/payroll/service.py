@@ -1008,19 +1008,40 @@ async def change_period_status(
                 ),
             )
     else:
-        await db.execute(
+        # CP-0B: All non-Open→InReview transitions use an expected-status predicate
+        # so that a stale request whose pre-flight read is now out of date cannot
+        # silently overwrite a status that changed concurrently.
+        #
+        # The predicate is: payrollperiodid=:period_id AND companyid=:company_id AND
+        # status=:old_status.  Zero RETURNING rows means another transaction already
+        # moved this period; we surface a 409 Conflict rather than a silent no-op.
+        update_result = await db.execute(
             text(
                 f"UPDATE payroll.payrollperiods "
                 f"SET    status = :new_status{extra_set}{notes_set} "
-                f"WHERE  payrollperiodid = :period_id"
+                f"WHERE  payrollperiodid = :period_id "
+                f"  AND  companyid       = :company_id "
+                f"  AND  status          = :old_status "
+                f"RETURNING payrollperiodid"
             ),
             {
                 "new_status": change.status,
                 "period_id": period_id,
+                "company_id": company_id,
+                "old_status": existing.status,
                 **extra_params,
                 **notes_params,
             },
         )
+        if update_result.first() is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Period is no longer '{existing.status}' — "
+                    "a concurrent transition may have already moved it. "
+                    "Please refresh and try again."
+                ),
+            )
 
     # Audit: write inside the same transaction so a failure rolls back the UPDATE.
     await _write_period_status_audit(
