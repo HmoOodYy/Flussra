@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** No roadmap phase is complete; all phases in this plan are `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `In Progress`; CP-1A and CP-1B are `Done with Notes`; CP-1C through CP-1E remain `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1230,6 +1230,58 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 
 **Phase 0 remaining debt:** See CP-0A, CP-0B, CP-0C, and CP-0D completion notes.
 
+### CP-1B completion note
+
+**Status:** Done with Notes  
+**Codex verdict:** PASS WITH NOTES  
+**Implementation commit:** f906817  
+**Review result:** No P0/P1 blockers remain.
+
+**What CP-1B completed:**
+- Added migration 0049 for one `InReview` payroll-period slot per CompanyID/BranchID.
+- Added partial unique index:
+  `ux_payrollperiods_oneinreviewperbranch`
+- Added duplicate-InReview preflight before index creation.
+- Migration fails rather than auto-repairing duplicate InReview rows.
+- Downgrade drops only the CP-1B InReview index.
+- Added friendly service guard for existing branch InReview periods.
+- Guard applies to Open submit and Returned resubmit.
+- Added narrow safe 409 translation for the exact InReview slot unique-index violation.
+- Preserved Draft/Open/Returned indexes and CP-1A Returned pointer behavior.
+- Did not add branch workflow lock.
+- Did not implement Smart Create.
+- Did not implement Draft/Prepared promotion.
+- Did not implement Returned-backlog submit/create blockers.
+- Replaced the now-impossible CP-1A two-InReview return-race test.
+- Added deterministic Open-submit vs Returned-resubmit race coverage in both winner directions.
+- Added rollback proof for:
+  - calculation refresh;
+  - REVIEW_ITEM_CREATED audit;
+  - Pending PeriodApproval creation;
+  - Returned pointer preservation;
+  - Returned old review item preservation;
+  - status-change audit rollback.
+
+**Validation reported by Codex:**
+- CP-1B: 12 passed.
+- CP-1A: 30 passed.
+- CP-1A + CP-1B: 42 passed.
+- Phase 0: 114 passed.
+- Lifecycle/payroll: 83 passed.
+- Finalization/ledger: 70 passed.
+- Security/schema: 85 passed.
+- `test_codex_p0p1.py`: 18 passed.
+- Previously failing combined order: 60 passed.
+- Alembic: 0049 head/current; upgrade successful/no-op at current head.
+- `git diff --check`: passed.
+
+**Remaining P2/P3 notes:**
+- P2: Snapshot `ManagerReviewDecisions` rows explicitly in the Returned-loser test.
+- P2: `_ensure_hourly_rate` treats any overlapping approved HOURLY rate as suitable without confirming it is 25.00 and covers the actual work dates.
+- P2: Prefer SQLSTATE plus driver diagnostic constraint metadata over exception-text fallback.
+- P3: Clean up mojibake and the inaccurate comment claiming `_create_and_open_period` calls `_cancel_active`.
+- P3: Temporary PostgreSQL/pytest-cache infrastructure warnings remain.
+
 ### CP-1A completion note
 
 **Status:** Done with Notes  
@@ -1477,7 +1529,7 @@ Existing tests intentionally permit InReview edits and manual returns. Those tes
 **Status:** `In Progress`
 
 - [x] P1A: add Returned domain state and reviewed transition graph.
-- [ ] P1B: enforce one InReview slot.
+- [x] P1B: enforce one InReview slot. — **Done with Notes**
 - [ ] P1C: implement branch-locked smart create.
 - [ ] P1D: atomically promote Prepared on submit.
 - [ ] P1E: return Hub-ready workflow alerts/capabilities.
