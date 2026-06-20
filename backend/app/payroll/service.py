@@ -57,11 +57,10 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     ("Draft",    "Cancelled"):  "payroll.finalize",   # CP-0C: was missing — any user could cancel Draft
     ("Open",     "InReview"):   "payroll.entry",
     ("Open",     "Cancelled"):  "payroll.finalize",
-    ("InReview", "Open"):       "payroll.finalize",
-    # M16: ("InReview", "Approved") removed — now exclusively via review decision.
-    ("InReview", "Cancelled"):  "payroll.finalize",
-    # CP-0C: ("Approved", "InReview") removed — transition blocked at schema level.
-    ("Approved", "Cancelled"):  "payroll.finalize",
+    # CP-1A: InReview→Open and InReview→Cancelled both removed.
+    # InReview has no PATCH exits — the review decision flow is the only exit path.
+    # CP-1A: Approved→Cancelled removed — Approved has no PATCH exits.
+    #   Approved exits only via POST /finalize (→ Locked).
     ("Locked",   "Archived"):   "payroll.finalize",
 }
 
@@ -212,6 +211,7 @@ def _row_to_summary(r: Any) -> PeriodSummary:
         notes=r["notes"],
         created_by_user_id=r["createdbyuserid"],
         created_at_utc=r["createdatutc"],
+        current_return_review_item_id=r.get("currentreturnreviewitemid"),
         draft_drivers=r["draftdrivers"] or 0,
         draft_lines=r["draftlines"] or 0,
         draft_lines_needing_attention=r["draftlinesneedingattention"] or 0,
@@ -222,7 +222,7 @@ def _row_to_summary(r: Any) -> PeriodSummary:
 
 
 # Base SELECT that joins the view with the base table for the extra fields
-# (paydate, notes, createdbyuserid, createdatutc).
+# (paydate, notes, createdbyuserid, createdatutc, currentreturnreviewitemid).
 _BASE_SELECT = """
     SELECT
         v.payrollperiodid,
@@ -244,7 +244,8 @@ _BASE_SELECT = """
         p.paydate,
         p.notes,
         p.createdbyuserid,
-        p.createdatutc
+        p.createdatutc,
+        p.currentreturnreviewitemid
     FROM   app.vw_payrollperiodlist v
     JOIN   payroll.payrollperiods   p ON p.payrollperiodid = v.payrollperiodid
 """
@@ -979,49 +980,10 @@ async def change_period_status(
     notes_set = ", notes = :notes" if change.notes is not None else ""
     notes_params = {"notes": change.notes} if change.notes is not None else {}
 
-    # CP-0C: Deadlock-safe review item lock acquisition for InReview exits.
-    #
-    # Lock ordering requirement:
-    #   decide_review_item() acquires: ReviewItem (FOR UPDATE) → Period (UPDATE)
-    #   This path must use the same order:  ReviewItem (FOR UPDATE) → Period (UPDATE)
-    #
-    # If we updated the period first and then cancelled the review item we would
-    # hold Period and then wait for ReviewItem — the opposite of decide_review_item's
-    # order — and the two transactions could deadlock.
-    #
-    # Solution: for the two transitions that must cancel a Pending PeriodApproval
-    # item (InReview→Open, InReview→Cancelled), SELECT the matching item FOR UPDATE
-    # here, BEFORE the period UPDATE.  If another transaction already holds the item
-    # row lock (e.g. a concurrent review decision), we wait on it.  Once we acquire
-    # it the period UPDATE follows under the same lock order as decide_review_item.
-    #
-    # If no Pending item exists (period was force-set without going through the
-    # API submit path) we record None and the period still transitions; there is
-    # no item to orphan so the later UPDATE is simply skipped.
-    _pending_review_item_id: int | None = None
-    if existing.status == "InReview" and change.status in {"Open", "Cancelled"}:
-        ri_lock_result = await db.execute(
-            text("""
-                SELECT reviewitemid FROM review.managerreviewitems
-                WHERE  companyid    = :cid
-                  AND  branchid     = :bid
-                  AND  entityschema = 'payroll'
-                  AND  entityname   = 'PayrollPeriods'
-                  AND  entityid     = :eid
-                  AND  requesttype  = 'PeriodApproval'
-                  AND  status       = 'Pending'
-                LIMIT 1
-                FOR UPDATE
-            """),
-            {
-                "cid": company_id,
-                "bid": existing.branch_id,
-                "eid": str(period_id),
-            },
-        )
-        ri_row = ri_lock_result.first()
-        if ri_row is not None:
-            _pending_review_item_id = ri_row[0]
+    # CP-1A: InReview→Open and InReview→Cancelled are now blocked via _VALID_TRANSITIONS.
+    # The CP-0C lock acquisition for those exits is removed because the transitions
+    # are unreachable — change_period_status raises before this point when they're
+    # attempted.  Returned→anything is also blocked via PATCH.
 
     # For Open→InReview use an atomic UPDATE WHERE status='Open' RETURNING to
     # prevent a double-submit race.  Two concurrent requests that both passed the
@@ -1088,30 +1050,6 @@ async def change_period_status(
                 ),
             )
 
-    # CP-0C: Resolve the already-locked Pending review item (if one was found above).
-    # This runs only after the period UPDATE has committed its intent — if the period
-    # UPDATE raised above, we never reach this line and the transaction rolls back,
-    # leaving the review item untouched.
-    if _pending_review_item_id is not None:
-        await db.execute(
-            text("""
-                UPDATE review.managerreviewitems
-                SET    status                = 'Cancelled',
-                       finaldecisionbyuserid = :uid,
-                       finaldecisionatutc    = NOW(),
-                       finaldecisionreason   = :reason
-                WHERE  reviewitemid = :riid
-            """),
-            {
-                "uid":    user_id,
-                "reason": (
-                    f"Period manually transitioned to '{change.status}' "
-                    f"by user {user_id} — review item auto-cancelled."
-                ),
-                "riid":   _pending_review_item_id,
-            },
-        )
-
     # Audit: write inside the same transaction so a failure rolls back the UPDATE.
     await _write_period_status_audit(
         db,
@@ -1121,6 +1059,296 @@ async def change_period_status(
         period_id=period_id,
         old_status=existing.status,
         new_status=change.status,
+    )
+
+    return await get_period_by_id(company_id, user_id, period_id, db)
+
+
+# ===========================================================================
+# CP-1A: Resubmission
+# ===========================================================================
+
+async def resubmit_period(
+    company_id: int,
+    user_id: int,
+    period_id: int,
+    db: AsyncConnection,
+) -> "PeriodSummary":
+    """
+    POST /payroll/periods/{period_id}/resubmissions
+
+    Resubmit a Returned period for review.  Requires payroll.entry permission.
+    Driver/ODA roles are blocked.
+
+    Steps:
+      1. Driver/ODA guard.
+      2. Load the period (access + permission check).
+      3. Acquire FOR UPDATE lock; verify status is still Returned.
+      4. Run all Open→InReview submission guards (refresh, empty, NMR, zero-calc,
+         duplicate-Pending).
+      5. Create a new Pending PeriodApproval review item.
+      6. UPDATE period: status='InReview', CurrentReturnReviewItemID=NULL
+         WHERE status='Returned' RETURNING.
+      7. Write audits (review item created + period status changed).
+      8. Return refreshed PeriodSummary.
+    """
+    # ── Step 1: driver/ODA guard ─────────────────────────────────────────── #
+    await _require_not_driver_role(company_id, user_id, db)
+    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
+    if own_driver_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Payroll resubmission is not accessible to driver-role users.",
+        )
+
+    # ── Step 2: load period (access check) ───────────────────────────────── #
+    existing = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # Friendly pre-flight (race-safe lock comes next).
+    if existing.status != "Returned":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Only Returned periods can be resubmitted "
+                f"(current status: '{existing.status}'). "
+                "Use POST /payroll/periods/{id}/resubmissions only on Returned periods."
+            ),
+        )
+
+    # Permission gate: resubmission requires payroll.entry.
+    await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
+
+    # ── Step 3: acquire period lock, recheck status ───────────────────────── #
+    lock_result = await db.execute(
+        text(
+            "SELECT status FROM payroll.payrollperiods "
+            "WHERE payrollperiodid = :pid AND companyid = :cid "
+            "FOR UPDATE"
+        ),
+        {"pid": period_id, "cid": company_id},
+    )
+    lock_row = lock_result.mappings().first()
+    locked_status = lock_row["status"] if lock_row else "unknown"
+    if locked_status != "Returned":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Period is no longer Returned (current status: '{locked_status}'). "
+                "A concurrent resubmission or state change may have moved it. "
+                "Please refresh and try again."
+            ),
+        )
+
+    # ── Step 4: run submission guards (same as Open→InReview) ────────────── #
+
+    # Refresh draft calculations so the guards see current rates.
+    await _refresh_draft_calculations(
+        period_id=period_id,
+        company_id=company_id,
+        period_start_date=existing.start_date,
+        db=db,
+    )
+
+    # Guard 1: empty period.
+    empty_result = await db.execute(
+        text("""
+            SELECT COUNT(*) FROM payroll.payrolldraftlines
+            WHERE  payrollperiodid = :pid AND companyid = :cid AND status != 'Void'
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    if int(empty_result.scalar_one()) == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Cannot resubmit an empty period for review. "
+                "Add at least one non-voided draft line before resubmitting."
+            ),
+        )
+
+    # Guard 2: unresolved NeedsManagerReview lines.
+    unresolved_result = await db.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM   payroll.payrolldraftlines
+            WHERE  payrollperiodid    = :pid
+              AND  companyid          = :cid
+              AND  status            != 'Void'
+              AND  needsmanagerreview  = TRUE
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    unresolved_count = int(unresolved_result.scalar_one())
+    if unresolved_count > 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot resubmit: {unresolved_count} draft line(s) still require "
+                f"manager review (calculatedamount unresolved or manually flagged). "
+                f"Resolve all flagged lines before resubmitting."
+            ),
+        )
+
+    # Guard 3: zero-calc unresolved lines.
+    zero_calc_result = await db.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM   payroll.payrolldraftlines dl
+            WHERE  dl.payrollperiodid    = :pid
+              AND  dl.companyid          = :cid
+              AND  dl.status            != 'Void'
+              AND  dl.needsmanagerreview  = FALSE
+              AND  dl.calculatedamount   IS NULL
+              AND  (
+                EXISTS (
+                    SELECT 1 FROM payroll.payitems pi
+                    WHERE  pi.payitemcode  = dl.linetype
+                      AND  (pi.companyid IS NULL OR pi.companyid = dl.companyid)
+                      AND  pi.ratebehavior IN (
+                          'OrdinalTier', 'RangeBracket',
+                          'RangeProgressive', 'Block'
+                      )
+                )
+                OR
+                (
+                    dl.rateamount IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM payroll.payitems pi
+                        WHERE  pi.payitemcode  = dl.linetype
+                          AND  (pi.companyid IS NULL OR pi.companyid = dl.companyid)
+                          AND  pi.ratebehavior = 'PerUnit'
+                    )
+                )
+                OR dl.linescope = 'Period'
+              )
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    zero_calc_count = int(zero_calc_result.scalar_one())
+    if zero_calc_count > 0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot resubmit: {zero_calc_count} rate-dependent draft line(s) have no "
+                f"resolved calculation amount. Fix or void these lines before resubmitting."
+            ),
+        )
+
+    # Guard 4: duplicate Pending review item.
+    dup_result = await db.execute(
+        text("""
+            SELECT reviewitemid FROM review.managerreviewitems
+            WHERE  companyid    = :cid
+              AND  entityschema = 'payroll'
+              AND  entityname   = 'PayrollPeriods'
+              AND  entityid     = :eid
+              AND  requesttype  = 'PeriodApproval'
+              AND  status       = 'Pending'
+            LIMIT 1
+        """),
+        {"cid": company_id, "eid": str(period_id)},
+    )
+    dup_row = dup_result.first()
+    if dup_row is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"A Pending review item already exists for this period "
+                f"(review item ID {dup_row[0]}). Resolve it before resubmitting."
+            ),
+        )
+
+    # ── Step 5: create new Pending PeriodApproval review item ────────────── #
+    try:
+        ri_result = await db.execute(
+            text("""
+                INSERT INTO review.managerreviewitems
+                    (companyid, branchid, requestedbyuserid,
+                     requesttype, entityschema, entityname, entityid,
+                     title, description, priority, status)
+                VALUES
+                    (:cid, :bid, :uid,
+                     'PeriodApproval', 'payroll', 'PayrollPeriods', :eid,
+                     :title, :description, 'Normal', 'Pending')
+                RETURNING reviewitemid
+            """),
+            {
+                "cid":         company_id,
+                "bid":         existing.branch_id,
+                "uid":         user_id,
+                "eid":         str(period_id),
+                "title":       f"Payroll Period Resubmission: {existing.period_name} ({existing.branch_name})",
+                "description": (
+                    f"Period {existing.period_name} ({existing.period_code}) has been "
+                    f"resubmitted for approval after correction. Date range: "
+                    f"{existing.start_date} to {existing.end_date}."
+                ),
+            },
+        )
+    except SAIntegrityError:
+        raise HTTPException(
+            status_code=422,
+            detail="A pending review already exists for this payroll period.",
+        )
+    new_review_item_id: int = ri_result.scalar_one()
+
+    # Write review item creation audit.
+    await db.execute(
+        text("""
+            INSERT INTO audit.auditlog
+                (companyid, branchid, actoruserid, actioncode,
+                 entityschema, entityname, entityid,
+                 newvaluejson, reason, sourcetype)
+            VALUES
+                (:cid, :bid, :uid, 'REVIEW_ITEM_CREATED',
+                 'review', 'ManagerReviewItems', :riid,
+                 :new_val, 'Review item submitted', 'Application')
+        """),
+        {
+            "cid":     company_id,
+            "bid":     existing.branch_id,
+            "uid":     user_id,
+            "riid":    str(new_review_item_id),
+            "new_val": json.dumps({
+                "request_type": "PeriodApproval",
+                "period_id":    period_id,
+                "period_name":  existing.period_name,
+                "resubmission": True,
+            }),
+        },
+    )
+
+    # ── Step 6: atomic transition Returned→InReview, clear pointer ────────── #
+    update_result = await db.execute(
+        text("""
+            UPDATE payroll.payrollperiods
+            SET    status                    = 'InReview',
+                   currentreturnreviewitemid = NULL
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  status          = 'Returned'
+            RETURNING payrollperiodid
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    if update_result.first() is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Period is no longer Returned — a concurrent resubmission may have "
+                "already moved it. Please refresh and try again."
+            ),
+        )
+
+    # ── Step 7: period status audit ──────────────────────────────────────── #
+    await _write_period_status_audit(
+        db,
+        company_id=company_id,
+        branch_id=existing.branch_id,
+        user_id=user_id,
+        period_id=period_id,
+        old_status="Returned",
+        new_status="InReview",
     )
 
     return await get_period_by_id(company_id, user_id, period_id, db)
@@ -1141,14 +1369,15 @@ async def _lock_period_for_mutation(
     db: AsyncConnection,
 ) -> None:
     """
-    CP-0A: Lock the PayrollPeriods row FOR UPDATE and verify it is still Open.
+    CP-0A/CP-1A: Lock the PayrollPeriods row FOR UPDATE and verify it is still
+    in an editable status (Open or Returned).
 
     Must be called immediately before the first DML write in every source
     mutation path.  The lock ensures that a concurrent status transition
-    (e.g. Open→InReview) cannot commit after this mutation has already passed
-    the upfront status check but before it writes.
+    cannot commit after this mutation has already passed the upfront status
+    check but before it writes.
 
-    Raises HTTP 409 Conflict when the current status is not Open.
+    Raises HTTP 409 Conflict when the current status is not Open or Returned.
     """
     result = await db.execute(
         text(
@@ -1160,11 +1389,12 @@ async def _lock_period_for_mutation(
     )
     row = result.mappings().first()
     current_status = row["status"] if row else "unknown"
-    if current_status != "Open":
+    if current_status not in {"Open", "Returned"}:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Period is no longer Open (current status: '{current_status}'). "
+                f"Period is no longer editable (current status: '{current_status}'). "
+                "Only Open or Returned periods accept source mutations. "
                 "The mutation was rejected to preserve payroll data integrity."
             ),
         )
@@ -2140,7 +2370,7 @@ async def add_draft_line(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Draft lines can only be added to Open periods "
+                f"Draft lines can only be added to Open or Returned periods "
                 f"(current status: '{period.status}')."
             ),
         )
@@ -6276,7 +6506,7 @@ async def add_period_pay_line(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Period Pay lines can only be added to Open periods "
+                f"Period Pay lines can only be added to Open or Returned periods "
                 f"(current status: '{period.status}')."
             ),
         )

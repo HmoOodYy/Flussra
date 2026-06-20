@@ -43,14 +43,15 @@ async def _cancel_active_periods(
     client: httpx.AsyncClient,
     token: str,
     branch_id: int,
+    direct_db=None,
 ) -> None:
     """
-    Cancel every Draft / Open / InReview / Approved period on `branch_id`.
-    Silently skips statuses that produce no results or periods that are
-    already in a terminal state.
+    Cancel every Draft / Open period via PATCH (production path).
+    InReview, Returned, and Approved cannot be cancelled via PATCH in CP-1A;
+    cancel those directly in the database when direct_db is provided.
     """
     headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
+    for s in ("Draft", "Open"):
         resp = await client.get(
             "/payroll/periods",
             params={"branch_id": branch_id, "status": s},
@@ -64,6 +65,25 @@ async def _cancel_active_periods(
                 json={"status": "Cancelled"},
                 headers=headers,
             )
+    if direct_db is not None:
+        from sqlalchemy import text as _text
+        # Returned: must clear CurrentReturnReviewItemID first (pointer-consistency CHECK).
+        await direct_db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods "
+                "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+                "WHERE branchid = :bid AND status = 'Returned'"
+            ),
+            {"bid": branch_id},
+        )
+        # InReview and Approved: no pointer to clear.
+        await direct_db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
+            ),
+            {"bid": branch_id},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +95,17 @@ async def paytest_clean(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
+    direct_db,
 ):
     """
     Cancels any active periods on PAYTEST before the test (safety net),
     yields the PAYTEST branch_id, then cancels again after the test.
-    This guarantees every test that uses it starts and ends with a clean
-    Draft/Open slate on PAYTEST.
+    CP-1A: InReview/Returned/Approved cancellation via PATCH is blocked;
+    use direct_db for those statuses.
     """
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, direct_db)
     yield paytest_branch_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, direct_db)
 
 
 @pytest_asyncio.fixture
@@ -608,11 +629,11 @@ class TestStatusTransitions:
         fresh_period: dict,
         paytest_driver_id: int,
     ):
+        """CP-1A: PATCH InReview→Open is blocked; InReview has no PATCH exits."""
         pid = fresh_period["payroll_period_id"]
         headers = auth(auth_token)
         await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "Open"}, headers=headers)
-        # Add a line so InReview is not blocked by empty-period guard
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
@@ -625,8 +646,10 @@ class TestStatusTransitions:
             json={"status": "Open"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "Open"
+        assert resp.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked (422), got {resp.status_code}: {resp.text}"
+        )
+        assert "InReview" in resp.text or "cannot be transitioned" in resp.text
 
     async def test_invalid_status_value_returns_422(
         self,
@@ -826,14 +849,18 @@ class TestStatusTransitionReviewGate:
         )
         assert resp.status_code == 422
 
-    async def test_duplicate_pending_item_blocks_open_to_inreview(
+    async def test_inreview_has_no_patch_exits(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_period: dict,
         paytest_driver_id: int,
     ):
-        """Open → InReview is blocked when a Pending review item already exists."""
+        """
+        CP-1A: Once InReview, no PATCH transition is allowed (not Open, not Cancelled,
+        not InReview again). The period must exit InReview only via the review decision flow.
+        The old 'return to Open manually' path (which relied on InReview→Open) is blocked.
+        """
         pid = fresh_period["payroll_period_id"]
         headers = auth(auth_token)
         await client.patch(f"/payroll/periods/{pid}/status",
@@ -843,17 +870,14 @@ class TestStatusTransitionReviewGate:
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
                   "line_type": "PTO_STATUS", "quantity": 1},
         )
-        # First submit → creates a Pending review item
         r1 = await client.patch(f"/payroll/periods/{pid}/status",
                                 json={"status": "InReview"}, headers=headers)
         assert r1.status_code == 200
 
-        # Return to Open manually
-        await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=headers)
-
-        # Second submit → blocked by duplicate Pending item
-        r2 = await client.patch(f"/payroll/periods/{pid}/status",
-                                json={"status": "InReview"}, headers=headers)
-        assert r2.status_code == 422
-        assert "pending" in r2.json()["detail"].lower()
+        # CP-1A: all PATCH exits from InReview are blocked
+        for target in ("Open", "Cancelled", "InReview", "Draft"):
+            r = await client.patch(f"/payroll/periods/{pid}/status",
+                                   json={"status": target}, headers=headers)
+            assert r.status_code == 422, (
+                f"CP-1A: InReview→{target} must be blocked (422), got {r.status_code}: {r.text}"
+            )

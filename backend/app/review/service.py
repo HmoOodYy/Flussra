@@ -48,6 +48,7 @@ All database access is raw parameterised SQL via sqlalchemy.text().
 import json
 from fastapi import HTTPException, status
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import (
@@ -546,6 +547,21 @@ async def decide_review_item(
     # Permission gate: deciding requires review.decide.
     await _check_permission(company_id, user_id, row["branchid"], "review.decide", db)
 
+    # CP-1A: PeriodApproval Rejected/EditRequested require a nonblank decision reason.
+    # These decisions return the period to Returned; the reason is preserved on
+    # the review item and is the authoritative source for why it was returned.
+    # Non-PeriodApproval review types are unaffected by this requirement.
+    if row.get("requesttype") == "PeriodApproval" and data.decision in {"Rejected", "EditRequested"}:
+        if not data.decision_reason or not data.decision_reason.strip():
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"A non-blank decision_reason is required for '{data.decision}' decisions "
+                    "on PeriodApproval items. The reason is recorded on the review item and "
+                    "visible to the submitter."
+                ),
+            )
+
     # Self-approval policy gate (substantive decisions only — Comments are always allowed).
     # Reads AllowSelfApproval from core.Companies; defaults to TRUE if the column is absent
     # (safety guard for environments not yet migrated to 0004).
@@ -742,42 +758,87 @@ async def decide_review_item(
                 )
 
         # Map decision → new period status
+        # CP-1A: Rejected and EditRequested now return to Returned (not Open).
         if data.decision == "Approved":
             new_period_status = "Approved"
         else:
-            # Rejected or EditRequested both return the period to Open
-            new_period_status = "Open"
+            # Rejected or EditRequested → period Returned
+            new_period_status = "Returned"
 
         # Stamp approvedbyuserid/approvedatutc when moving to Approved
         if new_period_status == "Approved":
             extra_set = ", approvedbyuserid = :approver, approvedatutc = NOW()"
             extra_params: dict = {"approver": user_id}
+        elif new_period_status == "Returned":
+            # CP-1A: set CurrentReturnReviewItemID = the resolved review item.
+            # One-Returned-slot guard: check before the UPDATE so the error is
+            # user-friendly.  The partial unique index is the concurrency authority
+            # — if two concurrent returns race past this guard, the second UPDATE
+            # hits the unique constraint and raises SAIntegrityError caught below.
+            slot_check = await db.execute(
+                text("""
+                    SELECT payrollperiodid FROM payroll.payrollperiods
+                    WHERE  companyid = :cid
+                      AND  branchid  = :bid
+                      AND  status    = 'Returned'
+                    LIMIT 1
+                """),
+                {"cid": company_id, "bid": int(row["branchid"])},
+            )
+            if slot_check.first() is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A Returned period already exists for this branch. "
+                        "Only one Returned period is allowed per branch at a time. "
+                        "Resolve the existing Returned period before returning another."
+                    ),
+                )
+            extra_set = ", currentreturnreviewitemid = :ri_id"
+            extra_params = {"ri_id": review_item_id}
         else:
             extra_set = ""
             extra_params = {}
 
         # Atomic claim: only updates if period is still InReview.
         # Prevents double-advance when two concurrent decisions race.
-        period_result = await db.execute(
-            text(
-                f"UPDATE payroll.payrollperiods "
-                f"SET    status = :new_status{extra_set} "
-                f"WHERE  payrollperiodid = :pid "
-                f"  AND  companyid       = :cid "
-                f"  AND  status          = 'InReview' "
-                f"RETURNING payrollperiodid, branchid"
-            ),
-            {"new_status": new_period_status, "pid": period_id, "cid": company_id,
-             **extra_params},
-        )
+        # CP-1A: for Returned, also sets CurrentReturnReviewItemID.
+        # The ux_PayrollPeriods_OneReturnedPerBranch partial unique index
+        # is the concurrency authority for the one-Returned-slot invariant.
+        try:
+            period_result = await db.execute(
+                text(
+                    f"UPDATE payroll.payrollperiods "
+                    f"SET    status = :new_status{extra_set} "
+                    f"WHERE  payrollperiodid = :pid "
+                    f"  AND  companyid       = :cid "
+                    f"  AND  status          = 'InReview' "
+                    f"RETURNING payrollperiodid, branchid"
+                ),
+                {"new_status": new_period_status, "pid": period_id, "cid": company_id,
+                 **extra_params},
+            )
+        except SAIntegrityError as exc:
+            # PostgreSQL folds unquoted identifiers to lowercase; normalize before matching.
+            exc_str = str(exc).lower()
+            if "ux_payrollperiods_onereturnedperbranch" in exc_str:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A concurrent return decision created a Returned period for this "
+                        "branch at the same time. Only one Returned period is allowed per "
+                        "branch. This return decision has been rolled back."
+                    ),
+                )
+            raise
+
         period_row = period_result.mappings().first()
         if period_row is None:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     "Period is no longer in InReview status — it may have been "
-                    "returned or cancelled concurrently. The review decision has been "
-                    "rolled back."
+                    "transitioned concurrently. The review decision has been rolled back."
                 ),
             )
 

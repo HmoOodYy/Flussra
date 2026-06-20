@@ -176,10 +176,11 @@ async def create_period(
         "Allowed transitions:\n"
         "- **Draft** → Open | Cancelled\n"
         "- **Open** → InReview | Cancelled\n"
-        "- **InReview** → Open | Cancelled\n"
-        "  *(InReview → Approved uses POST /review/items/{id}/decide)*\n"
-        "- **Approved** → Cancelled\n"
-        "  *(Approved → Locked uses POST /periods/{id}/finalize)*\n"
+        "- **InReview** → *(no PATCH exits — use POST /review/items/{id}/decide)*\n"
+        "  - Approved decision → period Approved\n"
+        "  - Rejected / EditRequested decision → period Returned\n"
+        "- **Returned** → *(no PATCH exits — use POST /periods/{id}/resubmissions)*\n"
+        "- **Approved** → *(no PATCH exits — use POST /periods/{id}/finalize to lock)*\n"
         "- **Locked** → Archived\n"
     ),
     responses={
@@ -199,6 +200,40 @@ async def change_period_status(
         user_id=int(token["sub"]),
         period_id=period_id,
         change=body,
+        db=db,
+    )
+
+
+@router.post(
+    "/periods/{period_id}/resubmissions",
+    response_model=PeriodSummary,
+    status_code=200,
+    summary="Resubmit a Returned period for review",
+    description=(
+        "Transitions a **Returned** period back to **InReview**.\n\n"
+        "Requires `payroll.entry` permission. Driver and ODA roles are blocked.\n\n"
+        "Reruns all Open→InReview submission guards (empty-period, NeedsManagerReview, "
+        "zero-calc, duplicate-Pending) before creating a new Pending PeriodApproval "
+        "review item. Clears `CurrentReturnReviewItemID` atomically.\n\n"
+        "The resolved review item from the previous return is preserved unchanged.\n\n"
+        "Returns **409** if the period is no longer Returned at the write boundary."
+    ),
+    responses={
+        403: {"description": "No access to this period's branch, or driver/ODA role"},
+        404: {"description": "Period not found"},
+        409: {"description": "Period is no longer Returned — concurrent transition"},
+        422: {"description": "Period not Returned, or submission guard failed"},
+    },
+)
+async def resubmit_period(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> PeriodSummary:
+    return await service.resubmit_period(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        period_id=period_id,
         db=db,
     )
 

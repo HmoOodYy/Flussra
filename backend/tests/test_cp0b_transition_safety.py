@@ -155,13 +155,14 @@ class TestTransitionPredicates:
         assert r.status_code == 200, f"Open→Cancelled failed: {r.text}"
         assert r.json()["status"] == "Cancelled"
 
-    async def test_inreview_to_open_manual_succeeds(
+    async def test_inreview_to_open_now_blocked(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
+        # CP-1A: InReview→Open is now blocked; InReview has no PATCH exits.
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
         r = await client.patch(
@@ -169,23 +170,21 @@ class TestTransitionPredicates:
             json={"status": "Open"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"InReview→Open failed: {r.text}"
-        assert r.json()["status"] == "Open"
-
-        # cleanup
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=_auth(auth_token),
+        assert r.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked (422), got {r.status_code}: {r.text}"
         )
 
-    async def test_inreview_to_cancelled_succeeds(
+        # cleanup via direct DB since InReview can't be cancelled via PATCH either
+        await _force_status(direct_db, pid, "Cancelled")
+
+    async def test_inreview_to_cancelled_now_blocked(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
+        # CP-1A: InReview→Cancelled is now blocked; InReview has no PATCH exits.
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
         r = await client.patch(
@@ -193,8 +192,11 @@ class TestTransitionPredicates:
             json={"status": "Cancelled"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"InReview→Cancelled failed: {r.text}"
-        assert r.json()["status"] == "Cancelled"
+        assert r.status_code == 422, (
+            f"CP-1A: InReview→Cancelled must be blocked (422), got {r.status_code}: {r.text}"
+        )
+
+        await _force_status(direct_db, pid, "Cancelled")
 
     async def test_approved_to_inreview_now_rejected(
         self,
@@ -221,13 +223,14 @@ class TestTransitionPredicates:
         # cleanup — period is still Approved; cancel it directly
         await _force_status(direct_db, pid, "Cancelled")
 
-    async def test_approved_to_cancelled_succeeds(
+    async def test_approved_to_cancelled_now_blocked(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
+        """CP-1A: Approved→Cancelled via PATCH is blocked. Approved has no PATCH exits."""
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "Approved")
         r = await client.patch(
@@ -235,8 +238,10 @@ class TestTransitionPredicates:
             json={"status": "Cancelled"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"Approved→Cancelled failed: {r.text}"
-        assert r.json()["status"] == "Cancelled"
+        assert r.status_code == 422, (
+            f"CP-1A: Approved→Cancelled must be blocked (422), got {r.status_code}: {r.text}"
+        )
+        await _force_status(direct_db, pid, "Cancelled")
 
     async def test_locked_to_archived_succeeds(
         self,
@@ -528,59 +533,30 @@ class TestStaleTransitionRejection:
             svc_payroll.get_period_by_id = real_gp
             # Period is Archived (terminal) — no further cleanup needed.
 
-    async def test_stale_inreview_to_open_rejected(
+    async def test_inreview_to_open_blocked_before_predicate_check(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
-        pg_instance,
     ):
         """
-        Pre-flight reads InReview; psycopg2 commits InReview→Cancelled before
-        the UPDATE; UPDATE WHERE status='InReview' → 0 rows → 409.
+        CP-1A: InReview→Open is blocked at the schema/transition level (422) before
+        any UPDATE is attempted.  The previous stale-state 409 scenario is now moot
+        because the transition is rejected immediately regardless of the DB state.
         """
-        import app.payroll.service as svc_payroll
-
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
-        loop = asyncio.get_running_loop()
+        r = await client.patch(
+            f"/payroll/periods/{pid}/status",
+            json={"status": "Open"},
+            headers=_auth(auth_token),
+        )
+        assert r.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked (422), got {r.status_code}: {r.text}"
+        )
 
-        real_gp = svc_payroll.get_period_by_id
-
-        async def patched_gp(company_id, user_id, period_id, db):
-            result = await real_gp(company_id, user_id, period_id, db)
-            if period_id == pid and result.status == "InReview":
-                def do_change():
-                    conn = psycopg2.connect(client_encoding="utf-8", **pg_instance.dsn())
-                    conn.autocommit = False
-                    cur = conn.cursor()
-                    cur.execute(
-                        "UPDATE payroll.payrollperiods "
-                        "SET status = 'Cancelled' "
-                        "WHERE payrollperiodid = %s AND status = 'InReview'",
-                        [pid],
-                    )
-                    conn.commit()
-                    conn.close()
-
-                await loop.run_in_executor(None, do_change)
-            return result
-
-        svc_payroll.get_period_by_id = patched_gp
-        try:
-            r = await client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Open"},
-                headers=_auth(auth_token),
-            )
-            assert r.status_code == 409, (
-                f"Expected 409 (stale InReview→Open), got {r.status_code}: {r.text}\n"
-                "Without the predicate, InReview→Open would overwrite Cancelled with Open."
-            )
-        finally:
-            svc_payroll.get_period_by_id = real_gp
-            # Period is Cancelled — no further cleanup needed.
+        await _force_status(direct_db, pid, "Cancelled")
 
 
 # ---------------------------------------------------------------------------

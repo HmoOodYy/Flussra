@@ -23,10 +23,12 @@ class PeriodSummary(BaseModel):
     start_date: date
     end_date: date
     pay_date: date | None = None
-    status: str               # Draft | Open | InReview | Approved | Locked | Cancelled | Archived
+    status: str               # Draft | Open | InReview | Returned | Approved | Locked | Cancelled | Archived
     notes: str | None = None
     created_by_user_id: int | None = None
     created_at_utc: datetime
+    # CP-1A: set when status='Returned'; cleared on resubmission.
+    current_return_review_item_id: int | None = None
     # Aggregate counts from vw_PayrollPeriodList
     draft_drivers: int = 0
     draft_lines: int = 0
@@ -79,17 +81,20 @@ class PeriodCreate(BaseModel):
 _VALID_TRANSITIONS: dict[str, set[str]] = {
     "Draft":    {"Open", "Cancelled"},
     "Open":     {"InReview", "Cancelled"},
-    # M16: InReview → Approved is removed from PATCH /status.
-    # Approval now flows exclusively through the review decision system:
-    #   POST /review/items/{id}/decide with decision='Approved'  → period Approved
-    #   POST /review/items/{id}/decide with decision='Rejected'  → period Open
-    #   POST /review/items/{id}/decide with decision='EditRequested' → period Open
-    # InReview → Open is kept for manual return / payroll admin override.
-    "InReview": {"Open", "Cancelled"},
-    # CP-0C: "InReview" removed — Approved→InReview left a period in InReview
-    # with no active Pending PeriodApproval item and no review path forward.
-    # The only valid exit from Approved is Cancelled (admin) or Locked (finalize).
-    "Approved": {"Cancelled"},
+    # CP-1A: InReview has no PATCH exits.
+    #   Approved    → period Approved  (via POST /review/items/{id}/decide)
+    #   Rejected    → period Returned  (via POST /review/items/{id}/decide + reason)
+    #   EditRequested → period Returned (via POST /review/items/{id}/decide + reason)
+    # Manual InReview→Open and InReview→Cancelled are both blocked.
+    "InReview": set(),
+    # CP-1A: Returned has no PATCH exits.
+    #   Resubmit via POST /payroll/periods/{id}/resubmissions → InReview.
+    #   Direct PATCH to Returned is also forbidden (see _PATCH_RESERVED_STATUSES).
+    "Returned": set(),
+    # CP-1A: Approved has no PATCH exits.
+    #   Approved → Locked goes through POST /periods/{id}/finalize (not PATCH).
+    #   Approved → Cancelled is blocked — only Draft and Open can be cancelled.
+    "Approved": set(),
     "Locked":   {"Archived"},
     "Cancelled": set(),
     "Archived":  set(),
@@ -97,9 +102,10 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
 
 _ALL_STATUSES = set(_VALID_TRANSITIONS.keys())
 
-# "Locked" is a valid DB status but must NEVER be set via PATCH /status —
-# it is only reachable through POST /periods/{id}/finalize.
-_PATCH_RESERVED_STATUSES = {"Locked"}
+# "Locked" and "Returned" must NEVER be set via PATCH /status:
+#   Locked   — reachable only through POST /periods/{id}/finalize.
+#   Returned — reachable only through the review decision flow (POST /review/items/{id}/decide).
+_PATCH_RESERVED_STATUSES = {"Locked", "Returned"}
 
 
 class NextPeriodDates(BaseModel):
@@ -168,9 +174,10 @@ _VALID_SOURCE_TYPES   = {"Manual", "Import", "System"}
 _VALID_LINE_STATUSES  = {"Active", "NeedsReview", "Rejected", "Void"}
 
 # Periods must be in one of these statuses to accept new/modified entries.
-# CP-0A: Only Open periods accept source mutations.
-# InReview and all later/terminal statuses are read-only for operational data.
-ENTRY_ALLOWED_STATUSES = {"Open"}
+# CP-0A: Open is the primary editable status.
+# CP-1A: Returned is also editable — corrections must be possible before resubmission.
+# InReview and all other statuses are read-only for operational data.
+ENTRY_ALLOWED_STATUSES = {"Open", "Returned"}
 
 
 class DraftLineSummary(BaseModel):

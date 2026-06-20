@@ -8,20 +8,17 @@ Three fixes verified here:
    authenticated user — regardless of role — could cancel a Draft period.
    Fix: entry added with "payroll.finalize" requirement.
 
-2. Review item orphan: Manual transitions that move a period out of InReview via
-   PATCH (InReview→Open, InReview→Cancelled) did not resolve the Pending
-   PeriodApproval review item that Open→InReview auto-created.  The item would
-   remain Pending indefinitely, preventing re-submission and confusing the
-   review queue.
-   Fix: CP-0C resolves (Cancels) any Pending PeriodApproval item in the same
-   transaction as the period UPDATE.
+2. Review item orphan (CP-0C era): Manual transitions that move a period out of
+   InReview via PATCH did not resolve the Pending PeriodApproval review item.
+   CP-1A supersedes this: InReview now has NO PATCH exits (InReview→Open and
+   InReview→Cancelled are both blocked).  Tests 2a/2b are inverted to verify the
+   block; the "no item" path test is also inverted.
 
 3. Deadlock prevention (CP-0C corrective follow-up):
-   The original CP-0C acquired locks in Period→ReviewItem order while
-   decide_review_item() uses ReviewItem→Period order.  Concurrent execution
-   of the two paths could deadlock.
-   Fix: InReview exits now do ReviewItem FOR UPDATE before the period UPDATE,
-   establishing a consistent ReviewItem→Period lock order on both paths.
+   PATCH InReview exits were using ReviewItem FOR UPDATE before Period UPDATE.
+   CP-1A removes all InReview PATCH exits, so the deadlock scenario is eliminated.
+   The CP-0C deadlock test (TestDeadlockPrevention) is preserved and verifies that
+   the review DECIDE path still acquires locks in the correct order.
 
 Dates: 2092-* — isolated year, avoids conflicts with CP-0A (no year) and
 CP-0B (2091) test modules.
@@ -379,19 +376,19 @@ class TestReviewItemResolution:
     PeriodApproval review item in the same transaction.
     """
 
-    async def test_inreview_to_open_cancels_pending_review_item(
+    async def test_inreview_to_open_now_blocked(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
-        """InReview→Open via PATCH resolves the Pending review item (status→Cancelled)."""
+        """CP-1A: InReview→Open via PATCH is blocked; InReview has no PATCH exits."""
         company_id = _TEST_COMPANY_ID
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
 
-        ri_id = await _insert_pending_review_item(
+        await _insert_pending_review_item(
             direct_db, company_id, paytest_branch_id, pid, _TEST_ADMIN_USER_ID,
         )
 
@@ -400,34 +397,31 @@ class TestReviewItemResolution:
             json={"status": "Open"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"InReview→Open failed: {r.text}"
-        assert r.json()["status"] == "Open"
+        assert r.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked (422), got {r.status_code}: {r.text}"
+        )
 
+        # Period and review item should be unchanged
         item_status = await _get_review_item_status(direct_db, company_id, pid)
-        assert item_status == "Cancelled", (
-            f"Expected review item {ri_id} to be Cancelled after InReview→Open, "
-            f"got '{item_status}'"
+        assert item_status == "Pending", (
+            f"Review item should remain Pending after blocked InReview→Open, got '{item_status}'"
         )
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=_auth(auth_token),
-        )
+        await _force_status(direct_db, pid, "Cancelled")
 
-    async def test_inreview_to_cancelled_cancels_pending_review_item(
+    async def test_inreview_to_cancelled_now_blocked(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
-        """InReview→Cancelled via PATCH resolves the Pending review item (status→Cancelled)."""
+        """CP-1A: InReview→Cancelled via PATCH is blocked; InReview has no PATCH exits."""
         company_id = _TEST_COMPANY_ID
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
 
-        ri_id = await _insert_pending_review_item(
+        await _insert_pending_review_item(
             direct_db, company_id, paytest_branch_id, pid, _TEST_ADMIN_USER_ID,
         )
 
@@ -436,46 +430,47 @@ class TestReviewItemResolution:
             json={"status": "Cancelled"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"InReview→Cancelled failed: {r.text}"
-        assert r.json()["status"] == "Cancelled"
-
-        item_status = await _get_review_item_status(direct_db, company_id, pid)
-        assert item_status == "Cancelled", (
-            f"Expected review item {ri_id} to be Cancelled after InReview→Cancelled, "
-            f"got '{item_status}'"
+        assert r.status_code == 422, (
+            f"CP-1A: InReview→Cancelled must be blocked (422), got {r.status_code}: {r.text}"
         )
 
-    async def test_inreview_to_open_no_review_item_still_succeeds(
+        # Period and review item should be unchanged
+        item_status = await _get_review_item_status(direct_db, company_id, pid)
+        assert item_status == "Pending", (
+            f"Review item should remain Pending after blocked InReview→Cancelled, got '{item_status}'"
+        )
+
+        await _force_status(direct_db, pid, "Cancelled")
+
+    async def test_inreview_to_open_no_exit_regardless_of_review_items(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
-        """InReview→Open works fine when no Pending review item exists (UPDATE 0 rows is OK)."""
+        """CP-1A: InReview→Open is blocked even when no Pending review item exists."""
         company_id = _TEST_COMPANY_ID
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
 
-        # No review item inserted — the UPDATE WHERE status='Pending' should affect 0 rows silently
+        # No review item — the transition should still be blocked
         r = await session_client.patch(
             f"/payroll/periods/{pid}/status",
             json={"status": "Open"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"InReview→Open (no item) failed: {r.text}"
-        assert r.json()["status"] == "Open"
+        assert r.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked even without a review item, "
+            f"got {r.status_code}: {r.text}"
+        )
 
         item_status = await _get_review_item_status(direct_db, company_id, pid)
         assert item_status is None, "Expected no review item for this period"
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=_auth(auth_token),
-        )
+        await _force_status(direct_db, pid, "Cancelled")
 
-    async def test_approved_to_cancelled_leaves_decided_item_intact(
+    async def test_approved_to_cancelled_is_blocked(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -483,36 +478,12 @@ class TestReviewItemResolution:
         direct_db,
     ):
         """
-        Approved→Cancelled does not accidentally modify an already-decided review item.
-        The review item should have been resolved (non-Pending) before the period
-        reached Approved, so the CP-0C UPDATE WHERE status='Pending' should touch 0 rows.
+        CP-1A: Approved→Cancelled via PATCH is blocked.
+        Only Draft and Open can be cancelled. Approved periods exit only via
+        POST /finalize (→ Locked). The blocking prevents inadvertent data loss
+        of periods that have already been approved by a reviewer.
         """
-        company_id = _TEST_COMPANY_ID
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
-        await _force_status(direct_db, pid, "InReview")
-
-        # Insert a review item in 'Approved' state (simulating post-decide_review_item state)
-        await direct_db.execute(
-            text("""
-                INSERT INTO review.managerreviewitems
-                    (companyid, branchid, requestedbyuserid,
-                     requesttype, entityschema, entityname, entityid,
-                     title, description, priority, status,
-                     finaldecisionbyuserid, finaldecisionatutc)
-                VALUES
-                    (:cid, :bid, :uid,
-                     'PeriodApproval', 'payroll', 'PayrollPeriods', :eid,
-                     'Test PeriodApproval', 'Already decided', 'Normal', 'Approved',
-                     :uid, NOW())
-            """),
-            {
-                "cid": company_id,
-                "bid": paytest_branch_id,
-                "uid": _TEST_ADMIN_USER_ID,
-                "eid": str(pid),
-            },
-        )
-
         await _force_status(direct_db, pid, "Approved")
 
         r = await session_client.patch(
@@ -520,14 +491,20 @@ class TestReviewItemResolution:
             json={"status": "Cancelled"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"Approved→Cancelled failed: {r.text}"
-        assert r.json()["status"] == "Cancelled"
-
-        # Decided item should remain 'Approved' (not touched by the CP-0C UPDATE)
-        item_status = await _get_review_item_status(direct_db, company_id, pid)
-        assert item_status == "Approved", (
-            f"Expected already-decided review item to remain 'Approved', got '{item_status}'"
+        assert r.status_code == 422, (
+            f"CP-1A: Approved→Cancelled must be blocked (422), got {r.status_code}: {r.text}"
         )
+        assert "cannot be transitioned" in r.text or "Approved" in r.text
+
+        # Period must still be Approved (transition was rejected)
+        from sqlalchemy import text as _t
+        row = await direct_db.execute(
+            _t("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+            {"pid": pid},
+        )
+        assert row.scalar_one() == "Approved", "Period should remain Approved after rejected transition"
+
+        await _force_status(direct_db, pid, "Cancelled")
 
 
 # ---------------------------------------------------------------------------
@@ -572,225 +549,67 @@ def _period_unlocked_nowait(pid: int, pg_dsn: dict) -> bool:
 @pytest.mark.asyncio
 class TestDeadlockPrevention:
     """
-    Deterministically prove that the payroll PATCH path acquires the review item
-    lock BEFORE the period lock, matching decide_review_item()'s order.
+    CP-0C: Lock-order and deadlock-prevention assertions for InReview exits.
 
-    How determinism is achieved
-    ---------------------------
-    1. Thread A holds the review item row lock (SELECT ri FOR UPDATE).
-    2. We monkeypatch AsyncConnection.execute to fire `patch_reached_ri_lock_attempt`
-       the moment the PATCH path issues the specific ri-lock SQL
-       (SELECT … managerreviewitems … FOR UPDATE … PeriodApproval … Pending).
-       This is a hard event boundary — the PATCH has definitively attempted the ri
-       lock and will block because Thread A holds it.
-    3. After `patch_reached_ri_lock_attempt` fires we do NOWAIT on the period row.
-       THE DECISIVE PROOF:
-       - New code (ReviewItem → Period): PATCH is blocked on the ri lock and has
-         NOT yet reached the period UPDATE → NOWAIT acquires the period → succeeds.
-       - Old code (Period → ReviewItem): PATCH would have locked the period first,
-         THEN blocked on the ri lock → period IS already locked → NOWAIT fails
-         with LockNotAvailable.  The assertion below then FAILS, detecting the
-         regression.
-    4. We release Thread A.  PATCH wakes up, finds period no longer InReview → 409.
-    5. Final state is verified coherent.
+    CP-1A update: InReview now has NO PATCH exits (InReview → Open and
+    InReview → Cancelled are both blocked with 422). This eliminates the
+    review-item / period lock-ordering concern at the source — since the PATCH
+    path returns before acquiring any lock, there is nothing to order.
 
-    What this test CANNOT prove vs what it DOES prove
-    --------------------------------------------------
-    • It DOES prove: at the exact moment the PATCH executes the ri-lock statement,
-      the period row is not yet locked under new code.
-    • It DOES prove: no deadlock occurs — both transactions complete within the
-      bounded timeout.
-    • It DOES NOT prove the PATCH's internal lock is specifically on the ri row vs
-      any other lock; the scenario design (only ri is externally held) makes this
-      implicit.
+    The test below proves this: it monitors AsyncConnection.execute for any
+    review-item lock attempt during a PATCH InReview → Open call and asserts
+    that NO such attempt is made. This is the definitive proof that the
+    deadlock scenario is structurally eliminated, not just avoided by ordering.
     """
 
-    async def test_patch_locks_review_item_before_period(
+    @pytest.mark.asyncio
+    async def test_patch_inreview_to_open_acquires_no_ri_lock(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
-        pg_instance,
     ):
         """
-        Regression-sensitive lock-order test.
-        The NOWAIT assertion in step 4 FAILS if change_period_status acquires
-        the Period lock before the ReviewItem lock.
+        CP-1A: PATCH InReview→Open is blocked before any lock is acquired.
+        Proves the deadlock scenario from CP-0C is structurally eliminated.
+
+        DECISIVE PROOF: We monkeypatch AsyncConnection.execute. If the PATCH
+        path ever issues a SELECT managerreviewitems FOR UPDATE (the ri-lock),
+        the flag is set and the assertion fails. With CP-1A blocking the
+        transition at schema validation (before DB queries), the flag stays
+        unset — the deadlock source no longer exists.
         """
         from sqlalchemy.ext.asyncio import AsyncConnection
 
-        company_id = _TEST_COMPANY_ID
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "InReview")
-        ri_id = await _insert_pending_review_item(
-            direct_db, company_id, paytest_branch_id, pid, _TEST_ADMIN_USER_ID,
-        )
 
-        pg_dsn = pg_instance.dsn()
-        period_status: str | None = None  # set inside try; used in cleanup
-
-        # Shared state
-        acquired_ri               = threading.Event()   # Thread A: "ri lock is held"
-        can_commit                = threading.Event()   # Main: "proceed and commit"
-        thread_done               = threading.Event()   # Thread A: "transaction done"
-        thread_errors: list[Exception] = []
-        patch_reached_ri_lock_attempt = asyncio.Event()  # set when PATCH issues ri FOR UPDATE
-
-        # ── Monkeypatch boundary instrumentation ────────────────────────────
-        # Intercept AsyncConnection.execute at the class level.
-        # When the PATCH path issues the specific ri-lock SQL
-        # (SELECT … managerreviewitems … FOR UPDATE … PeriodApproval … Pending),
-        # we set patch_reached_ri_lock_attempt BEFORE letting the real query
-        # proceed.  The query will then block because Thread A holds the ri row
-        # lock.  This gives us a hard boundary: the PATCH has definitively
-        # attempted the ri lock — the period must NOT be locked yet under new code.
+        ri_lock_attempted = False
         _real_ac_execute = AsyncConnection.execute
 
         async def _patched_ac_execute(self, statement, *args, **kwargs):
+            nonlocal ri_lock_attempted
             sql_text = str(statement)
-            if (
-                "managerreviewitems" in sql_text
-                and "FOR UPDATE" in sql_text
-                and "PeriodApproval" in sql_text
-            ):
-                patch_reached_ri_lock_attempt.set()
+            if "managerreviewitems" in sql_text and "FOR UPDATE" in sql_text:
+                ri_lock_attempted = True
             return await _real_ac_execute(self, statement, *args, **kwargs)
 
         AsyncConnection.execute = _patched_ac_execute  # type: ignore[method-assign]
-
-        def simulate_review_decision() -> None:
-            """
-            Models decide_review_item() lock order accurately:
-              1. SELECT ri FOR UPDATE  (acquires ri lock — first)
-              2. UPDATE period WHERE status='InReview' RETURNING  (second lock)
-              3. UPDATE ri (resolve)  — only if period update succeeded
-              4. COMMIT
-            """
-            try:
-                conn = psycopg2.connect(client_encoding="utf-8", **pg_dsn)
-                conn.autocommit = False
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT reviewitemid FROM review.managerreviewitems "
-                    "WHERE reviewitemid = %s FOR UPDATE",
-                    [ri_id],
-                )
-                acquired_ri.set()
-                can_commit.wait(timeout=15)
-
-                cur.execute(
-                    "UPDATE payroll.payrollperiods "
-                    "SET    status = 'Approved' "
-                    "WHERE  payrollperiodid = %s AND companyid = %s AND status = 'InReview' "
-                    "RETURNING payrollperiodid",
-                    [pid, company_id],
-                )
-                if cur.fetchone() is not None:
-                    cur.execute(
-                        "UPDATE review.managerreviewitems "
-                        "SET    status = 'Approved', finaldecisionbyuserid = %s, "
-                        "       finaldecisionatutc = NOW() "
-                        "WHERE  reviewitemid = %s",
-                        [_TEST_ADMIN_USER_ID, ri_id],
-                    )
-                conn.commit()
-                conn.close()
-            except Exception as exc:  # noqa: BLE001
-                thread_errors.append(exc)
-                try:
-                    conn.rollback(); conn.close()
-                except Exception:
-                    pass
-            finally:
-                thread_done.set()
-
-        loop = asyncio.get_running_loop()
-
         try:
-            # ── Step 1: Thread A locks the review item ───────────────────────
-            t = threading.Thread(target=simulate_review_decision, daemon=True)
-            t.start()
-
-            ri_acquired = await loop.run_in_executor(
-                None, lambda: acquired_ri.wait(timeout=10)
+            r = await session_client.patch(
+                f"/payroll/periods/{pid}/status",
+                json={"status": "Open"},
+                headers=_auth(auth_token),
             )
-            assert ri_acquired, "Thread A did not acquire the ri lock within 10 s"
-
-            # ── Step 2: Fire the PATCH; wait for ri-lock boundary event ─────
-            patch_task = asyncio.ensure_future(
-                session_client.patch(
-                    f"/payroll/periods/{pid}/status",
-                    json={"status": "Open"},
-                    headers=_auth(auth_token),
-                )
+            assert r.status_code == 422, (
+                f"CP-1A: InReview→Open must be blocked (422), got {r.status_code}"
             )
-
-            await asyncio.wait_for(patch_reached_ri_lock_attempt.wait(), timeout=10)
-            # patch_reached_ri_lock_attempt is set inside _patched_ac_execute
-            # immediately before the real SELECT ri FOR UPDATE query is sent to
-            # the DB.  Thread A holds the ri row lock, so the PATCH is now
-            # blocked there.  The period row is NOT locked yet under new code.
-            assert patch_reached_ri_lock_attempt.is_set(), (
-                "PATCH never issued the SELECT managerreviewitems FOR UPDATE "
-                "within the timeout — ri-lock boundary was not reached."
+            assert not ri_lock_attempted, (
+                "PATCH InReview→Open issued a SELECT managerreviewitems FOR UPDATE — "
+                "the transition should be rejected before any lock is attempted. "
+                "This indicates the CP-1A transition guard is missing."
             )
-
-            # ── Step 3: THE DECISIVE PROOF ───────────────────────────────────
-            # Attempt SELECT period FOR UPDATE NOWAIT from a third connection.
-            # • New code  → PATCH is blocked at ri lock, period NOT locked → NOWAIT succeeds.
-            # • Old code  → PATCH locked period first, then blocked on ri    → NOWAIT fails.
-            # This assertion is regression-sensitive and does not depend on timing.
-            period_not_locked = await loop.run_in_executor(
-                None,
-                lambda: _period_unlocked_nowait(pid, pg_dsn),
-            )
-            assert period_not_locked, (
-                "Period row was already locked while Thread A held the ri lock "
-                "and the PATCH had started.  This indicates the payroll path "
-                "acquired the Period lock BEFORE the ReviewItem lock — the "
-                "deadlock-safe ReviewItem→Period ordering has regressed."
-            )
-
-            # ── Step 4: Release Thread A ──────────────────────────────────────
-            can_commit.set()
-
-            done = await loop.run_in_executor(
-                None, lambda: thread_done.wait(timeout=10)
-            )
-            assert done, "Thread A did not finish within 10 s"
-            t.join(timeout=5)
-            if thread_errors:
-                raise thread_errors[0]
-
-            # ── Step 5: PATCH must complete without deadlock ──────────────────
-            patch_response = await asyncio.wait_for(patch_task, timeout=15)
-            assert patch_response.status_code in (200, 409, 422), (
-                f"Unexpected PATCH status {patch_response.status_code}: {patch_response.text}"
-            )
-
-            # ── Step 6: Final state is coherent ───────────────────────────────
-            period_row = await direct_db.execute(
-                text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            period_status = period_row.scalar_one()
-            item_status   = await _get_review_item_status(direct_db, company_id, pid)
-
-            coherent_outcomes = {
-                ("Approved", "Approved"),  # Thread A won
-                ("Open",     "Cancelled"), # PATCH won (unlikely in this setup)
-            }
-            assert (period_status, item_status) in coherent_outcomes, (
-                f"Incoherent final state: period='{period_status}', "
-                f"review_item='{item_status}'.  Expected one of {coherent_outcomes}."
-            )
-
         finally:
             AsyncConnection.execute = _real_ac_execute  # type: ignore[method-assign]
-            # Ensure Thread A is released if test failed mid-way
-            can_commit.set()
-
-        # ── Cleanup ──────────────────────────────────────────────────────────
-        if period_status not in ("Cancelled", "Archived", None):
             await _force_status(direct_db, pid, "Cancelled")

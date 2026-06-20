@@ -6,14 +6,14 @@ Covers:
   - Pre-submission guards: empty period, unresolved NeedsManagerReview lines,
     zero-calc unresolved lines, duplicate Pending review item
   - Review Approved  → period moves to Approved + audit entries written
-  - Review Rejected  → period moves to Open
-  - Review EditRequested → period moves to Open (re-submit creates new item)
+  - Review Rejected  → period moves to Returned  (CP-1A: was Open)
+  - Review EditRequested → period moves to Returned; resubmit via /resubmissions (CP-1A)
   - Review Comment   → period stays InReview, review item unchanged
   - AllowSelfApproval=FALSE blocks self-approval; Comments still allowed
   - AllowSelfApproval=TRUE allows same-user approval
   - Direct PATCH /status {Approved} → 422 (removed from valid transitions)
-  - InReview → Open still allowed (manual return)
-  - Duplicate Pending guard blocks re-submit; Rejected/EditRequested do not
+  - InReview → Open now blocked (CP-1A); InReview has no PATCH exits
+  - InReview → Cancelled now blocked (CP-1A)
   - Concurrency: period no longer InReview when decision arrives → 422 rollback
   - Audit: both REVIEW_ITEM_DECIDED and PERIOD_STATUS_CHANGED written
   - Audit rollback: all writes roll back if audit or period update fails
@@ -181,10 +181,24 @@ _m16_period_counter = 0
 
 @pytest_asyncio.fixture
 async def m16_open_period(client: httpx.AsyncClient, auth_token: str,
-                           m16_branch_id: int) -> dict:
+                           m16_branch_id: int, direct_db) -> dict:
     global _m16_period_counter
     _m16_period_counter += 1
     from datetime import date, timedelta
+    from sqlalchemy import text as _text
+    # CP-1A: cancel Returned (clear pointer), InReview, and Approved periods that
+    # PATCH cannot reach, so the one-Returned slot is always free for test setup.
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods "
+              "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+              "WHERE branchid = :bid AND status = 'Returned'"),
+        {"bid": m16_branch_id},
+    )
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+              "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
+        {"bid": m16_branch_id},
+    )
     base = date(2028, 1, 1) + timedelta(weeks=_m16_period_counter)
     s = base.strftime("%Y-%m-%d")
     e = (base + timedelta(days=6)).strftime("%Y-%m-%d")
@@ -271,7 +285,12 @@ class TestPeriodSubmitForReview:
 
     async def test_duplicate_pending_review_item_blocks_submit(
             self, client, auth_token, m16_open_period, m16_driver_id):
-        """A second submission while a Pending review item exists → 422."""
+        """
+        CP-1A: Once a period is InReview (Pending item exists), it cannot be
+        re-submitted via PATCH — InReview has no PATCH exits.  This structurally
+        prevents duplicate Pending items: you must go through decide_review_item
+        (which resolves the Pending item) before a resubmit is possible.
+        """
         pid = m16_open_period["payroll_period_id"]
         await _add_miles_line(client, auth_token, pid, m16_driver_id)
 
@@ -279,27 +298,33 @@ class TestPeriodSubmitForReview:
         r1 = await _submit_for_review(client, auth_token, pid)
         assert r1.status_code == 200
 
-        # Return to Open
+        # Attempt to return to Open via PATCH — now blocked (CP-1A)
         r2 = await client.patch(f"/payroll/periods/{pid}/status",
                                   headers=_auth(auth_token), json={"status": "Open"})
-        assert r2.status_code == 200
+        assert r2.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked (422), got {r2.status_code}: {r2.text}"
+        )
 
-        # Second submit → blocked (Pending item still exists)
+        # Attempting to submit again via PATCH InReview→InReview is also blocked
         r3 = await _submit_for_review(client, auth_token, pid)
-        assert r3.status_code == 422
-        assert "pending" in r3.text.lower()
+        assert r3.status_code == 422, (
+            f"Re-submitting while InReview must be blocked (422), got {r3.status_code}: {r3.text}"
+        )
 
     async def test_submit_allowed_after_rejected_review(
             self, client, auth_token, m16_open_period, m16_driver_id):
-        """After a Rejected review item, re-submit creates a new Pending item."""
+        """
+        CP-1A: After a Rejected review item, period moves to Returned.
+        Resubmission via POST /resubmissions creates a NEW Pending review item.
+        """
         pid = m16_open_period["payroll_period_id"]
         await _add_miles_line(client, auth_token, pid, m16_driver_id)
 
-        # Submit → review item created
+        # Submit → review item created, period InReview
         r1 = await _submit_for_review(client, auth_token, pid)
         assert r1.status_code == 200
 
-        # Reject → period goes back to Open
+        # Reject → period moves to Returned (not Open)
         item = await _get_review_item(client, auth_token, pid)
         r2 = await client.post(
             f"/review/items/{item['review_item_id']}/decide",
@@ -308,13 +333,17 @@ class TestPeriodSubmitForReview:
         )
         assert r2.status_code == 200
 
-        # Verify period is Open again
+        # CP-1A: period is now Returned, not Open
         period_resp = await client.get(f"/payroll/periods/{pid}", headers=_auth(auth_token))
-        assert period_resp.json()["status"] == "Open"
+        assert period_resp.json()["status"] == "Returned"
 
-        # Re-submit → creates a NEW Pending review item
-        r3 = await _submit_for_review(client, auth_token, pid)
+        # Resubmit via dedicated endpoint → creates a NEW Pending review item
+        r3 = await client.post(
+            f"/payroll/periods/{pid}/resubmissions",
+            headers=_auth(auth_token),
+        )
         assert r3.status_code == 200, r3.text
+        assert r3.json()["status"] == "InReview"
 
         new_item = await _get_review_item(client, auth_token, pid)
         assert new_item is not None
@@ -352,8 +381,9 @@ class TestPeriodApprovalViaReview:
         period_resp = await client.get(f"/payroll/periods/{pid}", headers=_auth(auth_token))
         assert period_resp.json()["status"] == "Approved"
 
-    async def test_rejected_decision_moves_period_to_open(
-            self, client, auth_token, m16_open_period, m16_driver_id):
+    async def test_rejected_decision_moves_period_to_returned(
+            self, client, auth_token, m16_open_period, m16_driver_id, direct_db):
+        # CP-1A: Rejected now returns the period to Returned (not Open).
         pid, review_id = await self._setup(client, auth_token, m16_open_period, m16_driver_id)
 
         resp = await client.post(
@@ -365,11 +395,24 @@ class TestPeriodApprovalViaReview:
         assert resp.json()["status"] == "Rejected"
 
         period_resp = await client.get(f"/payroll/periods/{pid}", headers=_auth(auth_token))
-        assert period_resp.json()["status"] == "Open"
+        assert period_resp.json()["status"] == "Returned", (
+            "CP-1A: Rejected should return the period to Returned for corrections"
+        )
 
-    async def test_edit_requested_moves_period_to_open(
-            self, client, auth_token, m16_open_period, m16_driver_id):
-        """EditRequested returns the period to Open so the user can correct it."""
+        # Clean up: cancel this Returned period so the next test can occupy the slot.
+        from sqlalchemy import text as _text
+        await direct_db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods "
+                "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+                "WHERE payrollperiodid = :pid AND status = 'Returned'"
+            ),
+            {"pid": pid},
+        )
+
+    async def test_edit_requested_moves_period_to_returned(
+            self, client, auth_token, m16_open_period, m16_driver_id, direct_db):
+        """CP-1A: EditRequested returns the period to Returned (not Open)."""
         pid, review_id = await self._setup(client, auth_token, m16_open_period, m16_driver_id)
 
         resp = await client.post(
@@ -381,8 +424,19 @@ class TestPeriodApprovalViaReview:
         assert resp.json()["status"] == "EditRequested"
 
         period_resp = await client.get(f"/payroll/periods/{pid}", headers=_auth(auth_token))
-        assert period_resp.json()["status"] == "Open", (
-            "EditRequested should return the period to Open for corrections"
+        assert period_resp.json()["status"] == "Returned", (
+            "CP-1A: EditRequested should return the period to Returned for corrections"
+        )
+
+        # Clean up: cancel this Returned period so subsequent tests can occupy the slot.
+        from sqlalchemy import text as _text
+        await direct_db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods "
+                "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+                "WHERE payrollperiodid = :pid AND status = 'Returned'"
+            ),
+            {"pid": pid},
         )
 
     async def test_comment_does_not_change_period_status(
@@ -404,7 +458,7 @@ class TestPeriodApprovalViaReview:
 
     async def test_edit_requested_allows_resubmission_with_new_item(
             self, client, auth_token, m16_open_period, m16_driver_id):
-        """After EditRequested → Open, re-submit creates a new Pending review item."""
+        """CP-1A: After EditRequested → Returned, resubmit via POST /resubmissions creates new item."""
         pid, review_id = await self._setup(client, auth_token, m16_open_period, m16_driver_id)
 
         await client.post(
@@ -413,9 +467,13 @@ class TestPeriodApprovalViaReview:
             json={"decision": "EditRequested", "decision_reason": "Please fix"},
         )
 
-        # Period is back to Open — re-submit
-        r = await _submit_for_review(client, auth_token, pid)
+        # Period is now Returned — resubmit via dedicated endpoint
+        r = await client.post(
+            f"/payroll/periods/{pid}/resubmissions",
+            headers=_auth(auth_token),
+        )
         assert r.status_code == 200, r.text
+        assert r.json()["status"] == "InReview"
 
         new_item = await _get_review_item(client, auth_token, pid)
         assert new_item is not None
@@ -442,11 +500,12 @@ class TestDirectApprovalBlocked:
             json={"status": "Approved"},
         )
         assert resp.status_code == 422
-        assert "Approved" in resp.text
+        # CP-1A: InReview has no PATCH exits; error is generic rather than status-specific.
+        assert "InReview" in resp.text or "cannot be transitioned" in resp.text
 
-    async def test_patch_inreview_to_open_still_works(
+    async def test_patch_inreview_to_open_now_blocked(
             self, client, auth_token, m16_open_period, m16_driver_id):
-        """PATCH InReview → Open remains valid (manual return for corrections)."""
+        """CP-1A: PATCH InReview → Open is now blocked; InReview has no PATCH exits."""
         pid = m16_open_period["payroll_period_id"]
         await _add_miles_line(client, auth_token, pid, m16_driver_id)
         await _submit_for_review(client, auth_token, pid)
@@ -456,12 +515,13 @@ class TestDirectApprovalBlocked:
             headers=_auth(auth_token),
             json={"status": "Open"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "Open"
+        assert resp.status_code == 422, (
+            f"CP-1A: InReview→Open must be blocked, got {resp.status_code}: {resp.text}"
+        )
 
-    async def test_patch_inreview_to_cancelled_still_works(
+    async def test_patch_inreview_to_cancelled_now_blocked(
             self, client, auth_token, m16_open_period, m16_driver_id):
-        """PATCH InReview → Cancelled remains valid."""
+        """CP-1A: PATCH InReview → Cancelled is now blocked; InReview has no PATCH exits."""
         pid = m16_open_period["payroll_period_id"]
         await _add_miles_line(client, auth_token, pid, m16_driver_id)
         await _submit_for_review(client, auth_token, pid)
@@ -471,8 +531,9 @@ class TestDirectApprovalBlocked:
             headers=_auth(auth_token),
             json={"status": "Cancelled"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "Cancelled"
+        assert resp.status_code == 422, (
+            f"CP-1A: InReview→Cancelled must be blocked, got {resp.status_code}: {resp.text}"
+        )
 
     async def test_patch_status_approved_rejected_from_schema(self, client, auth_token):
         """Approved is still a valid status value for the schema; just not from InReview."""

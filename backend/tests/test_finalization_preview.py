@@ -39,8 +39,9 @@ async def _cancel_active_periods(
     token: str,
     branch_id: int,
 ) -> None:
+    # CP-1A: only Draft and Open can be cancelled via PATCH.
     headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
+    for s in ("Draft", "Open"):
         resp = await client.get(
             "/payroll/periods",
             params={"branch_id": branch_id, "status": s},
@@ -259,7 +260,20 @@ async def _create_user_with_role(
 # ---------------------------------------------------------------------------
 
 async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
-    """Cancel Locked/Archived periods by temporarily disabling immutability triggers."""
+    """Cancel Locked/Archived/InReview/Approved/Returned periods bypassing blocked PATCH paths."""
+    # CP-1A: InReview and Approved cannot be cancelled via PATCH; use direct DB.
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+              "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
+        {"bid": branch_id},
+    )
+    # Returned: must clear CurrentReturnReviewItemID first (pointer-consistency CHECK).
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods "
+              "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+              "WHERE branchid = :bid AND status = 'Returned'"),
+        {"bid": branch_id},
+    )
     await direct_db.execute(
         _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
     )
@@ -1561,6 +1575,7 @@ async def cp5_consistency_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
+    direct_db,
 ):
     """
     Approved period on PAYTEST (2085-03-03 to 2085-03-09) with ONE HOURS
@@ -1638,9 +1653,9 @@ async def cp5_consistency_period(
 
     yield (pid, line_id, rate_id, rate_type_id, driver_id)
 
-    # Teardown: cancel any still-active (non-final) periods on this branch.
-    # Locked periods are terminal and do not block future period creation.
+    # Teardown: cancel Draft/Open via PATCH; Approved/InReview/Returned via direct DB.
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await _force_cancel_locked_periods(direct_db, paytest_branch_id)
 
 
 @pytest_asyncio.fixture
@@ -1648,6 +1663,7 @@ async def cp5_finalizes_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
+    direct_db,
 ):
     """
     Like cp5_consistency_period but uses April 2085 dates so that
@@ -1718,8 +1734,9 @@ async def cp5_finalizes_period(
 
     yield (pid, line_id, rate_id, rate_type_id, driver_id)
 
-    # Locked periods are terminal — just clean up active ones
+    # Teardown: cancel Draft/Open via PATCH; Approved/InReview/Returned via direct DB.
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await _force_cancel_locked_periods(direct_db, paytest_branch_id)
 
 
 class TestPreviewFinalizeConsistencyCP5:

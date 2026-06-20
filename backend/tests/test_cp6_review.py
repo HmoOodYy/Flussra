@@ -238,7 +238,20 @@ async def hq_driver_id(
 
 
 async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
-    """Cancel Locked/Archived periods by temporarily disabling immutability triggers."""
+    """Cancel Locked/Archived/InReview/Returned/Approved periods bypassing blocked PATCH paths."""
+    # InReview and Approved: PATCH to Cancelled is blocked in CP-1A, use direct DB.
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+              "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
+        {"bid": branch_id},
+    )
+    # Returned: must also clear CurrentReturnReviewItemID (pointer-consistency CHECK).
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods "
+              "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+              "WHERE branchid = :bid AND status = 'Returned'"),
+        {"bid": branch_id},
+    )
     await direct_db.execute(
         _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
     )
@@ -557,14 +570,14 @@ class TestReviewNMRBlocker:
 class TestReviewReturn:
 
     @pytest.mark.asyncio
-    async def test_edit_requested_returns_period_to_open(
+    async def test_edit_requested_returns_period_to_returned(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
     ):
-        """EditRequested decision → period transitions from InReview to Open."""
+        """CP-1A: EditRequested decision → period transitions from InReview to Returned."""
         pid = await _create_open_period(session_client, auth_token, cp6_clean)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
@@ -580,17 +593,17 @@ class TestReviewReturn:
         period_resp = await session_client.get(
             f"/payroll/periods/{pid}", headers=auth(auth_token)
         )
-        assert period_resp.json()["status"] == "Open"
+        assert period_resp.json()["status"] == "Returned"
 
     @pytest.mark.asyncio
-    async def test_rejected_returns_period_to_open(
+    async def test_rejected_returns_period_to_returned(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
     ):
-        """Rejected decision → period transitions from InReview to Open."""
+        """CP-1A: Rejected decision → period transitions from InReview to Returned."""
         pid = await _create_open_period(session_client, auth_token, cp6_clean)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
@@ -606,7 +619,7 @@ class TestReviewReturn:
         period_resp = await session_client.get(
             f"/payroll/periods/{pid}", headers=auth(auth_token)
         )
-        assert period_resp.json()["status"] == "Open"
+        assert period_resp.json()["status"] == "Returned"
 
     @pytest.mark.asyncio
     async def test_return_blocked_by_nmr_still_allowed(
@@ -645,7 +658,7 @@ class TestReviewReturn:
         period_resp = await session_client.get(
             f"/payroll/periods/{pid}", headers=auth(auth_token)
         )
-        assert period_resp.json()["status"] == "Open"
+        assert period_resp.json()["status"] == "Returned"
 
 
 # ---------------------------------------------------------------------------

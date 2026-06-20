@@ -76,8 +76,9 @@ async def _cancel_active_periods(
     token: str,
     branch_id: int,
 ) -> None:
+    # CP-1A: only Draft and Open can be cancelled via PATCH.
     headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
+    for s in ("Draft", "Open"):
         resp = await client.get(
             "/payroll/periods",
             params={"branch_id": branch_id, "status": s},

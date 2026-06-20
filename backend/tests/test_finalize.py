@@ -36,8 +36,9 @@ async def _cancel_active_periods(
     token: str,
     branch_id: int,
 ) -> None:
+    # CP-1A: only Draft and Open can be cancelled via PATCH.
     headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
+    for s in ("Draft", "Open"):
         resp = await client.get(
             "/payroll/periods",
             params={"branch_id": branch_id, "status": s},
@@ -58,13 +59,21 @@ async def _cancel_active_periods(
 # ---------------------------------------------------------------------------
 
 async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
-    """Cancel Locked/Archived periods by temporarily disabling immutability triggers.
-
-    Migration 0035 prevents cancelling Locked/Archived periods via normal UPDATE.
-    Tests need this cleanup so subsequent tests can reuse the same date ranges.
-    The triggers are re-enabled immediately after the cleanup UPDATE.
-    """
+    """Cancel Locked/Archived/InReview/Approved/Returned periods bypassing blocked PATCH paths."""
     from sqlalchemy import text as _text
+    # CP-1A: InReview and Approved cannot be cancelled via PATCH; use direct DB.
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+              "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
+        {"bid": branch_id},
+    )
+    # Returned: must clear CurrentReturnReviewItemID first (pointer-consistency CHECK).
+    await direct_db.execute(
+        _text("UPDATE payroll.payrollperiods "
+              "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+              "WHERE branchid = :bid AND status = 'Returned'"),
+        {"bid": branch_id},
+    )
     await direct_db.execute(
         _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
     )
