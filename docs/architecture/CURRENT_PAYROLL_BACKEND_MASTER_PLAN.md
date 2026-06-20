@@ -1188,7 +1188,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | Phase | Goal | Status | Owner | Review Gate |
 | --- | --- | --- | --- | --- |
 | Phase 0 | Workflow integrity lockdown | Done with Notes | Claude | Codex P0 review |
-| Phase 1 | Lifecycle slots, Returned state, smart creation | Pending | Claude | Codex lifecycle review |
+| Phase 1 | Lifecycle slots, Returned state, smart creation | In Progress | Claude | Codex lifecycle review |
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Pending | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Pending | Claude | Codex calculation parity review |
@@ -1229,6 +1229,54 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - Phase 0 concurrency regression tests now cover both transition-wins and source-write-wins outcomes.
 
 **Phase 0 remaining debt:** See CP-0A, CP-0B, CP-0C, and CP-0D completion notes.
+
+### CP-1A completion note
+
+**Status:** Done with Notes  
+**Codex verdict:** PASS WITH NOTES  
+**Implementation commit:** a584234  
+**Review result:** No P0/P1 blockers remain.
+
+**What CP-1A completed:**
+- Added pre-finalization `Returned` payroll-period status.
+- Added `CurrentReturnReviewItemID` as the current return pointer.
+- Added migration 0048 with:
+  - Returned status CHECK support;
+  - pointer consistency CHECK;
+  - company/branch-safe composite FK;
+  - one-Returned-per-company/branch partial unique index;
+  - safe downgrade refusal while Returned data or pointers exist.
+- Changed PeriodApproval Rejected/EditRequested to move `InReview -> Returned`.
+- Required nonblank reason only for PeriodApproval Rejected/EditRequested.
+- Kept unrelated review types unaffected.
+- Blocked direct PATCH into Returned.
+- Blocked manual `InReview -> Open`.
+- Blocked `InReview -> Cancelled`, `Returned -> Cancelled`, and `Approved -> Cancelled`.
+- Preserved `Draft -> Cancelled` and `Open -> Cancelled`.
+- Added dedicated Returned resubmission endpoint:
+  `POST /payroll/periods/{period_id}/resubmissions`
+- Resubmission creates a new Pending PeriodApproval item and does not reuse the old returned review item.
+- Resubmission clears `CurrentReturnReviewItemID` atomically.
+- Made exactly Open and Returned source-mutable.
+- Added deterministic one-Returned race test proving the DB partial unique index rejects the losing transaction and rolls it back fully.
+
+**Validation reported by Codex:**
+- CP-1A focused: 30 passed.
+- CP-0A/B/C/D: 114 passed.
+- M16 + CP6 + payroll: 83 passed.
+- Finalization preview + finalize + ledger: 70 passed.
+- Broad payroll/day-grid/security: 297 passed, 1 failed.
+- Broad failure passed in isolation and was classified as P2 order-dependent fixture contamination, not a CP-1A blocker.
+- Alembic: 0048 head/current, upgrade passed.
+- `git diff --check`: passed.
+
+**Remaining P2/P3 notes:**
+- P2: Broad-suite Draft fixture contamination.
+- P2: Prefer DBAPI constraint diagnostics over exception-string matching later.
+- P2: Returned source-mutation family coverage remains incomplete.
+- P2: Submit/resubmit guard logic is duplicated.
+- P3: Router filter description still omits Returned.
+- P3: Temporary database/cache warnings remain.
 
 ### CP-0D completion note
 
@@ -1426,9 +1474,9 @@ Existing tests intentionally permit InReview edits and manual returns. Those tes
 
 ### Phase 1 — Lifecycle Slots and Smart Creation
 
-**Status:** `Pending`
+**Status:** `In Progress`
 
-- [ ] P1A: add Returned domain state and reviewed transition graph.
+- [x] P1A: add Returned domain state and reviewed transition graph.
 - [ ] P1B: enforce one InReview slot.
 - [ ] P1C: implement branch-locked smart create.
 - [ ] P1D: atomically promote Prepared on submit.
