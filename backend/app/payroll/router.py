@@ -27,6 +27,7 @@ from app.payroll.schemas import (
     DayGridResponse, DayGridSaveRequest,
     DriversOffResponse,
     FinalizationPreviewResponse,
+    CandidatePreviewResponse, PeriodCreationRequest, PeriodCreationResponse,
 )
 from app.payroll import service
 from app.dependencies import get_db, get_current_user
@@ -1301,3 +1302,84 @@ async def save_day_grid(
         data=body,
         db=db,
     )
+
+
+# ---------------------------------------------------------------------------
+# CP-1C: Branch-locked candidate-based period creation
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/branches/{branch_id}/period-candidates",
+    response_model=CandidatePreviewResponse,
+    summary="Preview the current creatable period candidate for a branch",
+    description=(
+        "Returns a signed candidate key for the next period that can be created "
+        "for the branch. The candidate is deterministic: same branch state → same key. "
+        "mode must be OPEN_CREATION or PREPARED_CREATION. "
+        "Optionally pass cursor (a previous candidate_key) to navigate to adjacent periods."
+    ),
+    responses={
+        403: {"description": "Access denied or missing payroll.period.create permission"},
+        409: {"description": "Branch inactive, setup missing/incomplete, or invalid cursor"},
+        422: {"description": "Invalid mode parameter"},
+    },
+)
+async def get_period_candidates(
+    branch_id: int,
+    token: TokenDep,
+    db: DbDep,
+    mode: str = Query(..., description="OPEN_CREATION or PREPARED_CREATION"),
+    cursor: str | None = Query(None, description="Signed cursor from a previous candidate_key for navigation"),
+) -> CandidatePreviewResponse:
+    return await service.get_period_candidates(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        branch_id=branch_id,
+        mode=mode,
+        cursor_key=cursor,
+        db=db,
+    )
+
+
+@router.post(
+    "/branches/{branch_id}/period-creations",
+    response_model=PeriodCreationResponse,
+    status_code=201,
+    summary="Create a payroll period from a signed candidate key",
+    description=(
+        "Accepts a candidate_key from GET period-candidates and creates the period. "
+        "Idempotent: submitting the same key twice returns 200 ALREADY_EXISTS. "
+        "The backend re-validates all state under an advisory lock before inserting."
+    ),
+    responses={
+        200: {"description": "Period already exists (ALREADY_EXISTS replay)"},
+        201: {"description": "Period created successfully (CREATED)"},
+        403: {"description": "Access denied or missing payroll.period.create permission"},
+        409: {
+            "description": (
+                "INVALID_CANDIDATE_KEY | CANDIDATE_NOT_CURRENT | CANDIDATE_STALE | "
+                "CANDIDATE_SETUP_CHANGED | CANDIDATE_ALREADY_CANCELLED | "
+                "OPEN_REQUIRED | OPEN_FILLED | ACTIVE_PERIOD_SLOTS_FULL | "
+                "DRAFT_WITHOUT_OPEN | SLOT_INVARIANT_VIOLATION | "
+                "PERIOD_DATE_OVERLAP | BRANCH_INACTIVE"
+            )
+        },
+    },
+)
+async def create_period_from_candidate(
+    branch_id: int,
+    body: PeriodCreationRequest,
+    token: TokenDep,
+    db: DbDep,
+    response: Response,
+) -> PeriodCreationResponse:
+    result = await service.create_period_from_candidate(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        branch_id=branch_id,
+        data=body,
+        db=db,
+    )
+    if result.result == "ALREADY_EXISTS":
+        response.status_code = 200
+    return result

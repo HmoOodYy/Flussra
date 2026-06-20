@@ -224,14 +224,18 @@ class TestMigration:
         assert m.down_revision == "0048"
 
     def test_0049_in_alembic_heads(self):
+        """0049 was the head when CP-1B was written; 0050 (CP-1C) now extends it.
+        The chain must be linear: 0050 is the single head, which down-revises to 0049.
+        """
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             capture_output=True, text=True,
             cwd=str(__import__("pathlib").Path(__file__).parent.parent.parent),
         )
-        assert "0049" in result.stdout, (
-            f"alembic heads must include 0049; got:\n{result.stdout}\n{result.stderr}"
+        # Accept either 0049 (pre-CP-1C) or 0050 (post-CP-1C) as the sole head
+        assert ("0049" in result.stdout or "0050" in result.stdout), (
+            f"alembic heads must include 0049 or 0050; got:\n{result.stdout}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio

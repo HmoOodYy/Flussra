@@ -967,3 +967,52 @@ class FinalizationPreviewResponse(BaseModel):
     sys_adjustment_count: int    # number of SYS_MIN_TOPUP / SYS_MAX_CAP rows to be inserted
     final_line_count_estimate: int  # draft_line_count + sys_adjustment_count
     driver_count: int
+
+
+# ---------------------------------------------------------------------------
+# CP-1C: Branch-locked candidate-based period creation schemas
+# No PayDate field anywhere in these schemas.
+# ---------------------------------------------------------------------------
+
+class CandidateSelectedInfo(BaseModel):
+    """Info about the currently selected/previewed candidate period."""
+    candidate_key: str
+    target_status: str      # "Open" | "Draft"
+    start_date: date
+    end_date: date
+    period_type: str
+    label: str
+    creatable: bool
+    blocked_reason: str | None = None
+
+
+class CandidateNavigationInfo(BaseModel):
+    """Signed cursors for navigating to adjacent candidates (future periods only)."""
+    previous_cursor: str | None = None
+    next_cursor: str | None = None
+
+
+class CandidatePreviewResponse(BaseModel):
+    """Full response for GET /payroll/branches/{branch_id}/period-candidates."""
+    mode: str               # "OPEN_CREATION" | "PREPARED_CREATION"
+    selected: CandidateSelectedInfo
+    navigation: CandidateNavigationInfo
+
+
+class PeriodCreationRequest(BaseModel):
+    """Body for POST /payroll/branches/{branch_id}/period-creations."""
+    candidate_key: str
+
+
+class PeriodCreationResponse(BaseModel):
+    """Response for POST /payroll/branches/{branch_id}/period-creations."""
+    result: str             # "CREATED" | "ALREADY_EXISTS"
+    payroll_period_id: int
+    branch_id: int
+    period_code: str
+    period_name: str
+    period_type: str
+    start_date: date
+    end_date: date
+    status: str
+    created_at_utc: datetime | None = None

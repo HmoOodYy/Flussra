@@ -5,10 +5,12 @@ All SQL is raw parameterised via sqlalchemy.text().
 Branch-access enforcement is performed at the top of every mutating function;
 read functions filter by the user's allowed branches directly in the query.
 """
+import base64
 import calendar as _calendar
+import hmac as _hmac_mod
 import json
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
 
@@ -39,7 +41,10 @@ from app.payroll.schemas import (
     DayGridRow, DayGridSummary, DayGridPeriod, DayGridResponse,
     DayGridSaveRequest,
     DriversOffEntry, DriversOffResponse,
+    CandidateSelectedInfo, CandidateNavigationInfo, CandidatePreviewResponse,
+    PeriodCreationRequest, PeriodCreationResponse,
 )
+from app.config import settings
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +407,10 @@ async def create_period(
     # This is intentionally separate from payroll.entry (data entry/editing).
     # Migration 0030 seeds this permission and assigns it to appropriate roles.
     await _check_permission(company_id, user_id, data.branch_id, "payroll.period.create", db)
+
+    # CP-1C: Acquire branch advisory lock before overlap check and insert.
+    # Serializes all period creation (both legacy and candidate-based) for this branch.
+    await _acquire_branch_workflow_lock(company_id, data.branch_id, db)
 
     # Verify branch belongs to this company and get its BranchCode for period_code
     br_result = await db.execute(
@@ -9828,4 +9837,642 @@ async def save_day_grid(
         user_id=user_id,
         work_date=data.work_date,
         db=db,
+    )
+
+
+# =============================================================================
+# CP-1C: Branch-locked candidate-based period creation
+# =============================================================================
+
+_CP1C_VERSION = "cp1c-v1"
+_CP1C_PURPOSE = "period_creation"
+_CP1C_MAX_FUTURE = 12
+
+# Active slot statuses that govern mode-eligibility checks:
+_ACTIVE_SLOT_STATUSES = frozenset({"Draft", "Open", "InReview", "Returned"})
+
+
+# ---------------------------------------------------------------------------
+# Helpers: HMAC signing / verification
+# ---------------------------------------------------------------------------
+
+def _make_candidate_key(payload: dict) -> tuple[str, str]:
+    """
+    Sign payload and return (candidate_key, candidate_hash).
+    candidate_key  = base64url(canonical_json).hmac_sha256_hex
+    candidate_hash = hmac_sha256_hex (64 hex chars stored in DB)
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    b64_part = base64.urlsafe_b64encode(canonical.encode()).decode().rstrip("=")
+    sig = _hmac_mod.new(
+        settings.SECRET_KEY.encode(),
+        b64_part.encode(),
+        "sha256",
+    ).hexdigest()
+    return f"{b64_part}.{sig}", sig
+
+
+def _decode_candidate_key(key: str) -> tuple[dict, str]:
+    """
+    Decode and verify a candidate_key.
+    Returns (payload_dict, hmac_hex).
+    Raises HTTPException 409 INVALID_CANDIDATE_KEY on any failure.
+    """
+    try:
+        b64_part, sig = key.rsplit(".", 1)
+    except (ValueError, AttributeError):
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Malformed candidate key.")
+
+    expected = _hmac_mod.new(
+        settings.SECRET_KEY.encode(),
+        b64_part.encode(),
+        "sha256",
+    ).hexdigest()
+    if not _hmac_mod.compare_digest(expected, sig):
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Candidate key signature invalid.")
+
+    try:
+        padding = (4 - len(b64_part) % 4) % 4
+        payload = json.loads(
+            base64.urlsafe_b64decode(b64_part + "=" * padding).decode()
+        )
+    except Exception:
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Candidate key payload unreadable.")
+
+    if payload.get("ver") != _CP1C_VERSION or payload.get("purpose") != _CP1C_PURPOSE:
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Wrong version or purpose in candidate key.")
+
+    return payload, sig
+
+
+def _cp1c_error(code: str, message: str, http_status: int = 409) -> None:
+    raise HTTPException(
+        status_code=http_status,
+        detail={"code": code, "message": message},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers: fingerprints
+# ---------------------------------------------------------------------------
+
+def _setup_fingerprint(freq: str, anchor: date, interval_days: int | None) -> str:
+    return json.dumps(
+        {"anchor": str(anchor), "freq": freq, "interval": interval_days},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _slot_fingerprint(periods: list[dict]) -> str:
+    """Deterministic fingerprint of all non-Cancelled periods (sorted status+id pairs)."""
+    pairs = sorted(
+        [(r["status"], r["payrollperiodid"])
+         for r in periods
+         if r["status"] != "Cancelled"],
+        key=lambda x: (x[0], x[1]),
+    )
+    return json.dumps(pairs, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------------------
+# Helper: advisory lock
+# ---------------------------------------------------------------------------
+
+async def _acquire_branch_workflow_lock(
+    company_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    Acquire a transaction-level advisory lock for branch period creation.
+    Released automatically when the transaction commits or rolls back.
+    Idempotent within the same transaction.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
+        {"cid": company_id, "bid": branch_id},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper: slot matrix
+# ---------------------------------------------------------------------------
+
+def _check_slot_matrix(
+    mode: str,
+    periods: list[dict],
+) -> tuple[bool, str | None]:
+    """
+    Apply the mode/slot matrix.
+    Returns (creatable, error_code | None).
+    """
+    counts: dict[str, int] = {}
+    for p in periods:
+        s = p["status"]
+        if s in _ACTIVE_SLOT_STATUSES:
+            counts[s] = counts.get(s, 0) + 1
+
+    for s, cnt in counts.items():
+        if cnt > 1:
+            return False, "SLOT_INVARIANT_VIOLATION"
+
+    has_open = "Open" in counts
+    has_draft = "Draft" in counts
+
+    if mode == "OPEN_CREATION":
+        if has_open and has_draft:
+            return False, "ACTIVE_PERIOD_SLOTS_FULL"
+        if has_open:
+            return False, "OPEN_FILLED"
+        if has_draft:
+            return False, "DRAFT_WITHOUT_OPEN"
+        return True, None
+
+    if mode == "PREPARED_CREATION":
+        if has_open and has_draft:
+            return False, "ACTIVE_PERIOD_SLOTS_FULL"
+        if has_draft and not has_open:
+            return False, "DRAFT_WITHOUT_OPEN"
+        if not has_open:
+            return False, "OPEN_REQUIRED"
+        return True, None
+
+    _cp1c_error("INVALID_CANDIDATE_KEY", f"Unknown mode: {mode!r}.")
+    return False, None  # unreachable
+
+
+# ---------------------------------------------------------------------------
+# Helper: candidate date computation at offset N
+# ---------------------------------------------------------------------------
+
+def _candidate_dates_at_offset(
+    frequency: str,
+    anchor: date,
+    interval_days: int | None,
+    pred_end: date | None,
+    offset: int,
+) -> tuple[date, date]:
+    """Compute (start, end) for the candidate at position `offset` from current."""
+    if pred_end is None:
+        start = anchor
+    else:
+        start = max(anchor, pred_end + timedelta(days=1))
+
+    end = _period_end(frequency, start, interval_days)
+
+    for _ in range(offset):
+        start = end + timedelta(days=1)
+        end = _period_end(frequency, start, interval_days)
+
+    return start, end
+
+
+def _period_end(frequency: str, start: date, interval_days: int | None) -> date:
+    if frequency == "Week":
+        return start + timedelta(days=6)
+    if frequency == "Biweek":
+        return start + timedelta(days=13)
+    if frequency == "Month":
+        return _month_end(start)
+    if frequency == "Custom":
+        if not interval_days or interval_days <= 0:
+            raise ValueError("Custom frequency requires custom_interval_days > 0.")
+        return start + timedelta(days=interval_days - 1)
+    raise ValueError(f"Unknown payroll frequency: {frequency!r}")
+
+
+# ---------------------------------------------------------------------------
+# Helper: audit for CP-1C creation
+# ---------------------------------------------------------------------------
+
+async def _write_period_created_audit(
+    db: AsyncConnection,
+    *,
+    company_id: int,
+    branch_id: int,
+    user_id: int,
+    period_id: int,
+    candidate_hash: str,
+    mode: str,
+    initial_status: str,
+    start_date: date,
+    end_date: date,
+    setup_fp: str,
+) -> None:
+    await db.execute(
+        text("""
+            INSERT INTO audit.auditlog
+                (companyid, branchid, actoruserid, actioncode,
+                 entityschema, entityname, entityid,
+                 oldvaluejson, newvaluejson, reason, sourcetype)
+            VALUES
+                (:cid, :bid, :uid, 'PERIOD_CREATED',
+                 'payroll', 'PayrollPeriods', :eid,
+                 NULL, :new_val, 'Period created via candidate key', 'Application')
+        """),
+        {
+            "cid": company_id,
+            "bid": branch_id,
+            "uid": user_id,
+            "eid": str(period_id),
+            "new_val": json.dumps({
+                "candidate_hash": candidate_hash,
+                "mode": mode,
+                "initial_status": initial_status,
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+                "setup_fingerprint": setup_fp,
+                "result": "CREATED",
+            }),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service: GET /payroll/branches/{branch_id}/period-candidates
+# ---------------------------------------------------------------------------
+
+async def get_period_candidates(
+    company_id: int,
+    user_id: int,
+    branch_id: int,
+    mode: str,
+    cursor_key: str | None,
+    db: AsyncConnection,
+) -> CandidatePreviewResponse:
+    # Security checks
+    await _require_not_driver_role(company_id, user_id, db)
+
+    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    if not can_see_all and branch_id not in branch_ids:
+        raise HTTPException(status_code=403, detail="Access denied to the requested branch.")
+
+    await _check_permission(company_id, user_id, branch_id, "payroll.period.create", db)
+
+    # Validate mode
+    if mode not in ("OPEN_CREATION", "PREPARED_CREATION"):
+        raise HTTPException(
+            status_code=422,
+            detail="mode must be OPEN_CREATION or PREPARED_CREATION.",
+        )
+
+    # Determine preview offset from cursor (if provided)
+    preview_offset = 0
+    if cursor_key:
+        cursor_payload, _ = _decode_candidate_key(cursor_key)
+        if cursor_payload.get("cid") != company_id:
+            _cp1c_error("INVALID_CANDIDATE_KEY", "Cross-company cursor rejected.")
+        if cursor_payload.get("bid") != branch_id:
+            _cp1c_error("INVALID_CANDIDATE_KEY", "Cross-branch cursor rejected.")
+        if cursor_payload.get("mode") != mode:
+            _cp1c_error("INVALID_CANDIDATE_KEY", "Wrong mode in cursor.")
+        preview_offset = int(cursor_payload.get("offset", 0))
+
+    # Read branch status
+    branch_row = (await db.execute(
+        text(
+            "SELECT b.status FROM core.branches b "
+            "WHERE b.branchid = :bid AND b.companyid = :cid"
+        ),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().first()
+    if branch_row is None or branch_row["status"] != "Active":
+        _cp1c_error("BRANCH_INACTIVE", "Branch is inactive or not found.")
+
+    # Read payroll setup
+    setup_row = (await db.execute(
+        text("""
+            SELECT payrollfrequency, anchorstartdate, customintervaldays
+            FROM payroll.branchpayrollsettings
+            WHERE branchid = :bid AND companyid = :cid AND isactive = TRUE
+        """),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().first()
+    if setup_row is None:
+        _cp1c_error("PAYROLL_SETUP_REQUIRED", "No active payroll setup found for this branch.")
+
+    freq = setup_row["payrollfrequency"]
+    anchor = setup_row["anchorstartdate"]
+    interval_days = setup_row.get("customintervaldays")
+    if freq == "Custom" and (not interval_days or interval_days <= 0):
+        _cp1c_error("PAYROLL_SETUP_INCOMPLETE", "Custom frequency requires custom_interval_days > 0.")
+
+    setup_fp = _setup_fingerprint(freq, anchor, interval_days)
+
+    # Read all non-Cancelled periods for slot/date computation
+    period_rows = (await db.execute(
+        text("""
+            SELECT payrollperiodid, status, enddate
+            FROM payroll.payrollperiods
+            WHERE branchid = :bid AND companyid = :cid AND status != 'Cancelled'
+            ORDER BY enddate DESC, payrollperiodid DESC
+        """),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().all()
+
+    periods = [dict(r) for r in period_rows]
+    pred_end = periods[0]["enddate"] if periods else None
+    pred_id = periods[0]["payrollperiodid"] if periods else None
+    slot_fp = _slot_fingerprint(periods)
+
+    # Slot matrix check
+    creatable_base, blocked_reason = _check_slot_matrix(mode, periods)
+    target_status = "Open" if mode == "OPEN_CREATION" else "Draft"
+
+    # Compute dates at preview_offset
+    try:
+        start_date, end_date = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, preview_offset)
+    except ValueError as e:
+        _cp1c_error("PAYROLL_SETUP_INCOMPLETE", str(e))
+
+    # Offset > 0 candidates are never directly creatable (navigation only)
+    creatable = creatable_base and preview_offset == 0
+    eff_blocked_reason = blocked_reason
+    if preview_offset > 0 and eff_blocked_reason is None:
+        eff_blocked_reason = "CANDIDATE_NOT_CURRENT"
+
+    # Build candidate payload and sign it
+    payload = {
+        "ver": _CP1C_VERSION,
+        "purpose": _CP1C_PURPOSE,
+        "cid": company_id,
+        "bid": branch_id,
+        "mode": mode,
+        "target_status": target_status,
+        "freq": freq,
+        "anchor": str(anchor),
+        "interval": interval_days,
+        "period_type": freq,
+        "start": str(start_date),
+        "end": str(end_date),
+        "slot_fp": slot_fp,
+        "setup_fp": setup_fp,
+        "pred_id": pred_id,
+        "offset": preview_offset,
+    }
+    candidate_key, _ = _make_candidate_key(payload)
+    label = _auto_period_name(freq, start_date, end_date)
+
+    # Build navigation cursors
+    prev_cursor: str | None = None
+    next_cursor: str | None = None
+
+    if preview_offset > 0:
+        try:
+            ps, pe = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, preview_offset - 1)
+            prev_payload = {**payload, "offset": preview_offset - 1, "start": str(ps), "end": str(pe)}
+            prev_cursor, _ = _make_candidate_key(prev_payload)
+        except ValueError:
+            pass
+
+    if preview_offset < _CP1C_MAX_FUTURE - 1:
+        try:
+            ns, ne = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, preview_offset + 1)
+            next_payload = {**payload, "offset": preview_offset + 1, "start": str(ns), "end": str(ne)}
+            next_cursor, _ = _make_candidate_key(next_payload)
+        except ValueError:
+            pass
+
+    return CandidatePreviewResponse(
+        mode=mode,
+        selected=CandidateSelectedInfo(
+            candidate_key=candidate_key,
+            target_status=target_status,
+            start_date=start_date,
+            end_date=end_date,
+            period_type=freq,
+            label=label,
+            creatable=creatable,
+            blocked_reason=eff_blocked_reason,
+        ),
+        navigation=CandidateNavigationInfo(
+            previous_cursor=prev_cursor,
+            next_cursor=next_cursor,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Service: POST /payroll/branches/{branch_id}/period-creations
+# ---------------------------------------------------------------------------
+
+async def create_period_from_candidate(
+    company_id: int,
+    user_id: int,
+    branch_id: int,
+    data: PeriodCreationRequest,
+    db: AsyncConnection,
+) -> PeriodCreationResponse:
+    # Security checks
+    await _require_not_driver_role(company_id, user_id, db)
+
+    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    if not can_see_all and branch_id not in branch_ids:
+        raise HTTPException(status_code=403, detail="Access denied to the requested branch.")
+
+    await _check_permission(company_id, user_id, branch_id, "payroll.period.create", db)
+
+    # Decode and verify candidate key
+    payload, candidate_hash = _decode_candidate_key(data.candidate_key)
+
+    if payload.get("cid") != company_id:
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Cross-company key rejected.")
+    if payload.get("bid") != branch_id:
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Cross-branch key rejected.")
+
+    mode = payload.get("mode", "")
+    if mode not in ("OPEN_CREATION", "PREPARED_CREATION"):
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Unknown mode in candidate key.")
+
+    claimed_offset = int(payload.get("offset", 0))
+    if claimed_offset != 0:
+        _cp1c_error("CANDIDATE_NOT_CURRENT", "Only offset-0 candidates may be created.")
+
+    claimed_setup_fp = payload.get("setup_fp", "")
+    claimed_slot_fp = payload.get("slot_fp", "")
+    claimed_start = date.fromisoformat(payload["start"])
+    claimed_end = date.fromisoformat(payload["end"])
+    target_status = payload["target_status"]
+
+    # Acquire branch advisory lock (transaction-level)
+    await _acquire_branch_workflow_lock(company_id, branch_id, db)
+
+    # Replay check: if this hash already exists, return the existing period
+    existing_row = (await db.execute(
+        text("""
+            SELECT payrollperiodid, status, periodcode, periodname,
+                   periodtype, startdate, enddate, branchid
+            FROM payroll.payrollperiods
+            WHERE companyid = :cid AND branchid = :bid
+              AND creationcandidatekeyhash = :hash
+        """),
+        {"cid": company_id, "bid": branch_id, "hash": candidate_hash},
+    )).mappings().first()
+
+    if existing_row is not None:
+        if existing_row["status"] == "Cancelled":
+            _cp1c_error(
+                "CANDIDATE_ALREADY_CANCELLED",
+                "The period created from this candidate was later cancelled. "
+                "Generate a fresh candidate; this key cannot be replayed.",
+            )
+        return PeriodCreationResponse(
+            result="ALREADY_EXISTS",
+            payroll_period_id=existing_row["payrollperiodid"],
+            branch_id=existing_row["branchid"],
+            period_code=existing_row["periodcode"],
+            period_name=existing_row["periodname"],
+            period_type=existing_row["periodtype"],
+            start_date=existing_row["startdate"],
+            end_date=existing_row["enddate"],
+            status=existing_row["status"],
+        )
+
+    # Re-read branch under lock
+    branch_row = (await db.execute(
+        text(
+            "SELECT b.status FROM core.branches b "
+            "WHERE b.branchid = :bid AND b.companyid = :cid"
+        ),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().first()
+    if branch_row is None or branch_row["status"] != "Active":
+        _cp1c_error("BRANCH_INACTIVE", "Branch is inactive or not found.")
+
+    # Re-read setup under lock
+    setup_row = (await db.execute(
+        text("""
+            SELECT payrollfrequency, anchorstartdate, customintervaldays
+            FROM payroll.branchpayrollsettings
+            WHERE branchid = :bid AND companyid = :cid AND isactive = TRUE
+        """),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().first()
+    if setup_row is None:
+        _cp1c_error("PAYROLL_SETUP_REQUIRED", "No active payroll setup found.")
+
+    freq = setup_row["payrollfrequency"]
+    anchor = setup_row["anchorstartdate"]
+    interval_days = setup_row.get("customintervaldays")
+    current_setup_fp = _setup_fingerprint(freq, anchor, interval_days)
+
+    if current_setup_fp != claimed_setup_fp:
+        _cp1c_error("CANDIDATE_SETUP_CHANGED", "Payroll setup changed since this candidate was generated.")
+
+    # Re-read periods under lock
+    period_rows = (await db.execute(
+        text("""
+            SELECT payrollperiodid, status, startdate, enddate
+            FROM payroll.payrollperiods
+            WHERE branchid = :bid AND companyid = :cid AND status != 'Cancelled'
+            ORDER BY enddate DESC, payrollperiodid DESC
+        """),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().all()
+
+    periods = [dict(r) for r in period_rows]
+    current_slot_fp = _slot_fingerprint(periods)
+
+    if current_slot_fp != claimed_slot_fp:
+        _cp1c_error("CANDIDATE_STALE", "Branch period slot state changed since this candidate was generated.")
+
+    # Recompute candidate dates and compare to claimed values
+    pred_end = periods[0]["enddate"] if periods else None
+    try:
+        computed_start, computed_end = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, 0)
+    except ValueError as e:
+        _cp1c_error("PAYROLL_SETUP_INCOMPLETE", str(e))
+
+    if computed_start != claimed_start or computed_end != claimed_end:
+        _cp1c_error("CANDIDATE_STALE", "Candidate dates no longer match current branch state.")
+
+    # Check slot matrix under lock
+    creatable, slot_error = _check_slot_matrix(mode, periods)
+    if not creatable:
+        _cp1c_error(slot_error or "PERIOD_SLOT_CONFLICT", f"Cannot create period: {slot_error}.")
+
+    # Date overlap check under lock
+    overlap_row = (await db.execute(
+        text("""
+            SELECT payrollperiodid FROM payroll.payrollperiods
+            WHERE branchid = :bid AND companyid = :cid
+              AND status != 'Cancelled'
+              AND startdate <= :end_date
+              AND enddate >= :start_date
+            LIMIT 1
+        """),
+        {"bid": branch_id, "cid": company_id,
+         "start_date": computed_start, "end_date": computed_end},
+    )).first()
+    if overlap_row is not None:
+        _cp1c_error("PERIOD_DATE_OVERLAP", "Date range overlaps an existing non-cancelled period.")
+
+    # Fetch branch code for period code generation
+    br_row = (await db.execute(
+        text("SELECT branchcode FROM core.branches WHERE branchid = :bid AND companyid = :cid"),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().first()
+    branch_code = br_row["branchcode"] if br_row else str(branch_id)
+
+    period_name = _auto_period_name(freq, computed_start, computed_end)
+    base_code = f"{branch_code}-{computed_start.strftime('%Y%m%d')}"
+    period_code = await _unique_period_code(base_code, company_id, branch_id, db)
+
+    # Insert period with candidate hash
+    insert_result = await db.execute(
+        text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, periodcode, periodname, periodtype,
+                 startdate, enddate, status, notes, createdbyuserid,
+                 creationcandidatekeyhash)
+            VALUES
+                (:cid, :bid, :code, :name, :ptype,
+                 :start, :end, :status, NULL, :uid,
+                 :hash)
+            RETURNING payrollperiodid
+        """),
+        {
+            "cid": company_id,
+            "bid": branch_id,
+            "code": period_code,
+            "name": period_name,
+            "ptype": freq,
+            "start": computed_start,
+            "end": computed_end,
+            "status": target_status,
+            "uid": user_id,
+            "hash": candidate_hash,
+        },
+    )
+    new_period_id: int = insert_result.scalar_one()
+
+    # Write PERIOD_CREATED audit (exactly once — never on replay)
+    await _write_period_created_audit(
+        db,
+        company_id=company_id,
+        branch_id=branch_id,
+        user_id=user_id,
+        period_id=new_period_id,
+        candidate_hash=candidate_hash,
+        mode=mode,
+        initial_status=target_status,
+        start_date=computed_start,
+        end_date=computed_end,
+        setup_fp=current_setup_fp,
+    )
+
+    created_at = datetime.now(timezone.utc)
+
+    return PeriodCreationResponse(
+        result="CREATED",
+        payroll_period_id=new_period_id,
+        branch_id=branch_id,
+        period_code=period_code,
+        period_name=period_name,
+        period_type=freq,
+        start_date=computed_start,
+        end_date=computed_end,
+        status=target_status,
+        created_at_utc=created_at,
     )
