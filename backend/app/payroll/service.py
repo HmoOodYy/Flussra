@@ -776,6 +776,11 @@ async def change_period_status(
     # fails — or if the audit write raises — everything rolls back atomically.
     # The period never reaches InReview without a corresponding review item existing.
     if existing.status == "Open" and change.status == "InReview":
+        # CP-1B: Friendly InReview slot guard.  The partial unique index is the
+        # concurrency authority; this check gives a clearer 409 message on the
+        # common (non-race) path.
+        await _check_inreview_slot_available(company_id, existing.branch_id, period_id, db)
+
         # Auto-refresh: re-compute calculatedamount + needsmanagerreview for all
         # rate-dependent draft lines using the currently approved effective-dated
         # rates.  This ensures that backdated approved rates added since lines
@@ -991,21 +996,33 @@ async def change_period_status(
     # All other transitions keep the simple UPDATE (no race risk: the status guard
     # above already held a FOR UPDATE lock via get_period_by_id).
     if existing.status == "Open" and change.status == "InReview":
-        update_result = await db.execute(
-            text(
-                f"UPDATE payroll.payrollperiods "
-                f"SET    status = :new_status{extra_set}{notes_set} "
-                f"WHERE  payrollperiodid = :period_id "
-                f"  AND  status          = 'Open' "
-                f"RETURNING payrollperiodid"
-            ),
-            {
-                "new_status": change.status,
-                "period_id": period_id,
-                **extra_params,
-                **notes_params,
-            },
-        )
+        try:
+            update_result = await db.execute(
+                text(
+                    f"UPDATE payroll.payrollperiods "
+                    f"SET    status = :new_status{extra_set}{notes_set} "
+                    f"WHERE  payrollperiodid = :period_id "
+                    f"  AND  status          = 'Open' "
+                    f"RETURNING payrollperiodid"
+                ),
+                {
+                    "new_status": change.status,
+                    "period_id": period_id,
+                    **extra_params,
+                    **notes_params,
+                },
+            )
+        except SAIntegrityError as exc:
+            if _is_inreview_slot_violation(exc):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A concurrent submission created an InReview period for this "
+                        "branch at the same time. Only one period may be in review per "
+                        "branch. This submission has been rolled back."
+                    ),
+                )
+            raise
         if update_result.first() is None:
             raise HTTPException(
                 status_code=422,
@@ -1062,6 +1079,60 @@ async def change_period_status(
     )
 
     return await get_period_by_id(company_id, user_id, period_id, db)
+
+
+# ===========================================================================
+# CP-1B: One-InReview-per-branch slot helpers
+# ===========================================================================
+
+def _is_inreview_slot_violation(exc: SAIntegrityError) -> bool:
+    """Return True iff the IntegrityError is from the InReview-slot unique index."""
+    orig = getattr(exc, "orig", None)
+    if orig is not None:
+        name = getattr(orig, "constraint_name", None)
+        if name is not None:
+            return name.lower() == "ux_payrollperiods_oneinreviewperbranch"
+    return "ux_payrollperiods_oneinreviewperbranch" in str(exc).lower()
+
+
+async def _check_inreview_slot_available(
+    company_id: int,
+    branch_id: int,
+    current_period_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    Friendly pre-write guard for the InReview slot.
+
+    Raises HTTP 409 if another period for the same company/branch is already
+    InReview.  current_period_id is excluded defensively (e.g., when the caller
+    is a resubmit path and the period is Returned, not InReview).
+
+    The partial unique index ux_payrollperiods_oneinreviewperbranch is the
+    concurrency authority.  This check provides a friendlier error message on
+    the non-race (sequential) path.
+    """
+    row = await db.execute(
+        text("""
+            SELECT payrollperiodid
+            FROM   payroll.payrollperiods
+            WHERE  companyid        = :cid
+              AND  branchid         = :bid
+              AND  status           = 'InReview'
+              AND  payrollperiodid != :pid
+            LIMIT 1
+        """),
+        {"cid": company_id, "bid": branch_id, "pid": current_period_id},
+    )
+    if row.first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An InReview period already exists for this branch. "
+                "Only one period may be in review at a time. "
+                "Wait for the current review to complete before submitting another."
+            ),
+        )
 
 
 # ===========================================================================
@@ -1138,6 +1209,9 @@ async def resubmit_period(
                 "Please refresh and try again."
             ),
         )
+
+    # ── Step 3b: CP-1B InReview slot guard ───────────────────────────────── #
+    await _check_inreview_slot_available(company_id, existing.branch_id, period_id, db)
 
     # ── Step 4: run submission guards (same as Open→InReview) ────────────── #
 
@@ -1319,18 +1393,30 @@ async def resubmit_period(
     )
 
     # ── Step 6: atomic transition Returned→InReview, clear pointer ────────── #
-    update_result = await db.execute(
-        text("""
-            UPDATE payroll.payrollperiods
-            SET    status                    = 'InReview',
-                   currentreturnreviewitemid = NULL
-            WHERE  payrollperiodid = :pid
-              AND  companyid       = :cid
-              AND  status          = 'Returned'
-            RETURNING payrollperiodid
-        """),
-        {"pid": period_id, "cid": company_id},
-    )
+    try:
+        update_result = await db.execute(
+            text("""
+                UPDATE payroll.payrollperiods
+                SET    status                    = 'InReview',
+                       currentreturnreviewitemid = NULL
+                WHERE  payrollperiodid = :pid
+                  AND  companyid       = :cid
+                  AND  status          = 'Returned'
+                RETURNING payrollperiodid
+            """),
+            {"pid": period_id, "cid": company_id},
+        )
+    except SAIntegrityError as exc:
+        if _is_inreview_slot_violation(exc):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "A concurrent resubmission created an InReview period for this "
+                    "branch at the same time. Only one period may be in review per "
+                    "branch. This resubmission has been rolled back."
+                ),
+            )
+        raise
     if update_result.first() is None:
         raise HTTPException(
             status_code=409,

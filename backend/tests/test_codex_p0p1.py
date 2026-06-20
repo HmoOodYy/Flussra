@@ -436,6 +436,26 @@ class TestOpenToInReviewConcurrency:
         )
         company_id = result.scalar_one()
 
+        # CP-1B: cancel any leftover InReview/Returned periods so the InReview slot
+        # check doesn't fire before we reach the duplicate-review-item INSERT.
+        await direct_db.execute(
+            text(
+                "UPDATE payroll.payrollperiods "
+                "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+                "WHERE branchid = :bid AND status = 'Returned'"
+            ),
+            {"bid": paytest_branch_id},
+        )
+        await direct_db.execute(
+            text(
+                "UPDATE payroll.payrollperiods "
+                "SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status = 'InReview'"
+            ),
+            {"bid": paytest_branch_id},
+        )
+        await direct_db.commit()
+
         pid = await _create_open_period(
             client, auth_token, paytest_branch_id, "2029-08-04", "2029-08-10"
         )
