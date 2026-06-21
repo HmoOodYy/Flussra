@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `In Progress`; CP-1A and CP-1B are `Done with Notes`; CP-1C through CP-1E remain `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `In Progress`; CP-1A, CP-1B, and CP-1C are `Done with Notes`; CP-1D and CP-1E remain `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1282,6 +1282,51 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: Clean up mojibake and the inaccurate comment claiming `_create_and_open_period` calls `_cancel_active`.
 - P3: Temporary PostgreSQL/pytest-cache infrastructure warnings remain.
 
+### CP-1C completion note
+
+**Status:** Done with Notes
+**Codex verdict:** CLEAN WITH NOTES
+**Implementation commit:** `0f63787156cd01dc43c2318e26b4af1277256f51`
+**Fix-forward commit:** `540ae86`
+**Review result:** No P0/P1 blockers remain. CP-1C implementation and P1 fix-forward are safely closed.
+
+**What CP-1C completed:**
+- Added backend-owned candidate-based payroll-period creation.
+- Replaced sequential create-next semantics with selected-candidate creation semantics.
+- Added candidate preview endpoint for explicit Open and Prepared creation modes.
+- Added candidate creation endpoint that accepts `candidate_key` only.
+- Derived displayed candidates from `BranchPayrollSettings` / Payroll Setup.
+- Prevented frontend-submitted dates, status, period type, name, or PayDate from controlling creation.
+- Added deterministic signed candidate keys.
+- Added idempotent replay behavior: repeating the same candidate returns the same period and never advances to the next candidate.
+- Added explicit Prepared mode that creates database status `Draft`.
+- Preserved `Open` and `Draft` as database statuses; did not add a `Prepared` database status.
+- Added migration 0050 with `CreationCandidateKeyHash` and a partial unique index for durable candidate replay identity.
+- Added branch workflow advisory lock usage for candidate creation.
+- Added the same branch workflow lock to legacy `POST /payroll/periods` creation to serialize it with candidate creation.
+- Added the same branch workflow lock to Payroll Setup mutation so setup updates and candidate creation cannot interleave.
+- Revalidated setup fingerprints under lock so stale setup candidates are rejected.
+- Kept PayDate completely outside CP-1C product/API/audit behavior.
+- Added focused CP-1C candidate creation tests and setup/candidate TOCTOU fix-forward tests.
+
+**Validation reported by Codex:**
+- CP-1C: 72 passed.
+- Payroll setup/payroll: 93 passed.
+- CP-1A/CP-1B: 42 passed.
+- Smoke validation total: 207 passed.
+- Alembic head/current: 0050.
+- `git diff --check`: clean.
+
+**Remaining P2/P3 notes:**
+- P2: Replace timing-only lock tests with event-based synchronization.
+- P2: Add a real different-branch setup mutation lock test.
+- P2: Assert no period/audit writes after stale setup rejection.
+- P2: Harden connection cleanup in concurrency tests.
+- P2: Add audit-failure rollback coverage.
+- P2: Improve broader synchronized concurrency coverage.
+- P3: Tighten the CP-1B Alembic-head test.
+- P3: Retain known Windows temporary PostgreSQL / pytest-cache / global-ignore warning notes.
+
 ### CP-1A completion note
 
 **Status:** Done with Notes  
@@ -1530,7 +1575,7 @@ Existing tests intentionally permit InReview edits and manual returns. Those tes
 
 - [x] P1A: add Returned domain state and reviewed transition graph.
 - [x] P1B: enforce one InReview slot. — **Done with Notes**
-- [ ] P1C: implement branch-locked smart create.
+- [x] P1C: branch-locked candidate-based period creation. — **Done with Notes**
 - [ ] P1D: atomically promote Prepared on submit.
 - [ ] P1E: return Hub-ready workflow alerts/capabilities.
 
