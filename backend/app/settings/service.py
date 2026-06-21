@@ -978,6 +978,16 @@ async def upsert_payroll_setup(
             detail=f"Branch {branch_id} not found.",
         )
 
+    # Acquire the branch workflow advisory lock before reading or mutating
+    # BranchPayrollSettings.  This is the same transaction-level lock used by
+    # CP-1C candidate creation, ensuring setup changes and period creation are
+    # fully serialized per branch.  Lock is released when the transaction
+    # commits or rolls back.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
+        {"cid": company_id, "bid": branch_id},
+    )
+
     # Safety guard: the new anchor_start_date must not fall inside or before
     # any existing non-cancelled payroll period for this branch.
     # Changing the anchor to a date ≤ the last existing period would cause the

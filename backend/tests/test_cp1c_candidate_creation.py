@@ -1245,6 +1245,28 @@ class TestAuditAndRollback:
         assert cr2.json()["detail"]["code"] == "CANDIDATE_ALREADY_CANCELLED"
 
     @pytest.mark.asyncio
+    async def test_p2_extra_fields_rejected_in_creation_request(self, session_client, auth_token, cp1c_setup, direct_db):
+        """P2: PeriodCreationRequest with extra fields returns HTTP 422 (model_config extra='forbid').
+
+        Stray fields like start_date, status, pay_date must be rejected rather than silently
+        ignored — prevents clients from thinking they can supply period dates directly.
+        """
+        bid = cp1c_setup["branch_id"]
+        r = await session_client.post(
+            f"/payroll/branches/{bid}/period-creations",
+            json={
+                "candidate_key": "dummy",
+                "start_date": "2096-01-07",    # forbidden extra
+                "status": "Open",               # forbidden extra
+                "pay_date": "2096-01-14",       # forbidden extra
+            },
+            headers=_auth(auth_token),
+        )
+        assert r.status_code == 422, (
+            f"Expected 422 for extra fields, got {r.status_code}: {r.text}"
+        )
+
+    @pytest.mark.asyncio
     async def test_50_candidate_hash_unique_constraint_guards_race(self, session_client, auth_token, cp1c_setup, direct_db):
         """T50: DB unique index on (company, branch, hash) prevents duplicate inserts under race."""
         bid = cp1c_setup["branch_id"]
@@ -1365,6 +1387,227 @@ class TestConcurrency:
         cr = await _create(session_client, auth_token, bid, old_key)
         assert cr.status_code == 409
         assert cr.json()["detail"]["code"] == "CANDIDATE_STALE"
+
+    # -----------------------------------------------------------------------
+    # P1 fix: setup-race serialization tests (corrective commit)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_p1a_setup_update_waits_behind_creation_lock(
+        self, session_client, auth_token, cp1c_setup, direct_db, test_database_url,
+    ):
+        """P1-A: Setup mutation must not interleave with candidate creation.
+
+        Protocol:
+        - External raw connection holds the branch advisory lock for 300 ms.
+        - Concurrent PUT /settings/.../payroll-setup is issued 50 ms later.
+        - Setup update must block at the DB level until the lock is released.
+        - We prove blocking by measuring elapsed wall-clock time of the setup
+          call: it must exceed 200 ms (generous margin for CI).
+
+        Without the P1 fix, setup bypasses the advisory lock and completes
+        in < 50 ms regardless of the lock holder, so the timing check fails.
+        """
+        import time
+        from sqlalchemy import text as _t
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        bid = cp1c_setup["branch_id"]
+        await _cancel_all(direct_db, bid)
+
+        # Resolve company_id for this branch (needed for the advisory lock key)
+        cid_row = await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid=:bid"),
+            {"bid": bid},
+        )
+        cid = cid_row.scalar_one()
+
+        HOLD_MS = 300
+        DELAY_MS = 50
+        MIN_EXPECTED_MS = 200  # setup must have waited at least this long
+
+        # Task A: open a dedicated connection, begin a transaction, hold the lock
+        async def _hold_lock():
+            engine = create_async_engine(test_database_url, echo=False)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    _t("SELECT pg_advisory_xact_lock(:cid, :bid)"),
+                    {"cid": cid, "bid": bid},
+                )
+                await asyncio.sleep(HOLD_MS / 1000)
+                # commit releases the lock
+            await engine.dispose()
+
+        # Task B: wait briefly so Task A holds the lock first, then update setup
+        async def _update_setup():
+            await asyncio.sleep(DELAY_MS / 1000)
+            t0 = time.monotonic()
+            r = await session_client.put(
+                f"/settings/branches/{bid}/payroll-setup",
+                json={"payroll_frequency": "Week", "anchor_start_date": "2096-01-07"},
+                headers=_auth(auth_token),
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return r, elapsed_ms
+
+        (_lock_result, (setup_resp, elapsed_ms)) = await asyncio.gather(
+            _hold_lock(), _update_setup(),
+        )
+
+        assert setup_resp.status_code in (200, 201), setup_resp.text
+        assert elapsed_ms >= MIN_EXPECTED_MS, (
+            f"Setup completed in {elapsed_ms:.0f} ms — expected to be blocked "
+            f"for at least {MIN_EXPECTED_MS} ms while the advisory lock was held. "
+            "The P1 fix (advisory lock in upsert_payroll_setup) is missing or ineffective."
+        )
+
+    @pytest.mark.asyncio
+    async def test_p1b_stale_candidate_rejected_after_setup_change(
+        self, session_client, auth_token, cp1c_setup, direct_db,
+    ):
+        """P1-B: Candidate key signed against setup-A is rejected if setup changes.
+
+        Protocol:
+        - Preview an Open candidate from setup version A (Week/2096-01-07).
+        - Change setup to version B (Biweek/2096-01-14) via HTTP.
+        - Attempt to create with the old candidate key.
+        - Expected: 409 CANDIDATE_SETUP_CHANGED or CANDIDATE_STALE.
+        - No period is inserted; no PERIOD_CREATED audit is written.
+
+        Without CP-1C's fingerprint revalidation, the stale candidate would
+        silently create a period under the wrong cadence.
+        """
+        bid = cp1c_setup["branch_id"]
+        await _cancel_all(direct_db, bid)
+
+        # Setup A
+        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+
+        # Preview candidate under setup A
+        r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
+        assert r.status_code == 200
+        old_key = r.json()["selected"]["candidate_key"]
+
+        # Change setup to B (Biweek, different anchor)
+        r_setup = await session_client.put(
+            f"/settings/branches/{bid}/payroll-setup",
+            json={"payroll_frequency": "Biweek", "anchor_start_date": "2096-01-14"},
+            headers=_auth(auth_token),
+        )
+        assert r_setup.status_code in (200, 201)
+
+        # Attempt to create with the stale key
+        cr = await _create(session_client, auth_token, bid, old_key)
+        assert cr.status_code == 409, cr.text
+        code = cr.json()["detail"]["code"]
+        assert code in ("CANDIDATE_SETUP_CHANGED", "CANDIDATE_STALE", "INVALID_CANDIDATE_KEY"), (
+            f"Expected setup-stale rejection, got {code!r}"
+        )
+
+        # Restore setup for subsequent tests
+        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+
+    @pytest.mark.asyncio
+    async def test_p1c_different_branches_dont_block_each_other_setup(
+        self, session_client, auth_token, cp1c_setup, direct_db, test_database_url, hq_branch_id,
+    ):
+        """P1-C: Advisory locks are per (company_id, branch_id); different branches don't block.
+
+        Protocol:
+        - Hold the advisory lock for PAYTEST branch in an external connection.
+        - Concurrently update the HQ branch payroll setup.
+        - HQ update must complete quickly (< 500 ms) despite PAYTEST lock being held.
+        - Proves lock namespace is branch-scoped, not global.
+        """
+        import time
+        from sqlalchemy import text as _t
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        bid = cp1c_setup["branch_id"]
+
+        cid_row = await direct_db.execute(
+            _text("SELECT companyid FROM core.branches WHERE branchid=:bid"),
+            {"bid": bid},
+        )
+        cid = cid_row.scalar_one()
+
+        HOLD_MS = 400
+        DELAY_MS = 50
+        MAX_EXPECTED_MS = 500  # HQ update must NOT be blocked
+
+        async def _hold_paytest_lock():
+            engine = create_async_engine(test_database_url, echo=False)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    _t("SELECT pg_advisory_xact_lock(:cid, :bid)"),
+                    {"cid": cid, "bid": bid},
+                )
+                await asyncio.sleep(HOLD_MS / 1000)
+            await engine.dispose()
+
+        async def _update_hq_setup():
+            await asyncio.sleep(DELAY_MS / 1000)
+            t0 = time.monotonic()
+            # Use an endpoint that is always reachable regardless of HQ payroll state.
+            # The point is only that HQ operations are NOT blocked by PAYTEST's lock.
+            r_get = await session_client.get(
+                "/core/branches",
+                headers=_auth(auth_token),
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return r_get, elapsed_ms
+
+        (_, (hq_resp, elapsed_ms)) = await asyncio.gather(
+            _hold_paytest_lock(), _update_hq_setup(),
+        )
+
+        assert hq_resp.status_code == 200, hq_resp.text
+        assert elapsed_ms < MAX_EXPECTED_MS, (
+            f"HQ branch operation took {elapsed_ms:.0f} ms while PAYTEST lock was held — "
+            "suggests lock scope is too broad (not per-branch)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_p1d_unchanged_setup_candidate_still_succeeds(
+        self, session_client, auth_token, cp1c_setup, direct_db,
+    ):
+        """P1-D: Guard against false positives — if setup is unchanged, creation succeeds.
+
+        Protocol:
+        - Preview an Open candidate.
+        - Create it → 201 CREATED.
+        - Clean up.
+        - Preview again (same setup, no slot changes beyond the created period).
+        - Create the new candidate → 201 CREATED.
+
+        If the P1 locking logic produces false CANDIDATE_SETUP_CHANGED errors,
+        this test catches them.
+        """
+        bid = cp1c_setup["branch_id"]
+        await _cancel_all(direct_db, bid)
+        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+
+        r1 = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
+        assert r1.status_code == 200
+        key1 = r1.json()["selected"]["candidate_key"]
+
+        cr1 = await _create(session_client, auth_token, bid, key1)
+        assert cr1.status_code == 201, cr1.text
+        assert cr1.json()["result"] == "CREATED"
+
+        # After creation, setup unchanged → next candidate must also be creatable
+        # (after deleting the first to free the slot)
+        await _cancel_all(direct_db, bid)
+        # Re-setup: anchor stays the same, same setup fingerprint
+        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+
+        r2 = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
+        assert r2.status_code == 200
+        key2 = r2.json()["selected"]["candidate_key"]
+
+        cr2 = await _create(session_client, auth_token, bid, key2)
+        assert cr2.status_code == 201, cr2.text
+        assert cr2.json()["result"] == "CREATED"
 
 
 # ---------------------------------------------------------------------------

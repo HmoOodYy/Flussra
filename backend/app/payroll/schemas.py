@@ -1000,7 +1000,13 @@ class CandidatePreviewResponse(BaseModel):
 
 
 class PeriodCreationRequest(BaseModel):
-    """Body for POST /payroll/branches/{branch_id}/period-creations."""
+    """Body for POST /payroll/branches/{branch_id}/period-creations.
+
+    extra="forbid" ensures stray fields (start_date, status, pay_date, etc.)
+    are rejected with HTTP 422 rather than silently ignored.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     candidate_key: str
 
 
