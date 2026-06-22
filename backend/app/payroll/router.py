@@ -28,6 +28,7 @@ from app.payroll.schemas import (
     DriversOffResponse,
     FinalizationPreviewResponse,
     CandidatePreviewResponse, PeriodCreationRequest, PeriodCreationResponse,
+    CurrentWorkflowResponse,
 )
 from app.payroll import service
 from app.dependencies import get_db, get_current_user
@@ -1388,3 +1389,35 @@ async def create_period_from_candidate(
     if result.result == "ALREADY_EXISTS":
         response.status_code = 200
     return result
+
+
+# ---------------------------------------------------------------------------
+# CP-1E: Workflow hub read endpoint
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/current-workflow",
+    response_model=CurrentWorkflowResponse,
+    summary="Get current workflow slots, alerts, and capabilities for accessible branches",
+    description=(
+        "Returns backend-owned workflow state: active period slots (Open, Prepared/Draft, "
+        "InReview, Returned), per-period and per-branch workflow capabilities, and alerts.\n\n"
+        "This is NOT a financial hub — it returns no financial totals, no expected income, "
+        "no calculation preview, and no report data.\n\n"
+        "Pass `branch_id` to scope to a single branch; omit to return all accessible branches."
+    ),
+    responses={
+        403: {"description": "No branch access, driver role, or no payroll read permission"},
+    },
+)
+async def get_current_workflow(
+    token: TokenDep,
+    db: DbDep,
+    branch_id: int | None = Query(None, description="Scope to a specific branch (optional)"),
+) -> CurrentWorkflowResponse:
+    return await service.get_current_workflow(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        branch_id=branch_id,
+        db=db,
+    )

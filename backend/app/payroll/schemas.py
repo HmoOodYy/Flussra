@@ -1022,3 +1022,81 @@ class PeriodCreationResponse(BaseModel):
     end_date: date
     status: str
     created_at_utc: datetime | None = None
+
+
+# ===========================================================================
+# CP-1E: Current Workflow — hub-ready workflow slots, alerts, capabilities
+# ===========================================================================
+
+class WorkflowCapability(BaseModel):
+    allowed: bool
+    reason_code: str | None = None
+    reason_message: str | None = None
+
+
+class WorkflowSlotItem(BaseModel):
+    period_id: int
+    branch_id: int
+    branch_name: str
+    status: str                         # actual DB status
+    display_status: str                 # Draft → "Prepared"; others unchanged
+    period_name: str
+    period_code: str
+    period_type: str
+    start_date: date
+    end_date: date
+    submitted_at_utc: datetime | None = None
+    current_return_review_item_id: int | None = None
+    is_active_workflow_slot: bool
+    is_read_only: bool
+    read_only_reason_code: str | None = None
+    lifecycle_position: int             # Returned=1, Open=2, Draft/Prepared=3, InReview=4
+
+
+class WorkflowBranchSlots(BaseModel):
+    open: WorkflowSlotItem | None = None
+    prepared: WorkflowSlotItem | None = None    # Draft periods surface here
+    in_review: WorkflowSlotItem | None = None
+    returned: WorkflowSlotItem | None = None
+
+
+class WorkflowAlert(BaseModel):
+    code: str
+    severity: str                       # blocker | warning | info
+    title: str
+    message: str
+    related_period_id: int | None = None
+    affected_action_codes: list[str] = []
+
+
+class PeriodWorkflowCapabilities(BaseModel):
+    can_enter_source: WorkflowCapability
+    can_submit_for_review: WorkflowCapability
+    can_resubmit_returned: WorkflowCapability
+    can_view_review: WorkflowCapability
+    can_cancel: WorkflowCapability
+    can_open_day_grid: WorkflowCapability
+
+
+class BranchWorkflowCapabilities(BaseModel):
+    can_view_current_workflow: WorkflowCapability
+    can_create_open_candidate: WorkflowCapability
+    can_create_prepared_candidate: WorkflowCapability
+    can_view_candidates: WorkflowCapability
+    periods: dict[str, PeriodWorkflowCapabilities] = {}  # keyed by str(period_id)
+
+
+class BranchWorkflowEntry(BaseModel):
+    branch_id: int
+    branch_name: str
+    setup_status: str                   # "complete" | "missing" | "incomplete" | "inactive"
+    slots: WorkflowBranchSlots
+    capabilities: BranchWorkflowCapabilities
+    alerts: list[WorkflowAlert] = []
+
+
+class CurrentWorkflowResponse(BaseModel):
+    scope: str                          # "company" | "branch"
+    company_id: int
+    requested_branch_id: int | None = None
+    branches: list[BranchWorkflowEntry] = []
