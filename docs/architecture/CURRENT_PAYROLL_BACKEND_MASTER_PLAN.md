@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `In Progress`; CP-1A, CP-1B, and CP-1C are `Done with Notes`; CP-1D and CP-1E remain `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `In Progress`; CP-1A, CP-1B, CP-1C, and CP-1D are `Done with Notes`; CP-1E remains `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1282,6 +1282,44 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: Clean up mojibake and the inaccurate comment claiming `_create_and_open_period` calls `_cancel_active`.
 - P3: Temporary PostgreSQL/pytest-cache infrastructure warnings remain.
 
+### CP-1D completion note
+
+**Status:** Done with Notes
+**Codex verdict:** PASS WITH NOTES
+**Implementation commit:** `3e0a867` — feat: add cp-1d branch-locked submit promotion
+**Review result:** No P0/P1 blockers remain. CP-1D is safely closed.
+
+**What CP-1D completed:**
+- Added branch-locked Open submit and Returned resubmit workflow hardening.
+- Supports atomic Open → InReview submission with adjacent Draft/Prepared → Open promotion.
+- Enforces Returned backlog blockers and workflow slot conflict handling.
+- Preserves CP-1C candidate replay behavior after Draft promotion.
+- Populates SubmittedAtUtc transactionally on successful submit/resubmit.
+- Keeps Locked/Archived immutable.
+- Keeps finalization outside CP-1D scope.
+- Does not implement CP-1E Hub/capabilities/read model.
+- Does not introduce PayDate behavior.
+- Does not create a migration.
+
+**Validation:**
+- CP-1D: 37 passed.
+- CP-1C: 72 passed.
+- CP-1B + CP-1A: 42 passed.
+- Phase 0: 114 passed.
+- Payroll/review/finalization/ledger: 153 passed.
+- Setup/branch/security: 97 passed.
+- Total: 515 passed, 0 failed, 0 errors, 0 skipped.
+- Alembic head/current: 0050 / 0050.
+- `git diff --check`: clean.
+
+**Remaining P2/P3 notes:**
+- P2: D6 could additionally assert zero ManagerReviewDecisions and unchanged REVIEW_ITEM_DECIDED audit count explicitly.
+- P2: D5 could add a direct post-response query confirming Branch B period is InReview.
+- P2: Rollback hooks could inspect the in-transaction HOURS calc value before raising to prove it reached 25.00.
+- P3: Temporary PostgreSQL automatic shutdown warning remains — not a CP-1D blocker.
+- P3: Git global-ignore warning remains — not a CP-1D blocker.
+- P3: LF/CRLF working-copy warnings remain — not a CP-1D blocker.
+
 ### CP-1C completion note
 
 **Status:** Done with Notes
@@ -1576,7 +1614,7 @@ Existing tests intentionally permit InReview edits and manual returns. Those tes
 - [x] P1A: add Returned domain state and reviewed transition graph.
 - [x] P1B: enforce one InReview slot. — **Done with Notes**
 - [x] P1C: branch-locked candidate-based period creation. — **Done with Notes**
-- [ ] P1D: atomically promote Prepared on submit.
+- [x] P1D: atomically promote Prepared on submit. — **Done with Notes**
 - [ ] P1E: return Hub-ready workflow alerts/capabilities.
 
 **Objective**
