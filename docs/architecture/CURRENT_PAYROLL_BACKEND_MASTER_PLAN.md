@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `In Progress`; CP-1A, CP-1B, CP-1C, and CP-1D are `Done with Notes`; CP-1E remains `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1188,7 +1188,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | Phase | Goal | Status | Owner | Review Gate |
 | --- | --- | --- | --- | --- |
 | Phase 0 | Workflow integrity lockdown | Done with Notes | Claude | Codex P0 review |
-| Phase 1 | Lifecycle slots, Returned state, smart creation | In Progress | Claude | Codex lifecycle review |
+| Phase 1 | Lifecycle slots, Returned state, smart creation | Done with Notes | Claude | Codex lifecycle review |
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Pending | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Pending | Claude | Codex calculation parity review |
@@ -1229,6 +1229,61 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - Phase 0 concurrency regression tests now cover both transition-wins and source-write-wins outcomes.
 
 **Phase 0 remaining debt:** See CP-0A, CP-0B, CP-0C, and CP-0D completion notes.
+
+### CP-1E completion note
+
+**Status:** Done with Notes
+**Codex verdict:** PASS WITH NOTES
+**Implementation commit:** `2a4b95d` — feat: add cp-1e current workflow capabilities
+**Review result:** No P0/P1 blockers remain. CP-1E is safely closed.
+
+**What CP-1E completed:**
+- Added `GET /payroll/current-workflow`.
+- Added backend-owned workflow slots for Open, Prepared/Draft, InReview, and Returned.
+- Added workflow capability response model.
+- Added blocked-action reason codes.
+- Added workflow alerts, including Returned backlog, Prepared notice, InReview awaiting review, setup alerts, and slot invariant alerts.
+- Added company-scope and branch-scope workflow responses.
+- Enforced driver/ODA denial.
+- Enforced branch access and company/tenant boundaries.
+- Kept Returned backlog behavior aligned with CP-1D:
+  - blocks submit;
+  - does not block Prepared creation by itself.
+- Excluded Approved slot and finalization capability from CP-1E.
+- Excluded expected income, financial totals, reports, calculation preview, migrations, frontend work, and Phase 2 snapshots.
+- Added focused CP-1E workflow capability/security tests.
+
+**Validation:**
+- D09 isolation: 1 passed
+- F02 isolation: 1 passed
+- CP-1E: 43 passed
+- CP-1A/B/C/D: 151 passed
+- Phase 0: 114 passed
+- Payroll/security/branch: 82 passed
+- Regression matrix: 347 passed
+- Alembic current/head: 0050 / 0050
+- `git diff --check`: clean
+
+**Remaining P2/P3 notes:**
+- P2: Prefer `default_factory` for schema collection defaults later.
+- P2: Inactive-setup test could assert one exact reason code later.
+- P2: Fixed foreign-company identifiers could conflict under parallel test execution.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: Router LF→CRLF warning remains environment-only.
+- P3: Global Git ignore permission warning remains environment-only.
+
+### Phase 1 completion note
+
+**Status:** Done with Notes
+**Completed units:** CP-1A, CP-1B, CP-1C, CP-1D, CP-1E
+**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 remains Pending / not started.
+
+**Phase 1 completed:**
+- Returned domain state and reviewed transition graph (CP-1A).
+- One InReview slot enforced at database and service levels (CP-1B).
+- Branch-locked candidate-based period creation with deterministic replay (CP-1C).
+- Atomic Open → InReview submission with Draft → Open promotion (CP-1D).
+- Backend-owned workflow slots, alerts, capabilities, and reason codes (CP-1E).
 
 ### CP-1B completion note
 
@@ -1609,13 +1664,13 @@ Existing tests intentionally permit InReview edits and manual returns. Those tes
 
 ### Phase 1 — Lifecycle Slots and Smart Creation
 
-**Status:** `In Progress`
+**Status:** `Done with Notes`
 
 - [x] P1A: add Returned domain state and reviewed transition graph.
 - [x] P1B: enforce one InReview slot. — **Done with Notes**
 - [x] P1C: branch-locked candidate-based period creation. — **Done with Notes**
 - [x] P1D: atomically promote Prepared on submit. — **Done with Notes**
-- [ ] P1E: return Hub-ready workflow alerts/capabilities.
+- [x] P1E: return Hub-ready workflow alerts/capabilities. — **Done with Notes**
 
 **Objective**
 
