@@ -581,6 +581,9 @@ export function PayItemsPage() {
   const [editNameSaving, setEditNameSaving] = useState(false);
   const [editNameError, setEditNameError]   = useState('');
 
+  // ── Page tabs (Pay Items / Custom Item Requests) ──────────────────────
+  const [pageTab, setPageTab] = useState<'items' | 'requests'>('items');
+
   // ── Delete flow ───────────────────────────────────────────────────────────
   const [usageData, setUsageData]         = useState<CustomPayItemUsage | null>(null);
   const [usageLoading, setUsageLoading]   = useState(false);
@@ -1045,8 +1048,8 @@ export function PayItemsPage() {
   // Show CDPI request section to reviewers and branch-scoped submitters.
   const showCdpiRequests = userCanDirectCreate || userCanBranchCreate;
   // Show CDPI branch controls when the user can manage CDPI for the selected branch.
-  const userCanManageCdpiBranch = selectedBranchId !== null && canManageCdpiForBranch(user, selectedBranchId);
-  const showCdpiBranchControls = branchMode === 'single' && userCanManageCdpiBranch;
+
+
 
   const activeBranchCount = branchSt.branches.filter(b => b.status === 'Active').length;
   const loading   = branchMode === 'single' ? singleSt.loading : allSt.loading;
@@ -1224,7 +1227,28 @@ export function PayItemsPage() {
         </div>
       )}
 
-      {/* ── Body ── */}
+      {/* ── Page tabs ── */}
+      {showCdpiRequests && (
+        <div className={styles.pageTabs} role="tablist">
+          <button
+            role="tab"
+            aria-selected={pageTab === 'items'}
+            className={`${styles.pageTabBtn}${pageTab === 'items' ? ` ${styles.pageTabBtnActive}` : ''}`}
+            onClick={() => setPageTab('items')}>
+            Pay Items
+          </button>
+          <button
+            role="tab"
+            aria-selected={pageTab === 'requests'}
+            className={`${styles.pageTabBtn}${pageTab === 'requests' ? ` ${styles.pageTabBtnActive}` : ''}`}
+            onClick={() => setPageTab('requests')}>
+            Custom Item Requests
+          </button>
+        </div>
+      )}
+
+      {/* ── Body (Pay Items tab) ── */}
+      {(!showCdpiRequests || pageTab === 'items') && (
       <div className={styles.body}>
 
         {/* ── LEFT: Item list ── */}
@@ -1415,15 +1439,42 @@ export function PayItemsPage() {
               historyLoading={selSt.historyLoading}
               onShowHistory={loadHistory}
               onHideHistory={() => dispatchSel({ type: 'HISTORY_HIDE' })}
+              userCanManageCdpiBranch={branchMode === 'single' && !!selectedBranchId && canManageCdpiForBranch(user, selectedBranchId)}
+              cdpiBranchItem={branchMode === 'single' ? cdpiBranchSt.items.find(ci => ci.pay_item_id === selSt.selectedItem!.pay_item_id) : undefined}
+              cdpiBranchLoading={branchMode === 'single' ? cdpiBranchSt.loading : false}
+              cdpiBranchError={branchMode === 'single' ? cdpiBranchSt.error : undefined}
+              cdpiAnyToggling={togglingId !== null}
+              cdpiIsToggling={togglingId === selSt.selectedItem.pay_item_id}
+              onToggleCdpiBranchActive={() => {
+                if (!selectedBranchId || !canManageCdpiForBranch(user, selectedBranchId)) return;
+                const ci = cdpiBranchSt.items.find(c => c.pay_item_id === selSt.selectedItem!.pay_item_id);
+                if (ci) void toggleCdpiBranchActive(ci);
+              }}
+              cdpiEditNameId={editNameId}
+              cdpiEditNameValue={editNameValue}
+              cdpiEditNameSaving={editNameSaving}
+              cdpiEditNameError={editNameError}
+              onStartEditName={() => {
+                if (!selectedBranchId || !canManageCdpiForBranch(user, selectedBranchId)) return;
+                const ci = cdpiBranchSt.items.find(c => c.pay_item_id === selSt.selectedItem!.pay_item_id);
+                if (!ci) return;
+                setEditNameId(ci.pay_item_id);
+                setEditNameValue(ci.branch_display_name_override ?? '');
+                setEditNameError('');
+              }}
+              onSaveCdpiDisplayName={() => void saveCdpiBranchDisplayName()}
+              onCancelEditName={() => { setEditNameId(null); setEditNameError(''); }}
+              onEditNameChange={v => setEditNameValue(v)}
             />
           ) : selSt.selectedAgg ? (
             <AggItemDetail agg={selSt.selectedAgg} isAdmin={isAdmin} onEdit={openEdit} />
           ) : null}
         </div>
       </div>
+      )}
 
-      {/* ── CDPI Request Review Section ── */}
-      {showCdpiRequests && (
+      {/* ── Custom Item Requests tab ── */}
+      {showCdpiRequests && pageTab === 'requests' && (
         <div className={styles.cdpiSection}>
           <div className={styles.cdpiSectionHeader}>
             <h3 className={styles.cdpiSectionTitle}>Custom Item Requests</h3>
@@ -1504,123 +1555,6 @@ export function PayItemsPage() {
         </div>
       )}
 
-      {/* ── CDPI Branch Controls Section ── */}
-      {showCdpiBranchControls && (
-        <div className={styles.cdpiSection}>
-          <div className={styles.cdpiSectionHeader}>
-            <h3 className={styles.cdpiSectionTitle}>Approved Custom Daily Items</h3>
-            <button className={styles.btnGhost}
-              onClick={() => { setEditNameId(null); setCdpiBranchKey(k => k + 1); }}
-              disabled={cdpiBranchSt.loading || togglingId !== null}>
-              Refresh
-            </button>
-          </div>
-          <p className={styles.cdpiBranchHint}>
-            CDPI items available for this branch. Activate items to make them visible in payroll entry and set a branch-specific display name if needed.
-            Changes may be scheduled for a future date if a payroll period is currently protected.
-          </p>
-
-          {cdpiBranchSt.loading && (
-            <div className={styles.cdpiEmpty}><SpinnerIcon /> Loading custom items…</div>
-          )}
-          {cdpiBranchSt.error && !cdpiBranchSt.loading && (
-            <div className={styles.errorAlert} style={{ margin: '0.5rem 0' }}>
-              <AlertIcon /> {cdpiBranchSt.error}
-            </div>
-          )}
-          {!cdpiBranchSt.loading && !cdpiBranchSt.error && cdpiBranchSt.items.length === 0 && (
-            <div className={styles.cdpiEmpty}>No approved custom daily items for this branch yet.</div>
-          )}
-
-          {!cdpiBranchSt.loading && cdpiBranchSt.items.length > 0 && (
-            <div className={styles.cdpiBranchItemList}>
-              {cdpiBranchSt.items.map(item => {
-                const isToggling    = togglingId === item.pay_item_id;
-                const isEditingName = editNameId  === item.pay_item_id;
-                return (
-                  <div key={item.pay_item_id} className={styles.cdpiBranchItemCard}>
-                    {/* Header row */}
-                    <div className={styles.cdpiCardRow}>
-                      <span className={`${styles.cdpiStatusBadge} ${item.is_active ? styles.cdpiStatusBadgeApproved : styles.cdpiStatusBadgeDraft}`}>
-                        {item.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                      <span className={styles.cdpiCardName}>{item.item_name}</span>
-                      <span className={styles.cdpiCardMeta}>
-                        {item.data_type}
-                        {item.unit ? ` · ${item.unit}` : ''}
-                        {' · '}{RATE_BEHAVIOR_LABELS[item.rate_behavior] ?? item.rate_behavior}
-                      </span>
-                    </div>
-
-                    {/* Active toggle */}
-                    <div className={styles.cdpiBranchActiveRow}>
-                      <span className={styles.cdpiBranchControlLabel}>Current branch status</span>
-                      <label className={styles.switch}>
-                        <input type="checkbox"
-                          checked={item.is_active}
-                          disabled={isToggling || togglingId !== null}
-                          onChange={() => void toggleCdpiBranchActive(item)} />
-                        <span className={styles.switchTrack} />
-                      </label>
-                      {isToggling && <SpinnerIcon />}
-                    </div>
-
-                    {/* Branch display-name override */}
-                    <div className={styles.cdpiBranchNameRow}>
-                      <span className={styles.cdpiBranchControlLabel}>Current display name</span>
-                      {isEditingName ? (
-                        <div className={styles.cdpiBranchNameEdit}>
-                          <input
-                            className={styles.input}
-                            style={{ flex: 1, minWidth: 0 }}
-                            value={editNameValue}
-                            maxLength={120}
-                            placeholder="Leave blank to use company name"
-                            onChange={e => setEditNameValue(e.target.value)}
-                            disabled={editNameSaving}
-                            autoFocus
-                          />
-                          <button className={styles.btnPrimary}
-                            onClick={() => void saveCdpiBranchDisplayName()}
-                            disabled={editNameSaving}>
-                            {editNameSaving ? <><SpinnerIcon /> Saving…</> : 'Save'}
-                          </button>
-                          <button className={styles.btnSecondary}
-                            onClick={() => { setEditNameId(null); setEditNameError(''); }}
-                            disabled={editNameSaving}>
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <div className={styles.cdpiBranchNameDisplay}>
-                          <span className={item.branch_display_name_override ? styles.cdpiCardName : styles.cdpiCardMeta}>
-                            {item.branch_display_name_override
-                              ? item.branch_display_name_override
-                              : `Using company name: ${item.effective_display_name}`}
-                          </span>
-                          <button className={styles.btnGhost}
-                            onClick={() => {
-                              setEditNameId(item.pay_item_id);
-                              setEditNameValue(item.branch_display_name_override ?? '');
-                              setEditNameError('');
-                            }}>
-                            Edit
-                          </button>
-                        </div>
-                      )}
-                      {isEditingName && editNameError && (
-                        <div className={styles.errorAlert} style={{ marginTop: '0.3rem', width: '100%' }}>
-                          <AlertIcon /> {editNameError}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* ── Decide modal (Approve / ReturnToDraft / Reject) ── */}
       {decideOpen && decideTarget && (
@@ -1995,12 +1929,33 @@ export function PayItemsPage() {
 function SingleItemDetail({
   item, isAdmin, onEdit, onStartDelete, usageLoading,
   showHistory, history, historyLoading, onShowHistory, onHideHistory,
+  userCanManageCdpiBranch,
+  cdpiBranchItem, cdpiBranchLoading, cdpiBranchError,
+  cdpiAnyToggling, cdpiIsToggling, onToggleCdpiBranchActive,
+  cdpiEditNameId, cdpiEditNameValue, cdpiEditNameSaving, cdpiEditNameError,
+  onStartEditName, onSaveCdpiDisplayName, onCancelEditName, onEditNameChange,
 }: {
   item: BranchPayItemState; isAdmin: boolean;
   onEdit: () => void; onStartDelete: () => void; usageLoading: boolean;
   showHistory: boolean; history: BranchPayItemConfigVersion[];
   historyLoading: boolean; onShowHistory: () => void; onHideHistory: () => void;
+  userCanManageCdpiBranch?: boolean;
+  cdpiBranchItem?: CdpiBranchItem;
+  cdpiBranchLoading?: boolean;
+  cdpiBranchError?: string | null;
+  cdpiAnyToggling?: boolean;
+  cdpiIsToggling?: boolean;
+  onToggleCdpiBranchActive?: () => void;
+  cdpiEditNameId?: number | null;
+  cdpiEditNameValue?: string;
+  cdpiEditNameSaving?: boolean;
+  cdpiEditNameError?: string;
+  onStartEditName?: () => void;
+  onSaveCdpiDisplayName?: () => void;
+  onCancelEditName?: () => void;
+  onEditNameChange?: (v: string) => void;
 }) {
+  const isEditingName = cdpiBranchItem != null && cdpiEditNameId === cdpiBranchItem.pay_item_id;
   return (
     <>
       <div className={styles.detailHeader}>
@@ -2090,6 +2045,79 @@ function SingleItemDetail({
             </div>
           )}
         </div>
+
+        {(cdpiBranchItem || cdpiBranchLoading || cdpiBranchError) && userCanManageCdpiBranch && (
+          <div className={styles.detailSection}>
+            <p className={styles.detailSectionTitle}>Branch Controls</p>
+            {cdpiBranchLoading && !cdpiBranchItem && (
+              <div className={styles.detailValueMuted} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem' }}>
+                <SpinnerIcon /> Loading branch controls…
+              </div>
+            )}
+            {cdpiBranchError && !cdpiBranchItem && (
+              <div className={styles.errorAlert}>
+                <AlertIcon /> {cdpiBranchError}
+              </div>
+            )}
+            {cdpiBranchItem && (
+              <>
+                <div className={styles.cdpiBranchActiveRow}>
+                  <span className={styles.cdpiBranchControlLabel}>Branch active</span>
+                  <label className={styles.switch}>
+                    <input type="checkbox"
+                      checked={cdpiBranchItem.is_active}
+                      disabled={cdpiIsToggling || cdpiAnyToggling}
+                      onChange={onToggleCdpiBranchActive} />
+                    <span className={styles.switchTrack} />
+                  </label>
+                  {cdpiIsToggling && <SpinnerIcon />}
+                </div>
+
+                <div className={styles.cdpiBranchNameRow}>
+                  <span className={styles.cdpiBranchControlLabel}>Branch display name</span>
+                  {isEditingName ? (
+                    <div className={styles.cdpiBranchNameEdit}>
+                      <input
+                        className={styles.input}
+                        style={{ flex: 1, minWidth: 0 }}
+                        value={cdpiEditNameValue ?? ''}
+                        maxLength={120}
+                        placeholder="Leave blank to use company name"
+                        onChange={e => onEditNameChange?.(e.target.value)}
+                        disabled={cdpiEditNameSaving}
+                        autoFocus
+                      />
+                      <button className={styles.btnPrimary}
+                        onClick={onSaveCdpiDisplayName}
+                        disabled={cdpiEditNameSaving}>
+                        {cdpiEditNameSaving ? <><SpinnerIcon /> Saving…</> : 'Save'}
+                      </button>
+                      <button className={styles.btnSecondary}
+                        onClick={onCancelEditName}
+                        disabled={cdpiEditNameSaving}>
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <div className={styles.cdpiBranchNameDisplay}>
+                      <span className={cdpiBranchItem.branch_display_name_override ? styles.cdpiCardName : styles.cdpiCardMeta}>
+                        {cdpiBranchItem.branch_display_name_override
+                          ? cdpiBranchItem.branch_display_name_override
+                          : `Using company name: ${cdpiBranchItem.effective_display_name}`}
+                      </span>
+                      <button className={styles.btnGhost} onClick={onStartEditName}>Edit</button>
+                    </div>
+                  )}
+                  {isEditingName && cdpiEditNameError && (
+                    <div className={styles.errorAlert} style={{ marginTop: '0.3rem', width: '100%' }}>
+                      <AlertIcon /> {cdpiEditNameError}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {showHistory && (
           <div className={styles.detailSection}>

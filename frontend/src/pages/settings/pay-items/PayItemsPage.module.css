@@ -12,6 +12,30 @@
   height: 100%;
 }
 
+/* ── Page tabs ── */
+.pageTabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.pageTabBtn {
+  padding: 0.55rem 1.2rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+.pageTabBtn:hover { color: #1d4ed8; }
+.pageTabBtnActive { color: #1d4ed8; font-weight: 700; border-bottom-color: #2563eb; }
+
 /* ── Page header ── */
 .pageHeader {
   display: flex;
