@@ -23,10 +23,12 @@ Covered:
 - Empty final lines for a non-finalized (Approved) period
 - PeriodSummary includes final_gross and final_driver_count after finalization
 """
+import datetime
 import pytest
 import pytest_asyncio
 import httpx
 from decimal import Decimal
+from sqlalchemy import text as _sqla_text
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +240,7 @@ async def locked_period_data(
     paytest_branch_id: int,
     ledger_driver_id: int,
     paytest_rate_type_id: int,
+    session_db_conn,
 ) -> dict:
     """
     Create a period on the PAYTEST branch (dates 2087-01-06 to 2087-01-12),
@@ -273,27 +276,28 @@ async def locked_period_data(
     )
     assert approve_resp.status_code == 200, f"Approve rate failed: {approve_resp.text}"
 
-    # Create Draft
-    r = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id": paytest_branch_id,
-            "period_type": "Week",
-            "start_date": "2087-01-06",
-            "end_date": "2087-01-12",
-        },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"Create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-
-    # Draft → Open
-    tr = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert tr.status_code == 200
+    # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
+    row = (await session_db_conn.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', 'LEDGER-2087-0106', 'Ledger Test 2087-W01', 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": paytest_branch_id,
+         "start": datetime.date(2087, 1, 6),
+         "end": datetime.date(2087, 1, 12)},
+    )).mappings().first()
+    if row is None:
+        row = (await session_db_conn.execute(
+            _sqla_text(
+                "SELECT payrollperiodid FROM payroll.payrollperiods "
+                "WHERE branchid = :bid AND periodcode = 'LEDGER-2087-0106'"
+            ),
+            {"bid": paytest_branch_id},
+        )).mappings().first()
+    pid = row["payrollperiodid"]
 
     # Seed HOURS line (PerUnit, 8h × $25 = $200 from approved DriverRate)
     hl = await session_client.post(
@@ -375,21 +379,31 @@ class TestLedgerPeriodList:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """GET /payroll/periods?status=Locked must not return Draft periods."""
-        # Create a Draft period in 2087-07 (safe from locked_period 2087-01)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2087-07-07",
-                "end_date": "2087-07-13",
-            },
-            headers=auth(auth_token),
-        )
-        assert r.status_code == 201
-        draft_pid = r.json()["payroll_period_id"]
+        # Insert a Draft period directly (CP-1D: POST requires an existing Open)
+        _r = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Draft', 'LEDGER-DRAFT-2087-07', 'Ledger Draft Filter Test', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id,
+             "start": datetime.date(2087, 7, 7),
+             "end": datetime.date(2087, 7, 13)},
+        )).mappings().first()
+        if _r is None:
+            _r = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'LEDGER-DRAFT-2087-07'"
+                ),
+                {"bid": paytest_branch_id},
+            )).mappings().first()
+        draft_pid = _r["payrollperiodid"]
 
         try:
             resp = await session_client.get(
@@ -450,20 +464,30 @@ class TestLedgerPeriodList:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """A Draft period must have final_gross=0 (no final lines)."""
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2087-08-04",
-                "end_date": "2087-08-10",
-            },
-            headers=auth(auth_token),
-        )
-        assert r.status_code == 201
-        pid = r.json()["payroll_period_id"]
+        _r = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Draft', 'LEDGER-DRAFT-2087-08', 'Ledger Zero Gross Test', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id,
+             "start": datetime.date(2087, 8, 4),
+             "end": datetime.date(2087, 8, 10)},
+        )).mappings().first()
+        if _r is None:
+            _r = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'LEDGER-DRAFT-2087-08'"
+                ),
+                {"bid": paytest_branch_id},
+            )).mappings().first()
+        pid = _r["payrollperiodid"]
         try:
             resp = await session_client.get(
                 f"/payroll/periods/{pid}",
@@ -618,26 +642,30 @@ class TestFinalLines:
         not be exposed through the ledger path.
         """
         headers = auth(auth_token)
-        # Create a fresh approved period in 2087-09 (safe isolation)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2087-09-08",
-                "end_date": "2087-09-14",
-            },
-            headers=headers,
-        )
-        assert r.status_code == 201
-        pid = r.json()["payroll_period_id"]
+        # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
+        _r = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'LEDGER-APPR-2087-09', 'Ledger Approved Test', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id,
+             "start": datetime.date(2087, 9, 8),
+             "end": datetime.date(2087, 9, 14)},
+        )).mappings().first()
+        if _r is None:
+            _r = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'LEDGER-APPR-2087-09'"
+                ),
+                {"bid": paytest_branch_id},
+            )).mappings().first()
+        pid = _r["payrollperiodid"]
         try:
             # Open → InReview → Approved
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Open"},
-                headers=headers,
-            )
             await _advance_to_approved(
                 session_client, auth_token, pid, paytest_driver_id, "2087-09-09"
             )
@@ -829,6 +857,7 @@ class TestSysAdjFinalLines:
         paytest_branch_id: int,
         ledger_driver_id: int,
         paytest_rate_type_id: int,
+        direct_db,
     ):
         """
         When a MinimumPay rule causes a top-up, SYS_MIN_TOPUP must appear
@@ -862,25 +891,28 @@ class TestSysAdjFinalLines:
         assert rule_resp.status_code == 201, f"Create pay rule failed: {rule_resp.text}"
         rule_id = rule_resp.json()["driver_pay_rule_id"]
 
-        # Create period in Oct 2087
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2087-10-06",
-                "end_date": "2087-10-12",
-            },
-            headers=headers,
-        )
-        assert r.status_code == 201
-        pid = r.json()["payroll_period_id"]
-
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=headers,
-        )
+        # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
+        _r = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'LEDGER-TOPUP-2087-10', 'Ledger TopUp Test', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id,
+             "start": datetime.date(2087, 10, 6),
+             "end": datetime.date(2087, 10, 12)},
+        )).mappings().first()
+        if _r is None:
+            _r = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'LEDGER-TOPUP-2087-10'"
+                ),
+                {"bid": paytest_branch_id},
+            )).mappings().first()
+        pid = _r["payrollperiodid"]
 
         # Create and approve an HOURLY rate ($25) for ledger_driver_id.
         # A rate for ledger_driver_id at 2087-01-01 already exists (locked_period_data

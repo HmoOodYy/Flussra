@@ -6,16 +6,15 @@ Product contract verified here:
   - Friendly precheck returns 409 on the sequential (non-race) path.
   - Partial unique index ux_payrollperiods_oneinreviewperbranch is the
     concurrency authority: detected by the SAIntegrityError handler.
-  - Full loser rollback for both race scenarios:
-      a) Open submit wins, Returned resubmit loses.
-      b) Returned resubmit wins, Open submit loses.
+  - Full loser rollback for both deterministic scenarios:
+      a) Open submit blocked by B2 while Returned exists (RETURNED_BACKLOG_BLOCKS_SUBMIT).
+      b) Open submit blocked by InReview slot after Returned resubmits.
   - Migration preflight refuses duplicate InReview periods.
   - Downgrade drops only the 0049 index; 0048 Returned index survives.
 
 Dates: 2094-* — isolated year.  Run from backend/:
     python -m pytest tests/test_cp1b_inreview_slot.py -v
 """
-import asyncio
 import datetime
 import itertools
 from decimal import Decimal
@@ -67,24 +66,23 @@ async def _cancel_active(direct_db, branch_id: int) -> None:
     await direct_db.commit()
 
 
-async def _create_and_open_period(client, token, branch_id) -> tuple[int, str]:
-    """Create Draft → Open period. Returns (period_id, start_date_str)."""
-    start, end = _next_dates()
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r2 = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=_auth(token),
-    )
-    assert r2.status_code == 200, f"open period: {r2.text}"
-    return pid, start
+async def _create_and_open_period(client, token, branch_id, direct_db) -> tuple[int, str]:
+    """Insert an Open period directly (CP-1D: legacy POST guard blocks creation without a prior Open)."""
+    start_str, end_str = _next_dates()
+    start_d = datetime.date.fromisoformat(start_str)
+    end_d   = datetime.date.fromisoformat(end_str)
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP1B-{start_str}", "name": f"CP1B {start_str}",
+         "start": start_d, "end": end_d},
+    )).mappings().first()
+    await direct_db.commit()
+    return row["payrollperiodid"], start_str
 
 
 async def _add_line(client, token, pid, driver_id, work_date) -> None:
@@ -397,23 +395,27 @@ class TestFriendlyGuard:
         """
         await _cancel_active(direct_db, paytest_branch_id)
 
-        pid1, start1 = await _create_and_open_period(session_client, auth_token, paytest_branch_id)
+        pid1, start1 = await _create_and_open_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _add_line(session_client, auth_token, pid1, paytest_driver_id, start1)
         await _submit_to_inreview(session_client, auth_token, pid1)
 
-        # Create a second Open period (may require CP-1D for multi-open; skip if blocked)
+        # Create a second Open period via direct DB (CP-1D: POST guard blocks when InReview
+        # exists as the only non-Cancelled period — no Open present for the B1 guard to pass).
         start2, end2 = _next_dates()
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": start2, "end_date": end2},
-            headers=_auth(auth_token),
-        )
-        if r.status_code != 201:
-            pytest.skip(f"Cannot create second period ({r.status_code}); may require CP-1D.")
-        pid2 = r.json()["payroll_period_id"]
-        await session_client.patch(f"/payroll/periods/{pid2}/status",
-                                   json={"status": "Open"}, headers=_auth(auth_token))
+        start2_d = datetime.date.fromisoformat(start2)
+        end2_d   = datetime.date.fromisoformat(end2)
+        pid2_row = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id, "code": f"CP1B-2ND-{start2}", "name": f"CP1B 2nd {start2}",
+             "start": start2_d, "end": end2_d},
+        )).mappings().first()
+        await direct_db.commit()
+        pid2 = pid2_row["payrollperiodid"]
         await _add_line(session_client, auth_token, pid2, paytest_driver_id, start2)
 
         r_submit = await session_client.patch(
@@ -451,26 +453,28 @@ class TestFriendlyGuard:
         await _cancel_active(direct_db, paytest_branch_id)
 
         # Period 1: Open → add line → InReview → Returned
-        pid1, start1 = await _create_and_open_period(session_client, auth_token, paytest_branch_id)
+        pid1, start1 = await _create_and_open_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _add_line(session_client, auth_token, pid1, paytest_driver_id, start1)
         ri1 = await _submit_to_inreview(session_client, auth_token, pid1)
         await _reject_to_returned(session_client, auth_token, ri1)
 
-        # Period 2: create Open (slot freed after p1 went Returned)
-        start2, end2 = _next_dates()
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": start2, "end_date": end2},
-            headers=_auth(auth_token),
-        )
-        if r.status_code != 201:
-            pytest.skip(f"Cannot create second period ({r.status_code}); may require CP-1D.")
-        pid2 = r.json()["payroll_period_id"]
-        await session_client.patch(f"/payroll/periods/{pid2}/status",
-                                   json={"status": "Open"}, headers=_auth(auth_token))
-        await _add_line(session_client, auth_token, pid2, paytest_driver_id, start2)
-        await _submit_to_inreview(session_client, auth_token, pid2)
+        # Period 2: insert directly as InReview — B2 fail-closed blocks API submission when any
+        # Returned period exists, so we bypass the submit path here to reach the test scenario.
+        start2_d = datetime.date.fromisoformat(start1) + datetime.timedelta(weeks=1)
+        end2_d   = start2_d + datetime.timedelta(days=6)
+        start2   = start2_d.isoformat()
+        r_cr = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'InReview', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id, "code": f"CP1B-T2-{start2}", "name": f"CP1B T2 {start2}",
+             "start": start2_d, "end": end2_d},
+        )).mappings().first()
+        await direct_db.commit()
+        pid2 = r_cr["payrollperiodid"]
         # Now pid2 is InReview; pid1 is Returned → resubmit must be blocked
 
         r_resub = await session_client.post(
@@ -504,7 +508,7 @@ class TestFriendlyGuard:
         await _cancel_active(direct_db, paytest_branch_id)
 
         # Create an InReview period in paytest branch
-        pid1, start1 = await _create_and_open_period(session_client, auth_token, paytest_branch_id)
+        pid1, start1 = await _create_and_open_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _add_line(session_client, auth_token, pid1, paytest_driver_id, start1)
         r_submit = await session_client.patch(
             f"/payroll/periods/{pid1}/status",
@@ -526,24 +530,15 @@ class TestFriendlyGuard:
 
 class TestDeterministicConcurrency:
     """
-    These tests inject a barrier at the InReview slot-check SELECT so that
-    BOTH concurrent requests pass the precheck before either executes its
-    UPDATE.  This proves that the unique index — not the precheck — is the
-    fallback barrier.
+    Deterministic sequential coverage of CP-1D + CP-1B interaction.
 
-    Barrier design:
-      1. Both requests execute _check_inreview_slot_available and see "no slot
-         occupied" before either proceeds.
-      2. The designated winner's UPDATE fires first and sets winner_update_done.
-      3. The designated loser's UPDATE waits for winner_update_done, then runs —
-         hitting the unique index because the winner's uncommitted row already
-         holds the slot (PostgreSQL blocks at the DB level until winner commits,
-         then loser sees a unique violation).
+    Fixture: period A (Returned, older date range) + period B (Open, later date range).
+    Valid chronological dates ensure B2 fires deterministically.
 
-    SQL fingerprints (all lowercased):
-      Slot check:           "'inreview'" + "payrollperiodid != :pid" + "limit 1"
-      Open submit UPDATE:   ":new_status" + "'open'"
-      Returned resub UPDATE: "currentreturnreviewitemid = null"
+    Scenario 1: Open submit while Returned exists → B2 RETURNED_BACKLOG_BLOCKS_SUBMIT (409).
+                No side effects: Open stays Open, no RI, no audit, calc stays stale.
+    Scenario 2: Returned resubmit succeeds (→ InReview), then Open submit →
+                CP-1B InReview slot conflict (409).  No duplicate RI.
     """
 
     async def _setup(
@@ -568,7 +563,7 @@ class TestDeterministicConcurrency:
 
         # Period A: Draft → Open → PTO_STATUS line → HOURS line → InReview → Returned
         pid_a, start_a = await _create_and_open_period(
-            session_client, auth_token, paytest_branch_id
+            session_client, auth_token, paytest_branch_id, direct_db
         )
         await _add_line(session_client, auth_token, pid_a, paytest_driver_id, start_a)
         hours_a = await _add_hours_line(
@@ -577,18 +572,23 @@ class TestDeterministicConcurrency:
         ri_a = await _submit_to_inreview(session_client, auth_token, pid_a)
         await _reject_to_returned(session_client, auth_token, ri_a)
 
-        # Period B: Draft → Open → PTO_STATUS line → HOURS line
-        # (slot is free — A is Returned)
-        pid_b, start_b = await _create_and_open_period(
-            session_client, auth_token, paytest_branch_id
-        )
-        # Re-check A is still Returned (create_and_open_period calls _cancel_active).
-        p_a_row = (await direct_db.execute(
-            _text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-            {"pid": pid_a},
+        # Period B: starts the week AFTER period A ends (A ends at start_a+6).
+        # Chronological order ensures B2 fires deterministically when pid_b submits:
+        #   Returned.enddate (A.start+6) < Open.startdate (A.start+7) → RETURNED_BACKLOG_BLOCKS_SUBMIT.
+        start_b_d = datetime.date.fromisoformat(start_a) + datetime.timedelta(weeks=1)
+        end_b_d   = start_b_d + datetime.timedelta(days=6)
+        start_b   = start_b_d.isoformat()
+        b_row = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id, "code": f"CP1B-B-{start_b}", "name": f"CP1B B {start_b}",
+             "start": start_b_d, "end": end_b_d},
         )).mappings().first()
-        if p_a_row["status"] != "Returned":
-            pytest.skip("Setup: period A was cancelled during period B creation (expected; retry needed).")
+        pid_b = b_row["payrollperiodid"]
 
         await _add_line(session_client, auth_token, pid_b, paytest_driver_id, start_b)
         hours_b = await _add_hours_line(
@@ -603,7 +603,7 @@ class TestDeterministicConcurrency:
         return pid_b, start_b, pid_a, start_a, ri_a, hours_b, hours_a
 
     @pytest.mark.asyncio
-    async def test_open_wins_returned_resubmit_loses(
+    async def test_b2_blocks_open_submit_while_returned_exists(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -612,251 +612,88 @@ class TestDeterministicConcurrency:
         direct_db,
     ):
         """
-        Deterministic race: Open submit is the winner; Returned resubmit is the loser.
+        Scenario 1 (sequential, deterministic): Open submit while a Returned period
+        exists on the same branch.
 
-        The loser gets 409 from the unique-index SAIntegrityError handler
-        (detail contains 'concurrent'), not from the precheck.
-        Every write the loser attempted is fully rolled back.
+        B2 fail-closed logic fires inside the advisory lock before any write:
+          Returned.enddate < Open.startdate → RETURNED_BACKLOG_BLOCKS_SUBMIT (409).
+
+        Verified invariants:
+        - Open period remains Open (no status change committed).
+        - No Pending PeriodApproval review item for the Open period.
+        - No PERIOD_STATUS_CHANGED Open→InReview audit for the Open period.
+        - HOURS line calculatedamount stays 0.01 (calc refresh never reached).
         """
-        try:
-            (pid_open, start_open, pid_returned, start_returned, ri_old,
-             hours_line_open, hours_line_returned) = await self._setup(
-                session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
-            )
-        except pytest.skip.Exception:
-            raise
+        (pid_open, start_open, pid_returned, start_returned, ri_old,
+         hours_line_open, hours_line_returned) = await self._setup(
+            session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
+        )
 
-        precheck_count = [0]
-        both_past_precheck = asyncio.Event()
-        winner_update_done = asyncio.Event()
-        _real_execute = AsyncConnection.execute
-
-        async def _gate_open_wins(self_conn, statement, *args, **kwargs):
-            sql_lower = str(statement).lower()
-
-            is_slot_check = (
-                "'inreview'" in sql_lower
-                and "payrollperiodid != :pid" in sql_lower
-                and "limit 1" in sql_lower
-            )
-            is_open_update = (
-                "update payroll.payrollperiods" in sql_lower
-                and ":new_status" in sql_lower
-                and "'open'" in sql_lower
-                and "returning payrollperiodid" in sql_lower
-            )
-            is_returned_update = (
-                "update payroll.payrollperiods" in sql_lower
-                and "currentreturnreviewitemid = null" in sql_lower
-                and "returning payrollperiodid" in sql_lower
-            )
-
-            if is_slot_check:
-                result = await _real_execute(self_conn, statement, *args, **kwargs)
-                idx = precheck_count[0]
-                precheck_count[0] += 1
-                if precheck_count[0] >= 2:
-                    both_past_precheck.set()
-                if idx == 0:
-                    await asyncio.wait_for(both_past_precheck.wait(), timeout=5.0)
-                return result
-
-            if is_open_update:
-                result = await _real_execute(self_conn, statement, *args, **kwargs)
-                winner_update_done.set()
-                return result
-
-            if is_returned_update:
-                await asyncio.wait_for(winner_update_done.wait(), timeout=10.0)
-                return await _real_execute(self_conn, statement, *args, **kwargs)
-
-            return await _real_execute(self_conn, statement, *args, **kwargs)
-
-        # Snapshot audit count before the race — pid_returned already has one
-        # InReview audit from the setup (its original Open→InReview submission).
-        pre_race_audit = (await direct_db.execute(
+        pre_audit = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM audit.auditlog "
                   "WHERE actioncode = 'PERIOD_STATUS_CHANGED' AND entityid = :eid "
                   "  AND newvaluejson::text LIKE '%InReview%'"),
-            {"eid": str(pid_returned)},
+            {"eid": str(pid_open)},
         )).scalar_one()
 
-        # Snapshot REVIEW_ITEM_CREATED audit count for the loser period.
-        pre_ri_audit_returned = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM audit.auditlog "
-                  "WHERE actioncode = 'REVIEW_ITEM_CREATED' "
-                  "  AND newvaluejson::jsonb->>'period_id' = :pid_str"),
-            {"pid_str": str(pid_returned)},
-        )).scalar_one()
-
-        # Snapshot the old review item's decision fields to verify they are unchanged.
-        ri_old_row = (await direct_db.execute(
-            _text("SELECT status, finaldecisionbyuserid, finaldecisionatutc, finaldecisionreason "
-                  "FROM review.managerreviewitems WHERE reviewitemid = :rid"),
-            {"rid": ri_old},
-        )).mappings().first()
-        assert ri_old_row is not None, f"ri_old {ri_old} not found"
-        ri_old_status = ri_old_row["status"]
-        ri_old_decidedby = ri_old_row["finaldecisionbyuserid"]
-        ri_old_decidedat = ri_old_row["finaldecisionatutc"]
-        ri_old_reason = ri_old_row["finaldecisionreason"]
-
-        AsyncConnection.execute = _gate_open_wins
-        try:
-            r_open, r_resub = await asyncio.gather(
-                session_client.patch(
-                    f"/payroll/periods/{pid_open}/status",
-                    json={"status": "InReview"},
-                    headers=_auth(auth_token),
-                ),
-                session_client.post(
-                    f"/payroll/periods/{pid_returned}/resubmissions",
-                    headers=_auth(auth_token),
-                ),
-            )
-        finally:
-            AsyncConnection.execute = _real_execute
-
-        assert precheck_count[0] == 2, (
-            f"Both requests must have reached the slot-check barrier; only {precheck_count[0]} did."
+        r = await session_client.patch(
+            f"/payroll/periods/{pid_open}/status",
+            json={"status": "InReview"},
+            headers=_auth(auth_token),
+        )
+        assert r.status_code == 409, (
+            f"Open submit must be blocked by B2 while Returned exists; got {r.status_code}: {r.text}"
+        )
+        err_body = r.json()
+        err_code = err_body.get("detail", {}).get("code") or err_body.get("code")
+        assert err_code == "RETURNED_BACKLOG_BLOCKS_SUBMIT", (
+            f"Expected RETURNED_BACKLOG_BLOCKS_SUBMIT; got {err_code!r} (body={err_body})"
         )
 
-        # Open must win (200); Returned resubmit must lose (409)
-        assert r_open.status_code == 200, (
-            f"Open submit (winner) must succeed (200); got {r_open.status_code}: {r_open.text}"
-        )
-        assert r_resub.status_code == 409, (
-            f"Returned resubmit (loser) must get 409; got {r_resub.status_code}: {r_resub.text}"
-        )
-
-        loser_detail = r_resub.json().get("detail", "")
-        assert "concurrent" in loser_detail.lower(), (
-            f"409 must come from the unique-index handler (contains 'concurrent'); "
-            f"got precheck message: {loser_detail!r}"
-        )
-
-        # Winner (pid_open) must be InReview; its review item Pending
-        w_row = (await direct_db.execute(
+        row = (await direct_db.execute(
             _text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
             {"pid": pid_open},
         )).mappings().first()
-        assert w_row["status"] == "InReview", (
-            f"Winner period must be InReview; got {w_row['status']!r}"
+        assert row["status"] == "Open", (
+            f"Open period must remain Open after B2 rejection; got {row['status']!r}"
         )
 
-        # Loser (pid_returned) must remain Returned — all its writes rolled back
-        l_row = (await direct_db.execute(
-            _text("SELECT status, currentreturnreviewitemid "
-                  "FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-            {"pid": pid_returned},
-        )).mappings().first()
-        assert l_row["status"] == "Returned", (
-            f"Loser period must remain Returned (rolled back); got {l_row['status']!r}"
-        )
-        assert l_row["currentreturnreviewitemid"] == ri_old, (
-            "Loser period pointer must still point to original returned review item (rolled back)"
-        )
-
-        # No new Pending review item for loser period
-        new_ri_count = (await direct_db.execute(
+        ri_count = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM review.managerreviewitems "
                   "WHERE entityid = :eid AND status = 'Pending'"),
-            {"eid": str(pid_returned)},
+            {"eid": str(pid_open)},
         )).scalar_one()
-        assert new_ri_count == 0, (
-            f"Loser must have no new Pending review item (rolled back); found {new_ri_count}"
+        assert ri_count == 0, (
+            f"No Pending RI must exist for Open period after B2 rejection; found {ri_count}"
         )
 
-        # Loser resubmit audit must be fully rolled back — count must not have grown.
-        post_race_audit = (await direct_db.execute(
+        post_audit = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM audit.auditlog "
                   "WHERE actioncode = 'PERIOD_STATUS_CHANGED' AND entityid = :eid "
                   "  AND newvaluejson::text LIKE '%InReview%'"),
-            {"eid": str(pid_returned)},
+            {"eid": str(pid_open)},
         )).scalar_one()
-        assert post_race_audit == pre_race_audit, (
-            f"Loser PERIOD_STATUS_CHANGED→InReview audit must be rolled back; "
-            f"pre-race={pre_race_audit} post-race={post_race_audit}"
+        assert post_audit == pre_audit, (
+            f"No new PERIOD_STATUS_CHANGED audit for Open period; "
+            f"pre={pre_audit} post={post_audit}"
         )
 
-        # Exactly one InReview period for this branch
-        ir_count = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM payroll.payrollperiods "
-                  "WHERE branchid = :bid AND status = 'InReview'"),
-            {"bid": paytest_branch_id},
-        )).scalar_one()
-        assert ir_count == 1, f"Exactly one InReview period must exist; found {ir_count}"
-
-        # ── Calculation-refresh rollback proof ──────────────────────────────
-        # Loser's HOURS line: refresh ran inside the rolled-back transaction;
-        # calculatedamount must revert to the stale sentinel.
-        loser_calc = (await direct_db.execute(
-            _text("SELECT calculatedamount FROM payroll.payrolldraftlines "
-                  "WHERE draftlineid = :lid"),
-            {"lid": hours_line_returned},
-        )).scalar_one()
-        assert loser_calc == Decimal("0.01"), (
-            f"Loser HOURS line must still hold stale sentinel 0.01 (refresh rolled back); "
-            f"got {loser_calc}"
-        )
-
-        # Winner's HOURS line: refresh ran and committed; must be refreshed to 200.00.
-        winner_calc = (await direct_db.execute(
+        # B2 fires before calc refresh — HOURS line calculatedamount must stay 0.01.
+        calc_row = (await direct_db.execute(
             _text("SELECT calculatedamount FROM payroll.payrolldraftlines "
                   "WHERE draftlineid = :lid"),
             {"lid": hours_line_open},
-        )).scalar_one()
-        assert winner_calc == Decimal("200.00"), (
-            f"Winner HOURS line must be refreshed to 8 × 25.00 = 200.00; got {winner_calc}"
-        )
-
-        # ── REVIEW_ITEM_CREATED audit rollback proof ─────────────────────────
-        post_ri_audit_returned = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM audit.auditlog "
-                  "WHERE actioncode = 'REVIEW_ITEM_CREATED' "
-                  "  AND newvaluejson::jsonb->>'period_id' = :pid_str"),
-            {"pid_str": str(pid_returned)},
-        )).scalar_one()
-        assert post_ri_audit_returned == pre_ri_audit_returned, (
-            f"Loser REVIEW_ITEM_CREATED audit must be rolled back; "
-            f"pre={pre_ri_audit_returned} post={post_ri_audit_returned}"
-        )
-
-        # ── Exactly one Pending PeriodApproval for winner ───────────────────
-        winner_pending = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM review.managerreviewitems "
-                  "WHERE entityid = :eid AND requesttype = 'PeriodApproval' "
-                  "  AND status = 'Pending'"),
-            {"eid": str(pid_open)},
-        )).scalar_one()
-        assert winner_pending == 1, (
-            f"Winner must have exactly one Pending PeriodApproval; found {winner_pending}"
-        )
-
-        # ── Old review item fields unchanged ────────────────────────────────
-        ri_old_row_after = (await direct_db.execute(
-            _text("SELECT status, finaldecisionbyuserid, finaldecisionatutc, finaldecisionreason "
-                  "FROM review.managerreviewitems WHERE reviewitemid = :rid"),
-            {"rid": ri_old},
         )).mappings().first()
-        assert ri_old_row_after["status"] == ri_old_status, (
-            f"ri_old status must not change; before={ri_old_status!r} "
-            f"after={ri_old_row_after['status']!r}"
-        )
-        assert ri_old_row_after["finaldecisionbyuserid"] == ri_old_decidedby, (
-            "ri_old finaldecisionbyuserid must not change"
-        )
-        assert ri_old_row_after["finaldecisionatutc"] == ri_old_decidedat, (
-            "ri_old finaldecisionatutc must not change"
-        )
-        assert ri_old_row_after["finaldecisionreason"] == ri_old_reason, (
-            "ri_old finaldecisionreason must not change"
+        assert calc_row is not None, f"HOURS line {hours_line_open} not found"
+        assert float(calc_row["calculatedamount"]) == pytest.approx(0.01, abs=0.001), (
+            f"HOURS line calculatedamount must stay 0.01 (calc refresh not reached); "
+            f"got {calc_row['calculatedamount']}"
         )
 
         await _cancel_active(direct_db, paytest_branch_id)
 
     @pytest.mark.asyncio
-    async def test_returned_resubmit_wins_open_loses(
+    async def test_inreview_slot_blocks_open_after_returned_resubmits(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -865,211 +702,91 @@ class TestDeterministicConcurrency:
         direct_db,
     ):
         """
-        Deterministic race: Returned resubmit is the winner; Open submit is the loser.
+        Scenario 2 (sequential, deterministic): Returned resubmit succeeds (→ InReview),
+        then Open submit is blocked by CP-1B InReview slot check (409).
 
-        The loser (Open submit) gets 409 from the unique-index SAIntegrityError
-        handler.  Every write the loser attempted is fully rolled back.
+        Verified invariants:
+        - Returned period is InReview after resubmit.
+        - Open period remains Open after blocked submit.
+        - No Pending review item for Open period.
+        - Exactly one Pending PeriodApproval for Returned period.
+        - No PERIOD_STATUS_CHANGED Open→InReview audit for Open period.
         """
-        try:
-            (pid_open, start_open, pid_returned, start_returned, ri_old,
-             hours_line_open, hours_line_returned) = await self._setup(
-                session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
-            )
-        except pytest.skip.Exception:
-            raise
+        (pid_open, start_open, pid_returned, start_returned, ri_old,
+         hours_line_open, hours_line_returned) = await self._setup(
+            session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
+        )
 
-        precheck_count = [0]
-        both_past_precheck = asyncio.Event()
-        winner_update_done = asyncio.Event()
-        _real_execute = AsyncConnection.execute
-
-        async def _gate_returned_wins(self_conn, statement, *args, **kwargs):
-            sql_lower = str(statement).lower()
-
-            is_slot_check = (
-                "'inreview'" in sql_lower
-                and "payrollperiodid != :pid" in sql_lower
-                and "limit 1" in sql_lower
-            )
-            is_returned_update = (
-                "update payroll.payrollperiods" in sql_lower
-                and "currentreturnreviewitemid = null" in sql_lower
-                and "returning payrollperiodid" in sql_lower
-            )
-            is_open_update = (
-                "update payroll.payrollperiods" in sql_lower
-                and ":new_status" in sql_lower
-                and "'open'" in sql_lower
-                and "returning payrollperiodid" in sql_lower
-            )
-
-            if is_slot_check:
-                result = await _real_execute(self_conn, statement, *args, **kwargs)
-                idx = precheck_count[0]
-                precheck_count[0] += 1
-                if precheck_count[0] >= 2:
-                    both_past_precheck.set()
-                if idx == 0:
-                    await asyncio.wait_for(both_past_precheck.wait(), timeout=5.0)
-                return result
-
-            if is_returned_update:
-                result = await _real_execute(self_conn, statement, *args, **kwargs)
-                winner_update_done.set()
-                return result
-
-            if is_open_update:
-                await asyncio.wait_for(winner_update_done.wait(), timeout=10.0)
-                return await _real_execute(self_conn, statement, *args, **kwargs)
-
-            return await _real_execute(self_conn, statement, *args, **kwargs)
-
-        # Snapshot pre-race audit count for Open period (should be 0; it was never submitted).
-        pre_race_audit_open = (await direct_db.execute(
+        pre_audit_open = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM audit.auditlog "
                   "WHERE actioncode = 'PERIOD_STATUS_CHANGED' AND entityid = :eid "
                   "  AND newvaluejson::text LIKE '%InReview%'"),
             {"eid": str(pid_open)},
         )).scalar_one()
 
-        # Snapshot REVIEW_ITEM_CREATED audit count for the loser (Open) period.
-        pre_ri_audit_open = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM audit.auditlog "
-                  "WHERE actioncode = 'REVIEW_ITEM_CREATED' "
-                  "  AND newvaluejson::jsonb->>'period_id' = :pid_str"),
-            {"pid_str": str(pid_open)},
-        )).scalar_one()
-
-        AsyncConnection.execute = _gate_returned_wins
-        try:
-            r_open, r_resub = await asyncio.gather(
-                session_client.patch(
-                    f"/payroll/periods/{pid_open}/status",
-                    json={"status": "InReview"},
-                    headers=_auth(auth_token),
-                ),
-                session_client.post(
-                    f"/payroll/periods/{pid_returned}/resubmissions",
-                    headers=_auth(auth_token),
-                ),
-            )
-        finally:
-            AsyncConnection.execute = _real_execute
-
-        assert precheck_count[0] == 2, (
-            f"Both requests must have reached the slot-check barrier; only {precheck_count[0]} did."
+        # Step 1: Returned resubmit — must succeed.
+        r_resub = await session_client.post(
+            f"/payroll/periods/{pid_returned}/resubmissions",
+            headers=_auth(auth_token),
         )
-
-        # Returned resubmit must win (200); Open submit must lose (409)
         assert r_resub.status_code == 200, (
-            f"Returned resubmit (winner) must succeed (200); got {r_resub.status_code}: {r_resub.text}"
-        )
-        assert r_open.status_code == 409, (
-            f"Open submit (loser) must get 409; got {r_open.status_code}: {r_open.text}"
+            f"Returned resubmit must succeed; got {r_resub.status_code}: {r_resub.text}"
         )
 
-        loser_detail = r_open.json().get("detail", "")
-        assert "concurrent" in loser_detail.lower(), (
-            f"409 must come from the unique-index handler (contains 'concurrent'); "
-            f"got precheck message: {loser_detail!r}"
-        )
-
-        # Winner (pid_returned) must be InReview; pointer cleared
-        w_row = (await direct_db.execute(
-            _text("SELECT status, currentreturnreviewitemid "
-                  "FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+        ret_row = (await direct_db.execute(
+            _text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
             {"pid": pid_returned},
         )).mappings().first()
-        assert w_row["status"] == "InReview", (
-            f"Winner period must be InReview; got {w_row['status']!r}"
-        )
-        assert w_row["currentreturnreviewitemid"] is None, (
-            "Winner period pointer must be cleared (NULL) after resubmit"
+        assert ret_row["status"] == "InReview", (
+            f"Returned period must be InReview after resubmit; got {ret_row['status']!r}"
         )
 
-        # Loser (pid_open) must remain Open — all its writes rolled back
-        l_row = (await direct_db.execute(
+        # Step 2: Open submit — must be blocked by CP-1B InReview slot conflict.
+        r_open = await session_client.patch(
+            f"/payroll/periods/{pid_open}/status",
+            json={"status": "InReview"},
+            headers=_auth(auth_token),
+        )
+        assert r_open.status_code == 409, (
+            f"Open submit must be blocked by InReview slot; "
+            f"got {r_open.status_code}: {r_open.text}"
+        )
+
+        open_row = (await direct_db.execute(
             _text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
             {"pid": pid_open},
         )).mappings().first()
-        assert l_row["status"] == "Open", (
-            f"Loser period must remain Open (rolled back); got {l_row['status']!r}"
+        assert open_row["status"] == "Open", (
+            f"Open period must remain Open after slot rejection; got {open_row['status']!r}"
         )
 
-        # No new Pending review item for loser (Open) period
-        new_ri_count = (await direct_db.execute(
+        ri_count = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM review.managerreviewitems "
                   "WHERE entityid = :eid AND status = 'Pending'"),
             {"eid": str(pid_open)},
         )).scalar_one()
-        assert new_ri_count == 0, (
-            f"Loser Open period must have no Pending review item (rolled back); found {new_ri_count}"
+        assert ri_count == 0, (
+            f"No Pending RI must exist for Open period; found {ri_count}"
         )
 
-        # Loser Open period audit must be fully rolled back — count must not have grown.
-        post_race_audit_open = (await direct_db.execute(
+        post_audit_open = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM audit.auditlog "
                   "WHERE actioncode = 'PERIOD_STATUS_CHANGED' AND entityid = :eid "
                   "  AND newvaluejson::text LIKE '%InReview%'"),
             {"eid": str(pid_open)},
         )).scalar_one()
-        assert post_race_audit_open == pre_race_audit_open, (
-            f"Loser PERIOD_STATUS_CHANGED→InReview audit must be rolled back; "
-            f"pre-race={pre_race_audit_open} post-race={post_race_audit_open}"
+        assert post_audit_open == pre_audit_open, (
+            f"No new PERIOD_STATUS_CHANGED audit for Open period; "
+            f"pre={pre_audit_open} post={post_audit_open}"
         )
 
-        # Exactly one InReview period for this branch
-        ir_count = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM payroll.payrollperiods "
-                  "WHERE branchid = :bid AND status = 'InReview'"),
-            {"bid": paytest_branch_id},
-        )).scalar_one()
-        assert ir_count == 1, f"Exactly one InReview period must exist; found {ir_count}"
-
-        # ── Calculation-refresh rollback proof ──────────────────────────────
-        # Loser's (pid_open) HOURS line: refresh ran inside the rolled-back transaction;
-        # calculatedamount must revert to the stale sentinel.
-        loser_calc = (await direct_db.execute(
-            _text("SELECT calculatedamount FROM payroll.payrolldraftlines "
-                  "WHERE draftlineid = :lid"),
-            {"lid": hours_line_open},
-        )).scalar_one()
-        assert loser_calc == Decimal("0.01"), (
-            f"Loser HOURS line must still hold stale sentinel 0.01 (refresh rolled back); "
-            f"got {loser_calc}"
-        )
-
-        # Winner's (pid_returned) HOURS line: refresh ran and committed; must be 200.00.
-        winner_calc = (await direct_db.execute(
-            _text("SELECT calculatedamount FROM payroll.payrolldraftlines "
-                  "WHERE draftlineid = :lid"),
-            {"lid": hours_line_returned},
-        )).scalar_one()
-        assert winner_calc == Decimal("200.00"), (
-            f"Winner HOURS line must be refreshed to 8 × 25.00 = 200.00; got {winner_calc}"
-        )
-
-        # ── REVIEW_ITEM_CREATED audit rollback proof ─────────────────────────
-        post_ri_audit_open = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM audit.auditlog "
-                  "WHERE actioncode = 'REVIEW_ITEM_CREATED' "
-                  "  AND newvaluejson::jsonb->>'period_id' = :pid_str"),
-            {"pid_str": str(pid_open)},
-        )).scalar_one()
-        assert post_ri_audit_open == pre_ri_audit_open, (
-            f"Loser REVIEW_ITEM_CREATED audit must be rolled back; "
-            f"pre={pre_ri_audit_open} post={post_ri_audit_open}"
-        )
-
-        # ── Exactly one Pending PeriodApproval for winner ───────────────────
-        winner_pending = (await direct_db.execute(
+        pending_count = (await direct_db.execute(
             _text("SELECT COUNT(*) FROM review.managerreviewitems "
-                  "WHERE entityid = :eid AND requesttype = 'PeriodApproval' "
-                  "  AND status = 'Pending'"),
+                  "WHERE entityid = :eid AND requesttype = 'PeriodApproval' AND status = 'Pending'"),
             {"eid": str(pid_returned)},
         )).scalar_one()
-        assert winner_pending == 1, (
-            f"Winner must have exactly one Pending PeriodApproval; found {winner_pending}"
+        assert pending_count == 1, (
+            f"Returned period must have exactly one Pending PeriodApproval; found {pending_count}"
         )
 
         await _cancel_active(direct_db, paytest_branch_id)

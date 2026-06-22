@@ -95,33 +95,44 @@ async def _force_cancel(direct_db, period_id: int) -> None:
 
 
 async def _create_open_period(
-    client: httpx.AsyncClient,
-    token: str,
+    direct_db,
     branch_id: int,
     start: str = "2092-03-03",
     end: str = "2092-03-09",
 ) -> int:
-    """Create a Draft period and advance it to Open. Returns period_id."""
-    await _cancel_all_non_terminal(client, token, branch_id)
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id": branch_id,
-            "period_type": "Week",
-            "start_date": start,
-            "end_date": end,
-        },
-        headers=_auth(token),
+    """Insert an Open period directly. Returns period_id.
+
+    CP-1D: POST /payroll/periods (legacy) now requires an existing Open period.
+    Direct insertion bypasses the guard for test setup.
+    """
+    # Cancel any existing active period so ux_payrollperiods_oneopenperbranch doesn't fire.
+    await direct_db.execute(
+        text(
+            "UPDATE payroll.payrollperiods "
+            "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid AND status = 'Returned'"
+        ),
+        {"bid": branch_id},
     )
-    assert r.status_code == 201, f"create failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r2 = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=_auth(token),
+    await direct_db.execute(
+        text(
+            "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+            "WHERE branchid = :bid AND status IN ('Draft','Open','InReview')"
+        ),
+        {"bid": branch_id},
     )
-    assert r2.status_code == 200, f"open failed: {r2.text}"
-    return pid
+    import datetime as _dt
+    row = (await direct_db.execute(
+        text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP0A-{start}", "name": f"CP0A {start}",
+         "start": _dt.date.fromisoformat(start), "end": _dt.date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _add_draft_line(
@@ -215,7 +226,7 @@ class TestDraftLineMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             r = await client.post(
                 f"/payroll/periods/{pid}/lines",
@@ -244,7 +255,7 @@ class TestDraftLineMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             await _force_status(direct_db, pid, bad_status)
             r = await client.post(
@@ -272,7 +283,7 @@ class TestDraftLineMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_draft_line(
                 client, auth_token, pid, paytest_driver_id, _WORK_DATE
@@ -298,7 +309,7 @@ class TestDraftLineMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_draft_line(
                 client, auth_token, pid, paytest_driver_id, _WORK_DATE
@@ -323,7 +334,7 @@ class TestDraftLineMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_draft_line(
                 client, auth_token, pid, paytest_driver_id, _WORK_DATE
@@ -348,7 +359,7 @@ class TestDraftLineMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_draft_line(
                 client, auth_token, pid, paytest_driver_id, _WORK_DATE
@@ -384,7 +395,7 @@ class TestPeriodPayMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             await _ensure_bonus_active(client, auth_token, paytest_branch_id)
             r = await client.post(
@@ -408,7 +419,7 @@ class TestPeriodPayMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             await _ensure_bonus_active(client, auth_token, paytest_branch_id)
             await _force_status(direct_db, pid, bad_status)
@@ -431,7 +442,7 @@ class TestPeriodPayMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             r = await client.patch(
@@ -455,7 +466,7 @@ class TestPeriodPayMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             await _force_status(direct_db, pid, bad_status)
@@ -478,7 +489,7 @@ class TestPeriodPayMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             r = await client.delete(
@@ -501,7 +512,7 @@ class TestPeriodPayMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             await _force_status(direct_db, pid, bad_status)
@@ -534,7 +545,7 @@ class TestDayGridMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             r = await client.post(
                 f"/payroll/periods/{pid}/day-grid",
@@ -565,7 +576,7 @@ class TestDayGridMutationStatusGuard:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             await _force_status(direct_db, pid, bad_status)
             r = await client.post(
@@ -761,7 +772,7 @@ class TestTrueRace:
         Without the helper, boundary_reached never fires and the test fails at
         the assertion before the response check.
         """
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         loop = asyncio.get_running_loop()
 
         coro = client.post(
@@ -806,7 +817,7 @@ class TestTrueRace:
         Day-grid save: boundary is reached, transition commits InReview → 409.
         Removing _lock_period_for_mutation makes boundary_reached never fire → test fails.
         """
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         loop = asyncio.get_running_loop()
 
         coro = client.post(
@@ -838,7 +849,7 @@ class TestTrueRace:
         Period-pay bonus add: boundary reached, transition commits InReview → 409.
         """
         await _ensure_bonus_active(client, auth_token, paytest_branch_id)
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         loop = asyncio.get_running_loop()
 
         coro = client.post(
@@ -876,7 +887,7 @@ class TestRejectedMutationInvariants:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             audit_before = (await direct_db.execute(
                 text(
@@ -931,7 +942,7 @@ class TestRejectedMutationInvariants:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_draft_line(
                 client, auth_token, pid, paytest_driver_id, _WORK_DATE
@@ -984,7 +995,7 @@ class TestRejectedMutationInvariants:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             await _ensure_bonus_active(client, auth_token, paytest_branch_id)
 
@@ -1034,7 +1045,7 @@ class TestRejectedMutationInvariants:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_bonus_line(
                 client, auth_token, paytest_branch_id, pid, paytest_driver_id
@@ -1091,7 +1102,7 @@ class TestRejectedMutationInvariants:
         paytest_driver_id: int,
         direct_db,
     ):
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             lid = await _add_bonus_line(
                 client, auth_token, paytest_branch_id, pid, paytest_driver_id
@@ -1142,7 +1153,7 @@ class TestRejectedMutationInvariants:
         direct_db,
     ):
         """Day-grid save is rejected and no DailyStatus row is inserted/changed."""
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             audit_before = (await direct_db.execute(
                 text(
@@ -1281,7 +1292,7 @@ class TestSettingsDeletionGuard:
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
 
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             # Insert a void DraftLine with the custom item's code directly
             # (API won't accept an unregistered custom item code)
@@ -1357,7 +1368,7 @@ class TestSettingsDeletionGuard:
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
 
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             # Insert a void DraftLine in an Open period
             await direct_db.execute(
@@ -1451,7 +1462,7 @@ class TestSettingsDeletionGuard:
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
 
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
             # Insert a void DraftLine in the Open period.
             await direct_db.execute(
@@ -1617,7 +1628,7 @@ class TestFirstReferenceRace:
         )).scalar_one_or_none() or 1
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
 
         try:
             # Activate the custom item on the branch so API validation passes.
@@ -1772,7 +1783,7 @@ class TestFirstReferenceRace:
         )).scalar_one_or_none() or 1
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
 
         try:
             await direct_db.execute(
@@ -1949,7 +1960,7 @@ class TestStaleRetirementRace:
         )).scalar_one_or_none() or 1
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
 
         try:
             # Activate the custom item on the branch so API validation passes.
@@ -2145,7 +2156,7 @@ class TestZeroToMeaningfulRace:
         )).scalar_one_or_none() or 1
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
 
         try:
             # Activate the custom item on the branch.
@@ -2328,7 +2339,7 @@ class TestZeroToMeaningfulRace:
         )).scalar_one_or_none() or 1
 
         iid, code = await _insert_minimal_custom_item(direct_db, company_id=cid, user_id=uid)
-        pid = await _create_open_period(client, auth_token, paytest_branch_id)
+        pid = await _create_open_period(direct_db, paytest_branch_id)
 
         try:
             await direct_db.execute(

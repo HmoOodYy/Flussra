@@ -92,25 +92,35 @@ async def _cancel_stale_periods(client: httpx.AsyncClient, token: str, branch_id
 
 async def _create_open_period(client: httpx.AsyncClient, token: str, branch_id: int,
                                start: str = "2028-01-08",
-                               end: str = "2028-01-14") -> dict:
-    """Create a period in Draft status, then move it to Open."""
-    # Cancel any leftover Draft/Open periods to avoid unique constraint failures
-    await _cancel_stale_periods(client, token, branch_id)
+                               end: str = "2028-01-14",
+                               direct_db=None) -> dict:
+    """Insert an Open period directly and return its data dict.
 
-    resp = await client.post("/payroll/periods", headers=_auth(token), json={
-        "branch_id": branch_id,
-        "period_type": "Week",
-        "start_date": start,
-        "end_date":   end,
-        "period_name": f"M16 Week {start}",
-    })
-    assert resp.status_code == 201, resp.text
-    pid = resp.json()["payroll_period_id"]
-
-    r2 = await client.patch(f"/payroll/periods/{pid}/status",
-                             headers=_auth(token), json={"status": "Open"})
-    assert r2.status_code == 200, r2.text
-    return r2.json()
+    CP-1D: POST /payroll/periods requires an existing Open (B1 guard); insert directly.
+    direct_db is required; the parameter is kept optional only for backwards-compat signature.
+    """
+    from datetime import date
+    from sqlalchemy import text as _text
+    assert direct_db is not None, "_create_open_period requires direct_db after CP-1D"
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid, companyid, branchid, status, startdate, enddate,
+                      periodcode, periodname, periodtype
+        """),
+        {"bid": branch_id, "code": f"M16-{start}", "name": f"M16 Week {start}",
+         "start": date.fromisoformat(start), "end": date.fromisoformat(end)},
+    )).mappings().first()
+    # Return a dict matching the API response shape (only keys used by callers).
+    return {
+        "payroll_period_id": row["payrollperiodid"],
+        "status": row["status"],
+        "start_date": row["startdate"].isoformat(),
+        "end_date": row["enddate"].isoformat(),
+        "period_name": row["periodname"],
+    }
 
 
 async def _add_miles_line(client: httpx.AsyncClient, token: str, period_id: int,
@@ -196,13 +206,13 @@ async def m16_open_period(client: httpx.AsyncClient, auth_token: str,
     )
     await direct_db.execute(
         _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
+              "WHERE branchid = :bid AND status IN ('Draft', 'Open', 'InReview', 'Approved')"),
         {"bid": m16_branch_id},
     )
     base = date(2028, 1, 1) + timedelta(weeks=_m16_period_counter)
     s = base.strftime("%Y-%m-%d")
     e = (base + timedelta(days=6)).strftime("%Y-%m-%d")
-    return await _create_open_period(client, auth_token, m16_branch_id, s, e)
+    return await _create_open_period(client, auth_token, m16_branch_id, s, e, direct_db=direct_db)
 
 
 # ---------------------------------------------------------------------------

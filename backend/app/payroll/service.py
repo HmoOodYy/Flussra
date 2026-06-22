@@ -58,7 +58,8 @@ from app.config import settings
 # Approval, reversal, cancellation, and archiving require payroll.finalize —
 # these are irreversible or senior-level decisions.
 _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
-    ("Draft",    "Open"):       "payroll.entry",
+    # CP-1D: ("Draft", "Open") removed — Draft promotion is now done atomically
+    # inside the Open→InReview submit path, not via a standalone PATCH transition.
     ("Draft",    "Cancelled"):  "payroll.finalize",   # CP-0C: was missing — any user could cancel Draft
     ("Open",     "InReview"):   "payroll.entry",
     ("Open",     "Cancelled"):  "payroll.finalize",
@@ -83,13 +84,19 @@ async def _write_period_status_audit(
     period_id: int,
     old_status: str,
     new_status: str,
+    extra: dict | None = None,
 ) -> None:
     """
     Insert one row into audit.AuditLog for a period status-change event.
 
     Module-level so tests can monkeypatch it to verify that the preceding
     UPDATE rolls back when this raises.
+
+    extra: optional additional fields merged into newvaluejson (e.g. trigger context).
     """
+    new_val_dict: dict = {"status": new_status}
+    if extra:
+        new_val_dict.update(extra)
     await db.execute(
         text("""
             INSERT INTO audit.auditlog
@@ -107,7 +114,7 @@ async def _write_period_status_audit(
             "uid":     user_id,
             "eid":     str(period_id),
             "old_val": json.dumps({"status": old_status}),
-            "new_val": json.dumps({"status": new_status}),
+            "new_val": json.dumps(new_val_dict),
             "reason":  _PERIOD_AUDIT_REASONS["PERIOD_STATUS_CHANGED"],
         },
     )
@@ -411,6 +418,54 @@ async def create_period(
     # CP-1C: Acquire branch advisory lock before overlap check and insert.
     # Serializes all period creation (both legacy and candidate-based) for this branch.
     await _acquire_branch_workflow_lock(company_id, data.branch_id, db)
+
+    # CP-1D: Draft creation guard — legacy POST /payroll/periods creates a Draft;
+    # this is only valid when exactly one Open exists and no Draft already exists.
+    _slot_result = await db.execute(
+        text("""
+            SELECT status FROM payroll.payrollperiods
+            WHERE  companyid = :cid AND branchid = :bid
+              AND  status IN ('Draft', 'Open', 'InReview', 'Returned')
+        """),
+        {"cid": company_id, "bid": data.branch_id},
+    )
+    _slot_statuses = [r["status"] for r in _slot_result.mappings().all()]
+    if "Draft" in _slot_statuses:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code":    "DRAFT_SLOT_OCCUPIED",
+                "message": (
+                    "A Draft period already exists for this branch. "
+                    "Only one Draft period is permitted per branch at a time."
+                ),
+            },
+        )
+    _open_count = _slot_statuses.count("Open")
+    if _open_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code":    "DRAFT_CREATION_REQUIRES_OPEN",
+                "message": (
+                    "No Open period exists for this branch. "
+                    "Legacy Draft creation requires exactly one Open period. "
+                    "Use the candidate-based period creation endpoint instead."
+                ),
+            },
+        )
+    if _open_count > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code":    "WORKFLOW_SLOT_CONFLICT",
+                "message": (
+                    "More than one Open period exists for this branch — "
+                    "the workflow is in an inconsistent state."
+                ),
+            },
+        )
+    # Exactly one Open, no Draft → allow (InReview/Returned co-existence is valid)
 
     # Verify branch belongs to this company and get its BranchCode for period_code
     br_result = await db.execute(
@@ -785,6 +840,98 @@ async def change_period_status(
     # fails — or if the audit write raises — everything rolls back atomically.
     # The period never reaches InReview without a corresponding review item existing.
     if existing.status == "Open" and change.status == "InReview":
+        # CP-1D: Acquire branch advisory lock before touching any workflow rows.
+        # Same lock used by period creation (CP-1C) and resubmission — ensures all
+        # per-branch workflow mutations are fully serialized.
+        await _acquire_branch_workflow_lock(company_id, existing.branch_id, db)
+
+        # CP-1D: Lock all active workflow rows in a deterministic order to prevent
+        # deadlock when two concurrent submits race on the same branch.
+        _wf_result = await db.execute(
+            text("""
+                SELECT payrollperiodid, status, startdate, enddate
+                FROM   payroll.payrollperiods
+                WHERE  companyid = :cid
+                  AND  branchid  = :bid
+                  AND  status    IN ('Draft', 'Open', 'InReview', 'Returned')
+                ORDER  BY payrollperiodid ASC
+                FOR UPDATE
+            """),
+            {"cid": company_id, "bid": existing.branch_id},
+        )
+        _wf_rows = list(_wf_result.mappings().all())
+
+        _open_row = next(
+            (r for r in _wf_rows if r["payrollperiodid"] == period_id and r["status"] == "Open"),
+            None,
+        )
+        if _open_row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Period is no longer Open — a concurrent transition may have already "
+                    "moved it. Please refresh and try again."
+                ),
+            )
+
+        # CP-1D: Returned backlog and anomaly check — fail closed on any Returned presence.
+        # Older Returned (EndDate < Open.StartDate): unresolved backlog → block.
+        # Overlapping, same-boundary, or newer Returned: chronologically anomalous → fail closed.
+        for _ret in _wf_rows:
+            if _ret["status"] == "Returned":
+                if _ret["enddate"] < _open_row["startdate"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code":    "RETURNED_BACKLOG_BLOCKS_SUBMIT",
+                            "message": (
+                                "A Returned period (ending "
+                                f"{_ret['enddate']}) exists before this period's start date "
+                                f"({_open_row['startdate']}). Resolve the backlog Returned "
+                                "period before submitting."
+                            ),
+                        },
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code":    "WORKFLOW_SLOT_CONFLICT",
+                            "message": (
+                                "A Returned period (ending "
+                                f"{_ret['enddate']}) chronologically overlaps or is newer than "
+                                f"this Open period (starting {_open_row['startdate']}). "
+                                "This represents an anomalous workflow state. Resolve the "
+                                "Returned period before submitting."
+                            ),
+                        },
+                    )
+
+        # CP-1D: Draft promotion eligibility.
+        # If a Draft period exists it must start immediately after this Open period
+        # ends (Draft.StartDate == Open.EndDate + 1 day); otherwise block the submit.
+        from datetime import timedelta as _timedelta
+        _draft_rows = [r for r in _wf_rows if r["status"] == "Draft"]
+        _eligible_draft = None
+        if _draft_rows:
+            _draft_row = _draft_rows[0]
+            _expected_draft_start = _open_row["enddate"] + _timedelta(days=1)
+            if _draft_row["startdate"] == _expected_draft_start:
+                _eligible_draft = _draft_row
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code":    "DRAFT_PROMOTION_CONFLICT",
+                        "message": (
+                            f"A Draft period exists (start {_draft_row['startdate']}) "
+                            f"but does not immediately follow this period's end date "
+                            f"({_open_row['enddate']}). Resolve the Draft period before "
+                            "submitting."
+                        ),
+                    },
+                )
+
         # CP-1B: Friendly InReview slot guard.  The partial unique index is the
         # concurrency authority; this check gives a clearer 409 message on the
         # common (non-race) path.
@@ -990,6 +1137,10 @@ async def change_period_status(
     if change.status == "Locked":
         extra_set = ", lockedbyuserid = :locker, lockedatutc = NOW()"
         extra_params["locker"] = user_id
+    elif existing.status in ("Open", "Returned") and change.status == "InReview":
+        # CP-1D: populate SubmittedAtUtc atomically with the status transition
+        # (covers both initial submission and Returned→InReview resubmission).
+        extra_set = ", submittedatutc = NOW()"
 
     notes_set = ", notes = :notes" if change.notes is not None else ""
     notes_params = {"notes": change.notes} if change.notes is not None else {}
@@ -1011,12 +1162,16 @@ async def change_period_status(
                     f"UPDATE payroll.payrollperiods "
                     f"SET    status = :new_status{extra_set}{notes_set} "
                     f"WHERE  payrollperiodid = :period_id "
+                    f"  AND  companyid       = :company_id "
+                    f"  AND  branchid        = :branch_id "
                     f"  AND  status          = 'Open' "
                     f"RETURNING payrollperiodid"
                 ),
                 {
                     "new_status": change.status,
                     "period_id": period_id,
+                    "company_id": company_id,
+                    "branch_id": existing.branch_id,
                     **extra_params,
                     **notes_params,
                 },
@@ -1040,6 +1195,46 @@ async def change_period_status(
                     "already moved it. Please refresh and try again."
                 ),
             )
+
+        # CP-1D: Atomically promote eligible adjacent Draft → Open in the same transaction.
+        if _eligible_draft is not None:
+            _draft_promote = await db.execute(
+                text("""
+                    UPDATE payroll.payrollperiods
+                    SET    status = 'Open'
+                    WHERE  payrollperiodid = :did
+                      AND  companyid       = :cid
+                      AND  branchid        = :bid
+                      AND  status          = 'Draft'
+                    RETURNING payrollperiodid
+                """),
+                {
+                    "did": _eligible_draft["payrollperiodid"],
+                    "cid": company_id,
+                    "bid": existing.branch_id,
+                },
+            )
+            if _draft_promote.first() is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Adjacent Draft period moved concurrently during submission. "
+                        "Transaction rolled back. Please refresh and try again."
+                    ),
+                )
+            await _write_period_status_audit(
+                db,
+                company_id=company_id,
+                branch_id=existing.branch_id,
+                user_id=user_id,
+                period_id=_eligible_draft["payrollperiodid"],
+                old_status="Draft",
+                new_status="Open",
+                extra={
+                    "trigger":             "submit_promotion",
+                    "submitted_period_id": period_id,
+                },
+            )
     else:
         # CP-0B: All non-Open→InReview transitions use an expected-status predicate
         # so that a stale request whose pre-flight read is now out of date cannot
@@ -1054,6 +1249,7 @@ async def change_period_status(
                 f"SET    status = :new_status{extra_set}{notes_set} "
                 f"WHERE  payrollperiodid = :period_id "
                 f"  AND  companyid       = :company_id "
+                f"  AND  branchid        = :branch_id "
                 f"  AND  status          = :old_status "
                 f"RETURNING payrollperiodid"
             ),
@@ -1061,6 +1257,7 @@ async def change_period_status(
                 "new_status": change.status,
                 "period_id": period_id,
                 "company_id": company_id,
+                "branch_id": existing.branch_id,
                 "old_status": existing.status,
                 **extra_params,
                 **notes_params,
@@ -1198,7 +1395,11 @@ async def resubmit_period(
     # Permission gate: resubmission requires payroll.entry.
     await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
 
-    # ── Step 3: acquire period lock, recheck status ───────────────────────── #
+    # ── Step 3: acquire branch advisory lock, then period row lock ───────── #
+    # CP-1D: branch lock must come first (same order as submit and creation) to
+    # prevent deadlock when concurrent submit + resubmit race on the same branch.
+    await _acquire_branch_workflow_lock(company_id, existing.branch_id, db)
+
     lock_result = await db.execute(
         text(
             "SELECT status FROM payroll.payrollperiods "
@@ -1402,18 +1603,21 @@ async def resubmit_period(
     )
 
     # ── Step 6: atomic transition Returned→InReview, clear pointer ────────── #
+    # CP-1D: Include branchid predicate and populate SubmittedAtUtc atomically.
     try:
         update_result = await db.execute(
             text("""
                 UPDATE payroll.payrollperiods
                 SET    status                    = 'InReview',
-                       currentreturnreviewitemid = NULL
+                       currentreturnreviewitemid = NULL,
+                       submittedatutc            = NOW()
                 WHERE  payrollperiodid = :pid
                   AND  companyid       = :cid
+                  AND  branchid        = :bid
                   AND  status          = 'Returned'
                 RETURNING payrollperiodid
             """),
-            {"pid": period_id, "cid": company_id},
+            {"pid": period_id, "cid": company_id, "bid": existing.branch_id},
         )
     except SAIntegrityError as exc:
         if _is_inreview_slot_violation(exc):

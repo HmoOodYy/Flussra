@@ -441,25 +441,32 @@ async def created_driver_id(session_client: httpx.AsyncClient, auth_token: str) 
 
 
 @pytest_asyncio.fixture(scope="session")
-async def created_period_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
+async def created_period_id(session_db_conn) -> int:
     """
-    Create one payroll period at session start; return its payroll_period_id.
-    Used by read-only period tests.  Status-change tests create their own
-    periods to avoid ordering dependencies.
+    Insert one Draft payroll period at session start; return its payroll_period_id.
+    CP-1D: POST /payroll/periods requires an existing Open period (B1 guard), so
+    we insert directly. Used by read-only period tests.
     """
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id": 1,           # seeded HQ branch
-            "period_type": "Week",
-            "start_date": "2026-01-06",
-            "end_date":   "2026-01-12",
-            "pay_date":   "2026-01-14",
-        },
-        headers={"Authorization": f"Bearer {auth_token}"},
+    import datetime
+    from sqlalchemy import text as _sqla_text
+    # Cancel any stale HQ Draft/Open periods from prior runs
+    await session_db_conn.execute(
+        _sqla_text(
+            "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+            "WHERE branchid = 1 AND status IN ('Draft', 'Open')"
+        ),
     )
-    assert resp.status_code == 201, f"Period seed failed: {resp.text}"
-    return resp.json()["payroll_period_id"]
+    row = (await session_db_conn.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype,
+                 startdate, enddate, paydate)
+            VALUES (1, 1, 'Draft', 'HQ-2026-0106', 'Week of Jan 6, 2026', 'Week',
+                    '2026-01-06', '2026-01-12', '2026-01-14')
+            RETURNING payrollperiodid
+        """),
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -504,6 +511,29 @@ async def paytest_driver_id(
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert resp.status_code == 201, f"PAYTEST driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def hq_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    hq_branch_id: int,
+) -> int:
+    """Create one driver on the HQ branch at session start; return its driver_id."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id":      hq_branch_id,
+            "full_name":      "HQ Driver",
+            "preferred_name": "HQD",
+            "driver_code":    "HQD-001",
+            "cdl_number":     "CDL-HQ-001",
+            "email":          "hqd1@example.com",
+        },
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 201, f"HQ driver seed failed: {resp.text}"
     return resp.json()["driver_id"]
 
 

@@ -27,6 +27,7 @@ payroll.approve_rate  — approve / void a rate (approve_rate / void_rate)
 import pytest
 import pytest_asyncio
 import httpx
+from sqlalchemy import text as _sqla_text
 
 
 def auth(token: str) -> dict[str, str]:
@@ -40,23 +41,21 @@ def auth(token: str) -> dict[str, str]:
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_draft_period_id(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
+    session_db_conn,
     paytest_branch_id: int,
 ) -> int:
-    """Create one Draft period on PAYTEST at session start."""
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   paytest_branch_id,
-            "period_type": "Week",
-            "start_date":  "2044-01-06",
-            "end_date":    "2044-01-12",
-        },
-        headers=auth(auth_token),
-    )
-    assert resp.status_code == 201, f"PAYTEST period seed failed: {resp.text}"
-    return resp.json()["payroll_period_id"]
+    """Insert one Draft period on PAYTEST directly. CP-1D: POST needs an existing Open."""
+    import datetime
+    row = (await session_db_conn.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Draft', 'BA-2044-0106', 'BA Week', 'Week', '2044-01-06', '2044-01-12')
+            RETURNING payrollperiodid
+        """),
+        {"bid": paytest_branch_id},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 # ---------------------------------------------------------------------------
@@ -273,25 +272,40 @@ class TestPermissionDenial:
         auth_token: str,
         branch_user_token: str,
         hq_branch_id: int,
+        direct_db,
     ):
         """
         branch_user has branch access to HQ but no payroll.entry permission.
         PATCH /payroll/periods/{id}/status on an HQ period must return 403
         from the action-level permission gate.
         """
-        # Admin creates a Draft period on HQ for this test
-        create = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   hq_branch_id,
-                "period_type": "Week",
-                "start_date":  "2042-03-03",
-                "end_date":    "2042-03-09",
-            },
-            headers=auth(auth_token),
-        )
-        assert create.status_code == 201, f"Period creation failed: {create.text}"
-        pid = create.json()["payroll_period_id"]
+        # Insert a Draft period directly (CP-1D: POST requires an existing Open).
+        # Draft slot is unique per branch, so fall back to SELECT on conflict.
+        import datetime as _ba_dt
+        try:
+            row = (await direct_db.execute(
+                _sqla_text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                    VALUES (1, :bid, 'Draft', 'BA-2042-0303', 'BA Perm Test', 'Week', :start, :end)
+                    RETURNING payrollperiodid
+                """),
+                {"bid": hq_branch_id,
+                 "start": _ba_dt.date(2042, 3, 3),
+                 "end": _ba_dt.date(2042, 3, 9)},
+            )).mappings().first()
+        except Exception:
+            await direct_db.rollback()
+            row = None
+        if row is None:
+            row = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE companyid = 1 AND branchid = :bid AND status = 'Draft' LIMIT 1"
+                ),
+                {"bid": hq_branch_id},
+            )).mappings().first()
+        pid = row["payrollperiodid"]
 
         try:
             # branch_user CAN read the period (branch access passes)
@@ -301,10 +315,10 @@ class TestPermissionDenial:
             )
             assert read_resp.status_code == 200
 
-            # branch_user CANNOT change its status — lacks payroll.entry
+            # branch_user CANNOT change its status — lacks payroll.finalize (Draft→Cancelled)
             status_resp = await session_client.patch(
                 f"/payroll/periods/{pid}/status",
-                json={"status": "Open"},
+                json={"status": "Cancelled"},
                 headers=auth(branch_user_token),
             )
             assert status_resp.status_code == 403

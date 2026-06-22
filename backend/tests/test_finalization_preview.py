@@ -1,11 +1,11 @@
-﻿"""
+"""
 Integration tests for CP-3A: GET /payroll/periods/{id}/finalization-preview
 
 Tests use year 2085 dates to avoid conflicts with other test suites.
 
 Isolation note
 --------------
-Tests that assert specific dollar amounts (e.g. 8h × $20 = $160) must use a
+Tests that assert specific dollar amounts (e.g. 8h x $20 = $160) must use a
 driver with an approved DriverRate so that _compute_calculated_amount resolves
 a calculated_amount. The ``preview_driver_id`` fixture creates a fresh driver
 for each such test; tests then approve a rate for that driver before adding lines.
@@ -13,9 +13,10 @@ Similarly, the CP5 fixtures create their own isolated drivers so they can
 approve HOURLY rates without conflicting with rates approved by test_pay_rates.py.
 
 The approved_period fixture from test_finalize.py is re-created here as a
-local fixture that follows the exact same pattern (Draftâ†’Openâ†’InReviewâ†’Approved
+local fixture that follows the exact same pattern (Draft->'Open->'InReview->'Approved
 via review flow, then voids the dummy line) so this file is self-contained.
 """
+import datetime
 import pytest
 import itertools
 import pytest_asyncio
@@ -152,11 +153,11 @@ async def _add_line_to_approved_period(
     work_date: str = "2085-01-07",
 ) -> dict:
     """
-    Force period Open (bypassing the blocked Approved→InReview→Open API path),
+    Force period Open (bypassing the blocked Approved->InReview->Open API path),
     add a draft line, then re-approve via the normal review flow.
     Returns the created draft line dict.
 
-    CP-0C: Approved→InReview is a blocked transition (left InReview with no
+    CP-0C: Approved->InReview is a blocked transition (left InReview with no
     active PeriodApproval review item).  Use direct_db to force Open instead.
 
     Phase 4C: manual rate_amount is blocked for PerUnit lines.
@@ -164,7 +165,7 @@ async def _add_line_to_approved_period(
     Use PTO_STATUS for lines that need no rate, or set up an approved rate first.
     """
     headers = auth(token)
-    # Force to Open via direct DB — Approved→InReview is now blocked in production.
+    # Force to Open via direct DB - Approved->InReview is now blocked in production.
     await direct_db.execute(
         _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
         {"pid": period_id},
@@ -318,7 +319,7 @@ async def preview_driver_id(
 
     Used by tests that assert specific dollar amounts so that
     _refresh_draft_calculations finds no approved rate for this driver and
-    the COALESCE(calc, qty × rate_amount) path produces the expected value.
+    the COALESCE(calc, qty x rate_amount) path produces the expected value.
     Function-scoped so each test gets its own driver.
     """
     n = next(_preview_driver_counter)
@@ -349,29 +350,32 @@ async def cp3a_approved_period(
     headers = auth(auth_token)
     branch_id = cp3a_clean
 
-    r = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": "Week",
-            "start_date":  "2085-01-06",
-            "end_date":    "2085-01-12",
-        },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"create failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-
-    r2 = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r2.status_code == 200, f"open failed: {r2.text}"
+    # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft->Open blocked).
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', 'CP3A-2085-0106', 'CP3A Preview Test 2085', 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id,
+         "start": datetime.date(2085, 1, 6),
+         "end": datetime.date(2085, 1, 12)},
+    )).mappings().first()
+    if row is None:
+        row = (await direct_db.execute(
+            _text(
+                "SELECT payrollperiodid FROM payroll.payrollperiods "
+                "WHERE branchid = :bid AND periodcode = 'CP3A-2085-0106'"
+            ),
+            {"bid": branch_id},
+        )).mappings().first()
+    pid = row["payrollperiodid"]
 
     await _advance_to_approved(session_client, auth_token, pid, paytest_driver_id)
 
-    # Void the dummy line so the period is logically empty â€" tests add their own
+    # Void the dummy line so the period is logically empty -" tests add their own
     await direct_db.execute(
         _text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE payrollperiodid = :pid"),
         {"pid": pid},
@@ -387,7 +391,7 @@ async def cp3a_approved_period(
 
 class TestFinalizationPreview:
 
-    # â"€â"€ Status guard tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    # -- Status guard tests ---------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_preview_requires_approved_period(
@@ -395,26 +399,32 @@ class TestFinalizationPreview:
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp3a_clean: int,
+        direct_db,
     ):
-        """Open period â†’ 422."""
+        """Open period -> 422."""
         headers = auth(auth_token)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   cp3a_clean,
-                "period_type": "Week",
-                "start_date":  "2085-02-03",
-                "end_date":    "2085-02-09",
-            },
-            headers=headers,
-        )
-        assert r.status_code == 201
-        pid = r.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=headers,
-        )
+        # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft->Open blocked).
+        _r = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'CP3A-2085-0203', 'CP3A Preview Non-Approved', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": cp3a_clean,
+             "start": datetime.date(2085, 2, 3),
+             "end": datetime.date(2085, 2, 9)},
+        )).mappings().first()
+        if _r is None:
+            _r = (await direct_db.execute(
+                _text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'CP3A-2085-0203'"
+                ),
+                {"bid": cp3a_clean},
+            )).mappings().first()
+        pid = _r["payrollperiodid"]
 
         resp = await session_client.get(
             f"/payroll/periods/{pid}/finalization-preview",
@@ -439,7 +449,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Locked period â†’ 422."""
+        """Locked period ->' 422."""
         headers = auth(auth_token)
         pid = cp3a_approved_period["payroll_period_id"]
 
@@ -461,7 +471,7 @@ class TestFinalizationPreview:
         assert resp.status_code == 422
         assert "Approved" in resp.json()["detail"]
 
-    # â"€â"€ Blocker tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    # -- Blocker tests --------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_preview_blocks_on_needs_manager_review(
@@ -472,7 +482,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Period with a NeedsManagerReview=TRUE line â†’ can_finalize=False, blockers non-empty."""
+        """Period with a NeedsManagerReview=TRUE line ->' can_finalize=False, blockers non-empty."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
@@ -512,7 +522,7 @@ class TestFinalizationPreview:
         preview_driver_id: int,
         direct_db,
     ):
-        """PerUnit line with NULL calculatedamount AND NULL rateamount â†’ blocker."""
+        """PerUnit line with NULL calculatedamount AND NULL rateamount ->' blocker."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
@@ -550,7 +560,7 @@ class TestFinalizationPreview:
         assert body["can_finalize"] is False
         assert len(body["blockers"]) > 0
 
-    # â"€â"€ Content tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    # -- Content tests --------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_preview_includes_daily_lines(
@@ -621,7 +631,7 @@ class TestFinalizationPreview:
                     headers=headers,
                 )
 
-        # CP-0C: Approved→InReview is now blocked. Force directly to Open.
+        # CP-0C: Approved->InReview is now blocked. Force directly to Open.
         await direct_db.execute(
             _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
             {"pid": pid},
@@ -713,7 +723,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Clean Approved period with lines â†’ can_finalize=True, blockers=[]."""
+        """Clean Approved period with lines ->' can_finalize=True, blockers=[]."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
@@ -730,7 +740,7 @@ class TestFinalizationPreview:
         assert body["can_finalize"] is True
         assert body["blockers"] == []
 
-    # â"€â"€ Read-only test â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    # -- Read-only test -------------------------------------------------------
 
 
     # -- Rate-split test -------------------------------------------------------
@@ -742,6 +752,7 @@ class TestFinalizationPreview:
         auth_token: str,
         cp3a_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         Period spanning a rate boundary: preview lines on each side of the
@@ -780,26 +791,30 @@ class TestFinalizationPreview:
             effective_from="2085-03-06",
         )
 
-        # Create a period spanning the boundary
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   branch_id,
-                "period_type": "Week",
-                "start_date":  "2085-03-03",
-                "end_date":    "2085-03-09",
-            },
-            headers=headers,
-        )
-        assert r.status_code == 201, f"Create period failed: {r.text}"
-        pid = r.json()["payroll_period_id"]
+        # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft->Open blocked).
+        row = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'CP3A-2085-0303', 'CP3A Rate Split Test', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": branch_id,
+             "start": datetime.date(2085, 3, 3),
+             "end": datetime.date(2085, 3, 9)},
+        )).mappings().first()
+        if row is None:
+            row = (await direct_db.execute(
+                _text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'CP3A-2085-0303'"
+                ),
+                {"bid": branch_id},
+            )).mappings().first()
+        pid = row["payrollperiodid"]
 
         try:
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Open"},
-                headers=headers,
-            )
 
             # Add two HOURS lines -- one on each side of the rate boundary
             line1 = await session_client.post(
@@ -900,7 +915,7 @@ class TestFinalizationPreview:
         )
         assert resp.status_code == 200
 
-        # Count final lines after â€" must be unchanged
+        # Count final lines after -" must be unchanged
         after_result = await direct_db.execute(
             _text("SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
             {"pid": pid},
@@ -914,7 +929,7 @@ class TestFinalizationPreview:
         period_resp = await session_client.get(f"/payroll/periods/{pid}", headers=headers)
         assert period_resp.json()["status"] == "Approved"
 
-    # â"€â"€ Security tests â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    # -- Security tests -------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_preview_oda_blocked(
@@ -926,7 +941,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """ODA user â†’ 403."""
+        """ODA user ->' 403."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
@@ -962,7 +977,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """User with only payroll.entry (no payroll.finalize) â†’ 403."""
+        """User with only payroll.entry (no payroll.finalize) ->' 403."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
@@ -987,7 +1002,7 @@ class TestFinalizationPreview:
         )
         assert resp.status_code == 403
 
-    # â"€â"€ Preview / finalize consistency test â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    # -- Preview / finalize consistency test ---------------------------------
 
     @pytest.mark.asyncio
     async def test_preview_gross_matches_finalize(
@@ -1004,8 +1019,8 @@ class TestFinalizationPreview:
 
         Flow:
           1. Add two lines (Hours + Miles with approved DriverRates).
-          2. Call preview â†’ record total_final_gross.
-          3. Call finalize â†’ period becomes Locked.
+          2. Call preview ->' record total_final_gross.
+          3. Call finalize ->' period becomes Locked.
           4. Sum payrollfinallines.finalamount (excluding SYS rows).
           5. Assert preview total == final lines sum.
         """
@@ -1100,7 +1115,7 @@ class TestFinalizationPreview:
             await session_client.delete(f"/payroll/rates/{mileage_rate_id}", headers=headers)
 
 # ===========================================================================
-# POST /finalize â€" Driver/ODA security boundary
+# POST /finalize -" Driver/ODA security boundary
 # ===========================================================================
 
 class TestFinalizeODABlock:
@@ -1310,7 +1325,7 @@ class TestFinalizeODABlock:
         assert resp.status_code == 403
 
 # ===========================================================================
-# CP-3A.5 â€" Response shape: final_amount, line counts, SYS consistency
+# CP-3A.5 -" Response shape: final_amount, line counts, SYS consistency
 # ===========================================================================
 
 class TestPreviewResponseShape:
@@ -1417,7 +1432,7 @@ class TestPreviewResponseShape:
             work_date="2085-01-09",
         )
 
-        # Add a minimum pay rule via API — use a date range scoped to the period only
+        # Add a minimum pay rule via API - use a date range scoped to the period only
         # (2085-01-01 to 2085-01-31) so it does not overlap phase2c tests (2088+)
         rule_resp = await session_client.post(
             "/payroll/driver-pay-rules",
@@ -1441,7 +1456,7 @@ class TestPreviewResponseShape:
         assert resp.status_code == 200, resp.text
         preview = resp.json()
 
-        # Clean up the rule (void even though it has an effective_to — belt-and-suspenders)
+        # Clean up the rule (void even though it has an effective_to - belt-and-suspenders)
         await session_client.post(
             f"/payroll/driver-pay-rules/{rule_id}/void",
             json={"reason": "test cleanup"},
@@ -1484,7 +1499,7 @@ class TestPreviewResponseShape:
             work_date="2085-01-10",
         )
 
-        # Call preview — any active MinimumPay rule (from the previous test if still
+        # Call preview - any active MinimumPay rule (from the previous test if still
         # active, or none) will be reflected; we only check structural fields here.
         resp = await session_client.get(
             f"/payroll/periods/{pid}/finalization-preview",
@@ -1509,7 +1524,7 @@ class TestPreviewResponseShape:
 
 
 # ===========================================================================
-# CP-5 Fix — Preview/Finalize Consistency
+# CP-5 Fix - Preview/Finalize Consistency
 #
 # Tests that finalization-preview shows the same amounts as finalize will lock,
 # even when a rate was changed after the period reached Approved status.
@@ -1617,24 +1632,30 @@ async def cp5_consistency_period(
         effective_from="2085-03-03",
     )
 
-    # Create and open the period
-    r = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id": paytest_branch_id,
-            "period_type": "Week",
-            "start_date": "2085-03-03",
-            "end_date": "2085-03-09",
-        },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"Create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    await session_client.patch(
-        f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=headers
-    )
+    # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft->Open blocked).
+    _row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', 'CP5-2085-0303', 'CP5 Consistency Test', 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": paytest_branch_id,
+         "start": datetime.date(2085, 3, 3),
+         "end": datetime.date(2085, 3, 9)},
+    )).mappings().first()
+    if _row is None:
+        _row = (await direct_db.execute(
+            _text(
+                "SELECT payrollperiodid FROM payroll.payrollperiods "
+                "WHERE branchid = :bid AND periodcode = 'CP5-2085-0303'"
+            ),
+            {"bid": paytest_branch_id},
+        )).mappings().first()
+    pid = _row["payrollperiodid"]
 
-    # Add an HOURS line — the system will compute calc = 8 * 20 = 160
+    # Add an HOURS line - the system will compute calc = 8 * 20 = 160
     line_resp = await session_client.post(
         f"/payroll/periods/{pid}/lines",
         json={
@@ -1667,7 +1688,7 @@ async def cp5_finalizes_period(
 ):
     """
     Like cp5_consistency_period but uses April 2085 dates so that
-    finalizing the period (→Locked) does not block the March 2085 date range
+    finalizing the period (->Locked) does not block the March 2085 date range
     used by other consistency tests.
 
     Uses an isolated driver (no pre-existing approved rates) so that the
@@ -1701,21 +1722,28 @@ async def cp5_finalizes_period(
         effective_from="2085-04-07",
     )
 
-    r = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id": paytest_branch_id,
-            "period_type": "Week",
-            "start_date": "2085-04-07",
-            "end_date": "2085-04-13",
-        },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"Create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    await session_client.patch(
-        f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=headers
-    )
+    # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft->Open blocked).
+    _row2 = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', 'CP5F-2085-0407', 'CP5F Finalizes Test', 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": paytest_branch_id,
+         "start": datetime.date(2085, 4, 7),
+         "end": datetime.date(2085, 4, 13)},
+    )).mappings().first()
+    if _row2 is None:
+        _row2 = (await direct_db.execute(
+            _text(
+                "SELECT payrollperiodid FROM payroll.payrollperiods "
+                "WHERE branchid = :bid AND periodcode = 'CP5F-2085-0407'"
+            ),
+            {"bid": paytest_branch_id},
+        )).mappings().first()
+    pid = _row2["payrollperiodid"]
 
     line_resp = await session_client.post(
         f"/payroll/periods/{pid}/lines",
@@ -1754,7 +1782,7 @@ class TestPreviewFinalizeConsistencyCP5:
         direct_db,
     ):
         """
-        After period reaches Approved with calc=$160 (8h × $20):
+        After period reaches Approved with calc=$160 (8h x $20):
           1. Void old $20 rate, create+approve $35 rate (same effective date).
           2. Preview must show calc=$280, not stale $160.
           3. Preview must NOT write anything to payrolldraftlines.
@@ -1791,7 +1819,7 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200, resp.text
             preview = resp.json()
 
-            # Preview must show refreshed amount $280 (8 × $35)
+            # Preview must show refreshed amount $280 (8 x $35)
             hours_line = next(
                 (l for l in preview["lines"] if l["line_type"] in ("HOURS", "Hours")),
                 None,
@@ -1840,8 +1868,8 @@ class TestPreviewFinalizeConsistencyCP5:
 
         Flow:
           1. Void $20 rate, create+approve $35 rate.
-          2. Preview → record total_final_gross (should be $280).
-          3. Finalize → period becomes Locked.
+          2. Preview -> record total_final_gross (should be $280).
+          3. Finalize -> period becomes Locked.
           4. Sum payrollfinallines.finalamount (non-SYS).
           5. Assert preview total == finalized sum.
         """
@@ -1911,7 +1939,7 @@ class TestPreviewFinalizeConsistencyCP5:
         pid, line_id, old_rate_id, rate_type_id, driver_id = cp5_consistency_period
         headers = auth(auth_token)
 
-        # Replace rate: $20 → $35
+        # Replace rate: $20 -> $35
         await _void_rate(session_client, auth_token, old_rate_id)
         new_rate_id = await _create_and_approve_rate_preview(
             session_client, auth_token,
@@ -1944,7 +1972,7 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200
             preview = resp.json()
 
-            # Refreshed gross = $280 > min $200 → no SYS_MIN_TOPUP
+            # Refreshed gross = $280 > min $200 -> no SYS_MIN_TOPUP
             assert preview["sys_adjustment_count"] == 0, (
                 f"Expected no SYS adjustments (gross $280 > min $200), "
                 f"got: {preview['sys_adjustments']}"
@@ -1977,7 +2005,7 @@ class TestPreviewFinalizeConsistencyCP5:
         pid, line_id, old_rate_id, rate_type_id, driver_id = cp5_consistency_period
         headers = auth(auth_token)
 
-        # Replace rate: $20 → $35 (gross should be $280, not $160)
+        # Replace rate: $20 -> $35 (gross should be $280, not $160)
         await _void_rate(session_client, auth_token, old_rate_id)
         new_rate_id = await _create_and_approve_rate_preview(
             session_client, auth_token,
@@ -1986,7 +2014,7 @@ class TestPreviewFinalizeConsistencyCP5:
             effective_from="2085-03-03",
         )
 
-        # MinimumPay = $250 (above refreshed $280? No — $280 > $250 still no topup)
+        # MinimumPay = $250 (above refreshed $280? No - $280 > $250 still no topup)
         # Let's use $300 > $280 so topup IS expected (to verify it's the refreshed gross)
         rule_resp = await session_client.post(
             "/payroll/driver-pay-rules",
@@ -2011,7 +2039,7 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200
             preview = resp.json()
 
-            # Refreshed gross = $280 < min $300 → SYS_MIN_TOPUP = $20
+            # Refreshed gross = $280 < min $300 -> SYS_MIN_TOPUP = $20
             assert preview["sys_adjustment_count"] == 1, (
                 "Expected 1 SYS_MIN_TOPUP (gross $280 < min $300)"
             )
@@ -2049,7 +2077,7 @@ class TestPreviewFinalizeConsistencyCP5:
         pid, line_id, old_rate_id, rate_type_id, driver_id = cp5_consistency_period
         headers = auth(auth_token)
 
-        # Force NMR=True on the line (calc=$160 is still set — manager-controlled flag)
+        # Force NMR=True on the line (calc=$160 is still set - manager-controlled flag)
         await direct_db.execute(
             _text("""
                 UPDATE payroll.payrolldraftlines
@@ -2059,8 +2087,8 @@ class TestPreviewFinalizeConsistencyCP5:
             {"lid": line_id},
         )
 
-        # Also replace the rate ($20 → $35) to ensure virtual refresh would
-        # produce a different amount — but guard should skip this line
+        # Also replace the rate ($20 -> $35) to ensure virtual refresh would
+        # produce a different amount - but guard should skip this line
         await _void_rate(session_client, auth_token, old_rate_id)
         new_rate_id = await _create_and_approve_rate_preview(
             session_client, auth_token,
@@ -2089,7 +2117,7 @@ class TestPreviewFinalizeConsistencyCP5:
             )
             assert hours_line is not None
             assert hours_line["needs_manager_review"] is True
-            # Stored calc=$160 honoured — not overridden to $280
+            # Stored calc=$160 honoured - not overridden to $280
             assert Decimal(str(hours_line["calculated_amount"])) == Decimal("160.0000"), (
                 f"Manager-guarded calc must remain $160, got {hours_line['calculated_amount']}"
             )
@@ -2116,7 +2144,7 @@ class TestPreviewFinalizeConsistencyCP5:
     ):
         """
         Calling preview (including the virtual refresh) must not modify
-        any payrolldraftlines rows — calculatedamount and needsmanagerreview
+        any payrolldraftlines rows - calculatedamount and needsmanagerreview
         must remain exactly as stored before the preview call.
         """
         pid, line_id, old_rate_id, rate_type_id, driver_id = cp5_consistency_period
@@ -2160,10 +2188,10 @@ class TestPreviewFinalizeConsistencyCP5:
             )).mappings().first()
 
             assert str(before["calculatedamount"]) == str(after["calculatedamount"]), (
-                f"Preview mutated calculatedamount: {before['calculatedamount']} → {after['calculatedamount']}"
+                f"Preview mutated calculatedamount: {before['calculatedamount']} -> {after['calculatedamount']}"
             )
             assert before["needsmanagerreview"] == after["needsmanagerreview"], (
-                f"Preview mutated needsmanagerreview: {before['needsmanagerreview']} → {after['needsmanagerreview']}"
+                f"Preview mutated needsmanagerreview: {before['needsmanagerreview']} -> {after['needsmanagerreview']}"
             )
 
         finally:

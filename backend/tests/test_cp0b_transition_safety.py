@@ -79,21 +79,32 @@ async def _create_draft_period(
     branch_id: int,
     direct_db,
 ) -> int:
-    """Cancel active periods, allocate a fresh unique date range, create Draft."""
+    """Cancel active periods, allocate a fresh unique date range, insert Draft directly.
+
+    CP-1D: POST /payroll/periods now requires an existing Open period (B1 guard).
+    Direct insertion bypasses the guard for test setup.
+    """
     await _cancel_active_periods(direct_db, branch_id)
-    start, end = _next_dates()
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": "Week",
-            "start_date":  start,
-            "end_date":    end,
-        },
-        headers=_auth(token),
+    await direct_db.execute(
+        text(
+            "UPDATE payroll.payrollperiods "
+            "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid AND status = 'Returned'"
+        ),
+        {"bid": branch_id},
     )
-    assert r.status_code == 201, f"create Draft period failed: {r.text}"
-    return r.json()["payroll_period_id"]
+    start, end = _next_dates()
+    row = (await direct_db.execute(
+        text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Draft', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP0B-{start}", "name": f"CP0B {start}",
+         "start": datetime.date.fromisoformat(start), "end": datetime.date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _force_status(direct_db, period_id: int, new_status: str) -> None:
@@ -115,28 +126,26 @@ async def _force_status(direct_db, period_id: int, new_status: str) -> None:
 class TestTransitionPredicates:
     """Happy-path checks that each non-Open→InReview transition still works."""
 
-    async def test_draft_to_open_succeeds(
+    async def test_draft_to_open_now_blocked(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         direct_db,
     ):
+        """CP-1D: PATCH Draft→Open is now removed (handled atomically by submit). Expect 422."""
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         r = await client.patch(
             f"/payroll/periods/{pid}/status",
             json={"status": "Open"},
             headers=_auth(auth_token),
         )
-        assert r.status_code == 200, f"Draft→Open failed: {r.text}"
-        assert r.json()["status"] == "Open"
-
-        # cleanup
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=_auth(auth_token),
+        assert r.status_code == 422, (
+            f"CP-1D: Draft→Open must be blocked (422); got {r.status_code}: {r.text}"
         )
+
+        # cleanup via direct DB since Draft can only be Cancelled via PATCH
+        await _force_status(direct_db, pid, "Cancelled")
 
     async def test_open_to_cancelled_succeeds(
         self,
@@ -360,7 +369,7 @@ class TestStaleTransitionRejection:
     is absent from the UPDATE (i.e. the CP-0B fix was not applied).
     """
 
-    async def test_stale_draft_to_open_rejected(
+    async def test_stale_draft_to_open_blocked(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -369,55 +378,23 @@ class TestStaleTransitionRejection:
         pg_instance,
     ):
         """
-        Pre-flight reads Draft; psycopg2 commits Draft→Cancelled before the
-        UPDATE; UPDATE WHERE status='Draft' → 0 rows → 409.
+        CP-1D: PATCH Draft→Open is removed entirely. Returns 422 regardless of period state.
+
+        No race scenario is possible — the transition is rejected at the schema layer
+        before any DB predicate check. This test confirms the unconditional 422.
         """
-        import app.payroll.service as svc_payroll
-
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
-        loop = asyncio.get_running_loop()
 
-        real_gp = svc_payroll.get_period_by_id
+        r = await client.patch(
+            f"/payroll/periods/{pid}/status",
+            json={"status": "Open"},
+            headers=_auth(auth_token),
+        )
+        assert r.status_code == 422, (
+            f"CP-1D: Draft→Open must be blocked (422); got {r.status_code}: {r.text}"
+        )
 
-        async def patched_gp(company_id, user_id, period_id, db):
-            result = await real_gp(company_id, user_id, period_id, db)
-            if period_id == pid and result.status == "Draft":
-                # Competing transaction: Draft → Cancelled
-                def do_change():
-                    conn = psycopg2.connect(client_encoding="utf-8", **pg_instance.dsn())
-                    conn.autocommit = False
-                    cur = conn.cursor()
-                    cur.execute(
-                        "UPDATE payroll.payrollperiods "
-                        "SET status = 'Cancelled' "
-                        "WHERE payrollperiodid = %s AND status = 'Draft'",
-                        [pid],
-                    )
-                    conn.commit()
-                    conn.close()
-
-                await loop.run_in_executor(None, do_change)
-            return result
-
-        svc_payroll.get_period_by_id = patched_gp
-        try:
-            r = await client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Open"},
-                headers=_auth(auth_token),
-            )
-            assert r.status_code == 409, (
-                f"Expected 409 (stale Draft→Open), got {r.status_code}: {r.text}\n"
-                "Without the expected-status predicate in the UPDATE, the stale "
-                "transition would silently overwrite the Cancelled status with Open."
-            )
-            detail = r.json().get("detail", "")
-            assert "no longer" in detail.lower() or "concurrent" in detail.lower(), (
-                f"409 detail should mention stale/concurrent, got: {detail!r}"
-            )
-        finally:
-            svc_payroll.get_period_by_id = real_gp
-            # Period is Cancelled — nothing to clean up.
+        await _force_status(direct_db, pid, "Cancelled")
 
     async def test_stale_open_to_cancelled_rejected(
         self,

@@ -74,24 +74,23 @@ async def _create_open_period(
     branch_id: int,
     direct_db,
 ) -> tuple[int, str]:
-    """Create Draft → Open period.  Returns (period_id, work_date_str)."""
+    """Insert Open period directly. Returns (period_id, work_date_str).
+
+    CP-1D: POST /payroll/periods requires existing Open (B1 guard); insert directly.
+    """
     await _cancel_active(direct_db, branch_id)
     start, end = _next_dates()
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r2 = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=_auth(token),
-    )
-    assert r2.status_code == 200, f"open period: {r2.text}"
-    return pid, start
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP1A-{start}", "name": f"CP1A {start}",
+         "start": datetime.date.fromisoformat(start), "end": datetime.date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"], start
 
 
 async def _add_line(
@@ -843,35 +842,46 @@ class TestOneReturnedSlot:
         r = await session_client.get(f"/payroll/periods/{pid1}", headers=_auth(auth_token))
         assert r.json()["status"] == "Returned", "Period 1 must be Returned before slot test"
 
-        # Period 2: create without cancelling period 1 (Returned coexists per CP-1A)
+        # Period 2: insert directly as InReview (CP-1D fail-closed: B2 blocks any Open submit
+        # while Returned exists; we bypass the submit path to test the one-Returned index).
+        # Returned + InReview coexistence is the scenario we need to reach.
         start2, end2 = _next_dates()
-        create_r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": start2, "end_date": end2},
-            headers=_auth(auth_token),
-        )
-        if create_r.status_code != 201:
-            # If API blocks a second period while Returned exists, skip gracefully —
-            # this is CP-1D's responsibility, not CP-1A's.
-            pytest.skip(
-                f"Cannot create period2 while Returned exists ({create_r.status_code}); "
-                "CP-1D blocker may be active — slot guard still enforced by DB index."
-            )
-        pid2 = create_r.json()["payroll_period_id"]
+        start2_d = datetime.date.fromisoformat(start2)
+        end2_d   = datetime.date.fromisoformat(end2)
+        row2 = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'InReview', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id, "code": f"CP1A-2ND-{start2}", "name": f"CP1A 2nd {start2}",
+             "start": start2_d, "end": end2_d},
+        )).mappings().first()
+        await direct_db.commit()
+        pid2 = row2["payrollperiodid"]
 
-        # Open period 2
-        open_r = await session_client.patch(
-            f"/payroll/periods/{pid2}/status",
-            json={"status": "Open"},
-            headers=_auth(auth_token),
-        )
-        assert open_r.status_code == 200, f"Open period2 failed: {open_r.text}"
+        # Insert a Pending PeriodApproval review item for period 2 so decide endpoint works.
+        admin_uid = (await direct_db.execute(
+            _text("SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1")
+        )).scalar_one()
+        row_ri2 = (await direct_db.execute(
+            _text("""
+                INSERT INTO review.managerreviewitems
+                    (companyid, branchid, requestedbyuserid, requesttype,
+                     entityschema, entityname, entityid, title, status, priority)
+                VALUES (1, :bid, :uid, 'PeriodApproval',
+                        'payroll', 'PayrollPeriods', :eid,
+                        'CP1A slot test', 'Pending', 'Normal')
+                RETURNING reviewitemid
+            """),
+            {"bid": paytest_branch_id, "uid": admin_uid, "eid": str(pid2)},
+        )).mappings().first()
+        await direct_db.commit()
+        ri2_id = row_ri2["reviewitemid"]
 
-        # Submit period 2 to InReview
-        ri2_id = await _submit(session_client, auth_token, pid2, paytest_driver_id, start2)
-
-        # Attempt to return period 2 while period 1 is already Returned for same branch
+        # Attempt to return period 2 while period 1 is already Returned for same branch.
+        # The review service precheck finds period 1 Returned → 409.
         dec = await session_client.post(
             f"/review/items/{ri2_id}/decide",
             json={"decision": "Rejected", "decision_reason": "Second return attempt"},
@@ -911,18 +921,20 @@ class TestOneReturnedSlot:
         """
         await _cancel_active(direct_db, paytest_branch_id)
 
-        # -- Period 1: Draft → Open → add line → InReview (occupies the slot)
+        # -- Period 1: insert Open directly → add line → InReview (occupies the slot)
+        # CP-1D: POST /payroll/periods requires existing Open; use direct insert.
         start1, end1 = _next_dates()
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": start1, "end_date": end1},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 201, f"create p1: {r.text}"
-        pid1 = r.json()["payroll_period_id"]
-        await session_client.patch(f"/payroll/periods/{pid1}/status",
-                                   json={"status": "Open"}, headers=_auth(auth_token))
+        p1_row_ins = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id, "code": f"CP1A-R1-{start1}", "name": f"CP1A R1 {start1}",
+             "start": datetime.date.fromisoformat(start1), "end": datetime.date.fromisoformat(end1)},
+        )).mappings().first()
+        pid1 = p1_row_ins["payrollperiodid"]
         await _add_line(session_client, auth_token, pid1, paytest_driver_id, start1)
         r_submit1 = await session_client.patch(
             f"/payroll/periods/{pid1}/status",
@@ -933,19 +945,19 @@ class TestOneReturnedSlot:
             f"First InReview submit must succeed; got {r_submit1.status_code}: {r_submit1.text}"
         )
 
-        # -- Period 2: Draft → Open → add line → attempt InReview (slot is full)
+        # -- Period 2: insert Open directly → add line → attempt InReview (slot is full)
         start2, end2 = _next_dates()
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": start2, "end_date": end2},
-            headers=_auth(auth_token),
-        )
-        if r.status_code != 201:
-            pytest.skip(f"Cannot create period2 ({r.status_code}); may require CP-1D for multi-open.")
-        pid2 = r.json()["payroll_period_id"]
-        await session_client.patch(f"/payroll/periods/{pid2}/status",
-                                   json={"status": "Open"}, headers=_auth(auth_token))
+        p2_row_ins = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_branch_id, "code": f"CP1A-R2-{start2}", "name": f"CP1A R2 {start2}",
+             "start": datetime.date.fromisoformat(start2), "end": datetime.date.fromisoformat(end2)},
+        )).mappings().first()
+        pid2 = p2_row_ins["payrollperiodid"]
         await _add_line(session_client, auth_token, pid2, paytest_driver_id, start2)
 
         r_submit2 = await session_client.patch(

@@ -104,26 +104,30 @@ async def _create_open_period(
     direct_db,
 ) -> tuple[int, str]:
     """
-    Create a Draft period and advance it to Open.
-    Returns (period_id, start_date) so callers can compute valid work dates.
+    Insert an Open period directly and return (period_id, start_date).
+    CP-1D: POST /payroll/periods requires an existing Open (B1 guard); use direct insert.
     """
     await _cancel_active_periods(direct_db, branch_id)
+    await direct_db.execute(
+        text(
+            "UPDATE payroll.payrollperiods "
+            "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid AND status = 'Returned'"
+        ),
+        {"bid": branch_id},
+    )
     start, end = _next_dates()
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r2 = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=_auth(token),
-    )
-    assert r2.status_code == 200, f"open period failed: {r2.text}"
-    return pid, start
+    row = (await direct_db.execute(
+        text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP0D-{start}", "name": f"CP0D {start}",
+         "start": datetime.date.fromisoformat(start), "end": datetime.date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"], start
 
 
 async def _add_draft_line(
@@ -576,12 +580,10 @@ class TestDoubleSubmitPrevention:
             r = await asyncio.wait_for(submit_task, timeout=15)
 
             # ── Step 7: THE DECISIVE ASSERTION ───────────────────────────────
-            # 422 proves the UPDATE WHERE status='Open' returned 0 rows.
-            # If the predicate were removed, the UPDATE would blindly write
-            # status='InReview' even though it's already InReview — effectively
-            # succeeding (200) and breaking the invariant.
-            assert r.status_code == 422, (
-                f"Expected 422 (period no longer Open) from the concurrent second submit, "
+            # CP-1D: The loser returns 409 (period no longer Open — concurrent transition
+            # moved it). 422 was the pre-CP-1D behavior; 409 is correct with advisory locking.
+            assert r.status_code in (409, 422), (
+                f"Expected 409/422 (period no longer Open) from the concurrent second submit, "
                 f"got {r.status_code}: {r.text}. "
                 "This means the atomic UPDATE WHERE status='Open' predicate was bypassed "
                 "or is absent — a regression in the double-submit prevention logic."

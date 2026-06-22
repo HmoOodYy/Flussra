@@ -71,20 +71,28 @@ async def _create_draft_period(
     branch_id: int,
     direct_db,
 ) -> int:
+    """Insert Draft directly — CP-1D B1 guard blocks POST /payroll/periods without an Open."""
     await _cancel_active_periods(direct_db, branch_id)
-    start, end = _next_dates()
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": "Week",
-            "start_date":  start,
-            "end_date":    end,
-        },
-        headers=_auth(token),
+    await direct_db.execute(
+        text(
+            "UPDATE payroll.payrollperiods "
+            "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid AND status = 'Returned'"
+        ),
+        {"bid": branch_id},
     )
-    assert r.status_code == 201, f"create Draft period failed: {r.text}"
-    return r.json()["payroll_period_id"]
+    start, end = _next_dates()
+    row = (await direct_db.execute(
+        text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Draft', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP0C-{start}", "name": f"CP0C {start}",
+         "start": datetime.date.fromisoformat(start), "end": datetime.date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _force_status(direct_db, period_id: int, new_status: str) -> None:

@@ -79,7 +79,7 @@ class PeriodCreate(BaseModel):
 # Approved → Locked is intentionally excluded here — that path goes through
 # POST /periods/{id}/finalize (Milestone 5) which also creates PayrollFinalLines.
 _VALID_TRANSITIONS: dict[str, set[str]] = {
-    "Draft":    {"Open", "Cancelled"},
+    "Draft":    {"Cancelled"},           # CP-1D: Draft→Open removed; submit path handles promotion atomically
     "Open":     {"InReview", "Cancelled"},
     # CP-1A: InReview has no PATCH exits.
     #   Approved    → period Approved  (via POST /review/items/{id}/decide)

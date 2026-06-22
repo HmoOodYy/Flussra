@@ -41,6 +41,29 @@ def _auth(token: str) -> dict[str, str]:
 
 
 _WEEK_CTR = itertools.count(0)
+_OPEN_CTR = itertools.count(500)  # offset to avoid collision with _WEEK_CTR
+
+
+async def _insert_open_for_legacy(direct_db, branch_id: int) -> None:
+    """Insert an Open period so the B1 guard allows legacy POST /payroll/periods.
+
+    B1 guard requires exactly one Open period on the branch before Draft creation.
+    Uses 2095-* dates to avoid conflict with 2096-* test periods.
+    """
+    n = next(_OPEN_CTR)
+    start = datetime.date(2095, 1, 7) + datetime.timedelta(weeks=n)
+    end = start + datetime.timedelta(days=6)
+    await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+        """),
+        {"bid": branch_id, "code": f"CP1C-OPEN-{n}", "name": f"CP1C Open {n}",
+         "start": start, "end": end},
+    )
+    await direct_db.commit()
 
 
 def _next_week(base_date: datetime.date = datetime.date(2096, 1, 7)) -> tuple[str, str]:
@@ -62,8 +85,19 @@ async def _cancel_all(direct_db, branch_id: int, company_id: int | None = None) 
     We DELETE rather than CANCEL to avoid the CANDIDATE_ALREADY_CANCELLED guard:
     because candidate keys are deterministic, a cancelled period's hash would
     prevent a later test from reusing the same logical candidate key.
-    2096-* periods have no FK children (no draft lines, no review items).
+    Child records (draft lines, review items) are deleted first to satisfy FK
+    constraints — cross-file test contamination (e.g. cp1d tests creating draft
+    lines on the same branch) can leave FK children behind.
     """
+    await direct_db.execute(
+        _text("""
+            DELETE FROM payroll.payrolldraftlines
+            WHERE payrollperiodid IN (
+                SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid
+            )
+        """),
+        {"bid": branch_id},
+    )
     await direct_db.execute(
         _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
         {"bid": branch_id},
@@ -260,6 +294,9 @@ class TestCandidateKeyDeterminism:
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         assert r.status_code == 200
         key = r.json()["selected"]["candidate_key"]
+
+        # B1 guard: insert an Open period before legacy Draft creation
+        await _insert_open_for_legacy(direct_db, bid)
 
         # Insert a period via legacy endpoint (changes slot_fp)
         start, end = _next_week()
@@ -1374,6 +1411,9 @@ class TestConcurrency:
         old_key = r.json()["selected"]["candidate_key"]
         sel = r.json()["selected"]
 
+        # B1 guard: insert an Open period before legacy Draft creation
+        await _insert_open_for_legacy(direct_db, bid)
+
         # Legacy create occupying the same date range
         lr = await session_client.post(
             "/payroll/periods",
@@ -1399,66 +1439,102 @@ class TestConcurrency:
         """P1-A: Setup mutation must not interleave with candidate creation.
 
         Protocol:
-        - External raw connection holds the branch advisory lock for 300 ms.
-        - Concurrent PUT /settings/.../payroll-setup is issued 50 ms later.
-        - Setup update must block at the DB level until the lock is released.
-        - We prove blocking by measuring elapsed wall-clock time of the setup
-          call: it must exceed 200 ms (generous margin for CI).
+        - External raw connection holds the branch advisory lock (two-arg form).
+        - Setup PUT is fired; it should block at the DB level acquiring the same lock.
+        - pg_locks is queried to observe the setup connection waiting (decisive proof).
+        - Lock is released; setup must complete successfully.
 
-        Without the P1 fix, setup bypasses the advisory lock and completes
-        in < 50 ms regardless of the lock holder, so the timing check fails.
+        Without the P1 fix, setup bypasses the advisory lock, no waiter appears
+        in pg_locks, and the assert fails.
         """
-        import time
         from sqlalchemy import text as _t
         from sqlalchemy.ext.asyncio import create_async_engine
 
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
 
-        # Resolve company_id for this branch (needed for the advisory lock key)
         cid_row = await direct_db.execute(
             _text("SELECT companyid FROM core.branches WHERE branchid=:bid"),
             {"bid": bid},
         )
         cid = cid_row.scalar_one()
 
-        HOLD_MS = 300
-        DELAY_MS = 50
-        MIN_EXPECTED_MS = 200  # setup must have waited at least this long
+        lock_held = asyncio.Event()
+        blocker_done = asyncio.Event()
 
-        # Task A: open a dedicated connection, begin a transaction, hold the lock
         async def _hold_lock():
             engine = create_async_engine(test_database_url, echo=False)
-            async with engine.begin() as conn:
-                await conn.execute(
-                    _t("SELECT pg_advisory_xact_lock(:cid, :bid)"),
-                    {"cid": cid, "bid": bid},
-                )
-                await asyncio.sleep(HOLD_MS / 1000)
-                # commit releases the lock
-            await engine.dispose()
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        _t("SELECT pg_advisory_xact_lock(:cid, :bid)"),
+                        {"cid": cid, "bid": bid},
+                    )
+                    lock_held.set()
+                    await asyncio.wait_for(blocker_done.wait(), timeout=10.0)
+            finally:
+                await engine.dispose()
 
-        # Task B: wait briefly so Task A holds the lock first, then update setup
         async def _update_setup():
-            await asyncio.sleep(DELAY_MS / 1000)
-            t0 = time.monotonic()
-            r = await session_client.put(
+            return await session_client.put(
                 f"/settings/branches/{bid}/payroll-setup",
                 json={"payroll_frequency": "Week", "anchor_start_date": "2096-01-07"},
                 headers=_auth(auth_token),
             )
-            elapsed_ms = (time.monotonic() - t0) * 1000
-            return r, elapsed_ms
 
-        (_lock_result, (setup_resp, elapsed_ms)) = await asyncio.gather(
-            _hold_lock(), _update_setup(),
+        lock_task = asyncio.ensure_future(_hold_lock())
+        await asyncio.wait_for(lock_held.wait(), timeout=10.0)
+
+        # Fire setup request — it should block at the DB acquiring the same advisory lock.
+        setup_task = asyncio.ensure_future(_update_setup())
+
+        # Bounded poll: wait until pg_locks shows the setup connection waiting.
+        # Two-arg advisory lock: classid=company_id, objid=branch_id, objsubid=2.
+        import time as _time
+        _deadline = _time.monotonic() + 5.0
+        while _time.monotonic() < _deadline:
+            waiting_count = (await direct_db.execute(
+                _t("""
+                    SELECT COUNT(*) FROM pg_locks
+                    WHERE locktype = 'advisory'
+                      AND classid  = :cid
+                      AND objid    = :bid
+                      AND objsubid = 2
+                      AND NOT granted
+                """),
+                {"cid": cid, "bid": bid},
+            )).scalar_one()
+            if waiting_count >= 1:
+                break
+            await asyncio.sleep(0.05)
+
+        assert waiting_count >= 1, (
+            f"Setup request must be waiting on the advisory lock in pg_locks "
+            f"(classid={cid}, objid={bid}, objsubid=2, NOT granted = 0). "
+            "The P1 fix (advisory lock in upsert_payroll_setup) is missing or ineffective."
         )
 
+        blocker_done.set()
+        setup_resp = await asyncio.wait_for(setup_task, timeout=10.0)
+        await asyncio.wait_for(lock_task, timeout=10.0)
+
         assert setup_resp.status_code in (200, 201), setup_resp.text
-        assert elapsed_ms >= MIN_EXPECTED_MS, (
-            f"Setup completed in {elapsed_ms:.0f} ms — expected to be blocked "
-            f"for at least {MIN_EXPECTED_MS} ms while the advisory lock was held. "
-            "The P1 fix (advisory lock in upsert_payroll_setup) is missing or ineffective."
+
+        # Assert persisted final setup values in DB.
+        setup_row = (await direct_db.execute(
+            _t("""
+                SELECT payrollfrequency, anchorstartdate
+                FROM   payroll.branchpayrollsettings
+                WHERE  branchid = :bid
+            """),
+            {"bid": bid},
+        )).mappings().first()
+        assert setup_row is not None, f"No branchpayrollsettings row found for branch {bid}"
+        assert setup_row["payrollfrequency"] == "Week", (
+            f"Expected payrollfrequency='Week'; got {setup_row['payrollfrequency']!r}"
+        )
+        assert str(setup_row["anchorstartdate"]) == "2096-01-07", (
+            f"Expected anchorstartdate='2096-01-07'; got {setup_row['anchorstartdate']!r}"
         )
 
     @pytest.mark.asyncio
@@ -1679,6 +1755,9 @@ class TestRegressionBoundary:
         """T61: POST /payroll/periods (legacy endpoint) still creates periods correctly."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
+
+        # B1 guard: insert an Open period so the guard allows Draft creation
+        await _insert_open_for_legacy(direct_db, bid)
 
         start, end = _next_week()
         r = await session_client.post(

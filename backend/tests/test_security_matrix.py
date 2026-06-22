@@ -28,10 +28,12 @@ Matrix:
   15. Driver role with SpecificBranch (not only ODA) is specifically blocked.
 """
 
+import datetime
 import itertools
 import pytest
 import pytest_asyncio
 import httpx
+from sqlalchemy import text as _sqla_text
 
 # ---------------------------------------------------------------------------
 # Unique username counter — keeps each test's users separate
@@ -197,28 +199,43 @@ async def _create_and_open_period(
     branch_id: int,
     start: str,
     end: str,
+    *,
+    db_conn=None,
 ) -> int:
-    """Cancel any Draft/Open periods, create a new period, advance to Open."""
-    await _cancel_branch_active_periods(client, token, branch_id)
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id": branch_id,
-            "period_type": "Week",
-            "start_date": start,
-            "end_date": end,
-        },
-        headers=_hdr(token),
+    """Insert an Open period directly (CP-1D: POST requires existing Open; PATCH→Open blocked)."""
+    assert db_conn is not None, "_create_and_open_period requires db_conn after CP-1D"
+    code = f"SM-{branch_id}-{start}"
+    # Cancel any stale non-SM Open/InReview/Returned periods left by other test modules
+    # so the one-Open-per-branch partial unique index doesn't block the SM INSERT.
+    await db_conn.execute(
+        _sqla_text(
+            "UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid AND status IN ('Open','Draft','InReview','Returned') "
+            "  AND periodcode NOT LIKE 'SM-%'"
+        ),
+        {"bid": branch_id},
     )
-    assert r.status_code == 201, f"Create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    ro = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=_hdr(token),
-    )
-    assert ro.status_code == 200, f"Open period failed: {ro.text}"
-    return pid
+    row = (await db_conn.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": code,
+         "start": datetime.date.fromisoformat(start),
+         "end": datetime.date.fromisoformat(end)},
+    )).mappings().first()
+    if row is None:
+        row = (await db_conn.execute(
+            _sqla_text(
+                "SELECT payrollperiodid FROM payroll.payrollperiods "
+                "WHERE branchid = :bid AND periodcode = :code"
+            ),
+            {"bid": branch_id, "code": code},
+        )).mappings().first()
+    return row["payrollperiodid"]
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +262,13 @@ async def sm_hq_period_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     sm_hq_id: int,
+    session_db_conn,
 ) -> int:
     """One Open HQ period for all security matrix tests that need a period reference."""
     return await _create_and_open_period(
         session_client, auth_token, sm_hq_id,
         "2096-01-06", "2096-01-12",
+        db_conn=session_db_conn,
     )
 
 
@@ -258,11 +277,13 @@ async def sm_paytest_period_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     sm_paytest_id: int,
+    session_db_conn,
 ) -> int:
     """One Open PAYTEST period for security matrix tests."""
     return await _create_and_open_period(
         session_client, auth_token, sm_paytest_id,
         "2096-01-13", "2096-01-19",
+        db_conn=session_db_conn,
     )
 
 
@@ -835,21 +856,34 @@ class TestSecurityMatrix:
         session_client: httpx.AsyncClient,
         auth_token: str,
         sm_hq_id: int,
+        direct_db,
     ):
         """Final-lines returns 422 for a Draft period."""
-        # Create a Draft period (no need to open it for this test)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": sm_hq_id,
-                "period_type": "Week",
-                "start_date": "2097-01-06",
-                "end_date": "2097-01-12",
-            },
-            headers=_hdr(auth_token),
-        )
-        assert r.status_code == 201
-        pid = r.json()["payroll_period_id"]
+        # Insert a Draft period or find an existing one (Draft slot is unique per branch).
+        try:
+            row = (await direct_db.execute(
+                _sqla_text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                    VALUES (1, :bid, 'Draft', 'SM-DRAFT-2097', 'SM Draft 2097', 'Week', :start, :end)
+                    RETURNING payrollperiodid
+                """),
+                {"bid": sm_hq_id,
+                 "start": datetime.date(2097, 1, 6),
+                 "end": datetime.date(2097, 1, 12)},
+            )).mappings().first()
+        except Exception:
+            await direct_db.rollback()
+            row = None
+        if row is None:
+            row = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE companyid = 1 AND branchid = :bid AND status = 'Draft' LIMIT 1"
+                ),
+                {"bid": sm_hq_id},
+            )).mappings().first()
+        pid = row["payrollperiodid"]
 
         resp = await session_client.get(
             f"/payroll/periods/{pid}/final-lines",
@@ -997,26 +1031,42 @@ class TestSecurityMatrix:
         sm_paytest_driver_id: int,
         sm_paytest_period_id: int,
         sm_bonus_activated: None,
+        direct_db,
     ):
         """Final-lines returns 200 for a Locked period.
 
         Advances sm_paytest_period_id: Open→InReview→Approved→Locked.
         Must run after test_13_* (which rely on the period being Open).
         """
+        from sqlalchemy import text as _sqla_text
         pid = sm_paytest_period_id
 
-        # Add a draft line so the period is non-empty for finalization
-        await session_client.post(
+        # Ensure no stale InReview period blocks the submit (CP-1B slot conflict).
+        # InReview→Cancelled is blocked by CP-1A via API; use direct DB.
+        await direct_db.execute(
+            _sqla_text("""
+                UPDATE payroll.payrollperiods
+                SET    status = 'Cancelled', currentreturnreviewitemid = NULL
+                WHERE  branchid = :bid AND status = 'InReview'
+                  AND  payrollperiodid != :pid
+            """),
+            {"bid": sm_paytest_id, "pid": pid},
+        )
+        await direct_db.commit()
+
+        # Add a draft line so the period is non-empty for finalization.
+        # Use PTO_STATUS (informational, no rate required) to avoid rate setup dependencies.
+        line_r = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={
                 "driver_id": sm_paytest_driver_id,
                 "work_date": "2096-01-15",
-                "line_type": "HOURS",
-                "quantity": "4.00",
-                "rate_amount": "10.00",
+                "line_type": "PTO_STATUS",
+                "quantity": 1,
             },
             headers=_hdr(auth_token),
         )
+        assert line_r.status_code == 201, f"Add line failed: {line_r.text}"
 
         # Open → InReview
         ri = await session_client.patch(
@@ -1024,8 +1074,7 @@ class TestSecurityMatrix:
             json={"status": "InReview"},
             headers=_hdr(auth_token),
         )
-        if ri.status_code != 200:
-            pytest.skip(f"Cannot submit for review: {ri.text}")
+        assert ri.status_code == 200, f"Cannot submit for review: {ri.text}"
 
         # Approve the review item
         items = await session_client.get(
@@ -1049,8 +1098,7 @@ class TestSecurityMatrix:
             f"/payroll/periods/{pid}/finalize",
             headers=_hdr(auth_token),
         )
-        if fin.status_code != 200:
-            pytest.skip(f"Cannot finalize: {fin.text}")
+        assert fin.status_code == 200, f"Cannot finalize: {fin.text}"
 
         # Final-lines on Locked period must return 200
         resp = await session_client.get(
@@ -1284,6 +1332,7 @@ class TestLegacyODABlock:
         session_client: httpx.AsyncClient,
         auth_token: str,
         sm_hq_id: int,
+        direct_db,
     ):
         """
         A normal operational user (PAYROLL_ADMIN, no ODA/DRIVER role) can create
@@ -1312,14 +1361,26 @@ class TestLegacyODABlock:
         # Cancel any active periods on HQ so the Draft slot is free
         await _cancel_branch_active_periods(session_client, auth_token, sm_hq_id)
 
+        # B1 guard: insert an Open period so legacy create is allowed
+        await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'SM-OPCTL-2099', 'SM OpCtl Open', 'Week', '2099-03-24', '2099-03-30')
+                ON CONFLICT DO NOTHING
+            """),
+            {"bid": sm_hq_id},
+        )
+        await direct_db.commit()
+
         r = await session_client.post(
             "/payroll/periods",
             json={"branch_id": sm_hq_id, "period_type": "Week",
                   "start_date": "2099-04-01", "end_date": "2099-04-07"},
             headers=_hdr(tok),
         )
-        # 201 = success; 422 = duplicate period (another test may have created one) — both fine
-        assert r.status_code in (201, 422), (
+        # 201 = success; 409 = duplicate Draft slot; 422 = date overlap — all acceptable
+        assert r.status_code in (201, 409, 422), (
             f"Operational user (payroll.period.create + payroll.entry, no driver role) "
             f"must be able to create periods; got {r.status_code}: {r.text}"
         )

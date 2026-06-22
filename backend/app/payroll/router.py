@@ -151,9 +151,14 @@ async def get_period(
     response_model=PeriodSummary,
     status_code=201,
     summary="Create a new payroll period (starts in Draft status)",
+    description=(
+        "Legacy endpoint. Requires exactly one Open period on the branch (no Draft). "
+        "Use POST /payroll/branches/{branch_id}/period-candidates for candidate-based creation."
+    ),
     responses={
-        403: {"description": "No access to the target branch"},
-        422: {"description": "Validation error or invalid branch"},
+        403: {"description": "No access to the target branch or missing payroll.period.create permission"},
+        409: {"description": "DRAFT_SLOT_OCCUPIED | DRAFT_CREATION_REQUIRES_OPEN | WORKFLOW_SLOT_CONFLICT"},
+        422: {"description": "Validation error, invalid branch, or date overlap"},
     },
 )
 async def create_period(
@@ -175,7 +180,7 @@ async def create_period(
     summary="Transition a period to a new status",
     description=(
         "Allowed transitions:\n"
-        "- **Draft** → Open | Cancelled\n"
+        "- **Draft** → Cancelled *(Draft→Open is handled atomically by the submit path)*\n"
         "- **Open** → InReview | Cancelled\n"
         "- **InReview** → *(no PATCH exits — use POST /review/items/{id}/decide)*\n"
         "  - Approved decision → period Approved\n"

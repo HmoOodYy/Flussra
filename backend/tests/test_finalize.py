@@ -14,11 +14,13 @@ Draft → Open → InReview → Approved, and guarantees cleanup via
 `paytest_driver_id` (session-scoped, conftest) provides a valid driver on
 the PAYTEST branch so we can seed draft lines before finalizing.
 """
+import datetime
 import pytest
 import pytest_asyncio
 import httpx
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
+from sqlalchemy import text as _sqla_text
 
 from app.payroll import service as payroll_service
 
@@ -190,27 +192,28 @@ async def approved_period(
     headers = auth(auth_token)
     branch_id = paytest_clean
 
-    # Create Draft
-    r = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": "Week",
-            "start_date":  "2032-01-06",
-            "end_date":    "2032-01-12",
-        },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"create Draft failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-
-    # Draft → Open
-    r = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r.status_code == 200, f"transition to Open failed: {r.text}"
+    # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
+    row = (await direct_db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', 'FIN-2032-0106', 'Finalize Test 2032-W01', 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id,
+         "start": datetime.date(2032, 1, 6),
+         "end": datetime.date(2032, 1, 12)},
+    )).mappings().first()
+    if row is None:
+        row = (await direct_db.execute(
+            _sqla_text(
+                "SELECT payrollperiodid FROM payroll.payrollperiods "
+                "WHERE branchid = :bid AND periodcode = 'FIN-2032-0106'"
+            ),
+            {"bid": branch_id},
+        )).mappings().first()
+    pid = row["payrollperiodid"]
 
     # Open → InReview → Approved via review flow
     result = await _advance_to_approved(session_client, auth_token, pid, paytest_driver_id)
@@ -500,26 +503,32 @@ class TestFinalizePeriod:
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_clean: int,
+        direct_db,
     ):
         """Attempting to finalize an Open period must return 422."""
         headers = auth(auth_token)
-        # Create a Draft, open it (status=Open)
-        r = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_clean,
-                "period_type": "Week",
-                "start_date":  "2033-01-06",
-                "end_date":    "2033-01-12",
-            },
-            headers=headers,
-        )
-        pid = r.json()["payroll_period_id"]
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=headers,
-        )
+        # Insert an Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked)
+        row = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'FIN-NONAPPRV-2033', 'Finalize Non-Approved Test', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": paytest_clean,
+             "start": datetime.date(2033, 1, 6),
+             "end": datetime.date(2033, 1, 12)},
+        )).mappings().first()
+        if row is None:
+            row = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'FIN-NONAPPRV-2033'"
+                ),
+                {"bid": paytest_clean},
+            )).mappings().first()
+        pid = row["payrollperiodid"]
 
         resp = await client.post(
             f"/payroll/periods/{pid}/finalize",
@@ -595,21 +604,28 @@ class TestFinalizePeriod:
         headers = auth(auth_token)
         branch_id = paytest_clean
 
-        # Draft → Open
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": branch_id, "period_type": "Week",
-                  "start_date": "2035-03-03", "end_date": "2035-03-09"},
-            headers=headers,
-        )
-        assert r.status_code == 201, f"create failed: {r.text}"
-        pid = r.json()["payroll_period_id"]
-
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=headers,
-        )
+        # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
+        _r = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', 'FIN-FL-2035-0303', 'FinalLines Test 2035', 'Week', :start, :end)
+                ON CONFLICT DO NOTHING
+                RETURNING payrollperiodid
+            """),
+            {"bid": branch_id,
+             "start": datetime.date(2035, 3, 3),
+             "end": datetime.date(2035, 3, 9)},
+        )).mappings().first()
+        if _r is None:
+            _r = (await direct_db.execute(
+                _sqla_text(
+                    "SELECT payrollperiodid FROM payroll.payrollperiods "
+                    "WHERE branchid = :bid AND periodcode = 'FIN-FL-2035-0303'"
+                ),
+                {"bid": branch_id},
+            )).mappings().first()
+        pid = _r["payrollperiodid"]
 
         # Add 2 PTO_STATUS lines on different dates while Open
         # (duplicate guard: same driver + date + line_type would be rejected).

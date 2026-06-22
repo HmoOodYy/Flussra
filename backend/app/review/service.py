@@ -55,7 +55,7 @@ from app.core.service import (
     _check_branch_access, _build_in_clause, _check_permission, _check_any_permission,
     _require_not_driver_role, _has_any_permission,
 )
-from app.payroll.service import _write_period_status_audit  # M16: period write-back
+from app.payroll.service import _write_period_status_audit, _acquire_branch_workflow_lock  # M16, CP-1D
 from app.review.schemas import (
     ReviewItemSummary,
     ReviewItemDetail,
@@ -507,7 +507,54 @@ async def decide_review_item(
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)
 
-    # Fetch the item and acquire a row-level exclusive lock (FOR UPDATE).
+    # CP-1D: For PeriodApproval substantive decisions, the branch advisory lock must
+    # be acquired AFTER auth checks but BEFORE the FOR UPDATE row lock.
+    #
+    # Lock order:
+    #   1. Pre-read (no lock) — get branchid/requesttype for auth routing
+    #   2. Branch access check — unauthorized callers must NOT reach the lock
+    #   3. Permission check   — unauthorized callers must NOT reach the lock
+    #   4. Branch advisory lock (PeriodApproval non-Comment only)
+    #   5. FOR UPDATE on review item row
+    #
+    # This prevents DoS: an unauthorized caller cannot hold the branch lock
+    # by sending a PeriodApproval decision that is subsequently rejected by auth.
+    _pre = await db.execute(
+        text("""
+            SELECT branchid, requesttype
+            FROM   review.managerreviewitems
+            WHERE  reviewitemid = :iid AND companyid = :cid
+        """),
+        {"iid": review_item_id, "cid": company_id},
+    )
+    _pre_row = _pre.mappings().first()
+
+    if _pre_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Review item {review_item_id} not found.",
+        )
+
+    _pre_branch_id = int(_pre_row["branchid"])
+
+    # Step 2: Branch access check (uses pre-read branchid, no lock held).
+    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    if not can_see_all and _pre_branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this branch.",
+        )
+
+    # Step 3: Permission check (uses pre-read branchid, no lock held).
+    # Comments skip the branch lock below but still require review.decide.
+    await _check_permission(company_id, user_id, _pre_branch_id, "review.decide", db)
+
+    # Step 4: Branch advisory lock for PeriodApproval substantive decisions.
+    # Comments do not mutate payroll slots; they skip the branch lock.
+    if _pre_row.get("requesttype") == "PeriodApproval" and data.decision != "Comment":
+        await _acquire_branch_workflow_lock(company_id, _pre_branch_id, db)
+
+    # Step 5: Fetch the item with a row-level exclusive lock (FOR UPDATE).
     #
     # Why: the status check and the subsequent INSERT + UPDATE are not atomic
     # without a lock.  Two concurrent requests could both read status=Pending,
@@ -530,22 +577,24 @@ async def decide_review_item(
     )
     row = result.mappings().first()
 
+    # Re-check existence after lock (extremely rare: row was deleted between pre-read and lock).
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Review item {review_item_id} not found.",
         )
 
-    # Branch access check.
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    # Branch access already verified above; keep a belt-and-suspenders check
+    # in case the row's branchid changed (cannot happen via normal paths, but
+    # defensive against data corruption).
     if not can_see_all and row["branchid"] not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this branch.",
         )
 
-    # Permission gate: deciding requires review.decide.
-    await _check_permission(company_id, user_id, row["branchid"], "review.decide", db)
+    # Permission already verified above using pre-read branchid.
+    # No redundant check needed here — review.decide on _pre_branch_id is sufficient.
 
     # CP-1A: PeriodApproval Rejected/EditRequested require a nonblank decision reason.
     # These decisions return the period to Returned; the reason is preserved on
@@ -812,11 +861,12 @@ async def decide_review_item(
                     f"SET    status = :new_status{extra_set} "
                     f"WHERE  payrollperiodid = :pid "
                     f"  AND  companyid       = :cid "
+                    f"  AND  branchid        = :bid "
                     f"  AND  status          = 'InReview' "
                     f"RETURNING payrollperiodid, branchid"
                 ),
                 {"new_status": new_period_status, "pid": period_id, "cid": company_id,
-                 **extra_params},
+                 "bid": _pre_branch_id, **extra_params},
             )
         except SAIntegrityError as exc:
             # PostgreSQL folds unquoted identifiers to lowercase; normalize before matching.

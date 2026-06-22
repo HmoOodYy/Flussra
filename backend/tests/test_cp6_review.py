@@ -1,14 +1,14 @@
 """
-CP-6 Integration tests — Review / Approve UI
+CP-6 Integration tests ->' Review / Approve UI
 
 Tests cover:
   1.  Review list (GET /review/items?status=Pending) shows InReview period items
   2.  Open/Draft/Approved/Locked periods are NOT in the default Pending review list
-  3.  Operational reviewer can approve a clean InReview period (→Approved)
+  3.  Operational reviewer can approve a clean InReview period (->'Approved)
   4.  Period becomes Approved after review approval
   5.  Approved period can then be finalized (existing finalize flow)
   6.  Period with NeedsManagerReview lines cannot be approved (422)
-  7.  Return (EditRequested) works → period goes to Open
+  7.  Return (EditRequested) works ->' period goes to Open
   8.  Driver/ODA user is blocked from GET /review/items (403)
   9.  Branch-scoped user cannot approve another branch's period (403)
   10. AllCompanyBranches user can review periods from any branch
@@ -65,22 +65,31 @@ async def _create_open_period(
     branch_id: int,
     start: str = PERIOD_START,
     end: str = PERIOD_END,
+    direct_db=None,
 ) -> int:
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=headers,
+    """Insert an Open period directly. CP-1D: POST requires existing Open (B1 guard)."""
+    import datetime
+    from sqlalchemy import text as _sqla_text
+    assert direct_db is not None, "_create_open_period requires direct_db after CP-1D"
+    # Cancel any existing Open so ux_payrollperiods_oneopenperbranch doesn't fire.
+    await direct_db.execute(
+        _sqla_text(
+            "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+            "WHERE branchid = :bid AND status IN ('Draft', 'Open')"
+        ),
+        {"bid": branch_id},
     )
-    assert r.status_code == 201, f"Create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    t = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"}, headers=headers,
-    )
-    assert t.status_code == 200, f"Open: {t.text}"
-    return pid
+    row = (await direct_db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"CP6-{start}", "name": f"CP6 {start}",
+         "start": datetime.date.fromisoformat(start), "end": datetime.date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _advance_to_inreview(
@@ -134,7 +143,7 @@ async def _advance_to_approved_via_review(
     driver_id: int,
     work_date: str = WORK_DATE,
 ) -> None:
-    """Full Open → InReview → Approved flow via review decide."""
+    """Full Open ->' InReview ->' Approved flow via review decide."""
     review_id = await _advance_to_inreview(client, token, pid, driver_id, work_date)
     dec = await client.post(
         f"/review/items/{review_id}/decide",
@@ -287,7 +296,7 @@ async def cp6_clean(
 
 
 # ---------------------------------------------------------------------------
-# 1 & 2. Review list — what appears
+# 1 & 2. Review list ->' what appears
 # ---------------------------------------------------------------------------
 
 class TestReviewList:
@@ -299,9 +308,10 @@ class TestReviewList:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """A period submitted to InReview creates a Pending review item in the list."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -321,9 +331,10 @@ class TestReviewList:
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp6_clean: int,
+        direct_db,
     ):
         """An Open period has no Pending review item."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
 
         rv = await session_client.get(
             "/review/items",
@@ -345,9 +356,10 @@ class TestReviewList:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """GET /payroll/periods?status=InReview returns the period for the review page."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -367,9 +379,10 @@ class TestReviewList:
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp6_clean: int,
+        direct_db,
     ):
         """GET /payroll/periods?status=InReview does not include Open/Draft periods."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
 
         periods = await session_client.get(
             "/payroll/periods",
@@ -394,9 +407,10 @@ class TestReviewApprove:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
-        """Operational user approves InReview → period status becomes Approved."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """Operational user approves InReview ->' period status becomes Approved."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -423,9 +437,10 @@ class TestReviewApprove:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """After approval the review item is no longer Pending."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -472,7 +487,7 @@ class TestReviewApprove:
         assert drv.status_code == 201, f"Create driver: {drv.text}"
         fresh_driver_id = drv.json()["driver_id"]
 
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         await _advance_to_approved_via_review(
             session_client, auth_token, pid, fresh_driver_id
         )
@@ -503,8 +518,8 @@ class TestReviewNMRBlocker:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Period with NeedsManagerReview lines → approve returns 422."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """Period with NeedsManagerReview lines ->' approve returns 422."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
 
         # Add a line before InReview
         lr = await session_client.post(
@@ -548,9 +563,10 @@ class TestReviewNMRBlocker:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
-        """Period with no NMR lines → approve succeeds."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """Period with no NMR lines ->' approve succeeds."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -576,9 +592,10 @@ class TestReviewReturn:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
-        """CP-1A: EditRequested decision → period transitions from InReview to Returned."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """CP-1A: EditRequested decision ->' period transitions from InReview to Returned."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -602,9 +619,10 @@ class TestReviewReturn:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
-        """CP-1A: Rejected decision → period transitions from InReview to Returned."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """CP-1A: Rejected decision ->' period transitions from InReview to Returned."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -630,8 +648,8 @@ class TestReviewReturn:
         paytest_driver_id: int,
         direct_db,
     ):
-        """EditRequested is NOT blocked by NMR lines — reviewer can always return."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """EditRequested is NOT blocked by NMR lines ->' reviewer can always return."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         lr = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": WORK_DATE,
@@ -703,9 +721,10 @@ class TestReviewODASecurity:
         paytest_branch_id: int,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
-        """ODA user cannot decide (approve/reject) a review item — 403 before data access."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        """ODA user cannot decide (approve/reject) a review item ->' 403 before data access."""
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -752,10 +771,11 @@ class TestReviewBranchScope:
         hq_branch_id: int,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """SpecificBranch user scoped to HQ cannot approve a PAYTEST period."""
         # Create and submit period on PAYTEST
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -790,9 +810,10 @@ class TestReviewBranchScope:
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """AllCompanyBranches reviewer can approve a period on any branch."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -813,9 +834,10 @@ class TestReviewBranchScope:
         paytest_branch_id: int,
         cp6_clean: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """SpecificBranch user scoped to PAYTEST CAN see PAYTEST review items."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -864,7 +886,7 @@ class TestReviewNoManualAdjustment:
 
         Note: period is left in Approved (not finalized) to avoid creating a
         Locked period on paytest_driver_id that could block pay-rule tests."""
-        pid = await _create_open_period(session_client, auth_token, cp6_clean)
+        pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         await _advance_to_approved_via_review(
             session_client, auth_token, pid, paytest_driver_id
         )
@@ -890,7 +912,7 @@ class TestReviewNoManualAdjustment:
 
 
 # ---------------------------------------------------------------------------
-# P1 — per-branch permission filtering: mixed-branch user sees only permitted branches
+# P1 ->' per-branch permission filtering: mixed-branch user sees only permitted branches
 # ---------------------------------------------------------------------------
 
 class TestReviewPerBranchPermissionFilter:
@@ -917,12 +939,24 @@ class TestReviewPerBranchPermissionFilter:
         The user must see the PAYTEST review item and must NOT see the HQ item.
         """
         # Create an InReview period on HQ (Branch B, no permission for this user)
-        # Use direct status patch — no need to add lines since HQ may not have
+        # Use direct status patch ->' no need to add lines since HQ may not have
         # PTO_STATUS activated; we only need the review item to exist.
         await _cancel_active_periods(session_client, auth_token, hq_branch_id)
+        # InReview->Cancelled is blocked by CP-1A; force-cancel any stale InReview
+        # periods on HQ directly so the slot is free for the new submission.
+        await direct_db.execute(
+            _text('''
+                UPDATE payroll.payrollperiods
+                SET    status = 'Cancelled', currentreturnreviewitemid = NULL
+                WHERE  branchid = :bid AND status = 'InReview'
+            '''),
+            {'bid': hq_branch_id},
+        )
+        await direct_db.commit()
         hq_pid = await _create_open_period(
             session_client, auth_token, hq_branch_id,
             "2095-07-07", "2095-07-13",
+            direct_db=direct_db,
         )
         # Inject a DailyStatus line directly (informational; no pay item activation needed)
         hq_driver_resp = await session_client.get(
@@ -969,6 +1003,7 @@ class TestReviewPerBranchPermissionFilter:
         pt_pid = await _create_open_period(
             session_client, auth_token, paytest_branch_id,
             "2095-07-07", "2095-07-13",
+            direct_db=direct_db,
         )
         await _advance_to_inreview(
             session_client, auth_token, pt_pid, paytest_driver_id, "2095-07-08"
@@ -990,7 +1025,7 @@ class TestReviewPerBranchPermissionFilter:
             branch_id=paytest_branch_id,
         )
 
-        # GET /review/items — must return only PAYTEST items, not HQ items
+        # GET /review/items ->' must return only PAYTEST items, not HQ items
         rv = await session_client.get("/review/items", headers=auth(tok))
         assert rv.status_code == 200, f"Permitted user must be able to list review items: {rv.text}"
 
