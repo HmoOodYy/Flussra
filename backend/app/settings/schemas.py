@@ -204,6 +204,8 @@ class PayrollSetup(BaseModel):
     notes: str | None = None
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
+    # CP-2A: immutable schedule version bound at last setup update (or backfill).
+    schedule_version_id: int | None = None
 
 
 class PayrollSetupUpsert(BaseModel):

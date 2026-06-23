@@ -888,7 +888,8 @@ _SETUP_COLS = """
     s.payrollfrequency, s.anchorstartdate, s.paydateoffsetdays,
     s.paydayofweek, s.firstpaydate, s.includepaydayasworkday,
     s.normaldaysoffmask, s.customintervaldays, s.isactive, s.notes,
-    s.createdatutc, s.updatedatutc
+    s.createdatutc, s.updatedatutc,
+    s.currentscheduleversionid
 """
 
 
@@ -910,7 +911,94 @@ def _row_to_payroll_setup(row) -> PayrollSetup:
         notes=row.get("notes"),
         created_at_utc=row["createdatutc"],
         updated_at_utc=row.get("updatedatutc"),
+        schedule_version_id=row.get("currentscheduleversionid"),
     )
+
+
+async def create_schedule_version_for_setup(
+    company_id: int,
+    branch_id: int,
+    user_id: int,
+    data: "PayrollSetupUpsert",
+    db: AsyncConnection,
+) -> int:
+    """
+    Insert an immutable PayrollScheduleVersions row for a setup upsert and
+    update BranchPayrollSettings.CurrentScheduleVersionID.
+
+    Must be called inside the same transaction as the settings upsert, after
+    the upsert has already committed the new settings values, while still
+    holding the branch workflow advisory lock.
+
+    Returns the new ScheduleVersionID.
+    """
+    # Canonical config hash: same format as payroll._setup_fingerprint
+    config_hash = json.dumps(
+        {
+            "anchor":   str(data.anchor_start_date),
+            "freq":     data.payroll_frequency,
+            "interval": data.custom_interval_days,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    # Next version number = max(existing) + 1 for this branch
+    max_row = await db.execute(
+        text("""
+            SELECT COALESCE(MAX(versionnumber), 0) AS maxver
+            FROM   payroll.PayrollScheduleVersions
+            WHERE  companyid = :cid AND branchid = :bid
+        """),
+        {"cid": company_id, "bid": branch_id},
+    )
+    next_version = (max_row.scalar_one() or 0) + 1
+
+    ins = await db.execute(
+        text("""
+            INSERT INTO payroll.PayrollScheduleVersions
+                (CompanyID, BranchID, VersionNumber,
+                 PayrollFrequency, AnchorStartDate,
+                 CustomIntervalDays, NormalDaysOffMask,
+                 PayDayOfWeek, FirstPayDate, IncludePayDayAsWorkDay,
+                 EffectiveFromDate, EffectiveToDate,
+                 CreatedByUserID, SourceAction, ConfigHash)
+            VALUES
+                (:cid, :bid, :vnum,
+                 :freq, :anchor,
+                 :interval_days, :mask,
+                 :pdow, :fpd, :incl,
+                 :anchor, NULL,
+                 :uid, 'SETUP_UPDATED', :chash)
+            RETURNING ScheduleVersionID
+        """),
+        {
+            "cid":           company_id,
+            "bid":           branch_id,
+            "vnum":          next_version,
+            "freq":          data.payroll_frequency,
+            "anchor":        data.anchor_start_date,
+            "interval_days": data.custom_interval_days,
+            "mask":          data.normal_days_off_mask,
+            "pdow":          data.pay_day_of_week,
+            "fpd":           data.first_pay_date,
+            "incl":          bool(data.include_pay_day_as_work_day),
+            "uid":           user_id,
+            "chash":         config_hash,
+        },
+    )
+    new_sv_id: int = ins.scalar_one()
+
+    await db.execute(
+        text("""
+            UPDATE payroll.BranchPayrollSettings
+            SET    CurrentScheduleVersionID = :sv_id
+            WHERE  CompanyID = :cid AND BranchID = :bid
+        """),
+        {"sv_id": new_sv_id, "cid": company_id, "bid": branch_id},
+    )
+
+    return new_sv_id
 
 
 async def get_payroll_setup(
@@ -1073,6 +1161,10 @@ async def upsert_payroll_setup(
             "custom_interval_days":        data.custom_interval_days,
         },
     )
+
+    # CP-2A: create an immutable schedule version record for this setup upsert.
+    # Runs inside the same transaction and branch advisory lock as the upsert above.
+    await create_schedule_version_for_setup(company_id, branch_id, user_id, data, db)
 
     return await get_payroll_setup(branch_id, company_id, user_id, db)
 

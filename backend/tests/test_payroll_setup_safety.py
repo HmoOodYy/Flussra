@@ -305,7 +305,15 @@ async def pss_overlap_branch_id(
         headers=_hdr(auth_token),
     )
     assert resp.status_code == 201, f"Branch create failed: {resp.text}"
-    return resp.json()["branch_id"]
+    branch_id = resp.json()["branch_id"]
+    # CP-2A: ensure a schedule version exists before any legacy period creation.
+    sr = await session_client.put(
+        f"/settings/branches/{branch_id}/payroll-setup",
+        json={"payroll_frequency": "Week", "anchor_start_date": "2025-01-06"},
+        headers=_hdr(auth_token),
+    )
+    assert sr.status_code in (200, 201), f"Setup PUT failed: {sr.text}"
+    return branch_id
 
 
 @pytest_asyncio.fixture(scope="module")

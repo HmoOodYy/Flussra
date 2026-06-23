@@ -533,28 +533,46 @@ async def create_period(
     base_code = f"{branch_code}-{data.start_date.strftime('%Y%m%d')}"
     period_code = await _unique_period_code(base_code, company_id, data.branch_id, db)
 
+    # CP-2A: ensure schedule version and set on new period. Still under advisory lock.
+    # None means no active setup — reject before inserting a period with NULL version.
+    legacy_sv_id = await ensure_current_schedule_version(company_id, data.branch_id, user_id, db)
+    if legacy_sv_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code":    "PAYROLL_SETUP_REQUIRED",
+                "message": (
+                    "No active payroll setup or schedule version exists for this branch. "
+                    "Configure payroll setup before creating periods."
+                ),
+            },
+        )
+
     # Insert
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, periodcode, periodname, periodtype,
-                 startdate, enddate, paydate, status, notes, createdbyuserid)
+                 startdate, enddate, paydate, status, notes, createdbyuserid,
+                 scheduleversionid)
             VALUES
                 (:company_id, :branch_id, :period_code, :period_name, :period_type,
-                 :start_date, :end_date, :pay_date, 'Draft', :notes, :created_by)
+                 :start_date, :end_date, :pay_date, 'Draft', :notes, :created_by,
+                 :sv_id)
             RETURNING payrollperiodid
         """),
         {
-            "company_id": company_id,
-            "branch_id": data.branch_id,
+            "company_id":  company_id,
+            "branch_id":   data.branch_id,
             "period_code": period_code,
             "period_name": period_name,
             "period_type": data.period_type,
-            "start_date": data.start_date,
-            "end_date": data.end_date,
-            "pay_date": data.pay_date,
-            "notes": data.notes,
-            "created_by": user_id,
+            "start_date":  data.start_date,
+            "end_date":    data.end_date,
+            "pay_date":    data.pay_date,
+            "notes":       data.notes,
+            "created_by":  user_id,
+            "sv_id":       legacy_sv_id,
         },
     )
     period_id: int = insert_result.scalar_one()
@@ -10143,6 +10161,131 @@ def _slot_fingerprint(periods: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# CP-2A: ensure current schedule version
+# ---------------------------------------------------------------------------
+
+async def ensure_current_schedule_version(
+    company_id: int,
+    branch_id: int,
+    user_id: int | None,
+    db: AsyncConnection,
+) -> int | None:
+    """
+    Return the current ScheduleVersionID for this branch.
+
+    Must be called while holding the branch workflow advisory lock.
+
+    If BranchPayrollSettings.CurrentScheduleVersionID is already set and the
+    referenced version row exists for the correct company/branch, return it.
+
+    If it is NULL (e.g. setup pre-dates CP-2A migration and the backfill missed
+    this row, which should not happen but is handled defensively), create a new
+    repair version (SourceAction='REPAIR') and update CurrentScheduleVersionID.
+
+    Returns None if there is no active setup row at all. Callers must treat
+    None as PAYROLL_SETUP_REQUIRED — the same condition as a missing setup.
+
+    Does not create versions for missing/inactive setup; period creation paths
+    must reject PAYROLL_SETUP_REQUIRED before calling this.
+    """
+    setup_row = (await db.execute(
+        text("""
+            SELECT payrollfrequency, anchorstartdate, customintervaldays,
+                   normaldaysoffmask, paydayofweek, firstpaydate,
+                   includepaydayasworkday, currentscheduleversionid
+            FROM   payroll.branchpayrollsettings
+            WHERE  branchid = :bid AND companyid = :cid AND isactive = TRUE
+        """),
+        {"bid": branch_id, "cid": company_id},
+    )).mappings().first()
+
+    if setup_row is None:
+        return None
+
+    sv_id = setup_row.get("currentscheduleversionid")
+
+    if sv_id is not None:
+        # Verify the referenced version exists for this company/branch.
+        exists = (await db.execute(
+            text("""
+                SELECT 1 FROM payroll.PayrollScheduleVersions
+                WHERE scheduleversionid = :sv_id
+                  AND companyid = :cid AND branchid = :bid
+            """),
+            {"sv_id": sv_id, "cid": company_id, "bid": branch_id},
+        )).first()
+        if exists is not None:
+            return sv_id
+
+    # CurrentScheduleVersionID is missing or points to a stale/wrong row.
+    # Create a repair version from the current live setup values.
+    freq = setup_row["payrollfrequency"]
+    anchor = setup_row["anchorstartdate"]
+    interval_days = setup_row.get("customintervaldays")
+    config_hash = json.dumps(
+        {"anchor": str(anchor), "freq": freq, "interval": interval_days},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    max_row = await db.execute(
+        text("""
+            SELECT COALESCE(MAX(versionnumber), 0) AS maxver
+            FROM   payroll.PayrollScheduleVersions
+            WHERE  companyid = :cid AND branchid = :bid
+        """),
+        {"cid": company_id, "bid": branch_id},
+    )
+    next_version = (max_row.scalar_one() or 0) + 1
+
+    ins = await db.execute(
+        text("""
+            INSERT INTO payroll.PayrollScheduleVersions
+                (CompanyID, BranchID, VersionNumber,
+                 PayrollFrequency, AnchorStartDate,
+                 CustomIntervalDays, NormalDaysOffMask,
+                 PayDayOfWeek, FirstPayDate, IncludePayDayAsWorkDay,
+                 EffectiveFromDate, EffectiveToDate,
+                 CreatedByUserID, SourceAction, ConfigHash)
+            VALUES
+                (:cid, :bid, :vnum,
+                 :freq, :anchor,
+                 :interval_days, :mask,
+                 :pdow, :fpd, :incl,
+                 :anchor, NULL,
+                 :uid, 'REPAIR', :chash)
+            RETURNING ScheduleVersionID
+        """),
+        {
+            "cid":           company_id,
+            "bid":           branch_id,
+            "vnum":          next_version,
+            "freq":          freq,
+            "anchor":        anchor,
+            "interval_days": interval_days,
+            "mask":          setup_row.get("normaldaysoffmask"),
+            "pdow":          setup_row.get("paydayofweek"),
+            "fpd":           setup_row.get("firstpaydate"),
+            "incl":          bool(setup_row.get("includepaydayasworkday") or False),
+            "uid":           user_id,
+            "chash":         config_hash,
+        },
+    )
+    new_sv_id: int = ins.scalar_one()
+
+    await db.execute(
+        text("""
+            UPDATE payroll.BranchPayrollSettings
+            SET    CurrentScheduleVersionID = :sv_id
+            WHERE  CompanyID = :cid AND BranchID = :bid
+        """),
+        {"sv_id": new_sv_id, "cid": company_id, "bid": branch_id},
+    )
+
+    return new_sv_id
+
+
+# ---------------------------------------------------------------------------
 # Helper: advisory lock
 # ---------------------------------------------------------------------------
 
@@ -10347,10 +10490,11 @@ async def get_period_candidates(
     if branch_row is None or branch_row["status"] != "Active":
         _cp1c_error("BRANCH_INACTIVE", "Branch is inactive or not found.")
 
-    # Read payroll setup
+    # Read payroll setup — also fetch currentscheduleversionid for CP-2A binding.
     setup_row = (await db.execute(
         text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays
+            SELECT payrollfrequency, anchorstartdate, customintervaldays,
+                   currentscheduleversionid
             FROM payroll.branchpayrollsettings
             WHERE branchid = :bid AND companyid = :cid AND isactive = TRUE
         """),
@@ -10366,6 +10510,9 @@ async def get_period_candidates(
         _cp1c_error("PAYROLL_SETUP_INCOMPLETE", "Custom frequency requires custom_interval_days > 0.")
 
     setup_fp = _setup_fingerprint(freq, anchor, interval_days)
+    # CP-2A: include the current schedule version ID in the signed payload so
+    # any setup change (which creates a new version) invalidates this candidate.
+    current_sv_id = setup_row.get("currentscheduleversionid")
 
     # Read all non-Cancelled periods for slot/date computation
     period_rows = (await db.execute(
@@ -10399,7 +10546,9 @@ async def get_period_candidates(
     if preview_offset > 0 and eff_blocked_reason is None:
         eff_blocked_reason = "CANDIDATE_NOT_CURRENT"
 
-    # Build candidate payload and sign it
+    # Build candidate payload and sign it.
+    # CP-2A: sv_id (schedule_version_id) is included so that any setup PUT
+    # (which creates a new version row) invalidates candidates from the prior version.
     payload = {
         "ver": _CP1C_VERSION,
         "purpose": _CP1C_PURPOSE,
@@ -10415,6 +10564,7 @@ async def get_period_candidates(
         "end": str(end_date),
         "slot_fp": slot_fp,
         "setup_fp": setup_fp,
+        "sv_id": current_sv_id,
         "pred_id": pred_id,
         "offset": preview_offset,
     }
@@ -10501,6 +10651,9 @@ async def create_period_from_candidate(
     claimed_start = date.fromisoformat(payload["start"])
     claimed_end = date.fromisoformat(payload["end"])
     target_status = payload["target_status"]
+    # CP-2A: schedule version ID embedded in the candidate payload.
+    # None means this candidate was generated before CP-2A was deployed.
+    claimed_sv_id = payload.get("sv_id")
 
     # Acquire branch advisory lock (transaction-level)
     await _acquire_branch_workflow_lock(company_id, branch_id, db)
@@ -10547,10 +10700,11 @@ async def create_period_from_candidate(
     if branch_row is None or branch_row["status"] != "Active":
         _cp1c_error("BRANCH_INACTIVE", "Branch is inactive or not found.")
 
-    # Re-read setup under lock
+    # Re-read setup under lock — also fetch currentscheduleversionid for CP-2A validation.
     setup_row = (await db.execute(
         text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays
+            SELECT payrollfrequency, anchorstartdate, customintervaldays,
+                   currentscheduleversionid
             FROM payroll.branchpayrollsettings
             WHERE branchid = :bid AND companyid = :cid AND isactive = TRUE
         """),
@@ -10566,6 +10720,23 @@ async def create_period_from_candidate(
 
     if current_setup_fp != claimed_setup_fp:
         _cp1c_error("CANDIDATE_SETUP_CHANGED", "Payroll setup changed since this candidate was generated.")
+
+    # CP-2A: schedule version validation.
+    # If sv_id is absent the candidate is pre-CP-2A. Replay of an already-created
+    # pre-CP-2A period is allowed (handled by the replay check above). New creation
+    # from a no-sv_id candidate is rejected — clients must regenerate a fresh candidate.
+    current_sv_id_from_settings = setup_row.get("currentscheduleversionid")
+    if claimed_sv_id is None:
+        _cp1c_error(
+            "CANDIDATE_STALE",
+            "Candidate lacks a schedule version ID (pre-CP-2A candidate). "
+            "Regenerate a fresh candidate before creating a new period.",
+        )
+    if current_sv_id_from_settings != claimed_sv_id:
+        _cp1c_error(
+            "CANDIDATE_SETUP_CHANGED",
+            "Payroll schedule version changed since this candidate was generated.",
+        )
 
     # Re-read periods under lock
     period_rows = (await db.execute(
@@ -10626,30 +10797,35 @@ async def create_period_from_candidate(
     base_code = f"{branch_code}-{computed_start.strftime('%Y%m%d')}"
     period_code = await _unique_period_code(base_code, company_id, branch_id, db)
 
-    # Insert period with candidate hash
+    # CP-2A: ensure a valid schedule version exists and get its ID for the new period.
+    # Still under the branch advisory lock. Uses repair path if needed (defensive).
+    period_sv_id = await ensure_current_schedule_version(company_id, branch_id, user_id, db)
+
+    # Insert period with candidate hash and schedule version
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, periodcode, periodname, periodtype,
                  startdate, enddate, status, notes, createdbyuserid,
-                 creationcandidatekeyhash)
+                 creationcandidatekeyhash, scheduleversionid)
             VALUES
                 (:cid, :bid, :code, :name, :ptype,
                  :start, :end, :status, NULL, :uid,
-                 :hash)
+                 :hash, :sv_id)
             RETURNING payrollperiodid
         """),
         {
-            "cid": company_id,
-            "bid": branch_id,
-            "code": period_code,
-            "name": period_name,
+            "cid":   company_id,
+            "bid":   branch_id,
+            "code":  period_code,
+            "name":  period_name,
             "ptype": freq,
             "start": computed_start,
-            "end": computed_end,
+            "end":   computed_end,
             "status": target_status,
-            "uid": user_id,
-            "hash": candidate_hash,
+            "uid":   user_id,
+            "hash":  candidate_hash,
+            "sv_id": period_sv_id,
         },
     )
     new_period_id: int = insert_result.scalar_one()

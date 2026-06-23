@@ -326,18 +326,30 @@ class TestGetPeriod:
 @pytest_asyncio.fixture
 async def paytest_with_open(
     paytest_clean: int,
+    session_client: httpx.AsyncClient,
+    auth_token: str,
     direct_db,
 ) -> int:
     """
-    Like paytest_clean but also pre-seeds one Open period so POST /payroll/periods
-    can create a Draft (CP-1D B1 guard requires exactly one existing Open).
+    Like paytest_clean but also ensures payroll setup + one Open period exist so
+    POST /payroll/periods can create a Draft (CP-1D B1 guard requires exactly one
+    existing Open; CP-2A requires a schedule version before any period insert).
     Returns the PAYTEST branch_id; cleanup is handled by paytest_clean.
     """
+    # CP-2A: ensure an active payroll setup / schedule version exists.
+    r = await session_client.put(
+        f"/settings/branches/{paytest_clean}/payroll-setup",
+        json={"payroll_frequency": "Week", "anchor_start_date": "2025-01-06"},
+        headers=auth(auth_token),
+    )
+    assert r.status_code in (200, 201), f"setup PUT failed: {r.text}"
+
     await direct_db.execute(
         _sqla_text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', 'PT-OPEN-SEED', 'Open Seed', 'Week', '2025-01-06', '2025-01-12')
+            ON CONFLICT DO NOTHING
         """),
         {"bid": paytest_clean},
     )
