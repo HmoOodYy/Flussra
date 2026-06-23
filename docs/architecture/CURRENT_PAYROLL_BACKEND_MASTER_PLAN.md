@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1189,7 +1189,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | --- | --- | --- | --- | --- |
 | Phase 0 | Workflow integrity lockdown | Done with Notes | Claude | Codex P0 review |
 | Phase 1 | Lifecycle slots, Returned state, smart creation | Done with Notes | Claude | Codex lifecycle review |
-| Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Pending | Claude | Codex data-model review |
+| Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | In Progress | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Pending | Claude | Codex calculation parity review |
 | Phase 5 | Hub and calculation-report contracts | Pending | Claude | Codex contract/security review |
@@ -1272,11 +1272,59 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: Router LF→CRLF warning remains environment-only.
 - P3: Global Git ignore permission warning remains environment-only.
 
+### Phase 2 status note
+
+**Status:** In Progress
+**Started:** CP-2A Done with Notes. CP-2B through CP-2F remain Pending / not started.
+**Review result:** No CP-2A P0/P1 blockers remain. No CP-2B+ implementation has begun.
+
+### CP-2A completion note
+
+**Status:** Done with Notes
+**Codex verdict:** PASS WITH NOTES
+**Implementation commit:** `99ee02e` — feat: add cp-2a payroll schedule versioning
+**Review result:** No P0/P1 blockers remain. CP-2A is safely closed.
+
+**What CP-2A completed:**
+- Added migration 0051.
+- Added `payroll.PayrollScheduleVersions`.
+- Added `BranchPayrollSettings.CurrentScheduleVersionID`.
+- Added `PayrollPeriods.ScheduleVersionID`.
+- Added setup backfill to VersionNumber=1.
+- Added downgrade guards to avoid dropping meaningful schedule-version history (SourceAction != BACKFILL check).
+- Added schedule version creation on payroll setup update.
+- Added lazy `ensure_current_schedule_version` repair path.
+- Added CP-1C candidate `sv_id` binding and stale candidate rejection.
+- Preserved candidate replay behavior (pre-CP-2A candidates can still replay already-created periods).
+- Bound legacy period creation to ScheduleVersionID.
+- Rejected legacy period creation when no active setup/version can be ensured.
+- Confirmed SemiMonthly was not enabled.
+- Confirmed PayDate behavior was not reintroduced.
+- Added focused CP-2A tests (20 tests, 0 skipped) and related fixture updates.
+- Updated Alembic head expectations to 0051.
+
+**Validation:**
+- CP-2A: 20 passed, 0 skipped
+- CP-1C/D/E: 152 passed
+- setup safety + payroll: 93 passed
+- CP-1A/B: 42 passed
+- CP-0A/B/C/D: 114 passed
+- Alembic current/head: 0051 / 0051
+- `git diff --check`: no whitespace errors
+
+**Remaining P2/P3 notes:**
+- P2: test_s17_downgrade_refusal could be tightened later.
+- P2: test_s20_no_svid_candidate_rejected_for_new_creation could also assert period count unchanged later.
+- P3: Some comments/docstrings can be cleaned later without behavior impact.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: User global git ignore warning remains environment-only.
+- P3: LF/CRLF warnings remain environment-only.
+
 ### Phase 1 completion note
 
 **Status:** Done with Notes
 **Completed units:** CP-1A, CP-1B, CP-1C, CP-1D, CP-1E
-**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 remains Pending / not started.
+**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is now In Progress (CP-2A Done with Notes; CP-2B through CP-2F Pending).
 
 **Phase 1 completed:**
 - Returned domain state and reviewed transition graph (CP-1A).
@@ -1725,9 +1773,9 @@ Existing direct status transitions and cleanup fixtures assume Rejected→Open. 
 
 ### Phase 2 — Period Configuration and Operational Source Snapshots
 
-**Status:** `Pending`
+**Status:** `In Progress`
 
-- [ ] P2A: version Payroll Setup and add SemiMonthly design.
+- [x] P2A: schedule versioning. — **Done with Notes**
 - [ ] P2B: create period-day snapshots and Add Day command.
 - [ ] P2C: snapshot pay-item layout/order/classification.
 - [ ] P2D: normalize daily statuses/notes.
