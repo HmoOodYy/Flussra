@@ -2933,6 +2933,20 @@ async def add_draft_line(
             ),
         )
 
+    # CP-2D1: validate DailyStatus code before any mutation.
+    # Blank/missing notes for DailyStatus add is rejected — there is no clear
+    # operation on the add path; callers must supply a valid active status code.
+    _direct_add_sk_row: dict | None = None
+    if canonical_line_type == "DailyStatus":
+        if not data.notes or not data.notes.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="DailyStatus lines require a valid status code in 'notes'.",
+            )
+        _direct_add_sk_row = await _validate_status_key(
+            data.notes, company_id, period.branch_id, db,
+        )
+
     # CP-0A: Lock custom PayItem catalog row before period lock so both this path
     # and the physical-delete path acquire locks in the same order (PayItem then
     # Period), preventing deadlock while serializing against concurrent deletion.
@@ -2986,6 +3000,30 @@ async def add_draft_line(
             "source_type": data.source_type,
         },
     )
+
+    # CP-2D1: dual-write canonical entry-state for informational lines.
+    # DailyStatus: use statuskeyid from pre-validated _direct_add_sk_row (guaranteed active).
+    # DailyNote: plain text, no StatusKey involved.
+    if data.work_date is not None:
+        if canonical_line_type == "DailyStatus":
+            sk_id = _direct_add_sk_row["statuskeyid"] if _direct_add_sk_row else None
+            await _upsert_entry_state(
+                company_id, period.branch_id, period_id,
+                data.driver_id, data.work_date, user_id, db,
+                status_key_id=sk_id,
+                note_text=None,
+                set_status=True,
+                set_note=False,
+            )
+        elif canonical_line_type == "DailyNote":
+            await _upsert_entry_state(
+                company_id, period.branch_id, period_id,
+                data.driver_id, data.work_date, user_id, db,
+                status_key_id=None,
+                note_text=data.notes or None,
+                set_status=False,
+                set_note=True,
+            )
 
     return await _get_line_by_id(line_id, company_id, db)
 
@@ -3167,6 +3205,19 @@ async def update_draft_line(
                 ),
             )
 
+    # CP-2D1: validate DailyStatus code before any DraftLine mutation.
+    # Policy for direct update_draft_line: always require an active StatusKey when
+    # notes is being changed, regardless of whether the new code matches the existing
+    # selection. The deactivated-bypass is only available via save_day_grid.
+    # Blank notes on update is treated as clearing the status (returns None, no raise).
+    _direct_upd_sk_row: dict | None = None
+    if canonical_existing_lt == "DailyStatus" and data.notes is not None and not is_void_only:
+        _direct_upd_sk_row = await _validate_status_key(
+            data.notes, company_id, period.branch_id, db,
+        )
+        # _validate_status_key returns None for blank/empty (clear operation — allowed).
+        # It raises 422 for invalid or inactive codes.
+
     if fields:
         # CP-0A: Lock custom PayItem catalog row before period lock (same order as
         # deletion path) to prevent the zero-to-meaningful race: deletion reads zero
@@ -3194,6 +3245,42 @@ async def update_draft_line(
             action_code="DRAFT_LINE_UPDATED",
             new_value={k: (float(v) if isinstance(v, Decimal) else v) for k, v in fields.items()},
         )
+
+        # CP-2D1: dual-write canonical entry-state for informational lines.
+        # DailyStatus: notes was validated pre-mutation; use statuskeyid from that row.
+        # DailyNote: plain text, no StatusKey involved.
+        if line.work_date is not None and canonical_existing_lt in _INFORMATIONAL_ONLY:
+            if canonical_existing_lt == "DailyStatus":
+                # If notes changed: _direct_upd_sk_row holds the validated result.
+                # If notes not in fields (no change): resolve via _resolve_status_key_id
+                # so the canonical row stays in sync with the unchanged existing code.
+                if "notes" in fields:
+                    sk_id = _direct_upd_sk_row["statuskeyid"] if _direct_upd_sk_row else None
+                else:
+                    existing_code = line.notes
+                    sk_id = (
+                        await _resolve_status_key_id(company_id, period.branch_id, existing_code, db)
+                        if existing_code
+                        else None
+                    )
+                await _upsert_entry_state(
+                    company_id, period.branch_id, period_id,
+                    line.driver_id, line.work_date, user_id, db,
+                    status_key_id=sk_id,
+                    note_text=None,
+                    set_status=True,
+                    set_note=False,
+                )
+            else:  # DailyNote
+                new_note = fields.get("notes", line.notes)
+                await _upsert_entry_state(
+                    company_id, period.branch_id, period_id,
+                    line.driver_id, line.work_date, user_id, db,
+                    status_key_id=None,
+                    note_text=new_note or None,
+                    set_status=False,
+                    set_note=True,
+                )
 
     return await _get_line_by_id(draft_line_id, company_id, db)
 
@@ -3248,6 +3335,14 @@ async def void_draft_line(
         old_value={"status": "Active"},
         new_value={"status": "Void"},
     )
+
+    # CP-2D1: clear canonical entry-state field for informational lines.
+    if line.line_type in _INFORMATIONAL_ONLY and line.work_date is not None:
+        await _void_entry_state_field(
+            period_id, company_id, line.driver_id, line.work_date, user_id, db,
+            clear_status=(line.line_type == "DailyStatus"),
+            clear_note=(line.line_type == "DailyNote"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3805,6 +3900,10 @@ async def finalize_period(
                 "its status may have changed concurrently."
             ),
         )
+
+    # CP-2D1 Step 2b: canonicalize legacy DraftLine status/note rows and freeze snapshots.
+    # Runs after the period is atomically Locked, before PayrollFinalLines are written.
+    await _finalize_canonicalize_entry_state(period_id, company_id, period.branch_id, user_id, db)
 
     # Phase 6 (migration 0038) — authorise PayrollFinalLines INSERTs for this
     # transaction only.  The BEFORE INSERT trigger fn_guard_final_line_insert
@@ -9251,33 +9350,38 @@ async def _validate_status_key(
     company_id: int,
     branch_id: int,
     db: AsyncConnection,
+    *,
+    allow_deactivated: bool = False,
 ) -> dict | None:
     """
-    Validate that key_code exists in payrollstatuskeys and is active for the branch.
+    Validate that key_code exists in payrollstatuskeys for the branch.
 
-    - None / blank → returns None (caller treats as clear)
-    - Valid active  → returns the full row dict (including all limit fields)
-    - Not found / inactive → raises HTTP 422
+    - None / blank           → returns None (caller treats as clear)
+    - Valid active           → returns the full row dict (including all limit fields)
+    - Not found              → raises HTTP 422
+    - Inactive key           → raises HTTP 422 unless allow_deactivated=True
+      (allow_deactivated is used when the user is re-submitting a status code that
+       matches an existing DraftLine selection — key was deactivated after it was
+       originally applied, so saving the same value unchanged should not be blocked)
     """
     if not key_code or key_code.strip() == "":
         return None
     result = await db.execute(
         text("""
-            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue,
+            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue, isactive,
                    limitusesperperiodenabled, limitusesperperiod,
                    limitusesperdriverenabled, limitusesperdriver,
                    limitusesacrossdriversenabled, limitusesacrossdrivers,
                    limitusesperdayenabled, limitusesperday
             FROM   payroll.payrollstatuskeys
-            WHERE  companyid = :cid
-              AND  branchid  = :bid
+            WHERE  companyid  = :cid
+              AND  branchid   = :bid
               AND  statuscode = :code
-              AND  isactive   = TRUE
         """),
         {"cid": company_id, "bid": branch_id, "code": key_code.strip()},
     )
     row = result.mappings().first()
-    if row is None:
+    if row is None or (not allow_deactivated and not row["isactive"]):
         raise HTTPException(
             status_code=422,
             detail=(
@@ -9286,6 +9390,316 @@ async def _validate_status_key(
             ),
         )
     return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# CP-2D1: canonical daily driver/day entry-state helpers
+# ---------------------------------------------------------------------------
+
+_KEEP = object()  # sentinel: do not modify this field in ON CONFLICT UPDATE
+
+
+async def _resolve_status_key_id(
+    company_id: int,
+    branch_id: int,
+    status_code: str,
+    db: AsyncConnection,
+) -> "int | None":
+    """Return StatusKeyID for status_code — no isactive filter (accepts deactivated)."""
+    result = await db.execute(
+        text(
+            "SELECT statuskeyid FROM payroll.payrollstatuskeys "
+            "WHERE companyid = :cid AND branchid = :bid AND statuscode = :code LIMIT 1"
+        ),
+        {"cid": company_id, "bid": branch_id, "code": status_code},
+    )
+    row = result.first()
+    return row[0] if row else None
+
+
+async def _upsert_entry_state(
+    company_id: int,
+    branch_id: int,
+    period_id: int,
+    driver_id: int,
+    work_date: "date",
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    status_key_id: "int | None" = None,
+    note_text: "str | None" = None,
+    set_status: bool = True,
+    set_note: bool = True,
+) -> None:
+    """
+    Upsert canonical PayrollPeriodDriverDayEntryState row.
+
+    set_status / set_note control which fields are updated on conflict.
+    When both are True (default, save_day_grid path), both fields are set and
+    IsVoided is derived from whether both would be empty.
+    When only one is True (direct DraftLine API path), the other field is
+    not touched by the ON CONFLICT UPDATE — only the INSERT uses NULL as default.
+    """
+    if not set_status and not set_note:
+        return
+
+    day_id_result = await db.execute(
+        text(
+            "SELECT payrollperioddayid FROM payroll.payrollperioddays "
+            "WHERE payrollperiodid = :pid AND workdate = :dt LIMIT 1"
+        ),
+        {"pid": period_id, "dt": work_date},
+    )
+    day_id = day_id_result.scalar_one_or_none()
+
+    # IsVoided: only deterministic when setting both fields simultaneously.
+    # Single-field updates use FALSE (we are setting something, so not voided).
+    if set_status and set_note:
+        is_voided = status_key_id is None and not note_text
+    else:
+        is_voided = False
+
+    # Build ON CONFLICT SET clause — only include fields being updated.
+    conflict_parts = []
+    if set_status:
+        conflict_parts.append("statuskeyid = EXCLUDED.statuskeyid")
+    if set_note:
+        conflict_parts.append("notetext = EXCLUDED.notetext")
+    if set_status and set_note:
+        conflict_parts.append("isvoided = EXCLUDED.isvoided")
+    else:
+        conflict_parts.append("isvoided = FALSE")
+    conflict_parts += [
+        "updatedbyuserid = EXCLUDED.updatedbyuserid",
+        "updatedatutc    = NOW()",
+    ]
+    conflict_clause = ",\n                    ".join(conflict_parts)
+
+    await db.execute(
+        text(f"""
+            INSERT INTO payroll.payrollperioddriverdayentrystate
+                (companyid, branchid, payrollperiodid, payrollperioddayid,
+                 workdate, driverid, statuskeyid, notetext, isvoided,
+                 createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
+            VALUES
+                (:cid, :bid, :pid, :day_id,
+                 :dt, :did, :skid, :note, :voided,
+                 :uid, :uid, NOW(), NOW())
+            ON CONFLICT (payrollperiodid, driverid, workdate) DO UPDATE SET
+                {conflict_clause}
+        """),
+        {
+            "cid":    company_id,
+            "bid":    branch_id,
+            "pid":    period_id,
+            "day_id": day_id,
+            "dt":     work_date,
+            "did":    driver_id,
+            "skid":   status_key_id,
+            "note":   note_text or None,
+            "voided": is_voided,
+            "uid":    user_id,
+        },
+    )
+
+
+async def _void_entry_state_field(
+    period_id: int,
+    company_id: int,
+    driver_id: int,
+    work_date: "date",
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    clear_status: bool = False,
+    clear_note: bool = False,
+) -> None:
+    """
+    Update canonical entry-state row when a DailyStatus or DailyNote DraftLine is voided.
+
+    Sets the corresponding field to NULL and recomputes IsVoided (TRUE only when
+    both fields would then be empty).  No-op if the canonical row does not exist.
+    """
+    if not clear_status and not clear_note:
+        return
+
+    if clear_status and clear_note:
+        set_clause = "statuskeyid = NULL, notetext = NULL, isvoided = TRUE"
+    elif clear_status:
+        set_clause = "statuskeyid = NULL, isvoided = (notetext IS NULL OR notetext = '')"
+    else:
+        set_clause = "notetext = NULL, isvoided = (statuskeyid IS NULL)"
+
+    await db.execute(
+        text(f"""
+            UPDATE payroll.payrollperioddriverdayentrystate
+            SET    {set_clause},
+                   updatedbyuserid = :uid,
+                   updatedatutc    = NOW()
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  driverid        = :did
+              AND  workdate        = :dt
+              AND  isvoided          = FALSE
+        """),
+        {"pid": period_id, "cid": company_id, "did": driver_id, "dt": work_date, "uid": user_id},
+    )
+
+
+async def _finalize_canonicalize_entry_state(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    CP-2D1 finalization Step 2b.
+
+    Called inside finalize_period after the period is atomically claimed as Locked,
+    before PayrollFinalLines are written.  Runs in the same transaction.
+
+    Part A: Insert canonical entry-state rows for any driver/day/date combinations
+    that have a legacy DailyStatus/DailyNote DraftLine but no canonical row.
+    This covers periods created before CP-2D1 was deployed.
+
+    Part B: Fill snapshot fields (StatusCodeSnapshot, StatusLabelSnapshot, etc.) on
+    all non-voided canonical rows that have not yet been finalized.  The join omits
+    isactive=TRUE so that deactivated keys still get a proper snapshot.  Rows with
+    no StatusKeyID (note-only rows) are timestamped so display uses the canonical path.
+    """
+    # Part A-1: Create canonical rows from DailyStatus DraftLines that have none.
+    # The LEFT JOIN on DailyNote DraftLines picks up any note for the same driver/day.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.payrollperioddriverdayentrystate
+                (companyid, branchid, payrollperiodid, payrollperioddayid,
+                 workdate, driverid, statuskeyid, notetext, isvoided,
+                 createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
+            SELECT
+                ds.companyid,
+                ds.branchid,
+                ds.payrollperiodid,
+                ppd.payrollperioddayid,
+                ds.workdate,
+                ds.driverid,
+                sk.statuskeyid,
+                dn.notes,
+                FALSE,
+                :uid, :uid, NOW(), NOW()
+            FROM   payroll.payrolldraftlines ds
+            LEFT JOIN payroll.payrollstatuskeys sk
+                ON  sk.companyid  = ds.companyid
+                AND sk.branchid   = ds.branchid
+                AND sk.statuscode = ds.notes
+            LEFT JOIN payroll.payrolldraftlines dn
+                ON  dn.payrollperiodid = ds.payrollperiodid
+                AND dn.driverid        = ds.driverid
+                AND dn.workdate        = ds.workdate
+                AND dn.linetype        = 'DailyNote'
+                AND dn.status         != 'Void'
+            LEFT JOIN payroll.payrollperioddays ppd
+                ON  ppd.payrollperiodid = ds.payrollperiodid
+                AND ppd.workdate        = ds.workdate
+            WHERE  ds.payrollperiodid = :pid
+              AND  ds.companyid       = :cid
+              AND  ds.linetype        = 'DailyStatus'
+              AND  ds.status         != 'Void'
+              AND  NOT EXISTS (
+                       SELECT 1
+                       FROM   payroll.payrollperioddriverdayentrystate e
+                       WHERE  e.payrollperiodid = ds.payrollperiodid
+                         AND  e.driverid        = ds.driverid
+                         AND  e.workdate        = ds.workdate
+                   )
+            ON CONFLICT (payrollperiodid, driverid, workdate) DO NOTHING
+        """),
+        {"pid": period_id, "cid": company_id, "uid": user_id},
+    )
+
+    # Part A-2: Create canonical rows from DailyNote DraftLines with no DailyStatus
+    # counterpart and no existing canonical row.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.payrollperioddriverdayentrystate
+                (companyid, branchid, payrollperiodid, payrollperioddayid,
+                 workdate, driverid, statuskeyid, notetext, isvoided,
+                 createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
+            SELECT
+                dn.companyid,
+                dn.branchid,
+                dn.payrollperiodid,
+                ppd.payrollperioddayid,
+                dn.workdate,
+                dn.driverid,
+                NULL,
+                dn.notes,
+                FALSE,
+                :uid, :uid, NOW(), NOW()
+            FROM   payroll.payrolldraftlines dn
+            LEFT JOIN payroll.payrollperioddays ppd
+                ON  ppd.payrollperiodid = dn.payrollperiodid
+                AND ppd.workdate        = dn.workdate
+            WHERE  dn.payrollperiodid = :pid
+              AND  dn.companyid       = :cid
+              AND  dn.linetype        = 'DailyNote'
+              AND  dn.status         != 'Void'
+              AND  NOT EXISTS (
+                       SELECT 1
+                       FROM   payroll.payrolldraftlines ds2
+                       WHERE  ds2.payrollperiodid = dn.payrollperiodid
+                         AND  ds2.driverid        = dn.driverid
+                         AND  ds2.workdate        = dn.workdate
+                         AND  ds2.linetype        = 'DailyStatus'
+                         AND  ds2.status         != 'Void'
+                   )
+              AND  NOT EXISTS (
+                       SELECT 1
+                       FROM   payroll.payrollperioddriverdayentrystate e
+                       WHERE  e.payrollperiodid = dn.payrollperiodid
+                         AND  e.driverid        = dn.driverid
+                         AND  e.workdate        = dn.workdate
+                   )
+            ON CONFLICT (payrollperiodid, driverid, workdate) DO NOTHING
+        """),
+        {"pid": period_id, "cid": company_id, "uid": user_id},
+    )
+
+    # Part B-1: Fill snapshot columns on canonical rows that have a StatusKeyID.
+    # Join omits isactive=TRUE so deactivated keys still get a proper snapshot.
+    await db.execute(
+        text("""
+            UPDATE payroll.payrollperioddriverdayentrystate ppdes
+            SET    statuscodesnapshot        = sk.statuscode,
+                   statuslabelsnapshot       = sk.keyname,
+                   statusisoffreasonsnapshot = sk.isoffreason,
+                   statushoursvaluesnapshot  = sk.hoursvalue,
+                   finalizedatutc            = NOW(),
+                   updatedatutc              = NOW()
+            FROM   payroll.payrollstatuskeys sk
+            WHERE  ppdes.payrollperiodid = :pid
+              AND  ppdes.companyid       = :cid
+              AND  ppdes.statuskeyid     = sk.statuskeyid
+              AND  ppdes.isvoided          = FALSE
+              AND  ppdes.finalizedatutc  IS NULL
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+
+    # Part B-2: Timestamp note-only rows (no StatusKeyID) so display uses canonical path.
+    await db.execute(
+        text("""
+            UPDATE payroll.payrollperioddriverdayentrystate
+            SET    finalizedatutc = NOW(),
+                   updatedatutc   = NOW()
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  statuskeyid     IS NULL
+              AND  isvoided          = FALSE
+              AND  finalizedatutc  IS NULL
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
 
 
 async def _enforce_status_key_limits(
@@ -9742,6 +10156,52 @@ async def get_day_grid(
             if did in lines_by_driver:
                 lines_by_driver[did].append(dict(row))
 
+    # ── CP-2D1: batch-load canonical entry-state rows for this date ───────── #
+    canonical_by_driver: dict[int, dict] = {}
+    if driver_ids:
+        in_clause_ces, in_params_ces = _build_in_clause(driver_ids, "ces_drv")
+        ces_result = await db.execute(
+            text(f"""
+                SELECT driverid, statuskeyid, notetext,
+                       statuscodesnapshot, statuslabelsnapshot,
+                       statusisoffreasonsnapshot, finalizedatutc
+                FROM   payroll.payrollperioddriverdayentrystate
+                WHERE  payrollperiodid = :pid
+                  AND  workdate        = :dt
+                  AND  driverid        IN ({in_clause_ces})
+                  AND  isvoided          = FALSE
+            """),
+            {"pid": period_id, "dt": work_date, **in_params_ces},
+        )
+        for row in ces_result.mappings().all():
+            canonical_by_driver[row["driverid"]] = dict(row)
+
+    # Reverse lookup: StatusKeyID → DayGridStatusKey (for editable canonical path).
+    status_key_id_map: dict[int, DayGridStatusKey] = {sk.status_key_id: sk for sk in status_keys}
+
+    # Pre-load any deactivated keys referenced in canonical rows for editable periods.
+    # (Deactivated keys are absent from status_key_id_map; fetch them in one batch.)
+    deactivated_key_map: dict[int, dict] = {}
+    deactivated_sk_ids = {
+        row["statuskeyid"]
+        for row in canonical_by_driver.values()
+        if row.get("finalizedatutc") is None
+        and row.get("statuskeyid") is not None
+        and row["statuskeyid"] not in status_key_id_map
+    }
+    if deactivated_sk_ids:
+        in_clause_dk, in_params_dk = _build_in_clause(list(deactivated_sk_ids), "dkid")
+        dk_result = await db.execute(
+            text(f"""
+                SELECT statuskeyid, statuscode, keyname, isoffreason
+                FROM   payroll.payrollstatuskeys
+                WHERE  statuskeyid IN ({in_clause_dk})
+            """),
+            in_params_dk,
+        )
+        for row in dk_result.mappings().all():
+            deactivated_key_map[row["statuskeyid"]] = dict(row)
+
     # ── Build rows ────────────────────────────────────────────────────────── #
     col_codes = {c.pay_item_code for c in columns}
     rows: list[DayGridRow] = []
@@ -9757,22 +10217,52 @@ async def get_day_grid(
         did = drv["driverid"]
         drv_lines = lines_by_driver.get(did, [])
 
-        # Index lines by canonical code (normalise legacy names)
         values: dict[str, DayGridLineValue] = {}
         status_key_code: str | None = None
         notes_text: str | None = None
+        sk_label: str | None = None
+        is_off: bool = False
+
+        # CP-2D1: canonical-first per-driver status/note read.
+        # Falls back to DraftLines when no canonical row exists (legacy periods).
+        ces_row = canonical_by_driver.get(did)
+        if ces_row is not None:
+            notes_text = ces_row.get("notetext")
+            if ces_row["finalizedatutc"] is not None:
+                # Locked period: use frozen snapshot values.
+                status_key_code = ces_row["statuscodesnapshot"]
+                sk_label = ces_row["statuslabelsnapshot"]
+                snap_off = ces_row["statusisoffreasonsnapshot"]
+                is_off = bool(snap_off) if snap_off is not None else False
+            else:
+                # Editable period: live label/flags via StatusKeyID.
+                sk_id = ces_row.get("statuskeyid")
+                if sk_id is not None:
+                    live_sk = status_key_id_map.get(sk_id)
+                    if live_sk is not None:
+                        status_key_code = live_sk.key_code
+                        sk_label = live_sk.label
+                        is_off = bool(live_sk.is_off_reason)
+                    else:
+                        dk = deactivated_key_map.get(sk_id)
+                        if dk:
+                            status_key_code = dk["statuscode"]
+                            sk_label = dk["keyname"]
+                            is_off = bool(dk["isoffreason"])
 
         for line in drv_lines:
             lt = line["linetype"]
-            # Normalise legacy → canonical
             canonical = _LEGACY_TO_CANONICAL.get(lt, lt)
 
             if lt == "DailyStatus":
-                # Status key code is stored in the Notes column of DailyStatus lines
-                status_key_code = line["notes"]
+                if ces_row is None:
+                    # Legacy fallback: status code stored in DraftLine notes.
+                    status_key_code = line["notes"]
                 continue
             if lt == "DailyNote":
-                notes_text = line["notes"]
+                if ces_row is None:
+                    # Legacy fallback: note text stored in DraftLine notes.
+                    notes_text = line["notes"]
                 continue
 
             if canonical in col_codes:
@@ -9794,9 +10284,12 @@ async def get_day_grid(
                 if calc:
                     gross_total += Decimal(str(calc))
 
-        # Resolve status metadata
-        sk_obj = status_key_map.get(status_key_code) if status_key_code else None
-        is_off = bool(sk_obj.is_off_reason) if sk_obj else False
+        # Legacy path: resolve label/is_off from status_key_map when no canonical row.
+        if ces_row is None and status_key_code:
+            sk_obj = status_key_map.get(status_key_code)
+            if sk_obj is not None:
+                sk_label = sk_obj.label
+                is_off = bool(sk_obj.is_off_reason)
 
         if is_off:
             off_count += 1
@@ -9810,7 +10303,7 @@ async def get_day_grid(
             driver_name=drv["drivername"],
             driver_code=drv.get("drivercode"),
             status_key=status_key_code,
-            status_label=sk_obj.label if sk_obj else None,
+            status_label=sk_label,
             is_off=is_off,
             notes=notes_text,
             values=values,
@@ -9979,7 +10472,30 @@ async def save_day_grid(
 
         # P1 #3: validate status key — raises 422 for invalid/inactive.
         # Returns the full key row (with limit fields) or None when clearing.
-        key_row = await _validate_status_key(save_row.status_key, company_id, branch_id, db)
+        # CP-2D1: if the submitted code matches the existing DraftLine value,
+        # the user is not changing the status — allow saves of deactivated keys
+        # that were applied before the key was deactivated.
+        allow_deactivated = False
+        if save_row.status_key:
+            existing_sk_q = await db.execute(
+                text("""
+                    SELECT notes FROM payroll.payrolldraftlines
+                    WHERE  payrollperiodid = :pid AND workdate = :dt AND driverid = :did
+                      AND  linetype = 'DailyStatus' AND status != 'Void'
+                    LIMIT 1
+                """),
+                {"pid": period_id, "dt": work_date, "did": driver_id},
+            )
+            existing_sk_row = existing_sk_q.mappings().first()
+            if (
+                existing_sk_row is not None
+                and existing_sk_row["notes"] == save_row.status_key.strip()
+            ):
+                allow_deactivated = True
+        key_row = await _validate_status_key(
+            save_row.status_key, company_id, branch_id, db,
+            allow_deactivated=allow_deactivated,
+        )
         validated_status_key = save_row.status_key  # None/blank = clear
 
         parsed_rows.append((save_row, driver_id, parsed_values, validated_status_key, key_row))
@@ -10035,7 +10551,7 @@ async def save_day_grid(
     for code in sorted(all_canonical_codes):
         await _lock_pay_item_for_source_write(code, company_id, db, period_id=period.payroll_period_id)
 
-    for save_row, driver_id, parsed_values, validated_status_key, _ in parsed_rows:
+    for save_row, driver_id, parsed_values, validated_status_key, key_row in parsed_rows:
 
         # ── Pay item lines ────────────────────────────────────────────────── #
         for canonical, qty in parsed_values.items():
@@ -10310,6 +10826,13 @@ async def save_day_grid(
                     old_value={"line_type": "DailyNote"},
                     new_value={"status": "Void"},
                 )
+
+        # CP-2D1: upsert canonical entry-state after both DailyStatus/DailyNote writes.
+        await _upsert_entry_state(
+            company_id, branch_id, period_id, driver_id, work_date, user_id, db,
+            status_key_id=key_row["statuskeyid"] if key_row else None,
+            note_text=notes_val if notes_val else None,
+        )
 
     # Return the refreshed grid
     return await get_day_grid(
