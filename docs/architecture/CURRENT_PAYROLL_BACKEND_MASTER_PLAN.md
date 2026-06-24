@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`; CP-2C is `Done with Notes`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1275,8 +1275,8 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 ### Phase 2 status note
 
 **Status:** In Progress
-**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C through CP-2F remain Pending / not started.
-**Review result:** No CP-2A or CP-2B P0/P1 blockers remain. No CP-2C+ implementation has begun. Add Day activation is deferred and is not part of this CP-2B closure.
+**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C Done with Notes. CP-2D through CP-2F remain Pending / not started.
+**Review result:** No CP-2A, CP-2B, or CP-2C P0/P1 blockers remain. No CP-2D+ implementation has begun. Add Day activation is deferred and is not part of CP-2C closure.
 
 ### CP-2A completion note
 
@@ -1366,6 +1366,59 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P2: Add audit-count assertion for D26 later if desired.
 - P2: Add custom interval exact day-count test later if desired.
 - P2: Add rollback proof for day-row insert failure later if desired.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: User global git ignore warning remains environment-only.
+- P3: LF/CRLF warnings remain environment-only.
+
+### CP-2C completion note
+
+**Status:** Done with Notes
+**Codex verdict:** PASS WITH NOTES
+**Implementation commit:** `13d99c0` — feat: add cp-2c payroll pay-item snapshots
+**Review result:** No P0/P1 blockers remain. CP-2C pay-item layout snapshot foundation is safely closed.
+
+**What CP-2C completed:**
+- Added migration 0053.
+- Added `payroll.PayrollPeriodPayItems`.
+- Added period-owned pay-item layout snapshots.
+- Snapshot rows freeze: PayItem identity/code/name/display label; category/data type/unit/scope/rate behavior; visibility flags; RequiresRate; system/custom flags; PayItem status at snapshot time; active-in-period state; sort order; source branch config metadata where available.
+- Snapshots all non-retired eligible system/company PayItems.
+- Stores inactive branch items with `IsActiveInPeriod = false`.
+- Candidate-created Open periods create snapshot rows.
+- Candidate-created Draft/Prepared periods create snapshot rows.
+- Legacy-created periods create snapshot rows.
+- Candidate replay is idempotent and does not duplicate rows.
+- Draft → Open promotion preserves existing snapshot rows.
+- No historical backfill was performed.
+- Legacy periods without snapshot rows retain live-config fallback.
+- `get_day_grid` uses snapshot rows for snapshotted periods.
+- `save_day_grid` validates against snapshot rows for snapshotted periods.
+- Direct daily-line creation validates against snapshot rows.
+- Daily-line meaningful updates validate against snapshot rows.
+- Period Pay creation validates against snapshot rows.
+- Period Pay meaningful updates validate against snapshot rows.
+- Snapshot-first validation allows live-retired custom PayItems to remain usable for old periods when active in that period snapshot.
+- `get_day_grid` / `save_day_grid` do not fall back to live config when a snapshot exists but has zero active Daily items.
+- Custom Pay Item delete/retire guard treats snapshot references as historical usage.
+- DailyStatus / DailyNote remain pseudo/informational lines and are not snapshotted.
+- PTO_STATUS remains a Daily PayItem.
+- BONUS, ADJUSTMENT, and GUARANTEED_MINIMUM are snapshot metadata only.
+- No calculation/rate/finalization/ledger/report/expected-income/bonus workflow behavior was added.
+- No Add Day activation was added.
+- Prepared entry was not enabled.
+- SemiMonthly and PayDate behavior were not introduced.
+
+**Validation:**
+- CP-2C focused: 36 passed, 0 skipped
+- CP-2B + CP-2A + CP-1C/D/E: 198 passed, 0 skipped
+- payroll setup + payroll + CP-1A/B: 135 passed, 0 skipped
+- CP-0A/B/C/D: 114 passed, 0 skipped
+- Alembic current/head: 0053 / 0053
+- `git diff --check`: clean
+
+**Remaining P2/P3 notes:**
+- P2: Consider stronger DB-level composite integrity for PayrollPeriodPayItems company/branch vs parent period.
+- P2: Clean minor comment mojibake later.
 - P3: Temporary PostgreSQL shutdown warning remains environment-only.
 - P3: User global git ignore warning remains environment-only.
 - P3: LF/CRLF warnings remain environment-only.
@@ -1827,7 +1880,7 @@ Existing direct status transitions and cleanup fixtures assume Rejected→Open. 
 
 - [x] P2A: schedule versioning. — **Done with Notes**
 - [x] P2B: period-day calendar snapshots. — **Done with Notes**
-- [ ] P2C: snapshot pay-item layout/order/classification.
+- [x] P2C: snapshot pay-item layout/order/classification. — **Done with Notes**
 - [ ] P2D: normalize daily statuses/notes.
 - [ ] P2E: unify historical driver-date eligibility.
 - [ ] P2F: enable controlled Prepared operational entry without financial exposure.
