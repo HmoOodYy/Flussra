@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`; CP-2C is `Done with Notes`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`; CP-2C is `Done with Notes`; CP-2D1 is `Done with Notes`; CP-2D2, CP-2E, and CP-2F are `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1275,8 +1275,8 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 ### Phase 2 status note
 
 **Status:** In Progress
-**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C Done with Notes. CP-2D through CP-2F remain Pending / not started.
-**Review result:** No CP-2A, CP-2B, or CP-2C P0/P1 blockers remain. No CP-2D+ implementation has begun. Add Day activation is deferred and is not part of CP-2C closure.
+**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C Done with Notes. CP-2D1 Done with Notes. CP-2D2 Pending. CP-2E and CP-2F Pending.
+**Review result:** No CP-2A, CP-2B, CP-2C, or CP-2D1 P0/P1 blockers remain. CP-2D has been split: CP-2D1 (canonical daily entry state) is complete; CP-2D2 (status-driven payment lane) remains pending. Add Day activation is deferred and is not part of CP-2C closure.
 
 ### CP-2A completion note
 
@@ -1422,6 +1422,76 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: Temporary PostgreSQL shutdown warning remains environment-only.
 - P3: User global git ignore warning remains environment-only.
 - P3: LF/CRLF warnings remain environment-only.
+
+### CP-2D1 completion note
+
+**Status:** Done with Notes
+**Codex verdict:** PASS WITH NOTES (initial FAIL due to P1 — direct DailyStatus write accepted invalid/inactive codes; fixed before commit)
+**Implementation commit:** `d872889` — feat: add cp-2d1 canonical daily entry state
+**Review result:** No P0/P1 blockers remain. CP-2D1 canonical daily entry state is safely closed. CP-2D has been split — CP-2D1 covers the canonical table and read/write plumbing; CP-2D2 (status-driven payment lane) remains Pending.
+
+**What CP-2D1 completed:**
+- Added migration 0054.
+- Added `payroll.PayrollPeriodDriverDayEntryState` — one row per driver per work-date per period.
+- Selected StatusKey stored as `StatusKeyID` (FK, ON DELETE RESTRICT).
+- User note stored as `NoteText` (plain text, independent of StatusKeyID).
+- `IsVoided` soft-delete flag: set TRUE when both `StatusKeyID` and `NoteText` are cleared.
+- Finalization snapshot fields (`StatusCodeSnapshot`, `StatusLabelSnapshot`, `StatusIsOffReasonSnapshot`, `StatusHoursValueSnapshot`, `FinalizedAtUtc`) remain NULL for editable periods; frozen at finalization.
+- UNIQUE constraint on `(PayrollPeriodID, DriverID, WorkDate)`.
+- ON DELETE CASCADE from `PayrollPeriods` (period delete cascades canonical rows).
+- 5 supporting indexes added.
+- Live StatusKey dropdown from `PayrollStatusKeys` for editable periods — no availability snapshot at period open; no `PayrollPeriodStatusKeys` table.
+- `_upsert_entry_state` shared helper with `set_status` / `set_note` flags for partial-field writes.
+- `_void_entry_state_field` partial-clear helper with `clear_status` / `clear_note` flags.
+- `_finalize_canonicalize_entry_state` finalization helper: Part A creates canonical rows from legacy DailyStatus/DailyNote DraftLines; Part B fills snapshot fields and timestamps note-only rows.
+- `save_day_grid` dual-writes canonical row after DraftLine write; deactivated-key bypass for unchanged resubmissions preserved.
+- `get_day_grid` batch-loads canonical rows; per-driver canonical-first read with DraftLine legacy fallback.
+- Finalized/locked periods use snapshot values for status code, label, and is_off display.
+- Editable periods resolve label/is_off from live `status_key_id_map`; deactivated keys referenced in existing canonical rows pre-fetched via `deactivated_key_map`.
+- `add_draft_line` with `DailyStatus`: validates status code as active before inserting DraftLine; blank/missing notes rejected; invalid/inactive codes raise 422 before any mutation.
+- `update_draft_line` with `DailyStatus`: validates new code as active before updating DraftLine; policy — direct path always requires active key, no deactivated bypass (unlike `save_day_grid`).
+- `add_draft_line` / `update_draft_line` / `void_draft_line` with `DailyNote`: dual-write canonical `NoteText`; no StatusKey validation required.
+- `void_draft_line` clears canonical status and/or note field depending on line type; sets `IsVoided = TRUE` when both fields become NULL.
+- Legacy DailyStatus/DailyNote DraftLine dual-write fully preserved for compatibility (finalization Step 3, usage-limit enforcement, off-driver query).
+- No payment implementation, no `StatusKeyPayRules`, no derived payment lines.
+- No DAC/allowance ledger, no off allowance.
+- No `PTO_STATUS` behavior change.
+- No finalization total/rate/ledger/report changes.
+- No `PayrollPeriodStatusKeys` (no availability snapshot at period open).
+- No frontend work.
+- Added CP-2D1 focused tests (23 tests, 0 skipped); updated Alembic head expectations in CP-2B and CP-2C test files to 0054.
+
+**Validation:**
+- CP-2D1 focused: 23 passed, 0 skipped
+- CP-2C + CP-2B: 62 passed, 0 skipped
+- CP-0A: 74 passed, 0 skipped
+- Alembic current/head: 0054 / 0054
+- `git diff --check`: clean (LF→CRLF warning only, environment-only)
+
+**Remaining P2/P3 notes:**
+- P2: `update_draft_line` deactivated-bypass is intentionally absent on the direct path; document in API notes if a UI caller needs it.
+- P2: `_resolve_status_key_id` (no `isactive` filter) still used in `update_draft_line` when `notes` is not changing but other fields are; this is correct behavior (canonical stays in sync without forcing active-key re-validation on non-status edits).
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: User global git ignore warning remains environment-only.
+- P3: LF/CRLF warnings remain environment-only.
+
+### CP-2D2 note (Pending)
+
+**Status:** Pending
+**Description:** Status-driven payment lane — derives system payment lines from a selected StatusKey via `StatusKeyPayRule` or equivalent mechanism.
+
+**Scope when started:**
+- `StatusKeyPayRule` catalog or equivalent payment-rule table.
+- Derived system payment DraftLines generated when a driver's daily status is set.
+- Driver-rate resolution for status-driven lines.
+- Double-count / `PTO_STATUS` transition handling (ensure status-driven pay and PTO_STATUS do not both finalize for the same day).
+- No DAC/off allowance ledger in CP-2D2.
+
+**What CP-2D2 must not change:**
+- Canonical `PayrollPeriodDriverDayEntryState` table schema (set by CP-2D1).
+- DailyStatus/DailyNote DraftLine dual-write behavior (set by CP-2D1).
+- Finalization snapshot fields (set by CP-2D1).
+- PTO_STATUS finalizes at $0 behavior (unchanged since CP-0).
 
 ### Phase 1 completion note
 
