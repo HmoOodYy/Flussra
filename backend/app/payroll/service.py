@@ -577,6 +577,21 @@ async def create_period(
     )
     period_id: int = insert_result.scalar_one()
 
+    # CP-2B: create period-day snapshot from the schedule version's mask.
+    # Read from PayrollScheduleVersions (immutable) — not from mutable BranchPayrollSettings.
+    sv_mask_row = (await db.execute(
+        text(
+            "SELECT normaldaysoffmask FROM payroll.PayrollScheduleVersions "
+            "WHERE scheduleversionid = :sv_id"
+        ),
+        {"sv_id": legacy_sv_id},
+    )).mappings().first()
+    period_mask = sv_mask_row["normaldaysoffmask"] if sv_mask_row else None
+    await _create_period_day_rows(
+        period_id, company_id, data.branch_id,
+        legacy_sv_id, data.start_date, data.end_date, period_mask, db,
+    )
+
     return await get_period_by_id(company_id, user_id, period_id, db)
 
 
@@ -2706,17 +2721,15 @@ async def add_draft_line(
             detail="work_date is required for Daily draft lines.",
         )
 
-    # work_date must fall within the period's date range.
-    # Rate lookup and activation checks use work_date — accepting a date outside
-    # the period would silently apply rates/configs from a different effective window.
-    if not (period.start_date <= data.work_date <= period.end_date):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"work_date {data.work_date} is outside the period range "
-                f"({period.start_date} to {period.end_date})."
-            ),
-        )
+    # CP-2B: snapshot-aware work_date validation.
+    # Checks StartDate/EndDate bounds and, when PayrollPeriodDays rows exist for
+    # the period, also verifies the work_date appears in the snapshot.
+    # Raises 400 for out-of-bounds; raises 400 for snapshot-missing dates.
+    # IsConfiguredOffDay does not block entry in CP-2B.
+    await _validate_period_work_date(
+        period.payroll_period_id, data.work_date,
+        period.start_date, period.end_date, db,
+    )
 
     # Full driver eligibility check: company, branch, employment status,
     # hire/termination dates, and transfer effective windows.
@@ -9372,15 +9385,11 @@ async def get_day_grid(
         else:
             work_date = period.start_date
 
-    # ── work_date bounds check ────────────────────────────────────────────── #
-    if not (period.start_date <= work_date <= period.end_date):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"work_date {work_date} is outside the period range "
-                f"({period.start_date} to {period.end_date})."
-            ),
-        )
+    # ── work_date bounds check (CP-2B: snapshot-aware) ───────────────────── #
+    await _validate_period_work_date(
+        period.payroll_period_id, work_date,
+        period.start_date, period.end_date, db,
+    )
 
     # ── Permission: payroll.view OR payroll.entry ─────────────────────────── #
     await _check_any_permission(
@@ -9642,14 +9651,11 @@ async def save_day_grid(
 
     work_date = data.work_date
 
-    if not (period.start_date <= work_date <= period.end_date):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"work_date {work_date} is outside the period range "
-                f"({period.start_date} to {period.end_date})."
-            ),
-        )
+    # CP-2B: snapshot-aware date validation
+    await _validate_period_work_date(
+        period.payroll_period_id, work_date,
+        period.start_date, period.end_date, db,
+    )
 
     # ── Permission: payroll.entry ─────────────────────────────────────────── #
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
@@ -10378,6 +10384,135 @@ def _candidate_dates_at_offset(
     return start, end
 
 
+# ---------------------------------------------------------------------------
+# CP-2B: Period-day snapshot helpers
+# ---------------------------------------------------------------------------
+
+def _generate_period_day_rows(
+    start_date: date,
+    end_date: date,
+    normal_days_off_mask: int | None,
+) -> list[dict]:
+    """
+    Return one dict per calendar day from start_date through end_date inclusive.
+
+    DayOfWeek uses Sun=0 … Sat=6 to match NormalDaysOffMask bit positions
+    (bit 0=Sun, bit 1=Mon, …, bit 6=Sat).
+
+    Conversion from Python date.weekday() (Mon=0 … Sun=6):
+        day_of_week = (python_weekday + 1) % 7
+    """
+    rows = []
+    current = start_date
+    while current <= end_date:
+        py_wd = current.weekday()          # Mon=0 … Sun=6
+        day_of_week = (py_wd + 1) % 7     # Sun=0 … Sat=6
+
+        mask = normal_days_off_mask or 0
+        is_configured_off = bool(mask & (1 << day_of_week))
+        rows.append({
+            "work_date":           current,
+            "day_of_week":         day_of_week,
+            "is_default_work_day": not is_configured_off,
+            "is_configured_off_day": is_configured_off,
+        })
+        current += timedelta(days=1)
+    return rows
+
+
+async def _create_period_day_rows(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    schedule_version_id: int,
+    start_date: date,
+    end_date: date,
+    normal_days_off_mask: int | None,
+    db: AsyncConnection,
+) -> None:
+    """
+    Insert one PayrollPeriodDays row per calendar day for the given period.
+    Called inside the period-creation transaction, still under the branch advisory lock.
+    ON CONFLICT DO NOTHING ensures idempotency (candidate replay guard).
+    Only called when schedule_version_id is not None.
+    """
+    day_rows = _generate_period_day_rows(start_date, end_date, normal_days_off_mask)
+    if not day_rows:
+        return
+
+    values_sql = ", ".join(
+        f"(:pid, :cid, :bid, :sv_id, :wd_{i}, :dow_{i}, :isd_{i}, :ico_{i})"
+        for i in range(len(day_rows))
+    )
+    params: dict = {"pid": period_id, "cid": company_id, "bid": branch_id, "sv_id": schedule_version_id}
+    for i, row in enumerate(day_rows):
+        params[f"wd_{i}"]  = row["work_date"]
+        params[f"dow_{i}"] = row["day_of_week"]
+        params[f"isd_{i}"] = row["is_default_work_day"]
+        params[f"ico_{i}"] = row["is_configured_off_day"]
+
+    await db.execute(
+        text(f"""
+            INSERT INTO payroll.PayrollPeriodDays
+                (PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID,
+                 WorkDate, DayOfWeek, IsDefaultWorkDay, IsConfiguredOffDay)
+            VALUES {values_sql}
+            ON CONFLICT (PayrollPeriodID, WorkDate) DO NOTHING
+        """),
+        params,
+    )
+
+
+async def _validate_period_work_date(
+    period_id: int,
+    work_date: date,
+    start_date: date,
+    end_date: date,
+    db: AsyncConnection,
+) -> None:
+    """
+    Validate that work_date is valid for a period.
+
+    1. Existing StartDate/EndDate bounds check (always applied).
+    2. If PayrollPeriodDays rows exist for the period, work_date must appear
+       in the snapshot. Missing dates are rejected (400).
+    3. Configured-off days (IsConfiguredOffDay=TRUE) are NOT rejected in CP-2B
+       — IsScheduledWorkDay is metadata-only in this version.
+
+    Legacy periods (created before 0052, no day rows) fall back to step 1 only.
+    """
+    if not (start_date <= work_date <= end_date):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"work_date {work_date} is outside the period range "
+                f"({start_date} to {end_date})."
+            ),
+        )
+
+    has_snapshot = (await db.execute(
+        text("SELECT 1 FROM payroll.PayrollPeriodDays WHERE payrollperiodid = :pid LIMIT 1"),
+        {"pid": period_id},
+    )).first()
+
+    if has_snapshot is not None:
+        day_row = (await db.execute(
+            text("""
+                SELECT 1 FROM payroll.PayrollPeriodDays
+                WHERE payrollperiodid = :pid AND workdate = :dt
+            """),
+            {"pid": period_id, "dt": work_date},
+        )).first()
+        if day_row is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"work_date {work_date} is not in the period day snapshot. "
+                    "The requested date was not part of this period's calendar."
+                ),
+            )
+
+
 def _period_end(frequency: str, start: date, interval_days: int | None) -> date:
     if frequency == "Week":
         return start + timedelta(days=6)
@@ -10843,6 +10978,21 @@ async def create_period_from_candidate(
         start_date=computed_start,
         end_date=computed_end,
         setup_fp=current_setup_fp,
+    )
+
+    # CP-2B: create period-day snapshot from the schedule version's mask.
+    # Read from PayrollScheduleVersions (immutable) — not from mutable BranchPayrollSettings.
+    sv_mask_row = (await db.execute(
+        text(
+            "SELECT normaldaysoffmask FROM payroll.PayrollScheduleVersions "
+            "WHERE scheduleversionid = :sv_id"
+        ),
+        {"sv_id": period_sv_id},
+    )).mappings().first()
+    period_mask = sv_mask_row["normaldaysoffmask"] if sv_mask_row else None
+    await _create_period_day_rows(
+        new_period_id, company_id, branch_id,
+        period_sv_id, computed_start, computed_end, period_mask, db,
     )
 
     created_at = datetime.now(timezone.utc)
