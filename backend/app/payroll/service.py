@@ -592,6 +592,11 @@ async def create_period(
         legacy_sv_id, data.start_date, data.end_date, period_mask, db,
     )
 
+    # CP-2C: create period pay-item layout snapshot.
+    await _create_period_pay_item_rows(
+        period_id, company_id, data.branch_id, data.start_date, db,
+    )
+
     return await get_period_by_id(company_id, user_id, period_id, db)
 
 
@@ -1739,6 +1744,8 @@ async def _lock_pay_item_for_source_write(
     line_type: str,
     company_id: int,
     db: AsyncConnection,
+    *,
+    period_id: int | None = None,
 ) -> None:
     """
     CP-0A: Acquire a FOR UPDATE row lock on the company-owned PayItems catalog
@@ -1759,11 +1766,36 @@ async def _lock_pay_item_for_source_write(
     needed.  Informational-only items (DailyStatus, DailyNote) have no catalog
     row and are skipped.
 
+    CP-2C: if period_id is provided and the item appears in that period's
+    PayrollPeriodPayItems snapshot with IsActiveInPeriod=TRUE, the live
+    status check is bypassed.  The FK lock is still acquired so a concurrent
+    physical-delete (which the snapshot FK blocks anyway) is serialised.
+    Physical deletion of an item with snapshot rows is already prevented by
+    the FK constraint on PayrollPeriodPayItems; this code path is reached only
+    when a concurrent retirement races with the write.
+
     Raises HTTP 422 if the custom row is absent when the lock is attempted,
     meaning a concurrent deletion committed between validation and this call.
     """
     if line_type in _INFORMATIONAL_ONLY:
         return  # no PayItems catalog row
+
+    # CP-2C: snapshot authorisation — item active in period snapshot remains
+    # usable even if live PayItems.Status was later changed to Retired.
+    snapshot_authorised = False
+    if period_id is not None:
+        snap_auth = await db.execute(
+            text("""
+                SELECT 1 FROM payroll.payrollperiodpayitems
+                WHERE payrollperiodid = :pid
+                  AND payitemcode     = :code
+                  AND isactiveinperiod = TRUE
+                LIMIT 1
+            """),
+            {"pid": period_id, "code": line_type},
+        )
+        if snap_auth.first() is not None:
+            snapshot_authorised = True
 
     # Try to lock the custom (company-specific) row and read its status.
     # Selecting status here means the retirement race is caught: if a concurrent
@@ -1780,7 +1812,7 @@ async def _lock_pay_item_for_source_write(
     )
     row = result.mappings().first()
     if row is not None:
-        if row["status"] != "Active":
+        if row["status"] != "Active" and not snapshot_authorised:
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -1789,7 +1821,7 @@ async def _lock_pay_item_for_source_write(
                     "Refresh and try again."
                 ),
             )
-        # Custom row locked and Active — held until this transaction commits.
+        # Custom row locked — held until this transaction commits.
         return
 
     # No custom row.  Check whether a system row exists (system items can't
@@ -2139,6 +2171,7 @@ async def _validate_line_type(
     company_id: int,
     as_of_date: date,
     db: AsyncConnection,
+    period_id: int | None = None,
 ) -> _LineTypeInfo:
     """
     Validate a daily draft line's line_type and return its calculation metadata.
@@ -2157,10 +2190,12 @@ async def _validate_line_type(
           1. Finalization-only codes rejected.
           2. Informational-only items (DailyStatus, DailyNote) accepted without
              any DB checks — they have no PayItems catalog row.
-          3. DB lookup — both system and custom.
-          4. Retired / Period-scope guards.
-          5. Branch activation (BranchPayItemConfig LEFT JOIN + COALESCE fallback).
-          6. Rate-type mapping (from PayItemRateTypeMap).
+          3. CP-2C: if period_id is supplied and PayrollPeriodPayItems rows exist,
+             validate against the snapshot instead of live BranchPayItemConfig.
+          4. DB lookup — both system and custom.
+          5. Retired / Period-scope guards.
+          6. Branch activation (BranchPayItemConfig LEFT JOIN + COALESCE fallback).
+          7. Rate-type mapping (from PayItemRateTypeMap).
 
     Raises HTTP 422 for any invalid condition.
     """
@@ -2176,7 +2211,78 @@ async def _validate_line_type(
         # DailyStatus / DailyNote — no monetary value, no branch check needed.
         return _LineTypeInfo("None", None, "Daily")
 
-    # ── 3. Unified DB lookup ───────────────────────────────────────────── #
+    # ── 3. CP-2C: snapshot-first validation ───────────────────────────── #
+    # When period_id is provided and PayrollPeriodPayItems rows exist, validate
+    # against the frozen snapshot rather than live BranchPayItemConfig.
+    if period_id is not None:
+        snap_result = await db.execute(
+            text("""
+                SELECT payitemcode, ratebehavior, isactiveinperiod, itemscope
+                FROM payroll.payrollperiodpayitems
+                WHERE payrollperiodid = :pid
+                  AND companyid       = :cid
+                  AND payitemcode     = :code
+            """),
+            {"pid": period_id, "cid": company_id, "code": line_type},
+        )
+        snap_row = snap_result.mappings().first()
+
+        # Only use snapshot path if the period actually has snapshot rows.
+        has_any_snap = (await db.execute(
+            text("SELECT 1 FROM payroll.payrollperiodpayitems WHERE payrollperiodid = :pid LIMIT 1"),
+            {"pid": period_id},
+        )).first()
+
+        if has_any_snap is not None:
+            if snap_row is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{line_type}' is not in the pay-item snapshot for this period. "
+                        "The item was not active or did not exist when the period was created."
+                    ),
+                )
+            if snap_row["itemscope"] == "Period":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{line_type}' is a Period-scope pay item and cannot be entered "
+                        "as a daily draft line. Use the Period Pay endpoint instead."
+                    ),
+                )
+            if not bool(snap_row["isactiveinperiod"]):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Pay item '{line_type}' was not active for this branch when the "
+                        "period was created and cannot be used for new entries."
+                    ),
+                )
+            # Snapshot validates scope and activation; still need rate-type mapping.
+            rt_result = await db.execute(
+                text("""
+                    SELECT rt.ratecode
+                    FROM   payroll.payitemratetypemap  pirtm
+                    JOIN   payroll.payitems            pi
+                           ON pi.payitemid = pirtm.payitemid
+                    JOIN   payroll.ratetypes           rt
+                           ON rt.ratetypeid = pirtm.ratetypeid
+                    WHERE  pi.payitemcode = :code
+                      AND  (pi.companyid IS NULL OR pi.companyid = :cid)
+                      AND  pirtm.status  = 'Active'
+                      AND  rt.isactive   = TRUE
+                    ORDER BY pirtm.isprimary DESC
+                    LIMIT 1
+                """),
+                {"code": line_type, "cid": company_id},
+            )
+            rt_row = rt_result.mappings().first()
+            return _LineTypeInfo(
+                rate_behavior=snap_row["ratebehavior"],
+                rate_code=rt_row["ratecode"] if rt_row else None,
+            )
+
+    # ── 4. Unified DB lookup ───────────────────────────────────────────── #
     # Covers system items (companyid IS NULL) AND custom items (companyid = :cid).
     # When both exist for the same PayItemCode (should not happen in practice)
     # the company-specific row takes precedence (ORDER BY companyid NULLS LAST).
@@ -2750,7 +2856,8 @@ async def add_draft_line(
     # start date (covers retro-entry where work_date is omitted).
     as_of_date: date = data.work_date if data.work_date is not None else period.start_date
     lt_info: _LineTypeInfo = await _validate_line_type(
-        canonical_line_type, period.branch_id, company_id, as_of_date, db
+        canonical_line_type, period.branch_id, company_id, as_of_date, db,
+        period_id=period.payroll_period_id,
     )
 
     # M13c: OrdinalTier items require a positive integer quantity.
@@ -2829,7 +2936,8 @@ async def add_draft_line(
     # CP-0A: Lock custom PayItem catalog row before period lock so both this path
     # and the physical-delete path acquire locks in the same order (PayItem then
     # Period), preventing deadlock while serializing against concurrent deletion.
-    await _lock_pay_item_for_source_write(canonical_line_type, company_id, db)
+    # CP-2C: pass period_id so snapshot-authorised items bypass the live status check.
+    await _lock_pay_item_for_source_write(canonical_line_type, company_id, db, period_id=period_id)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
 
@@ -2912,18 +3020,32 @@ async def update_draft_line(
     if line.status == "Void":
         raise HTTPException(status_code=422, detail="Cannot modify a voided draft line.")
 
-    # Re-validate the existing line's pay item.  Historical rows may store legacy
-    # display strings ("Hours").  Normalise to canonical before validation so
-    # both old and new rows use the same unified DB path.
-    # The stored linetype is NOT changed on update — only qty/rate/notes change.
     as_of_date: date = line.work_date if line.work_date is not None else period.start_date
     canonical_existing_lt: str = _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type)
-    lt_info: _LineTypeInfo = await _validate_line_type(
-        canonical_existing_lt, period.branch_id, company_id, as_of_date, db
+
+    # Determine void-only before validation: void cleanup must remain possible
+    # even when the live PayItem was retired after the line was created.
+    # Meaningful edits (quantity / rate / notes / NMR change) re-validate using
+    # the period snapshot so snapshot-authorised items stay usable.
+    is_void_only = (
+        data.status == "Void"
+        and data.quantity is None
+        and data.rate_amount is None
+        and data.notes is None
+        and data.needs_manager_review is None
     )
 
+    lt_info: _LineTypeInfo | None = None
+    if not is_void_only:
+        # CP-2C: pass period_id so snapshot-authorised items (e.g. retired after
+        # period creation) remain editable for this period.
+        lt_info = await _validate_line_type(
+            canonical_existing_lt, period.branch_id, company_id, as_of_date, db,
+            period_id=period.payroll_period_id,
+        )
+
     # M13c: OrdinalTier items require a positive integer quantity.
-    if lt_info.rate_behavior == "OrdinalTier" and data.quantity is not None:
+    if lt_info is not None and lt_info.rate_behavior == "OrdinalTier" and data.quantity is not None:
         if data.quantity <= 0 or data.quantity % 1 != 0:
             raise HTTPException(
                 status_code=422,
@@ -2934,7 +3056,7 @@ async def update_draft_line(
             )
 
     # Phase 4C: block manual rate overrides for PerUnit daily lines on update.
-    if lt_info.rate_behavior == "PerUnit" and data.rate_amount is not None:
+    if lt_info is not None and lt_info.rate_behavior == "PerUnit" and data.rate_amount is not None:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -2950,13 +3072,6 @@ async def update_draft_line(
     # that the line's existing driver/work_date combination is still eligible.
     # This blocks edits to lines that reference a driver who has since been
     # transferred out or terminated.
-    is_void_only = (
-        data.status == "Void"
-        and data.quantity is None
-        and data.rate_amount is None
-        and data.notes is None
-        and data.needs_manager_review is None
-    )
     if not is_void_only and line.work_date is not None:
         await _assert_driver_eligible_for_date(
             company_id, line.driver_id, period.branch_id, line.work_date, db
@@ -3056,7 +3171,9 @@ async def update_draft_line(
         # CP-0A: Lock custom PayItem catalog row before period lock (same order as
         # deletion path) to prevent the zero-to-meaningful race: deletion reads zero
         # usage, update changes a line to meaningful, deletion physically deletes.
-        await _lock_pay_item_for_source_write(canonical_existing_lt, company_id, db)
+        # CP-2C: pass period_id so snapshot-authorised items bypass live status check.
+        await _lock_pay_item_for_source_write(canonical_existing_lt, company_id, db,
+                                              period_id=period.payroll_period_id)
         # CP-0A: Recheck period status under a row-level lock before writing.
         await _lock_period_for_mutation(period_id, company_id, db)
         set_clause = ", ".join(f"{col} = :{col}" for col in fields)
@@ -6660,6 +6777,7 @@ async def _validate_period_line_type(
     company_id: int,
     as_of_date: date,
     db: AsyncConnection,
+    period_id: int | None = None,
 ) -> _LineTypeInfo:
     """
     Validate a line_type for a Period Pay line.
@@ -6675,11 +6793,12 @@ async def _validate_period_line_type(
     Checks (in order):
       1. Finalization-only / explicitly blocked items — clear deferral error.
       2. Normalise to canonical PayItemCode.
-      3. Unified DB lookup (system companyid IS NULL + custom companyid = :cid).
-      4. Status guard (Retired → 422).
-      5. Scope guard — must be 'Period'; daily items → clear redirect message.
-      6. Rate behavior guard — must be EnteredAmount or Fixed (not Calculated).
-      7. Branch activation check.
+      3. CP-2C: if period_id supplied and snapshot exists, validate against it.
+      4. Unified DB lookup (system companyid IS NULL + custom companyid = :cid).
+      5. Status guard (Retired → 422).
+      6. Scope guard — must be 'Period'; daily items → clear redirect message.
+      7. Rate behavior guard — must be EnteredAmount or Fixed (not Calculated).
+      8. Branch activation check.
     """
     # --- 0. Manual ADJUSTMENT is not designed for this release ---
     # Normalise first so both "Adjustment" and "ADJUSTMENT" are caught.
@@ -6709,7 +6828,71 @@ async def _validate_period_line_type(
     # --- 2. Normalise to canonical PayItemCode ---
     canonical_code: str = _LEGACY_TO_CANONICAL.get(line_type, line_type)
 
-    # --- 3. Unified DB lookup ---
+    # --- 3. CP-2C: snapshot-first validation ---
+    if period_id is not None:
+        snap_result = await db.execute(
+            text("""
+                SELECT payitemcode, ratebehavior, isactiveinperiod, itemscope
+                FROM payroll.payrollperiodpayitems
+                WHERE payrollperiodid = :pid
+                  AND companyid       = :cid
+                  AND payitemcode     = :code
+            """),
+            {"pid": period_id, "cid": company_id, "code": canonical_code},
+        )
+        snap_row = snap_result.mappings().first()
+
+        has_any_snap = (await db.execute(
+            text("SELECT 1 FROM payroll.payrollperiodpayitems WHERE payrollperiodid = :pid LIMIT 1"),
+            {"pid": period_id},
+        )).first()
+
+        if has_any_snap is not None:
+            if snap_row is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{line_type}' is not in the pay-item snapshot for this period. "
+                        "The item was not active or did not exist when the period was created."
+                    ),
+                )
+            if snap_row["itemscope"] == "Daily":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{line_type}' is a Daily-scope pay item and cannot be used as a "
+                        "Period Pay line. Use POST /periods/{id}/lines for daily entry."
+                    ),
+                )
+            if not bool(snap_row["isactiveinperiod"]):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Pay item '{line_type}' was not active for this branch when the "
+                        "period was created and cannot be used for new entries."
+                    ),
+                )
+            behavior = snap_row["ratebehavior"]
+            if behavior == "Calculated":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{line_type}' uses Calculated behavior which requires the automated "
+                        "pay-rule engine. This item cannot be entered as a manual Period Pay line."
+                    ),
+                )
+            if behavior not in _PERIOD_PAY_ALLOWED_BEHAVIORS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Pay item '{line_type}' uses '{behavior}' rate behavior, which is not "
+                        f"supported for manual Period Pay entry. "
+                        f"Supported behaviors: {sorted(_PERIOD_PAY_ALLOWED_BEHAVIORS)}."
+                    ),
+                )
+            return _LineTypeInfo(rate_behavior=behavior, rate_code=None, item_scope="Period")
+
+    # --- 4. Unified DB lookup ---
     pi_result = await db.execute(
         text("""
             SELECT pi.payitemid, pi.itemscope, pi.ratebehavior,
@@ -6865,12 +7048,14 @@ async def add_period_pay_line(
     # Use period.start_date as the effective date so backdated and future periods
     # validate against the period date, not CURRENT_DATE.
     await _validate_period_line_type(
-        canonical_period_lt, period.branch_id, company_id, period.start_date, db
+        canonical_period_lt, period.branch_id, company_id, period.start_date, db,
+        period_id=period_id,
     )
 
     # CP-0A: Lock custom PayItem catalog row before period lock (same order as the
     # physical-delete path) to prevent the first-reference orphan race.
-    await _lock_pay_item_for_source_write(canonical_period_lt, company_id, db)
+    # CP-2C: pass period_id so snapshot-authorised items bypass live status check.
+    await _lock_pay_item_for_source_write(canonical_period_lt, company_id, db, period_id=period_id)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
 
@@ -7022,10 +7207,43 @@ async def update_period_pay_line(
         # No changes — return as-is
         return line
 
+    canonical_period_pay_lt = _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type)
+
+    # CP-2C: for periods with a snapshot, validate the line's pay item against
+    # the snapshot before writing.  This allows updates on items that were
+    # active at period creation but later retired, while still rejecting items
+    # that were inactive or absent in the snapshot.
+    has_snap = await _period_has_pay_item_snapshot(period_id, db)
+    if has_snap:
+        snap_upd = (await db.execute(
+            text("""
+                SELECT isactiveinperiod FROM payroll.payrollperiodpayitems
+                WHERE payrollperiodid = :pid
+                  AND payitemcode     = :code
+            """),
+            {"pid": period_id, "code": canonical_period_pay_lt},
+        )).mappings().first()
+        if snap_upd is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"'{line.line_type}' is not in the pay-item snapshot for this period."
+                ),
+            )
+        if not bool(snap_upd["isactiveinperiod"]):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Pay item '{line.line_type}' was not active for this branch when "
+                    "the period was created and cannot be updated."
+                ),
+            )
+
     # CP-0A: Lock custom PayItem catalog row before period lock to prevent the
     # zero-to-meaningful race on period-pay lines (same lock ordering as deletion).
-    canonical_period_pay_lt = _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type)
-    await _lock_pay_item_for_source_write(canonical_period_pay_lt, company_id, db)
+    # CP-2C: pass period_id so snapshot-authorised items bypass live status check.
+    await _lock_pay_item_for_source_write(canonical_period_pay_lt, company_id, db,
+                                          period_id=period_id)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
     set_clause = ", ".join(f"{col} = :{col}" for col in fields)
@@ -9399,35 +9617,55 @@ async def get_day_grid(
     branch_id = period.branch_id
 
     # ── Load active Daily columns for the branch ─────────────────────────── #
-    cols_result = await db.execute(
-        text("""
-            SELECT pi.payitemcode, pi.payitemname, pi.ratebehavior, pi.datatype
-            FROM   payroll.payitems pi
-            LEFT JOIN payroll.branchpayitemconfig bpic
-                   ON bpic.payitemid  = pi.payitemid
-                  AND bpic.companyid  = :cid
-                  AND bpic.branchid   = :bid
-                  AND bpic.effectivefrom <= :dt
-                  AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
-            WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND  pi.itemscope  = 'Daily'
-              AND  pi.status    != 'Retired'
-              AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
-            ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
-        """),
-        {"cid": company_id, "bid": branch_id, "dt": work_date},
-    )
+    # CP-2C: use snapshot when period has PayrollPeriodPayItems rows (post-0053
+    # periods); fall back to live BranchPayItemConfig query for legacy periods.
+    # Use _period_has_pay_item_snapshot to distinguish "post-0053 period with
+    # zero active Daily items" from "legacy period with no snapshot" — both
+    # would produce an empty snap_cols list, but only the latter should fall back.
     columns: list[DayGridColumn] = []
-    for row in cols_result.mappings().all():
-        code = row["payitemcode"]
-        if code in _INFORMATIONAL_ONLY:
-            continue
-        columns.append(DayGridColumn(
-            pay_item_code=code,
-            label=row["payitemname"] or code,
-            rate_behavior=row["ratebehavior"] or "None",
-            is_time=(code in ("HOURS", "WAIT_TIME")) or (row["datatype"] == "Time"),
-        ))
+    if await _period_has_pay_item_snapshot(period.payroll_period_id, db):
+        snap_cols = await _get_period_pay_item_snapshot(
+            period.payroll_period_id, company_id, db, scope="Daily", active_only=True,
+        )
+        for row in snap_cols:
+            code = row["payitemcode"]
+            if code in _INFORMATIONAL_ONLY:
+                continue
+            columns.append(DayGridColumn(
+                pay_item_code=code,
+                label=row["displaylabel"] or row["payitemname"] or code,
+                rate_behavior=row["ratebehavior"] or "None",
+                is_time=(code in ("HOURS", "WAIT_TIME")) or (row["datatype"] == "Time"),
+            ))
+    else:
+        cols_result = await db.execute(
+            text("""
+                SELECT pi.payitemcode, pi.payitemname, pi.ratebehavior, pi.datatype
+                FROM   payroll.payitems pi
+                LEFT JOIN payroll.branchpayitemconfig bpic
+                       ON bpic.payitemid  = pi.payitemid
+                      AND bpic.companyid  = :cid
+                      AND bpic.branchid   = :bid
+                      AND bpic.effectivefrom <= :dt
+                      AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
+                WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
+                  AND  pi.itemscope  = 'Daily'
+                  AND  pi.status    != 'Retired'
+                  AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+                ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
+            """),
+            {"cid": company_id, "bid": branch_id, "dt": work_date},
+        )
+        for row in cols_result.mappings().all():
+            code = row["payitemcode"]
+            if code in _INFORMATIONAL_ONLY:
+                continue
+            columns.append(DayGridColumn(
+                pay_item_code=code,
+                label=row["payitemname"] or code,
+                rate_behavior=row["ratebehavior"] or "None",
+                is_time=(code in ("HOURS", "WAIT_TIME")) or (row["datatype"] == "Time"),
+            ))
 
     # ── Load status keys for the branch ──────────────────────────────────── #
     sk_result = await db.execute(
@@ -9663,29 +9901,41 @@ async def save_day_grid(
     branch_id = period.branch_id
 
     # ── Load active Daily columns for this branch/date ───────────────────── #
-    # Used in Phase 1 to reject unknown or branch-inactive PayItemCodes before
-    # any DB writes, preserving all-or-nothing atomicity for the batch.
-    _active_cols_result = await db.execute(
-        text("""
-            SELECT pi.payitemcode
-            FROM   payroll.payitems pi
-            LEFT JOIN payroll.branchpayitemconfig bpic
-                   ON bpic.payitemid  = pi.payitemid
-                  AND bpic.companyid  = :cid
-                  AND bpic.branchid   = :bid
-                  AND bpic.effectivefrom <= :dt
-                  AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
-            WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND  pi.itemscope  = 'Daily'
-              AND  pi.status    != 'Retired'
-              AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
-        """),
-        {"cid": company_id, "bid": branch_id, "dt": work_date},
-    )
-    active_col_codes: set[str] = {
-        _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])
-        for r in _active_cols_result.mappings().all()
-    }
+    # CP-2C: snapshot-first. Post-0053 periods use PayrollPeriodPayItems;
+    # legacy periods fall back to live BranchPayItemConfig.
+    # Use _period_has_pay_item_snapshot so a post-0053 period with zero active
+    # Daily rows doesn't fall back to live config (an empty active set is the
+    # correct answer — no codes should pass the validate step).
+    if await _period_has_pay_item_snapshot(period.payroll_period_id, db):
+        snap_active = await _get_period_pay_item_snapshot(
+            period.payroll_period_id, company_id, db, scope="Daily", active_only=True,
+        )
+        active_col_codes: set[str] = {
+            _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])
+            for r in snap_active
+        }
+    else:
+        _active_cols_result = await db.execute(
+            text("""
+                SELECT pi.payitemcode
+                FROM   payroll.payitems pi
+                LEFT JOIN payroll.branchpayitemconfig bpic
+                       ON bpic.payitemid  = pi.payitemid
+                      AND bpic.companyid  = :cid
+                      AND bpic.branchid   = :bid
+                      AND bpic.effectivefrom <= :dt
+                      AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
+                WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
+                  AND  pi.itemscope  = 'Daily'
+                  AND  pi.status    != 'Retired'
+                  AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+            """),
+            {"cid": company_id, "bid": branch_id, "dt": work_date},
+        )
+        active_col_codes: set[str] = {
+            _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])
+            for r in _active_cols_result.mappings().all()
+        }
 
     # ── Phase 1: validate ALL inputs before any DB writes ────────────────── #
     # P1 #2: strict quantity parsing (non-numeric → 422 before writes)
@@ -9783,7 +10033,7 @@ async def save_day_grid(
     all_canonical_codes.discard("DailyStatus")
     all_canonical_codes.discard("DailyNote")
     for code in sorted(all_canonical_codes):
-        await _lock_pay_item_for_source_write(code, company_id, db)
+        await _lock_pay_item_for_source_write(code, company_id, db, period_id=period.payroll_period_id)
 
     for save_row, driver_id, parsed_values, validated_status_key, _ in parsed_rows:
 
@@ -10513,6 +10763,173 @@ async def _validate_period_work_date(
             )
 
 
+# ---------------------------------------------------------------------------
+# CP-2C: Period pay-item layout snapshot helpers
+# ---------------------------------------------------------------------------
+
+async def _create_period_pay_item_rows(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    start_date: date,
+    db: AsyncConnection,
+) -> None:
+    """
+    Insert one PayrollPeriodPayItems row per non-Retired PayItem (system +
+    company custom) as of start_date.
+
+    Branch activation is resolved from BranchPayItemConfig using start_date.
+    Both Daily and Period scope items are snapshotted.
+    DailyStatus / DailyNote pseudo-lines are excluded (no PayItems catalog row).
+
+    Called once at period creation; rows are immutable afterward.
+    """
+    items_result = await db.execute(
+        text("""
+            SELECT
+                pi.payitemid,
+                pi.payitemcode,
+                pi.payitemname,
+                pi.displaylabel,
+                pi.category,
+                pi.datatype,
+                pi.unit,
+                pi.itemscope,
+                pi.ratebehavior,
+                pi.appearsinpayrollentry,
+                pi.appearsinledger,
+                pi.appearsinreports,
+                pi.requiresrate,
+                pi.issystemstandard,
+                (pi.companyid IS NOT NULL) AS iscustom,
+                pi.status,
+                pi.sortorder,
+                pi.isdefaultbranchactive,
+                bpic.isactive          AS cfg_isactive,
+                bpic.effectivefrom     AS cfg_effectivefrom,
+                bpic.configid          AS cfg_configid
+            FROM payroll.payitems pi
+            LEFT JOIN payroll.branchpayitemconfig bpic
+                   ON bpic.payitemid      = pi.payitemid
+                  AND bpic.companyid      = :cid
+                  AND bpic.branchid       = :bid
+                  AND bpic.effectivefrom <= :dt
+                  AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
+            WHERE (pi.companyid IS NULL OR pi.companyid = :cid)
+              AND pi.status != 'Retired'
+            ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
+        """),
+        {"cid": company_id, "bid": branch_id, "dt": start_date},
+    )
+    rows = items_result.mappings().all()
+    if not rows:
+        return
+
+    for r in rows:
+        is_active_in_period = bool(
+            r["cfg_isactive"] if r["cfg_isactive"] is not None else r["isdefaultbranchactive"]
+        )
+        await db.execute(
+            text("""
+                INSERT INTO payroll.payrollperiodpayitems
+                    (payrollperiodid, companyid, branchid, payitemid,
+                     payitemcode, payitemname, displaylabel,
+                     category, datatype, unit,
+                     itemscope, ratebehavior,
+                     appearsinpayrollentry, appearsinledger, appearsinreports,
+                     requiresrate, issystemstandard, iscustom,
+                     payitemstatusatsnapshot, isactiveinperiod, sortorder,
+                     snapshoteffectivefrom, sourcebranchpayitemconfigid,
+                     createdatutc)
+                VALUES
+                    (:period_id, :cid, :bid, :payitemid,
+                     :payitemcode, :payitemname, :displaylabel,
+                     :category, :datatype, :unit,
+                     :itemscope, :ratebehavior,
+                     :appearsinpayrollentry, :appearsinledger, :appearsinreports,
+                     :requiresrate, :issystemstandard, :iscustom,
+                     :payitemstatus, :isactiveinperiod, :sortorder,
+                     :snapshoteffectivefrom, :sourceconfigid,
+                     NOW())
+                ON CONFLICT (payrollperiodid, payitemid) DO NOTHING
+            """),
+            {
+                "period_id":             period_id,
+                "cid":                   company_id,
+                "bid":                   branch_id,
+                "payitemid":             r["payitemid"],
+                "payitemcode":           r["payitemcode"],
+                "payitemname":           r["payitemname"],
+                "displaylabel":          r["displaylabel"],
+                "category":              r["category"],
+                "datatype":              r["datatype"],
+                "unit":                  r["unit"],
+                "itemscope":             r["itemscope"],
+                "ratebehavior":          r["ratebehavior"],
+                "appearsinpayrollentry": r["appearsinpayrollentry"],
+                "appearsinledger":       r["appearsinledger"],
+                "appearsinreports":      r["appearsinreports"],
+                "requiresrate":          r["requiresrate"],
+                "issystemstandard":      r["issystemstandard"],
+                "iscustom":              bool(r["iscustom"]),
+                "payitemstatus":         r["status"],
+                "isactiveinperiod":      is_active_in_period,
+                "sortorder":             r["sortorder"] if r["sortorder"] is not None else 0,
+                "snapshoteffectivefrom": r["cfg_effectivefrom"],
+                "sourceconfigid":        r["cfg_configid"],
+            },
+        )
+
+
+async def _period_has_pay_item_snapshot(
+    period_id: int,
+    db: AsyncConnection,
+) -> bool:
+    """Return True if the period has any PayrollPeriodPayItems rows (post-0053 period)."""
+    result = await db.execute(
+        text("SELECT 1 FROM payroll.payrollperiodpayitems WHERE payrollperiodid = :pid LIMIT 1"),
+        {"pid": period_id},
+    )
+    return result.first() is not None
+
+
+async def _get_period_pay_item_snapshot(
+    period_id: int,
+    company_id: int,
+    db: AsyncConnection,
+    scope: str | None = None,
+    active_only: bool = False,
+) -> list:
+    """
+    Return PayrollPeriodPayItems rows for a period.
+
+    scope: 'Daily' | 'Period' | None (all)
+    active_only: if True, only rows with IsActiveInPeriod = TRUE
+
+    Returns list of mapping rows. Empty list if no snapshot exists (legacy period).
+    """
+    filters = ["payrollperiodid = :pid", "companyid = :cid"]
+    params: dict = {"pid": period_id, "cid": company_id}
+    if scope:
+        filters.append("itemscope = :scope")
+        params["scope"] = scope
+    if active_only:
+        filters.append("isactiveinperiod = TRUE")
+    where = " AND ".join(filters)
+    result = await db.execute(
+        text(f"""
+            SELECT payitemcode, payitemname, displaylabel, category, datatype, unit,
+                   itemscope, ratebehavior, appearsinpayrollentry, isactiveinperiod,
+                   payitemid, payitemstatusatsnapshot, sortorder
+            FROM payroll.payrollperiodpayitems
+            WHERE {where}
+            ORDER BY sortorder NULLS LAST, payitemcode
+        """),
+        params,
+    )
+    return result.mappings().all()
+
+
 def _period_end(frequency: str, start: date, interval_days: int | None) -> date:
     if frequency == "Week":
         return start + timedelta(days=6)
@@ -10993,6 +11410,11 @@ async def create_period_from_candidate(
     await _create_period_day_rows(
         new_period_id, company_id, branch_id,
         period_sv_id, computed_start, computed_end, period_mask, db,
+    )
+
+    # CP-2C: create period pay-item layout snapshot.
+    await _create_period_pay_item_rows(
+        new_period_id, company_id, branch_id, computed_start, db,
     )
 
     created_at = datetime.now(timezone.utc)

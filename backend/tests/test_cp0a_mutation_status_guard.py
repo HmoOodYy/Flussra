@@ -1682,12 +1682,12 @@ class TestFirstReferenceRace:
             boundary_reached = threading.Event()
             release_boundary = threading.Event()
 
-            async def mock_lock_fn(line_type, company_id_arg, db):
+            async def mock_lock_fn(line_type, company_id_arg, db, *, period_id=None):
                 if line_type == code:
                     boundary_reached.set()
                     ok = await loop.run_in_executor(None, release_boundary.wait, 15.0)
                     assert ok, "release_boundary never fired"
-                await real_lock_fn(line_type, company_id_arg, db)
+                await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
 
             svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
 
@@ -1803,8 +1803,8 @@ class TestFirstReferenceRace:
 
             real_lock_fn = svc_payroll._lock_pay_item_for_source_write
 
-            async def mock_lock_fn(line_type, company_id_arg, db):
-                await real_lock_fn(line_type, company_id_arg, db)
+            async def mock_lock_fn(line_type, company_id_arg, db, *, period_id=None):
+                await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
                 if line_type == code:
                     payitem_lock_acquired.set()
                     ok = await loop.run_in_executor(None, release_after_lock.wait, 15.0)
@@ -2015,12 +2015,12 @@ class TestStaleRetirementRace:
             boundary_reached = threading.Event()
             release_boundary = threading.Event()
 
-            async def mock_lock_fn(line_type, company_id_arg, db):
+            async def mock_lock_fn(line_type, company_id_arg, db, *, period_id=None):
                 if line_type == code:
                     boundary_reached.set()
                     ok = await loop.run_in_executor(None, release_boundary.wait, 15.0)
                     assert ok, "release_boundary never fired"
-                await real_lock_fn(line_type, company_id_arg, db)
+                await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
 
             svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
 
@@ -2238,12 +2238,12 @@ class TestZeroToMeaningfulRace:
             boundary_reached = threading.Event()
             release_boundary = threading.Event()
 
-            async def mock_lock_fn(line_type, company_id_arg, db):
+            async def mock_lock_fn(line_type, company_id_arg, db, *, period_id=None):
                 if line_type == code:
                     boundary_reached.set()
                     ok = await loop.run_in_executor(None, release_boundary.wait, 15.0)
                     assert ok, "release_boundary never fired"
-                await real_lock_fn(line_type, company_id_arg, db)
+                await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
 
             svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
 

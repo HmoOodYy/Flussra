@@ -3407,6 +3407,22 @@ async def delete_custom_pay_item(
 
     usage = await _compute_usage(item_id, company_id, pay_item_code, db)
 
+    # CP-2C: if the item is referenced by any period pay-item snapshot, retire
+    # instead of physically deleting — snapshot rows must outlive the catalog row.
+    if not usage.deletion_would_retire:
+        snap_count_row = await db.execute(
+            text("""
+                SELECT COUNT(*) AS cnt
+                FROM payroll.payrollperiodpayitems
+                WHERE payitemid = :iid
+            """),
+            {"iid": item_id},
+        )
+        snap_count = int((snap_count_row.scalar_one() or 0))
+        if snap_count > 0:
+            # Force retire path — physical delete would violate the FK.
+            usage = usage.model_copy(update={"deletion_would_retire": True})
+
     if usage.deletion_would_retire:
         # --- RETIRE ---
         await db.execute(

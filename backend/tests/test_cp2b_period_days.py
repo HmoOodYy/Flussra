@@ -227,11 +227,11 @@ class TestCp2bPeriodDays:
             assert idx_r.first() is not None, f"Index {idx_name!r} missing"
 
     # ------------------------------------------------------------------ #
-    # D02 — Alembic head is exactly 0052
+    # D02 — Alembic head is exactly 0053
     # ------------------------------------------------------------------ #
 
-    def test_d02_alembic_head_0052(self):
-        """D02: Migration chain is linear and head is 0052."""
+    def test_d02_alembic_head_0053(self):
+        """D02: Migration chain is linear and head is 0053."""
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
@@ -242,7 +242,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0052" in lines[0], f"Expected head 0052, got: {lines[0]}"
+        assert "0053" in lines[0], f"Expected head 0053, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows
