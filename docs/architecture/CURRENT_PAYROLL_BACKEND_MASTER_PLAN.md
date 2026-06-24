@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -1275,8 +1275,8 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 ### Phase 2 status note
 
 **Status:** In Progress
-**Started:** CP-2A Done with Notes. CP-2B through CP-2F remain Pending / not started.
-**Review result:** No CP-2A P0/P1 blockers remain. No CP-2B+ implementation has begun.
+**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C through CP-2F remain Pending / not started.
+**Review result:** No CP-2A or CP-2B P0/P1 blockers remain. No CP-2C+ implementation has begun. Add Day activation is deferred and is not part of this CP-2B closure.
 
 ### CP-2A completion note
 
@@ -1316,6 +1316,56 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P2: test_s17_downgrade_refusal could be tightened later.
 - P2: test_s20_no_svid_candidate_rejected_for_new_creation could also assert period count unchanged later.
 - P3: Some comments/docstrings can be cleaned later without behavior impact.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: User global git ignore warning remains environment-only.
+- P3: LF/CRLF warnings remain environment-only.
+
+### CP-2B completion note
+
+**Status:** Done with Notes
+**Codex verdict:** PASS WITH NOTES
+**Implementation commit:** `072c9f8` — feat: add cp-2b payroll period-day snapshots
+**Review result:** No P0/P1 blockers remain. CP-2B calendar snapshot foundation is safely closed.
+
+**What CP-2B completed:**
+- Added migration 0052.
+- Added `payroll.PayrollPeriodDays`.
+- Added period-day calendar rows for periods created after CP-2B.
+- Candidate-created Open periods now create period-day rows.
+- Candidate-created Draft/Prepared periods now create period-day rows.
+- Legacy-created periods now create period-day rows.
+- Period-day rows use the period's `ScheduleVersionID`.
+- Period-day rows read `NormalDaysOffMask` from `PayrollScheduleVersions`, not mutable current setup.
+- Added day-of-week convention: Sun=0 through Sat=6.
+- Added configured-off/default-work-day metadata.
+- Added future Add Day fields: `IsAddedWorkDay`, `AddedByUserID`, `AddedAtUtc`, `AddedReason`.
+- Add Day activation was explicitly deferred; no Add Day endpoint or workflow was added.
+- Added snapshot-aware date validation for `get_day_grid`, `save_day_grid`, and direct draft-line creation.
+- Legacy periods without day rows continue to use StartDate/EndDate fallback.
+- Draft → Open promotion preserves existing period-day rows.
+- Setup changes do not mutate existing period-day rows.
+- Confirmed SemiMonthly was not enabled.
+- Confirmed PayDate behavior was not introduced.
+- Confirmed Prepared entry was not enabled.
+- Added focused CP-2B tests.
+- Updated Alembic head expectations to 0052.
+
+**Validation:**
+- CP-2B: 26 passed, 0 skipped
+- CP-2A + CP-1C/D/E: 172 passed, 0 skipped
+- setup safety + payroll: 93 passed, 0 skipped
+- CP-1A/B: 42 passed, 0 skipped
+- CP-0A/B/C/D: 114 passed, 0 skipped
+- Alembic current/head: 0052 / 0052
+- `git diff --check`: clean, LF→CRLF warning only
+
+**Remaining P2/P3 notes:**
+- P2: Add Day activation is deferred to a later CP-2B2 / pre-CP-2F unit.
+- P2: `update_draft_line` does not accept/move `work_date`; snapshot validation there is future hardening only.
+- P2: DB-level same-period/same-schedule composite FK hardening remains future hardening.
+- P2: Add audit-count assertion for D26 later if desired.
+- P2: Add custom interval exact day-count test later if desired.
+- P2: Add rollback proof for day-row insert failure later if desired.
 - P3: Temporary PostgreSQL shutdown warning remains environment-only.
 - P3: User global git ignore warning remains environment-only.
 - P3: LF/CRLF warnings remain environment-only.
@@ -1776,7 +1826,7 @@ Existing direct status transitions and cleanup fixtures assume Rejected→Open. 
 **Status:** `In Progress`
 
 - [x] P2A: schedule versioning. — **Done with Notes**
-- [ ] P2B: create period-day snapshots and Add Day command.
+- [x] P2B: period-day calendar snapshots. — **Done with Notes**
 - [ ] P2C: snapshot pay-item layout/order/classification.
 - [ ] P2D: normalize daily statuses/notes.
 - [ ] P2E: unify historical driver-date eligibility.
