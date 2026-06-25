@@ -63,8 +63,18 @@ async def _cancel_active_periods(
     client: httpx.AsyncClient,
     token: str,
     branch_id: int,
+    db=None,
 ) -> None:
     """Cancel all active (non-final, non-cancelled) periods on the given branch."""
+    from sqlalchemy import text as _text
+    if db is not None:
+        await db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
+            ),
+            {"bid": branch_id},
+        )
     headers = auth(token)
     for s in ("Draft", "Open", "InReview", "Approved"):
         resp = await client.get(
@@ -88,28 +98,26 @@ async def _open_period(
     branch_id: int,
     start: str,
     end: str,
+    db=None,
 ) -> int:
-    """Create a period and advance it to Open status. Returns period_id."""
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": "Week",
-            "start_date":  start,
-            "end_date":    end,
-        },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"Create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    t = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert t.status_code == 200, f"Open period failed: {t.text}"
-    return pid
+    """Insert an Open period directly into DB. Returns period_id."""
+    from datetime import date as _date
+    from sqlalchemy import text as _text
+    if db is None:
+        raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
+    code = f"RCB-{branch_id}-{start}"
+    row = (await db.execute(
+        _text(f"""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"RCB {start}",
+         "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _create_driver(
@@ -261,8 +269,9 @@ async def _advance_to_approved(
             json={
                 "driver_id": driver_id,
                 "work_date": seed_date,
-                "line_type": "PTO_STATUS",
+                "line_type": "DailyNote",
                 "quantity":  1,
+                "notes":     "filler",
             },
             headers=headers,
         )
@@ -317,6 +326,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         One period, two work_dates, two approved rates → two different amounts.
@@ -333,7 +343,7 @@ class TestRateCalculationBoundaries:
         2082-06-25 even though it still exists in the DB as Superseded.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -359,7 +369,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=SPLIT_START, end=SPLIT_END,
         )
         try:
@@ -412,7 +422,7 @@ class TestRateCalculationBoundaries:
             # — use direct void via DELETE (which sets status=Voided) if supported.
             # If rate_a_id is already Superseded, DELETE will void it.
             await session_client.delete(f"/payroll/rates/{rate_a_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_pending_approval_rate_excluded_clean(
@@ -420,6 +430,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         A PendingApproval rate must NOT be used for calculation.
@@ -428,7 +439,7 @@ class TestRateCalculationBoundaries:
         calculated_amount must be None and needs_manager_review must be True.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -445,7 +456,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=SPLIT_START, end=SPLIT_END,
         )
         try:
@@ -462,7 +473,7 @@ class TestRateCalculationBoundaries:
             )
         finally:
             await session_client.delete(f"/payroll/rates/{pending_rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_voided_rate_excluded(
@@ -470,6 +481,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         A Voided rate must NOT be used for calculation.
@@ -484,7 +496,7 @@ class TestRateCalculationBoundaries:
           - Line after void: calculated_amount=None, needs_manager_review=True
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -500,7 +512,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=SPLIT_START, end=SPLIT_END,
         )
         try:
@@ -537,7 +549,7 @@ class TestRateCalculationBoundaries:
                 "After void: needs_manager_review must be True (no approved rate)"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_superseded_rate_used_for_historical_date(
@@ -545,6 +557,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         A Superseded rate IS still used for work_dates that fall within its
@@ -558,7 +571,7 @@ class TestRateCalculationBoundaries:
         Rate A.status = Superseded — but it should still be used.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -593,7 +606,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=SUPER_START, end=SUPER_END,
         )
         try:
@@ -614,7 +627,7 @@ class TestRateCalculationBoundaries:
         finally:
             await session_client.delete(f"/payroll/rates/{rate_b_id}", headers=headers)
             await session_client.delete(f"/payroll/rates/{rate_a_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_missing_rate_blocks_submit(
@@ -622,6 +635,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         A draft line with needs_manager_review=True (no approved rate) blocks
@@ -635,7 +649,7 @@ class TestRateCalculationBoundaries:
         focuses on the BLOCKED state before any rate is approved.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -644,7 +658,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
@@ -687,7 +701,7 @@ class TestRateCalculationBoundaries:
             # Clean up rate
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_finalization_refreshes_stale_draft_calc(
@@ -712,7 +726,7 @@ class TestRateCalculationBoundaries:
         The scenario here uses 2082-08-xx to confirm the pattern across date ranges.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -729,7 +743,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
@@ -822,7 +836,7 @@ class TestRateCalculationBoundaries:
         API endpoint directly.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         # Use SUPER dates (July 2082) — distinct from MISC (August 2082)
         period_start = "2082-07-14"
@@ -843,7 +857,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=period_start, end=period_end,
         )
         try:
@@ -932,6 +946,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Phase 4C fix: manual rate_amount is rejected for PerUnit daily lines.
@@ -941,7 +956,7 @@ class TestRateCalculationBoundaries:
         Rates must come exclusively from approved DriverRates in Pay Rates.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,
@@ -949,7 +964,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=SPLIT_START, end=SPLIT_END,
         )
         try:
@@ -972,7 +987,7 @@ class TestRateCalculationBoundaries:
                 f"Error message should mention rates: {r.json()['detail']}"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_manual_rate_amount_rejected_on_update(
@@ -980,12 +995,13 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Phase 4C: PATCH /lines/{id} with rate_amount on a PerUnit line → 422.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -1002,7 +1018,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
@@ -1031,7 +1047,7 @@ class TestRateCalculationBoundaries:
             )
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_approved_rate_calculation_unchanged(
@@ -1039,13 +1055,14 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Regression: approved DriverRate + quantity still produces correct calculated_amount.
         Phase 4C must not change this path.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(
@@ -1061,7 +1078,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
@@ -1089,7 +1106,7 @@ class TestRateCalculationBoundaries:
             assert body["needs_manager_review"] is False
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_missing_rate_still_triggers_nmr(
@@ -1097,13 +1114,14 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Regression: no approved rate + no rate_amount → NMR=True, calculated_amount=None.
         Phase 4C must not change this path.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,
@@ -1111,7 +1129,7 @@ class TestRateCalculationBoundaries:
         )
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
@@ -1135,7 +1153,7 @@ class TestRateCalculationBoundaries:
                 "No approved rate: needs_manager_review must be True"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_period_pay_direct_money_still_works(
@@ -1144,6 +1162,7 @@ class TestRateCalculationBoundaries:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         Regression: Period-pay (Bonus, Adjustment) lines still accept `amount`.
@@ -1151,22 +1170,23 @@ class TestRateCalculationBoundaries:
         (PeriodPayLineCreate) with an `amount` field, not `rate_amount`.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         await _activate_bonus(session_client, auth_token, paytest_branch_id)
 
         pid = await _open_period(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
-            # First add a daily line (PTO_STATUS) so the period is non-empty
+            # First add a daily line (DailyNote) so the period is non-empty
             r = await session_client.post(
                 f"/payroll/periods/{pid}/lines",
                 json={
                     "driver_id": paytest_driver_id,
                     "work_date": DATE_AUG05,
-                    "line_type": "PTO_STATUS",
+                    "line_type": "DailyNote",
                     "quantity":  1,
+                    "notes":     "filler",
                 },
                 headers=headers,
             )
@@ -1193,7 +1213,7 @@ class TestRateCalculationBoundaries:
             )
             assert bonus_line["needs_manager_review"] is False
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_rate_overlap_earlier_effective_from_rejected(
@@ -1201,6 +1221,7 @@ class TestRateCalculationBoundaries:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Documents the rate overlap guard (_check_no_future_approved_conflict).
@@ -1217,7 +1238,7 @@ class TestRateCalculationBoundaries:
         BEFORE A.effectivefrom (invalid dates), so the rejection is correct.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(

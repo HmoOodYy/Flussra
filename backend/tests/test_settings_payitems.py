@@ -118,9 +118,10 @@ class TestListPayItems:
         assert resp.status_code == 200
         codes = {i["pay_item_code"] for i in resp.json()}
         for expected in ("HOURS", "MILES", "LOADS", "OVERNIGHT", "WAIT_TIME",
-                         "PALLETS", "SILOS", "PTO_STATUS", "BONUS",
+                         "PALLETS", "SILOS", "BONUS",
                          "ADJUSTMENT", "GUARANTEED_MINIMUM"):
             assert expected in codes, f"{expected} missing from pay items list"
+        assert "PTO_STATUS" not in codes, "PTO_STATUS must not appear in pay items list (removed in 0055)"
 
     async def test_schema_complete(
         self,
@@ -399,6 +400,7 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
     ):
         """
         When effective_from falls inside a currently-running open period,
@@ -406,9 +408,11 @@ class TestUpdatePayItemConfig:
 
         A 'current' period means startdate <= today <= enddate.
         """
+        from sqlalchemy import text as _sqla_text
         today = date.today()
 
-        # Create a branch + a period that contains today
+        # Create a branch then insert an Open period directly (POST /payroll/periods
+        # requires an existing Open period guard — bypass with direct DB insert).
         br = await client.post(
             "/settings/branches",
             json={"branch_name": "Period Protection Branch A", "branch_code": "PPBA"},
@@ -417,20 +421,17 @@ class TestUpdatePayItemConfig:
         assert br.status_code == 201
         bid = br.json()["branch_id"]
 
-        period = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   bid,
-                "period_type": "Week",
-                "start_date":  str(today - timedelta(days=1)),
-                "end_date":    str(today + timedelta(days=5)),
-            },
-            headers=auth(auth_token),
-        )
-        assert period.status_code == 201
-        pid = period.json()["payroll_period_id"]
-        await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=auth(auth_token))
+        row = (await db_conn.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": bid, "code": f"PPBA-{bid}", "name": f"PPBA Open {bid}",
+             "start": today - timedelta(days=1), "end": today + timedelta(days=5)},
+        )).mappings().first()
+        pid = row["payrollperiodid"]
 
         try:
             item = await _item_by_code(client, auth_token, bid, "HOURS")
@@ -450,6 +451,7 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
     ):
         """
         When effective_from is omitted and there is a currently-running open
@@ -458,6 +460,7 @@ class TestUpdatePayItemConfig:
         The response shows pending_config (not current_config) and
         has_open_periods = True.
         """
+        from sqlalchemy import text as _sqla_text
         today = date.today()
 
         br = await client.post(
@@ -469,20 +472,17 @@ class TestUpdatePayItemConfig:
         bid = br.json()["branch_id"]
         period_end = today + timedelta(days=5)
 
-        period = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   bid,
-                "period_type": "Week",
-                "start_date":  str(today - timedelta(days=1)),
-                "end_date":    str(period_end),
-            },
-            headers=auth(auth_token),
-        )
-        assert period.status_code == 201
-        pid = period.json()["payroll_period_id"]
-        await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=auth(auth_token))
+        row = (await db_conn.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": bid, "code": f"PPBB-{bid}", "name": f"PPBB Open {bid}",
+             "start": today - timedelta(days=1), "end": period_end},
+        )).mappings().first()
+        pid = row["payrollperiodid"]
 
         try:
             item = await _item_by_code(client, auth_token, bid, "MILES")
@@ -508,11 +508,13 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
     ):
         """
         Providing effective_from = period.end_date + 1 explicitly must be
         accepted even when a current open period exists.
         """
+        from sqlalchemy import text as _sqla_text
         today = date.today()
 
         br = await client.post(
@@ -524,20 +526,17 @@ class TestUpdatePayItemConfig:
         bid = br.json()["branch_id"]
         period_end = today + timedelta(days=3)
 
-        period = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   bid,
-                "period_type": "Week",
-                "start_date":  str(today - timedelta(days=1)),
-                "end_date":    str(period_end),
-            },
-            headers=auth(auth_token),
-        )
-        assert period.status_code == 201
-        pid = period.json()["payroll_period_id"]
-        await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=auth(auth_token))
+        row = (await db_conn.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": bid, "code": f"PPBC-{bid}", "name": f"PPBC Open {bid}",
+             "start": today - timedelta(days=1), "end": period_end},
+        )).mappings().first()
+        pid = row["payrollperiodid"]
 
         try:
             item = await _item_by_code(client, auth_token, bid, "LOADS")
@@ -559,12 +558,14 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        db_conn,
     ):
         """
         An open period whose startdate > today does NOT block a change
         applied effective today.  Only currently-running periods (containing
         today in their date range) trigger the protection.
         """
+        from sqlalchemy import text as _sqla_text
         today = date.today()
 
         br = await client.post(
@@ -577,20 +578,17 @@ class TestUpdatePayItemConfig:
 
         # Period that starts in the future — does NOT contain today
         future_start = today + timedelta(days=30)
-        period = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   bid,
-                "period_type": "Week",
-                "start_date":  str(future_start),
-                "end_date":    str(future_start + timedelta(days=6)),
-            },
-            headers=auth(auth_token),
-        )
-        assert period.status_code == 201
-        pid = period.json()["payroll_period_id"]
-        await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=auth(auth_token))
+        row = (await db_conn.execute(
+            _sqla_text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+                RETURNING payrollperiodid
+            """),
+            {"bid": bid, "code": f"PPBD-{bid}", "name": f"PPBD Open {bid}",
+             "start": future_start, "end": future_start + timedelta(days=6)},
+        )).mappings().first()
+        pid = row["payrollperiodid"]
 
         try:
             item = await _item_by_code(client, auth_token, bid, "OVERNIGHT")
@@ -675,7 +673,7 @@ class TestPayItemConfigHistory:
         The first PATCH sets today's config; the next two schedule future versions
         (each closing the previous open row).
         """
-        item = await _item_by_code(client, auth_token, hq_branch_id, "PTO_STATUS")
+        item = await _item_by_code(client, auth_token, hq_branch_id, "OVERNIGHT")
         iid = item["pay_item_id"]
         today = date.today()
 

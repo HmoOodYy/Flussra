@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 import httpx
 from datetime import date as _date
-from sqlalchemy import text as _text
+from sqlalchemy import text as _text, text as _sqla_text
 
 # ---------------------------------------------------------------------------
 # Year slots / URL templates
@@ -90,26 +90,28 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
     return rid
 
 
-async def _open_period(client, token, branch_id, start, end):
-    headers = _tok(token)
-    r = await client.post("/payroll/periods", json={
-        "branch_id": branch_id, "period_type": "Week",
-        "start_date": start, "end_date": end,
-    }, headers=headers)
-    assert r.status_code == 201, f"create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=headers)
-    assert r.status_code == 200, f"Open: {r.text}"
-    return pid
+async def _open_period(db, branch_id, start, end):
+    """Insert an Open period directly into DB.  Returns period_id."""
+    row = (await db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"P8-{branch_id}-{start}",
+         "name": f"P8 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _advance_to_approved(client, token, pid, driver_id, work_date):
-    """Open → InReview (dummy PTO_STATUS) → Approved via review flow."""
+    """Open → InReview (dummy DailyNote) → Approved via review flow."""
     headers = _tok(token)
     await client.post(f"/payroll/periods/{pid}/lines",
                       json={"driver_id": driver_id, "work_date": work_date,
-                            "line_type": "PTO_STATUS", "quantity": "1"},
+                            "line_type": "DailyNote", "notes": "filler"},
                       headers=headers)
     r = await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -261,6 +263,7 @@ async def test_p8_t3_valid_system_ratetype_still_works(
     auth_token: str,
     paytest_branch_id: int,
     paytest_rate_type_id: int,
+    direct_db,
 ):
     """
     T3: The fail-closed change must not break standard system rate types.
@@ -278,7 +281,7 @@ async def test_p8_t3_valid_system_ratetype_still_works(
                                        paytest_rate_type_id,
                                        effective_from="2078-01-01")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(direct_db, paytest_branch_id,
                                  T3_START, T3_END)
 
         # Add HOURS line (rate-dependent)
@@ -464,7 +467,7 @@ async def test_p8_t5_preview_finalize_parity_unresolvable_mapping(
                                "T5Map", hire_date="2080-01-01")
     pid = None
     try:
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(direct_db, paytest_branch_id,
                                  T5_START, T5_END)
 
         # Add a draft line using the unmapped custom pay item

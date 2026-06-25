@@ -247,7 +247,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0054."""
+        """S03: Alembic migration chain is linear and head is 0055."""
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
@@ -258,7 +258,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0054" in lines[0], f"Expected head 0054, got: {lines[0]}"
+        assert "0055" in lines[0], f"Expected head 0055, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist
@@ -973,19 +973,19 @@ class TestCp2cPayItemSnapshot:
         rows_before = await _snap_rows(direct_db, pid)
         assert rows_before, "No snapshot rows after period creation"
 
-        # PTO_STATUS is non-rate-dependent so calculatedamount is resolved immediately;
-        # this satisfies both the empty-period guard and the NMR guard.
+        # DailyNote is informational-only (no rate needed), satisfies both the
+        # empty-period guard and the NMR guard.
         r_line = await client.post(
             f"/payroll/periods/{pid}/lines",
             json={
                 "driver_id": snap_driver_id,
-                "line_type": "PTO_STATUS",
+                "line_type": "DailyNote",
                 "work_date": start,
-                "quantity":  1,
+                "notes":     "filler",
             },
             headers=_auth(auth_token),
         )
-        assert r_line.status_code in (200, 201), f"Add PTO_STATUS line failed: {r_line.text}"
+        assert r_line.status_code in (200, 201), f"Add DailyNote line failed: {r_line.text}"
 
         # Promote Open → InReview
         r_review = await client.patch(

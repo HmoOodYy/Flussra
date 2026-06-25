@@ -19,7 +19,7 @@ import pytest_asyncio
 import httpx
 from decimal import Decimal
 from datetime import date as _date
-from sqlalchemy import text as _text
+from sqlalchemy import text as _text, text as _sqla_text
 
 # Re-use the p4b_env fixture + helper for the contamination test (T3)
 from tests.test_payroll_trust_p4b import (
@@ -98,26 +98,28 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
     return rid
 
 
-async def _open_period(client, token, branch_id, start, end):
-    headers = _tok(token)
-    r = await client.post("/payroll/periods",
-                          json={"branch_id": branch_id, "period_type": "Week",
-                                "start_date": start, "end_date": end},
-                          headers=headers)
-    assert r.status_code == 201, f"create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=headers)
-    assert r.status_code == 200, f"Open: {r.text}"
-    return pid
+async def _open_period(db, branch_id, start, end):
+    """Insert an Open period directly into DB.  Returns period_id."""
+    row = (await db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"P7-{branch_id}-{start}",
+         "name": f"P7 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _advance_to_approved(client, token, pid, driver_id, work_date):
-    """Open -> InReview (dummy PTO) -> Approved via review flow."""
+    """Open -> InReview (dummy DailyNote) -> Approved via review flow."""
     headers = _tok(token)
     await client.post(f"/payroll/periods/{pid}/lines",
                       json={"driver_id": driver_id, "work_date": work_date,
-                            "line_type": "PTO_STATUS", "quantity": "1"},
+                            "line_type": "DailyNote", "notes": "filler"},
                       headers=headers)
     r = await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -159,7 +161,7 @@ async def test_p7_t1_preview_blocks_duplicate_daily_lines(
         await _create_and_approve_rate(session_client, auth_token, drv,
                                        paytest_rate_type_id,
                                        effective_from="2066-01-01")
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(direct_db, paytest_branch_id,
                                  T1_START, T1_END)
         await _advance_to_approved(session_client, auth_token, pid, drv, T1_WORK)
 
@@ -179,7 +181,7 @@ async def test_p7_t1_preview_blocks_duplicate_daily_lines(
                              workdate, linetype, linescope, quantity,
                              sourcetype, status, needsmanagerreview, addedbyuserid)
                         SELECT companyid, :bid, :pid, :did,
-                               :wdate, 'PTO_STATUS', 'Daily', 1,
+                               :wdate, 'DailyNote', 'Daily', 1,
                                'Manual', 'Active', FALSE, 1
                         FROM   payroll.payrollperiods
                         WHERE  payrollperiodid = :pid
@@ -214,13 +216,13 @@ async def test_p7_t1_preview_blocks_duplicate_daily_lines(
             )
 
         finally:
-            # Void ALL PTO_STATUS lines for this period so the unique index can
+            # Void ALL DailyNote lines for this period so the unique index can
             # be rebuilt cleanly (original + 2 injected → no active duplicates).
             await direct_db.execute(
                 _text("""
                     UPDATE payroll.payrolldraftlines
                     SET    status = 'Void'
-                    WHERE  payrollperiodid = :pid AND linetype = 'PTO_STATUS'
+                    WHERE  payrollperiodid = :pid AND linetype = 'DailyNote'
                 """),
                 {"pid": pid},
             )
@@ -269,7 +271,7 @@ async def test_p7_t2_preview_blocks_ineligible_driver_line(
         await _create_and_approve_rate(session_client, auth_token, drv,
                                        paytest_rate_type_id,
                                        effective_from="2067-01-01")
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(direct_db, paytest_branch_id,
                                  T2_START, T2_END)
 
         # Add a HOURS line on T2_WORK (will become ineligible after we terminate)
@@ -470,7 +472,7 @@ async def test_p7_t4_preview_blocks_nmr_unresolved_line(
     drv = await _create_driver(session_client, auth_token, paytest_branch_id,
                                "T4NMR", hire_date="2068-01-01")
     try:
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(direct_db, paytest_branch_id,
                                  T4_START, T4_END)
 
         # Add HOURS line — NMR=True because no rate exists for this driver
@@ -549,7 +551,7 @@ async def test_p7_t5_valid_period_preview_and_finalize(
         await _create_and_approve_rate(session_client, auth_token, drv,
                                        paytest_rate_type_id,
                                        effective_from="2069-01-01")
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(direct_db, paytest_branch_id,
                                  T5_START, T5_END)
 
         r = await session_client.post(

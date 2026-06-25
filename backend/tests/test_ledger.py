@@ -117,8 +117,9 @@ async def _advance_to_approved(
             json={
                 "driver_id": driver_id,
                 "work_date": start_date,
-                "line_type": "PTO_STATUS",
+                "line_type": "DailyNote",
                 "quantity": 1,
+                "notes": "filler",
             },
         )
     r = await client.patch(

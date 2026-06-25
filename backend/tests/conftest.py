@@ -642,7 +642,7 @@ async def activate_paytest_system_items(
     """
     await _activate_branch_items(
         session_client, auth_token, paytest_branch_id,
-        {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS", "PTO_STATUS"},
+        {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS"},
     )
     # Force-activate so BranchPayItemConfig rows are created for matrix queries
     await _activate_branch_items(

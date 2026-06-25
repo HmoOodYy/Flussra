@@ -25,7 +25,7 @@ Product contracts verified:
     rows are not visible.
   - direct add_draft_line / update_draft_line / void_draft_line for DailyStatus and
     DailyNote write / update / clear the canonical row.
-  - Money non-impact: PTO_STATUS finalized amount is $0 regardless of canonical row.
+
 
 Dates: 2096-* — isolated year (2094=CP-2C, 2095=CP-2B).
 Run from backend/:
@@ -192,7 +192,7 @@ async def _advance_to_approved(
             f"/payroll/periods/{period_id}/lines",
             headers=headers,
             json={"driver_id": driver_id, "work_date": work_date,
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "notes": "filler"},
         )
     r = await client.patch(f"/payroll/periods/{period_id}/status",
                            headers=headers, json={"status": "InReview"})
@@ -927,7 +927,7 @@ class TestCp2dCanonicalEntryState:
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
             )
-            # Also add a PTO_STATUS so finalization won't reject for empty period
+            # Also add a DailyNote so finalization won't reject for empty period
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
@@ -935,7 +935,7 @@ class TestCp2dCanonicalEntryState:
                          workdate, linetype, linescope, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'PTO_STATUS', 'Daily', 1, 'Manual', 'Active', FALSE, 1)
+                            'DailyNote', 'Daily', 1, 'Manual', 'Active', FALSE, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start},
             )
@@ -1101,57 +1101,6 @@ class TestCp2dCanonicalEntryState:
                 {"pid": pid},
             )).all()
             assert not rows_c2, "Cross-company canonical rows must not exist"
-        finally:
-            await _clean_branch(direct_db, ces_branch_id)
-
-    # ------------------------------------------------------------------ #
-    # E15 — Money non-impact: PTO_STATUS amount unchanged
-    # ------------------------------------------------------------------ #
-
-    @pytest.mark.asyncio
-    async def test_e15_pto_status_amount_unchanged(
-        self,
-        session_client,
-        auth_token: str,
-        direct_db,
-        ces_branch_id: int,
-        ces_driver_id: int,
-    ):
-        """E15: PTO_STATUS finalizes at $0 regardless of canonical entry-state row."""
-        start, end = _week_2096()
-        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e15")
-        wdate = str(start)
-        headers = _auth(auth_token)
-        try:
-            # Add a PTO_STATUS line and set a note on the canonical row
-            await session_client.post(
-                f"/payroll/periods/{pid}/lines",
-                headers=headers,
-                json={"driver_id": ces_driver_id, "work_date": wdate,
-                      "line_type": "PTO_STATUS", "quantity": "1"},
-            )
-            await session_client.post(
-                f"/payroll/periods/{pid}/day-grid",
-                headers=headers,
-                json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {}, "notes": "E15 note"}]},
-            )
-
-            await _advance_to_approved(session_client, auth_token, pid, ces_driver_id, wdate)
-            fin = await session_client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
-            assert fin.status_code == 200
-
-            # Verify PTO_STATUS final line amount is $0
-            fl = (await direct_db.execute(
-                _text("""
-                    SELECT finalamount FROM payroll.payrollfinallines
-                    WHERE payrollperiodid = :pid AND driverid = :did AND linetype = 'PTO_STATUS'
-                    LIMIT 1
-                """),
-                {"pid": pid, "did": ces_driver_id},
-            )).mappings().first()
-            assert fl is not None, "PTO_STATUS final line missing"
-            assert float(fl["finalamount"]) == 0.0, "PTO_STATUS must finalize at $0"
         finally:
             await _clean_branch(direct_db, ces_branch_id)
 

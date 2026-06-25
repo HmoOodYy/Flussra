@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 import httpx
 import sqlalchemy.exc
+from datetime import date as _date
 from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
@@ -119,28 +120,24 @@ async def _create_and_approve_rate(
 
 
 async def _make_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str,
     end: str,
 ) -> int:
-    headers = _auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=headers,
-    )
-    assert r.status_code == 201, f"period create: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r.status_code == 200, f"Open: {r.text}"
-    return pid
+    """Insert an Open period directly into DB.  Returns period_id."""
+    row = (await db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"P5-{branch_id}-{start}",
+         "name": f"P5 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _advance_to_approved(
@@ -150,16 +147,16 @@ async def _advance_to_approved(
     driver_id: int,
     work_date: str,
 ) -> None:
-    """Open -> InReview (add PTO line) -> Approved via review flow."""
+    """Open -> InReview (add DailyNote line) -> Approved via review flow."""
     headers = _auth(token)
 
     dummy = await client.post(
         f"/payroll/periods/{period_id}/lines",
         json={"driver_id": driver_id, "work_date": work_date,
-              "line_type": "PTO_STATUS", "quantity": "1"},
+              "line_type": "DailyNote", "notes": "filler"},
         headers=headers,
     )
-    assert dummy.status_code == 201, f"PTO line: {dummy.text}"
+    assert dummy.status_code == 201, f"DailyNote line: {dummy.text}"
 
     r = await client.patch(
         f"/payroll/periods/{period_id}/status",
@@ -222,7 +219,7 @@ async def _lock_period_with_rate(
         client, token, drv, rate_type_id, "15.00",
         effective_from=start[:4] + "-01-01",
     )
-    pid = await _make_period(client, token, branch_id, start, end)
+    pid = await _make_period(db, branch_id, start, end)
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
         json={"driver_id": drv, "work_date": work_date,

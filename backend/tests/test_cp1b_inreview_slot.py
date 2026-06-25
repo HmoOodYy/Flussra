@@ -89,7 +89,7 @@ async def _add_line(client, token, pid, driver_id, work_date) -> None:
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
         json={"driver_id": driver_id, "work_date": work_date,
-              "line_type": "PTO_STATUS", "quantity": 1},
+              "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         headers=_auth(token),
     )
     assert r.status_code == 201, f"add line: {r.text}"
@@ -234,8 +234,8 @@ class TestMigration:
             f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
             f"{result.stdout}\n{result.stderr}"
         )
-        assert "0053" in lines[0], (
-            f"Expected head 0053, got: {lines[0]}\n{result.stderr}"
+        assert "0055" in lines[0], (
+            f"Expected head 0055, got: {lines[0]}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio
@@ -548,8 +548,8 @@ class TestDeterministicConcurrency:
     ) -> tuple[int, str, int, str, int, int, int]:
         """
         Build test fixture:
-          pid_open (Open, has PTO_STATUS + HOURS lines, ready to submit)
-          pid_returned (Returned, has PTO_STATUS + HOURS lines, old resolved review item)
+          pid_open (Open, has DailyNote + HOURS lines, ready to submit)
+          pid_returned (Returned, has DailyNote + HOURS lines, old resolved review item)
 
         Both HOURS lines are stale-ified to calculatedamount=0.01 after setup so that
         refresh mutations are observable as rollback proof.
@@ -563,7 +563,7 @@ class TestDeterministicConcurrency:
         # Ensure an approved HOURLY rate exists for the driver (idempotent).
         await _ensure_hourly_rate(session_client, auth_token, paytest_driver_id, direct_db)
 
-        # Period A: Draft → Open → PTO_STATUS line → HOURS line → InReview → Returned
+        # Period A: Draft → Open → DailyNote line → HOURS line → InReview → Returned
         pid_a, start_a = await _create_and_open_period(
             session_client, auth_token, paytest_branch_id, direct_db
         )

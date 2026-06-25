@@ -66,7 +66,7 @@ async def _advance_to_approved(
     start_date: str = "2085-01-07",
 ) -> dict:
     """Submit period for review and approve via the review flow.
-    Adds a dummy PTO_STATUS line only if the period has no non-void lines."""
+    Adds a dummy DailyNote line only if the period has no non-void lines."""
     headers = auth(token)
     lines_resp = await client.get(
         f"/payroll/periods/{period_id}/lines",
@@ -80,8 +80,9 @@ async def _advance_to_approved(
             json={
                 "driver_id":  driver_id,
                 "work_date":  start_date,
-                "line_type":  "PTO_STATUS",
+                "line_type":  "DailyNote",
                 "quantity":   "1",
+                "notes":      "filler",
             },
         )
     r = await client.patch(
@@ -148,7 +149,7 @@ async def _add_line_to_approved_period(
     driver_id: int,
     direct_db,
     *,
-    line_type: str = "PTO_STATUS",
+    line_type: str = "DailyNote",
     quantity: str = "1.00",
     work_date: str = "2085-01-07",
 ) -> dict:
@@ -162,7 +163,7 @@ async def _add_line_to_approved_period(
 
     Phase 4C: manual rate_amount is blocked for PerUnit lines.
     PerUnit line types (Hours, Miles, etc.) require an approved DriverRate.
-    Use PTO_STATUS for lines that need no rate, or set up an approved rate first.
+    Use DailyNote for lines that need no rate, or set up an approved rate first.
     """
     headers = auth(token)
     # Force to Open via direct DB - Approved->InReview is now blocked in production.
@@ -176,6 +177,8 @@ async def _add_line_to_approved_period(
         "line_type": line_type,
         "quantity":  quantity,
     }
+    if line_type == "DailyNote":
+        payload["notes"] = "filler"
 
     r = await client.post(
         f"/payroll/periods/{period_id}/lines",
@@ -453,10 +456,10 @@ class TestFinalizationPreview:
         headers = auth(auth_token)
         pid = cp3a_approved_period["payroll_period_id"]
 
-        # Add a line and finalize to reach Locked (PTO_STATUS needs no approved rate)
+        # Add a line and finalize to reach Locked (DailyNote needs no approved rate)
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
         fin = await session_client.post(
             f"/payroll/periods/{pid}/finalize", headers=headers
@@ -489,7 +492,7 @@ class TestFinalizationPreview:
         # Add a normal line so period is not empty
         line = await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
         line_id = line["draft_line_id"]
 
@@ -684,11 +687,11 @@ class TestFinalizationPreview:
         # Add two lines: one valid, one we'll void
         line_keep = await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00", work_date="2085-01-07",
+            line_type="DailyNote", quantity="1.00", work_date="2085-01-07",
         )
         line_void = await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00", work_date="2085-01-08",
+            line_type="DailyNote", quantity="1.00", work_date="2085-01-08",
         )
 
         # Void the second line directly
@@ -708,7 +711,7 @@ class TestFinalizationPreview:
         assert line_keep["draft_line_id"] in ids
         assert line_void["draft_line_id"] not in ids
 
-        # Voided line must NOT appear in totals (PTO_STATUS has $0 final_amount anyway)
+        # Voided line must NOT appear in totals (DailyNote has $0 final_amount anyway)
         gross = Decimal(str(body["total_final_gross"]))
         assert line_void["draft_line_id"] not in ids, (
             f"Void line leaked into preview lines: {gross}"
@@ -728,7 +731,7 @@ class TestFinalizationPreview:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         resp = await session_client.get(
@@ -898,7 +901,7 @@ class TestFinalizationPreview:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         # Count final lines before
@@ -946,7 +949,7 @@ class TestFinalizationPreview:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         role_id = await _create_role_with_perms(
@@ -982,7 +985,7 @@ class TestFinalizationPreview:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         role_id = await _create_role_with_perms(
@@ -1139,7 +1142,7 @@ class TestFinalizeODABlock:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         role_id = await _create_role_with_perms(
@@ -1177,7 +1180,7 @@ class TestFinalizeODABlock:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         count_before = (await direct_db.execute(
@@ -1231,7 +1234,7 @@ class TestFinalizeODABlock:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         role_id = await _create_role_with_perms(
@@ -1265,7 +1268,7 @@ class TestFinalizeODABlock:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         role_id = await _create_role_with_perms(
@@ -1302,7 +1305,7 @@ class TestFinalizeODABlock:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
         )
 
         role_id = await _create_role_with_perms(
@@ -1392,7 +1395,7 @@ class TestPreviewResponseShape:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
             work_date="2085-01-08",
         )
 
@@ -1425,10 +1428,10 @@ class TestPreviewResponseShape:
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        # Add a PTO_STATUS line (finalamount=$0) so driver is below any minimum pay rule
+        # Add a DailyNote line (finalamount=$0) so driver is below any minimum pay rule
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
             work_date="2085-01-09",
         )
 
@@ -1495,7 +1498,7 @@ class TestPreviewResponseShape:
 
         await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="PTO_STATUS", quantity="1.00",
+            line_type="DailyNote", quantity="1.00",
             work_date="2085-01-10",
         )
 

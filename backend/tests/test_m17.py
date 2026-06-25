@@ -90,6 +90,25 @@ async def hq_entry_token(
 # TestDashboardAuth
 # ---------------------------------------------------------------------------
 
+async def _make_open_period(db, branch_id: int, start: str, end: str) -> int:
+    """Insert an Open period directly into DB. Returns period_id."""
+    from datetime import date as _date
+    from sqlalchemy import text as _sqla_text
+    code = f"M17-{branch_id}-{start}"
+    row = (await db.execute(
+        _sqla_text(f"""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"M17 {start}",
+         "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
+
+
 class TestDashboardAuth:
     async def test_requires_auth(self, client: httpx.AsyncClient):
         resp = await client.get(BASE)
@@ -262,31 +281,15 @@ class TestDashboardPeriodCounts:
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """Create an Open period on PAYTEST; verify periods_open ≥ 1."""
         # Get baseline
         base = (await _get_dashboard(client, auth_token)).json()
         base_open = base["periods_open"]
 
-        # Create a Draft period and advance to Open
-        create = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":  paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2027-06-01",
-                "end_date":   "2027-06-07",
-            },
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-        assert create.status_code == 201, create.text
-        pid = create.json()["payroll_period_id"]
-
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
+        # Create an Open period via direct DB (CP-1D B1 guard blocks HTTP POST)
+        pid = await _make_open_period(direct_db, paytest_branch_id, "2027-06-01", "2027-06-07")
 
         # Verify count increased
         resp = await _get_dashboard(client, auth_token)
@@ -305,41 +308,25 @@ class TestDashboardPeriodCounts:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Advance a period through review to Approved; verify periods_approved ≥ 1."""
         base = (await _get_dashboard(client, auth_token)).json()
         base_approved = base["periods_approved"]
 
-        # Create period
-        create = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":  paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2027-07-01",
-                "end_date":   "2027-07-07",
-            },
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-        assert create.status_code == 201, create.text
-        pid = create.json()["payroll_period_id"]
+        # Create an Open period via direct DB (CP-1D B1 guard blocks HTTP POST)
+        pid = await _make_open_period(direct_db, paytest_branch_id, "2027-07-01", "2027-07-07")
 
-        # Draft → Open
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-
-        # Add a PTO_STATUS line so period is non-empty (no approved rate needed)
+        # Add a DailyNote line so period is non-empty (no approved rate needed)
         line_resp = await client.post(
             f"/payroll/periods/{pid}/lines",
             json={
                 "driver_id":   paytest_driver_id,
-                "line_type":   "PTO_STATUS",
+                "line_type":   "DailyNote",
                 "quantity":    1,
                 "work_date":   "2027-07-02",
                 "source_type": "Manual",
+                "notes":       "filler",
             },
             headers={"Authorization": f"Bearer {auth_token}"},
         )
@@ -388,20 +375,10 @@ class TestDashboardPeriodCounts:
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """Cancelled periods must NOT appear in any count."""
-        create = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":  paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2027-08-01",
-                "end_date":   "2027-08-07",
-            },
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-        assert create.status_code == 201
-        pid = create.json()["payroll_period_id"]
+        pid = await _make_open_period(direct_db, paytest_branch_id, "2027-08-01", "2027-08-07")
         await client.patch(
             f"/payroll/periods/{pid}/status",
             json={"status": "Cancelled"},
@@ -428,37 +405,22 @@ class TestDashboardReviewCounts:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """Submit a period for review; verify review_pending increases."""
         base = (await _get_dashboard(client, auth_token)).json()
         base_pending = base["review_pending"]
 
-        create = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":  paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2027-09-01",
-                "end_date":   "2027-09-07",
-            },
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-        assert create.status_code == 201
-        pid = create.json()["payroll_period_id"]
-
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
+        pid = await _make_open_period(direct_db, paytest_branch_id, "2027-09-01", "2027-09-07")
         line_resp = await client.post(
             f"/payroll/periods/{pid}/lines",
             json={
                 "driver_id":   paytest_driver_id,
-                "line_type":   "PTO_STATUS",
+                "line_type":   "DailyNote",
                 "quantity":    1,
                 "work_date":   "2027-09-02",
                 "source_type": "Manual",
+                "notes":       "filler",
             },
             headers={"Authorization": f"Bearer {auth_token}"},
         )
@@ -484,16 +446,10 @@ class TestDashboardReviewCounts:
             if item.get("entity_id") == str(pid):
                 review_id = item["review_item_id"]
                 break
-        if review_id:
-            await client.post(
-                f"/review/items/{review_id}/decide",
-                json={"decision": "Rejected", "reason": "cleanup"},
-                headers={"Authorization": f"Bearer {auth_token}"},
-            )
-        await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers={"Authorization": f"Bearer {auth_token}"},
+        # Force-cancel via direct DB: CP-1A blocks Returned→Cancelled via HTTP.
+        await direct_db.execute(
+            text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
+            {"pid": pid},
         )
 
     async def test_edit_requested_review_counted(
@@ -502,30 +458,23 @@ class TestDashboardReviewCounts:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """EditRequested review item → review_edit_requested increases."""
+        from sqlalchemy import text as _sqla_text
+        await direct_db.execute(
+            _sqla_text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE branchid = :bid AND status IN ('InReview', 'Approved', 'Returned')"),
+            {"bid": paytest_branch_id},
+        )
         base = (await _get_dashboard(client, auth_token)).json()
         base_er = base["review_edit_requested"]
 
-        create = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":  paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2027-10-01",
-                "end_date":   "2027-10-07",
-            },
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-        assert create.status_code == 201
-        pid = create.json()["payroll_period_id"]
-
-        await client.patch(f"/payroll/periods/{pid}/status", json={"status": "Open"},
-                           headers={"Authorization": f"Bearer {auth_token}"})
+        pid = await _make_open_period(direct_db, paytest_branch_id, "2027-10-01", "2027-10-07")
         lr2 = await client.post(f"/payroll/periods/{pid}/lines",
-                          json={"driver_id": paytest_driver_id, "line_type": "PTO_STATUS",
+                          json={"driver_id": paytest_driver_id, "line_type": "DailyNote",
                                 "quantity": 1,
-                                "work_date": "2027-10-02", "source_type": "Manual"},
+                                "work_date": "2027-10-02", "source_type": "Manual",
+                                "notes": "filler"},
                           headers={"Authorization": f"Bearer {auth_token}"})
         assert lr2.status_code == 201, f"Line add failed: {lr2.text}"
         ir2 = await client.patch(f"/payroll/periods/{pid}/status", json={"status": "InReview"},
@@ -541,16 +490,19 @@ class TestDashboardReviewCounts:
                 review_id = item["review_item_id"]
                 break
         assert review_id is not None
-        await client.post(f"/review/items/{review_id}/decide",
-                          json={"decision": "EditRequested", "reason": "needs fix"},
+        decide_resp = await client.post(f"/review/items/{review_id}/decide",
+                          json={"decision": "EditRequested", "decision_reason": "needs fix"},
                           headers={"Authorization": f"Bearer {auth_token}"})
+        assert decide_resp.status_code == 200, f"EditRequested decision failed: {decide_resp.text}"
 
         after = (await _get_dashboard(client, auth_token)).json()
-        assert after["review_edit_requested"] >= base_er + 1
+        assert after["review_edit_requested"] >= base_er + 1, f"Dashboard after: {after}"
 
-        # Cleanup
-        await client.patch(f"/payroll/periods/{pid}/status", json={"status": "Cancelled"},
-                           headers={"Authorization": f"Bearer {auth_token}"})
+        # Force-cancel via direct DB: CP-1A blocks Returned→Cancelled via HTTP.
+        await direct_db.execute(
+            text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
+            {"pid": pid},
+        )
 
 
 # ---------------------------------------------------------------------------

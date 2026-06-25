@@ -46,7 +46,16 @@ async def _cancel_active_periods(
     client: httpx.AsyncClient,
     token: str,
     branch_id: int,
+    db=None,
 ) -> None:
+    if db is not None:
+        await db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status IN ('InReview', 'Approved', 'Returned')"
+            ),
+            {"bid": branch_id},
+        )
     headers = auth(token)
     for s in ("Draft", "Open", "InReview", "Approved"):
         resp = await client.get(
@@ -65,34 +74,29 @@ async def _cancel_active_periods(
 
 
 async def _create_open_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str = P_START,
     end: str = P_END,
 ) -> int:
-    """Create a Draft period and advance it to Open. Returns period_id."""
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": "Week",
-            "start_date":  start,
-            "end_date":    end,
+    """Insert an Open period directly into the DB. Returns period_id."""
+    from datetime import date as _ddate
+    row = (await db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING RETURNING payrollperiodid
+        """),
+        {
+            "bid":   branch_id,
+            "code":  f"P1-{branch_id}-{start}",
+            "name":  f"P1 {start}",
+            "start": _ddate.fromisoformat(start),
+            "end":   _ddate.fromisoformat(end),
         },
-        headers=headers,
-    )
-    assert r.status_code == 201, f"create Draft failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-
-    r = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r.status_code == 200, f"transition to Open failed: {r.text}"
-    return pid
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _add_line(
@@ -101,18 +105,21 @@ async def _add_line(
     period_id: int,
     driver_id: int,
     work_date: str = WORK_A,
-    line_type: str = "PTO_STATUS",
+    line_type: str = "DailyNote",
     quantity: int = 1,
 ) -> httpx.Response:
+    payload: dict = {
+        "driver_id": driver_id,
+        "work_date": work_date,
+        "line_type": line_type,
+        "quantity":  quantity,
+    }
+    if line_type == "DailyNote":
+        payload["notes"] = "filler"
     return await client.post(
         f"/payroll/periods/{period_id}/lines",
         headers=auth(token),
-        json={
-            "driver_id": driver_id,
-            "work_date": work_date,
-            "line_type": line_type,
-            "quantity":  quantity,
-        },
+        json=payload,
     )
 
 
@@ -125,7 +132,7 @@ async def _advance_to_approved(
     """Advance an Open period all the way to Approved via the review workflow."""
     headers = auth(token)
 
-    # Ensure at least one non-void line (PTO_STATUS — no rate needed)
+    # Ensure at least one non-void line (DailyNote — no rate needed)
     lines_resp = await client.get(
         f"/payroll/periods/{period_id}/lines",
         headers=headers,
@@ -176,7 +183,7 @@ async def p1_clean(
     direct_db,
 ):
     """Cancel any conflicting PAYTEST periods before and after each test."""
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
     # Also force-cancel Locked/Archived periods left by finalization tests
     # (migration 0035 blocks direct status UPDATE; disable triggers temporarily)
     await direct_db.execute(_text(
@@ -197,7 +204,7 @@ async def p1_clean(
         "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
     ))
     yield paytest_branch_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
     await direct_db.execute(_text(
         "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
     ))
@@ -222,9 +229,10 @@ async def open_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     p1_clean: int,
+    direct_db,
 ) -> int:
     """Open period on PAYTEST, returns period_id."""
-    return await _create_open_period(session_client, auth_token, p1_clean)
+    return await _create_open_period(direct_db, p1_clean)
 
 
 @pytest_asyncio.fixture
@@ -239,7 +247,7 @@ async def approved_period_p1(
     Create an Approved period on PAYTEST with all draft lines voided so each
     test can seed its own lines.  Returns period_id.
     """
-    pid = await _create_open_period(session_client, auth_token, p1_clean)
+    pid = await _create_open_period(direct_db, p1_clean)
     await _advance_to_approved(
         session_client, auth_token, pid, paytest_driver_id
     )
@@ -312,7 +320,7 @@ async def test_add_draft_line_allows_different_pay_item(
     driver = paytest_driver_id
 
     r1 = await _add_line(
-        session_client, auth_token, pid, driver, line_type="PTO_STATUS"
+        session_client, auth_token, pid, driver, line_type="DailyNote"
     )
     assert r1.status_code == 201, r1.text
 
@@ -376,13 +384,13 @@ async def test_update_cannot_collide(
     headers = auth(auth_token)
 
     r1 = await _add_line(
-        session_client, auth_token, pid, driver, work_date=WORK_A, line_type="PTO_STATUS"
+        session_client, auth_token, pid, driver, work_date=WORK_A, line_type="DailyNote"
     )
     assert r1.status_code == 201, r1.text
     line_id_a = r1.json()["draft_line_id"]
 
     r2 = await _add_line(
-        session_client, auth_token, pid, driver, work_date=WORK_B, line_type="PTO_STATUS"
+        session_client, auth_token, pid, driver, work_date=WORK_B, line_type="DailyNote"
     )
     assert r2.status_code == 201, r2.text
 
@@ -500,7 +508,7 @@ async def test_finalization_blocks_preexisting_duplicates(
                          workdate, linetype, linescope, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     SELECT companyid, :bid, :pid, :did,
-                           :wdate, 'PTO_STATUS', 'Daily', 1,
+                           :wdate, 'DailyNote', 'Daily', 1,
                            'Manual', 'Active', FALSE, NULL, 1
                     FROM   payroll.payrollperiods
                     WHERE  payrollperiodid = :pid
@@ -524,7 +532,7 @@ async def test_finalization_blocks_preexisting_duplicates(
             _text("""
                 UPDATE payroll.payrolldraftlines
                 SET    status = 'Void'
-                WHERE  payrollperiodid = :pid AND linetype = 'PTO_STATUS'
+                WHERE  payrollperiodid = :pid AND linetype = 'DailyNote'
             """),
             {"pid": pid},
         )
@@ -571,7 +579,7 @@ async def test_db_unique_index_prevents_direct_duplicate(
              workdate, linetype, linescope, quantity,
              sourcetype, status, needsmanagerreview, notes, addedbyuserid)
         SELECT companyid, :bid, :pid, :did,
-               :wdate, 'PTO_STATUS', 'Daily', 1,
+               :wdate, 'DailyNote', 'Daily', 1,
                'Manual', 'Active', FALSE, NULL, 1
         FROM   payroll.payrollperiods
         WHERE  payrollperiodid = :pid
@@ -671,7 +679,7 @@ async def test_normal_add_and_finalize_still_works(
     driver = paytest_driver_id
     headers = auth(auth_token)
 
-    # Inject exactly one active PTO_STATUS line via direct_db
+    # Inject exactly one active DailyNote line via direct_db
     await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
@@ -679,7 +687,7 @@ async def test_normal_add_and_finalize_still_works(
                  workdate, linetype, linescope, quantity,
                  sourcetype, status, needsmanagerreview, notes, addedbyuserid)
             SELECT companyid, branchid, :pid, :did,
-                   :wdate, 'PTO_STATUS', 'Daily', 1,
+                   :wdate, 'DailyNote', 'Daily', 1,
                    'Manual', 'Active', FALSE, NULL, 1
             FROM   payroll.payrollperiods
             WHERE  payrollperiodid = :pid
@@ -702,6 +710,6 @@ async def test_normal_add_and_finalize_still_works(
     assert lines_resp.status_code == 200
     final_lines = lines_resp.json()
     assert any(
-        fl.get("line_type") == "PTO_STATUS"
+        fl.get("line_type") == "DailyNote"
         for fl in final_lines
-    ), f"expected PTO_STATUS in final lines, got: {final_lines}"
+    ), f"expected DailyNote in final lines, got: {final_lines}"

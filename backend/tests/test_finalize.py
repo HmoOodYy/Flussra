@@ -129,15 +129,16 @@ async def _advance_to_approved(
         params={"status": "Active"},
     )
     if lines_resp.status_code == 200 and len(lines_resp.json()) == 0:
-        # Add a non-void line so the period is not empty (PTO_STATUS needs no approved rate)
+        # Add a non-void line so the period is not empty (DailyNote needs no approved rate)
         await client.post(
             f"/payroll/periods/{period_id}/lines",
             headers=headers,
             json={
                 "driver_id":   driver_id,
                 "work_date":   start_date,
-                "line_type":   "PTO_STATUS",
+                "line_type":   "DailyNote",
                 "quantity":    1,
+                "notes":       "filler",
             },
         )
     # Submit to InReview
@@ -265,7 +266,7 @@ async def _add_line(
     driver_id: int,
     direct_db,
     *,
-    line_type: str = "PTO_STATUS",
+    line_type: str = "DailyNote",
     quantity: str = "1.00",
     work_date: str = "2032-01-07",
 ) -> dict:
@@ -274,11 +275,11 @@ async def _add_line(
     The period must be in Approved status when called.
     Returns the created draft line dict.
 
-    Default line_type is 'PTO_STATUS' (ratebehavior='None') because:
+    Default line_type is 'DailyNote' (ratebehavior='None') because:
     - 'None' behavior never triggers a DriverRate lookup.
     - needs_manager_review is always False (no unresolved calculation).
     - The period can always reach Approved without resolving a rate.
-    - calculatedamount is NULL; finalamount is 0 at finalization (correct for PTO).
+    - calculatedamount is NULL; finalamount is 0 at finalization.
     - Tests that need PerUnit calculation must set up an approved DriverRate first.
 
     Phase 4C: manual rate_amount is blocked for PerUnit lines.
@@ -301,6 +302,8 @@ async def _add_line(
         "line_type":  line_type,
         "quantity":   quantity,
     }
+    if line_type == "DailyNote":
+        payload["notes"] = "filler"
 
     r = await client.post(
         f"/payroll/periods/{period_id}/lines",
@@ -388,7 +391,7 @@ class TestFinalizePeriod:
     ):
         pid = approved_period["payroll_period_id"]
 
-        # Seed two non-Void draft lines (PTO_STATUS requires no approved rate)
+        # Seed two non-Void draft lines (DailyNote requires no approved rate)
         await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
         await _add_line(client, auth_token, pid, paytest_driver_id, direct_db, work_date="2032-01-08")
 
@@ -407,7 +410,7 @@ class TestFinalizePeriod:
         lines = ledger.json()
         assert len(lines) == 2
         types = {l["line_type"] for l in lines}
-        assert types == {"PTO_STATUS"}
+        assert types == {"DailyNote"}
 
     async def test_void_draft_lines_not_finalized(
         self,
@@ -422,7 +425,7 @@ class TestFinalizePeriod:
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        # Seed one non-voided PTO_STATUS line so finalization has something to lock.
+        # Seed one non-voided DailyNote line so finalization has something to lock.
         # _add_line steps the period: Approved -> Open -> (add line) -> Approved.
         await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
 
@@ -461,7 +464,7 @@ class TestFinalizePeriod:
         assert ledger.status_code == 200
         types = [l["line_type"] for l in ledger.json()]
         assert "OVERNIGHT" not in types
-        assert "PTO_STATUS" in types
+        assert "DailyNote" in types
 
     async def test_final_amount_computed_from_rate(
         self,
@@ -627,16 +630,16 @@ class TestFinalizePeriod:
             )).mappings().first()
         pid = _r["payrollperiodid"]
 
-        # Add 2 PTO_STATUS lines on different dates while Open
+        # Add 2 DailyNote lines on different dates while Open
         # (duplicate guard: same driver + date + line_type would be rejected).
         for wdate in ("2035-03-04", "2035-03-05"):
             lr = await session_client.post(
                 f"/payroll/periods/{pid}/lines",
                 json={"driver_id": paytest_driver_id, "work_date": wdate,
-                      "line_type": "PTO_STATUS", "quantity": "1.00"},
+                      "line_type": "DailyNote", "quantity": "1.00", "notes": "filler"},
                 headers=headers,
             )
-            assert lr.status_code == 201, f"add PTO_STATUS line failed: {lr.text}"
+            assert lr.status_code == 201, f"add DailyNote line failed: {lr.text}"
             assert not lr.json().get("needs_manager_review")
 
         # Open → InReview → Approved → Locked (finalize)
@@ -723,7 +726,7 @@ class TestGetFinalLines:
         assert "source_type" in line
         assert "approved_at_utc" in line
         assert line["driver_id"] == paytest_driver_id
-        assert line["line_type"] == "PTO_STATUS"
+        assert line["line_type"] == "DailyNote"
 
     async def test_filter_by_driver_id(
         self,
@@ -790,7 +793,7 @@ class TestGetFinalLines:
             f"/payroll/periods/{pid}/final-lines",
             headers=auth(auth_token),
         )
-        pto_lines = [l for l in ledger.json() if l["line_type"] == "PTO_STATUS"]
+        pto_lines = [l for l in ledger.json() if l["line_type"] == "DailyNote"]
         assert len(pto_lines) == 1
         assert pto_lines[0]["draft_line_id"] == draft["draft_line_id"]
 

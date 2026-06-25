@@ -51,8 +51,17 @@ async def _cancel_active_periods(
     client: httpx.AsyncClient,
     token: str,
     branch_id: int,
+    db=None,
 ) -> None:
     """Cancel all active (non-final) periods on the given branch."""
+    if db is not None:
+        await db.execute(
+            _text(
+                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
+            ),
+            {"bid": branch_id},
+        )
     headers = auth(token)
     for s in ("Draft", "Open", "InReview", "Approved"):
         resp = await client.get(
@@ -76,24 +85,25 @@ async def _open_period(
     branch_id: int,
     start: str = PERIOD_START,
     end: str = PERIOD_END,
+    db=None,
 ) -> int:
-    """Create a period and advance it to Open status. Returns period_id."""
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=headers,
-    )
-    assert r.status_code == 201, f"Create period failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    t = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert t.status_code == 200, f"Open failed: {t.text}"
-    return pid
+    """Insert an Open period directly into DB. Returns period_id."""
+    from datetime import date as _date
+    if db is None:
+        raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
+    code = f"CP5-{branch_id}-{start}"
+    row = (await db.execute(
+        _text(f"""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"CP5 {start}",
+         "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _advance_to_approved(
@@ -114,7 +124,7 @@ async def _advance_to_approved(
         r = await client.post(
             f"/payroll/periods/{period_id}/lines",
             json={"driver_id": driver_id, "work_date": seed_date,
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
             headers=headers,
         )
         assert r.status_code == 201, f"Seed line failed: {r.text}"
@@ -286,14 +296,15 @@ class TestDriverEligibilityByDate:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Driver with hire_date=2089-06-23 must NOT appear in the day-grid on
         2089-06-21 (two days before hire).
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,
@@ -311,7 +322,7 @@ class TestDriverEligibilityByDate:
                 f"Driver hired {DATE_JUN23} must not appear on {DATE_JUN21}"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_driver_hired_midperiod_visible_from_hire_date(
@@ -319,13 +330,14 @@ class TestDriverEligibilityByDate:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Same driver (hire_date=2089-06-23) MUST appear on 2089-06-23 and later.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,
@@ -344,7 +356,7 @@ class TestDriverEligibilityByDate:
                     f"Driver hired {DATE_JUN23} must appear on {wdate}"
                 )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_driver_terminated_midperiod_absent_after_termination(
@@ -352,13 +364,14 @@ class TestDriverEligibilityByDate:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Driver terminated on 2089-06-25 must NOT appear on 2089-06-27.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,
@@ -379,7 +392,7 @@ class TestDriverEligibilityByDate:
                 f"Driver terminated {DATE_JUN25} must not appear on {DATE_JUN27}"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_driver_terminated_midperiod_visible_until_termination(
@@ -387,13 +400,14 @@ class TestDriverEligibilityByDate:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         Driver terminated on 2089-06-25 must appear on 2089-06-25 (inclusive).
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
             session_client, auth_token, paytest_branch_id,
@@ -415,7 +429,7 @@ class TestDriverEligibilityByDate:
                     f"Driver terminated {DATE_JUN25} must appear on {wdate}"
                 )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +445,7 @@ class TestSavedLinePersistsAfterTermination:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         A draft line saved for a driver remains in the DB (not voided, not deleted)
@@ -440,8 +455,8 @@ class TestSavedLinePersistsAfterTermination:
         so the session fixture is not permanently disrupted.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         # Add a line on JUN23 for the main paytest driver
         line_resp = await session_client.post(
@@ -449,8 +464,9 @@ class TestSavedLinePersistsAfterTermination:
             json={
                 "driver_id": paytest_driver_id,
                 "work_date": DATE_JUN23,
-                "line_type": "PTO_STATUS",
+                "line_type": "DailyNote",
                 "quantity": 1,
+                "notes": "filler",
             },
             headers=headers,
         )
@@ -479,7 +495,7 @@ class TestSavedLinePersistsAfterTermination:
                 json={"termination_date": None},
                 headers=headers,
             )
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +511,7 @@ class TestRateLookupByWorkDate:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         An HOURS line entered when NO approved rate exists gets
@@ -506,8 +523,8 @@ class TestRateLookupByWorkDate:
         not the date the rate was entered into the system.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         # Get HOURLY rate type
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
@@ -565,7 +582,7 @@ class TestRateLookupByWorkDate:
                 f"/payroll/rates/{rate_id}",
                 headers=headers,
             )
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_pending_rate_not_used_for_calculation(
@@ -574,6 +591,7 @@ class TestRateLookupByWorkDate:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         A PendingApproval rate must NOT be used for calculatedamount.
@@ -581,8 +599,8 @@ class TestRateLookupByWorkDate:
         if only a Pending rate exists for the work_date.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
@@ -624,7 +642,7 @@ class TestRateLookupByWorkDate:
                 )
         finally:
             await session_client.delete(f"/payroll/rates/{pending_rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_missing_approved_rate_sets_needs_manager_review(
@@ -641,8 +659,8 @@ class TestRateLookupByWorkDate:
         Uses a fresh driver with no rates to guarantee isolation.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         # Create a fresh driver with no rates
         fresh_driver_id = await _create_driver(
@@ -669,7 +687,7 @@ class TestRateLookupByWorkDate:
                 "needsmanagerreview must be True when no approved rate exists"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -700,8 +718,8 @@ class TestSubmitAutoRefresh:
         each line after a rate is approved.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
@@ -763,7 +781,7 @@ class TestSubmitAutoRefresh:
             assert Decimal(str(hours_line["calculated_amount"])) == Decimal("250.0000")
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -795,8 +813,8 @@ class TestFinalizeAutoRefresh:
         This is the strictest form of the backdated-rate scenario.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         fresh_driver_id = await _create_driver(
@@ -921,8 +939,8 @@ class TestLockedPeriodNotMutated:
         isolated driver ensures this does not contaminate other tests.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         # Isolated driver: rate stays in PayrollFinalLines after finalization
@@ -1013,14 +1031,15 @@ class TestODASecurityRegression:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         CP-5 changes must not relax any ODA/Driver access boundaries.
         ODA users must still receive 403 on GET day-grid.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         role_id = await _create_role_with_perms(
             session_client, auth_token,
@@ -1040,4 +1059,4 @@ class TestODASecurityRegression:
             )
             assert resp.status_code == 403
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)

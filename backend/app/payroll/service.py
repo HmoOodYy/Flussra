@@ -2077,7 +2077,6 @@ _SYSTEM_LINE_TYPE_INFO: dict[str, _LineTypeInfo] = {
     "Wait":        _LineTypeInfo("PerUnit",       "WAIT"),
     "Pallets":     _LineTypeInfo("PerUnit",       "PALLET"),
     "Silos":       _LineTypeInfo("PerUnit",       "SILO"),
-    "PTO":         _LineTypeInfo("None",          None),   # no monetary value
     "DailyStatus": _LineTypeInfo("None",          None),   # informational
     "DailyNote":   _LineTypeInfo("None",          None),   # informational
     "Bonus":       _LineTypeInfo("Fixed",         None,  "Period"),  # Period item; blocked from daily entry
@@ -2095,7 +2094,6 @@ _SYSTEM_ITEM_DB_CODES: dict[str, str | None] = {
     "Wait":        "WAIT_TIME",
     "Pallets":     "PALLETS",
     "Silos":       "SILOS",
-    "PTO":         "PTO_STATUS",
     "DailyStatus": None,      # no DB counterpart; informational only
     "DailyNote":   None,      # no DB counterpart; informational only
     "Bonus":       "BONUS",
@@ -2112,7 +2110,7 @@ _LEGACY_TO_CANONICAL: dict[str, str] = {
     for legacy, code in _SYSTEM_ITEM_DB_CODES.items()
     if code is not None   # DailyStatus / DailyNote have no canonical PayItemCode
 }
-# e.g. {"Hours": "HOURS", "Miles": "MILES", ..., "Bonus": "BONUS", ...}
+# e.g. {"Hours": "HOURS", "Miles": "MILES", ..., "Silos": "SILOS", "Bonus": "BONUS", ...}
 
 # Pure-informational items that have no PayItems catalog counterpart.
 # Accepted unconditionally (no scope, branch, or rate checks).
@@ -10293,8 +10291,6 @@ async def get_day_grid(
 
         if is_off:
             off_count += 1
-        elif status_key_code and status_key_code.upper() in ("PTO", "PTO_STATUS"):
-            pto_count += 1
         else:
             worked_count += 1
 

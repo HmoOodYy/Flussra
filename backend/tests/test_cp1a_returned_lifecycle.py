@@ -103,7 +103,7 @@ async def _add_line(
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
         json={"driver_id": driver_id, "work_date": work_date,
-              "line_type": "PTO_STATUS", "quantity": 1},
+              "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         headers=_auth(token),
     )
     assert r.status_code == 201, f"add line: {r.text}"
@@ -523,7 +523,7 @@ class TestReturnedEditability:
         r = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": next_date,
-                  "line_type": "PTO_STATUS", "quantity": 2},
+                  "line_type": "DailyNote", "quantity": 2, "notes": "filler"},
             headers=_auth(auth_token),
         )
         assert r.status_code == 201, (
@@ -573,7 +573,7 @@ class TestReturnedEditability:
         r = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": next_date,
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
             headers=_auth(auth_token),
         )
         assert r.status_code == 422, (

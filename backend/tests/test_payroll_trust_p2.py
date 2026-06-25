@@ -30,7 +30,7 @@ import pytest
 import pytest_asyncio
 import httpx
 from datetime import date as _date, timedelta as _td
-from sqlalchemy import text as _text
+from sqlalchemy import text as _text, text as _sqla_text
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +51,17 @@ async def _cancel_periods(
     client: httpx.AsyncClient,
     token: str,
     branch_id: int,
+    db=None,
 ) -> None:
     headers = auth(token)
+    if db is not None:
+        await db.execute(
+            _sqla_text(
+                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
+            ),
+            {"bid": branch_id},
+        )
     for s in ("Draft", "Open", "InReview", "Approved"):
         resp = await client.get(
             "/payroll/periods",
@@ -70,29 +79,24 @@ async def _cancel_periods(
 
 
 async def _make_open_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str = P_START,
     end: str = P_END,
 ) -> int:
-    """Create Draft → Open period; returns period_id."""
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=headers,
-    )
-    assert r.status_code == 201, f"period create failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r.status_code == 200, f"Open transition failed: {r.text}"
-    return pid
+    """Insert an Open period directly into DB; returns period_id."""
+    row = (await db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"P2-{branch_id}-{start}",
+         "name": f"P2 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _create_driver(
@@ -163,18 +167,21 @@ async def _add_line(
     period_id: int,
     driver_id: int,
     work_date: str = WORK_MID,
-    line_type: str = "PTO_STATUS",
-    quantity: int = 1,
+    line_type: str = "DailyNote",
 ) -> httpx.Response:
+    payload: dict = {
+        "driver_id": driver_id,
+        "work_date": work_date,
+        "line_type": line_type,
+    }
+    if line_type == "DailyNote":
+        payload["notes"] = "filler"
+    else:
+        payload["quantity"] = 1
     return await client.post(
         f"/payroll/periods/{period_id}/lines",
         headers=auth(token),
-        json={
-            "driver_id": driver_id,
-            "work_date": work_date,
-            "line_type": line_type,
-            "quantity":  quantity,
-        },
+        json=payload,
     )
 
 
@@ -190,7 +197,7 @@ async def p2_env(
     direct_db,
 ):
     """Cancel conflicting periods; yield env dict; cancel again after test."""
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
+    await _cancel_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     env = {
         "client":    session_client,
@@ -203,7 +210,7 @@ async def p2_env(
     yield env
 
     # Teardown: cancel any open periods this test may have left
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
+    await _cancel_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     # Delete any ephemeral drivers created by this test
     for did in env["created_drivers"]:
@@ -227,7 +234,7 @@ class TestAddDraftLineEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
         assert resp.status_code == 422, resp.text
@@ -243,7 +250,7 @@ class TestAddDraftLineEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
         assert resp.status_code == 201, resp.text
@@ -261,7 +268,7 @@ class TestAddDraftLineEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
         assert resp.status_code == 422, resp.text
@@ -279,7 +286,7 @@ class TestAddDraftLineEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
         assert resp.status_code == 201, resp.text
@@ -306,7 +313,7 @@ class TestAddDraftLineEligibility:
         p2_env["created_drivers"].append(driver_id)
 
         # Period is on PAYTEST branch
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
         assert resp.status_code == 422, resp.text
@@ -326,7 +333,7 @@ class TestDayGridEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         # Look up a valid pay-item code that the day-grid accepts
         pi_resp = await c.get(
@@ -372,7 +379,7 @@ class TestUpdateDraftLineEligibility:
         driver_id = await _create_driver(c, tok, bid, "T7", hire_date="2034-01-01")
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         # Add line while driver is still eligible
         add = await _add_line(c, tok, pid, driver_id)
@@ -423,7 +430,7 @@ class TestUpdateDraftLineEligibility:
         driver_id = await _create_driver(c, tok, bid, "T8", hire_date="2034-01-01")
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         add = await _add_line(c, tok, pid, driver_id)
         assert add.status_code == 201, add.text
@@ -474,7 +481,7 @@ class TestFinalizationEligibility:
         driver_id = await _create_driver(c, tok, bid, "T9", hire_date="2034-01-01")
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         add = await _add_line(c, tok, pid, driver_id)
         assert add.status_code == 201, add.text
@@ -573,7 +580,7 @@ class TestPeriodPayEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await c.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -601,7 +608,7 @@ class TestPeriodPayEligibility:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await c.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -641,7 +648,7 @@ class TestTransferEligibility:
             {"eto": _date(2034, 5, 9), "did": driver_id},
         )
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         # Source driver's effectiveto < work_date → ineligible
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
@@ -682,7 +689,7 @@ class TestTransferEligibility:
             {"efrom": _date(2034, 5, 15), "did": driver_id},
         )
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         # effectivefrom (2034-05-15) > work_date (2034-05-12) → ineligible
         resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
@@ -713,7 +720,7 @@ class TestNormalPathStillWorks:
         )
         p2_env["created_drivers"].append(driver_id)
 
-        pid = await _make_open_period(c, tok, bid)
+        pid = await _make_open_period(p2_env["db"], bid)
 
         # Add
         add = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)

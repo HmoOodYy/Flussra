@@ -10,7 +10,7 @@ fields added in migration 0034:
      historically-valid) rate row is stored, not the newer rate's ID.
   C  Rate change after finalization does not alter locked source fields.
   D  BONUS period-pay line: RateBehavior='EnteredAmount', rate fields NULL.
-  E  PTO_STATUS line: RateBehavior='None', rate fields NULL.
+  E  DailyNote line: RateBehavior='None', rate fields NULL (replaces removed PTO_STATUS test).
   F  SYS_MIN_TOPUP line: RateBehavior='System', rate fields NULL.
   G  Finalization preview exposes resolved_rate_amount / rate_behavior
      consistent with what finalization will actually write.
@@ -42,7 +42,7 @@ B_START, B_END, B_WORK = "2036-04-07", "2036-04-20", "2036-04-10"
 C_START, C_END, C_WORK = "2037-04-07", "2037-04-20", "2037-04-10"
 # Test D — 2038 (EnteredAmount / BONUS)
 D_START, D_END, D_WORK = "2038-04-07", "2038-04-20", "2038-04-10"
-# Test E — 2039 (PTO_STATUS None behavior)
+# Test E — 2039 (DailyNote None behavior)
 E_START, E_END, E_WORK = "2039-04-07", "2039-04-20", "2039-04-10"
 # Test F — 2040 (SYS_MIN_TOPUP)
 F_START, F_END, F_WORK = "2040-04-07", "2040-04-20", "2040-04-10"
@@ -83,29 +83,24 @@ async def _cancel_periods(
 
 
 async def _make_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str = A_START,
     end: str = A_END,
 ) -> int:
-    """Create Draft period and open it.  Returns period_id."""
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=headers,
-    )
-    assert r.status_code == 201, f"period create: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r.status_code == 200, f"Open: {r.text}"
-    return pid
+    """Insert an Open period directly into DB.  Returns period_id."""
+    row = (await db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"P3B-{branch_id}-{start}",
+         "name": f"P3B {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _create_driver(
@@ -245,17 +240,17 @@ async def _advance_to_approved(
     driver_id: int,
     work_date: str = "2035-04-10",
 ) -> None:
-    """Open → InReview (add dummy PTO line) → Approved via review flow."""
+    """Open → InReview (add dummy DailyNote line) → Approved via review flow."""
     headers = auth(token)
 
-    # Add a no-review-needed PTO line so the period is non-empty
+    # Add a no-review-needed DailyNote line so the period is non-empty
     dummy = await client.post(
         f"/payroll/periods/{period_id}/lines",
         json={"driver_id": driver_id, "work_date": work_date,
-              "line_type": "PTO_STATUS", "quantity": "1"},
+              "line_type": "DailyNote", "notes": "filler"},
         headers=headers,
     )
-    assert dummy.status_code == 201, f"dummy PTO: {dummy.text}"
+    assert dummy.status_code == 201, f"dummy DailyNote: {dummy.text}"
 
     r = await client.patch(
         f"/payroll/periods/{period_id}/status",
@@ -366,7 +361,7 @@ class TestA_PerUnitSourceSnapshot:
             c, tok, drv, hrly_rtid, "22.50", effective_from="2035-01-01"
         )
 
-        pid = await _make_period(c, tok, bid, start=A_START, end=A_END)
+        pid = await _make_period(p3b_env["db"], bid, start=A_START, end=A_END)
         await _add_draft_line(c, tok, pid, drv, "HOURS", quantity="8.0000",
                               work_date=A_WORK)
 
@@ -421,7 +416,7 @@ class TestB_SupersededRateSnapshot:
         )
 
         # Period in 2036 — work date Apr 10 is before Apr 15 → old rate applies
-        pid = await _make_period(c, tok, bid, start=B_START, end=B_END)
+        pid = await _make_period(p3b_env["db"], bid, start=B_START, end=B_END)
         await _add_draft_line(c, tok, pid, drv, "MILES", quantity="100.0000",
                               work_date=B_WORK)
         await _advance_to_approved(c, tok, pid, drv, work_date=B_WORK)
@@ -460,7 +455,7 @@ class TestC_ImmutableAfterFinalize:
             c, tok, drv, hrly_rtid, "20.00", effective_from="2037-01-01"
         )
 
-        pid = await _make_period(c, tok, bid, start=C_START, end=C_END)
+        pid = await _make_period(p3b_env["db"], bid, start=C_START, end=C_END)
         await _add_draft_line(c, tok, pid, drv, "HOURS", quantity="10.0000",
                               work_date=C_WORK)
         await _advance_to_approved(c, tok, pid, drv, work_date=C_WORK)
@@ -506,7 +501,7 @@ class TestD_BonusPeriodPay:
         p3b_env["created_drivers"].append(drv)
 
         await _activate_pay_item(c, tok, bid, "BONUS")
-        pid = await _make_period(c, tok, bid, start=D_START, end=D_END)
+        pid = await _make_period(p3b_env["db"], bid, start=D_START, end=D_END)
         await _add_period_pay_line(c, tok, pid, drv, "BONUS", "250.00")
         await _advance_to_approved(c, tok, pid, drv, work_date=D_WORK)
         await _finalize(c, tok, pid)
@@ -526,30 +521,30 @@ class TestD_BonusPeriodPay:
 
 
 # ---------------------------------------------------------------------------
-# Test E — PTO_STATUS (None behavior)
+# Test E — DailyNote (None behavior, replaces removed PTO_STATUS test)
 # ---------------------------------------------------------------------------
 
-class TestE_PtoStatusNoneBehavior:
+class TestE_DailyNoteNoneBehavior:
 
     @pytest.mark.asyncio
-    async def test_e_pto_status_none_behavior(self, p3b_env):
-        """E — PTO_STATUS line: RateBehavior='None', no DriverRateID."""
+    async def test_e_dailynote_none_behavior(self, p3b_env):
+        """E — DailyNote line: RateBehavior='None', no DriverRateID (replaces removed PTO_STATUS test)."""
         c, tok, bid = p3b_env["client"], p3b_env["token"], p3b_env["branch_id"]
+        db = p3b_env["db"]
 
         drv = await _create_driver(c, tok, bid, "E1")
         p3b_env["created_drivers"].append(drv)
 
-        pid = await _make_period(c, tok, bid, start=E_START, end=E_END)
-        # _advance_to_approved adds a dummy PTO_STATUS line for us
+        pid = await _make_period(db, bid, start=E_START, end=E_END)
         await _advance_to_approved(c, tok, pid, drv, work_date=E_WORK)
         await _finalize(c, tok, pid)
 
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        pto_lines = [l for l in lines if l["line_type"] == "PTO_STATUS"]
-        assert len(pto_lines) >= 1
-        fl = pto_lines[0]
+        note_lines = [l for l in lines if l["line_type"] == "DailyNote"]
+        assert len(note_lines) >= 1
+        fl = note_lines[0]
 
-        assert fl["rate_behavior"] == "None", fl
+        assert fl["rate_behavior"] in (None, "None"), fl
         assert fl["driver_rate_id"] is None, fl
         assert fl["rate_type_id"] is None, fl
         assert fl["resolved_rate_amount"] is None, fl
@@ -582,8 +577,8 @@ class TestF_SysMinTopupBehavior:
             {"bid": bid, "did": drv},
         )
 
-        pid = await _make_period(c, tok, bid, start=F_START, end=F_END)
-        # _advance_to_approved adds the PTO_STATUS dummy line for us
+        pid = await _make_period(p3b_env["db"], bid, start=F_START, end=F_END)
+        # _advance_to_approved adds the DailyNote dummy line for us
         await _advance_to_approved(c, tok, pid, drv, work_date=F_WORK)
         await _finalize(c, tok, pid)
 
@@ -628,7 +623,7 @@ class TestG_PreviewRateSourceFields:
             c, tok, drv, hrly_rtid, "30.00", effective_from="2041-01-01"
         )
 
-        pid = await _make_period(c, tok, bid, start=G_START, end=G_END)
+        pid = await _make_period(p3b_env["db"], bid, start=G_START, end=G_END)
         await _add_draft_line(c, tok, pid, drv, "HOURS", quantity="5.0000",
                               work_date=G_WORK)
         await _advance_to_approved(c, tok, pid, drv, work_date=G_WORK)
@@ -686,7 +681,7 @@ class TestH_PreMigrationRowsTolerated:
             c, tok, drv, hrly_rtid, "18.00", effective_from="2042-01-01"
         )
 
-        pid = await _make_period(c, tok, bid, start=H_START, end=H_END)
+        pid = await _make_period(p3b_env["db"], bid, start=H_START, end=H_END)
         await _add_draft_line(c, tok, pid, drv, "HOURS", quantity="4.0000",
                               work_date=H_WORK)
         await _advance_to_approved(c, tok, pid, drv, work_date=H_WORK)

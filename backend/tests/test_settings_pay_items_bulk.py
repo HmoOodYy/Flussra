@@ -596,7 +596,7 @@ class TestBulkAudit:
         After a successful bulk update a PAY_ITEM_BULK_CONFIG audit record
         must exist in audit.auditlog (test 10).
         """
-        item_id = await _get_pay_item_id(session_client, auth_token, hq_branch_id, "PTO_STATUS")
+        item_id = await _get_pay_item_id(session_client, auth_token, hq_branch_id, "OVERNIGHT")
 
         resp = await session_client.patch(
             BULK_URL.format(item_id=item_id),

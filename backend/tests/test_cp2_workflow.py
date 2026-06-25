@@ -11,7 +11,9 @@ Follows conftest.py and test_m14.py patterns.
 import pytest
 import pytest_asyncio
 import httpx
+from datetime import date as _date
 from decimal import Decimal
+from sqlalchemy import text as _sqla_text
 
 
 # ---------------------------------------------------------------------------
@@ -45,39 +47,45 @@ async def _cancel_active_periods(
 
 
 async def _make_draft_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str,
     end: str,
 ) -> dict:
-    await _cancel_active_periods(client, token, branch_id)
-    resp = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=auth(token),
-    )
-    assert resp.status_code == 201, f"create failed: {resp.text}"
-    return resp.json()
+    """Insert a Draft period directly into DB and return a period dict."""
+    code = f"CP2-{branch_id}-{start}"
+    row = (await db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Draft', :code, :name, 'Week', :start, :end)
+            ON CONFLICT (branchid, periodcode) DO UPDATE SET status = 'Draft'
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"CP2 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return {"payroll_period_id": row["payrollperiodid"], "status": "Draft"}
 
 
 async def _make_open_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str,
     end: str,
 ) -> dict:
-    period = await _make_draft_period(client, token, branch_id, start, end)
-    pid = period["payroll_period_id"]
-    r = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(token),
-    )
-    assert r.status_code == 200, f"open failed: {r.text}"
-    return period
+    """Insert an Open period directly into DB and return a period dict."""
+    code = f"CP2-{branch_id}-{start}"
+    row = (await db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"CP2 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return {"payroll_period_id": row["payrollperiodid"], "status": "Open"}
 
 
 async def _activate_bonus(
@@ -137,10 +145,11 @@ class TestWorkflowTransitions:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """PATCH Draft→Open succeeds and returns the updated period."""
         period = await _make_draft_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-01-01", "2082-01-07",
         )
         pid = period["payroll_period_id"]
@@ -173,7 +182,7 @@ class TestWorkflowTransitions:
         from sqlalchemy import text as _text
 
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-01-08", "2082-01-14",
         )
         pid = period["payroll_period_id"]
@@ -181,8 +190,8 @@ class TestWorkflowTransitions:
         # Add a daily line and flag it NeedsManagerReview via direct DB
         add = await session_client.post(
             f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "line_type": "PTO_STATUS",
-                  "quantity": "1", "source_type": "Manual",
+            json={"driver_id": paytest_driver_id, "line_type": "DailyNote",
+                  "notes": "filler", "source_type": "Manual",
                   "work_date": "2082-01-08"},
             headers=auth(auth_token),
         )
@@ -222,10 +231,11 @@ class TestWorkflowTransitions:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """Open→InReview succeeds when no NeedsManagerReview lines exist."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-01-15", "2082-01-21",
         )
         pid = period["payroll_period_id"]
@@ -260,10 +270,11 @@ class TestWorkflowTransitions:
         auth_token: str,
         branch_user_token: str,
         paytest_branch_id: int,
+        direct_db,
     ):
         """No payroll.entry permission → 403 on Draft→Open transition."""
         period = await _make_draft_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-01-22", "2082-01-28",
         )
         pid = period["payroll_period_id"]
@@ -297,10 +308,11 @@ class TestBonusPanel:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """GET /period-pay returns BONUS lines added to an Open period."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-02-01", "2082-02-07",
         )
         pid = period["payroll_period_id"]
@@ -338,10 +350,11 @@ class TestBonusPanel:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """POST bonus → line_type=BONUS, line_scope=Period, work_date=NULL."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-02-08", "2082-02-14",
         )
         pid = period["payroll_period_id"]
@@ -374,10 +387,11 @@ class TestBonusPanel:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """amount=0 is rejected with 422."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-02-15", "2082-02-21",
         )
         pid = period["payroll_period_id"]
@@ -406,10 +420,11 @@ class TestBonusPanel:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """No payroll.entry permission → 403 on POST bonus."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-02-22", "2082-02-28",
         )
         pid = period["payroll_period_id"]
@@ -436,10 +451,11 @@ class TestBonusPanel:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """DELETE bonus → status='Void' (soft delete, line still retrievable)."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-03-01", "2082-03-07",
         )
         pid = period["payroll_period_id"]
@@ -491,7 +507,7 @@ class TestBonusPanel:
         from sqlalchemy import text as _text
 
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-03-08", "2082-03-14",
         )
         pid = period["payroll_period_id"]
@@ -543,13 +559,14 @@ class TestBonusPanel:
         branch_user_token: str,
         paytest_branch_id: int,
         hq_branch_id: int,
+        direct_db,
     ):
         """
         branch_user (PAYROLL_VIEWER, SpecificBranch=HQ) cannot access
         period-pay lines on PAYTEST branch (cross-branch denial).
         """
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-03-15", "2082-03-21",
         )
         pid = period["payroll_period_id"]
@@ -576,10 +593,11 @@ class TestBonusPanel:
         paytest_driver_id: int,
         paytest_branch_id: int,
         cp2_bonus_activated,
+        direct_db,
     ):
         """branch_user without payroll.entry cannot POST bonus."""
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-03-22", "2082-03-28",
         )
         pid = period["payroll_period_id"]
@@ -605,6 +623,7 @@ class TestBonusPanel:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        direct_db,
     ):
         """
         BONUS is accepted (201, line_type='BONUS').
@@ -613,7 +632,7 @@ class TestBonusPanel:
         cannot be created so cannot contaminate the bonus panel.
         """
         period = await _make_open_period(
-            session_client, auth_token, paytest_branch_id,
+            direct_db, paytest_branch_id,
             "2082-04-01", "2082-04-07",
         )
         pid = period["payroll_period_id"]

@@ -126,8 +126,8 @@ async def _create_open_period(client: httpx.AsyncClient, token: str, branch_id: 
 async def _add_miles_line(client: httpx.AsyncClient, token: str, period_id: int,
                            driver_id: int, miles: int = 200,
                            rate: float = 0.55) -> dict:
-    """Add a PTO_STATUS draft line to make the period non-empty.
-    (Miles/rate_amount overrides are blocked by Phase 4C; PTO_STATUS has
+    """Add a DailyNote draft line to make the period non-empty.
+    (Miles/rate_amount overrides are blocked by Phase 4C; DailyNote has
     None rate-behavior so no driver rate is required.)
     Fetches the period's start date to use as work_date."""
     period_resp = await client.get(f"/payroll/periods/{period_id}", headers=_auth(token))
@@ -139,8 +139,9 @@ async def _add_miles_line(client: httpx.AsyncClient, token: str, period_id: int,
         json={
             "driver_id": driver_id,
             "work_date": start_date,
-            "line_type": "PTO_STATUS",
+            "line_type": "DailyNote",
             "quantity":  1,
+            "notes":     "filler",
         },
     )
     assert resp.status_code == 201, resp.text

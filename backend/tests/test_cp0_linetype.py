@@ -7,8 +7,8 @@ Tests the fix that makes the payroll entry backend accept canonical PayItemCodes
 
 Coverage:
   TestCanonicalCodesAccepted    — POST with "HOURS", "MILES", "LOADS", "OVERNIGHT",
-                                   "WAIT_TIME", "PALLETS", "SILOS", "PTO_STATUS"
-                                   all return 201 and store canonical code.
+                                   "WAIT_TIME", "PALLETS", "SILOS" all return 201
+                                   and store canonical code; "PTO_STATUS" returns 422.
   TestLegacyStringsStillWork    — POST with "Hours", "Miles", "Loads", "Overnight",
                                    etc. still return 201 and now store canonical code.
   TestSystemItemsCompanyIsNull  — system items (companyid IS NULL) found via DB
@@ -30,8 +30,11 @@ Isolation strategy:
 import pytest
 import pytest_asyncio
 import httpx
+from sqlalchemy import text as _text
 
 from datetime import date
+
+_COMPANY_ID = 1
 
 
 def auth(token: str) -> dict:
@@ -61,27 +64,30 @@ async def _cancel_active_periods(
 
 
 async def _open_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str,
     end: str,
 ) -> dict:
-    """Create and open a period, return the opened period dict."""
-    cr = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201, f"period create failed: {cr.text}"
-    pid = cr.json()["payroll_period_id"]
-    op = await client.patch(
-        f"/payroll/periods/{pid}/status", json={"status": "Open"},
-        headers=auth(token),
-    )
-    assert op.status_code == 200, f"period open failed: {op.text}"
-    return op.json()
+    """Insert an Open period directly into DB and return a period dict.
+
+    POST /payroll/periods requires an existing Open period (CP-1D B1 guard),
+    so we bypass HTTP and insert directly — the same pattern used by
+    test_cp2d._open_period and test_cp1d._insert_open_period.
+    """
+    code = f"CP0-{branch_id}-{start}"
+    row = (await db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (:cid, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"cid": _COMPANY_ID, "bid": branch_id, "code": code,
+         "name": f"CP0 {start}", "start": date.fromisoformat(start), "end": date.fromisoformat(end)},
+    )).mappings().first()
+    return {"payroll_period_id": row["payrollperiodid"], "start_date": start, "end_date": end}
 
 
 async def _add_line(
@@ -113,11 +119,14 @@ async def _add_line(
 
 @pytest_asyncio.fixture
 async def cp0_clean(
-    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    direct_db: AsyncConnection,
 ):
     """Cancel any active PAYTEST periods before and after each CP-0 test."""
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-    yield paytest_branch_id
+    yield (paytest_branch_id, direct_db)
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
 
 
@@ -138,10 +147,8 @@ class TestCanonicalCodesAccepted:
     async def test_canonical_hours_accepted(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-01-06", "2080-01-12",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-01-06", "2080-01-12")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -156,10 +163,8 @@ class TestCanonicalCodesAccepted:
     async def test_canonical_miles_accepted(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-01-13", "2080-01-19",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-01-13", "2080-01-19")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -172,10 +177,8 @@ class TestCanonicalCodesAccepted:
     async def test_canonical_loads_accepted(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-01-20", "2080-01-26",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-01-20", "2080-01-26")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -189,10 +192,8 @@ class TestCanonicalCodesAccepted:
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
         """PALLETS is not IsDefaultBranchActive — but PAYTEST has it activated by conftest."""
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-01-27", "2080-02-02",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-01-27", "2080-02-02")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -202,21 +203,18 @@ class TestCanonicalCodesAccepted:
         assert body["line_type"] == "PALLETS"
 
     @pytest.mark.asyncio
-    async def test_canonical_pto_status_accepted(
+    async def test_pto_status_rejected(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        """PTO_STATUS has rate_behavior='None' — no monetary value, no rate needed."""
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-02-03", "2080-02-09",
-        )
+        """PTO_STATUS was removed in migration 0055 — must return 422."""
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-02-03", "2080-02-09")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
             line_type="PTO_STATUS", quantity="8.00", work_date="2080-02-04",
         )
-        assert sc == 201, f"Expected 201, got {sc}: {body}"
-        assert body["line_type"] == "PTO_STATUS"
+        assert sc == 422, f"PTO_STATUS must be rejected after migration 0055; got {sc}: {body}"
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +233,8 @@ class TestLegacyStringsStillWork:
     async def test_legacy_hours_still_accepted(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-03-03", "2080-03-09",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-03-03", "2080-03-09")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -257,10 +253,8 @@ class TestLegacyStringsStillWork:
     async def test_legacy_miles_still_accepted(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-03-10", "2080-03-16",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-03-10", "2080-03-16")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -273,10 +267,8 @@ class TestLegacyStringsStillWork:
     async def test_legacy_loads_still_accepted(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-03-17", "2080-03-23",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-03-17", "2080-03-23")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -286,20 +278,18 @@ class TestLegacyStringsStillWork:
         assert body["line_type"] == "LOADS"
 
     @pytest.mark.asyncio
-    async def test_legacy_pto_still_accepted(
+    async def test_legacy_pto_rejected(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-03-24", "2080-03-30",
-        )
+        """Legacy 'PTO' mapped to PTO_STATUS which was removed in migration 0055."""
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-03-24", "2080-03-30")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
             line_type="PTO", quantity="8.00", work_date="2080-03-25",
         )
-        assert sc == 201, f"Legacy 'PTO' must still be accepted; got {sc}: {body}"
-        assert body["line_type"] == "PTO_STATUS"
+        assert sc == 422, f"Legacy 'PTO' must be rejected after migration 0055; got {sc}: {body}"
 
 
 # ---------------------------------------------------------------------------
@@ -322,10 +312,8 @@ class TestSystemItemsCompanyIsNull:
         The unified DB query must find it; the old slow path with
         `companyid = :cid` would return no row and give 422.
         """
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-04-07", "2080-04-13",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-04-07", "2080-04-13")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -340,10 +328,8 @@ class TestSystemItemsCompanyIsNull:
     async def test_miles_system_item_found_via_db(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-04-14", "2080-04-20",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-04-14", "2080-04-20")
         pid = period["payroll_period_id"]
         sc, body = await _add_line(
             session_client, auth_token, pid, paytest_driver_id,
@@ -425,10 +411,7 @@ class TestBranchInactiveRejected:
             )
 
         try:
-            period = await _open_period(
-                session_client, auth_token, cp0_clean,
-                "2080-05-05", "2080-05-11",
-            )
+            period = await _open_period(direct_db, paytest_branch_id, "2080-05-05", "2080-05-11")
             pid = period["payroll_period_id"]
             sc, body = await _add_line(
                 session_client, auth_token, pid, paytest_driver_id,
@@ -508,10 +491,8 @@ class TestPeriodPayCanonical:
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
         cp0_period_items_activated,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-06-02", "2080-06-08",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-06-02", "2080-06-08")
         pid = period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -526,10 +507,8 @@ class TestPeriodPayCanonical:
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
         cp0_period_items_activated,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-06-09", "2080-06-15",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-06-09", "2080-06-15")
         pid = period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -545,10 +524,8 @@ class TestPeriodPayCanonical:
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
         cp0_period_items_activated,
     ):
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-06-16", "2080-06-22",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-06-16", "2080-06-22")
         pid = period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -566,10 +543,8 @@ class TestPeriodPayCanonical:
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
     ):
         """'HOURS' is a Daily-scope item — period-pay endpoint must reject it with 422."""
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-06-23", "2080-06-29",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-06-23", "2080-06-29")
         pid = period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -603,10 +578,8 @@ class TestFinalizationGuardCanonical:
         The period must be blocked from advancing to InReview (Open→InReview guard
         checks same condition as finalization).
         """
-        period = await _open_period(
-            session_client, auth_token, cp0_clean,
-            "2080-07-07", "2080-07-13",
-        )
+        branch_id, db = cp0_clean
+        period = await _open_period(db, branch_id, "2080-07-07", "2080-07-13")
         pid = period["payroll_period_id"]
 
         # Add a canonical HOURS line — no approved rate exists in the DB for

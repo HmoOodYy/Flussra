@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 import httpx
 from decimal import Decimal
+from datetime import date as _date
 from sqlalchemy import text as _text
 from sqlalchemy.exc import ProgrammingError
 
@@ -71,28 +72,24 @@ async def _cancel_periods(
 
 
 async def _make_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str,
     end: str,
 ) -> int:
-    headers = auth(token)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=headers,
-    )
-    assert r.status_code == 201, f"period create: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=headers,
-    )
-    assert r.status_code == 200, f"Open: {r.text}"
-    return pid
+    """Insert an Open period directly into DB.  Returns period_id."""
+    row = (await db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": f"P3C-{branch_id}-{start}",
+         "name": f"P3C {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _create_driver(
@@ -160,16 +157,16 @@ async def _advance_to_approved(
     driver_id: int,
     work_date: str,
 ) -> None:
-    """Open → InReview (add dummy PTO line) → Approved via review flow."""
+    """Open → InReview (add dummy DailyNote line) → Approved via review flow."""
     headers = auth(token)
 
     dummy = await client.post(
         f"/payroll/periods/{period_id}/lines",
         json={"driver_id": driver_id, "work_date": work_date,
-              "line_type": "PTO_STATUS", "quantity": "1"},
+              "line_type": "DailyNote", "notes": "filler"},
         headers=headers,
     )
-    assert dummy.status_code == 201, f"dummy PTO: {dummy.text}"
+    assert dummy.status_code == 201, f"dummy DailyNote: {dummy.text}"
 
     r = await client.patch(
         f"/payroll/periods/{period_id}/status",
@@ -248,7 +245,7 @@ async def _lock_period(
     drv = await _create_driver(c, tok, branch_id, suffix, hire_date=start[:4] + "-01-01")
     await _create_and_approve_rate(c, tok, drv, rate_type_id, "15.00",
                                    effective_from=start[:4] + "-01-01")
-    pid = await _make_period(c, tok, branch_id, start=start, end=end)
+    pid = await _make_period(db, branch_id, start=start, end=end)
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
         json={"driver_id": drv, "work_date": work_date,
@@ -486,7 +483,7 @@ class TestT6_FinalizationStillWorks:
         await _create_and_approve_rate(c, tok, drv, rtid, "18.00",
                                        effective_from="2048-01-01")
 
-        pid = await _make_period(c, tok, bid, start=T6_START, end=T6_END)
+        pid = await _make_period(db, bid, start=T6_START, end=T6_END)
         r = await c.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": drv, "work_date": T6_WORK,
@@ -524,7 +521,7 @@ class TestT7_LedgerReadWorks:
         await _create_and_approve_rate(c, tok, drv, rtid, "20.00",
                                        effective_from="2049-01-01")
 
-        pid = await _make_period(c, tok, bid, start=T7_START, end=T7_END)
+        pid = await _make_period(db, bid, start=T7_START, end=T7_END)
         r = await c.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": drv, "work_date": T7_WORK,

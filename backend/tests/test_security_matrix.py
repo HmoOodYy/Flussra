@@ -1055,14 +1055,15 @@ class TestSecurityMatrix:
         await direct_db.commit()
 
         # Add a draft line so the period is non-empty for finalization.
-        # Use PTO_STATUS (informational, no rate required) to avoid rate setup dependencies.
+        # Use DailyNote (informational, no rate required) to avoid rate setup dependencies.
         line_r = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={
                 "driver_id": sm_paytest_driver_id,
                 "work_date": "2096-01-15",
-                "line_type": "PTO_STATUS",
+                "line_type": "DailyNote",
                 "quantity": 1,
+                "notes": "filler",
             },
             headers=_hdr(auth_token),
         )

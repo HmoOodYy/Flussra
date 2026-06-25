@@ -137,15 +137,16 @@ async def _add_draft_line(
     driver_id: int,
     work_date: str,
 ) -> int:
-    """Add a PTO_STATUS draft line while period is Open. Returns draft_line_id."""
+    """Add a DailyNote draft line while period is Open. Returns draft_line_id."""
     r = await client.post(
         f"/payroll/periods/{period_id}/lines",
         json={
             "driver_id":   driver_id,
             "work_date":   work_date,
-            "line_type":   "PTO_STATUS",
+            "line_type":   "DailyNote",
             "quantity":    1,
             "source_type": "Manual",
+            "notes":       "filler",
         },
         headers=_auth(token),
     )
@@ -352,9 +353,10 @@ class TestSourceMutationVsCancellation:
                     json={
                         "driver_id":   paytest_driver_id,
                         "work_date":   work_date,
-                        "line_type":   "PTO_STATUS",
+                        "line_type":   "DailyNote",
                         "quantity":    1,
                         "source_type": "Manual",
+                        "notes":       "filler",
                     },
                     headers=_auth(auth_token),
                 )
@@ -737,9 +739,10 @@ class TestSourceMutationFirstSerialization:
                     json={
                         "driver_id":   paytest_driver_id,
                         "work_date":   work_date_race,
-                        "line_type":   "PTO_STATUS",
+                        "line_type":   "DailyNote",
                         "quantity":    1,
                         "source_type": "Manual",
+                        "notes":       "filler",
                     },
                     headers=_auth(auth_token),
                 )
@@ -862,9 +865,10 @@ class TestSourceMutationFirstSerialization:
                 json={
                     "driver_id":   paytest_driver_id,
                     "work_date":   work_date_post,
-                    "line_type":   "PTO_STATUS",
+                    "line_type":   "DailyNote",
                     "quantity":    2,
                     "source_type": "Manual",
+                    "notes":       "filler",
                 },
                 headers=_auth(auth_token),
             )

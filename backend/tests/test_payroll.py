@@ -598,7 +598,7 @@ class TestStatusTransitions:
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         resp = await client.patch(f"/payroll/periods/{pid}/status",
                                   json={"status": "InReview"}, headers=headers)
@@ -620,7 +620,7 @@ class TestStatusTransitions:
             f"/payroll/periods/{pid}/lines",
             headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
 
         # Open → InReview
@@ -691,7 +691,7 @@ class TestStatusTransitions:
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -762,7 +762,7 @@ class TestStatusTransitions:
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -821,7 +821,7 @@ class TestStatusTransitions:
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -885,7 +885,7 @@ class TestStatusTransitionReviewGate:
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
                            json={"status": "InReview"}, headers=headers)
@@ -914,7 +914,7 @@ class TestStatusTransitionReviewGate:
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
             json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         r1 = await client.patch(f"/payroll/periods/{pid}/status",
                                 json={"status": "InReview"}, headers=headers)

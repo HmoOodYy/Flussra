@@ -35,9 +35,19 @@ def auth(token: str) -> dict[str, str]:
 
 
 async def _cancel_active_periods(
-    client: httpx.AsyncClient, token: str, branch_id: int
+    client: httpx.AsyncClient, token: str, branch_id: int, db=None
 ) -> None:
+    from sqlalchemy import text as _sqla_text
     headers = auth(token)
+    # Force-cancel InReview/Approved directly in DB (CP-1A blocks those HTTP transitions)
+    if db is not None:
+        await db.execute(
+            _sqla_text(
+                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
+            ),
+            {"bid": branch_id},
+        )
     for s in ("Draft", "Open", "InReview", "Approved"):
         resp = await client.get(
             "/payroll/periods", params={"branch_id": branch_id, "status": s},
@@ -53,27 +63,31 @@ async def _cancel_active_periods(
 
 
 async def _open_period(
-    client: httpx.AsyncClient,
-    token: str,
+    db,
     branch_id: int,
     start: str = "2034-01-01",
     end: str = "2034-01-07",
+    status: str = "Open",
 ) -> dict:
-    await _cancel_active_periods(client, token, branch_id)
-    p_resp = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=auth(token),
-    )
-    assert p_resp.status_code == 201, f"period create failed: {p_resp.text}"
-    period = p_resp.json()
-    open_resp = await client.patch(
-        f"/payroll/periods/{period['payroll_period_id']}/status",
-        json={"status": "Open"}, headers=auth(token),
-    )
-    assert open_resp.status_code == 200
-    return period
+    """Insert a period directly into DB with the given status (default Open).
+
+    POST /payroll/periods requires an existing Open period (CP-1D B1 guard),
+    so we insert directly — same pattern used by test_cp2d and test_cp1d.
+    """
+    from datetime import date as _date
+    from sqlalchemy import text as _sqla_text
+    code = f"M14-{branch_id}-{start}"
+    row = (await db.execute(
+        _sqla_text(f"""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, '{status}', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"M14 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return {"payroll_period_id": row["payrollperiodid"]}
 
 
 async def _approve_period_via_review(
@@ -221,12 +235,11 @@ async def m14_open_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
+    direct_db,
 ) -> dict:
     """Open a fresh weekly period (2034-01-01 to 2034-01-07). Cancelled after test."""
-    return await _open_period(
-        session_client, auth_token, paytest_branch_id,
-        start="2034-01-01", end="2034-01-07",
-    )
+    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+    return await _open_period(direct_db, paytest_branch_id, start="2034-01-01", end="2034-01-07")
 
 
 # ===========================================================================
@@ -385,15 +398,9 @@ class TestPeriodPayCreate:
         """Period in non-entry status (Draft) → 422 (cannot add period pay lines)."""
         from sqlalchemy import text as _text
 
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-02-01", "end_date": "2034-02-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        result = await _open_period(direct_db, paytest_branch_id, start="2034-02-01", end="2034-02-07", status="Draft")
+        pid = result["payroll_period_id"]
         # Period is in Draft status — not Open or InReview
 
         resp = await session_client.post(
@@ -595,18 +602,8 @@ class TestPeriodPayUpdate:
         """
         from sqlalchemy import text as _text
 
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-11-01", "end_date": "2034-11-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-11-01", end="2034-11-07"))["payroll_period_id"]
 
         # Inject a legacy Adjustment line directly (API blocks creation of ADJUSTMENT lines)
         result = await direct_db.execute(
@@ -661,18 +658,8 @@ class TestPeriodPayUpdate:
         """
         from sqlalchemy import text as _text
 
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-12-01", "end_date": "2034-12-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-12-01", end="2034-12-07"))["payroll_period_id"]
 
         # Inject a canonical ADJUSTMENT line directly
         result = await direct_db.execute(
@@ -827,25 +814,15 @@ class TestPeriodPayFinalization:
         paytest_driver_id: int,
         paytest_branch_id: int,
         m14_bonus_activated,
+        direct_db,
     ):
         """
         A period with a Bonus Period Pay line finalizes correctly.
         The bonus appears in /final-lines with WorkDate=None and correct FinalAmount.
         """
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-04-01", "end_date": "2034-04-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-04-01", end="2034-04-07"))["payroll_period_id"]
 
-        # Open → add Bonus line → InReview → Approved → Finalize
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "300.00"},
@@ -879,21 +856,11 @@ class TestPeriodPayFinalization:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        direct_db,
     ):
         """ADJUSTMENT is blocked at creation time and cannot reach finalization."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-05-01", "end_date": "2034-05-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
-
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-05-01", end="2034-05-07"))["payroll_period_id"]
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Adjustment", "amount": "-45.00"},
@@ -914,25 +881,16 @@ class TestPeriodPayFinalization:
         paytest_driver_id: int,
         paytest_branch_id: int,
         m14_bonus_activated,
+        direct_db,
     ):
         """
         A voided Period Pay line does not appear in PayrollFinalLines.
         A second non-voided Bonus line keeps the period financeable and
         is used to confirm finalization succeeds; only it appears in final-lines.
         """
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-06-01", "end_date": "2034-06-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-06-01", end="2034-06-07"))["payroll_period_id"]
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
 
         # Line 1: Bonus $150 — will be voided
         add_bonus = await session_client.post(
@@ -1003,20 +961,12 @@ class TestPeriodPaySafetyGuards:
         paytest_driver_id: int,
         paytest_branch_id: int,
         m14_bonus_activated,
+        direct_db,
     ):
         """A well-formed Period Pay line does not interfere with InReview→Approved."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-07-01", "end_date": "2034-07-07"},
-            headers=auth(auth_token),
-        )
-        pid = p_resp.json()["payroll_period_id"]
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-07-01", end="2034-07-07"))["payroll_period_id"]
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
         await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "200.00"},
@@ -1046,19 +996,8 @@ class TestPeriodPaySafetyGuards:
         """
         from sqlalchemy import text as _text
 
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-08-01", "end_date": "2034-08-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
-
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-08-01", end="2034-08-07"))["payroll_period_id"]
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "500.00"},
@@ -1122,19 +1061,8 @@ class TestPeriodPaySafetyGuards:
         """
         from sqlalchemy import text as _text
 
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p_resp = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-09-01", "end_date": "2034-09-07"},
-            headers=auth(auth_token),
-        )
-        assert p_resp.status_code == 201
-        pid = p_resp.json()["payroll_period_id"]
-
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-09-01", end="2034-09-07"))["payroll_period_id"]
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "250.00"},
@@ -1189,20 +1117,12 @@ class TestM14SafetyFixes:
         paytest_driver_id: int,
         paytest_branch_id: int,
         m14_bonus_activated,
+        direct_db,
     ):
         """Finalized Period Pay Bonus line has line_scope='Period' in final-lines."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-10-01", "end_date": "2034-10-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-10-01", end="2034-10-07"))["payroll_period_id"]
+
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "175.00"},
@@ -1229,26 +1149,18 @@ class TestM14SafetyFixes:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        direct_db,
     ):
         """Finalized daily Miles line has line_scope='Daily' in final-lines."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-11-01", "end_date": "2034-11-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
-        # Phase 4C: use PTO_STATUS (non-PerUnit) instead of Miles+rate_amount.
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-11-01", end="2034-11-07"))["payroll_period_id"]
+
+        # Phase 4C: use DailyNote (non-PerUnit) instead of Miles+rate_amount.
         # The scope test (Daily) applies to any daily line type.
         add = await session_client.post(
             f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "line_type": "PTO_STATUS",
-                  "quantity": "1", "work_date": "2034-11-01"},
+            json={"driver_id": paytest_driver_id, "line_type": "DailyNote",
+                  "quantity": "1", "work_date": "2034-11-01", "notes": "filler"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201
@@ -1261,7 +1173,7 @@ class TestM14SafetyFixes:
         fl = await session_client.get(
             f"/payroll/periods/{pid}/final-lines", headers=auth(auth_token)
         )
-        daily_lines = [x for x in fl.json() if x["line_type"] == "PTO_STATUS"]
+        daily_lines = [x for x in fl.json() if x["line_type"] == "DailyNote"]
         assert len(daily_lines) == 1
         assert daily_lines[0]["line_scope"] == "Daily", f"Expected Daily scope, got: {daily_lines[0]}"
 
@@ -1272,25 +1184,17 @@ class TestM14SafetyFixes:
         paytest_driver_id: int,
         paytest_branch_id: int,
         m14_bonus_activated,
+        direct_db,
     ):
         """Period with daily + period-pay lines: each final line gets its correct scope."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2034-12-01", "end_date": "2034-12-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
-        # Phase 4C: use PTO_STATUS (non-PerUnit) instead of Miles+rate_amount.
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2034-12-01", end="2034-12-07"))["payroll_period_id"]
+
+        # Phase 4C: use DailyNote (non-PerUnit) instead of Miles+rate_amount.
         await session_client.post(
             f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "line_type": "PTO_STATUS",
-                  "quantity": "1", "work_date": "2034-12-01"},
+            json={"driver_id": paytest_driver_id, "line_type": "DailyNote",
+                  "quantity": "1", "work_date": "2034-12-01", "notes": "filler"},
             headers=auth(auth_token),
         )
         await session_client.post(
@@ -1309,7 +1213,7 @@ class TestM14SafetyFixes:
         rows = fl.json()
         assert len(rows) == 2
         by_type = {r["line_type"]: r["line_scope"] for r in rows}
-        assert by_type["PTO_STATUS"] == "Daily",  f"PTO_STATUS scope wrong: {by_type}"
+        assert by_type["DailyNote"] == "Daily",  f"DailyNote scope wrong: {by_type}"
         assert by_type["BONUS"]      == "Period", f"Bonus scope wrong: {by_type}"
 
     # -----------------------------------------------------------------------
@@ -1348,18 +1252,9 @@ class TestM14SafetyFixes:
                 {"piid": item_id, "bid": paytest_branch_id},
             )
 
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-            p = await session_client.post(
-                "/payroll/periods",
-                json={"branch_id": paytest_branch_id, "period_type": "Week",
-                      "start_date": "2035-01-01", "end_date": "2035-01-07"},
-                headers=auth(auth_token),
-            )
-            assert p.status_code == 201
-            pid = p.json()["payroll_period_id"]
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-            )
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            pid = (await _open_period(direct_db, paytest_branch_id, start="2035-01-01", end="2035-01-07"))["payroll_period_id"]
+
 
             # Must fail: BONUS not active as of period.start_date 2035-01-01
             # (effectivefrom=2035-06-01 > start_date=2035-01-01)
@@ -1394,20 +1289,12 @@ class TestM14SafetyFixes:
         paytest_driver_id: int,
         paytest_branch_id: int,
         m14_custom_period_item: dict,
+        direct_db,
     ):
         """An item active as of period.start_date is accepted, even for future periods."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2035-02-01", "end_date": "2035-02-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2035-02-01", end="2035-02-07"))["payroll_period_id"]
+
         add = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id,
@@ -1464,18 +1351,9 @@ class TestM14SafetyFixes:
             )
 
             # Backdated period: start_date = 2025-01-01 (before effectivefrom 2026-01-01)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-            p = await session_client.post(
-                "/payroll/periods",
-                json={"branch_id": paytest_branch_id, "period_type": "Week",
-                      "start_date": "2025-01-01", "end_date": "2025-01-07"},
-                headers=auth(auth_token),
-            )
-            assert p.status_code == 201
-            pid = p.json()["payroll_period_id"]
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-            )
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            pid = (await _open_period(direct_db, paytest_branch_id, start="2025-01-01", end="2025-01-07"))["payroll_period_id"]
+
 
             # Must be rejected: BONUS active today but NOT active at period.start_date 2025-01-01.
             # If CURRENT_DATE were used this would wrongly return 201.
@@ -1514,6 +1392,7 @@ class TestM14SafetyFixes:
         paytest_branch_id: int,
         m14_bonus_activated,
         m14_adjustment_activated,
+        direct_db,
     ):
         """
         GET /payroll/periods/{id}/lines/summary must NOT include Period Pay lines.
@@ -1521,25 +1400,16 @@ class TestM14SafetyFixes:
         the daily payroll entry grid — period-level bonuses/adjustments must
         not pollute the daily quantity/amount totals.
         """
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        p = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": "2035-03-01", "end_date": "2035-03-07"},
-            headers=auth(auth_token),
-        )
-        assert p.status_code == 201
-        pid = p.json()["payroll_period_id"]
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Open"}, headers=auth(auth_token)
-        )
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+        pid = (await _open_period(direct_db, paytest_branch_id, start="2035-03-01", end="2035-03-07"))["payroll_period_id"]
 
-        # Add a daily line (PTO_STATUS) — should appear in the summary.
-        # Phase 4C: rate_amount removed; PTO_STATUS has None behavior (no rate needed).
+
+        # Add a daily line (DailyNote) — should appear in the summary.
+        # Phase 4C: rate_amount removed; DailyNote has None behavior (no rate needed).
         await session_client.post(
             f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "line_type": "PTO_STATUS",
-                  "quantity": "1", "work_date": "2035-03-01"},
+            json={"driver_id": paytest_driver_id, "line_type": "DailyNote",
+                  "quantity": "1", "work_date": "2035-03-01", "notes": "filler"},
             headers=auth(auth_token),
         )
 
@@ -1561,10 +1431,10 @@ class TestM14SafetyFixes:
         assert summary_resp.status_code == 200
         summary = summary_resp.json()
 
-        # Only the daily PTO_STATUS line should appear (not Period Pay).
+        # Only the daily DailyNote line should appear (not Period Pay).
         line_types_in_summary = {row["line_type"] for row in summary}
-        assert "PTO_STATUS" in line_types_in_summary, (
-            f"Expected PTO_STATUS in summary, got: {line_types_in_summary}"
+        assert "DailyNote" in line_types_in_summary, (
+            f"Expected DailyNote in summary, got: {line_types_in_summary}"
         )
         assert "BONUS" not in line_types_in_summary, (
             f"BONUS (Period Pay) must NOT appear in /lines/summary, got: {line_types_in_summary}"
@@ -1574,8 +1444,8 @@ class TestM14SafetyFixes:
             f"got: {line_types_in_summary}"
         )
 
-        # Total quantity in summary should reflect only the daily PTO_STATUS line
-        pto_rows = [r for r in summary if r["line_type"] == "PTO_STATUS"]
+        # Total quantity in summary should reflect only the daily DailyNote line
+        pto_rows = [r for r in summary if r["line_type"] == "DailyNote"]
         assert len(pto_rows) == 1
         assert Decimal(pto_rows[0]["total_quantity"]) == Decimal("1")
 

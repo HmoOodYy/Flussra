@@ -62,31 +62,32 @@ async def _create_open_period(
     branch_id: int,
     start: str,
     end: str,
+    db=None,
 ) -> int:
-    """
-    Cancel any stale Draft on the branch, create a new period, advance
-    Draft->Open, and return the period_id.
-    """
-    await _cancel_existing_draft(client, token, branch_id)
-    r = await client.post(
-        "/payroll/periods",
-        json={"branch_id": branch_id, "period_type": "Week",
-              "start_date": start, "end_date": end},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, r.text
-    pid = r.json()["payroll_period_id"]
-    r2 = await client.patch(f"/payroll/periods/{pid}/status",
-                             json={"status": "Open"}, headers=_auth(token))
-    assert r2.status_code == 200, r2.text
-    return pid
+    """Insert an Open period directly into DB; returns period_id."""
+    from datetime import date as _date
+    if db is None:
+        raise RuntimeError("_create_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
+    code = f"CP0P1-{branch_id}-{start}"
+    row = (await db.execute(
+        text(f"""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
+            ON CONFLICT DO NOTHING
+            RETURNING payrollperiodid
+        """),
+        {"bid": branch_id, "code": code, "name": f"CP0P1 {start}",
+         "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
+    )).mappings().first()
+    return row["payrollperiodid"]
 
 
 async def _add_line(client, token, pid, driver_id, work_date):
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
-        json={"driver_id": driver_id, "line_type": "PTO_STATUS",
-              "quantity": 1, "work_date": work_date, "source_type": "Manual"},
+        json={"driver_id": driver_id, "line_type": "DailyNote",
+              "quantity": 1, "work_date": work_date, "source_type": "Manual", "notes": "filler"},
         headers=_auth(token),
     )
     assert r.status_code == 201, r.text
@@ -330,14 +331,19 @@ class TestOpenToInReviewConcurrency:
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
+        direct_db,
     ):
         """
         If a period is already InReview, a second concurrent submit must return 422.
         We simulate by submitting, then attempting again after manually returning
         to Open and submitting again — but more directly by checking the status guard.
         """
+        await direct_db.execute(
+            text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
+            {"bid": paytest_branch_id},
+        )
         pid = await _create_open_period(
-            client, auth_token, paytest_branch_id, "2029-02-03", "2029-02-09"
+            client, auth_token, paytest_branch_id, "2029-02-03", "2029-02-09", db=direct_db
         )
         await _add_line(client, auth_token, pid, paytest_driver_id, "2029-02-04")
         await _submit_for_review(client, auth_token, pid)
@@ -457,7 +463,7 @@ class TestOpenToInReviewConcurrency:
         await direct_db.commit()
 
         pid = await _create_open_period(
-            client, auth_token, paytest_branch_id, "2029-08-04", "2029-08-10"
+            client, auth_token, paytest_branch_id, "2029-08-04", "2029-08-10", db=direct_db
         )
         await _add_line(client, auth_token, pid, paytest_driver_id, "2029-08-05")
 
@@ -788,7 +794,7 @@ class TestDraftLineAuditLogging:
         company_id = result.scalar_one()
 
         pid = await _create_open_period(
-            client, auth_token, paytest_branch_id, "2029-03-03", "2029-03-09"
+            client, auth_token, paytest_branch_id, "2029-03-03", "2029-03-09", db=direct_db
         )
         line_id = await _add_line(client, auth_token, pid, paytest_driver_id, "2029-03-04")
 
@@ -822,7 +828,7 @@ class TestDraftLineAuditLogging:
         company_id = result.scalar_one()
 
         pid = await _create_open_period(
-            client, auth_token, paytest_branch_id, "2029-04-07", "2029-04-13"
+            client, auth_token, paytest_branch_id, "2029-04-07", "2029-04-13", db=direct_db
         )
         line_id = await _add_line(client, auth_token, pid, paytest_driver_id, "2029-04-08")
 
@@ -857,7 +863,7 @@ class TestDraftLineAuditLogging:
     ):
         """If _write_line_audit raises, the draft line INSERT must roll back."""
         pid = await _create_open_period(
-            client, auth_token, paytest_branch_id, "2029-05-05", "2029-05-11"
+            client, auth_token, paytest_branch_id, "2029-05-05", "2029-05-11", db=direct_db
         )
 
         # Count lines before
@@ -876,8 +882,8 @@ class TestDraftLineAuditLogging:
         with _pytest.raises(RuntimeError):
             await client.post(
                 f"/payroll/periods/{pid}/lines",
-                json={"driver_id": paytest_driver_id, "line_type": "PTO_STATUS",
-                      "quantity": 1, "work_date": "2029-05-06", "source_type": "Manual"},
+                json={"driver_id": paytest_driver_id, "line_type": "DailyNote",
+                      "quantity": 1, "work_date": "2029-05-06", "source_type": "Manual", "notes": "filler"},
                 headers=_auth(auth_token),
             )
 
@@ -953,7 +959,7 @@ class TestPeriodPayAuditLogging:
         pid = None
         try:
             pid = await _create_open_period(
-                client, auth_token, paytest_branch_id, "2029-06-02", "2029-06-08"
+                client, auth_token, paytest_branch_id, "2029-06-02", "2029-06-08", db=direct_db
             )
 
             r = await client.post(
@@ -1008,7 +1014,7 @@ class TestPeriodPayAuditLogging:
         pid = None
         try:
             pid = await _create_open_period(
-                client, auth_token, paytest_branch_id, "2029-07-07", "2029-07-13"
+                client, auth_token, paytest_branch_id, "2029-07-07", "2029-07-13", db=direct_db
             )
 
             r = await client.post(

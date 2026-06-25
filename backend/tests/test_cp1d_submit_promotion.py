@@ -109,6 +109,17 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
         ),
         p,
     )
+    # 7. Ensure branchpayrollsettings row exists (required by CP-2A ensure_current_schedule_version).
+    # The PAYTEST branch is created in seed stmts but never configured — this is a test-only upsert.
+    await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.branchpayrollsettings
+                (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
+            VALUES (:cid, :bid, 'Week', '2024-01-01', TRUE)
+            ON CONFLICT (companyid, branchid) DO NOTHING
+        """),
+        {"cid": _COMPANY_ID, "bid": branch_id},
+    )
 
 
 async def _insert_open_period(
@@ -223,14 +234,15 @@ async def _add_pto_line(
     driver_id: int,
     work_date: datetime.date,
 ) -> None:
-    """Add a non-rate-dependent PTO_STATUS line to satisfy the empty-period guard."""
+    """Add a non-rate-dependent DailyNote line to satisfy the empty-period guard."""
     r = await client.post(
         f"/payroll/periods/{period_id}/lines",
         json={
             "driver_id": driver_id,
             "work_date":  work_date.isoformat(),
-            "line_type":  "PTO_STATUS",
+            "line_type":  "DailyNote",
             "quantity":   1,
+            "notes":      "filler",
         },
         headers=_auth(token),
     )
@@ -1360,7 +1372,7 @@ class TestSerializationConcurrency:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'PTO_STATUS', 'Daily', 1, 'Manual', 'Active')
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
             """),
             {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id},
         )
@@ -1423,7 +1435,7 @@ class TestSerializationConcurrency:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'PTO_STATUS', 'Daily', 1, 'Manual', 'Active')
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
             """),
             {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id},
         )
@@ -1510,7 +1522,7 @@ class TestSerializationConcurrency:
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
                      linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'PTO_STATUS', 'Daily', 1, 'Manual', 'Active')
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
             """),
             {"pid": pid_b, "cid": _COMPANY_ID, "bid": hq_branch_id, "did": hq_driver_id},
         )
@@ -1937,7 +1949,7 @@ class TestDeterministicLockBoundary:
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
                      linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'PTO_STATUS', 'Daily', 1, 'Manual', 'Active')
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
             """),
             {
                 "pid": pid_b,

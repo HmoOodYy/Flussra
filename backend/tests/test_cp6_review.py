@@ -101,7 +101,7 @@ async def _advance_to_inreview(
 ) -> int:
     """Advance an Open period to InReview. Returns the review_item_id."""
     headers = auth(token)
-    # Ensure a non-void line exists (PTO_STATUS is informational, always passes)
+    # Ensure a non-void line exists (DailyNote is informational, always passes)
     lines = await client.get(
         f"/payroll/periods/{pid}/lines",
         params={"status": "Active"}, headers=headers,
@@ -110,7 +110,7 @@ async def _advance_to_inreview(
         r = await client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": driver_id, "work_date": work_date,
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
             headers=headers,
         )
         assert r.status_code == 201, f"Add line: {r.text}"
@@ -525,7 +525,7 @@ class TestReviewNMRBlocker:
         lr = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": WORK_DATE,
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
             headers=auth(auth_token),
         )
         assert lr.status_code == 201
@@ -653,7 +653,7 @@ class TestReviewReturn:
         lr = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": WORK_DATE,
-                  "line_type": "PTO_STATUS", "quantity": 1},
+                  "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
             headers=auth(auth_token),
         )
         line_id = lr.json()["draft_line_id"]
@@ -940,7 +940,7 @@ class TestReviewPerBranchPermissionFilter:
         """
         # Create an InReview period on HQ (Branch B, no permission for this user)
         # Use direct status patch ->' no need to add lines since HQ may not have
-        # PTO_STATUS activated; we only need the review item to exist.
+        # DailyNote activated; we only need the review item to exist.
         await _cancel_active_periods(session_client, auth_token, hq_branch_id)
         # InReview->Cancelled is blocked by CP-1A; force-cancel any stale InReview
         # periods on HQ directly so the slot is free for the new submission.
