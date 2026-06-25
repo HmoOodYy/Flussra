@@ -373,6 +373,15 @@ class StatusKeyCreate(BaseModel):
             raise ValueError("hours_value must be between 0 and 24")
         return v
 
+    @field_validator("deducts_from_yearly_allowance")
+    @classmethod
+    def yearly_allowance_not_available(cls, v: bool) -> bool:
+        if v:
+            raise ValueError(
+                "Yearly allowance tracking is not available yet."
+            )
+        return v
+
     @field_validator("allowance_category")
     @classmethod
     def category_valid(cls, v: str | None) -> str | None:
@@ -450,6 +459,15 @@ class StatusKeyUpdate(BaseModel):
     def hours_in_range(cls, v: Decimal | None) -> Decimal | None:
         if v is not None and not (Decimal("0") <= v <= Decimal("24")):
             raise ValueError("hours_value must be between 0 and 24")
+        return v
+
+    @field_validator("deducts_from_yearly_allowance")
+    @classmethod
+    def yearly_allowance_not_available(cls, v: bool | None) -> bool | None:
+        if v:
+            raise ValueError(
+                "Yearly allowance tracking is not available yet."
+            )
         return v
 
     @field_validator("allowance_category")

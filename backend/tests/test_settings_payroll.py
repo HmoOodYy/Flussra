@@ -321,8 +321,6 @@ async def setup_branch_key_id(
             "key_name": "Vacation",
             "hours_value": "8.00",
             "is_off_reason": True,
-            "deducts_from_yearly_allowance": True,
-            "allowance_category": "Vacation",
         },
         headers=auth(auth_token),
     )
@@ -549,14 +547,13 @@ class TestCreateStatusKey:
         auth_token: str,
         setup_branch_id: int,
     ):
+        """deducts_from_yearly_allowance is guarded — full payload without it succeeds."""
         resp = await client.post(
             f"/settings/branches/{setup_branch_id}/status-keys",
             json={
-                "key_name":   "Sick Day",
+                "key_name":      "Sick Day",
                 "hours_value":   "8.00",
                 "is_off_reason": True,
-                "deducts_from_yearly_allowance": True,
-                "allowance_category": "Sick",
             },
             headers=auth(auth_token),
         )
@@ -565,8 +562,8 @@ class TestCreateStatusKey:
         assert body["key_name"]                         == "Sick Day"
         assert float(body["hours_value"])               == 8.0
         assert body["is_off_reason"]                    is True
-        assert body["deducts_from_yearly_allowance"]    is True
-        assert body["allowance_category"]               == "Sick"
+        assert body["deducts_from_yearly_allowance"]    is False
+        assert body["allowance_category"]               is None
         assert body["is_active"]                        is True
 
     async def test_hours_above_24_rejected(
@@ -596,43 +593,25 @@ class TestCreateStatusKey:
         assert resp.status_code == 201
         assert float(resp.json()["hours_value"]) == 0.0
 
-    async def test_deducts_without_category_rejected(
+    async def test_deducts_true_rejected_future_guard(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         setup_branch_id: int,
     ):
+        """deducts_from_yearly_allowance=true is rejected by the future-only guard."""
         resp = await client.post(
             f"/settings/branches/{setup_branch_id}/status-keys",
             json={
                 "key_name": "Deduct No Cat",
                 "is_off_reason": True,
                 "deducts_from_yearly_allowance": True,
-                "allowance_category": None,
             },
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
-        assert "allowance_category" in resp.json()["detail"]
-
-    async def test_deducts_without_off_reason_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        resp = await client.post(
-            f"/settings/branches/{setup_branch_id}/status-keys",
-            json={
-                "key_name": "Deduct Not Off",
-                "is_off_reason": False,
-                "deducts_from_yearly_allowance": True,
-                "allowance_category": "Vacation",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "is_off_reason" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "not available yet" in str(detail).lower()
 
     async def test_invalid_allowance_category_rejected(
         self,
@@ -640,12 +619,13 @@ class TestCreateStatusKey:
         auth_token: str,
         setup_branch_id: int,
     ):
+        """allowance_category schema validator rejects unknown values regardless of deducts."""
         resp = await client.post(
             f"/settings/branches/{setup_branch_id}/status-keys",
             json={
                 "key_name": "Bad Cat",
                 "is_off_reason": True,
-                "deducts_from_yearly_allowance": True,
+                "deducts_from_yearly_allowance": False,
                 "allowance_category": "Weekend",
             },
             headers=auth(auth_token),
@@ -1082,3 +1062,117 @@ class TestDeleteStatusKey:
         # New SK_ code is different from the old one
         assert reuse.json()["status_code"] != first_code
         assert reuse.json()["key_name"] == "Reusable Name"
+
+
+# ---------------------------------------------------------------------------
+# TestYearlyAllowanceGuard
+# ---------------------------------------------------------------------------
+
+class TestYearlyAllowanceGuard:
+    """
+    deducts_from_yearly_allowance is a future-only feature.
+    Creating or updating a status key with deducts_from_yearly_allowance=true
+    must be rejected with 422.  Setting it to false (or omitting it) must succeed.
+    """
+
+    async def test_create_with_deducts_true_rejected(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        setup_branch_id: int,
+    ):
+        """POST with deducts_from_yearly_allowance=true → 422."""
+        resp = await client.post(
+            f"/settings/branches/{setup_branch_id}/status-keys",
+            json={
+                "key_name": "YA Guard Create True",
+                "is_off_reason": True,
+                "deducts_from_yearly_allowance": True,
+                "allowance_category": "Vacation",
+            },
+            headers=auth(auth_token),
+        )
+        assert resp.status_code == 422
+        detail = str(resp.json()["detail"]).lower()
+        assert "not available yet" in detail
+
+    async def test_create_with_deducts_false_succeeds(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        setup_branch_id: int,
+    ):
+        """POST with deducts_from_yearly_allowance=false (explicit) → 201."""
+        resp = await client.post(
+            f"/settings/branches/{setup_branch_id}/status-keys",
+            json={
+                "key_name": "YA Guard Create False",
+                "is_off_reason": True,
+                "deducts_from_yearly_allowance": False,
+            },
+            headers=auth(auth_token),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["deducts_from_yearly_allowance"] is False
+
+    async def test_create_omitting_deducts_succeeds(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        setup_branch_id: int,
+    ):
+        """POST without deducts_from_yearly_allowance → 201 with default False."""
+        resp = await client.post(
+            f"/settings/branches/{setup_branch_id}/status-keys",
+            json={"key_name": "YA Guard Create Omit"},
+            headers=auth(auth_token),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["deducts_from_yearly_allowance"] is False
+
+    async def test_patch_deducts_true_rejected(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        setup_branch_id: int,
+    ):
+        """PATCH with deducts_from_yearly_allowance=true → 422."""
+        create = await client.post(
+            f"/settings/branches/{setup_branch_id}/status-keys",
+            json={"key_name": "YA Guard Patch Target", "is_off_reason": True},
+            headers=auth(auth_token),
+        )
+        assert create.status_code == 201
+        kid = create.json()["status_key_id"]
+
+        resp = await client.patch(
+            f"/settings/branches/{setup_branch_id}/status-keys/{kid}",
+            json={"deducts_from_yearly_allowance": True, "allowance_category": "Sick"},
+            headers=auth(auth_token),
+        )
+        assert resp.status_code == 422
+        detail = str(resp.json()["detail"]).lower()
+        assert "not available yet" in detail
+
+    async def test_patch_deducts_false_succeeds(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        setup_branch_id: int,
+    ):
+        """PATCH with deducts_from_yearly_allowance=false (explicit no-op) → 200."""
+        create = await client.post(
+            f"/settings/branches/{setup_branch_id}/status-keys",
+            json={"key_name": "YA Guard Patch False", "is_off_reason": True},
+            headers=auth(auth_token),
+        )
+        assert create.status_code == 201
+        kid = create.json()["status_key_id"]
+
+        resp = await client.patch(
+            f"/settings/branches/{setup_branch_id}/status-keys/{kid}",
+            json={"deducts_from_yearly_allowance": False},
+            headers=auth(auth_token),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deducts_from_yearly_allowance"] is False

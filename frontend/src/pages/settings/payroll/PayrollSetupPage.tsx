@@ -33,10 +33,6 @@ const DAYS = [
   { label: 'Sat', full: 'Saturday',  bit: 6 },
 ];
 
-const ALLOWANCE_CATEGORIES = [
-  'Vacation', 'Sick', 'Bereavement', 'Jury Duty', 'Personal', 'Other',
-] as const;
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function apiError(err: unknown): string {
@@ -1314,53 +1310,8 @@ function KeyFormFields({
         </label>
       </div>
 
-      {/* Deducts Allowance */}
-      <div className={`${s.formGroup} ${s.formGroupFull}`}>
-        <label
-          className={s.checkboxLabel}
-          style={{ opacity: form.is_off_reason ? 1 : 0.4 }}
-        >
-          <input
-            type="checkbox"
-            checked={form.deducts_from_yearly_allowance}
-            onChange={e => {
-              const checked = e.target.checked;
-              onChange({
-                deducts_from_yearly_allowance: checked,
-                ...(!checked && { allowance_category: '' }),
-              });
-            }}
-            disabled={disabled || !form.is_off_reason}
-          />
-          <span>
-            <strong>Deducts from yearly allowance</strong>
-            <span className={s.checkboxDesc}> — when used, deducts from the driver's yearly allowance category</span>
-          </span>
-        </label>
-      </div>
-
-      {/* Allowance Category */}
-      {form.deducts_from_yearly_allowance && (
-        <div className={`${s.formGroup} ${s.formGroupFull}`}>
-          <label className={s.label}>
-            Allowance Category <span className={s.required}>*</span>
-          </label>
-          <p className={s.fieldHint}>
-            Which yearly allowance category this key deducts from.
-          </p>
-          <select
-            className={s.select}
-            value={form.allowance_category}
-            onChange={e => onChange({ allowance_category: e.target.value })}
-            disabled={disabled}
-          >
-            <option value="">— Select category —</option>
-            {ALLOWANCE_CATEGORIES.map(c => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </div>
-      )}
+      {/* Deducts Allowance — future feature, hidden until yearly allowance tracking is available */}
+      {/* Allowance Category — future feature, hidden until yearly allowance tracking is available */}
 
       {/* Usage Limits */}
       <div className={`${s.formGroup} ${s.formGroupFull}`} style={{ borderTop: '1px solid #f1f5f9', paddingTop: '0.75rem', marginTop: '0.25rem' }}>
@@ -1476,19 +1427,8 @@ function StatusKeyDetail({
           )}
           <div className={s.keyDetailRow}>
             <span className={s.keyDetailLabel}>Deducts allowance</span>
-            <span className={s.keyDetailValue}>{k.deducts_from_yearly_allowance ? 'Yes' : 'No'}</span>
+            <span className={s.keyDetailValue} style={{ color: 'var(--color-text-muted, #888)', fontStyle: 'italic' }}>Future feature</span>
           </div>
-          {k.deducts_from_yearly_allowance && (
-            <>
-              <div className={s.keyDetailRow}>
-                <span className={s.keyDetailLabel}>Allowance category</span>
-                <span className={s.keyDetailValue}>{k.allowance_category ?? '—'}</span>
-              </div>
-              <p className={s.keyDetailHint}>
-                When used, deducts from the driver's yearly <em>{k.allowance_category}</em> allowance.
-              </p>
-            </>
-          )}
         </div>
 
         {/* Usage Limits */}

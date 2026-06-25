@@ -1237,18 +1237,10 @@ def _validate_deduction_rules(
     allowance_category: str | None,
 ) -> None:
     """Raise 422 if the deduction-related fields are inconsistent."""
-    if deducts and not is_off_reason:
+    if deducts:
         raise HTTPException(
             status_code=422,
-            detail="deducts_from_yearly_allowance requires is_off_reason=true.",
-        )
-    if deducts and not allowance_category:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "allowance_category is required when "
-                "deducts_from_yearly_allowance=true."
-            ),
+            detail="Yearly allowance tracking is not available yet.",
         )
 
 

@@ -357,8 +357,8 @@ async def list_status_keys(
         "among active keys for this branch.\n\n"
         "Business rules:\n"
         "- `hours_value` must be 0–24.\n"
-        "- `deducts_from_yearly_allowance=true` requires `is_off_reason=true` "
-        "and a non-null `allowance_category`.\n\n"
+        "- `deducts_from_yearly_allowance=true` is **not available yet** — "
+        "yearly allowance tracking is a future feature; sending `true` returns 422.\n\n"
         "Requires AllCompanyBranches scope."
     ),
     responses={
