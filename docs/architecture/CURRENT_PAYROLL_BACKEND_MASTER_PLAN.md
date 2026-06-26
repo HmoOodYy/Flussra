@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`; CP-2C is `Done with Notes`; CP-2D1 is `Done with Notes`; CP-2D2, CP-2E, and CP-2F are `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`; CP-2C is `Done with Notes`; CP-2D1 is `Done with Notes`; CP-2D2 is `Done with Notes`; CP-2E and CP-2F are `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -201,7 +201,7 @@ It does not have a snapshotted period calendar, stable pay-item layout, or histo
 - A selected status is not stored by StatusKeyID; only code text is stored.
 - Historical reads join back to an active Status Key. Deactivating or renaming a key can hide/change historical meaning.
 - `DailyStatus` and `DailyNote` are informational pseudo-line types in DraftLines.
-- A system Pay Item named `PTO_STATUS` also exists, conflicting with the product rule that Status is not a Pay Item.
+- At the earlier baseline, a system Pay Item named `PTO_STATUS` existed, conflicting with the product rule that Status is not a Pay Item. `PTO_STATUS` was subsequently removed as a Pay Item in commit `236a506`. Current status payment uses `StatusRateColumns` and derived system payment lines, not `PTO_STATUS`.
 - There is no effective-dated `StatusKeyPayRule` domain.
 
 ### 3.8 Off-driver behavior today
@@ -372,7 +372,7 @@ Pay-item reordering affects future periods only. Existing Prepared/Open/InReview
 
 ### AD-6 — Status is a separate operational domain
 
-Do not model selected statuses as Pay Items or free-text pseudo-lines. Introduce normalized daily status storage with StatusKeyID plus immutable snapshots. Deprecate `PTO_STATUS` as a grid Pay Item while preserving historical records.
+Do not model selected statuses as Pay Items or free-text pseudo-lines. Introduce normalized daily status storage with StatusKeyID plus immutable snapshots. `PTO_STATUS` has been removed as a grid Pay Item (commit `236a506`); it must not be reintroduced. Historical records referencing `PTO_STATUS` are preserved. Current status payment uses `StatusRateColumns` and derived system payment lines.
 
 Future `StatusKeyPayRule` records may create derived payroll calculation components. Allowance use and financial behavior remain separate mappings.
 
@@ -505,7 +505,7 @@ Not allowed:
 - Mutable text code storage.
 - No StatusKeyID snapshot.
 - No historical label/off flag preservation.
-- Status modeled partly as pseudo DraftLines and partly as `PTO_STATUS` Pay Item.
+- Historically, status was modeled partly as pseudo DraftLines and partly as a `PTO_STATUS` Pay Item. `PTO_STATUS` has since been removed (commit `236a506`). CP-2D1/CP-2D2 moved the design to canonical `PayrollPeriodDriverDayEntryState` rows and `StatusRateColumns`-backed derived payment lines. Legacy `DailyStatus`/`DailyNote` DraftLine compatibility remains for finalization.
 - No future pay-rule mapping.
 - Status usage limits are read-then-write and are not concurrency-safe.
 
@@ -1275,8 +1275,8 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 ### Phase 2 status note
 
 **Status:** In Progress
-**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C Done with Notes. CP-2D1 Done with Notes. CP-2D2 Pending. CP-2E and CP-2F Pending.
-**Review result:** No CP-2A, CP-2B, CP-2C, or CP-2D1 P0/P1 blockers remain. CP-2D has been split: CP-2D1 (canonical daily entry state) is complete; CP-2D2 (status-driven payment lane) remains pending. Add Day activation is deferred and is not part of CP-2C closure.
+**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C Done with Notes. CP-2D1 Done with Notes. CP-2D2 Done with Notes. CP-2E and CP-2F Pending.
+**Review result:** No CP-2A, CP-2B, CP-2C, CP-2D1, or CP-2D2 P0/P1 blockers remain. CP-2D has been split and both parts are complete: CP-2D1 (canonical daily entry state) and CP-2D2 (status-driven payment lane). Add Day activation is deferred and is not part of CP-2C or CP-2D2 closure.
 
 ### CP-2A completion note
 
@@ -1401,7 +1401,7 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - `get_day_grid` / `save_day_grid` do not fall back to live config when a snapshot exists but has zero active Daily items.
 - Custom Pay Item delete/retire guard treats snapshot references as historical usage.
 - DailyStatus / DailyNote remain pseudo/informational lines and are not snapshotted.
-- PTO_STATUS remains a Daily PayItem.
+- At the time CP-2C closed, PTO_STATUS remained unchanged as a Daily PayItem. PTO_STATUS was subsequently removed as a Pay Item in commit `236a506`. CP-2D2 did not reintroduce PTO_STATUS.
 - BONUS, ADJUSTMENT, and GUARANTEED_MINIMUM are snapshot metadata only.
 - No calculation/rate/finalization/ledger/report/expected-income/bonus workflow behavior was added.
 - No Add Day activation was added.
@@ -1428,7 +1428,7 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 **Status:** Done with Notes
 **Codex verdict:** PASS WITH NOTES (initial FAIL due to P1 — direct DailyStatus write accepted invalid/inactive codes; fixed before commit)
 **Implementation commit:** `d872889` — feat: add cp-2d1 canonical daily entry state
-**Review result:** No P0/P1 blockers remain. CP-2D1 canonical daily entry state is safely closed. CP-2D has been split — CP-2D1 covers the canonical table and read/write plumbing; CP-2D2 (status-driven payment lane) remains Pending.
+**Review result:** No P0/P1 blockers remain. CP-2D1 canonical daily entry state is safely closed. CP-2D has been split — CP-2D1 covers the canonical table and read/write plumbing; CP-2D2 (status-driven payment lane) was implemented subsequently and is also Done with Notes.
 
 **What CP-2D1 completed:**
 - Added migration 0054.
@@ -1453,7 +1453,7 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - `add_draft_line` / `update_draft_line` / `void_draft_line` with `DailyNote`: dual-write canonical `NoteText`; no StatusKey validation required.
 - `void_draft_line` clears canonical status and/or note field depending on line type; sets `IsVoided = TRUE` when both fields become NULL.
 - Legacy DailyStatus/DailyNote DraftLine dual-write fully preserved for compatibility (finalization Step 3, usage-limit enforcement, off-driver query).
-- No payment implementation, no `StatusKeyPayRules`, no derived payment lines.
+- CP-2D1 itself did not implement payment, `StatusKeyPayRules`, or derived payment lines; those were deferred to CP-2D2, which subsequently implemented the status-driven payment lane and is now Done with Notes.
 - No DAC/allowance ledger, no off allowance.
 - No `PTO_STATUS` behavior change.
 - No finalization total/rate/ledger/report changes.
@@ -1475,29 +1475,58 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: User global git ignore warning remains environment-only.
 - P3: LF/CRLF warnings remain environment-only.
 
-### CP-2D2 note (Pending)
+### CP-2D2 completion note
 
-**Status:** Pending
-**Description:** Status-driven payment lane — derives system payment lines from a selected StatusKey via `StatusKeyPayRule` or equivalent mechanism.
+**Status:** Done with Notes
+**Codex verdict:** PASS_WITH_NOTES
+**Implementation commit:** `8bbd1fd` — feat: add cp-2d2 status payment
+**Review result:** No P0/P1 blockers remain. CP-2D2 status-driven payment lane is safely closed.
 
-**Scope when started:**
-- `StatusKeyPayRule` catalog or equivalent payment-rule table.
-- Derived system payment DraftLines generated when a driver's daily status is set.
-- Driver-rate resolution for status-driven lines.
-- Double-count / `PTO_STATUS` transition handling (ensure status-driven pay and PTO_STATUS do not both finalize for the same day).
-- No DAC/off allowance ledger in CP-2D2.
+**What CP-2D2 completed:**
 
-**What CP-2D2 must not change:**
-- Canonical `PayrollPeriodDriverDayEntryState` table schema (set by CP-2D1).
-- DailyStatus/DailyNote DraftLine dual-write behavior (set by CP-2D1).
-- Finalization snapshot fields (set by CP-2D1).
-- PTO_STATUS finalizes at $0 behavior (unchanged since CP-0).
+- Added migration 0056.
+- Added `payroll.StatusRateColumns`.
+- Added default system `Status Pay`.
+- Status rate columns are backed by `payroll.RateTypes`.
+- Custom status columns create company-owned `SRC_*` RateTypes.
+- Status Keys can link to a status rate column.
+- Existing `StatusKey.HoursValue` is used as the status payment quantity.
+- Daily Grid status selection can derive system-owned status payment DraftLines.
+- Derived amount = `StatusKey.HoursValue × DriverRate.Amount` for the linked status rate column.
+- Missing driver status rate produces `NeedsManagerReview=True` / blocker behavior, not silent zero.
+- Driver Pay Rates matrix includes default/custom status rate columns.
+- Driver Pay Rates batch save supports status rate columns without `PayItemRateTypeMap`.
+- Generic DriverRate create/update/approve paths are guarded against cross-branch status RateType misuse.
+- `_resolve_rate_behavior` no longer trusts `SRC_*` prefix alone; it verifies active `StatusRateColumns` membership.
+- DB triggers enforce StatusRateColumn RateType ownership and BranchID/CompanyID ownership.
+- StatusKey linkage enforces same branch/company and `HoursValue > 0` when payment is configured.
+- SourceSnapshot is populated for derived status payment DraftLines.
+- SourceSnapshot is preserved through finalization.
+- System-derived status payment lines are protected from manual edit/void paths.
+- `PTO_STATUS` did not return.
+- No status Pay Item was created.
+- No frontend work was included.
+- No allowance/DAC/leave accrual workflow was implemented.
+
+**Validation:**
+
+- CP-2D2 focused tests: 45 passed.
+- Alembic current/head: 0056 / 0056.
+- `git diff --check`: clean.
+- Frontend lint: passed with one unrelated existing warning.
+- Representative suite retained 5 known unrelated/pre-existing/order-dependent failures.
+
+**Remaining P2/P3 notes:**
+
+- P2: Add explicit unauthorized-branch access test for `GET /settings/branches/{branch_id}/status-rate-columns` once a limited-scope user fixture exists.
+- P3: Temporary PostgreSQL/test database shutdown warning remains environment-only where observed.
+- P3: Representative suite has known unrelated/order-dependent failures outside CP-2D2.
 
 ### Phase 1 completion note
 
 **Status:** Done with Notes
 **Completed units:** CP-1A, CP-1B, CP-1C, CP-1D, CP-1E
-**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is now In Progress (CP-2A Done with Notes; CP-2B through CP-2F Pending).
+**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is In Progress: CP-2A Done with Notes; CP-2B Done with Notes; CP-2C Done with Notes; CP-2D1 Done with Notes; CP-2D2 Done with Notes; CP-2E and CP-2F Pending.
 
 **Phase 1 completed:**
 - Returned domain state and reviewed transition graph (CP-1A).
@@ -1951,7 +1980,8 @@ Existing direct status transitions and cleanup fixtures assume Rejected→Open. 
 - [x] P2A: schedule versioning. — **Done with Notes**
 - [x] P2B: period-day calendar snapshots. — **Done with Notes**
 - [x] P2C: snapshot pay-item layout/order/classification. — **Done with Notes**
-- [ ] P2D: normalize daily statuses/notes.
+- [x] P2D1: canonical daily status/note entry state. — **Done with Notes**
+- [x] P2D2: status-driven payment lane. — **Done with Notes**
 - [ ] P2E: unify historical driver-date eligibility.
 - [ ] P2F: enable controlled Prepared operational entry without financial exposure.
 
@@ -2326,7 +2356,8 @@ Each unit must be executed as a separate, reviewable prompt. Claude must not com
 | CP-2A | Version schedule and derive period/pay dates | settings/payroll models, focused migration, tests | frontend and client date authority | all cadences, pay-date boundaries, version history | All cadences including SemiMonthly are server-derived |
 | CP-2B | Period calendar and Add Day | payroll model/service and tests | arbitrary dates or UI-only enforcement | off-mask, activation, navigation, bounds | Only valid period/configured off days are navigable/activatable |
 | CP-2C | Pay-item layout snapshot | payroll/settings, focused migration, tests | blocking all future settings changes | reorder/rename/retire after period creation | Historical order, labels, and classifications remain stable |
-| CP-2D | Normalize daily status/note | payroll/settings, focused migration/backfill, tests | new pseudo status Pay Items or silent guesses | deactivation/rename/history/duplicate/race tests | StatusKeyID plus snapshots; no new pseudo status lines |
+| CP-2D1 | Canonical daily status/note entry state | payroll/settings, focused migration/backfill, tests | new pseudo status Pay Items or silent guesses | deactivation/rename/history/duplicate/race tests | StatusKeyID plus snapshots; no new pseudo status lines |
+| CP-2D2 | Status-driven payment lane | payroll/settings service, focused migration, tests | DAC/allowance, PTO_STATUS revival, frontend | status rate columns, derived lines, finalization preservation | System-derived status payment from HoursValue × DriverRate; SourceSnapshot preserved |
 | CP-2E | Canonical eligibility service | payroll/core eligibility paths and tests | frontend filtering or unrelated employee redesign | hire/termination/transfer/current-status history matrix | All endpoints agree on driver-date eligibility and history |
 | CP-2F | Controlled Prepared pre-entry | payroll schemas/service and tests | bonus, expected income, submit/finalize for Draft | source save/read matrix and financial-field absence | Operational saves allowed; no financial exposure or actions |
 | CP-3A | Canonical bonus-event migration | payroll bonus model, focused migration, tests | dual writes, zero events, Prepared bonus | legacy migration, multiple events, actor metadata | One source, multiple events, historical migration reconciled |
