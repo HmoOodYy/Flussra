@@ -978,6 +978,17 @@ async def change_period_status(
         # common (non-race) path.
         await _check_inreview_slot_available(company_id, existing.branch_id, period_id, db)
 
+        # CP-2D2: re-sync status payment lines from canonical PPDES state before
+        # refresh so that rate changes (new/backdated driver rates for STATUS_PAY)
+        # are reflected before submit guards run.
+        await _refresh_status_payment_lines(
+            period_id=period_id,
+            company_id=company_id,
+            branch_id=existing.branch_id,
+            user_id=user_id,
+            db=db,
+        )
+
         # Auto-refresh: re-compute calculatedamount + needsmanagerreview for all
         # rate-dependent draft lines using the currently approved effective-dated
         # rates.  This ensures that backdated approved rates added since lines
@@ -3056,6 +3067,24 @@ async def update_draft_line(
     if line.status == "Void":
         raise HTTPException(status_code=422, detail="Cannot modify a voided draft line.")
 
+    # CP-2D2: guard — STATUS_PAYMENT lines are managed automatically
+    _sp_check = await db.execute(
+        text(
+            "SELECT sourceid FROM payroll.payrolldraftlines "
+            "WHERE draftlineid = :lid AND companyid = :cid"
+        ),
+        {"lid": draft_line_id, "cid": company_id},
+    )
+    _sp_row = _sp_check.mappings().first()
+    if _sp_row and (_sp_row.get("sourceid") or "").startswith("STATUS_PAYMENT:"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Status payment lines are managed automatically. "
+                "Update the status key configuration or driver rates instead."
+            ),
+        )
+
     as_of_date: date = line.work_date if line.work_date is not None else period.start_date
     canonical_existing_lt: str = _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type)
 
@@ -3311,6 +3340,24 @@ async def void_draft_line(
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
     if line.status == "Void":
         return  # Idempotent
+
+    # CP-2D2: guard — STATUS_PAYMENT lines are managed automatically
+    _sp_void_check = await db.execute(
+        text(
+            "SELECT sourceid FROM payroll.payrolldraftlines "
+            "WHERE draftlineid = :lid AND companyid = :cid"
+        ),
+        {"lid": draft_line_id, "cid": company_id},
+    )
+    _sp_void_row = _sp_void_check.mappings().first()
+    if _sp_void_row and (_sp_void_row.get("sourceid") or "").startswith("STATUS_PAYMENT:"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Status payment lines are managed automatically. "
+                "Update the status key configuration or driver rates instead."
+            ),
+        )
 
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
@@ -3720,6 +3767,17 @@ async def finalize_period(
         {"cid": company_id, "bid": period.branch_id},
     )
 
+    # Step 1.6a — CP-2D2: re-sync status payment lines from canonical PPDES state
+    # before the standard calculation refresh.  Handles rate changes (new/backdated
+    # driver rates for STATUS_PAY) that occurred after the period was submitted.
+    await _refresh_status_payment_lines(
+        period_id=period_id,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        user_id=user_id,
+        db=db,
+    )
+
     # Step 1.6 — auto-refresh draft calculations.
     # Re-compute calculatedamount + needsmanagerreview for all rate-dependent
     # lines using currently approved effective-dated rates.  Handles the case
@@ -3963,27 +4021,33 @@ async def finalize_period(
                 rate_sub.ratetypeid,
                 rate_sub.driverrateid,
                 rate_sub.resolvedrateamount,
-                -- Phase 9+11: source snapshot — immutable audit record of inputs at finalization
-                JSONB_STRIP_NULLS(JSONB_BUILD_OBJECT(
-                    'pay_item_id',          pi_sub.payitemid,
-                    'pay_item_code',        pi_sub.payitemcode,
-                    'pay_item_name',        pi_sub.payitemname,
-                    'rate_behavior',        pi_sub.ratebehavior,
-                    'rate_type_id',         rate_sub.ratetypeid,
-                    'rate_type_code',       rate_sub.ratecode,
-                    'rate_type_name',       rate_sub.ratename,
-                    'driver_rate_id',       rate_sub.driverrateid,
-                    'driver_rate_amount',   rate_sub.dr_amount,
-                    'driver_rate_status',   rate_sub.dr_status,
-                    'driver_rate_eff_from', rate_sub.effectivefrom,
-                    'driver_rate_eff_to',   rate_sub.effectiveto,
-                    -- Phase 11: Block-specific calculation metadata
-                    'block_size',           rate_sub.blocksize,
-                    'rounding_rule',        rate_sub.roundingrule,
-                    -- Phase 11: Tier snapshot for OrdinalTier/RangeBracket/RangeProgressive
-                    'tiers',               tier_sub.tiers_snapshot,
-                    'finalized_at',         NOW()
-                )) AS sourcesnapshot
+                -- Phase 9+11: source snapshot — immutable audit record of inputs at finalization.
+                -- CP-2D2: STATUS_PAYMENT draft lines carry dl.sourcesnapshot pre-built at draft
+                -- time.  COALESCE uses it as-is so final lines record the exact status key /
+                -- rate column / driver rate that was live when the draft was created.
+                COALESCE(
+                    dl.sourcesnapshot,
+                    JSONB_STRIP_NULLS(JSONB_BUILD_OBJECT(
+                        'pay_item_id',          pi_sub.payitemid,
+                        'pay_item_code',        pi_sub.payitemcode,
+                        'pay_item_name',        pi_sub.payitemname,
+                        'rate_behavior',        pi_sub.ratebehavior,
+                        'rate_type_id',         rate_sub.ratetypeid,
+                        'rate_type_code',       rate_sub.ratecode,
+                        'rate_type_name',       rate_sub.ratename,
+                        'driver_rate_id',       rate_sub.driverrateid,
+                        'driver_rate_amount',   rate_sub.dr_amount,
+                        'driver_rate_status',   rate_sub.dr_status,
+                        'driver_rate_eff_from', rate_sub.effectivefrom,
+                        'driver_rate_eff_to',   rate_sub.effectiveto,
+                        -- Phase 11: Block-specific calculation metadata
+                        'block_size',           rate_sub.blocksize,
+                        'rounding_rule',        rate_sub.roundingrule,
+                        -- Phase 11: Tier snapshot for OrdinalTier/RangeBracket/RangeProgressive
+                        'tiers',               tier_sub.tiers_snapshot,
+                        'finalized_at',         NOW()
+                    ))
+                ) AS sourcesnapshot
             FROM   payroll.payrolldraftlines dl
             -- Resolve payitemid + ratebehavior (prefer company-specific over system item)
             LEFT JOIN LATERAL (
@@ -4997,6 +5061,64 @@ async def _assert_rate_type_allowed_for_company(
     )
 
 
+async def _is_status_rate_type(rate_type_id: int, db: AsyncConnection) -> bool:
+    """Return True if rate_type_id is referenced by any active StatusRateColumns row."""
+    row = (await db.execute(
+        text("""
+            SELECT 1 FROM payroll.statusratecolumns
+            WHERE ratetypeid = :rtid AND isactive = TRUE
+            LIMIT 1
+        """),
+        {"rtid": rate_type_id},
+    )).first()
+    return row is not None
+
+
+async def _assert_status_rate_type_for_branch(
+    rate_type_id: int,
+    company_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    CP-2D2 branch guard for status-payment RateTypes.
+
+    If rate_type_id is referenced by payroll.StatusRateColumns (anywhere), then it is a
+    status-only RateType and must have an active StatusRateColumns row for (branch_id,
+    company_id) specifically.  This prevents a driver in branch A from creating rates
+    using a status RateType that only exists for branch B.
+
+    Raises HTTPException 422 if the RateType is status-only but does not belong to the
+    driver's branch.  Does nothing for ordinary PayItem RateTypes.
+    """
+    # First: is this a status-backed RateType at all?
+    is_status = await _is_status_rate_type(rate_type_id, db)
+    if not is_status:
+        return  # ordinary PayItem rate — existing validation applies
+
+    # Second: require an active StatusRateColumns row for this specific branch/company.
+    branch_row = (await db.execute(
+        text("""
+            SELECT 1 FROM payroll.statusratecolumns
+            WHERE ratetypeid = :rtid
+              AND branchid   = :bid
+              AND companyid  = :cid
+              AND isactive   = TRUE
+            LIMIT 1
+        """),
+        {"rtid": rate_type_id, "bid": branch_id, "cid": company_id},
+    )).first()
+    if branch_row is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"rate_type_id={rate_type_id} is a status-payment RateType but is not "
+                "configured for this driver's branch. Use the batch rate save endpoint "
+                "with status_rate_column_id to set status pay rates."
+            ),
+        )
+
+
 async def _resolve_rate_behavior(
     rate_type_id: int,
     company_id: int,
@@ -5008,10 +5130,17 @@ async def _resolve_rate_behavior(
     Company-specific (custom) items take priority over system items (companyid IS NULL).
 
     Phase 8 — Fail-closed: raises HTTPException 422 when no PayItemRateTypeMap entry
-    exists for this RateType.  Callers must NOT assume a default PerUnit behavior for
-    unmapped or orphaned RateTypes — every RateType used for a DriverRate must have an
-    explicit, active PayItem mapping that resolves its calculation behavior.
+    exists for this RateType.
+
+    CP-2D2 exception: RateTypes that are referenced by active StatusRateColumns rows are
+    status-payment-only types that always use PerUnit behavior (HoursValue × Amount).
+    Membership is verified via a DB lookup — RateCode prefix alone is not sufficient.
     """
+    # CP-2D2: StatusRateColumn-backed types skip PayItemRateTypeMap resolution.
+    # Verified by actual DB membership, not by RateCode prefix.
+    if await _is_status_rate_type(rate_type_id, db):
+        return "PerUnit"
+
     result = await db.execute(
         text("""
             SELECT pi.ratebehavior
@@ -5915,6 +6044,10 @@ async def create_rate(
     # Validate rate type: existence, activity, and company scope (closes P0 cross-company leak).
     await _assert_rate_type_allowed_for_company(db, company_id, data.rate_type_id)
 
+    # CP-2D2: Status-payment RateTypes are branch-scoped; reject if this branch has no
+    # active StatusRateColumns row for this RateType.
+    await _assert_status_rate_type_for_branch(data.rate_type_id, company_id, driver_branch_id, db)
+
     # Fix 8: When this rate type is mapped to pay items (via PayItemRateTypeMap),
     # validate that at least one of those pay items is active for this branch.
     # Mirrors the activation logic in _validate_line_type:
@@ -6103,6 +6236,10 @@ async def update_rate(
     # Defensive cross-company scope guard: reject contaminated rows that reference
     # another company's RateType (e.g. created before P0 was closed).
     await _assert_rate_type_allowed_for_company(db, company_id, rate.rate_type_id)
+
+    # CP-2D2: Status-payment RateTypes are branch-scoped; reject if this branch has no
+    # active StatusRateColumns row for this RateType.
+    await _assert_status_rate_type_for_branch(rate.rate_type_id, company_id, rate.branch_id, db)
 
     # Validate date range if either date is being changed
     new_from = data.effective_from if data.effective_from is not None else rate.effective_from
@@ -6491,6 +6628,10 @@ async def approve_rate(
     # Step 1.36 — Defensive cross-company scope guard: reject contaminated rows
     # (e.g. created before P0 was closed) that reference another company's RateType.
     await _assert_rate_type_allowed_for_company(db, company_id, rate.rate_type_id)
+
+    # Step 1.37 — CP-2D2: status-payment RateTypes are branch-scoped. Reject approval of a
+    # contaminated pending rate that references a status RateType not active for this branch.
+    await _assert_status_rate_type_for_branch(rate.rate_type_id, company_id, rate.branch_id, db)
 
     # Step 1.4 — M13c: belt-and-suspenders tier-existence check.
     # The create/update paths already enforce this, but a defensive check here
@@ -8223,10 +8364,12 @@ async def get_driver_rate_matrix(
         groups.append(
             RateMatrixGroup(
                 group_key=f"{pay_item_id}:{rate_type_id}",
+                rate_source="PayItem",
                 pay_item_id=pay_item_id,
                 pay_item_name=row["payitemname"],
                 item_scope=row["itemscope"],
                 rate_behavior=row["ratebehavior"],
+                status_rate_column_id=None,
                 rate_type_id=rate_type_id,
                 rate_code=row["ratecode"],
                 rate_name=row["ratename"],
@@ -8236,6 +8379,100 @@ async def get_driver_rate_matrix(
                 is_required=True,
                 is_missing=(current_rate is None),
                 pay_item_effective_from=row["pay_item_effective_from"],
+            )
+        )
+
+    # Step 4 — StatusRateColumn groups for the branch.
+    # Each active StatusRateColumn produces a separate rate group so the
+    # driver can have a STATUS_PAY (or custom SRC_) rate set here.
+    src_result = await db.execute(
+        text("""
+            SELECT src.statusratecolumnid, src.columnname,
+                   src.ratetypeid, rt.ratecode, rt.ratename, rt.unitname
+            FROM   payroll.statusratecolumns src
+            JOIN   payroll.ratetypes rt ON rt.ratetypeid = src.ratetypeid
+            WHERE  src.branchid  = :bid
+              AND  src.companyid = :cid
+              AND  src.isactive  = TRUE
+            ORDER BY src.isdefault DESC, src.statusratecolumnid
+        """),
+        {"bid": branch_id, "cid": company_id},
+    )
+    for src_row in src_result.mappings().all():
+        src_rate_type_id: int = src_row["ratetypeid"]
+        src_col_id: int       = src_row["statusratecolumnid"]
+
+        approved_result2 = await db.execute(
+            text("""
+                SELECT driverrateid, amount, effectivefrom, effectiveto, status
+                FROM   payroll.driverrates
+                WHERE  driverid       = :did
+                  AND  companyid      = :cid
+                  AND  ratetypeid     = :rtid
+                  AND  status         IN ('Approved', 'Superseded')
+                  AND  effectivefrom <= :as_of
+                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
+                ORDER BY effectivefrom DESC
+                LIMIT 1
+            """),
+            {"did": driver_id, "cid": company_id, "rtid": src_rate_type_id, "as_of": as_of_date},
+        )
+        src_approved = approved_result2.mappings().first()
+
+        pending_result2 = await db.execute(
+            text("""
+                SELECT driverrateid, amount, effectivefrom, effectiveto, status
+                FROM   payroll.driverrates
+                WHERE  driverid   = :did
+                  AND  companyid  = :cid
+                  AND  ratetypeid = :rtid
+                  AND  status     = 'PendingApproval'
+                ORDER BY effectivefrom DESC
+                LIMIT 1
+            """),
+            {"did": driver_id, "cid": company_id, "rtid": src_rate_type_id},
+        )
+        src_pending = pending_result2.mappings().first()
+
+        src_current = (
+            RateMatrixCurrentRate(
+                driver_rate_id=src_approved["driverrateid"],
+                amount=Decimal(str(src_approved["amount"])),
+                effective_from=src_approved["effectivefrom"],
+                effective_to=src_approved["effectiveto"],
+                status=src_approved["status"],
+            )
+            if src_approved else None
+        )
+        src_pending_rate = (
+            RateMatrixCurrentRate(
+                driver_rate_id=src_pending["driverrateid"],
+                amount=Decimal(str(src_pending["amount"])),
+                effective_from=src_pending["effectivefrom"],
+                effective_to=src_pending["effectiveto"],
+                status=src_pending["status"],
+            )
+            if src_pending else None
+        )
+
+        groups.append(
+            RateMatrixGroup(
+                group_key=f"SRC:{src_col_id}:{src_rate_type_id}",
+                rate_source="StatusRateColumn",
+                pay_item_id=None,
+                pay_item_name=None,
+                item_scope="Daily",
+                rate_behavior="PerUnit",
+                status_rate_column_id=src_col_id,
+                rate_type_id=src_rate_type_id,
+                rate_code=src_row["ratecode"],
+                rate_name=src_row["columnname"],
+                unit_name=src_row["unitname"],
+                current_rate=src_current,
+                pending_rate=src_pending_rate,
+                is_required=True,
+                is_missing=(src_current is None),
+                pay_item_effective_from=None,
             )
         )
 
@@ -8272,23 +8509,21 @@ async def batch_save_rates(
     supported.  Tiered (OrdinalTier, RangeBracket, RangeProgressive) and
     Block rates must be saved via individual endpoints.
     """
-    # Step 1 — validate changes list: empty and duplicate (pay_item_id, rate_type_id) pairs
+    # Step 1 — validate changes list: empty and duplicate rate_type_id entries.
     # Empty list is caught by the schema validator; double-check here.
     if not data.changes:
         raise HTTPException(status_code=422, detail="changes must not be empty.")
 
-    seen_pairs: set[tuple[int, int]] = set()
+    seen_rt_ids: set[int] = set()
     for change in data.changes:
-        pair = (change.pay_item_id, change.rate_type_id)
-        if pair in seen_pairs:
+        if change.rate_type_id in seen_rt_ids:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Duplicate (pay_item_id={change.pay_item_id}, "
-                    f"rate_type_id={change.rate_type_id}) in the same batch request."
+                    f"Duplicate rate_type_id={change.rate_type_id} in the same batch request."
                 ),
             )
-        seen_pairs.add(pair)
+        seen_rt_ids.add(change.rate_type_id)
 
     # Step 2 — driver lookup + branch check
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
@@ -8333,97 +8568,121 @@ async def batch_save_rates(
             company_id, driver_branch_id, data.effective_from, db
         )
 
-    # Step 6 — validate each change using the exact pay_item_id + rate_type_id mapping.
+    # Step 6 — validate each change.
     #
     # All validation runs before any writes (all-or-nothing).
     #
-    # The mapping must:
-    #   a) Exist in PayItemRateTypeMap with status='Active' for the exact pair.
-    #   b) The PayItem must be RequiresRate=TRUE and not Retired.
-    #   c) The PayItem must be branch-active for the driver's branch as of effective_from.
-    #   d) The rate behavior must be simple (Phase 2A: not tiered or block).
+    # PayItem path:  validates PayItemRateTypeMap + branch-active + behavior.
+    # StatusRateColumn path: validates StatusRateColumns membership + rate_type_id match.
     for change in data.changes:
-        # Exact pay_item_id + rate_type_id mapping check — rejects:
-        #   • RateType that exists but is not mapped to this PayItem
-        #   • PayItem that does not RequiresRate
-        #   • Retired/inactive PayItem
-        #   • Mapping not Active
-        #   • PayItem not branch-active for the driver's branch as of effective_from
-        map_result = await db.execute(
-            text("""
-                SELECT
-                    pi.payitemid,
-                    pi.ratebehavior,
-                    pi.isdefaultbranchactive,
-                    bpic.isactive AS cfg_isactive
-                FROM payroll.payitemratetypemap pirm
-                JOIN payroll.payitems  pi ON pi.payitemid    = pirm.payitemid
-                JOIN payroll.ratetypes rt ON rt.ratetypeid   = pirm.ratetypeid
-                                         AND rt.isactive      = TRUE
-                LEFT JOIN payroll.branchpayitemconfig bpic
-                       ON bpic.payitemid  = pi.payitemid
-                      AND bpic.companyid  = :cid
-                      AND bpic.branchid   = :bid
-                      AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= CAST(:effective_from AS date))
-                WHERE pirm.payitemid  = :piid
-                  AND pirm.ratetypeid = :rtid
-                  AND pirm.status     = 'Active'
-                  AND pi.status       != 'Retired'
-                  AND pi.requiresrate = TRUE
-                  AND (pi.companyid IS NULL OR pi.companyid = :cid)
-                ORDER BY bpic.effectivefrom DESC NULLS LAST
-                LIMIT 1
-            """),
-            {
-                "piid":           change.pay_item_id,
-                "rtid":           change.rate_type_id,
-                "cid":            company_id,
-                "bid":            driver_branch_id,
-                "effective_from": data.effective_from,
-            },
-        )
-        map_row = map_result.mappings().first()
-
-        # Reject if mapping doesn't exist at all
-        if map_row is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"pay_item_id={change.pay_item_id} is not actively mapped to "
-                    f"rate_type_id={change.rate_type_id} for this company. "
-                    "Verify the PayItem → RateType mapping is Active."
-                ),
+        if change.status_rate_column_id is not None:
+            # ---- StatusRateColumn validation path ----
+            src_result = await db.execute(
+                text("""
+                    SELECT src.ratetypeid
+                    FROM   payroll.statusratecolumns src
+                    WHERE  src.statusratecolumnid = :src_id
+                      AND  src.branchid           = :bid
+                      AND  src.companyid          = :cid
+                      AND  src.isactive           = TRUE
+                """),
+                {
+                    "src_id": change.status_rate_column_id,
+                    "bid":    driver_branch_id,
+                    "cid":    company_id,
+                },
             )
-
-        # Phase 4B.3 — defense-in-depth: validate RateType ownership even if a
-        # PayItemRateTypeMap row exists.  A contaminated row (Company B PayItem
-        # mapped to Company A's CPI_ RateType via a direct-DB bypass) would pass
-        # the map_result check above but must be caught here.
-        await _assert_rate_type_allowed_for_company(db, company_id, change.rate_type_id)
-
-        # Reject if the pay item is not branch-active for this driver's branch
-        cfg = map_row["cfg_isactive"]
-        is_branch_active = bool(cfg) if cfg is not None else bool(map_row["isdefaultbranchactive"])
-        if not is_branch_active:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"pay_item_id={change.pay_item_id} is not active for this driver's branch "
-                    f"as of {data.effective_from}."
-                ),
+            src_row = src_result.mappings().first()
+            if src_row is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"status_rate_column_id={change.status_rate_column_id} not found "
+                        "or not active for this driver's branch."
+                    ),
+                )
+            if src_row["ratetypeid"] != change.rate_type_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"rate_type_id={change.rate_type_id} does not match the backing RateType "
+                        f"for status_rate_column_id={change.status_rate_column_id}."
+                    ),
+                )
+            # StatusRateColumn RateTypes are company-owned or system — ownership already
+            # enforced by trg_src_ratetype_owner trigger; skip redundant check here.
+        else:
+            # ---- PayItem validation path ----
+            # Exact pay_item_id + rate_type_id mapping check
+            map_result = await db.execute(
+                text("""
+                    SELECT
+                        pi.payitemid,
+                        pi.ratebehavior,
+                        pi.isdefaultbranchactive,
+                        bpic.isactive AS cfg_isactive
+                    FROM payroll.payitemratetypemap pirm
+                    JOIN payroll.payitems  pi ON pi.payitemid    = pirm.payitemid
+                    JOIN payroll.ratetypes rt ON rt.ratetypeid   = pirm.ratetypeid
+                                             AND rt.isactive      = TRUE
+                    LEFT JOIN payroll.branchpayitemconfig bpic
+                           ON bpic.payitemid  = pi.payitemid
+                          AND bpic.companyid  = :cid
+                          AND bpic.branchid   = :bid
+                          AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= CAST(:effective_from AS date))
+                    WHERE pirm.payitemid  = :piid
+                      AND pirm.ratetypeid = :rtid
+                      AND pirm.status     = 'Active'
+                      AND pi.status       != 'Retired'
+                      AND pi.requiresrate = TRUE
+                      AND (pi.companyid IS NULL OR pi.companyid = :cid)
+                    ORDER BY bpic.effectivefrom DESC NULLS LAST
+                    LIMIT 1
+                """),
+                {
+                    "piid":           change.pay_item_id,
+                    "rtid":           change.rate_type_id,
+                    "cid":            company_id,
+                    "bid":            driver_branch_id,
+                    "effective_from": data.effective_from,
+                },
             )
+            map_row = map_result.mappings().first()
 
-        # Reject tiered / block behaviors (Phase 2A: not supported in batch)
-        rate_behavior: str = map_row["ratebehavior"] or "PerUnit"
-        if rate_behavior in _TIERED_BEHAVIORS or rate_behavior == "Block":
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"pay_item_id={change.pay_item_id} uses '{rate_behavior}' behavior "
-                    "which requires tier or block configuration. "
-                    "Use the individual rate endpoint to save this rate."
-                ),
-            )
+            if map_row is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"pay_item_id={change.pay_item_id} is not actively mapped to "
+                        f"rate_type_id={change.rate_type_id} for this company. "
+                        "Verify the PayItem → RateType mapping is Active."
+                    ),
+                )
+
+            # Phase 4B.3 — defense-in-depth: validate RateType ownership
+            await _assert_rate_type_allowed_for_company(db, company_id, change.rate_type_id)
+
+            cfg = map_row["cfg_isactive"]
+            is_branch_active = bool(cfg) if cfg is not None else bool(map_row["isdefaultbranchactive"])
+            if not is_branch_active:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"pay_item_id={change.pay_item_id} is not active for this driver's branch "
+                        f"as of {data.effective_from}."
+                    ),
+                )
+
+            rate_behavior: str = map_row["ratebehavior"] or "PerUnit"
+            if rate_behavior in _TIERED_BEHAVIORS or rate_behavior == "Block":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"pay_item_id={change.pay_item_id} uses '{rate_behavior}' behavior "
+                        "which requires tier or block configuration. "
+                        "Use the individual rate endpoint to save this rate."
+                    ),
+                )
 
     # Step 7 — write: create or update PendingApproval rows
     # All validation passed — now write inside the same transaction.
@@ -9542,6 +9801,299 @@ async def _void_entry_state_field(
         """),
         {"pid": period_id, "cid": company_id, "did": driver_id, "dt": work_date, "uid": user_id},
     )
+
+
+# =============================================================================
+# CP-2D2: Status payment sync helpers
+# =============================================================================
+
+async def _sync_status_payment_for_entry_state(
+    company_id: int,
+    branch_id: int,
+    period_id: int,
+    driver_id: int,
+    work_date: "date",
+    status_key_id: "int | None",
+    user_id: int,
+    db: AsyncConnection,
+) -> None:
+    """
+    Create, update, or void the STATUS_PAYMENT draft line for a driver/day.
+
+    Called from save_day_grid after _upsert_entry_state.
+    Called from _refresh_status_payment_lines for each PPDES row at submit/finalize.
+
+    Logic:
+      - If status_key_id is None or StatusKey has no StatusRateColumnID → void any existing line.
+      - Otherwise → look up driver rate for StatusRateColumns.RateTypeID as-of work_date,
+        compute HoursValue × rate, and upsert the draft line.
+
+    SOURCE_ID format: 'STATUS_PAYMENT:{entry_state_id}:{status_key_id}:{status_rate_column_id}'
+    Line type: the RateType's RateCode (e.g., 'STATUS_PAY').
+    """
+    # 1. Get canonical entry state row ID
+    es_result = await db.execute(
+        text("""
+            SELECT payrollperioddriverdayentrystateid
+            FROM   payroll.payrollperioddriverdayentrystate
+            WHERE  payrollperiodid = :pid AND driverid = :did AND workdate = :dt
+        """),
+        {"pid": period_id, "did": driver_id, "dt": work_date},
+    )
+    es_row = es_result.mappings().first()
+    entry_state_id: int | None = (
+        es_row["payrollperioddriverdayentrystateid"] if es_row else None
+    )
+
+    # 2. Look up StatusKey payment config if status is set
+    src_col_id: int | None = None
+    src_rate_type_id: int | None = None
+    rate_code: str | None = None
+    hours_value: "Decimal | None" = None
+    status_code_val: str | None = None
+    key_name_val: str | None = None
+    col_name_val: str | None = None
+
+    if status_key_id is not None:
+        sk_result = await db.execute(
+            text("""
+                SELECT sk.statuskeyid, sk.statuscode, sk.keyname,
+                       sk.hoursvalue, sk.statusratecolumnid,
+                       src.columnname AS src_col_name,
+                       src.ratetypeid, rt.ratecode
+                FROM   payroll.payrollstatuskeys sk
+                LEFT JOIN payroll.statusratecolumns src
+                       ON src.statusratecolumnid = sk.statusratecolumnid
+                LEFT JOIN payroll.ratetypes rt
+                       ON rt.ratetypeid = src.ratetypeid
+                WHERE  sk.statuskeyid = :skid
+            """),
+            {"skid": status_key_id},
+        )
+        sk_row = sk_result.mappings().first()
+        if sk_row:
+            src_col_id       = sk_row["statusratecolumnid"]
+            src_rate_type_id = sk_row["ratetypeid"]
+            rate_code        = sk_row["ratecode"]
+            hv               = sk_row["hoursvalue"]
+            hours_value      = Decimal(str(hv)) if hv is not None else Decimal("0")
+            status_code_val  = sk_row["statuscode"]
+            key_name_val     = sk_row["keyname"]
+            col_name_val     = sk_row["src_col_name"]
+
+    # 3. Find any existing non-void STATUS_PAYMENT line for this slot
+    existing_result = await db.execute(
+        text("""
+            SELECT draftlineid, sourceid
+            FROM   payroll.payrolldraftlines
+            WHERE  payrollperiodid = :pid
+              AND  driverid        = :did
+              AND  workdate        = :dt
+              AND  companyid       = :cid
+              AND  sourceid        LIKE 'STATUS_PAYMENT:%'
+              AND  status         != 'Void'
+            LIMIT 1
+        """),
+        {"pid": period_id, "did": driver_id, "dt": work_date, "cid": company_id},
+    )
+    existing = existing_result.mappings().first()
+
+    # 4. If no status, no rate column, or no entry state → void existing and return
+    if status_key_id is None or src_col_id is None or entry_state_id is None:
+        if existing:
+            await db.execute(
+                text(
+                    "UPDATE payroll.payrolldraftlines SET status = 'Void' "
+                    "WHERE draftlineid = :lid"
+                ),
+                {"lid": existing["draftlineid"]},
+            )
+        return
+
+    # 5. Compute amount
+    import json as _json
+    rate_result = await db.execute(
+        text("""
+            SELECT driverrateid, amount
+            FROM   payroll.driverrates
+            WHERE  driverid     = :did
+              AND  ratetypeid   = :rtid
+              AND  companyid    = :cid
+              AND  status       IN ('Approved', 'Superseded')
+              AND  effectivefrom <= :dt
+              AND  (effectiveto IS NULL OR effectiveto >= :dt)
+            ORDER BY effectivefrom DESC
+            LIMIT 1
+        """),
+        {"did": driver_id, "rtid": src_rate_type_id, "cid": company_id, "dt": work_date},
+    )
+    rate_row = rate_result.mappings().first()
+    resolved_rate    = Decimal(str(rate_row["amount"])) if rate_row else None
+    resolved_rate_id = rate_row["driverrateid"] if rate_row else None
+    calc_amount = (
+        (hours_value * resolved_rate).quantize(Decimal("0.0001"))
+        if (resolved_rate is not None and hours_value)
+        else None
+    )
+    needs_review = resolved_rate is None
+
+    new_source_id = (
+        f"STATUS_PAYMENT:{entry_state_id}:{status_key_id}:{src_col_id}"
+    )
+
+    # Build SourceSnapshot — immutable audit record of inputs at draft time.
+    snapshot_dict: dict = {
+        "entry_state_id":           entry_state_id,
+        "payroll_period_id":        period_id,
+        "driver_id":                driver_id,
+        "work_date":                str(work_date),
+        "status_key_id":            status_key_id,
+        "status_code":              status_code_val,
+        "status_key_name":          key_name_val,
+        "hours_value_used":         float(hours_value) if hours_value is not None else None,
+        "status_rate_column_id":    src_col_id,
+        "status_rate_column_name":  col_name_val,
+        "rate_type_id":             src_rate_type_id,
+        "rate_code":                rate_code,
+        "driver_rate_id":           resolved_rate_id,
+        "resolved_rate_amount":     float(resolved_rate) if resolved_rate is not None else None,
+        "calculated_amount":        float(calc_amount) if calc_amount is not None else None,
+        "formula":                  "HoursValue * DriverRate.Amount",
+    }
+    # Remove None values to keep snapshot lean
+    source_snapshot = _json.dumps(
+        {k: v for k, v in snapshot_dict.items() if v is not None}
+    )
+
+    # 6. Upsert draft line
+    if existing:
+        if existing["sourceid"] != new_source_id:
+            # Status key or column changed — void old, fall through to insert
+            await db.execute(
+                text(
+                    "UPDATE payroll.payrolldraftlines SET status = 'Void' "
+                    "WHERE draftlineid = :lid"
+                ),
+                {"lid": existing["draftlineid"]},
+            )
+            existing = None
+        else:
+            # In-place update (also refresh SourceSnapshot in case rate changed)
+            await db.execute(
+                text("""
+                    UPDATE payroll.payrolldraftlines
+                    SET    quantity           = :qty,
+                           calculatedamount   = :calc,
+                           needsmanagerreview = :review,
+                           sourcesnapshot     = CAST(:snap AS JSONB),
+                           status             = 'Active'
+                    WHERE  draftlineid = :lid
+                """),
+                {
+                    "qty":    hours_value,
+                    "calc":   calc_amount,
+                    "review": needs_review,
+                    "snap":   source_snapshot,
+                    "lid":    existing["draftlineid"],
+                },
+            )
+            return
+
+    # Insert new STATUS_PAYMENT line
+    await db.execute(
+        text("""
+            INSERT INTO payroll.payrolldraftlines
+                (companyid, branchid, payrollperiodid, driverid,
+                 workdate, linetype, linescope, quantity,
+                 calculatedamount, sourcetype, sourceid,
+                 status, needsmanagerreview, addedbyuserid, sourcesnapshot)
+            VALUES
+                (:cid, :bid, :pid, :did,
+                 :dt, :lt, 'Daily', :qty,
+                 :calc, 'System', :sid,
+                 'Active', :review, :uid, CAST(:snap AS JSONB))
+        """),
+        {
+            "cid":    company_id,
+            "bid":    branch_id,
+            "pid":    period_id,
+            "did":    driver_id,
+            "dt":     work_date,
+            "lt":     rate_code,
+            "qty":    hours_value,
+            "calc":   calc_amount,
+            "sid":    new_source_id,
+            "review": needs_review,
+            "uid":    user_id,
+            "snap":   source_snapshot,
+        },
+    )
+
+
+async def _refresh_status_payment_lines(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> int:
+    """
+    Re-sync all STATUS_PAYMENT draft lines for a period from PPDES state.
+
+    Called before _refresh_draft_calculations at submit and finalize so that
+    status-payment lines are current before the NMR guard runs.
+
+    Returns the count of PPDES rows processed.
+    """
+    # Fetch all non-voided PPDES rows for this period
+    ppdes_result = await db.execute(
+        text("""
+            SELECT payrollperioddriverdayentrystateid,
+                   driverid, workdate, statuskeyid
+            FROM   payroll.payrollperioddriverdayentrystate
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  isvoided        = FALSE
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    rows = list(ppdes_result.mappings().all())
+
+    # Also void any orphaned STATUS_PAYMENT lines for slots with no PPDES row
+    # (e.g., status was cleared and PPDES was voided after a prior sync)
+    await db.execute(
+        text("""
+            UPDATE payroll.payrolldraftlines
+            SET    status = 'Void'
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  sourceid        LIKE 'STATUS_PAYMENT:%'
+              AND  status         != 'Void'
+              AND  NOT EXISTS (
+                SELECT 1 FROM payroll.payrollperioddriverdayentrystate ppdes
+                WHERE  ppdes.payrollperiodid = payrolldraftlines.payrollperiodid
+                  AND  ppdes.driverid        = payrolldraftlines.driverid
+                  AND  ppdes.workdate        = payrolldraftlines.workdate
+                  AND  ppdes.isvoided        = FALSE
+                  AND  ppdes.statuskeyid     IS NOT NULL
+              )
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+
+    for row in rows:
+        await _sync_status_payment_for_entry_state(
+            company_id=company_id,
+            branch_id=branch_id,
+            period_id=period_id,
+            driver_id=row["driverid"],
+            work_date=row["workdate"],
+            status_key_id=row["statuskeyid"],
+            user_id=user_id,
+            db=db,
+        )
+
+    return len(rows)
 
 
 async def _finalize_canonicalize_entry_state(
@@ -10828,6 +11380,18 @@ async def save_day_grid(
             company_id, branch_id, period_id, driver_id, work_date, user_id, db,
             status_key_id=key_row["statuskeyid"] if key_row else None,
             note_text=notes_val if notes_val else None,
+        )
+
+        # CP-2D2: sync STATUS_PAYMENT draft line from the updated entry state.
+        await _sync_status_payment_for_entry_state(
+            company_id=company_id,
+            branch_id=branch_id,
+            period_id=period_id,
+            driver_id=driver_id,
+            work_date=work_date,
+            status_key_id=key_row["statuskeyid"] if key_row else None,
+            user_id=user_id,
+            db=db,
         )
 
     # Return the refreshed grid

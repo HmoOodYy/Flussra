@@ -24,6 +24,8 @@ from app.settings.schemas import (
     StatusKey,
     StatusKeyCreate,
     StatusKeyUpdate,
+    StatusRateColumn,
+    StatusRateColumnCreate,
     BranchPayItemState,
     BranchPayItemConfigVersion,
     PayItemConfigUpdate,
@@ -441,6 +443,66 @@ async def delete_status_key(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
+        db=db,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Status rate columns (CP-2D2)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/branches/{branch_id}/status-rate-columns",
+    response_model=list[StatusRateColumn],
+    summary="List status rate columns for a branch",
+    description=(
+        "Returns all active status rate columns for the branch.  Each column "
+        "is backed by a RateType and can be assigned to a status key to enable "
+        "automatic payment calculation (HoursValue × driver rate).\n\n"
+        "Any authenticated user with branch access can read this."
+    ),
+)
+async def list_status_rate_columns(
+    branch_id: int,
+    token: TokenDep,
+    db: DbDep,
+    include_inactive: bool = Query(False),
+) -> list[StatusRateColumn]:
+    return await service.list_status_rate_columns(
+        branch_id=branch_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+        active_only=not include_inactive,
+    )
+
+
+@router.post(
+    "/branches/{branch_id}/status-rate-columns",
+    response_model=StatusRateColumn,
+    status_code=201,
+    summary="Create a status rate column",
+    description=(
+        "Creates a named rate-column config for status payment.  Requires "
+        "AllCompanyBranches scope."
+    ),
+    responses={
+        403: {"description": "Insufficient scope"},
+        404: {"description": "Branch not found"},
+        422: {"description": "Validation error"},
+    },
+)
+async def create_status_rate_column(
+    branch_id: int,
+    body: StatusRateColumnCreate,
+    token: TokenDep,
+    db: DbDep,
+) -> StatusRateColumn:
+    return await service.create_status_rate_column(
+        branch_id=branch_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        data=body,
         db=db,
     )
 

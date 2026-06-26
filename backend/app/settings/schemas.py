@@ -290,6 +290,50 @@ class PayrollSetupUpsert(BaseModel):
 # Payroll status keys
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Status rate columns (CP-2D2)
+# ---------------------------------------------------------------------------
+
+class StatusRateColumn(BaseModel):
+    """A named rate-column config for status payment, backed by a RateType."""
+    status_rate_column_id: int
+    company_id: int
+    branch_id: int
+    rate_type_id: int
+    rate_type_code: str
+    column_name: str
+    is_default: bool
+    is_active: bool
+    created_at_utc: datetime
+
+
+class StatusRateColumnCreate(BaseModel):
+    """
+    Create a custom status rate column.
+
+    The service auto-creates a new company-owned RateType backed by this column.
+    Do NOT supply rate_type_id — it is derived internally.
+    unit_name defaults to "Hour" (status payment is always hour-based).
+    """
+    column_name: str
+    unit_name: str = "Hour"
+    is_default: bool = False
+
+    @field_validator("column_name")
+    @classmethod
+    def name_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("column_name must not be blank")
+        return v.strip()
+
+    @field_validator("unit_name")
+    @classmethod
+    def unit_name_non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("unit_name must not be blank")
+        return v.strip()
+
+
 class StatusKey(BaseModel):
     """
     A single branch payroll status key — returned by all status-key endpoints.
@@ -301,6 +345,9 @@ class StatusKey(BaseModel):
     normalized_status_code : uppercase/normalized version of status_code.
                              Used for the uniqueness constraint.
     display_order : legacy field, kept for DB compat but not exposed in the UI.
+    status_rate_column_id : if set, this status key generates a System draft line
+                            using HoursValue × driver rate from that column.
+                            NULL = no money for this status key.
     """
     status_key_id: int
     company_id: int
@@ -314,6 +361,7 @@ class StatusKey(BaseModel):
     allowance_category: str | None = None
     is_active: bool
     display_order: int = 0
+    status_rate_column_id: int | None = None
     # Usage limits
     limit_uses_per_period_enabled: bool = False
     limit_uses_per_period: int | None = None
@@ -342,6 +390,8 @@ class StatusKeyCreate(BaseModel):
     key_name is the only required user-facing field.
     status_code is generated server-side (SK_XXXXXXXX) and must not be sent.
     display_order is managed internally (always 0 for new keys); omit it.
+    status_rate_column_id: optional; if set, generates a System payment line
+                           on save using HoursValue × driver rate for that column.
     """
     key_name: str
     hours_value: Decimal = Decimal("0")
@@ -349,6 +399,7 @@ class StatusKeyCreate(BaseModel):
     deducts_from_yearly_allowance: bool = False
     allowance_category: str | None = None
     is_active: bool = True
+    status_rate_column_id: int | None = None
     # Usage limits
     limit_uses_per_period_enabled: bool = False
     limit_uses_per_period: int | None = None
@@ -429,6 +480,7 @@ class StatusKeyUpdate(BaseModel):
     status_code is immutable after creation (SK_ code never changes).
     display_order is legacy; it can be patched for backward compat but is not
     exposed in the UI.
+    status_rate_column_id: use -1 as sentinel to clear (set to NULL).
     """
     key_name: str | None = None
     hours_value: Decimal | None = None
@@ -437,6 +489,7 @@ class StatusKeyUpdate(BaseModel):
     allowance_category: str | None = None
     is_active: bool | None = None
     display_order: int | None = None   # legacy, kept for backward compat
+    status_rate_column_id: int | None = None  # -1 = clear to NULL
     # Usage limits
     limit_uses_per_period_enabled: bool | None = None
     limit_uses_per_period: int | None = None

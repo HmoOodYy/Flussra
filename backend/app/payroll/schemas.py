@@ -573,12 +573,19 @@ class RateMatrixCurrentRate(BaseModel):
 
 
 class RateMatrixGroup(BaseModel):
-    """One pay-item + rate-type combination in the matrix."""
-    group_key: str          # f"{pay_item_id}:{rate_type_id}" — composite key for frontend
-    pay_item_id: int
-    pay_item_name: str
-    item_scope: str
-    rate_behavior: str
+    """One rate group in the driver pay-rate matrix.
+
+    rate_source distinguishes PayItem-backed groups from StatusRateColumn groups.
+    For PayItem groups: pay_item_id, pay_item_name, item_scope, rate_behavior are set.
+    For StatusRateColumn groups: status_rate_column_id is set; pay_item_* are None.
+    """
+    group_key: str          # "{pay_item_id}:{rate_type_id}" or "SRC:{src_id}:{rate_type_id}"
+    rate_source: str        # "PayItem" | "StatusRateColumn"
+    pay_item_id: int | None = None
+    pay_item_name: str | None = None
+    item_scope: str | None = None
+    rate_behavior: str | None = None
+    status_rate_column_id: int | None = None
     rate_type_id: int
     rate_code: str
     rate_name: str
@@ -587,8 +594,7 @@ class RateMatrixGroup(BaseModel):
     pending_rate: RateMatrixCurrentRate | None = None
     is_required: bool
     is_missing: bool
-    # Payroll activation date: when this item becomes usable in the day-grid.
-    # None when the item uses the IsDefaultBranchActive fallback (no explicit config row).
+    # Payroll activation date (PayItem groups only).
     pay_item_effective_from: date | None = None
 
 
@@ -675,12 +681,16 @@ class BatchRateChange(BaseModel):
     """
     One rate change in a batch save request.
 
-    Both pay_item_id and rate_type_id are required so the exact
-    PayItemRateTypeMap row can be validated.  This prevents saving a rate
-    against an active RateType that is not actively mapped to the named
-    PayItem for the driver's branch.
+    Exactly one of pay_item_id or status_rate_column_id must be set.
+
+    For PayItem-backed rates: pay_item_id + rate_type_id are validated against
+    the active PayItemRateTypeMap for the driver's branch.
+
+    For StatusRateColumn-backed rates: status_rate_column_id + rate_type_id are
+    validated against the StatusRateColumns table (no PayItemRateTypeMap needed).
     """
-    pay_item_id: int    # must match an active PayItemRateTypeMap row for this driver's branch
+    pay_item_id: int | None = None
+    status_rate_column_id: int | None = None
     rate_type_id: int
     amount: Decimal
     notes: str | None = None
@@ -691,6 +701,18 @@ class BatchRateChange(BaseModel):
         if v <= 0:
             raise ValueError("amount must be positive")
         return v
+
+    from pydantic import model_validator
+
+    @model_validator(mode="after")
+    def exactly_one_source(self) -> "BatchRateChange":
+        has_pi  = self.pay_item_id is not None
+        has_src = self.status_rate_column_id is not None
+        if has_pi == has_src:  # both set or neither set
+            raise ValueError(
+                "Exactly one of pay_item_id or status_rate_column_id must be provided."
+            )
+        return self
 
 
 class BatchRateRequest(BaseModel):
