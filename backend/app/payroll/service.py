@@ -597,6 +597,15 @@ async def create_period(
         period_id, company_id, data.branch_id, data.start_date, db,
     )
 
+    # CP-2E: create driver eligibility snapshot for legacy Draft periods.
+    # Draft stays provisional (freeze=False); freeze happens when promoted to Open.
+    await _create_period_driver_eligibility_rows(
+        period_id, company_id, data.branch_id, db,
+        snapshot_source="Generated",
+        freeze=False,
+        created_by_user_id=user_id,
+    )
+
     return await get_period_by_id(company_id, user_id, period_id, db)
 
 
@@ -1286,6 +1295,15 @@ async def change_period_status(
                     "trigger":             "submit_promotion",
                     "submitted_period_id": period_id,
                 },
+            )
+            # CP-2E: promoted period is now Open — generate and freeze its snapshot.
+            await _regenerate_period_driver_eligibility_rows(
+                _eligible_draft["payrollperiodid"],
+                company_id,
+                existing.branch_id,
+                db,
+                created_by_user_id=user_id,
+                frozen_by_user_id=user_id,
             )
     else:
         # CP-0B: All non-Open→InReview transitions use an expected-status predicate
@@ -2796,6 +2814,411 @@ async def _assert_driver_eligible_for_period(
         )
 
 
+# ── CP-2E: Canonical Eligibility Snapshot helpers ────────────────────────────
+
+async def _period_has_driver_eligibility_snapshot(
+    period_id: int, db: AsyncConnection
+) -> bool:
+    """Check marker table — one row per snapshotted period, even if zero drivers eligible."""
+    row = (await db.execute(
+        text(
+            "SELECT 1 FROM payroll.payrollperiodeligibilitysnapshots "
+            "WHERE payrollperiodid = :pid LIMIT 1"
+        ),
+        {"pid": period_id},
+    )).first()
+    return row is not None
+
+
+async def _get_driver_eligibility_row(
+    period_id: int, driver_id: int, company_id: int, branch_id: int,
+    db: AsyncConnection,
+):
+    return (await db.execute(
+        text("""
+            SELECT payrollperioddrivereligibilityid,
+                   eligibilityreasoncode,
+                   hiredatesnapshot,
+                   terminationdatesnapshot,
+                   drivereffectivefromsnapshot,
+                   drivereffectivetosnapshot,
+                   frozenatutc,
+                   drivernamesnapshot,
+                   drivercodesnapshot,
+                   employeekeysnapshot,
+                   iseligibleforperiod
+            FROM   payroll.payrollperioddrivereligibility
+            WHERE  payrollperiodid = :pid
+              AND  driverid        = :did
+              AND  companyid       = :cid
+              AND  branchid        = :bid
+        """),
+        {"pid": period_id, "did": driver_id, "cid": company_id, "bid": branch_id},
+    )).first()
+
+
+def _is_snapshot_row_eligible_for_workdate(row, work_date: date) -> bool:
+    """Derive date-level eligibility from a snapshot row.
+
+    Returns True only if the driver's snapshotted date windows cover work_date.
+    IncludedByExistingData always returns False here — such drivers require an
+    existing-source check (DB query) and are never eligible purely by window.
+    Generated-row reason codes (Active/TerminatedHistorical/Transferred) are
+    evaluated against their snapshotted hire/termination/effectivefrom/effectiveto.
+    """
+    if row is None or not row.iseligibleforperiod:
+        return False
+    reason = row.eligibilityreasoncode
+
+    # IBED is never window-eligible; always requires existing-source rescue
+    if reason == "IncludedByExistingData":
+        return False
+
+    hire     = row.hiredatesnapshot
+    term     = row.terminationdatesnapshot
+    eff_from = row.drivereffectivefromsnapshot
+    eff_to   = row.drivereffectivetosnapshot
+
+    if hire is not None and hire > work_date:
+        return False
+    if eff_from is not None and eff_from > work_date:
+        return False
+    if eff_to is not None and eff_to < work_date:
+        return False
+
+    if reason == "TerminatedHistorical":
+        if term is None or term < work_date:
+            return False
+    else:
+        if term is not None and term < work_date:
+            return False
+    return True
+
+
+async def _driver_has_existing_daily_source_on_date(
+    period_id: int, driver_id: int, work_date: date, db: AsyncConnection
+) -> bool:
+    r = (await db.execute(
+        text("""
+            SELECT 1 FROM payroll.payrolldraftlines
+            WHERE payrollperiodid = :pid AND driverid = :did
+              AND workdate = :dt AND status != 'Void'
+            LIMIT 1
+        """),
+        {"pid": period_id, "did": driver_id, "dt": work_date},
+    )).first()
+    if r:
+        return True
+    r2 = (await db.execute(
+        text("""
+            SELECT 1 FROM payroll.payrollperioddriverdayentrystate
+            WHERE payrollperiodid = :pid AND driverid = :did
+              AND workdate = :dt AND isvoided = FALSE
+            LIMIT 1
+        """),
+        {"pid": period_id, "did": driver_id, "dt": work_date},
+    )).first()
+    return r2 is not None
+
+
+async def _driver_has_existing_period_pay_source(
+    period_id: int, driver_id: int, db: AsyncConnection
+) -> bool:
+    r = (await db.execute(
+        text("""
+            SELECT 1 FROM payroll.payrolldraftlines
+            WHERE payrollperiodid = :pid AND driverid = :did
+              AND linescope = 'Period' AND status != 'Void'
+            LIMIT 1
+        """),
+        {"pid": period_id, "did": driver_id},
+    )).first()
+    return r is not None
+
+
+async def _assert_driver_eligible_for_workdate_via_snapshot(
+    company_id: int, branch_id: int, period_id: int,
+    driver_id: int, work_date: date, db: AsyncConnection,
+    allow_existing_source_rescue: bool = True,
+) -> None:
+    """Check eligibility for a specific work date, using snapshot when available.
+
+    Primary gate: date-window check via _is_snapshot_row_eligible_for_workdate.
+    Secondary gate (rescue): if allow_existing_source_rescue=True, a driver
+    whose date window does not cover work_date is still allowed if they have
+    existing daily source (DraftLine or EntryState) on that exact date.
+    This rescue applies to ALL reason codes, not just IncludedByExistingData —
+    a generated-row driver (Active/TerminatedHistorical/Transferred) may have
+    data outside their eligibility window from before the snapshot was frozen.
+
+    Callers:
+    - save_day_grid:         allow_existing_source_rescue=True  (default)
+    - update_draft_line:     allow_existing_source_rescue=True  (default)
+    - add_draft_line:        allow_existing_source_rescue=False (new source — no rescue)
+    """
+    if not await _period_has_driver_eligibility_snapshot(period_id, db):
+        await _assert_driver_eligible_for_date(company_id, driver_id, branch_id, work_date, db)
+        return
+    row = await _get_driver_eligibility_row(period_id, driver_id, company_id, branch_id, db)
+    if row is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Driver has no eligibility snapshot for this period.",
+        )
+    # Primary: date-window check
+    if _is_snapshot_row_eligible_for_workdate(row, work_date):
+        return
+    # Secondary rescue: existing source on exact date (any reason code)
+    if allow_existing_source_rescue:
+        has_existing = await _driver_has_existing_daily_source_on_date(
+            period_id, driver_id, work_date, db
+        )
+        if has_existing:
+            return
+    # Build a useful error message based on reason code
+    if row.eligibilityreasoncode == "IncludedByExistingData":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Driver is only eligible for existing saved dates. "
+                "New entries on new work dates are not permitted."
+            ),
+        )
+    raise HTTPException(
+        status_code=422,
+        detail="Driver is not eligible for this work date.",
+    )
+
+
+async def _assert_driver_eligible_for_period_via_snapshot(
+    company_id: int, branch_id: int, period_id: int,
+    driver_id: int, db: AsyncConnection,
+) -> None:
+    """Check period-level eligibility, using snapshot when available."""
+    if not await _period_has_driver_eligibility_snapshot(period_id, db):
+        period = (await db.execute(
+            text(
+                "SELECT startdate, enddate FROM payroll.payrollperiods "
+                "WHERE payrollperiodid = :pid"
+            ),
+            {"pid": period_id},
+        )).first()
+        await _assert_driver_eligible_for_period(
+            company_id, driver_id, branch_id, period.startdate, period.enddate, db
+        )
+        return
+    row = await _get_driver_eligibility_row(period_id, driver_id, company_id, branch_id, db)
+    if row is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Driver has no eligibility snapshot for this period.",
+        )
+    if row.eligibilityreasoncode == "IncludedByExistingData":
+        has_existing = await _driver_has_existing_period_pay_source(period_id, driver_id, db)
+        if not has_existing:
+            raise HTTPException(
+                status_code=422,
+                detail="Driver is not eligible for new period-pay entries in this period.",
+            )
+        return
+    # Active / TerminatedHistorical / Transferred — present in snapshot = period-eligible
+
+
+async def _create_period_driver_eligibility_rows(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+    snapshot_source: str = "Generated",
+    freeze: bool = False,
+    created_by_user_id: int | None = None,
+    frozen_by_user_id: int | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    frozen_at = now if freeze else None
+
+    # Paths 1–3: Active / TerminatedHistorical / Transferred
+    await db.execute(text("""
+        INSERT INTO payroll.payrollperioddrivereligibility
+            (companyid, branchid, payrollperiodid, driverid, sourceemployeeid,
+             drivercodesnapshot, drivernamesnapshot, employeekeysnapshot,
+             driverstatussnapshot,
+             employmentstatussnapshot,
+             transferredfromdriveridsnapshot, transferredtodriveridsnapshot,
+             hiredatesnapshot, terminationdatesnapshot,
+             drivereffectivefromsnapshot, drivereffectivetosnapshot,
+             iseligibleforperiod, eligibilityreasoncode, snapshotsource,
+             createdatutc, createdbyuserid, updatedatutc, frozenatutc, frozenbyuserid)
+        SELECT
+            pp.companyid, pp.branchid, pp.payrollperiodid,
+            d.driverid, e.employeeid,
+            d.drivercode, e.fullname, e.employeekey, d.driverstatus, e.employmentstatus,
+            d.transferredfromdriverid, d.transferredtodriverid,
+            e.hiredate, e.terminationdate, d.effectivefrom, d.effectiveto,
+            TRUE,
+            CASE
+                WHEN d.driverstatus = 'Terminated' THEN 'TerminatedHistorical'
+                WHEN d.driverstatus = 'Transferred' THEN 'Transferred'
+                ELSE 'Active'
+            END,
+            :src, CAST(:now AS TIMESTAMPTZ), CAST(:uid AS INTEGER), CAST(:now AS TIMESTAMPTZ), CAST(:frozen_at AS TIMESTAMPTZ), CAST(:fuid AS INTEGER)
+        FROM payroll.payrollperiods pp
+        JOIN core.drivers d ON d.companyid = pp.companyid AND d.branchid = pp.branchid
+        JOIN core.employees e ON e.employeeid = d.employeeid
+        WHERE pp.payrollperiodid = :pid
+          AND (
+            (    d.driverstatus     = 'Active'
+             AND e.employmentstatus = 'Active'
+             AND (e.hiredate IS NULL OR e.hiredate <= pp.enddate)
+             AND (e.terminationdate IS NULL OR e.terminationdate >= pp.startdate)
+             AND (d.effectivefrom IS NULL OR d.effectivefrom <= pp.enddate)
+             AND (d.effectiveto   IS NULL OR d.effectiveto   >= pp.startdate)
+            )
+            OR
+            (    d.driverstatus     = 'Terminated'
+             AND e.employmentstatus = 'Terminated'
+             AND e.terminationdate IS NOT NULL
+             AND e.terminationdate >= pp.startdate
+             AND (e.hiredate IS NULL OR e.hiredate <= pp.enddate)
+             AND (d.effectivefrom IS NULL OR d.effectivefrom <= pp.enddate)
+             AND (d.effectiveto   IS NULL OR d.effectiveto   >= pp.startdate)
+            )
+            OR
+            (    d.driverstatus     = 'Transferred'
+             AND e.employmentstatus = 'Active'
+             AND d.effectiveto IS NOT NULL
+             AND d.effectiveto >= pp.startdate
+             AND (d.effectivefrom IS NULL OR d.effectivefrom <= pp.enddate)
+             AND (e.hiredate IS NULL OR e.hiredate <= pp.enddate)
+             AND (e.terminationdate IS NULL OR e.terminationdate >= pp.startdate)
+            )
+          )
+        ON CONFLICT (payrollperiodid, driverid) DO NOTHING
+    """), {
+        "pid": period_id, "src": snapshot_source, "now": now,
+        "uid": created_by_user_id, "frozen_at": frozen_at, "fuid": frozen_by_user_id,
+    })
+
+    # Path 4: IncludedByExistingData
+    await db.execute(text("""
+        INSERT INTO payroll.payrollperioddrivereligibility
+            (companyid, branchid, payrollperiodid, driverid, sourceemployeeid,
+             drivercodesnapshot, drivernamesnapshot, employeekeysnapshot,
+             driverstatussnapshot,
+             employmentstatussnapshot,
+             transferredfromdriveridsnapshot, transferredtodriveridsnapshot,
+             hiredatesnapshot, terminationdatesnapshot,
+             drivereffectivefromsnapshot, drivereffectivetosnapshot,
+             iseligibleforperiod, eligibilityreasoncode, snapshotsource,
+             createdatutc, createdbyuserid, updatedatutc, frozenatutc, frozenbyuserid)
+        SELECT DISTINCT
+            pp.companyid, pp.branchid, pp.payrollperiodid,
+            d.driverid, e.employeeid,
+            d.drivercode, e.fullname, e.employeekey, d.driverstatus, e.employmentstatus,
+            d.transferredfromdriverid, d.transferredtodriverid,
+            e.hiredate, e.terminationdate, d.effectivefrom, d.effectiveto,
+            TRUE, 'IncludedByExistingData', :src,
+            CAST(:now AS TIMESTAMPTZ), CAST(:uid AS INTEGER), CAST(:now AS TIMESTAMPTZ), CAST(:frozen_at AS TIMESTAMPTZ), CAST(:fuid AS INTEGER)
+        FROM payroll.payrollperiods pp
+        JOIN (
+            SELECT payrollperiodid, driverid, companyid
+            FROM   payroll.payrolldraftlines
+            WHERE  status != 'Void'
+            UNION
+            SELECT payrollperiodid, driverid, companyid
+            FROM   payroll.payrollperioddriverdayentrystate
+            WHERE  isvoided = FALSE
+        ) src2 ON src2.payrollperiodid = pp.payrollperiodid
+               AND src2.companyid = pp.companyid
+        JOIN core.drivers   d ON d.driverid  = src2.driverid
+                              AND d.companyid = pp.companyid
+                              AND d.branchid  = pp.branchid
+        JOIN core.employees e ON e.employeeid = d.employeeid
+        WHERE pp.payrollperiodid = :pid
+        ON CONFLICT (payrollperiodid, driverid) DO NOTHING
+    """), {
+        "pid": period_id, "src": snapshot_source, "now": now,
+        "uid": created_by_user_id, "frozen_at": frozen_at, "fuid": frozen_by_user_id,
+    })
+
+    # Upsert marker row — ensure period is tracked as snapshotted even if zero drivers
+    await db.execute(text("""
+        INSERT INTO payroll.payrollperiodeligibilitysnapshots
+            (payrollperiodid, companyid, branchid, snapshotsource,
+             createdatutc, createdbyuserid, updatedatutc, frozenatutc, frozenbyuserid)
+        SELECT
+            pp.payrollperiodid, pp.companyid, pp.branchid, :src,
+            CAST(:now AS TIMESTAMPTZ), CAST(:uid AS INTEGER),
+            CAST(:now AS TIMESTAMPTZ),
+            CAST(:frozen_at AS TIMESTAMPTZ), CAST(:fuid AS INTEGER)
+        FROM payroll.payrollperiods pp
+        WHERE pp.payrollperiodid = :pid
+        ON CONFLICT (payrollperiodid) DO NOTHING
+    """), {
+        "pid": period_id, "src": snapshot_source, "now": now,
+        "uid": created_by_user_id, "frozen_at": frozen_at, "fuid": frozen_by_user_id,
+    })
+
+
+async def _regenerate_period_driver_eligibility_rows(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+    created_by_user_id: int | None = None,
+    frozen_by_user_id: int | None = None,
+) -> None:
+    """Drop provisional snapshot rows and re-create frozen for Draft→Open promotion."""
+    await db.execute(
+        text(
+            "DELETE FROM payroll.payrollperioddrivereligibility "
+            "WHERE payrollperiodid = :pid"
+        ),
+        {"pid": period_id},
+    )
+    await _create_period_driver_eligibility_rows(
+        period_id, company_id, branch_id, db,
+        snapshot_source="Generated",
+        freeze=True,
+        created_by_user_id=created_by_user_id,
+        frozen_by_user_id=frozen_by_user_id,
+    )
+
+
+async def _freeze_period_driver_eligibility_snapshot(
+    period_id: int,
+    db: AsyncConnection,
+    frozen_by_user_id: int | None = None,
+) -> None:
+    """Freeze all unfrozen eligibility rows and the marker row for a period."""
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        text("""
+            UPDATE payroll.payrollperioddrivereligibility
+            SET frozenatutc    = CAST(:now AS TIMESTAMPTZ),
+                frozenbyuserid = :uid,
+                updatedatutc   = CAST(:now AS TIMESTAMPTZ)
+            WHERE payrollperiodid = :pid
+              AND frozenatutc IS NULL
+        """),
+        {"pid": period_id, "now": now, "uid": frozen_by_user_id},
+    )
+    # Also freeze the marker row
+    await db.execute(
+        text("""
+            UPDATE payroll.payrollperiodeligibilitysnapshots
+            SET frozenatutc    = CAST(:now AS TIMESTAMPTZ),
+                frozenbyuserid = :uid,
+                updatedatutc   = CAST(:now AS TIMESTAMPTZ)
+            WHERE payrollperiodid = :pid
+              AND frozenatutc IS NULL
+        """),
+        {"pid": period_id, "now": now, "uid": frozen_by_user_id},
+    )
+
+# ── End CP-2E helpers ─────────────────────────────────────────────────────────
+
+
 # ---------------------------------------------------------------------------
 # Add a draft line
 # ---------------------------------------------------------------------------
@@ -2846,11 +3269,11 @@ async def add_draft_line(
         period.start_date, period.end_date, db,
     )
 
-    # Full driver eligibility check: company, branch, employment status,
-    # hire/termination dates, and transfer effective windows.
-    # Uses the same criteria as the day-grid so write paths are consistent.
-    await _assert_driver_eligible_for_date(
-        company_id, data.driver_id, period.branch_id, data.work_date, db
+    # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
+    # add_draft_line creates new source — rescue not allowed; driver must be in window.
+    await _assert_driver_eligible_for_workdate_via_snapshot(
+        company_id, period.branch_id, period_id, data.driver_id, data.work_date, db,
+        allow_existing_source_rescue=False,
     )
 
     # CP-0: Normalise caller-supplied line_type to canonical PayItemCode before
@@ -3135,11 +3558,10 @@ async def update_draft_line(
     # permitted — it is the recovery action for ineligible lines.
     # For any other meaningful change (quantity / rate / notes / NMR), verify
     # that the line's existing driver/work_date combination is still eligible.
-    # This blocks edits to lines that reference a driver who has since been
-    # transferred out or terminated.
+    # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
     if not is_void_only and line.work_date is not None:
-        await _assert_driver_eligible_for_date(
-            company_id, line.driver_id, period.branch_id, line.work_date, db
+        await _assert_driver_eligible_for_workdate_via_snapshot(
+            company_id, period.branch_id, period_id, line.driver_id, line.work_date, db
         )
 
     fields: dict[str, Any] = {}
@@ -3474,37 +3896,65 @@ async def _validate_period_can_finalize(
         )
 
     # ── 2. Driver eligibility — Daily lines ───────────────────────────────────
-    elig_daily_result = await db.execute(
-        text("""
-            SELECT dl.draftlineid, dl.driverid, dl.workdate, dl.linetype
-            FROM   payroll.payrolldraftlines dl
-            WHERE  dl.payrollperiodid = :period_id
-              AND  dl.companyid       = :company_id
-              AND  dl.status         != 'Void'
-              AND  dl.linescope       = 'Daily'
-              AND  NOT EXISTS (
-                       SELECT 1
-                       FROM   core.drivers   d
-                       JOIN   core.employees e ON e.employeeid = d.employeeid
-                       WHERE  d.driverid         = dl.driverid
-                         AND  d.companyid        = :company_id
-                         AND  d.branchid         = :branch_id
-                         AND  e.employmentstatus = 'Active'
-                         AND  (
-                                  d.driverstatus = 'Active'
-                               OR (d.driverstatus = 'Transferred'
-                                   AND d.effectiveto IS NOT NULL
-                                   AND d.effectiveto >= dl.workdate)
-                              )
-                         AND  (e.hiredate IS NULL OR e.hiredate <= dl.workdate)
-                         AND  (e.terminationdate IS NULL OR e.terminationdate >= dl.workdate)
-                         AND  (d.effectivefrom IS NULL OR d.effectivefrom <= dl.workdate)
-                         AND  (d.effectiveto   IS NULL OR d.effectiveto   >= dl.workdate)
-                   )
-            LIMIT 5
-        """),
-        {"period_id": period_id, "company_id": company_id, "branch_id": branch_id},
-    )
+    # CP-2E: use snapshot-based eligibility for snapshotted periods to correctly
+    # handle IncludedByExistingData, TerminatedHistorical, and Transferred drivers.
+    # Legacy live-query path retained for periods without a snapshot.
+    _has_snapshot = await _period_has_driver_eligibility_snapshot(period_id, db)
+    if _has_snapshot:
+        elig_daily_result = await db.execute(
+            text("""
+                SELECT dl.draftlineid, dl.driverid, dl.workdate, dl.linetype
+                FROM   payroll.payrolldraftlines dl
+                WHERE  dl.payrollperiodid = :period_id
+                  AND  dl.companyid       = :company_id
+                  AND  dl.status         != 'Void'
+                  AND  dl.linescope       = 'Daily'
+                  AND  NOT EXISTS (
+                           SELECT 1
+                           FROM   payroll.payrollperioddrivereligibility ppde
+                           WHERE  ppde.payrollperiodid = dl.payrollperiodid
+                             AND  ppde.driverid        = dl.driverid
+                             AND  ppde.iseligibleforperiod = TRUE
+                             -- CP-2E: a DraftLine that already exists proves existing source
+                             -- on that exact date for any reason code (including generated-row
+                             -- drivers outside their date window). Pass if in snapshot at all.
+                       )
+                LIMIT 5
+            """),
+            {"period_id": period_id, "company_id": company_id},
+        )
+    else:
+        elig_daily_result = await db.execute(
+            text("""
+                SELECT dl.draftlineid, dl.driverid, dl.workdate, dl.linetype
+                FROM   payroll.payrolldraftlines dl
+                WHERE  dl.payrollperiodid = :period_id
+                  AND  dl.companyid       = :company_id
+                  AND  dl.status         != 'Void'
+                  AND  dl.linescope       = 'Daily'
+                  AND  NOT EXISTS (
+                           SELECT 1
+                           FROM   core.drivers   d
+                           JOIN   core.employees e ON e.employeeid = d.employeeid
+                           WHERE  d.driverid         = dl.driverid
+                             AND  d.companyid        = :company_id
+                             AND  d.branchid         = :branch_id
+                             AND  e.employmentstatus = 'Active'
+                             AND  (
+                                      d.driverstatus = 'Active'
+                                   OR (d.driverstatus = 'Transferred'
+                                       AND d.effectiveto IS NOT NULL
+                                       AND d.effectiveto >= dl.workdate)
+                                  )
+                             AND  (e.hiredate IS NULL OR e.hiredate <= dl.workdate)
+                             AND  (e.terminationdate IS NULL OR e.terminationdate >= dl.workdate)
+                             AND  (d.effectivefrom IS NULL OR d.effectivefrom <= dl.workdate)
+                             AND  (d.effectiveto   IS NULL OR d.effectiveto   >= dl.workdate)
+                       )
+                LIMIT 5
+            """),
+            {"period_id": period_id, "company_id": company_id, "branch_id": branch_id},
+        )
     elig_daily_rows = elig_daily_result.mappings().all()
     if elig_daily_rows:
         examples = "; ".join(
@@ -3518,38 +3968,59 @@ async def _validate_period_can_finalize(
         )
 
     # ── 3. Driver eligibility — Period Pay lines ──────────────────────────────
-    elig_period_result = await db.execute(
-        text("""
-            SELECT dl.draftlineid, dl.driverid, dl.linetype
-            FROM   payroll.payrolldraftlines dl
-            WHERE  dl.payrollperiodid = :period_id
-              AND  dl.companyid       = :company_id
-              AND  dl.status         != 'Void'
-              AND  dl.linescope       = 'Period'
-              AND  NOT EXISTS (
-                       SELECT 1
-                       FROM   core.drivers   d
-                       JOIN   core.employees e ON e.employeeid = d.employeeid
-                       WHERE  d.driverid         = dl.driverid
-                         AND  d.companyid        = :company_id
-                         AND  d.branchid         = :branch_id
-                         AND  e.employmentstatus = 'Active'
-                         AND  d.driverstatus     = 'Active'
-                         AND  (e.hiredate IS NULL OR e.hiredate <= :period_end)
-                         AND  (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
-                         AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :period_end)
-                         AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :period_start)
-                   )
-            LIMIT 5
-        """),
-        {
-            "period_id":    period_id,
-            "company_id":   company_id,
-            "branch_id":    branch_id,
-            "period_start": period_start,
-            "period_end":   period_end,
-        },
-    )
+    if _has_snapshot:
+        elig_period_result = await db.execute(
+            text("""
+                SELECT dl.draftlineid, dl.driverid, dl.linetype
+                FROM   payroll.payrolldraftlines dl
+                WHERE  dl.payrollperiodid = :period_id
+                  AND  dl.companyid       = :company_id
+                  AND  dl.status         != 'Void'
+                  AND  dl.linescope       = 'Period'
+                  AND  NOT EXISTS (
+                           SELECT 1
+                           FROM   payroll.payrollperioddrivereligibility ppde
+                           WHERE  ppde.payrollperiodid = dl.payrollperiodid
+                             AND  ppde.driverid        = dl.driverid
+                             AND  ppde.iseligibleforperiod = TRUE
+                       )
+                LIMIT 5
+            """),
+            {"period_id": period_id, "company_id": company_id},
+        )
+    else:
+        elig_period_result = await db.execute(
+            text("""
+                SELECT dl.draftlineid, dl.driverid, dl.linetype
+                FROM   payroll.payrolldraftlines dl
+                WHERE  dl.payrollperiodid = :period_id
+                  AND  dl.companyid       = :company_id
+                  AND  dl.status         != 'Void'
+                  AND  dl.linescope       = 'Period'
+                  AND  NOT EXISTS (
+                           SELECT 1
+                           FROM   core.drivers   d
+                           JOIN   core.employees e ON e.employeeid = d.employeeid
+                           WHERE  d.driverid         = dl.driverid
+                             AND  d.companyid        = :company_id
+                             AND  d.branchid         = :branch_id
+                             AND  e.employmentstatus = 'Active'
+                             AND  d.driverstatus     = 'Active'
+                             AND  (e.hiredate IS NULL OR e.hiredate <= :period_end)
+                             AND  (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
+                             AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :period_end)
+                             AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :period_start)
+                       )
+                LIMIT 5
+            """),
+            {
+                "period_id":    period_id,
+                "company_id":   company_id,
+                "branch_id":    branch_id,
+                "period_start": period_start,
+                "period_end":   period_end,
+            },
+        )
     elig_period_rows = elig_period_result.mappings().all()
     if elig_period_rows:
         examples = "; ".join(
@@ -7268,15 +7739,9 @@ async def add_period_pay_line(
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     # Period-level driver eligibility check.
-    # A Period Pay line requires the driver to be eligible for at least one day
-    # inside the period.  Examples:
-    #   - driver terminated before period start → rejected
-    #   - driver hired after period end → rejected
-    #   - driver hired mid-period → allowed (eligible on at least one day)
-    #   - driver terminated mid-period → allowed
-    await _assert_driver_eligible_for_period(
-        company_id, data.driver_id, period.branch_id,
-        period.start_date, period.end_date, db
+    # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
+    await _assert_driver_eligible_for_period_via_snapshot(
+        company_id, period.branch_id, period_id, data.driver_id, db
     )
 
     # CP-0: Normalise to canonical PayItemCode before validation and storage.
@@ -7603,6 +8068,56 @@ async def get_period_eligible_drivers(
     await _check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
+
+    # CP-2E: For snapshotted periods use the snapshot roster instead of live tables.
+    _has_snap = await _period_has_driver_eligibility_snapshot(period_id, db)
+    if _has_snap:
+        # Active / TerminatedHistorical / Transferred → prospective choices
+        # IncludedByExistingData → only if they already have a period-pay line
+        snap_result = await db.execute(
+            text("""
+                SELECT ppde.driverid,
+                       COALESCE(ppde.drivernamesnapshot, '') AS drivername,
+                       COALESCE(ppde.drivercodesnapshot, '') AS drivercode,
+                       ppde.eligibilityreasoncode
+                FROM   payroll.payrollperioddrivereligibility ppde
+                WHERE  ppde.payrollperiodid = :period_id
+                  AND  ppde.companyid       = :cid
+                  AND  ppde.branchid        = :bid
+                  AND  ppde.iseligibleforperiod = TRUE
+                ORDER BY ppde.drivernamesnapshot
+            """),
+            {"period_id": period_id, "cid": company_id, "bid": period.branch_id},
+        )
+        snap_rows = list(snap_result.mappings().all())
+
+        # For IBED: check which have existing period-pay lines
+        ibed_ids = [r["driverid"] for r in snap_rows if r["eligibilityreasoncode"] == "IncludedByExistingData"]
+        ibed_with_period_pay: set[int] = set()
+        if ibed_ids:
+            in_cl, in_pr = _build_in_clause(ibed_ids, "ibed")
+            ibed_res = await db.execute(
+                text(f"""
+                    SELECT DISTINCT driverid FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :period_id AND linescope = 'Period'
+                      AND status != 'Void'
+                      AND driverid IN ({in_cl})
+                """),
+                {"period_id": period_id, **in_pr},
+            )
+            ibed_with_period_pay = {r["driverid"] for r in ibed_res.mappings().all()}
+
+        out = []
+        for r in snap_rows:
+            if r["eligibilityreasoncode"] == "IncludedByExistingData":
+                if r["driverid"] not in ibed_with_period_pay:
+                    continue
+            out.append({
+                "driver_id":   int(r["driverid"]),
+                "driver_name": r["drivername"],
+                "driver_code": r["drivercode"],
+            })
+        return out
 
     result = await db.execute(
         text("""
@@ -10081,13 +10596,50 @@ async def _refresh_status_payment_lines(
         {"pid": period_id, "cid": company_id},
     )
 
+    # CP-2E: pre-load snapshot rows for this period (one query, not per-row)
+    _refresh_has_snap = await _period_has_driver_eligibility_snapshot(period_id, db)
+    _snap_row_by_driver: dict[int, Any] = {}
+    if _refresh_has_snap:
+        snap_res = await db.execute(
+            text("""
+                SELECT driverid, eligibilityreasoncode,
+                       hiredatesnapshot, terminationdatesnapshot,
+                       drivereffectivefromsnapshot, drivereffectivetosnapshot,
+                       iseligibleforperiod
+                FROM   payroll.payrollperioddrivereligibility
+                WHERE  payrollperiodid = :pid AND companyid = :cid
+            """),
+            {"pid": period_id, "cid": company_id},
+        )
+        for snap in snap_res.mappings().all():
+            _snap_row_by_driver[snap["driverid"]] = snap
+
     for row in rows:
+        driver_id = row["driverid"]
+        work_date = row["workdate"]
+
+        # CP-2E: eligibility guard — skip ineligible dates in snapshotted periods
+        if _refresh_has_snap:
+            snap = _snap_row_by_driver.get(driver_id)
+            if snap is None:
+                # Driver not in snapshot → skip
+                continue
+            # Primary: date-window check. Secondary rescue: existing source on
+            # exact date (any reason code — covers generated-row drivers with
+            # PPDES outside their eligibility window from before the snapshot).
+            if not _is_snapshot_row_eligible_for_workdate(snap, work_date):
+                has_src = await _driver_has_existing_daily_source_on_date(
+                    period_id, driver_id, work_date, db
+                )
+                if not has_src:
+                    continue
+
         await _sync_status_payment_for_entry_state(
             company_id=company_id,
             branch_id=branch_id,
             period_id=period_id,
-            driver_id=row["driverid"],
-            work_date=row["workdate"],
+            driver_id=driver_id,
+            work_date=work_date,
             status_key_id=row["statuskeyid"],
             user_id=user_id,
             db=db,
@@ -10656,30 +11208,107 @@ async def get_day_grid(
         status_keys.append(sk)
         status_key_map[row["statuscode"]] = sk
 
-    # ── Load eligible drivers ─────────────────────────────────────────────── #
-    drv_result = await db.execute(
-        text("""
-            SELECT d.driverid, e.fullname AS drivername, d.drivercode
-            FROM   core.drivers   d
-            JOIN   core.employees e ON e.employeeid = d.employeeid
-            WHERE  d.companyid          = :cid
-              AND  d.branchid           = :bid
-              AND  e.employmentstatus   = 'Active'
-              AND  (
-                       d.driverstatus = 'Active'
-                    OR (d.driverstatus = 'Transferred'
-                        AND d.effectiveto IS NOT NULL
-                        AND d.effectiveto >= :dt)
-                   )
-              AND  (e.hiredate IS NULL OR e.hiredate <= :dt)
-              AND  (e.terminationdate IS NULL OR e.terminationdate >= :dt)
-              AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :dt)
-              AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :dt)
-            ORDER BY e.fullname
-        """),
-        {"cid": company_id, "bid": branch_id, "dt": work_date},
-    )
-    drivers = list(drv_result.mappings().all())
+    # ── Load eligible drivers (CP-2E: snapshot-aware) ────────────────────── #
+    # For snapshotted periods use the canonical eligibility snapshot roster.
+    # Legacy periods (no marker) fall back to the live EmploymentStatus query.
+    _has_snapshot = await _period_has_driver_eligibility_snapshot(period_id, db)
+    if _has_snapshot:
+        # Load all snapshot rows for this period
+        snap_rows_result = await db.execute(
+            text("""
+                SELECT driverid,
+                       COALESCE(drivernamesnapshot, '') AS drivername,
+                       COALESCE(drivercodesnapshot, '') AS drivercode,
+                       eligibilityreasoncode,
+                       hiredatesnapshot,
+                       terminationdatesnapshot,
+                       drivereffectivefromsnapshot,
+                       drivereffectivetosnapshot,
+                       iseligibleforperiod
+                FROM   payroll.payrollperioddrivereligibility
+                WHERE  payrollperiodid = :pid
+                  AND  companyid       = :cid
+                  AND  branchid        = :bid
+                ORDER BY drivername
+            """),
+            {"pid": period_id, "cid": company_id, "bid": branch_id},
+        )
+        snap_rows_all = list(snap_rows_result.mappings().all())
+
+        # Existing-source rescue: for ANY reason code, a driver out of their
+        # date window is still shown if they have existing daily source on this
+        # exact work_date (DraftLine or EntryState).  Collect the out-of-window
+        # candidates first, then batch-check them.
+        out_of_window_candidates = [
+            r["driverid"] for r in snap_rows_all
+            if not _is_snapshot_row_eligible_for_workdate(r, work_date)
+        ]
+        rescue_driver_ids_on_date: set[int] = set()
+        if out_of_window_candidates:
+            in_clause_rescue, in_params_rescue = _build_in_clause(
+                out_of_window_candidates, "rescue"
+            )
+            rescue_result = await db.execute(
+                text(f"""
+                    SELECT DISTINCT driverid FROM (
+                        SELECT driverid FROM payroll.payrolldraftlines
+                        WHERE payrollperiodid = :pid AND workdate = :dt
+                          AND status != 'Void'
+                          AND driverid IN ({in_clause_rescue})
+                        UNION
+                        SELECT driverid FROM payroll.payrollperioddriverdayentrystate
+                        WHERE payrollperiodid = :pid AND workdate = :dt
+                          AND isvoided = FALSE
+                          AND driverid IN ({in_clause_rescue})
+                    ) src
+                """),
+                {"pid": period_id, "dt": work_date, **in_params_rescue},
+            )
+            rescue_driver_ids_on_date = {
+                r["driverid"] for r in rescue_result.mappings().all()
+            }
+
+        # Filter snapshot rows to those eligible for this work_date
+        # (primary: date-window check; secondary: existing-source rescue)
+        drivers_raw = []
+        for snap in snap_rows_all:
+            if _is_snapshot_row_eligible_for_workdate(snap, work_date):
+                pass  # window eligible — include
+            elif snap["driverid"] in rescue_driver_ids_on_date:
+                pass  # existing source rescue — include
+            else:
+                continue
+            drivers_raw.append({
+                "driverid":   snap["driverid"],
+                "drivername": snap["drivername"],
+                "drivercode": snap["drivercode"],
+            })
+        drivers = drivers_raw
+    else:
+        # Legacy fallback: live roster query
+        drv_result = await db.execute(
+            text("""
+                SELECT d.driverid, e.fullname AS drivername, d.drivercode
+                FROM   core.drivers   d
+                JOIN   core.employees e ON e.employeeid = d.employeeid
+                WHERE  d.companyid          = :cid
+                  AND  d.branchid           = :bid
+                  AND  e.employmentstatus   = 'Active'
+                  AND  (
+                           d.driverstatus = 'Active'
+                        OR (d.driverstatus = 'Transferred'
+                            AND d.effectiveto IS NOT NULL
+                            AND d.effectiveto >= :dt)
+                       )
+                  AND  (e.hiredate IS NULL OR e.hiredate <= :dt)
+                  AND  (e.terminationdate IS NULL OR e.terminationdate >= :dt)
+                  AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :dt)
+                  AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :dt)
+                ORDER BY e.fullname
+            """),
+            {"cid": company_id, "bid": branch_id, "dt": work_date},
+        )
+        drivers = list(drv_result.mappings().all())
     driver_ids = [d["driverid"] for d in drivers]
 
     # ── Load existing draft lines for these drivers on this date ─────────── #
@@ -10989,13 +11618,10 @@ async def save_day_grid(
     for save_row in data.rows:
         driver_id = save_row.driver_id
 
-        # Full driver eligibility check for this work_date.
-        # Prevents crafted payloads from writing lines for drivers who are
-        # not eligible on this date (wrong branch, terminated, not yet hired,
-        # or outside transfer effective window).
+        # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
         try:
-            await _assert_driver_eligible_for_date(
-                company_id, driver_id, branch_id, work_date, db
+            await _assert_driver_eligible_for_workdate_via_snapshot(
+                company_id, branch_id, period.payroll_period_id, driver_id, work_date, db
             )
         except HTTPException:
             raise HTTPException(
@@ -12498,6 +13124,17 @@ async def create_period_from_candidate(
     # CP-2C: create period pay-item layout snapshot.
     await _create_period_pay_item_rows(
         new_period_id, company_id, branch_id, computed_start, db,
+    )
+
+    # CP-2E: create driver eligibility snapshot.
+    # Open periods are frozen immediately; Draft (Prepared) periods are provisional.
+    _is_open_creation = (target_status == "Open")
+    await _create_period_driver_eligibility_rows(
+        new_period_id, company_id, branch_id, db,
+        snapshot_source="Generated",
+        freeze=_is_open_creation,
+        created_by_user_id=user_id,
+        frozen_by_user_id=user_id if _is_open_creation else None,
     )
 
     created_at = datetime.now(timezone.utc)
