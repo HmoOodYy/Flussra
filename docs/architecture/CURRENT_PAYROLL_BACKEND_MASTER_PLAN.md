@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `In Progress`; CP-2A is `Done with Notes`; CP-2B is `Done with Notes`; CP-2C is `Done with Notes`; CP-2D1 is `Done with Notes`; CP-2D2 is `Done with Notes`; CP-2E and CP-2F are `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -147,11 +147,11 @@ The database currently enforces:
 
 It does not enforce one InReview period per branch.
 
-### 3.4 Draft today
+### 3.4 Draft today (updated: CP-2F)
 
-Draft is created by the generic create endpoint and is write-blocked by payroll entry services. Draft cannot submit directly, approve, finalize, or use the Approved finalization preview.
+Draft is the internal database status for the product concept “Prepared.” Draft is created by the candidate creation endpoint. Draft cannot submit, approve, finalize, or use the Approved finalization preview.
 
-No separate operational meaning for Draft was found. Draft is therefore the correct internal status for product “Prepared,” but current Draft cannot yet satisfy the new pre-entry requirement.
+CP-2F enabled controlled operational source entry for Draft. Draft is now an active source-entry workspace with financial exposure fully suppressed. `SOURCE_ENTRY_STATUSES = {“Draft”, “Open”, “Returned”}` guards source-only paths; `ENTRY_ALLOWED_STATUSES = {“Open”, “Returned”}` continues to guard all financial paths. Draft lines store `CalculatedAmount = NULL`, `RateAmount = NULL`, and `NeedsManagerReview = FALSE`. Draft day-grid responses return `gross_total = null` and `financials_available = false`. Status payment derivation is suppressed in Draft saves. Draft→Open activation regenerates/freezes eligibility, derives status payment, and refreshes daily calculations in one transaction.
 
 ### 3.5 Period creation today
 
@@ -170,15 +170,15 @@ Current Payroll Setup supports:
 - include-pay-day-as-work-day;
 - custom interval days.
 
-Gaps:
+Gaps (pre-CP-2A/2B baseline; partially resolved):
 
-- no SemiMonthly cadence;
-- pay-date offset is forcibly stored as zero;
-- first-pay-date/pay-day fields do not drive period creation;
-- one mutable settings row replaces history;
-- no schedule version is attached to a period;
-- no period-day snapshot exists;
-- no backend Add Day workflow exists.
+- no SemiMonthly cadence (still pending);
+- pay-date offset is forcibly stored as zero (still pending);
+- first-pay-date/pay-day fields do not drive period creation (still pending);
+- one mutable settings row replaces history — ~~resolved by CP-2A~~: `PayrollScheduleVersions` added; `BranchPayrollSettings.CurrentScheduleVersionID` and `PayrollPeriods.ScheduleVersionID` link periods to immutable versions;
+- ~~no schedule version is attached to a period~~ — resolved by CP-2A;
+- ~~no period-day snapshot exists~~ — resolved by CP-2B: `PayrollPeriodDays` added;
+- no backend Add Day workflow exists (still pending — deferred to future CP-2B2).
 
 ### 3.6 Daily grid today
 
@@ -191,18 +191,17 @@ The grid:
 - writes quantities, DailyStatus, and DailyNote into `PayrollDraftLines`;
 - stores the selected status code as mutable text in `PayrollDraftLines.Notes`;
 - exposes calculated amounts and a day gross summary;
-- currently permits Open and InReview writes.
+- permits source writes for Draft/Prepared (operational source only, no financial exposure), Open (normal operational entry), and Returned (correction entry). InReview remains read-only; entry writes are blocked for InReview and all later statuses.
 
-It does not have a snapshotted period calendar, stable pay-item layout, or historical status label snapshot. It also filters on current `Employees.EmploymentStatus='Active'`, which can hide historically eligible terminated/inactive employees.
+CP-2B added `PayrollPeriodDays` (snapshotted period calendar). CP-2C added `PayrollPeriodPayItems` (stable snapshotted pay-item layout per period). CP-2E added canonical eligibility snapshots (`PayrollPeriodDriverEligibility` + `PayrollPeriodEligibilitySnapshots`): for marked periods, live `Employees.EmploymentStatus` no longer controls eligibility — the frozen snapshot does. Legacy fallback applies only to periods without a CP-2E marker. Add Day activation and full calendar navigation remain future work.
 
-### 3.7 Status system today
+### 3.7 Status system today (updated: CP-2D1, CP-2D2)
 
 - Status Keys are branch-scoped and have code, display name, off-reason flag, allowance fields, usage limits, and activity state.
-- A selected status is not stored by StatusKeyID; only code text is stored.
-- Historical reads join back to an active Status Key. Deactivating or renaming a key can hide/change historical meaning.
-- `DailyStatus` and `DailyNote` are informational pseudo-line types in DraftLines.
-- At the earlier baseline, a system Pay Item named `PTO_STATUS` existed, conflicting with the product rule that Status is not a Pay Item. `PTO_STATUS` was subsequently removed as a Pay Item in commit `236a506`. Current status payment uses `StatusRateColumns` and derived system payment lines, not `PTO_STATUS`.
-- There is no effective-dated `StatusKeyPayRule` domain.
+- CP-2D1: selected status is now stored through `PayrollPeriodDriverDayEntryState` using `StatusKeyID` (FK). Code-text-only storage was the pre-CP-2D1 baseline; it no longer applies to new writes. Historical reads resolve via `StatusKeyID`; deactivated keys referenced in existing canonical rows are pre-fetched from a deactivated key map.
+- `DailyStatus` and `DailyNote` pseudo-line dual-write is preserved for finalization legacy compatibility only.
+- Status is not a Pay Item. `PTO_STATUS` was removed in commit `236a506` and must not return. Current status payment uses `StatusRateColumns` and CP-2D2 derived system payment lines; it is eligibility-aware and is suppressed for Draft periods.
+- There is no effective-dated `StatusKeyPayRule` domain (future Phase 3+ work).
 
 ### 3.8 Off-driver behavior today
 
@@ -212,7 +211,7 @@ The day grid itself contains per-day `is_off` fields, but there is no dedicated 
 
 ### 3.9 Calculation and expected income today
 
-- Draft lines can store `RateAmount` and `CalculatedAmount`.
+- Draft (Prepared) lines store `RateAmount = NULL` and `CalculatedAmount = NULL`; CP-2F suppresses all financial fields for Draft. Open/Returned lines can store `RateAmount` and `CalculatedAmount`.
 - Submission refreshes rate-dependent calculations.
 - Approved finalization preview virtually resolves current rates and mirrors finalization.
 - Finalization again refreshes/resolves current rates and writes final lines.
@@ -493,19 +492,19 @@ Not allowed:
 
 ### 6.2 Source data and calendar
 
-- Prepared cannot receive controlled pre-entry.
-- Derived calculation values are mixed into operational draft responses.
-- No period-day snapshot or Add Day state.
-- Off-day mask does not govern grid navigation.
-- Pay-item ordering and labels are not snapshotted.
-- Historical driver rows can disappear after current status changes.
+- ~~Prepared cannot receive controlled pre-entry.~~ Resolved by CP-2F: Draft/Prepared is now an operational source-entry workspace with financial exposure suppressed.
+- ~~Derived calculation values are mixed into operational draft responses.~~ Resolved by CP-2F: Draft responses return `calculated_amount = null`, `rate_amount = null`, `gross_total = null`, `financials_available = false`.
+- ~~No period-day snapshot.~~ Resolved by CP-2B: `PayrollPeriodDays` provides snapshotted period-day calendar. Remaining future work: Add Day activation / calendar extension controls.
+- Off-day mask does not yet govern grid navigation (pending Add Day activation workflow).
+- ~~Pay-item ordering and labels are not snapshotted.~~ Resolved by CP-2C: `PayrollPeriodPayItems` provides stable snapshotted pay-item layout, labels, and sort order per period.
+- ~~Historical driver rows can disappear after current status changes.~~ Resolved by CP-2E: canonical eligibility snapshot controls marked periods; live `EmploymentStatus`/`DriverStatus` no longer hides historically eligible drivers for those periods.
 
 ### 6.3 Status
 
-- Mutable text code storage.
-- No StatusKeyID snapshot.
-- No historical label/off flag preservation.
-- Historically, status was modeled partly as pseudo DraftLines and partly as a `PTO_STATUS` Pay Item. `PTO_STATUS` has since been removed (commit `236a506`). CP-2D1/CP-2D2 moved the design to canonical `PayrollPeriodDriverDayEntryState` rows and `StatusRateColumns`-backed derived payment lines. Legacy `DailyStatus`/`DailyNote` DraftLine compatibility remains for finalization.
+- ~~Mutable text code storage.~~ Resolved by CP-2D1: selected status is now stored in `PayrollPeriodDriverDayEntryState` with `StatusKeyID` (FK, ON DELETE RESTRICT). Code-text-only storage is the pre-CP-2D1 historical baseline; it no longer applies to new writes.
+- ~~No StatusKeyID snapshot.~~ Resolved by CP-2D1: canonical rows carry `StatusKeyID`; deactivated keys referenced in existing rows are resolved via a deactivated-key map. Finalization snapshot fields (`StatusCodeSnapshot`, `StatusLabelSnapshot`, `StatusIsOffReasonSnapshot`) are populated at finalization time. Remaining future work: immutable per-period StatusKey availability snapshot (`PayrollPeriodStatusKeys`) is deferred.
+- ~~No historical label/off flag preservation.~~ Resolved by CP-2D1: finalization freezes `StatusCodeSnapshot`, `StatusLabelSnapshot`, `StatusIsOffReasonSnapshot`, `StatusHoursValueSnapshot` on the canonical row. Pre-finalization editable periods resolve label/is_off from live StatusKey map with deactivated-key fallback.
+- Historically, status was modeled partly as pseudo DraftLines and partly as a `PTO_STATUS` Pay Item. `PTO_STATUS` was removed (commit `236a506`). CP-2D1/CP-2D2 moved the design to canonical `PayrollPeriodDriverDayEntryState` rows and `StatusRateColumns`-backed derived payment lines. Legacy `DailyStatus`/`DailyNote` DraftLine dual-write is preserved for finalization compatibility only.
 - No future pay-rule mapping.
 - Status usage limits are read-then-write and are not concurrency-safe.
 
@@ -1147,15 +1146,15 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 3. No smart schedule-derived creation/promotion workflow.
 4. Client-supplied standard period dates/pay date remain authoritative.
 5. No SemiMonthly cadence or durable schedule version.
-6. No period-day/calendar/Add Day snapshot.
-7. Prepared pre-entry cannot be enabled safely through current response contracts.
+6. ~~No period-day/calendar/Add Day snapshot.~~ Period-day snapshot resolved by CP-2B (`PayrollPeriodDays`). Add Day activation workflow remains pending.
+7. ~~Prepared pre-entry cannot be enabled safely through current response contracts.~~ Resolved by CP-2F.
 8. No backend Current Payroll Hub contract.
 9. No Open/Returned expected-income contract.
 10. No calculation/report contracts for required views.
 11. Bonus is generic Period Pay with competing unused storage.
-12. Status is mutable code text and historical labels can disappear.
-13. Current employment status can hide historical eligibility.
-14. Pay-item order/labels are not period-snapshotted.
+12. ~~Status is mutable code text and historical labels can disappear.~~ Resolved by CP-2D1: canonical `PayrollPeriodDriverDayEntryState` stores `StatusKeyID`; finalization freezes label/off-reason snapshots. Remaining future work: per-period StatusKey availability snapshot.
+13. ~~Current employment status can hide historical eligibility.~~ Resolved by CP-2E canonical eligibility snapshot.
+14. ~~Pay-item order/labels are not period-snapshotted.~~ Resolved by CP-2C (`PayrollPeriodPayItems`).
 15. Review return/manual transition paths can orphan workflow state.
 16. Draft cancellation lacks a transition-specific action permission.
 17. Fourteen tenant-integrity constraints remain unvalidated.
@@ -1189,7 +1188,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | --- | --- | --- | --- | --- |
 | Phase 0 | Workflow integrity lockdown | Done with Notes | Claude | Codex P0 review |
 | Phase 1 | Lifecycle slots, Returned state, smart creation | Done with Notes | Claude | Codex lifecycle review |
-| Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | In Progress | Claude | Codex data-model review |
+| Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Done with Notes | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Pending | Claude | Codex calculation parity review |
 | Phase 5 | Hub and calculation-report contracts | Pending | Claude | Codex contract/security review |
@@ -1274,9 +1273,9 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 
 ### Phase 2 status note
 
-**Status:** In Progress
-**Started:** CP-2A Done with Notes. CP-2B Done with Notes. CP-2C Done with Notes. CP-2D1 Done with Notes. CP-2D2 Done with Notes. CP-2E and CP-2F Pending.
-**Review result:** No CP-2A, CP-2B, CP-2C, CP-2D1, or CP-2D2 P0/P1 blockers remain. CP-2D has been split and both parts are complete: CP-2D1 (canonical daily entry state) and CP-2D2 (status-driven payment lane). Add Day activation is deferred and is not part of CP-2C or CP-2D2 closure.
+**Status:** Done with Notes
+**Completed:** CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, CP-2F — all Done with Notes.
+**Review result:** No CP-2A through CP-2F P0/P1 blockers remain. CP-2D was split into CP-2D1 (canonical daily entry state) and CP-2D2 (status-driven payment lane). Add Day activation is deferred and is not part of CP-2C, CP-2D2, or CP-2F closure. Phase 2 is closed.
 
 ### CP-2A completion note
 
@@ -1522,11 +1521,92 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: Temporary PostgreSQL/test database shutdown warning remains environment-only where observed.
 - P3: Representative suite has known unrelated/order-dependent failures outside CP-2D2.
 
+### CP-2E completion note
+
+**Status:** Done with Notes
+**Implementation commit:** `c100b3c` — feat: add cp-2e canonical eligibility
+**Alembic revision:** 0057 (head)
+**Review result:** No P0/P1 blockers remain. CP-2E canonical eligibility snapshot is safely closed.
+
+**What CP-2E completed:**
+
+- Added migration 0057.
+- Added `payroll.PayrollPeriodEligibilitySnapshots` — one marker row per snapshotted period. Marker prevents empty-snapshot periods from falling back to live roster.
+- Added `payroll.PayrollPeriodDriverEligibility` — one detail row per `PayrollPeriodID + DriverID` with reason code and effective window.
+- Eligibility reason codes: `Active`, `TerminatedHistorical`, `Transferred`, `IncludedByExistingData`.
+- Draft creation inserts a provisional marker and snapshot rows.
+- Draft→Open promotion regenerates and freezes eligibility (marker `IsFrozen = TRUE`).
+- Direct Open creation freezes immediately.
+- Existing Open, Returned, InReview, and Approved periods are backfilled with a marker by migration 0057 and frozen (`IsFrozen = TRUE`).
+- Locked/Archived/Cancelled are not backfilled by the CP-2E migration.
+- Returned periods remain frozen and editable only for source corrections.
+- Day grid, save, direct draft lines, period-pay eligibility, finalization, and status payment refresh use snapshot eligibility for marked periods.
+- Legacy fallback applies only when no marker exists.
+- Existing-source rescue: any snapshot row, regardless of reason code, keeps a driver/date visible and manageable if an existing `DraftLine` or `PPDES` source row exists for that exact `work_date`.
+- Existing period-pay source uses `LineScope='Period'`, not `WorkDate IS NULL`.
+- Snapshot validation replaces live `EmploymentStatus`/`DriverStatus` checks during finalization preview and finalization for marked periods.
+- Non-snapshot driver lines block finalization.
+- CP-2D2 status payment derivation is eligibility-aware; no `PTO_STATUS`; status is not a PayItem.
+
+**Validation:**
+
+- CP-2E focused tests: 75 passed.
+- CP-2D2 focused: 45 passed.
+- CP-0A mutation guard: 70 passed.
+- Alembic current/head: 0057 / 0057.
+- `git diff --check`: clean.
+
+**Remaining P2/P3 notes:**
+
+- P2: `PayrollPeriodStatusKeys` (availability snapshot at period open) remains deferred.
+- P2: Concurrency-safe status usage limits remain a future hardening item.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+
+### CP-2F completion note
+
+**Status:** Done with Notes
+**Implementation commit:** `1019b16` — feat: add cp-2f prepared source entry
+**Alembic revision:** 0057 (no new migration; CP-2F added no schema changes)
+**Review result:** No P0/P1 blockers remain. CP-2F controlled Prepared operational entry is safely closed.
+
+**What CP-2F completed:**
+
+- `SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}` added to `schemas.py` — guards source-only operational paths.
+- `ENTRY_ALLOWED_STATUSES = {"Open", "Returned"}` remains unchanged — guards all financial paths. Draft is not added to financial guards.
+- Draft (Prepared) is an operational source-entry workspace only. DB status remains `Draft`; "Prepared" is display/workflow language.
+- Draft GET day grid suppresses financial fields: `calculated_amount = null`, `rate_amount = null`, `gross_total = null`, `financials_available = false`.
+- Draft SAVE day grid writes source only (quantity, status, notes) and skips status payment money derivation at the `save_day_grid` call site (`if period.status == "Draft": continue` before `_sync_status_payment_for_entry_state`).
+- Draft POST `/lines` supports daily Manual source rows; rejects System source, missing `work_date`, `rate_amount` (universally, regardless of PayItem/RateBehavior), and `needs_manager_review`. `CalculatedAmount = NULL`, `RateAmount = NULL`, `NeedsManagerReview = FALSE` are stored.
+- Draft PATCH `/lines` clears stale `CalculatedAmount`, `RateAmount`, `NeedsManagerReview` on every allowed non-void edit (not only on qty/rate changes).
+- Draft DELETE `/lines` allows daily source cleanup only.
+- `/lines` for Draft is sanitized: Period-scope, System-source, `STATUS_PAYMENT`, and `ADJUSTMENT` rows are filtered; financial fields are nulled.
+- `/lines/summary`, `/period-pay`, and eligible-drivers endpoints return 422 for Draft.
+- Draft→Open activation (inside the existing workflow lock): CP-2E regenerates/freezes eligibility → `_refresh_status_payment_lines` derives status payment → `_refresh_draft_calculations` refreshes daily calculations. No duplicate STATUS_PAYMENT lines.
+- Hub `can_enter_source` and `can_open_day_grid` allow Draft; `can_submit_for_review` requires `status == "Open"`.
+- Period Pay, Bonus, Expected Income, finalization preview, finalization, approval, lock, and archive remain blocked for Draft.
+
+**Validation:**
+
+- CP-2F focused tests: 46 passed (includes `test_cp2f_draft_direct_daily_line_rejects_rate_amount_for_non_perunit_item` with custom Fixed-behavior pay item proving CP-2F guard fires before PerUnit guard).
+- CP-2E focused: 75 passed.
+- CP-2D2 focused: 45 passed.
+- payroll_trust_p2: 15 passed.
+- CP-0A mutation guard: 70 passed.
+- Alembic current/head: 0057 / 0057.
+- `git diff --check`: clean.
+
+**Remaining P2/P3 notes:**
+
+- P2: Add Day activation for Draft remains deferred (CP-2B2 scope).
+- P2: Hub does not yet expose Draft money totals — confirmed by design; no future work needed here.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: LF/CRLF working-copy warnings remain environment-only.
+
 ### Phase 1 completion note
 
 **Status:** Done with Notes
 **Completed units:** CP-1A, CP-1B, CP-1C, CP-1D, CP-1E
-**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is In Progress: CP-2A Done with Notes; CP-2B Done with Notes; CP-2C Done with Notes; CP-2D1 Done with Notes; CP-2D2 Done with Notes; CP-2E and CP-2F Pending.
+**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is Done with Notes: CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are all Done with Notes. Phase 3 remains Pending.
 
 **Phase 1 completed:**
 - Returned domain state and reviewed transition graph (CP-1A).
@@ -1975,15 +2055,15 @@ Existing direct status transitions and cleanup fixtures assume Rejected→Open. 
 
 ### Phase 2 — Period Configuration and Operational Source Snapshots
 
-**Status:** `In Progress`
+**Status:** `Done with Notes`
 
 - [x] P2A: schedule versioning. — **Done with Notes**
 - [x] P2B: period-day calendar snapshots. — **Done with Notes**
 - [x] P2C: snapshot pay-item layout/order/classification. — **Done with Notes**
 - [x] P2D1: canonical daily status/note entry state. — **Done with Notes**
 - [x] P2D2: status-driven payment lane. — **Done with Notes**
-- [ ] P2E: unify historical driver-date eligibility.
-- [ ] P2F: enable controlled Prepared operational entry without financial exposure.
+- [x] P2E: unify historical driver-date eligibility. — **Done with Notes**
+- [x] P2F: enable controlled Prepared operational entry without financial exposure. — **Done with Notes**
 
 **Objective**
 
