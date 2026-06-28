@@ -246,7 +246,8 @@ class TestDraftLineMutationStatusGuard:
             await _force_cancel(direct_db, pid)
 
     @pytest.mark.parametrize("bad_status", [
-        "Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"
+        # CP-2F: Draft removed — Draft now allows daily source line adds.
+        "InReview", "Approved", "Locked", "Archived", "Cancelled"
     ])
     async def test_add_line_non_open_rejected(
         self,
@@ -301,7 +302,8 @@ class TestDraftLineMutationStatusGuard:
             await _force_cancel(direct_db, pid)
 
     @pytest.mark.parametrize("bad_status", [
-        "Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"
+        # CP-2F: Draft removed — Draft now allows daily source line updates.
+        "InReview", "Approved", "Locked", "Archived", "Cancelled"
     ])
     async def test_update_line_non_open_rejected(
         self,
@@ -351,7 +353,8 @@ class TestDraftLineMutationStatusGuard:
             await _force_cancel(direct_db, pid)
 
     @pytest.mark.parametrize("bad_status", [
-        "Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"
+        # CP-2F: Draft removed — Draft now allows daily source line voids.
+        "InReview", "Approved", "Locked", "Archived", "Cancelled"
     ])
     async def test_void_line_non_open_rejected(
         self,
@@ -568,7 +571,8 @@ class TestDayGridMutationStatusGuard:
             await _force_cancel(direct_db, pid)
 
     @pytest.mark.parametrize("bad_status", [
-        "Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"
+        # CP-2F: Draft removed — Draft now allows day-grid saves (operational entry).
+        "InReview", "Approved", "Locked", "Archived", "Cancelled"
     ])
     async def test_day_grid_save_non_open_rejected(
         self,

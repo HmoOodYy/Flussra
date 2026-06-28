@@ -27,7 +27,7 @@ from app.payroll.schemas import (
     PeriodSummary, PeriodCreate, PeriodStatusChange, NextPeriodDates, PeriodEntryCount,
     _VALID_TRANSITIONS,
     DraftLineSummary, DraftLineCreate, DraftLineUpdate,
-    DriverPeriodSummary, ENTRY_ALLOWED_STATUSES,
+    DriverPeriodSummary, ENTRY_ALLOWED_STATUSES, SOURCE_ENTRY_STATUSES,
     FinalLineSummary,
     RateTypeSummary, DriverRateSummary, DriverRateCreate, DriverRateUpdate,
     TierSummary, OrdinalTierCreate, RangeTierCreate,
@@ -1305,6 +1305,26 @@ async def change_period_status(
                 created_by_user_id=user_id,
                 frozen_by_user_id=user_id,
             )
+            # CP-2F: refresh status payment lines for Draft-era PPDES rows now that
+            # the period is Open and rates are resolved.
+            await _refresh_status_payment_lines(
+                period_id=_eligible_draft["payrollperiodid"],
+                company_id=company_id,
+                branch_id=existing.branch_id,
+                user_id=user_id,
+                db=db,
+            )
+            # CP-2F: refresh daily calculations for Draft-era source lines now that
+            # the period is Open and approved rates can be looked up.
+            _draft_period_summary = await get_period_by_id(
+                company_id, user_id, _eligible_draft["payrollperiodid"], db
+            )
+            await _refresh_draft_calculations(
+                period_id=_eligible_draft["payrollperiodid"],
+                company_id=company_id,
+                period_start_date=_draft_period_summary.start_date,
+                db=db,
+            )
     else:
         # CP-0B: All non-Open→InReview transitions use an expected-status predicate
         # so that a stale request whose pre-flight read is now out of date cannot
@@ -1758,12 +1778,14 @@ async def _lock_period_for_mutation(
     )
     row = result.mappings().first()
     current_status = row["status"] if row else "unknown"
-    if current_status not in {"Open", "Returned"}:
+    # CP-2F: Draft (Prepared) is also editable for operational source-entry paths.
+    # SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}
+    if current_status not in SOURCE_ENTRY_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"Period is no longer editable (current status: '{current_status}'). "
-                "Only Open or Returned periods accept source mutations. "
+                "Only Open, Returned, or Prepared (Draft) periods accept source mutations. "
                 "The mutation was rejected to preserve payroll data integrity."
             ),
         )
@@ -1938,7 +1960,7 @@ async def get_period_lines(
     line_status: str | None = None,
 ) -> list[DraftLineSummary]:
     """Return draft lines for a period (access-checked via the period lookup)."""
-    await get_period_by_id(company_id, user_id, period_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
 
     conditions = [
         "dl.payrollperiodid  = :period_id",
@@ -1953,6 +1975,16 @@ async def get_period_lines(
         "period_id": period_id,
         "company_id": company_id,
     }
+
+    # CP-2F: for Draft periods, exclude System-sourced lines, STATUS_PAYMENT, and
+    # ADJUSTMENT / MINIMUM / MAXIMUM pay items — these are financial and must not be
+    # visible until the period is promoted to Open.
+    if period.status == "Draft":
+        conditions.append("dl.sourcetype != 'System'")
+        conditions.append(
+            "dl.linetype NOT IN ('STATUS_PAYMENT', 'ADJUSTMENT', 'MINIMUM', 'MAXIMUM',"
+            " 'SYS_MIN_TOPUP', 'SYS_MAX_CAP')"
+        )
 
     if driver_id is not None:
         conditions.append("dl.driverid = :driver_id")
@@ -1971,7 +2003,21 @@ async def get_period_lines(
         text(f"{_LINE_SELECT} WHERE {where} ORDER BY dl.workdate, dl.driverid, dl.linetype"),
         params,
     )
-    return [_line_row_to_summary(r) for r in result.mappings().all()]
+    rows = [_line_row_to_summary(r) for r in result.mappings().all()]
+
+    # CP-2F: sanitize money fields for Draft so callers never see stale rates/amounts.
+    if period.status == "Draft":
+        sanitized = []
+        for ln in rows:
+            ln = ln.model_copy(update={
+                "rate_amount": None,
+                "calculated_amount": None,
+                "needs_manager_review": False,
+            })
+            sanitized.append(ln)
+        return sanitized
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -1991,6 +2037,14 @@ async def get_period_draft_summary(
     are explicitly excluded from the aggregation.
     """
     period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # CP-2F: Draft periods have no financial summary — block to avoid returning
+    # zero totals that could mislead callers into thinking the period is empty.
+    if period.status == "Draft":
+        raise HTTPException(
+            status_code=422,
+            detail="Lines summary is not available for Prepared (Draft) periods.",
+        )
 
     result = await db.execute(
         text("""
@@ -3239,7 +3293,65 @@ async def add_draft_line(
     """
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
-    if period.status not in ENTRY_ALLOWED_STATUSES:
+    # CP-2F: Draft periods allow daily source-only lines (operational entry).
+    # Period Pay, Bonus, System lines, STATUS_PAYMENT, ADJUSTMENT, MINIMUM/MAXIMUM,
+    # NeedsManagerReview=True, and lines without work_date are blocked.
+    if period.status == "Draft":
+        if data.source_type == "System":
+            raise HTTPException(
+                status_code=422,
+                detail="System lines cannot be added to a Prepared (Draft) period.",
+            )
+        if data.work_date is None:
+            raise HTTPException(
+                status_code=422,
+                detail="work_date is required when adding lines to a Prepared (Draft) period.",
+            )
+        # CP-2F: Draft is source-only — rate_amount is a financial field, always rejected.
+        if data.rate_amount is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="rate_amount cannot be supplied for a Prepared (Draft) period line.",
+            )
+        if data.needs_manager_review:
+            raise HTTPException(
+                status_code=422,
+                detail="needs_manager_review cannot be set on a Prepared (Draft) period.",
+            )
+        # Period-scope and financial items are blocked in Draft
+        _draft_pi_check = await db.execute(
+            text("""
+                SELECT itemscope, payitemcode FROM payroll.payitems
+                WHERE payitemcode = :code
+                  AND (companyid IS NULL OR companyid = :cid)
+                  AND status != 'Retired'
+                LIMIT 1
+            """),
+            {"code": _LEGACY_TO_CANONICAL.get(data.line_type, data.line_type), "cid": company_id},
+        )
+        _draft_pi_row = _draft_pi_check.mappings().first()
+        if _draft_pi_row:
+            if _draft_pi_row["itemscope"] == "Period":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Period-scope pay lines (Period Pay, Bonus, etc.) cannot be added "
+                        "to a Prepared (Draft) period."
+                    ),
+                )
+            # Block STATUS_PAYMENT / ADJUSTMENT / MINIMUM / MAXIMUM pay items
+            _blocked_codes = {"STATUS_PAYMENT", "ADJUSTMENT", "MINIMUM", "MAXIMUM",
+                              "SYS_MIN_TOPUP", "SYS_MAX_CAP"}
+            if _draft_pi_row["payitemcode"] in _blocked_codes:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Pay item '{_draft_pi_row['payitemcode']}' cannot be added "
+                        "to a Prepared (Draft) period."
+                    ),
+                )
+        # informational (DailyStatus, DailyNote) and Daily pay items are allowed
+    elif period.status not in ENTRY_ALLOWED_STATUSES:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -3314,20 +3426,28 @@ async def add_draft_line(
             ),
         )
 
-    # M13b: compute calculated amount.
-    _cr_add = await _compute_calculated_amount(
-        rate_behavior=lt_info.rate_behavior,
-        rate_code=lt_info.rate_code,
-        quantity=data.quantity,
-        rate_amount_override=data.rate_amount,
-        driver_id=data.driver_id,
-        company_id=company_id,
-        as_of_date=as_of_date,
-        db=db,
-    )
-    calc_amount = _cr_add.calculated_amount
-    flag_review = _cr_add.needs_manager_review
-    needs_review: bool = data.needs_manager_review or flag_review
+    # CP-2F: Draft (Prepared) periods store NULL financial fields — no calculation,
+    # no rate lookup, no NeedsManagerReview.  Calculations are applied at Draft→Open.
+    if period.status == "Draft":
+        calc_amount = None
+        needs_review = False
+        # rate_amount was already rejected above; force NULL at INSERT level as defence-in-depth.
+        _insert_rate_amount = None
+    else:
+        # M13b: compute calculated amount.
+        _cr_add = await _compute_calculated_amount(
+            rate_behavior=lt_info.rate_behavior,
+            rate_code=lt_info.rate_code,
+            quantity=data.quantity,
+            rate_amount_override=data.rate_amount,
+            driver_id=data.driver_id,
+            company_id=company_id,
+            as_of_date=as_of_date,
+            db=db,
+        )
+        calc_amount = _cr_add.calculated_amount
+        flag_review = _cr_add.needs_manager_review
+        needs_review: bool = data.needs_manager_review or flag_review
 
     # ── P0 duplicate guard ────────────────────────────────────────────────── #
     # Reject if an active (non-Void) Daily line already exists for the same
@@ -3407,7 +3527,7 @@ async def add_draft_line(
             "work_date":    data.work_date,
             "line_type":    canonical_line_type,   # store canonical, not raw input
             "quantity":     data.quantity,
-            "rate_amount":  data.rate_amount,
+            "rate_amount":  _insert_rate_amount if period.status == "Draft" else data.rate_amount,
             "calc_amount":  calc_amount,
             "source_type":  data.source_type,
             "needs_review": needs_review,
@@ -3475,7 +3595,19 @@ async def update_draft_line(
     """Partially update a draft line — only non-None fields are touched."""
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
-    if period.status in _WRITE_BLOCKED_STATUSES:
+    # CP-2F: Draft (Prepared) periods allow updating daily source lines only.
+    if period.status == "Draft":
+        if data.rate_amount is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="rate_amount cannot be set on a Prepared (Draft) period line.",
+            )
+        if data.needs_manager_review is True:
+            raise HTTPException(
+                status_code=422,
+                detail="needs_manager_review cannot be set to True on a Prepared (Draft) period.",
+            )
+    elif period.status in _WRITE_BLOCKED_STATUSES:
         raise HTTPException(
             status_code=422,
             detail=f"Cannot modify lines on a period with status '{period.status}'.",
@@ -3489,6 +3621,14 @@ async def update_draft_line(
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
     if line.status == "Void":
         raise HTTPException(status_code=422, detail="Cannot modify a voided draft line.")
+
+    # CP-2F: For Draft periods, only daily source lines may be updated.
+    if period.status == "Draft":
+        if line.line_scope != "Daily" or line.source_type == "System":
+            raise HTTPException(
+                status_code=422,
+                detail="Only daily source lines can be updated on a Prepared (Draft) period.",
+            )
 
     # CP-2D2: guard — STATUS_PAYMENT lines are managed automatically
     _sp_check = await db.execute(
@@ -3576,8 +3716,15 @@ async def update_draft_line(
     if data.needs_manager_review is not None:
         fields["needsmanagerreview"] = data.needs_manager_review
 
+    # CP-2F: Draft (Prepared) periods keep NULL financial fields — skip calculation.
+    # Apply on every non-void Draft edit regardless of which fields changed.
+    if period.status == "Draft" and not is_void_only:
+        fields["calculatedamount"] = None
+        fields["rateamount"] = None
+        fields["needsmanagerreview"] = False
+
     # M13b: re-compute calculatedamount when quantity or rate_amount changes.
-    if data.quantity is not None or data.rate_amount is not None:
+    elif data.quantity is not None or data.rate_amount is not None:
         new_qty  = data.quantity    if data.quantity    is not None else line.quantity
         new_rate = data.rate_amount if data.rate_amount is not None else line.rate_amount
         _cr_upd = await _compute_calculated_amount(
@@ -3748,7 +3895,10 @@ async def void_draft_line(
     """Soft-delete: set status = 'Void'. Idempotent if already void."""
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
-    if period.status in _WRITE_BLOCKED_STATUSES:
+    # CP-2F: Draft (Prepared) periods allow voiding daily source lines only.
+    if period.status == "Draft":
+        pass  # allowed for daily source lines — checked after line is loaded
+    elif period.status in _WRITE_BLOCKED_STATUSES:
         raise HTTPException(
             status_code=422,
             detail=f"Cannot void lines on a period with status '{period.status}'.",
@@ -3762,6 +3912,14 @@ async def void_draft_line(
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
     if line.status == "Void":
         return  # Idempotent
+
+    # CP-2F: For Draft periods, only daily source lines may be voided.
+    if period.status == "Draft":
+        if line.line_scope != "Daily" or line.source_type == "System":
+            raise HTTPException(
+                status_code=422,
+                detail="Only daily source lines can be voided on a Prepared (Draft) period.",
+            )
 
     # CP-2D2: guard — STATUS_PAYMENT lines are managed automatically
     _sp_void_check = await db.execute(
@@ -7832,7 +7990,14 @@ async def get_period_pay_lines(
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)
 
-    await get_period_by_id(company_id, user_id, period_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # CP-2F: Period Pay is a financial path — block for Draft (Prepared) periods.
+    if period.status == "Draft":
+        raise HTTPException(
+            status_code=422,
+            detail="Period Pay lines are not available for Prepared (Draft) periods.",
+        )
 
     conditions = [
         "dl.payrollperiodid = :period_id",
@@ -8064,6 +8229,13 @@ async def get_period_eligible_drivers(
     await _require_not_driver_role(company_id, user_id, db)
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # CP-2F: Period Pay / Bonus eligible driver list is a financial path — block for Draft.
+    if period.status == "Draft":
+        raise HTTPException(
+            status_code=422,
+            detail="Period eligible drivers are not available for Prepared (Draft) periods.",
+        )
 
     await _check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
@@ -11486,6 +11658,8 @@ async def get_day_grid(
             values=values,
         ))
 
+    # CP-2F: suppress gross_total for Draft (Prepared) periods — financials not available.
+    _is_draft = period.status == "Draft"
     summary = DayGridSummary(
         total_drivers=len(drivers),
         worked=worked_count,
@@ -11493,8 +11667,9 @@ async def get_day_grid(
         off=off_count,
         total_hours=str(total_hours.quantize(Decimal("0.01"))),
         total_miles=str(total_miles.quantize(Decimal("0.01"))),
-        gross_total=str(gross_total.quantize(Decimal("0.01"))),
+        gross_total=None if _is_draft else str(gross_total.quantize(Decimal("0.01"))),
         needs_attention=needs_attention,
+        financials_available=not _is_draft,
     )
 
     grid_period = DayGridPeriod(
@@ -11548,12 +11723,13 @@ async def save_day_grid(
     # ── Load and access-check the period ─────────────────────────────────── #
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
-    if period.status not in ENTRY_ALLOWED_STATUSES:
+    # CP-2F: Draft (Prepared) periods support operational day-grid entry.
+    if period.status not in SOURCE_ENTRY_STATUSES:
         raise HTTPException(
             status_code=403,
             detail=(
                 f"Period is not editable (status: '{period.status}'). "
-                "Only Open periods accept entry."
+                "Only Open, Returned, or Prepared (Draft) periods accept entry."
             ),
         )
 
@@ -12009,6 +12185,9 @@ async def save_day_grid(
         )
 
         # CP-2D2: sync STATUS_PAYMENT draft line from the updated entry state.
+        # CP-2F: Draft (Prepared) is source-only — skip money derivation.
+        if period.status == "Draft":
+            continue
         await _sync_status_payment_for_entry_state(
             company_id=company_id,
             branch_id=branch_id,
@@ -13371,13 +13550,13 @@ def _build_branch_entry(
         key = str(pid)
 
         # can_enter_source
+        # CP-2F: Draft (Prepared) supports operational source entry (day grid save,
+        # daily lines). Financial entry (Period Pay, Bonus) is blocked separately.
         if not (has_entry or has_view):
             ce = _denied("PERMISSION_DENIED", "payroll.view or payroll.entry required.")
         elif st == "InReview":
             ce = _denied("PERIOD_IN_REVIEW_READ_ONLY", "Period is in review; source entry is locked.")
-        elif st == "Draft":
-            ce = _denied("PERIOD_DRAFT_NO_SUBMIT", "Draft/Prepared periods do not support source entry.")
-        elif st in ("Open", "Returned"):
+        elif st in ("Open", "Returned", "Draft"):
             if not has_entry:
                 ce = _denied("PERMISSION_DENIED", "payroll.entry required for source entry.")
             else:
@@ -13436,14 +13615,15 @@ def _build_branch_entry(
             cc = _cap(False, "PERIOD_NOT_OPEN", "Only Draft and Open periods can be cancelled via this workflow.")
 
         # can_open_day_grid
+        # CP-2F: Draft (Prepared) periods expose the day grid for operational entry.
         if not (has_view or has_entry):
             cg = _denied("PERMISSION_DENIED", "payroll.view or payroll.entry required.")
-        elif st in ("Open", "Returned"):
+        elif st in ("Open", "Returned", "Draft"):
             cg = _cap(True)
         elif st == "InReview":
             cg = _cap(True)  # read-only access allowed; is_read_only on slot signals that
         else:
-            cg = _cap(False, "PERIOD_DRAFT_NO_SUBMIT", "Day grid not available for Draft/Prepared periods.")
+            cg = _cap(False, "PERIOD_NOT_EDITABLE", "Day grid not available for this period status.")
 
         period_caps[key] = PeriodWorkflowCapabilities(
             can_enter_source=ce,

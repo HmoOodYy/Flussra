@@ -179,6 +179,11 @@ _VALID_LINE_STATUSES  = {"Active", "NeedsReview", "Rejected", "Void"}
 # InReview and all other statuses are read-only for operational data.
 ENTRY_ALLOWED_STATUSES = {"Open", "Returned"}
 
+# CP-2F: Draft (Prepared) allows operational source-entry only — not financial paths.
+# Use SOURCE_ENTRY_STATUSES for day-grid save and daily-source DraftLine guards only.
+# Do NOT use this constant for Period Pay, Bonus, or any financial line creation.
+SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}
+
 
 class DraftLineSummary(BaseModel):
     draft_line_id: int
@@ -868,8 +873,9 @@ class DayGridSummary(BaseModel):
     off: int
     total_hours: str
     total_miles: str
-    gross_total: str
+    gross_total: str | None = None   # CP-2F: None for Draft (Prepared) periods — financials not available
     needs_attention: int
+    financials_available: bool = True  # CP-2F: False for Draft periods
 
 
 class DayGridPeriod(BaseModel):
