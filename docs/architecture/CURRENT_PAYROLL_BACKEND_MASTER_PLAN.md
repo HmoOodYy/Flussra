@@ -6,7 +6,7 @@
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline:** Alembic `0047 (head)`  
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `In Progress`; CP-3A is `Done with Notes`; CP-3B and CP-3C remain `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -232,16 +232,21 @@ Required behavior is:
 normal pay -> apply minimum/maximum -> add bonus
 ```
 
-### 3.10 Bonus today
+### 3.10 Bonus today (updated: CP-3A)
 
-- Bonus is generic Period Pay stored as a `PayrollDraftLines` row with `LineScope='Period'` and `LineType='BONUS'`.
-- Multiple active BONUS rows for one driver/period are intentionally permitted by current tests.
-- Added-by and added-at fields exist through DraftLines; update/void metadata is incomplete.
-- Eligible drivers and bonus rows are separate endpoint calls.
-- There is no backend all-driver zero-inclusive aggregate, batch contract, revision control, or idempotency.
-- The initial schema contains an unused `PayrollRunBonuses` table with richer bonus-specific fields.
-
-The two storage models must never be active simultaneously.
+- Bonus is now canonicalized as `payroll.PayrollBonusEvents`. The old unused `PayrollRunBonuses` table was converted and renamed by migration 0058.
+- Generic Period Pay (`/period-pay`) no longer creates BONUS. The create path rejects `line_type='BONUS'` with a redirect message pointing to `POST /payroll/periods/{id}/bonuses`.
+- Legacy BONUS `PayrollDraftLines` rows may remain as migration trace rows only, linked via `SourceDraftLineID`. They are hidden from `/period-pay` reads (`linetype != 'BONUS'` filter), and update/void through `/period-pay` is blocked by a 422 guard.
+- Bonus events are strictly positive-only (`Amount > 0` DB constraint). Zero means no event; voiding is explicit.
+- Multiple active bonus events per driver/period are allowed.
+- Full actor/time/reason/notes/update/void metadata fields exist on `PayrollBonusEvents`.
+- Bonus mutation is allowed only for Open and Returned periods. Draft/InReview/Approved/Locked/Archived/Cancelled reject bonus mutation.
+- Bonus create validates CP-2E snapshot-aware driver eligibility and branch ownership (same guard as non-BONUS period-pay).
+- Finalization reads active `PayrollBonusEvents` directly and writes them as `BONUS` `PayrollFinalLines` with `BonusEventID` linkage. Voided events are excluded.
+- Finalization preview reads canonical bonus events and exposes them in the `bonus_events` list. BONUS does not appear in the `lines` (DraftLine) list.
+- Ledger receives bonus through final lines as before.
+- Batch bonus (CP-3B) and zero-inclusive all-driver summary remain future work.
+- Min/max formula correction remains pending CP-3C. Bonus still participates in the current min/max base; this is known debt.
 
 ### 3.11 Review today
 
@@ -379,14 +384,14 @@ Future `StatusKeyPayRule` records may create derived payroll calculation compone
 
 Use multiple bonus events per driver/period and aggregate them into `TotalBonus`. This preserves who gave each bonus, when, and why. One total row would lose required event-level detail.
 
-Adopt one canonical bonus-event model. Preferred direction:
+**Implemented by CP-3A.** The canonical bonus-event domain is now live:
 
-- redesign/rename the currently unused `PayrollRunBonuses` structure into the canonical bonus-event domain if a data audit confirms it is unused/clean;
-- migrate legacy BONUS DraftLines once;
-- stop accepting BONUS through generic period-pay CRUD;
-- never dual-write or read from both models after cutover.
+- `PayrollRunBonuses` was converted and renamed to `payroll.PayrollBonusEvents` by migration 0058.
+- Legacy BONUS `PayrollDraftLines` were backfilled into `PayrollBonusEvents` with `SourceDraftLineID` trace linkage.
+- Generic Period Pay (`/period-pay`) no longer accepts BONUS creation; it is blocked at the route level with a 422 redirect to the canonical endpoints.
+- There is no dual-write path; `PayrollBonusEvents` is the single source of truth for all bonus data.
 
-Bonus is always excluded from minimum/maximum comparison.
+Bonus is invariantly excluded from minimum/maximum comparison by domain rule. The formula correction (removing bonus from the min/max base in the calculation engine) is pending CP-3C.
 
 ### AD-8 — One calculation core, immutable submitted snapshot
 
@@ -518,14 +523,14 @@ Not allowed:
 - Current preview response cannot support required dynamic report views.
 - Current day grid exposes financial calculated amounts directly.
 
-### 6.5 Bonus
+### 6.5 Bonus (updated: CP-3A)
 
-- Generic Period Pay contract only.
-- Competing unused bonus table.
-- No zero-inclusive all-driver summary.
-- No batch transaction/idempotency/revision.
-- Incomplete actor/update/void metadata.
-- No explicit min/max exclusion invariant.
+- ~~Generic Period Pay contract only.~~ Resolved by CP-3A: canonical `PayrollBonusEvents` table with dedicated CRUD endpoints. Generic Period Pay path blocks BONUS creation.
+- ~~Competing unused bonus table.~~ Resolved by CP-3A: `PayrollRunBonuses` converted/renamed to `PayrollBonusEvents`; legacy BONUS DraftLines backfilled and hidden/blocked from period-pay paths.
+- ~~Incomplete actor/update/void metadata.~~ Resolved by CP-3A: full actor/time/reason/notes/update/void metadata on `PayrollBonusEvents`.
+- No zero-inclusive all-driver summary (pending CP-3B).
+- No batch transaction/idempotency/revision (pending CP-3B).
+- No explicit min/max exclusion invariant enforced in the formula (pending CP-3C). Bonus still enters the current min/max base.
 
 ### 6.6 Review and audit
 
@@ -634,24 +639,24 @@ Daily notes should be a typed operational record or typed field, not a fake Pay 
 
 Future `StatusKeyPayRules` should be effective-dated and independently map a Status Key to financial behavior. Allowance-category mapping remains separate.
 
-### 7.6 Bonus events
+### 7.6 Bonus events (updated: CP-3A)
 
-Canonical `PayrollBonusEvents` direction:
+`payroll.PayrollBonusEvents` exists after migration 0058 (CP-3A). The old unused `PayrollRunBonuses` table was converted into this canonical domain:
 
 - BonusEventID;
 - company/branch/period/driver;
-- positive amount;
+- positive amount (DB-enforced `Amount > 0`);
 - optional reason/notes;
 - created/updated/voided actors and timestamps;
-- state;
-- batch correlation ID;
-- idempotency key;
-- data revision;
-- source/import metadata.
+- state (`Active` / `Voided`);
+- `SourceDraftLineID` trace FK (links migrated rows to their legacy DraftLine origin; NULL for events created through the API after cutover);
+- batch correlation ID (column exists; batch endpoint pending CP-3B);
+- idempotency key (column exists; batch idempotency pending CP-3B);
+- data revision.
 
-Multiple events are allowed. Zero means no event; clearing/voiding is explicit. Bonus is invariantly excluded from min/max.
+Multiple events are allowed. Zero means no event; voiding is explicit. Bonus is invariantly excluded from min/max by the required product rule; the formula correction that enforces this is pending CP-3C.
 
-The existing unused `PayrollRunBonuses` table should be either deliberately migrated into this role or retired. Do not create a third active bonus representation.
+Remaining future work: batch/idempotency/zero-inclusive summary polish (CP-3B); min/max exclusion formula correction (CP-3C). Do not create a third active bonus representation.
 
 ### 7.7 Calculation snapshots
 
@@ -772,17 +777,24 @@ GET /payroll/periods/{id}/calculation-preview
 
 Allowed for Open and Returned. InReview/Approved returns the submitted snapshot representation rather than recalculating. Draft returns no financial preview. Locked/Archived redirects conceptually to final snapshot/report contracts.
 
-### 8.7 Bonus
+### 8.7 Bonus (updated: CP-3A)
+
+Implemented by CP-3A:
 
 ```text
-GET    /payroll/periods/{id}/bonuses
-POST   /payroll/periods/{id}/bonuses
-PATCH  /payroll/periods/{id}/bonuses/{bonus_event_id}
-DELETE /payroll/periods/{id}/bonuses/{bonus_event_id}
-POST   /payroll/periods/{id}/bonuses/batch
+GET    /payroll/periods/{id}/bonuses                           — list active + voided events
+POST   /payroll/periods/{id}/bonuses                           — create canonical bonus event
+PATCH  /payroll/periods/{id}/bonuses/{bonus_event_id}          — update amount/reason/notes
+DELETE /payroll/periods/{id}/bonuses/{bonus_event_id}          — void (idempotent)
 ```
 
-The list returns all eligible drivers, zero totals, event lists, total bonus, capabilities, and revision. Batch is all-or-nothing, validates all rows before writing, uses idempotency/correlation, and writes complete audit details.
+Remaining future contracts (not implemented by CP-3A):
+
+```text
+POST   /payroll/periods/{id}/bonuses/batch                     — CP-3B: all-or-nothing batch
+```
+
+The full-list zero-inclusive all-driver summary (all eligible drivers with zero totals, event lists, capabilities, and revision) remains a future contract. The current GET list returns bonus events scoped by period/company. Batch is deferred to CP-3B: all-or-nothing, validates all rows before writing, uses idempotency/correlation, and writes complete audit details.
 
 ### 8.8 Review
 
@@ -1151,7 +1163,7 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 8. No backend Current Payroll Hub contract.
 9. No Open/Returned expected-income contract.
 10. No calculation/report contracts for required views.
-11. Bonus is generic Period Pay with competing unused storage.
+11. ~~Bonus is generic Period Pay with competing unused storage.~~ Resolved by CP-3A: canonical `PayrollBonusEvents` domain; generic Period Pay blocks BONUS; legacy BONUS DraftLines hidden/blocked from period-pay paths. Remaining debt: bonus still participates in the current min/max base until CP-3C corrects the formula.
 12. ~~Status is mutable code text and historical labels can disappear.~~ Resolved by CP-2D1: canonical `PayrollPeriodDriverDayEntryState` stores `StatusKeyID`; finalization freezes label/off-reason snapshots. Remaining future work: per-period StatusKey availability snapshot.
 13. ~~Current employment status can hide historical eligibility.~~ Resolved by CP-2E canonical eligibility snapshot.
 14. ~~Pay-item order/labels are not period-snapshotted.~~ Resolved by CP-2C (`PayrollPeriodPayItems`).
@@ -1189,7 +1201,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | Phase 0 | Workflow integrity lockdown | Done with Notes | Claude | Codex P0 review |
 | Phase 1 | Lifecycle slots, Returned state, smart creation | Done with Notes | Claude | Codex lifecycle review |
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Done with Notes | Claude | Codex data-model review |
-| Phase 3 | Canonical bonus domain and min/max classification | Pending | Claude | Codex financial-rule review |
+| Phase 3 | Canonical bonus domain and min/max classification | In Progress | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Pending | Claude | Codex calculation parity review |
 | Phase 5 | Hub and calculation-report contracts | Pending | Claude | Codex contract/security review |
 | Phase 6 | Finalized payroll information library and audit | Pending | Claude | Codex ledger immutability review |
@@ -1275,7 +1287,7 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 
 **Status:** Done with Notes
 **Completed:** CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, CP-2F — all Done with Notes.
-**Review result:** No CP-2A through CP-2F P0/P1 blockers remain. CP-2D was split into CP-2D1 (canonical daily entry state) and CP-2D2 (status-driven payment lane). Add Day activation is deferred and is not part of CP-2C, CP-2D2, or CP-2F closure. Phase 2 is closed.
+**Review result:** No CP-2A through CP-2F P0/P1 blockers remain. CP-2D was split into CP-2D1 (canonical daily entry state) and CP-2D2 (status-driven payment lane). Add Day activation is deferred and is not part of CP-2C, CP-2D2, or CP-2F closure. Phase 2 is closed. Phase 3 is In Progress: CP-3A is Done with Notes; CP-3B and CP-3C remain Pending.
 
 ### CP-2A completion note
 
@@ -1602,11 +1614,80 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - P3: Temporary PostgreSQL shutdown warning remains environment-only.
 - P3: LF/CRLF working-copy warnings remain environment-only.
 
+### Phase 3 — Canonical Bonus Domain and Min/Max Classification
+
+**Status:** `In Progress`
+
+- [x] P3A: Canonical bonus event domain (CP-3A). — **Done with Notes**
+- [ ] P3B: Batch bonus and zero-inclusive all-driver summary. — **Pending**
+- [ ] P3C: Min/max formula correction (bonus excluded from min/max base). — **Pending**
+
+### CP-3A completion note
+
+**Status:** Done with Notes
+**Implementation commit:** `ade9234` — feat: add cp-3a canonical bonus events
+**Alembic revision:** 0058
+**Review result:** Codex PASS_WITH_NOTES; no P0/P1 blockers remain.
+
+**What CP-3A completed:**
+
+- Converted/renamed unused `payroll.PayrollRunBonuses` into canonical `payroll.PayrollBonusEvents` (migration 0058).
+- Backfilled positive legacy BONUS Period Pay DraftLines into `PayrollBonusEvents` with `SourceDraftLineID` trace linkage. Voided legacy rows mapped to `Voided` status in the canonical table.
+- Removed `IncludeInMinimumPayComparison` as a configurable behavior (dropped; bonus is invariantly excluded from min/max by domain rule — formula correction pending CP-3C).
+- Added canonical bonus-event CRUD endpoints:
+  - `GET /payroll/periods/{id}/bonuses`
+  - `POST /payroll/periods/{id}/bonuses`
+  - `PATCH /payroll/periods/{id}/bonuses/{bonus_event_id}`
+  - `DELETE /payroll/periods/{id}/bonuses/{bonus_event_id}` (void, idempotent)
+- Blocked new BONUS creation through generic `/period-pay` (422 with redirect message).
+- Hidden legacy BONUS DraftLines from `/period-pay` reads (`linetype != 'BONUS'` filter).
+- Blocked update/void of legacy BONUS DraftLines through `/period-pay` (422 guard).
+- Added CP-2E snapshot-aware eligibility and branch ownership validation for bonus creation (same `_assert_driver_eligible_for_period_via_snapshot` guard as non-BONUS period-pay).
+- Enforced strictly positive bonus amount (`Amount > 0` DB constraint; zero and negative rejected).
+- Allowed multiple active bonus events per driver/period.
+- Enforced Open/Returned-only mutation; Draft/InReview/Approved/Locked/Archived/Cancelled reject bonus mutation.
+- Added finalization bridge: active `PayrollBonusEvents` are written as `BONUS` `PayrollFinalLines` with `BonusEventID` linkage. Voided events are excluded. Old BONUS DraftLines are not included in finalization.
+- Added finalization preview bridge: canonical bonus events populate `bonus_events` list in the preview response. BONUS does not appear in the DraftLine-based `lines` list.
+- Preserved ledger bonus inclusion through final lines.
+- Added `BonusEventID` column to `PayrollFinalLines` for finalization bridge.
+- Updated submit/resubmit empty-period guards to count non-BONUS DraftLines plus active BonusEvents (bonus-only periods can submit).
+- Added full `BONUS_EVENT_ADDED` / `BONUS_EVENT_UPDATED` / `BONUS_EVENT_VOIDED` audit events with `entity_name = 'PayrollBonusEvents'`.
+
+**Not implemented by CP-3A:**
+
+- No batch bonus (CP-3B).
+- No min/max formula correction (CP-3C).
+- No Hub, reports, frontend, submitted snapshot, or manual recalculation work.
+- No zero-inclusive all-driver bonus summary.
+
+**Validation:**
+
+- CP-3A focused tests: 26 passed.
+- test_finalization_preview: passed.
+- test_ledger: 19 passed.
+- test_cp0a_mutation_status_guard: 70 passed.
+- test_m14: 32 passed.
+- Combined sanity after alembic upgrade: 73 passed (cp3a + finalization_preview + ledger).
+- Full 7-suite regression: 296 passed, 12 warnings.
+- Alembic current/head: 0058 / 0058.
+- `git diff --check`: clean (LF→CRLF warnings only, environment-only).
+
+**Remaining P2/P3 notes:**
+
+- P2: Defense-in-depth DB branch predicates (e.g., composite FK trigger ensuring BonusEvent branch matches period branch) are service-level guarded by the eligibility check but not yet enforced by a DB-level trigger. Acceptable at current scale; document as known gap.
+- P2: Zero-inclusive all-driver bonus summary (all eligible drivers with zero totals) remains future scope (CP-3B).
+- P2: Batch bonus with idempotency/correlation remains future scope (CP-3B).
+- P3: Bonus still participates in the current min/max base; the formula correction to exclude it is CP-3C and is clearly documented as known debt.
+- P3: Temporary PostgreSQL shutdown warning remains environment-only.
+- P3: LF/CRLF working-copy warnings remain environment-only.
+
+---
+
 ### Phase 1 completion note
 
 **Status:** Done with Notes
 **Completed units:** CP-1A, CP-1B, CP-1C, CP-1D, CP-1E
-**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is Done with Notes: CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are all Done with Notes. Phase 3 remains Pending.
+**Review result:** No phase-scoped P0/P1 blockers remain after CP-1E. Phase 2 is Done with Notes: CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are all Done with Notes. Phase 3 is In Progress: CP-3A is Done with Notes; CP-3B and CP-3C remain Pending.
 
 **Phase 1 completed:**
 - Returned domain state and reviewed transition graph (CP-1A).
@@ -2112,67 +2193,6 @@ Backfilling historical status identity from free-text codes may be ambiguous. Am
 - [ ] Prepared response schemas contain no derived financial totals.
 - [ ] Period calendar prevents arbitrary dates.
 - [ ] Pay-item reorder behavior is versioned, not UI-only.
-
-### Phase 3 — Canonical Bonus Domain and Min/Max Classification
-
-**Status:** `Pending`
-
-- [ ] P3A: choose/convert one canonical bonus-event store.
-- [ ] P3B: migrate legacy BONUS DraftLines once.
-- [ ] P3C: add zero-inclusive summary and event CRUD.
-- [ ] P3D: add transactional batch bonus.
-- [ ] P3E: add typed normal-pay/minmax classification.
-- [ ] P3F: correct min/max calculation order.
-
-**Objective**
-
-Represent required bonus event metadata without dual truth and eliminate the current financial calculation error.
-
-**Allowed backend areas**
-
-- payroll bonus/period-pay/calculation code;
-- pay-item financial classification;
-- focused migrations and tests.
-
-**Forbidden changes**
-
-- dual writes;
-- bonus in Prepared;
-- zero-value bonus events;
-- configurable inclusion of bonus in min/max;
-- frontend aggregation.
-
-**Required tests**
-
-- multiple bonus events aggregate correctly;
-- actor/time/reason retained;
-- all eligible drivers returned with zero;
-- batch all-or-nothing and idempotent;
-- Open/Returned-only mutation;
-- bonus excluded from minimum top-up comparison;
-- bonus excluded from maximum cap comparison;
-- formula example normal 1000 + bonus 200 = total 1200;
-- final snapshot/ledger linkage.
-
-**Acceptance criteria**
-
-- one canonical bonus source;
-- `TotalBonus` is backend-computed;
-- complete event audit exists;
-- min/max base excludes all bonus events by invariant;
-- no P0 financial-rule gap remains.
-
-**Risk notes**
-
-The unused PayrollRunBonuses table must be audited before repurposing. Existing tests deliberately allow multiple BONUS DraftLines and require controlled replacement.
-
-**Codex review checklist**
-
-- [ ] Source-of-truth cutover is one-way and explicit.
-- [ ] No generic Period Pay endpoint can create bonus after cutover.
-- [ ] Min/max tests include bonus boundary cases.
-- [ ] Batch rollback proven.
-- [ ] Tenant/branch/driver eligibility checked for each event.
 
 ### Phase 4 — Unified Calculation Core and Immutable Review Snapshot
 
