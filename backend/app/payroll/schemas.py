@@ -545,6 +545,72 @@ class PeriodPayLineUpdate(BaseModel):
         return v
 
 
+# ---------------------------------------------------------------------------
+# CP-3A — Bonus Events schemas
+# ---------------------------------------------------------------------------
+
+class BonusEventResponse(BaseModel):
+    """A single canonical bonus event row."""
+    bonus_event_id: int
+    period_id: int
+    company_id: int
+    branch_id: int
+    driver_id: int
+    amount: Decimal
+    reason: str | None
+    notes: str | None
+    status: str                     # 'Active' | 'Voided'
+    data_revision: int
+    source_draft_line_id: int | None
+    voided_by_user_id: int | None
+    voided_at_utc: datetime | None
+    void_reason: str | None
+    created_by_user_id: int | None
+    created_at_utc: datetime
+    updated_by_user_id: int | None
+    updated_at_utc: datetime | None
+
+
+class BonusEventCreate(BaseModel):
+    """Create one canonical bonus event."""
+    driver_id: int
+    amount: Decimal
+    reason: str | None = None
+    notes: str | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("Bonus amount must be positive (> 0).")
+        return v
+
+
+class BonusEventUpdate(BaseModel):
+    """Partial update for a bonus event (amount, reason, notes)."""
+    amount: Decimal | None = None
+    reason: str | None = None
+    notes: str | None = None
+    data_revision: int | None = None    # optional optimistic-lock value
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_positive(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError("Bonus amount must be positive (> 0).")
+        return v
+
+
+class BonusEventPreviewEntry(BaseModel):
+    """One bonus event as it will appear after finalization (preview only)."""
+    bonus_event_id: int
+    driver_id: int
+    driver_name: str | None
+    amount: Decimal
+    reason: str | None = None
+    notes: str | None = None
+
+
 class RateLookupResult(BaseModel):
     """
     Result of GET /payroll/rates/lookup — the single rate that applies to a
@@ -991,10 +1057,13 @@ class FinalizationPreviewResponse(BaseModel):
     lines: list[FinalizationPreviewLine]
     total_final_gross: Decimal
     # Line count semantics (explicit to avoid frontend guessing):
-    draft_line_count: int        # non-Void draft lines that will be inserted as FinalLines
-    sys_adjustment_count: int    # number of SYS_MIN_TOPUP / SYS_MAX_CAP rows to be inserted
-    final_line_count_estimate: int  # draft_line_count + sys_adjustment_count
+    draft_line_count: int        # non-Void, non-BONUS draft lines that will be inserted
+    sys_adjustment_count: int    # SYS_MIN_TOPUP / SYS_MAX_CAP rows to be inserted
+    bonus_event_count: int = 0   # active PayrollBonusEvents rows to be inserted (CP-3A)
+    final_line_count_estimate: int  # draft_line_count + sys_adjustment_count + bonus_event_count
     driver_count: int
+    # CP-3A: canonical bonus events (separate from DraftLine-based lines list)
+    bonus_events: list["BonusEventPreviewEntry"] = []
 
 
 # ---------------------------------------------------------------------------

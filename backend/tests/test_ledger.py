@@ -256,7 +256,6 @@ async def locked_period_data(
     """
     headers = auth(auth_token)
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-    await _activate_bonus(session_client, auth_token, paytest_branch_id)
 
     # Create and approve an HOURLY rate ($25) for ledger_driver_id
     rate_resp = await session_client.post(
@@ -314,18 +313,17 @@ async def locked_period_data(
     assert hl.status_code == 201, f"Add hours line failed: {hl.text}"
     hours_line = hl.json()
 
-    # Seed BONUS period-pay line ($50 bonus)
+    # Seed BONUS event ($50 bonus) via canonical CP-3A path
     bl = await session_client.post(
-        f"/payroll/periods/{pid}/period-pay",
+        f"/payroll/periods/{pid}/bonuses",
         json={
             "driver_id": ledger_driver_id,
-            "line_type": "BONUS",
             "amount": "50.00",
             "notes": "Performance bonus",
         },
         headers=headers,
     )
-    assert bl.status_code == 201, f"Add bonus line failed: {bl.text}"
+    assert bl.status_code == 201, f"Add bonus event failed: {bl.text}"
     bonus_line = bl.json()
 
     # Open → InReview → Approved via review flow

@@ -616,39 +616,25 @@ class TestFinalizationPreview:
         paytest_branch_id: int,
         direct_db,
     ):
-        """BONUS period-scope line appears in lines and is counted in period_pay."""
+        """CP-3A: Bonus event (POST /bonuses) appears in bonus_events field of preview.
+        BONUS must NOT appear in lines (DraftLines).  Bonus amounts counted in period_pay."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        # Ensure BONUS is activated on PAYTEST branch
-        items_resp = await session_client.get(
-            f"/settings/branches/{paytest_branch_id}/pay-items",
-            headers=headers,
-        )
-        assert items_resp.status_code == 200
-        for item in items_resp.json():
-            if item["pay_item_code"] == "BONUS" and not item.get("is_active"):
-                await session_client.patch(
-                    f"/settings/branches/{paytest_branch_id}/pay-items/{item['pay_item_id']}",
-                    json={"is_active": True},
-                    headers=headers,
-                )
-
-        # CP-0C: Approved->InReview is now blocked. Force directly to Open.
+        # Force back to Open to add the bonus event
         await direct_db.execute(
             _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
             {"pid": pid},
         )
+        await direct_db.commit()
+
         bonus_resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={
-                "driver_id": paytest_driver_id,
-                "line_type": "BONUS",
-                "amount":    "50.00",
-            },
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "50.00"},
             headers=headers,
         )
-        assert bonus_resp.status_code == 201, f"Bonus line creation failed: {bonus_resp.text}"
+        assert bonus_resp.status_code == 201, f"Bonus event creation failed: {bonus_resp.text}"
+        bonus_event_id = bonus_resp.json()["bonus_event_id"]
 
         # Re-approve
         await _advance_to_approved(session_client, auth_token, pid, paytest_driver_id)
@@ -660,13 +646,16 @@ class TestFinalizationPreview:
         assert resp.status_code == 200
         body = resp.json()
 
-        # BONUS line must appear in lines with linescope='Period'
-        period_lines = [l for l in body["lines"] if l["line_scope"] == "Period"]
-        assert len(period_lines) >= 1
-        bonus_line = next((l for l in period_lines if l["line_type"] == "BONUS"), None)
-        assert bonus_line is not None
+        # Bonus event must appear in bonus_events list
+        assert body["bonus_event_count"] >= 1
+        be_ids = [be["bonus_event_id"] for be in body["bonus_events"]]
+        assert bonus_event_id in be_ids, f"Created bonus event not in preview bonus_events: {body['bonus_events']}"
 
-        # period_pay in driver total must include bonus
+        # BONUS must NOT appear in lines (DraftLines)
+        bonus_in_lines = [l for l in body["lines"] if l["line_type"] == "BONUS"]
+        assert not bonus_in_lines, "BONUS DraftLines must not appear in preview lines after CP-3A"
+
+        # period_pay in driver total must include bonus amount
         totals = body["driver_totals"]
         assert len(totals) >= 1
         assert Decimal(str(totals[0]["period_pay"])) >= Decimal("50.00")

@@ -18,6 +18,7 @@ from app.payroll.schemas import (
     RateTypeSummary, DriverRateSummary, DriverRateCreate, DriverRateUpdate,
     RateLookupResult,
     PeriodPayLineCreate, PeriodPayLineUpdate,
+    BonusEventCreate, BonusEventUpdate, BonusEventResponse,
     PeriodEligibleDriversResponse,
     DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
     DriverRateMatrix,
@@ -1017,6 +1018,103 @@ async def void_period_pay_line(
     return await service.void_period_pay_line(
         period_id=period_id,
         line_id=line_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CP-3A — Canonical Bonus Events  (/payroll/periods/{id}/bonuses)
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/periods/{period_id}/bonuses",
+    response_model=list[BonusEventResponse],
+    summary="List bonus events for a period",
+)
+async def list_bonus_events(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+    driver_id: int | None = Query(None, description="Filter to a specific driver"),
+) -> list[BonusEventResponse]:
+    return await service.list_bonus_events(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+        driver_id=driver_id,
+    )
+
+
+@router.post(
+    "/periods/{period_id}/bonuses",
+    response_model=BonusEventResponse,
+    status_code=201,
+    summary="Add a canonical bonus event to a period",
+    responses={
+        422: {"description": "Period not Open/Returned, or amount not positive"},
+    },
+)
+async def create_bonus_event(
+    period_id: int,
+    data: BonusEventCreate,
+    token: TokenDep,
+    db: DbDep,
+) -> BonusEventResponse:
+    return await service.create_bonus_event(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        data=data,
+        db=db,
+    )
+
+
+@router.patch(
+    "/periods/{period_id}/bonuses/{bonus_event_id}",
+    response_model=BonusEventResponse,
+    summary="Update a bonus event (amount, reason, notes)",
+    responses={
+        409: {"description": "Optimistic concurrency conflict"},
+        422: {"description": "Period not Open/Returned, or event already voided"},
+    },
+)
+async def update_bonus_event(
+    period_id: int,
+    bonus_event_id: int,
+    data: BonusEventUpdate,
+    token: TokenDep,
+    db: DbDep,
+) -> BonusEventResponse:
+    return await service.update_bonus_event(
+        period_id=period_id,
+        bonus_event_id=bonus_event_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        data=data,
+        db=db,
+    )
+
+
+@router.delete(
+    "/periods/{period_id}/bonuses/{bonus_event_id}",
+    response_model=BonusEventResponse,
+    summary="Void a bonus event (idempotent)",
+    responses={
+        422: {"description": "Period not Open/Returned"},
+    },
+)
+async def void_bonus_event(
+    period_id: int,
+    bonus_event_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> BonusEventResponse:
+    return await service.void_bonus_event(
+        period_id=period_id,
+        bonus_event_id=bonus_event_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,

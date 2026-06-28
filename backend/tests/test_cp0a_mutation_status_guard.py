@@ -187,15 +187,14 @@ async def _add_bonus_line(
     period_id: int,
     driver_id: int,
 ) -> int:
-    """Activate BONUS, add a period-pay line while period is Open. Returns draft_line_id."""
-    await _ensure_bonus_active(client, token, branch_id)
+    """Add a canonical bonus event while period is Open. Returns bonus_event_id."""
     r = await client.post(
-        f"/payroll/periods/{period_id}/period-pay",
-        json={"driver_id": driver_id, "line_type": "Bonus", "amount": "50.00"},
+        f"/payroll/periods/{period_id}/bonuses",
+        json={"driver_id": driver_id, "amount": "50.00"},
         headers=_auth(token),
     )
     assert r.status_code == 201, f"add bonus failed: {r.text}"
-    return r.json()["draft_line_id"]
+    return r.json()["bonus_event_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -403,10 +402,9 @@ class TestPeriodPayMutationStatusGuard:
     ):
         pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
-            await _ensure_bonus_active(client, auth_token, paytest_branch_id)
             r = await client.post(
-                f"/payroll/periods/{pid}/period-pay",
-                json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "25.00"},
+                f"/payroll/periods/{pid}/bonuses",
+                json={"driver_id": paytest_driver_id, "amount": "25.00"},
                 headers=_auth(auth_token),
             )
             assert r.status_code == 201, r.text
@@ -427,11 +425,10 @@ class TestPeriodPayMutationStatusGuard:
     ):
         pid = await _create_open_period(direct_db, paytest_branch_id)
         try:
-            await _ensure_bonus_active(client, auth_token, paytest_branch_id)
             await _force_status(direct_db, pid, bad_status)
             r = await client.post(
-                f"/payroll/periods/{pid}/period-pay",
-                json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "25.00"},
+                f"/payroll/periods/{pid}/bonuses",
+                json={"driver_id": paytest_driver_id, "amount": "25.00"},
                 headers=_auth(auth_token),
             )
             assert r.status_code in (403, 409, 422), (
@@ -452,7 +449,7 @@ class TestPeriodPayMutationStatusGuard:
         try:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             r = await client.patch(
-                f"/payroll/periods/{pid}/period-pay/{lid}",
+                f"/payroll/periods/{pid}/bonuses/{lid}",
                 json={"amount": "75.00"},
                 headers=_auth(auth_token),
             )
@@ -477,7 +474,7 @@ class TestPeriodPayMutationStatusGuard:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             await _force_status(direct_db, pid, bad_status)
             r = await client.patch(
-                f"/payroll/periods/{pid}/period-pay/{lid}",
+                f"/payroll/periods/{pid}/bonuses/{lid}",
                 json={"amount": "75.00"},
                 headers=_auth(auth_token),
             )
@@ -499,7 +496,7 @@ class TestPeriodPayMutationStatusGuard:
         try:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             r = await client.delete(
-                f"/payroll/periods/{pid}/period-pay/{lid}",
+                f"/payroll/periods/{pid}/bonuses/{lid}",
                 headers=_auth(auth_token),
             )
             assert r.status_code == 200, r.text
@@ -523,7 +520,7 @@ class TestPeriodPayMutationStatusGuard:
             lid = await _add_bonus_line(client, auth_token, paytest_branch_id, pid, paytest_driver_id)
             await _force_status(direct_db, pid, bad_status)
             r = await client.delete(
-                f"/payroll/periods/{pid}/period-pay/{lid}",
+                f"/payroll/periods/{pid}/bonuses/{lid}",
                 headers=_auth(auth_token),
             )
             assert r.status_code in (403, 409, 422), (
@@ -854,15 +851,14 @@ class TestTrueRace:
         direct_db,
     ):
         """
-        Period-pay bonus add: boundary reached, transition commits InReview → 409.
+        Bonus event add: boundary reached, transition commits InReview → 409.
         """
-        await _ensure_bonus_active(client, auth_token, paytest_branch_id)
         pid = await _create_open_period(direct_db, paytest_branch_id)
         loop = asyncio.get_running_loop()
 
         coro = client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "50.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "50.00"},
             headers=_auth(auth_token),
         )
         r = await self._run_race(
@@ -1061,14 +1057,14 @@ class TestRejectedMutationInvariants:
             )
 
             orig = (await direct_db.execute(
-                text("SELECT calculatedamount FROM payroll.payrolldraftlines WHERE draftlineid = :lid"),
+                text("SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :lid"),
                 {"lid": lid},
             )).scalar_one()
 
             audit_before = (await direct_db.execute(
                 text(
                     "SELECT COUNT(*) FROM audit.auditlog "
-                    "WHERE actioncode = 'PERIOD_PAY_UPDATED' AND entityid = :eid"
+                    "WHERE actioncode = 'BONUS_EVENT_UPDATED' AND entityid = :eid"
                 ),
                 {"eid": str(lid)},
             )).scalar_one()
@@ -1076,14 +1072,14 @@ class TestRejectedMutationInvariants:
             await _force_status(direct_db, pid, bad_status)
 
             r = await client.patch(
-                f"/payroll/periods/{pid}/period-pay/{lid}",
+                f"/payroll/periods/{pid}/bonuses/{lid}",
                 json={"amount": "999.00"},
                 headers=_auth(auth_token),
             )
             assert r.status_code in (403, 409, 422), r.text
 
             after_amount = (await direct_db.execute(
-                text("SELECT calculatedamount FROM payroll.payrolldraftlines WHERE draftlineid = :lid"),
+                text("SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :lid"),
                 {"lid": lid},
             )).scalar_one()
             assert float(after_amount) == float(orig), (
@@ -1093,11 +1089,11 @@ class TestRejectedMutationInvariants:
             audit_after = (await direct_db.execute(
                 text(
                     "SELECT COUNT(*) FROM audit.auditlog "
-                    "WHERE actioncode = 'PERIOD_PAY_UPDATED' AND entityid = :eid"
+                    "WHERE actioncode = 'BONUS_EVENT_UPDATED' AND entityid = :eid"
                 ),
                 {"eid": str(lid)},
             )).scalar_one()
-            assert audit_after == audit_before, "Rejected period-pay update must not write audit"
+            assert audit_after == audit_before, "Rejected bonus update must not write audit"
         finally:
             await _force_cancel(direct_db, pid)
 
@@ -1121,33 +1117,33 @@ class TestRejectedMutationInvariants:
             audit_before = (await direct_db.execute(
                 text(
                     "SELECT COUNT(*) FROM audit.auditlog "
-                    "WHERE actioncode = 'PERIOD_PAY_VOIDED' AND entityid = :eid"
+                    "WHERE actioncode = 'BONUS_EVENT_VOIDED' AND entityid = :eid"
                 ),
                 {"eid": str(lid)},
             )).scalar_one()
 
             r = await client.delete(
-                f"/payroll/periods/{pid}/period-pay/{lid}",
+                f"/payroll/periods/{pid}/bonuses/{lid}",
                 headers=_auth(auth_token),
             )
             assert r.status_code in (403, 409, 422), r.text
 
             row = (await direct_db.execute(
-                text("SELECT status FROM payroll.payrolldraftlines WHERE draftlineid = :lid"),
+                text("SELECT status FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :lid"),
                 {"lid": lid},
             )).mappings().first()
-            assert row is not None and row["status"] != "Void", (
-                "Rejected period-pay void must leave the row active"
+            assert row is not None and row["status"] != "Voided", (
+                "Rejected bonus void must leave the event active"
             )
 
             audit_after = (await direct_db.execute(
                 text(
                     "SELECT COUNT(*) FROM audit.auditlog "
-                    "WHERE actioncode = 'PERIOD_PAY_VOIDED' AND entityid = :eid"
+                    "WHERE actioncode = 'BONUS_EVENT_VOIDED' AND entityid = :eid"
                 ),
                 {"eid": str(lid)},
             )).scalar_one()
-            assert audit_after == audit_before, "Rejected period-pay void must not write audit"
+            assert audit_after == audit_before, "Rejected bonus void must not write audit"
         finally:
             await _force_cancel(direct_db, pid)
 

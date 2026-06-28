@@ -32,6 +32,7 @@ from app.payroll.schemas import (
     RateTypeSummary, DriverRateSummary, DriverRateCreate, DriverRateUpdate,
     TierSummary, OrdinalTierCreate, RangeTierCreate,
     PeriodPayLineCreate, PeriodPayLineUpdate,
+    BonusEventCreate, BonusEventUpdate, BonusEventResponse, BonusEventPreviewEntry,
     DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
     DriverRateMatrix, RateMatrixGroup, RateMatrixCurrentRate,
     BatchRateRequest, BatchRateSaveResult,
@@ -137,28 +138,35 @@ async def _write_line_audit(
     action_code: str,
     old_value: dict | None = None,
     new_value: dict | None = None,
+    entity_name: str = "PayrollDraftLines",
 ) -> None:
     """
-    Insert one row into audit.AuditLog for a draft-line or period-pay mutation.
+    Insert one row into audit.AuditLog for a draft-line, period-pay, or bonus-event mutation.
 
     Known action codes:
-      DRAFT_LINE_ADDED    — new draft line inserted
-      DRAFT_LINE_UPDATED  — draft line fields changed
-      DRAFT_LINE_VOIDED   — draft line status set to Void
-      PERIOD_PAY_ADDED    — new period-pay line inserted
-      PERIOD_PAY_UPDATED  — period-pay line fields changed
-      PERIOD_PAY_VOIDED   — period-pay line status set to Void
+      DRAFT_LINE_ADDED      — new draft line inserted
+      DRAFT_LINE_UPDATED    — draft line fields changed
+      DRAFT_LINE_VOIDED     — draft line status set to Void
+      PERIOD_PAY_ADDED      — new period-pay line inserted
+      PERIOD_PAY_UPDATED    — period-pay line fields changed
+      PERIOD_PAY_VOIDED     — period-pay line status set to Void
+      BONUS_EVENT_ADDED     — new canonical bonus event created (CP-3A)
+      BONUS_EVENT_UPDATED   — bonus event fields changed (CP-3A)
+      BONUS_EVENT_VOIDED    — bonus event voided (CP-3A)
 
     Module-level so tests can monkeypatch it to verify that all preceding
     writes roll back when this raises.
     """
     _LINE_AUDIT_REASONS: dict[str, str] = {
-        "DRAFT_LINE_ADDED":   "Draft line added",
-        "DRAFT_LINE_UPDATED": "Draft line updated",
-        "DRAFT_LINE_VOIDED":  "Draft line voided",
-        "PERIOD_PAY_ADDED":   "Period pay line added",
-        "PERIOD_PAY_UPDATED": "Period pay line updated",
-        "PERIOD_PAY_VOIDED":  "Period pay line voided",
+        "DRAFT_LINE_ADDED":    "Draft line added",
+        "DRAFT_LINE_UPDATED":  "Draft line updated",
+        "DRAFT_LINE_VOIDED":   "Draft line voided",
+        "PERIOD_PAY_ADDED":    "Period pay line added",
+        "PERIOD_PAY_UPDATED":  "Period pay line updated",
+        "PERIOD_PAY_VOIDED":   "Period pay line voided",
+        "BONUS_EVENT_ADDED":   "Bonus event added",
+        "BONUS_EVENT_UPDATED": "Bonus event updated",
+        "BONUS_EVENT_VOIDED":  "Bonus event voided",
     }
     await db.execute(
         text("""
@@ -168,7 +176,7 @@ async def _write_line_audit(
                  oldvaluejson, newvaluejson, reason, sourcetype)
             VALUES
                 (:cid, :bid, :uid, :action_code,
-                 'payroll', 'PayrollDraftLines', :eid,
+                 'payroll', :entity_name, :eid,
                  :old_val, :new_val, :reason, 'Application')
         """),
         {
@@ -176,6 +184,7 @@ async def _write_line_audit(
             "bid":         branch_id,
             "uid":         user_id,
             "action_code": action_code,
+            "entity_name": entity_name,
             "eid":         str(line_id),
             "old_val":     json.dumps(old_value)  if old_value  is not None else None,
             "new_val":     json.dumps(new_value)  if new_value  is not None else None,
@@ -1011,10 +1020,19 @@ async def change_period_status(
         )
 
         # Guard 1: empty period — refuse to submit a period with no payroll data.
+        # CP-3A: count non-BONUS DraftLines + Active BonusEvents (BONUS DraftLines
+        # are no longer used; bonus data lives in PayrollBonusEvents).
         empty_result = await db.execute(
             text("""
-                SELECT COUNT(*) FROM payroll.payrolldraftlines
-                WHERE  payrollperiodid = :pid AND companyid = :cid AND status != 'Void'
+                SELECT (
+                    SELECT COUNT(*) FROM payroll.payrolldraftlines
+                    WHERE  payrollperiodid = :pid AND companyid = :cid
+                      AND  status != 'Void' AND linetype != 'BONUS'
+                ) + (
+                    SELECT COUNT(*) FROM payroll.payrollbonusevents
+                    WHERE  payrollperiodid = :pid AND companyid = :cid
+                      AND  status = 'Active'
+                ) AS total_lines
             """),
             {"pid": period_id, "cid": company_id},
         )
@@ -1524,10 +1542,18 @@ async def resubmit_period(
     )
 
     # Guard 1: empty period.
+    # CP-3A: count non-BONUS DraftLines + Active BonusEvents.
     empty_result = await db.execute(
         text("""
-            SELECT COUNT(*) FROM payroll.payrolldraftlines
-            WHERE  payrollperiodid = :pid AND companyid = :cid AND status != 'Void'
+            SELECT (
+                SELECT COUNT(*) FROM payroll.payrolldraftlines
+                WHERE  payrollperiodid = :pid AND companyid = :cid
+                  AND  status != 'Void' AND linetype != 'BONUS'
+            ) + (
+                SELECT COUNT(*) FROM payroll.payrollbonusevents
+                WHERE  payrollperiodid = :pid AND companyid = :cid
+                  AND  status = 'Active'
+            ) AS total_lines
         """),
         {"pid": period_id, "cid": company_id},
     )
@@ -4420,15 +4446,26 @@ async def finalize_period(
     )
 
     # Step 1.7 — empty-period guard: refuse to lock a period with no payroll data.
+    # CP-3A: Count includes non-BONUS DraftLines + active PayrollBonusEvents.
+    # BONUS DraftLines are excluded (they finalize via PayrollBonusEvents now).
     # This check runs BEFORE the atomic claim so no DB side-effects are produced
     # when the period has no lines (the claim UPDATE is simply never executed).
     count_result = await db.execute(
         text("""
-            SELECT COUNT(*)
-            FROM   payroll.payrolldraftlines
-            WHERE  payrollperiodid = :period_id
-              AND  companyid       = :company_id
-              AND  status         != 'Void'
+            SELECT (
+                SELECT COUNT(*)
+                FROM   payroll.payrolldraftlines
+                WHERE  payrollperiodid = :period_id
+                  AND  companyid       = :company_id
+                  AND  status         != 'Void'
+                  AND  linetype       != 'BONUS'
+            ) + (
+                SELECT COUNT(*)
+                FROM   payroll.payrollbonusevents
+                WHERE  payrollperiodid = :period_id
+                  AND  companyid       = :company_id
+                  AND  status          = 'Active'
+            ) AS total_lines
         """),
         {"period_id": period_id, "company_id": company_id},
     )
@@ -4513,6 +4550,7 @@ async def finalize_period(
             WHERE  dl.payrollperiodid    = :period_id
               AND  dl.companyid          = :company_id
               AND  dl.status            != 'Void'
+              AND  dl.linetype          != 'BONUS'
               AND  dl.needsmanagerreview  = FALSE
               AND  dl.calculatedamount   IS NULL
               AND  (
@@ -4540,10 +4578,11 @@ async def finalize_period(
                     )
                 )
                 OR
-                -- (c) M14 Period Pay lines (LineScope='Period'): calculatedamount is
-                -- always set at entry time for EnteredAmount/Fixed behaviors.
+                -- (c) Non-BONUS Period Pay lines (LineScope='Period'): calculatedamount
+                -- is always set at entry time for EnteredAmount/Fixed behaviors.
                 -- A NULL calc on a period pay line means the row is malformed/legacy.
                 -- Block finalization — silent zero fallback must never occur.
+                -- CP-3A: BONUS DraftLines are excluded (handled by PayrollBonusEvents).
                 dl.linescope = 'Period'
               )
         """),
@@ -4738,12 +4777,69 @@ async def finalize_period(
             WHERE  dl.payrollperiodid = :period_id
               AND  dl.companyid       = :company_id
               AND  dl.status         != 'Void'
+              AND  dl.linetype       != 'BONUS'
         """),
         {
             "approved_by":   user_id,
             "period_id":     period_id,
             "company_id":    company_id,
             "period_start":  period.start_date,
+        },
+    )
+
+    # Step 3-bonus (CP-3A) — INSERT active PayrollBonusEvents into the final ledger.
+    # These are not sourced from DraftLines; they have their own source type and a
+    # BonusEventID FK.  SourceSnapshot records the bonus event metadata for audit.
+    await db.execute(
+        text("""
+            INSERT INTO payroll.payrollfinallines
+                (companyid, branchid, payrollperiodid, draftlineid, bonuseventid,
+                 driverid, workdate, linetype, linescope, quantity, rateamount,
+                 finalamount, sourcetype, approvedbyuserid, approvedatutc,
+                 lockedatutc, notes, payitemid, ratebehavior, sourcesnapshot)
+            SELECT
+                be.companyid,
+                be.branchid,
+                be.payrollperiodid,
+                NULL                AS draftlineid,
+                be.payrollbonuseventid,
+                be.driverid,
+                NULL                AS workdate,
+                'BONUS'             AS linetype,
+                'Period'            AS linescope,
+                1                   AS quantity,
+                NULL                AS rateamount,
+                be.amount           AS finalamount,
+                'BonusEvent'        AS sourcetype,
+                :approved_by        AS approvedbyuserid,
+                NOW()               AS approvedatutc,
+                NOW()               AS lockedatutc,
+                be.notes,
+                pi_sub.payitemid,
+                'Fixed'             AS ratebehavior,
+                JSONB_STRIP_NULLS(JSONB_BUILD_OBJECT(
+                    'bonus_event_id',      be.payrollbonuseventid,
+                    'reason',              be.reason,
+                    'source_draft_line_id', be.sourcedraftlineid,
+                    'finalized_at',        NOW()
+                ))                  AS sourcesnapshot
+            FROM payroll.payrollbonusevents be
+            LEFT JOIN LATERAL (
+                SELECT pi.payitemid
+                FROM   payroll.payitems pi
+                WHERE  pi.payitemcode = 'BONUS'
+                  AND  (pi.companyid IS NULL OR pi.companyid = be.companyid)
+                ORDER BY pi.companyid NULLS LAST
+                LIMIT 1
+            ) pi_sub ON true
+            WHERE be.payrollperiodid = :period_id
+              AND be.companyid       = :company_id
+              AND be.status          = 'Active'
+        """),
+        {
+            "approved_by": user_id,
+            "period_id":   period_id,
+            "company_id":  company_id,
         },
     )
 
@@ -5128,14 +5224,23 @@ async def get_finalization_preview(
         period_id, company_id, period.start_date, db
     )
 
-    # ── Blocker 1: empty period ──────────────────────────────────────────────
+    # ── Blocker 1: empty period (CP-3A: non-BONUS DraftLines + Active BonusEvents)
     count_result = await db.execute(
         text("""
-            SELECT COUNT(*)
-            FROM   payroll.payrolldraftlines
-            WHERE  payrollperiodid = :period_id
-              AND  companyid       = :company_id
-              AND  status         != 'Void'
+            SELECT (
+                SELECT COUNT(*)
+                FROM   payroll.payrolldraftlines
+                WHERE  payrollperiodid = :period_id
+                  AND  companyid       = :company_id
+                  AND  status         != 'Void'
+                  AND  linetype       != 'BONUS'
+            ) + (
+                SELECT COUNT(*)
+                FROM   payroll.payrollbonusevents
+                WHERE  payrollperiodid = :period_id
+                  AND  companyid       = :company_id
+                  AND  status          = 'Active'
+            ) AS total_lines
         """),
         {"period_id": period_id, "company_id": company_id},
     )
@@ -5144,7 +5249,7 @@ async def get_finalization_preview(
             "No payroll lines: the period has no non-voided draft lines."
         )
 
-    # ── Load all non-Void draft lines ────────────────────────────────────────
+    # ── Load all non-Void, non-BONUS draft lines (CP-3A: BONUS sourced from BonusEvents)
     lines_result = await db.execute(
         text("""
             SELECT
@@ -5164,11 +5269,45 @@ async def get_finalization_preview(
             WHERE  dl.payrollperiodid = :period_id
               AND  dl.companyid       = :company_id
               AND  dl.status         != 'Void'
+              AND  dl.linetype       != 'BONUS'
             ORDER BY dl.driverid, dl.workdate NULLS LAST, dl.draftlineid
         """),
         {"period_id": period_id, "company_id": company_id},
     )
     raw_lines = lines_result.mappings().fetchall()
+
+    # ── Load Active bonus events (CP-3A) ─────────────────────────────────────
+    bonus_result = await db.execute(
+        text("""
+            SELECT
+                be.payrollbonuseventid,
+                be.driverid,
+                e.fullname  AS drivername,
+                be.amount,
+                be.reason,
+                be.notes
+            FROM   payroll.payrollbonusevents be
+            LEFT JOIN core.drivers   d ON d.driverid   = be.driverid
+            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            WHERE  be.payrollperiodid = :period_id
+              AND  be.companyid       = :company_id
+              AND  be.status          = 'Active'
+            ORDER BY be.driverid, be.payrollbonuseventid
+        """),
+        {"period_id": period_id, "company_id": company_id},
+    )
+    raw_bonuses = bonus_result.mappings().fetchall()
+    bonus_events_preview: list[BonusEventPreviewEntry] = [
+        BonusEventPreviewEntry(
+            bonus_event_id=int(b["payrollbonuseventid"]),
+            driver_id=int(b["driverid"]),
+            driver_name=b["drivername"],
+            amount=Decimal(str(b["amount"])),
+            reason=b["reason"],
+            notes=b["notes"],
+        )
+        for b in raw_bonuses
+    ]
 
     # ── Build preview_lines using refreshed (virtual) calculations ───────────
     # For lines in refreshed_calcs, use the virtually-refreshed calc + NMR
@@ -5234,9 +5373,11 @@ async def get_finalization_preview(
     # ── Blocker 3: zero-calculation guard (from refreshed preview) ───────────
     # Mirrors finalize_period Step 1.8.  A line is "unresolved" (would
     # finalize as zero) when, after virtual refresh:
-    #   • Period-scope with no calc (BONUS entered as $0, etc.)
+    #   • Period-scope with no calc (period pay with NULL calculatedamount)
     #   • Rate-dependent AND no calc AND no rate_amount fallback
     #     (rate_amount IS NOT NULL → COALESCE(calc, qty×rate) is non-zero)
+    # CP-3A: BONUS DraftLines are excluded from preview_lines entirely;
+    # bonus amounts come from bonus_events_preview (always have a positive amount).
     zero_unresolved = 0
     for pl in preview_lines:
         if pl.needs_manager_review:
@@ -5293,6 +5434,17 @@ async def get_finalization_preview(
             driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amt
         else:  # Period
             driver_period[drv] = driver_period.get(drv, Decimal("0")) + amt
+
+    # ── Add bonus event amounts to driver_period (CP-3A) ────────────────────
+    # Bonus events are finalized as Period-scope lines.  Add their amounts to
+    # driver_period so that Min/Max and gross totals are computed identically
+    # to what finalize_period will produce.  (CP-3C known debt: BONUS still
+    # enters the min/max base here — fix in CP-3C.)
+    for be in bonus_events_preview:
+        drv = be.driver_id
+        driver_names.setdefault(drv, be.driver_name)
+        driver_counts[drv] = driver_counts.get(drv, 0) + 1
+        driver_period[drv] = driver_period.get(drv, Decimal("0")) + be.amount
 
     all_driver_ids = set(driver_daily) | set(driver_period)
 
@@ -5416,10 +5568,12 @@ async def get_finalization_preview(
         driver_totals=driver_totals,
         sys_adjustments=sys_adjustments,
         lines=preview_lines,
+        bonus_events=bonus_events_preview,
+        bonus_event_count=len(bonus_events_preview),
         total_final_gross=total_final_gross,
         draft_line_count=len(preview_lines),
         sys_adjustment_count=len(sys_adjustments),
-        final_line_count_estimate=len(preview_lines) + len(sys_adjustments),
+        final_line_count_estimate=len(preview_lines) + len(sys_adjustments) + len(bonus_events_preview),
         driver_count=len(all_driver_ids),
     )
 
@@ -7667,19 +7821,6 @@ async def _validate_period_line_type(
       7. Rate behavior guard — must be EnteredAmount or Fixed (not Calculated).
       8. Branch activation check.
     """
-    # --- 0. Manual ADJUSTMENT is not designed for this release ---
-    # Normalise first so both "Adjustment" and "ADJUSTMENT" are caught.
-    _early_canonical = _LEGACY_TO_CANONICAL.get(line_type, line_type)
-    if _early_canonical == "ADJUSTMENT":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Manual Adjustment period pay is not supported in this version. "
-                "Use Bonus (BONUS) for discretionary period-level pay. "
-                "Adjustment will be available in a future release."
-            ),
-        )
-
     # --- 1. Blocked codes (GuaranteedMinimum, SYS lines) ---
     if line_type in _SYSTEM_PERIOD_BLOCKED:
         raise HTTPException(
@@ -7905,6 +8046,18 @@ async def add_period_pay_line(
     # CP-0: Normalise to canonical PayItemCode before validation and storage.
     canonical_period_lt: str = _LEGACY_TO_CANONICAL.get(data.line_type, data.line_type)
 
+    # CP-3A: BONUS is now a canonical bonus event, not a generic period pay line.
+    # All bonus creation must go through POST /payroll/periods/{id}/bonuses.
+    if canonical_period_lt == "BONUS":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "BONUS lines must be added through the canonical Bonus Events API: "
+                f"POST /payroll/periods/{period_id}/bonuses. "
+                "The period-pay path no longer accepts BONUS line type (CP-3A)."
+            ),
+        )
+
     # Validate the line type (scope, status, behavior, branch activation).
     # Use period.start_date as the effective date so backdated and future periods
     # validate against the period date, not CURRENT_DATE.
@@ -8003,6 +8156,7 @@ async def get_period_pay_lines(
         "dl.payrollperiodid = :period_id",
         "dl.companyid       = :company_id",
         "dl.linescope       = 'Period'",    # period pay lines only
+        "dl.linetype        != 'BONUS'",    # CP-3A: BONUS is canonical bonus events, not period-pay
     ]
     params: dict[str, Any] = {"period_id": period_id, "company_id": company_id}
 
@@ -8063,6 +8217,14 @@ async def update_period_pay_line(
         raise HTTPException(
             status_code=422,
             detail="ADJUSTMENT lines cannot be modified. Use the standard payroll entry workflow.",
+        )
+    if line.line_type.upper() == "BONUS":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "BONUS lines cannot be modified through /period-pay. "
+                f"Use PATCH /payroll/periods/{period_id}/bonuses/<bonus_event_id> (CP-3A)."
+            ),
         )
 
     fields: dict[str, Any] = {}
@@ -8174,6 +8336,14 @@ async def void_period_pay_line(
             status_code=422,
             detail="This line is a daily line, not a Period Pay line. Use the daily line endpoint.",
         )
+    if line.line_type.upper() == "BONUS":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "BONUS lines cannot be voided through /period-pay. "
+                f"Use DELETE /payroll/periods/{period_id}/bonuses/<bonus_event_id> (CP-3A)."
+            ),
+        )
 
     # Idempotent: already voided → return as-is
     if line.status != "Void":
@@ -8199,6 +8369,378 @@ async def void_period_pay_line(
         )
 
     return await _get_line_by_id(line_id, company_id, db)
+
+
+# ---------------------------------------------------------------------------
+# CP-3A: Canonical Bonus Event CRUD
+# ---------------------------------------------------------------------------
+
+_BONUS_ENTRY_ALLOWED_STATUSES: set[str] = {"Open", "Returned"}
+
+
+async def _get_bonus_event_by_id(
+    bonus_event_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> BonusEventResponse:
+    result = await db.execute(
+        text("""
+            SELECT
+                be.payrollbonuseventid,
+                be.payrollperiodid,
+                be.companyid,
+                be.branchid,
+                be.driverid,
+                be.amount,
+                be.reason,
+                be.notes,
+                be.status,
+                be.datarevision,
+                be.sourcedraftlineid,
+                be.voidedbyuserid,
+                be.voidedatutc,
+                be.voidreason,
+                be.createdbyuserid,
+                be.createdatutc,
+                be.updatedbyuserid,
+                be.updatedatutc
+            FROM payroll.payrollbonusevents be
+            WHERE be.payrollbonuseventid = :beid
+              AND be.companyid           = :company_id
+        """),
+        {"beid": bonus_event_id, "company_id": company_id},
+    )
+    row = result.mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Bonus event not found.")
+    return BonusEventResponse(
+        bonus_event_id=int(row["payrollbonuseventid"]),
+        period_id=int(row["payrollperiodid"]),
+        company_id=int(row["companyid"]),
+        branch_id=int(row["branchid"]),
+        driver_id=int(row["driverid"]),
+        amount=Decimal(str(row["amount"])),
+        reason=row["reason"],
+        notes=row["notes"],
+        status=row["status"],
+        data_revision=int(row["datarevision"]),
+        source_draft_line_id=row["sourcedraftlineid"],
+        voided_by_user_id=row["voidedbyuserid"],
+        voided_at_utc=row["voidedatutc"],
+        void_reason=row["voidreason"],
+        created_by_user_id=row["createdbyuserid"],
+        created_at_utc=row["createdatutc"],
+        updated_by_user_id=row["updatedbyuserid"],
+        updated_at_utc=row["updatedatutc"],
+    )
+
+
+async def list_bonus_events(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    driver_id: int | None = None,
+) -> list[BonusEventResponse]:
+    await _require_not_driver_role(company_id, user_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+    await _check_permission(company_id, user_id, period.branch_id, "payroll.view", db)
+
+    params: dict = {"period_id": period_id, "company_id": company_id}
+    driver_filter = ""
+    if driver_id is not None:
+        driver_filter = "AND be.driverid = :driver_id"
+        params["driver_id"] = driver_id
+
+    result = await db.execute(
+        text(f"""
+            SELECT
+                be.payrollbonuseventid,
+                be.payrollperiodid,
+                be.companyid,
+                be.branchid,
+                be.driverid,
+                be.amount,
+                be.reason,
+                be.notes,
+                be.status,
+                be.datarevision,
+                be.sourcedraftlineid,
+                be.voidedbyuserid,
+                be.voidedatutc,
+                be.voidreason,
+                be.createdbyuserid,
+                be.createdatutc,
+                be.updatedbyuserid,
+                be.updatedatutc
+            FROM payroll.payrollbonusevents be
+            WHERE be.payrollperiodid = :period_id
+              AND be.companyid       = :company_id
+              {driver_filter}
+            ORDER BY be.driverid, be.payrollbonuseventid
+        """),
+        params,
+    )
+    rows = result.mappings().fetchall()
+    return [
+        BonusEventResponse(
+            bonus_event_id=int(r["payrollbonuseventid"]),
+            period_id=int(r["payrollperiodid"]),
+            company_id=int(r["companyid"]),
+            branch_id=int(r["branchid"]),
+            driver_id=int(r["driverid"]),
+            amount=Decimal(str(r["amount"])),
+            reason=r["reason"],
+            notes=r["notes"],
+            status=r["status"],
+            data_revision=int(r["datarevision"]),
+            source_draft_line_id=r["sourcedraftlineid"],
+            voided_by_user_id=r["voidedbyuserid"],
+            voided_at_utc=r["voidedatutc"],
+            void_reason=r["voidreason"],
+            created_by_user_id=r["createdbyuserid"],
+            created_at_utc=r["createdatutc"],
+            updated_by_user_id=r["updatedbyuserid"],
+            updated_at_utc=r["updatedatutc"],
+        )
+        for r in rows
+    ]
+
+
+async def create_bonus_event(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    data: "BonusEventCreate",
+    db: AsyncConnection,
+) -> BonusEventResponse:
+    await _require_not_driver_role(company_id, user_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Bonus events can only be added to Open or Returned periods. "
+                f"Current status: '{period.status}'."
+            ),
+        )
+
+    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+
+    # CP-3A: same snapshot-aware eligibility guard as non-BONUS period-pay.
+    await _assert_driver_eligible_for_period_via_snapshot(
+        company_id, period.branch_id, period_id, data.driver_id, db
+    )
+
+    await _lock_period_for_mutation(period_id, company_id, db)
+
+    insert_result = await db.execute(
+        text("""
+            INSERT INTO payroll.payrollbonusevents
+                (companyid, branchid, payrollperiodid, driverid,
+                 amount, reason, notes, status,
+                 createdbyuserid, createdatutc, datarevision)
+            VALUES
+                (:company_id, :branch_id, :period_id, :driver_id,
+                 :amount, :reason, :notes, 'Active',
+                 :user_id, NOW(), 1)
+            RETURNING payrollbonuseventid
+        """),
+        {
+            "company_id": company_id,
+            "branch_id":  period.branch_id,
+            "period_id":  period_id,
+            "driver_id":  data.driver_id,
+            "amount":     data.amount,
+            "reason":     data.reason,
+            "notes":      data.notes,
+            "user_id":    user_id,
+        },
+    )
+    new_id = insert_result.scalar_one()
+
+    await _write_line_audit(
+        db,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        user_id=user_id,
+        line_id=new_id,
+        action_code="BONUS_EVENT_ADDED",
+        old_value=None,
+        new_value={"driver_id": data.driver_id, "amount": str(data.amount)},
+        entity_name="PayrollBonusEvents",
+    )
+
+    return await _get_bonus_event_by_id(new_id, company_id, db)
+
+
+async def update_bonus_event(
+    period_id: int,
+    bonus_event_id: int,
+    company_id: int,
+    user_id: int,
+    data: "BonusEventUpdate",
+    db: AsyncConnection,
+) -> BonusEventResponse:
+    await _require_not_driver_role(company_id, user_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Bonus events can only be updated on Open or Returned periods. "
+                f"Current status: '{period.status}'."
+            ),
+        )
+
+    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+
+    event = await _get_bonus_event_by_id(bonus_event_id, company_id, db)
+    if event.period_id != period_id:
+        raise HTTPException(status_code=404, detail="Bonus event not found in this period.")
+    if event.status == "Voided":
+        raise HTTPException(status_code=422, detail="Cannot update a voided bonus event.")
+
+    # Optimistic concurrency: if caller provided data_revision, it must match.
+    if data.data_revision is not None and data.data_revision != event.data_revision:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Bonus event has been modified by another request. "
+                f"Expected revision {data.data_revision}, found {event.data_revision}. "
+                "Re-fetch and retry."
+            ),
+        )
+
+    # Build SET clause dynamically — only update provided fields.
+    set_parts = ["updatedbyuserid = :user_id", "updatedatutc = NOW()",
+                 "datarevision = datarevision + 1"]
+    params: dict = {
+        "beid": bonus_event_id,
+        "company_id": company_id,
+        "period_id": period_id,
+        "user_id": user_id,
+    }
+    old_snap: dict = {}
+    new_snap: dict = {}
+
+    if data.amount is not None:
+        set_parts.append("amount = :amount")
+        params["amount"] = data.amount
+        old_snap["amount"] = str(event.amount)
+        new_snap["amount"] = str(data.amount)
+    if data.reason is not None:
+        set_parts.append("reason = :reason")
+        params["reason"] = data.reason
+        old_snap["reason"] = event.reason
+        new_snap["reason"] = data.reason
+    if data.notes is not None:
+        set_parts.append("notes = :notes")
+        params["notes"] = data.notes
+        old_snap["notes"] = event.notes
+        new_snap["notes"] = data.notes
+
+    if not (old_snap or new_snap):
+        # No-op update — return current state unchanged.
+        return event
+
+    await _lock_period_for_mutation(period_id, company_id, db)
+
+    set_clause = ", ".join(set_parts)
+    await db.execute(
+        text(f"""
+            UPDATE payroll.payrollbonusevents
+            SET    {set_clause}
+            WHERE  payrollbonuseventid = :beid
+              AND  companyid           = :company_id
+              AND  payrollperiodid     = :period_id
+        """),
+        params,
+    )
+
+    await _write_line_audit(
+        db,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        user_id=user_id,
+        line_id=bonus_event_id,
+        action_code="BONUS_EVENT_UPDATED",
+        old_value=old_snap,
+        new_value=new_snap,
+        entity_name="PayrollBonusEvents",
+    )
+
+    return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
+
+
+async def void_bonus_event(
+    period_id: int,
+    bonus_event_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> BonusEventResponse:
+    await _require_not_driver_role(company_id, user_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Bonus events can only be voided on Open or Returned periods. "
+                f"Current status: '{period.status}'."
+            ),
+        )
+
+    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+
+    event = await _get_bonus_event_by_id(bonus_event_id, company_id, db)
+    if event.period_id != period_id:
+        raise HTTPException(status_code=404, detail="Bonus event not found in this period.")
+
+    # Idempotent: already voided → return as-is.
+    if event.status == "Voided":
+        return event
+
+    await _lock_period_for_mutation(period_id, company_id, db)
+
+    await db.execute(
+        text("""
+            UPDATE payroll.payrollbonusevents
+            SET    status          = 'Voided',
+                   voidedbyuserid  = :user_id,
+                   voidedatutc     = NOW(),
+                   updatedbyuserid = :user_id,
+                   updatedatutc    = NOW(),
+                   datarevision    = datarevision + 1
+            WHERE  payrollbonuseventid = :beid
+              AND  companyid           = :company_id
+              AND  payrollperiodid     = :period_id
+        """),
+        {
+            "beid":       bonus_event_id,
+            "company_id": company_id,
+            "period_id":  period_id,
+            "user_id":    user_id,
+        },
+    )
+
+    await _write_line_audit(
+        db,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        user_id=user_id,
+        line_id=bonus_event_id,
+        action_code="BONUS_EVENT_VOIDED",
+        old_value={"status": "Active"},
+        new_value={"status": "Voided"},
+        entity_name="PayrollBonusEvents",
+    )
+
+    return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
 
 
 # ---------------------------------------------------------------------------

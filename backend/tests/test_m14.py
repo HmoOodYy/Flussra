@@ -257,21 +257,17 @@ class TestPeriodPayCreate:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """POST Bonus period pay line → 201, WorkDate=None, calc=amount, review=False."""
+        """CP-3A: POST Bonus via period-pay → 422 with redirect to /bonuses."""
         pid = m14_open_period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "250.00"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 201, resp.text
-        line = resp.json()
-        assert line["work_date"] is None
-        assert Decimal(line["calculated_amount"]) == Decimal("250.00")
-        assert line["quantity"] == "1.0000"
-        assert line["rate_amount"] is None
-        assert line["needs_manager_review"] is False
-        assert line["status"] == "Active"
+        assert resp.status_code == 422, resp.text
+        assert "/bonuses" in resp.json()["detail"], (
+            f"Expected redirect to /bonuses in detail; got: {resp.json()['detail']}"
+        )
 
     async def test_add_adjustment_negative_amount(
         self,
@@ -315,7 +311,7 @@ class TestPeriodPayCreate:
         m14_open_period: dict,
         m14_custom_period_item: dict,
     ):
-        """POST a Period item (system BONUS) → 201. Custom Period items are no longer supported."""
+        """CP-3A: POST Bonus (system BONUS via period-pay) is blocked → 422 with redirect."""
         pid = m14_open_period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
@@ -325,11 +321,8 @@ class TestPeriodPayCreate:
                   "notes": "Safety bonus Q1"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 201, resp.text
-        line = resp.json()
-        assert Decimal(line["calculated_amount"]) == Decimal("100.00")
-        assert line["notes"] == "Safety bonus Q1"
-        assert line["work_date"] is None
+        assert resp.status_code == 422, resp.text
+        assert "/bonuses" in resp.json()["detail"]
 
     async def test_zero_amount_rejected(
         self,
@@ -339,15 +332,15 @@ class TestPeriodPayCreate:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """amount=0 is rejected with 422 (schema-level validation)."""
+        """CP-3A: amount=0 is rejected by the /bonuses endpoint (schema-level validation)."""
         pid = m14_open_period["payroll_period_id"]
         resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "0"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "0"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
-        assert "non-zero" in resp.text.lower() or "zero" in resp.text.lower()
+        assert "positive" in resp.text.lower() or "zero" in resp.text.lower()
 
     async def test_daily_item_rejected(
         self,
@@ -447,29 +440,45 @@ class TestPeriodPayCreate:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
+        paytest_branch_id: int,
         m14_open_period: dict,
-        m14_bonus_activated,
+        direct_db,
     ):
-        """Period pay lines (WorkDate=NULL) do not appear in GET /periods/{id}/lines."""
+        """CP-3A: Period-scope DraftLines (WorkDate=NULL) do not appear in /lines.
+        Uses direct-DB injection of a non-BONUS Period line (BONUS is now canonical)."""
+        from sqlalchemy import text as _text
+
         pid = m14_open_period["payroll_period_id"]
 
-        # Add a period pay line
-        add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "50.00"},
-            headers=auth(auth_token),
+        # Inject a non-BONUS Period-scope DraftLine directly (ADJUSTMENT, legacy type)
+        result = await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrolldraftlines
+                    (companyid, branchid, payrollperiodid, driverid,
+                     workdate, linetype, linescope, calculatedamount,
+                     sourcetype, status, needsmanagerreview, addedbyuserid)
+                VALUES
+                    ((SELECT companyid FROM core.branches WHERE branchid = :bid),
+                     :bid, :pid, :did,
+                     NULL, 'Adjustment', 'Period', 50.00,
+                     'Manual', 'Active', FALSE,
+                     (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
+                RETURNING draftlineid
+            """),
+            {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id},
         )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
+        row = result.mappings().first()
+        assert row is not None
+        line_id = row["draftlineid"]
 
-        # The daily lines endpoint must NOT include this period pay line
+        # The daily lines endpoint must NOT include this period-scope line
         daily = await session_client.get(
             f"/payroll/periods/{pid}/lines", headers=auth(auth_token)
         )
         assert daily.status_code == 200
         daily_ids = [l["draft_line_id"] for l in daily.json()]
         assert line_id not in daily_ids, (
-            "Period pay line (WorkDate=NULL) must not appear in /lines endpoint"
+            "Period-scope DraftLine (WorkDate=NULL) must not appear in /lines endpoint"
         )
 
         # But it must appear in GET /period-pay
@@ -496,25 +505,25 @@ class TestPeriodPayUpdate:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """PATCH amount → CalculatedAmount updated to new value immediately."""
+        """CP-3A: PATCH /bonuses amount → amount updated to new value immediately."""
         pid = m14_open_period["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "100.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "100.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
-        assert Decimal(add.json()["calculated_amount"]) == Decimal("100.00")
+        assert add.status_code == 201, add.text
+        event_id = add.json()["bonus_event_id"]
+        assert Decimal(add.json()["amount"]) == Decimal("100.00")
 
         patch = await session_client.patch(
-            f"/payroll/periods/{pid}/period-pay/{line_id}",
+            f"/payroll/periods/{pid}/bonuses/{event_id}",
             json={"amount": "200.00"},
             headers=auth(auth_token),
         )
         assert patch.status_code == 200, patch.text
-        assert Decimal(patch.json()["calculated_amount"]) == Decimal("200.00")
+        assert Decimal(patch.json()["amount"]) == Decimal("200.00")
 
     async def test_update_to_zero_rejected(
         self,
@@ -524,19 +533,19 @@ class TestPeriodPayUpdate:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """PATCH amount=0 is rejected (schema-level validation)."""
+        """CP-3A: PATCH /bonuses amount=0 is rejected (schema-level validation)."""
         pid = m14_open_period["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "100.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "100.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
+        assert add.status_code == 201, add.text
+        event_id = add.json()["bonus_event_id"]
 
         patch = await session_client.patch(
-            f"/payroll/periods/{pid}/period-pay/{line_id}",
+            f"/payroll/periods/{pid}/bonuses/{event_id}",
             json={"amount": "0"},
             headers=auth(auth_token),
         )
@@ -550,25 +559,25 @@ class TestPeriodPayUpdate:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """PATCH notes only → amount unchanged, notes updated."""
+        """CP-3A: PATCH /bonuses notes only → amount unchanged, notes updated."""
         pid = m14_open_period["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "25.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "25.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
-        original_calc = add.json()["calculated_amount"]
+        assert add.status_code == 201, add.text
+        event_id = add.json()["bonus_event_id"]
+        original_amount = add.json()["amount"]
 
         patch = await session_client.patch(
-            f"/payroll/periods/{pid}/period-pay/{line_id}",
+            f"/payroll/periods/{pid}/bonuses/{event_id}",
             json={"notes": "Fuel bonus correction"},
             headers=auth(auth_token),
         )
         assert patch.status_code == 200
-        assert patch.json()["calculated_amount"] == original_calc
+        assert patch.json()["amount"] == original_amount
         assert patch.json()["notes"] == "Fuel bonus correction"
 
     async def test_update_nonexistent_line_is_404(
@@ -708,29 +717,24 @@ class TestPeriodPayUpdate:
         m14_bonus_activated,
         m14_open_period: dict,
     ):
-        """
-        Confirm the ADJUSTMENT block does not regress BONUS line updates.
-        A normal BONUS line must still be patchable (regression guard).
-        """
+        """CP-3A: BONUS via /period-pay is blocked with a clear redirect message.
+        The ADJUSTMENT block and the BONUS redirect are separate 422 guards."""
         pid = m14_open_period["payroll_period_id"]
 
-        add = await session_client.post(
+        resp = await session_client.post(
             f"/payroll/periods/{pid}/period-pay",
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "100.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201, f"Create Bonus line: {add.text}"
-        line_id = add.json()["draft_line_id"]
-
-        patch = await session_client.patch(
-            f"/payroll/periods/{pid}/period-pay/{line_id}",
-            json={"amount": "150.00"},
-            headers=auth(auth_token),
+        assert resp.status_code == 422, (
+            f"BONUS via /period-pay must be blocked (CP-3A); got {resp.status_code}: {resp.text}"
         )
-        assert patch.status_code == 200, (
-            f"BONUS line update must still work after ADJUSTMENT block; got {patch.status_code}: {patch.text}"
+        detail = resp.json()["detail"]
+        assert "/bonuses" in detail, f"Expected redirect to /bonuses; got: {detail}"
+        # Ensure the ADJUSTMENT block message is not shown (separate guard)
+        assert "adjustment" not in detail.lower(), (
+            f"BONUS block must not mention ADJUSTMENT; got: {detail}"
         )
-        assert Decimal(patch.json()["calculated_amount"]) == Decimal("150.00")
 
 
 # ===========================================================================
@@ -748,23 +752,23 @@ class TestPeriodPayVoid:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """DELETE a period pay line → status becomes 'Void'."""
+        """CP-3A: DELETE /bonuses/{id} → status becomes 'Voided'."""
         pid = m14_open_period["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "50.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "50.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
+        assert add.status_code == 201, add.text
+        event_id = add.json()["bonus_event_id"]
 
         void_resp = await session_client.delete(
-            f"/payroll/periods/{pid}/period-pay/{line_id}",
+            f"/payroll/periods/{pid}/bonuses/{event_id}",
             headers=auth(auth_token),
         )
         assert void_resp.status_code == 200
-        assert void_resp.json()["status"] == "Void"
+        assert void_resp.json()["status"] == "Voided"
 
     async def test_void_idempotent(
         self,
@@ -774,30 +778,30 @@ class TestPeriodPayVoid:
         m14_open_period: dict,
         m14_bonus_activated,
     ):
-        """Voiding an already-voided line succeeds without error (idempotent)."""
+        """CP-3A: Voiding an already-voided bonus event succeeds without error (idempotent)."""
         pid = m14_open_period["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "30.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "30.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
+        assert add.status_code == 201, add.text
+        event_id = add.json()["bonus_event_id"]
 
         # First void
         r1 = await session_client.delete(
-            f"/payroll/periods/{pid}/period-pay/{line_id}", headers=auth(auth_token)
+            f"/payroll/periods/{pid}/bonuses/{event_id}", headers=auth(auth_token)
         )
         assert r1.status_code == 200
-        assert r1.json()["status"] == "Void"
+        assert r1.json()["status"] == "Voided"
 
         # Second void — must not error
         r2 = await session_client.delete(
-            f"/payroll/periods/{pid}/period-pay/{line_id}", headers=auth(auth_token)
+            f"/payroll/periods/{pid}/bonuses/{event_id}", headers=auth(auth_token)
         )
         assert r2.status_code == 200
-        assert r2.json()["status"] == "Void"
+        assert r2.json()["status"] == "Voided"
 
 
 # ===========================================================================
@@ -816,19 +820,16 @@ class TestPeriodPayFinalization:
         m14_bonus_activated,
         direct_db,
     ):
-        """
-        A period with a Bonus Period Pay line finalizes correctly.
-        The bonus appears in /final-lines with WorkDate=None and correct FinalAmount.
-        """
+        """CP-3A: Bonus event (POST /bonuses) appears in /final-lines after finalization."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-04-01", end="2034-04-07"))["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "300.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "300.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
+        assert add.status_code == 201, add.text
 
         await _approve_period_via_review(session_client, auth_token, pid)
 
@@ -858,7 +859,21 @@ class TestPeriodPayFinalization:
         paytest_branch_id: int,
         direct_db,
     ):
-        """ADJUSTMENT is blocked at creation time and cannot reach finalization."""
+        """ADJUSTMENT is not active for this branch → period-pay returns 422 'not active'."""
+        from sqlalchemy import text as _text_local
+        # Ensure ADJUSTMENT is not active for this branch (remove any stale config from prior runs)
+        await direct_db.execute(
+            _text_local("""
+                DELETE FROM payroll.branchpayitemconfig
+                WHERE branchid = :bid
+                  AND payitemid = (
+                      SELECT payitemid FROM payroll.payitems
+                      WHERE payitemcode = 'ADJUSTMENT' AND companyid IS NULL
+                      LIMIT 1
+                  )
+            """),
+            {"bid": paytest_branch_id},
+        )
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-05-01", end="2034-05-07"))["payroll_period_id"]
         add = await session_client.post(
@@ -883,35 +898,30 @@ class TestPeriodPayFinalization:
         m14_bonus_activated,
         direct_db,
     ):
-        """
-        A voided Period Pay line does not appear in PayrollFinalLines.
-        A second non-voided Bonus line keeps the period financeable and
-        is used to confirm finalization succeeds; only it appears in final-lines.
-        """
+        """CP-3A: A voided bonus event does not appear in PayrollFinalLines."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-06-01", end="2034-06-07"))["payroll_period_id"]
 
-
-        # Line 1: Bonus $150 — will be voided
+        # Event 1: $150 — will be voided
         add_bonus = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "150.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "150.00"},
             headers=auth(auth_token),
         )
-        assert add_bonus.status_code == 201
-        bonus_line_id = add_bonus.json()["draft_line_id"]
+        assert add_bonus.status_code == 201, add_bonus.text
+        event_id = add_bonus.json()["bonus_event_id"]
 
-        # Line 2: Bonus $10 — kept active so the period can be finalized
+        # Event 2: $10 — kept active so the period can be finalized
         add_keep = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "10.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "10.00"},
             headers=auth(auth_token),
         )
-        assert add_keep.status_code == 201
+        assert add_keep.status_code == 201, add_keep.text
 
-        # Void the first Bonus before finalizing
+        # Void the first bonus before finalizing
         void_resp = await session_client.delete(
-            f"/payroll/periods/{pid}/period-pay/{bonus_line_id}", headers=auth(auth_token)
+            f"/payroll/periods/{pid}/bonuses/{event_id}", headers=auth(auth_token)
         )
         assert void_resp.status_code == 200
 
@@ -926,21 +936,21 @@ class TestPeriodPayFinalization:
         )
         final_lines = final_resp.json()
 
-        # Voided $150 Bonus must NOT appear
+        # Voided $150 must NOT appear
         voided_final = [
             fl for fl in final_lines
             if fl["line_type"] == "BONUS" and fl["work_date"] is None
             and Decimal(str(fl["final_amount"])) == Decimal("150.00")
         ]
-        assert len(voided_final) == 0, "Voided period pay line must not appear in final lines"
+        assert len(voided_final) == 0, "Voided bonus event must not appear in final lines"
 
-        # Active $10 Bonus MUST appear
+        # Active $10 MUST appear
         kept_final = [
             fl for fl in final_lines
             if fl["line_type"] == "BONUS" and fl["work_date"] is None
             and Decimal(str(fl["final_amount"])) == Decimal("10.00")
         ]
-        assert len(kept_final) == 1, "Active period pay line must appear in final lines"
+        assert len(kept_final) == 1, "Active bonus event must appear in final lines"
 
 
 # ===========================================================================
@@ -963,17 +973,18 @@ class TestPeriodPaySafetyGuards:
         m14_bonus_activated,
         direct_db,
     ):
-        """A well-formed Period Pay line does not interfere with InReview→Approved."""
+        """CP-3A: A bonus event does not interfere with InReview→Approved."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-07-01", end="2034-07-07"))["payroll_period_id"]
 
-        await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "200.00"},
+        r = await session_client.post(
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "200.00"},
             headers=auth(auth_token),
         )
+        assert r.status_code == 201, r.text
         await _approve_period_via_review(session_client, auth_token, pid)
-        # Well-formed period pay line must not block the review flow (approve succeeded)
+        # Bonus event must not block the review flow (approve succeeded)
 
         # Cleanup
         await session_client.patch(
@@ -990,42 +1001,39 @@ class TestPeriodPaySafetyGuards:
         direct_db,
     ):
         """
-        A Period Pay line where calculatedamount was NULL'd via direct DB
-        bypass must block /finalize even when period is forced to Approved.
-        Silent zero finalization (COALESCE fallback) must never occur.
+        CP-3A: A Period-scope DraftLine with calculatedamount=NULL (injected directly)
+        must block /finalize.  Uses direct DB injection (BONUS blocked via /period-pay).
         """
         from sqlalchemy import text as _text
 
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-08-01", end="2034-08-07"))["payroll_period_id"]
-        add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "500.00"},
-            headers=auth(auth_token),
-        )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
 
-        # Corrupt the line: set calculatedamount=NULL (keep linescope='Period', review=FALSE)
-        await direct_db.execute(
+        # Inject a malformed Period-scope line directly (calculatedamount=NULL)
+        result = await direct_db.execute(
             _text("""
-                UPDATE payroll.payrolldraftlines
-                SET    calculatedamount   = NULL,
-                       needsmanagerreview = FALSE
-                WHERE  draftlineid = :lid
+                INSERT INTO payroll.payrolldraftlines
+                    (companyid, branchid, payrollperiodid, driverid,
+                     workdate, linetype, linescope, calculatedamount,
+                     sourcetype, status, needsmanagerreview, addedbyuserid)
+                VALUES
+                    ((SELECT companyid FROM core.branches WHERE branchid = :bid),
+                     :bid, :pid, :did,
+                     NULL, 'Adjustment', 'Period', NULL,
+                     'Manual', 'Active', FALSE,
+                     (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
+                RETURNING draftlineid
             """),
-            {"lid": line_id},
+            {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id},
         )
+        assert result.mappings().first() is not None
 
         # Force period to Approved bypassing the approval guard
         await direct_db.execute(
-            _text("""
-                UPDATE payroll.payrollperiods
-                SET    status = 'Approved'
-                WHERE  payrollperiodid = :pid
-            """),
+            _text("UPDATE payroll.payrollperiods SET status = 'Approved' WHERE payrollperiodid = :pid"),
             {"pid": pid},
         )
+        await direct_db.commit()
 
         # /finalize must block — silent zero is not allowed for period pay lines
         fin = await session_client.post(
@@ -1038,13 +1046,10 @@ class TestPeriodPaySafetyGuards:
 
         # Cleanup
         await direct_db.execute(
-            _text("""
-                UPDATE payroll.payrollperiods
-                SET    status = 'Cancelled'
-                WHERE  payrollperiodid = :pid
-            """),
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
             {"pid": pid},
         )
+        await direct_db.commit()
 
     async def test_malformed_period_pay_line_blocks_submission(
         self,
@@ -1056,31 +1061,33 @@ class TestPeriodPaySafetyGuards:
         direct_db,
     ):
         """
-        A Period Pay line where calculatedamount=NULL and needsmanagerreview=FALSE
-        (direct-DB bypass state) must block Open→InReview (M16: guard moved here).
+        CP-3A: A Period-scope DraftLine with calculatedamount=NULL (injected directly)
+        must block Open→InReview.  Uses direct DB injection (BONUS blocked via /period-pay).
         """
         from sqlalchemy import text as _text
 
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-09-01", end="2034-09-07"))["payroll_period_id"]
-        add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "250.00"},
-            headers=auth(auth_token),
-        )
-        assert add.status_code == 201
-        line_id = add.json()["draft_line_id"]
 
-        # Corrupt via direct DB
-        await direct_db.execute(
+        # Inject a malformed Period-scope line directly (calculatedamount=NULL)
+        result = await direct_db.execute(
             _text("""
-                UPDATE payroll.payrolldraftlines
-                SET    calculatedamount   = NULL,
-                       needsmanagerreview = FALSE
-                WHERE  draftlineid = :lid
+                INSERT INTO payroll.payrolldraftlines
+                    (companyid, branchid, payrollperiodid, driverid,
+                     workdate, linetype, linescope, calculatedamount,
+                     sourcetype, status, needsmanagerreview, addedbyuserid)
+                VALUES
+                    ((SELECT companyid FROM core.branches WHERE branchid = :bid),
+                     :bid, :pid, :did,
+                     NULL, 'Adjustment', 'Period', NULL,
+                     'Manual', 'Active', FALSE,
+                     (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
+                RETURNING draftlineid
             """),
-            {"lid": line_id},
+            {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id},
         )
+        assert result.mappings().first() is not None
+        await direct_db.commit()
 
         # Open→InReview must be blocked (M16: guard moved here)
         blocked = await session_client.patch(
@@ -1119,17 +1126,16 @@ class TestM14SafetyFixes:
         m14_bonus_activated,
         direct_db,
     ):
-        """Finalized Period Pay Bonus line has line_scope='Period' in final-lines."""
+        """CP-3A: Finalized bonus event has line_scope='Period' in final-lines."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-10-01", end="2034-10-07"))["payroll_period_id"]
 
         add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "175.00"},
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "175.00"},
             headers=auth(auth_token),
         )
-        assert add.status_code == 201
-        assert add.json()["line_scope"] == "Period"    # draft line carries scope
+        assert add.status_code == 201, add.text
         await _approve_period_via_review(session_client, auth_token, pid)
         fin = await session_client.post(
             f"/payroll/periods/{pid}/finalize", headers=auth(auth_token)
@@ -1197,11 +1203,12 @@ class TestM14SafetyFixes:
                   "quantity": "1", "work_date": "2034-12-01", "notes": "filler"},
             headers=auth(auth_token),
         )
-        await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "100.00"},
+        r_bonus = await session_client.post(
+            f"/payroll/periods/{pid}/bonuses",
+            json={"driver_id": paytest_driver_id, "amount": "100.00"},
             headers=auth(auth_token),
         )
+        assert r_bonus.status_code == 201, r_bonus.text
         await _approve_period_via_review(session_client, auth_token, pid)
         fin = await session_client.post(
             f"/payroll/periods/{pid}/finalize", headers=auth(auth_token)
@@ -1226,7 +1233,6 @@ class TestM14SafetyFixes:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
-        m14_custom_period_item: dict,
         direct_db,
     ):
         """
@@ -1234,33 +1240,39 @@ class TestM14SafetyFixes:
         Proves the check uses period.start_date not CURRENT_DATE: if today's date
         were used the item (activated today) would wrongly pass for a 2035 period.
 
-        Uses system BONUS (Period-scope). ADJUSTMENT is deferred to a future release.
+        Uses ADJUSTMENT (Period-scope). BONUS is routed to /bonuses in CP-3A and
+        bypasses the period-pay activation check.
         """
         from sqlalchemy import text as _text
 
-        # m14_custom_period_item ensures BONUS is activated; borrow its pay_item_id.
-        item_id = m14_custom_period_item["pay_item_id"]
+        # Look up ADJUSTMENT pay_item_id from DB
+        from sqlalchemy import text as _text_sq
+        row = (await direct_db.execute(
+            _text_sq("SELECT payitemid FROM payroll.payitems WHERE payitemcode = 'ADJUSTMENT' AND companyid IS NULL LIMIT 1")
+        )).mappings().first()
+        assert row is not None, "ADJUSTMENT system pay item not found"
+        item_id = row["payitemid"]
 
         try:
-            # Push BONUS effectivefrom past period.start_date so it fails the check.
+            # Activate ADJUSTMENT on this branch with effectivefrom in the future
+            # so it fails the period.start_date check.
             await direct_db.execute(
-                _text(
-                    "UPDATE payroll.branchpayitemconfig "
-                    "SET effectivefrom = '2035-06-01' "
-                    "WHERE payitemid = :piid AND branchid = :bid"
-                ),
+                _text("DELETE FROM payroll.branchpayitemconfig WHERE branchid = :bid AND payitemid = :piid"),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
+            await direct_db.execute(
+                _text("INSERT INTO payroll.branchpayitemconfig (companyid, branchid, payitemid, isactive, effectivefrom) VALUES (1, :bid, :piid, TRUE, '2035-06-01')"),
                 {"piid": item_id, "bid": paytest_branch_id},
             )
 
             await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
             pid = (await _open_period(direct_db, paytest_branch_id, start="2035-01-01", end="2035-01-07"))["payroll_period_id"]
 
-
-            # Must fail: BONUS not active as of period.start_date 2035-01-01
+            # Must fail: ADJUSTMENT not active as of period.start_date 2035-01-01
             # (effectivefrom=2035-06-01 > start_date=2035-01-01)
             add = await session_client.post(
                 f"/payroll/periods/{pid}/period-pay",
-                json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "50.00"},
+                json={"driver_id": paytest_driver_id, "line_type": "Adjustment", "amount": "50.00"},
                 headers=auth(auth_token),
             )
             assert add.status_code == 422, (
@@ -1272,11 +1284,10 @@ class TestM14SafetyFixes:
                 f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
             )
         finally:
-            # Restore BONUS effectivefrom so subsequent tests see it as active
+            # Remove the ADJUSTMENT branch config so other tests see it as inactive
             await direct_db.execute(
                 _text(
-                    "UPDATE payroll.branchpayitemconfig "
-                    "SET effectivefrom = '2000-01-01' "
+                    "DELETE FROM payroll.branchpayitemconfig "
                     "WHERE payitemid = :piid AND branchid = :bid"
                 ),
                 {"piid": item_id, "bid": paytest_branch_id},
@@ -1288,27 +1299,54 @@ class TestM14SafetyFixes:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
-        m14_custom_period_item: dict,
         direct_db,
     ):
         """An item active as of period.start_date is accepted, even for future periods."""
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = (await _open_period(direct_db, paytest_branch_id, start="2035-02-01", end="2035-02-07"))["payroll_period_id"]
+        from sqlalchemy import text as _text
 
-        add = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id,
-                  "line_type": "Bonus", "amount": "75.00"},
-            headers=auth(auth_token),
-        )
-        assert add.status_code == 201, (
-            f"Expected 201 (item active at period.start_date) but got {add.status_code}: {add.text}"
-        )
-        assert add.json()["line_scope"] == "Period"
+        from sqlalchemy import text as _text_sq
+        row = (await direct_db.execute(
+            _text_sq("SELECT payitemid FROM payroll.payitems WHERE payitemcode = 'ADJUSTMENT' AND companyid IS NULL LIMIT 1")
+        )).mappings().first()
+        assert row is not None, "ADJUSTMENT system pay item not found"
+        item_id = row["payitemid"]
 
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
-        )
+        try:
+            # Activate ADJUSTMENT with effectivefrom well in the past
+            await direct_db.execute(
+                _text("DELETE FROM payroll.branchpayitemconfig WHERE branchid = :bid AND payitemid = :piid"),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
+            await direct_db.execute(
+                _text("INSERT INTO payroll.branchpayitemconfig (companyid, branchid, payitemid, isactive, effectivefrom) VALUES (1, :bid, :piid, TRUE, '2000-01-01')"),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
+
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            pid = (await _open_period(direct_db, paytest_branch_id, start="2035-02-01", end="2035-02-07"))["payroll_period_id"]
+
+            add = await session_client.post(
+                f"/payroll/periods/{pid}/period-pay",
+                json={"driver_id": paytest_driver_id,
+                      "line_type": "Adjustment", "amount": "75.00"},
+                headers=auth(auth_token),
+            )
+            assert add.status_code == 201, (
+                f"Expected 201 (item active at period.start_date) but got {add.status_code}: {add.text}"
+            )
+            assert add.json()["line_scope"] == "Period"
+
+            await session_client.patch(
+                f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
+            )
+        finally:
+            await direct_db.execute(
+                _text(
+                    "DELETE FROM payroll.branchpayitemconfig "
+                    "WHERE payitemid = :piid AND branchid = :bid"
+                ),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
 
     async def test_period_pay_active_today_but_not_at_period_start_is_rejected(
         self,
@@ -1316,7 +1354,6 @@ class TestM14SafetyFixes:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
-        m14_custom_period_item: dict,
         direct_db,
     ):
         """
@@ -1331,22 +1368,27 @@ class TestM14SafetyFixes:
         With period.start_date it sees:    effectivefrom (2026-01-01) <= 2025-01-01 ✗
             → correctly REJECTS the item (expected 422)
 
-        Uses system BONUS (Period-scope). ADJUSTMENT is deferred to a future release.
+        Uses ADJUSTMENT (Period-scope). BONUS is routed to /bonuses in CP-3A and
+        bypasses the period-pay activation check.
         """
         from sqlalchemy import text as _text
 
-        # m14_custom_period_item ensures BONUS is activated; borrow its pay_item_id.
-        item_id = m14_custom_period_item["pay_item_id"]
+        from sqlalchemy import text as _text_sq
+        row = (await direct_db.execute(
+            _text_sq("SELECT payitemid FROM payroll.payitems WHERE payitemcode = 'ADJUSTMENT' AND companyid IS NULL LIMIT 1")
+        )).mappings().first()
+        assert row is not None, "ADJUSTMENT system pay item not found"
+        item_id = row["payitemid"]
 
         try:
-            # Set BONUS effectivefrom to 2026-01-01:
-            # active today (2026-06-15 >= 2026-01-01) but NOT for period starting 2025-01-01.
+            # Activate ADJUSTMENT with effectivefrom 2026-01-01:
+            # active today (2026-06-28 >= 2026-01-01) but NOT for period starting 2025-01-01.
             await direct_db.execute(
-                _text(
-                    "UPDATE payroll.branchpayitemconfig "
-                    "SET effectivefrom = '2026-01-01' "
-                    "WHERE payitemid = :piid AND branchid = :bid"
-                ),
+                _text("DELETE FROM payroll.branchpayitemconfig WHERE branchid = :bid AND payitemid = :piid"),
+                {"piid": item_id, "bid": paytest_branch_id},
+            )
+            await direct_db.execute(
+                _text("INSERT INTO payroll.branchpayitemconfig (companyid, branchid, payitemid, isactive, effectivefrom) VALUES (1, :bid, :piid, TRUE, '2026-01-01')"),
                 {"piid": item_id, "bid": paytest_branch_id},
             )
 
@@ -1355,12 +1397,12 @@ class TestM14SafetyFixes:
             pid = (await _open_period(direct_db, paytest_branch_id, start="2025-01-01", end="2025-01-07"))["payroll_period_id"]
 
 
-            # Must be rejected: BONUS active today but NOT active at period.start_date 2025-01-01.
+            # Must be rejected: ADJUSTMENT active today but NOT active at period.start_date 2025-01-01.
             # If CURRENT_DATE were used this would wrongly return 201.
             add = await session_client.post(
                 f"/payroll/periods/{pid}/period-pay",
                 json={"driver_id": paytest_driver_id,
-                      "line_type": "Bonus", "amount": "50.00"},
+                      "line_type": "Adjustment", "amount": "50.00"},
                 headers=auth(auth_token),
             )
             assert add.status_code == 422, (
@@ -1374,11 +1416,10 @@ class TestM14SafetyFixes:
                 f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
             )
         finally:
-            # Restore BONUS effectivefrom so it remains active for subsequent tests
+            # Remove the ADJUSTMENT branch config so other tests see it as inactive
             await direct_db.execute(
                 _text(
-                    "UPDATE payroll.branchpayitemconfig "
-                    "SET effectivefrom = '2000-01-01' "
+                    "DELETE FROM payroll.branchpayitemconfig "
                     "WHERE payitemid = :piid AND branchid = :bid"
                 ),
                 {"piid": item_id, "bid": paytest_branch_id},
