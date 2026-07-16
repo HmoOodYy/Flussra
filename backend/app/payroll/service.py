@@ -33,6 +33,7 @@ from app.payroll.schemas import (
     TierSummary, OrdinalTierCreate, RangeTierCreate,
     PeriodPayLineCreate, PeriodPayLineUpdate,
     BonusEventCreate, BonusEventUpdate, BonusEventResponse, BonusEventPreviewEntry,
+    BonusSummaryEvent, BonusSummaryCapabilities, BonusSummaryDriver, BonusSummaryResponse,
     DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
     DriverRateMatrix, RateMatrixGroup, RateMatrixCurrentRate,
     BatchRateRequest, BatchRateSaveResult,
@@ -8741,6 +8742,223 @@ async def void_bonus_event(
     )
 
     return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
+
+
+# ---------------------------------------------------------------------------
+# CP-3B1: Zero-inclusive bonus summary
+# ---------------------------------------------------------------------------
+
+async def _bonus_summary_driver_create_eligible(
+    eligibility_reason_code: str,
+    period_id: int,
+    driver_id: int,
+    db: AsyncConnection,
+) -> bool:
+    """Read-only mirror of the snapshot branch of
+    _assert_driver_eligible_for_period_via_snapshot — never raises, never
+    mutates.  The bonus summary is only ever computed for periods that have
+    a CP-2E snapshot (enforced earlier in get_bonus_summary), so only the
+    snapshot branch of that eligibility check is relevant here.
+
+    IncludedByExistingData drivers are period-eligible for VIEWING but not for
+    NEW bonus creation unless they already have a period-pay source — this
+    must match create_bonus_event's guard exactly so summary capabilities
+    never claim can_create=true when POST /bonuses would reject.
+    """
+    if eligibility_reason_code == "IncludedByExistingData":
+        return await _driver_has_existing_period_pay_source(period_id, driver_id, db)
+    return True  # Active / TerminatedHistorical / Transferred
+
+
+async def get_bonus_summary(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> BonusSummaryResponse:
+    """
+    Zero-inclusive bonus summary for one period.
+
+    Roster source is the CP-2E period eligibility snapshot ONLY — every
+    snapshot-eligible driver appears even with zero bonus events, and bonus
+    events for drivers not in the snapshot never expand the roster.  Periods
+    without a CP-2E marker get a controlled 422 (no live-roster fallback).
+    """
+    await _require_not_driver_role(company_id, user_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # Draft (Prepared) periods have no financial exposure — same rule as the
+    # period-eligible-drivers endpoint (CP-2F).
+    if period.status == "Draft":
+        raise HTTPException(
+            status_code=422,
+            detail="Bonus summary is not available for Prepared (Draft) periods.",
+        )
+
+    await _check_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
+    )
+
+    if not await _period_has_driver_eligibility_snapshot(period_id, db):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "BONUS_SUMMARY_UNAVAILABLE_NO_ELIGIBILITY_SNAPSHOT: "
+                "the zero-inclusive bonus summary requires a period eligibility "
+                "snapshot (CP-2E). This period has no snapshot marker, and the "
+                "summary never falls back to the live driver roster."
+            ),
+        )
+
+    # ── Roster: snapshot rows only ─────────────────────────────────────────── #
+    roster_result = await db.execute(
+        text("""
+            SELECT ppde.driverid,
+                   ppde.drivercodesnapshot,
+                   ppde.drivernamesnapshot,
+                   ppde.eligibilityreasoncode
+            FROM   payroll.payrollperioddrivereligibility ppde
+            WHERE  ppde.payrollperiodid     = :period_id
+              AND  ppde.companyid           = :company_id
+              AND  ppde.branchid            = :branch_id
+              AND  ppde.iseligibleforperiod = TRUE
+        """),
+        {"period_id": period_id, "company_id": company_id, "branch_id": period.branch_id},
+    )
+    roster_rows = roster_result.mappings().fetchall()
+
+    # ── Events: canonical PayrollBonusEvents only ──────────────────────────── #
+    # BranchID is part of the filter (not just PeriodID/CompanyID) so a
+    # same-company, cross-branch contaminated row can never contribute to a
+    # snapshot driver's totals — PayrollBonusEvents.BranchID is denormalized
+    # from the period at write time, so this filter is authoritative.
+    events_result = await db.execute(
+        text("""
+            SELECT
+                be.payrollbonuseventid,
+                be.driverid,
+                be.amount,
+                be.reason,
+                be.notes,
+                be.status,
+                be.datarevision,
+                be.batchcorrelationid,
+                be.idempotencykey,
+                be.sourcedraftlineid,
+                be.voidedbyuserid,
+                be.voidedatutc,
+                be.voidreason,
+                be.createdbyuserid,
+                be.createdatutc,
+                be.updatedbyuserid,
+                be.updatedatutc
+            FROM payroll.payrollbonusevents be
+            WHERE be.payrollperiodid = :period_id
+              AND be.companyid       = :company_id
+              AND be.branchid        = :branch_id
+            ORDER BY be.driverid, be.payrollbonuseventid
+        """),
+        {"period_id": period_id, "company_id": company_id, "branch_id": period.branch_id},
+    )
+    events_by_driver: dict[int, list[BonusSummaryEvent]] = {}
+    for r in events_result.mappings().fetchall():
+        events_by_driver.setdefault(int(r["driverid"]), []).append(
+            BonusSummaryEvent(
+                bonus_event_id=int(r["payrollbonuseventid"]),
+                driver_id=int(r["driverid"]),
+                amount=Decimal(str(r["amount"])),
+                reason=r["reason"],
+                notes=r["notes"],
+                status=r["status"],
+                created_by_user_id=r["createdbyuserid"],
+                created_at_utc=r["createdatutc"],
+                updated_by_user_id=r["updatedbyuserid"],
+                updated_at_utc=r["updatedatutc"],
+                voided_by_user_id=r["voidedbyuserid"],
+                voided_at_utc=r["voidedatutc"],
+                void_reason=r["voidreason"],
+                data_revision=int(r["datarevision"]),
+                batch_correlation_id=(
+                    str(r["batchcorrelationid"]) if r["batchcorrelationid"] is not None else None
+                ),
+                idempotency_key=r["idempotencykey"],
+                source_draft_line_id=r["sourcedraftlineid"],
+            )
+        )
+
+    # ── Period/user-wide mutation preconditions (shared by every driver) ──── #
+    period_reason_codes: list[str] = []
+    if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
+        period_reason_codes.append("status_read_only")
+    has_entry = await _has_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.entry"], db
+    )
+    if not has_entry:
+        period_reason_codes.append("permission_entry_required")
+    period_allows_mutation = not period_reason_codes
+
+    # ── Aggregate events onto the snapshot roster, with per-driver capabilities #
+    drivers: list[BonusSummaryDriver] = []
+    for row in roster_rows:
+        driver_id = int(row["driverid"])
+        reason_code = row["eligibilityreasoncode"]
+        events = events_by_driver.get(driver_id, [])
+        active_events = [e for e in events if e.status == "Active"]
+
+        reason_codes = list(period_reason_codes)
+        can_create = period_allows_mutation
+        if period_allows_mutation:
+            driver_create_eligible = await _bonus_summary_driver_create_eligible(
+                reason_code, period_id, driver_id, db
+            )
+            if not driver_create_eligible:
+                can_create = False
+                reason_codes.append("eligibility_existing_data_only")
+
+        can_update_void = period_allows_mutation
+        if period_allows_mutation and not active_events:
+            can_update_void = False
+            reason_codes.append("no_active_bonus_event")
+
+        drivers.append(
+            BonusSummaryDriver(
+                driver_id=driver_id,
+                driver_code=row["drivercodesnapshot"],
+                driver_name=row["drivernamesnapshot"],
+                eligibility_reason_code=reason_code,
+                total_bonus=sum((e.amount for e in active_events), Decimal("0")),
+                active_event_count=len(active_events),
+                voided_event_count=len(events) - len(active_events),
+                events=events,
+                capabilities=BonusSummaryCapabilities(
+                    can_create=can_create,
+                    can_update=can_update_void,
+                    can_void=can_update_void,
+                    reason_codes=reason_codes,
+                ),
+            )
+        )
+
+    # Nonzero totals first (descending), then stable name/code/id order.
+    drivers.sort(
+        key=lambda d: (
+            0 if d.total_bonus > 0 else 1,
+            -d.total_bonus,
+            d.driver_name or "",
+            d.driver_code or "",
+            d.driver_id,
+        )
+    )
+
+    return BonusSummaryResponse(
+        period_id=period_id,
+        branch_id=period.branch_id,
+        period_status=period.status,
+        eligibility_source="PeriodEligibilitySnapshot",
+        drivers=drivers,
+        active_event_count=sum(d.active_event_count for d in drivers),
+        active_bonus_total=sum((d.total_bonus for d in drivers), Decimal("0")),
+    )
 
 
 # ---------------------------------------------------------------------------

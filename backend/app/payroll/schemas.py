@@ -611,6 +611,63 @@ class BonusEventPreviewEntry(BaseModel):
     notes: str | None = None
 
 
+class BonusSummaryEvent(BaseModel):
+    """One bonus event row inside the zero-inclusive bonus summary (CP-3B1)."""
+    bonus_event_id: int
+    driver_id: int
+    amount: Decimal
+    reason: str | None
+    notes: str | None
+    status: str                     # 'Active' | 'Voided'
+    created_by_user_id: int | None
+    created_at_utc: datetime
+    updated_by_user_id: int | None
+    updated_at_utc: datetime | None
+    voided_by_user_id: int | None
+    voided_at_utc: datetime | None
+    void_reason: str | None
+    data_revision: int
+    batch_correlation_id: str | None
+    idempotency_key: str | None
+    source_draft_line_id: int | None
+
+
+class BonusSummaryCapabilities(BaseModel):
+    """Backend-owned mutation capabilities for the bonus summary (CP-3B1)."""
+    can_create: bool
+    can_update: bool
+    can_void: bool
+    reason_codes: list[str] = []
+
+
+class BonusSummaryDriver(BaseModel):
+    """One eligible driver row in the zero-inclusive bonus summary (CP-3B1).
+
+    The roster comes from the CP-2E period eligibility snapshot — drivers with
+    zero bonus events still appear with total_bonus = 0.
+    """
+    driver_id: int
+    driver_code: str | None
+    driver_name: str | None
+    eligibility_reason_code: str
+    total_bonus: Decimal            # sum of Active events only
+    active_event_count: int
+    voided_event_count: int
+    events: list[BonusSummaryEvent]
+    capabilities: BonusSummaryCapabilities
+
+
+class BonusSummaryResponse(BaseModel):
+    """Zero-inclusive bonus summary for a payroll period (CP-3B1)."""
+    period_id: int
+    branch_id: int
+    period_status: str
+    eligibility_source: str         # 'PeriodEligibilitySnapshot'
+    drivers: list[BonusSummaryDriver]
+    active_event_count: int
+    active_bonus_total: Decimal
+
+
 class RateLookupResult(BaseModel):
     """
     Result of GET /payroll/rates/lookup — the single rate that applies to a

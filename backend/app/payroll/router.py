@@ -18,7 +18,7 @@ from app.payroll.schemas import (
     RateTypeSummary, DriverRateSummary, DriverRateCreate, DriverRateUpdate,
     RateLookupResult,
     PeriodPayLineCreate, PeriodPayLineUpdate,
-    BonusEventCreate, BonusEventUpdate, BonusEventResponse,
+    BonusEventCreate, BonusEventUpdate, BonusEventResponse, BonusSummaryResponse,
     PeriodEligibleDriversResponse,
     DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
     DriverRateMatrix,
@@ -1045,6 +1045,29 @@ async def list_bonus_events(
         user_id=int(token["sub"]),
         db=db,
         driver_id=driver_id,
+    )
+
+
+# CP-3B1: /bonuses/summary — declared before dynamic /bonuses/{bonus_event_id}
+# routes so the literal 'summary' segment can never be captured as an event id.
+@router.get(
+    "/periods/{period_id}/bonuses/summary",
+    response_model=BonusSummaryResponse,
+    summary="Zero-inclusive bonus summary for a period (CP-3B1)",
+    responses={
+        422: {"description": "Draft period, or period has no CP-2E eligibility snapshot"},
+    },
+)
+async def get_bonus_summary(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> BonusSummaryResponse:
+    return await service.get_bonus_summary(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
     )
 
 
