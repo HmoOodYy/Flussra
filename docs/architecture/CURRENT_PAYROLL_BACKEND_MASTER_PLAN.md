@@ -4,7 +4,8 @@
 **Document role:** Official working plan for the Current Payroll backend rebuild/redesign  
 **Plan status:** Active planning baseline  
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
-**Database migration baseline:** Alembic `0047 (head)`  
+**Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
+**Current migration head after implemented units:** Alembic `0058` (post CP-3A; CP-3B1 added no migration)  
 **Last source revalidation:** 2026-06-19  
 **Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `In Progress`; CP-3A is `Done with Notes`; CP-3B1 (zero-inclusive bonus summary) is `Done with Notes`; CP-3B2 (transactional batch bonus) and CP-3C (min/max formula correction) remain `Pending`.
 
