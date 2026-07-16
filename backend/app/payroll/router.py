@@ -19,6 +19,7 @@ from app.payroll.schemas import (
     RateLookupResult,
     PeriodPayLineCreate, PeriodPayLineUpdate,
     BonusEventCreate, BonusEventUpdate, BonusEventResponse, BonusSummaryResponse,
+    BonusBatchCreate, BonusBatchResponse,
     PeriodEligibleDriversResponse,
     DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
     DriverRateMatrix,
@@ -1069,6 +1070,38 @@ async def get_bonus_summary(
         user_id=int(token["sub"]),
         db=db,
     )
+
+
+# CP-3B2b: /bonuses/batch — declared before dynamic /bonuses/{bonus_event_id}
+# routes so the literal 'batch' segment can never be captured as an event id.
+@router.post(
+    "/periods/{period_id}/bonuses/batch",
+    response_model=BonusBatchResponse,
+    status_code=201,
+    summary="Create-only transactional bonus batch (CP-3B2b)",
+    responses={
+        200: {"description": "Idempotent replay of a previously-applied batch"},
+        409: {"description": "Stale expected revision, or idempotency-key payload conflict"},
+        422: {"description": "Period not Open/Returned, or an item failed validation"},
+    },
+)
+async def apply_bonus_batch(
+    period_id: int,
+    data: BonusBatchCreate,
+    token: TokenDep,
+    db: DbDep,
+    response: Response,
+) -> BonusBatchResponse:
+    result, is_new = await service.apply_bonus_batch(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        data=data,
+        db=db,
+    )
+    # 201 on a fresh apply; 200 on an idempotent replay (nothing was written).
+    response.status_code = 201 if is_new else 200
+    return result
 
 
 @router.post(

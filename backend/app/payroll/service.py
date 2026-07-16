@@ -7,9 +7,11 @@ read functions filter by the user's allowed branches directly in the query.
 """
 import base64
 import calendar as _calendar
+import hashlib
 import hmac as _hmac_mod
 import json
 import math
+import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, NamedTuple
@@ -34,6 +36,7 @@ from app.payroll.schemas import (
     PeriodPayLineCreate, PeriodPayLineUpdate,
     BonusEventCreate, BonusEventUpdate, BonusEventResponse, BonusEventPreviewEntry,
     BonusSummaryEvent, BonusSummaryCapabilities, BonusSummaryDriver, BonusSummaryResponse,
+    BonusBatchItem, BonusBatchCreate, BonusBatchResponse,
     DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
     DriverRateMatrix, RateMatrixGroup, RateMatrixCurrentRate,
     BatchRateRequest, BatchRateSaveResult,
@@ -176,6 +179,7 @@ async def _write_line_audit(
         "BONUS_EVENT_ADDED":   "Bonus event added",
         "BONUS_EVENT_UPDATED": "Bonus event updated",
         "BONUS_EVENT_VOIDED":  "Bonus event voided",
+        "BONUS_BATCH_APPLIED": "Bonus batch applied",
     }
     params = {
         "cid":         company_id,
@@ -8877,6 +8881,309 @@ async def void_bonus_event(
     )
 
     return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
+
+
+# ---------------------------------------------------------------------------
+# CP-3B2b: Create-only transactional bonus batch
+# ---------------------------------------------------------------------------
+
+def _bonus_batch_canonical_payload(
+    expected_bonus_data_revision: int,
+    items: list["BonusBatchItem"],
+) -> dict:
+    """Build the canonical request payload used both for hashing and durable
+    storage.  Item order is preserved (significant); amounts are fixed
+    two-decimal strings so numerically-equal inputs hash identically."""
+    return {
+        "version": 1,
+        "expected_bonus_data_revision": expected_bonus_data_revision,
+        "items": [
+            {
+                "driver_id": it.driver_id,
+                "amount":    f"{it.amount:.2f}",
+                "reason":    it.reason,
+                "notes":     it.notes,
+            }
+            for it in items
+        ],
+    }
+
+
+def _bonus_batch_request_hash(payload: dict) -> str:
+    """SHA-256 hex of the canonical payload: UTF-8, keys sorted, compact
+    separators.  Deterministic across equal requests; sensitive to item order
+    (a reordered item list is a different request)."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _get_bonus_events_in_order(
+    ids: list[int],
+    company_id: int,
+    db: AsyncConnection,
+) -> list[BonusEventResponse]:
+    return [await _get_bonus_event_by_id(i, company_id, db) for i in ids]
+
+
+async def apply_bonus_batch(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    data: "BonusBatchCreate",
+    db: AsyncConnection,
+) -> tuple[BonusBatchResponse, bool]:
+    """
+    Create-only transactional bonus batch (CP-3B2b).
+
+    All-or-nothing: every item is validated before any event is inserted, and
+    the whole request runs in one transaction (via get_db's engine.begin()), so
+    any failure rolls back all events, the batch-request row, the revision bump,
+    and every audit row.
+
+    Idempotency: keyed on (Company, Branch, Period, IdempotencyKey). An exact
+    replay (same key + same request hash) returns the stored result read-only —
+    no writes, no revision bump, and it succeeds even if the period later became
+    non-editable. A same-key/different-payload request is a 409.
+
+    Returns (response, is_new): is_new=True for a fresh apply (HTTP 201),
+    False for an idempotent replay (HTTP 200).
+    """
+    await _require_not_driver_role(company_id, user_id, db)
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+
+    branch_id = period.branch_id
+    payload = _bonus_batch_canonical_payload(data.expected_bonus_data_revision, data.items)
+    request_hash = _bonus_batch_request_hash(payload)
+
+    # ── Lock the period row (does NOT enforce editability — replay must work on
+    #    a now-locked/archived period). All idempotency and write decisions
+    #    below happen under this lock, serializing concurrent batches and
+    #    single-event mutations on the same period. ──────────────────────────── #
+    locked = (await db.execute(
+        text(
+            "SELECT status FROM payroll.payrollperiods "
+            "WHERE payrollperiodid = :pid AND companyid = :cid "
+            "FOR UPDATE"
+        ),
+        {"pid": period_id, "cid": company_id},
+    )).mappings().first()
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Payroll period not found.")
+    locked_status = locked["status"]
+
+    # ── Idempotency lookup (under lock) ────────────────────────────────────── #
+    existing = (await db.execute(
+        text("""
+            SELECT payrollbonusbatchrequestid, requesthash, batchcorrelationid,
+                   idempotencykey, expectedbonusdatarevision, resultbonusdatarevision,
+                   createdeventids, createdeventcount
+            FROM   payroll.payrollbonusbatchrequests
+            WHERE  companyid       = :cid
+              AND  branchid        = :bid
+              AND  payrollperiodid = :pid
+              AND  idempotencykey  = :key
+        """),
+        {"cid": company_id, "bid": branch_id, "pid": period_id, "key": data.idempotency_key},
+    )).mappings().first()
+
+    if existing is not None:
+        if existing["requesthash"] != request_hash:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Idempotency key already used for a different bonus batch "
+                    "payload (or a different expected revision) in this period."
+                ),
+            )
+        # Exact replay — read-only, no status check, no writes, no bump.
+        raw_ids = existing["createdeventids"]
+        stored_ids = raw_ids if isinstance(raw_ids, list) else json.loads(raw_ids)
+        events = await _get_bonus_events_in_order(list(stored_ids), company_id, db)
+        response = BonusBatchResponse(
+            period_id=period_id,
+            branch_id=branch_id,
+            batch_request_id=int(existing["payrollbonusbatchrequestid"]),
+            idempotency_key=existing["idempotencykey"],
+            batch_correlation_id=str(existing["batchcorrelationid"]),
+            expected_bonus_data_revision=int(existing["expectedbonusdatarevision"]),
+            result_bonus_data_revision=int(existing["resultbonusdatarevision"]),
+            created_event_count=int(existing["createdeventcount"]),
+            created_event_ids=[int(i) for i in stored_ids],
+            events=events,
+            replayed=True,
+        )
+        return response, False
+
+    # ── New apply path ─────────────────────────────────────────────────────── #
+    if locked_status not in _BONUS_ENTRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Bonus batches can only be applied to Open or Returned periods. "
+                f"Current status: '{locked_status}'."
+            ),
+        )
+
+    # Validate every item before any insert (all-or-nothing). The eligibility
+    # guard raises the same 422s as single-event POST /bonuses, including the
+    # IncludedByExistingData-without-source and wrong-branch cases.
+    for idx, item in enumerate(data.items):
+        try:
+            await _assert_driver_eligible_for_period_via_snapshot(
+                company_id, branch_id, period_id, item.driver_id, db
+            )
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=f"items[{idx}] (driver {item.driver_id}): {exc.detail}",
+            )
+
+    # Predicated revision bump — 409 if the caller's expected revision is stale.
+    # Exactly one increment for the whole batch.
+    result_revision = await _increment_bonus_data_revision(
+        db,
+        company_id=company_id,
+        period_id=period_id,
+        expected_bonus_data_revision=data.expected_bonus_data_revision,
+    )
+
+    batch_correlation_id = str(_uuid.uuid4())
+
+    # Insert every event, stamped with the shared correlation id and the batch
+    # idempotency key (non-unique on events — the authoritative unique record is
+    # the PayrollBonusBatchRequests row).
+    created_ids: list[int] = []
+    total_amount = Decimal("0")
+    for item in data.items:
+        ins = await db.execute(
+            text("""
+                INSERT INTO payroll.payrollbonusevents
+                    (companyid, branchid, payrollperiodid, driverid,
+                     amount, reason, notes, status,
+                     batchcorrelationid, idempotencykey,
+                     createdbyuserid, createdatutc, datarevision)
+                VALUES
+                    (:cid, :bid, :pid, :did,
+                     :amount, :reason, :notes, 'Active',
+                     CAST(:corr AS UUID), :key,
+                     :uid, NOW(), 1)
+                RETURNING payrollbonuseventid
+            """),
+            {
+                "cid":    company_id,
+                "bid":    branch_id,
+                "pid":    period_id,
+                "did":    item.driver_id,
+                "amount": item.amount,
+                "reason": item.reason,
+                "notes":  item.notes,
+                "corr":   batch_correlation_id,
+                "key":    data.idempotency_key,
+                "uid":    user_id,
+            },
+        )
+        created_ids.append(int(ins.scalar_one()))
+        total_amount += item.amount
+
+    # Insert the durable batch-request row. A concurrent same-key insert (should
+    # be serialized by the period lock, but belt-and-suspenders) trips the unique
+    # idempotency index — surface a clean 409 instead of a raw 500.
+    try:
+        batch_ins = await db.execute(
+            text("""
+                INSERT INTO payroll.payrollbonusbatchrequests
+                    (companyid, branchid, payrollperiodid,
+                     idempotencykey, requesthash, requestpayloadjson, batchcorrelationid,
+                     expectedbonusdatarevision, resultbonusdatarevision,
+                     createdeventids, createdeventcount, status,
+                     createdbyuserid, createdatutc, appliedatutc)
+                VALUES
+                    (:cid, :bid, :pid,
+                     :key, :hash, CAST(:payload AS JSONB), CAST(:corr AS UUID),
+                     :expected, :result,
+                     CAST(:event_ids AS JSONB), :event_count, 'Applied',
+                     :uid, NOW(), NOW())
+                RETURNING payrollbonusbatchrequestid
+            """),
+            {
+                "cid":         company_id,
+                "bid":         branch_id,
+                "pid":         period_id,
+                "key":         data.idempotency_key,
+                "hash":        request_hash,
+                "payload":     json.dumps(payload),
+                "corr":        batch_correlation_id,
+                "expected":    data.expected_bonus_data_revision,
+                "result":      result_revision,
+                "event_ids":   json.dumps(created_ids),
+                "event_count": len(created_ids),
+                "uid":         user_id,
+            },
+        )
+    except SAIntegrityError:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A bonus batch with this idempotency key is already being "
+                "applied for this period. Retry to receive the applied result."
+            ),
+        )
+    batch_request_id = int(batch_ins.scalar_one())
+
+    # Per-event audit rows, all sharing the batch correlation id.
+    for created_id, item in zip(created_ids, data.items):
+        await _write_line_audit(
+            db,
+            company_id=company_id,
+            branch_id=branch_id,
+            user_id=user_id,
+            line_id=created_id,
+            action_code="BONUS_EVENT_ADDED",
+            old_value=None,
+            new_value={"driver_id": item.driver_id, "amount": str(item.amount)},
+            entity_name="PayrollBonusEvents",
+            correlation_id=batch_correlation_id,
+        )
+
+    # One batch-level audit row, same correlation id.
+    await _write_line_audit(
+        db,
+        company_id=company_id,
+        branch_id=branch_id,
+        user_id=user_id,
+        line_id=batch_request_id,
+        action_code="BONUS_BATCH_APPLIED",
+        old_value=None,
+        new_value={
+            "idempotency_key":               data.idempotency_key,
+            "request_hash":                  request_hash,
+            "batch_correlation_id":          batch_correlation_id,
+            "item_count":                    len(created_ids),
+            "created_event_ids":             created_ids,
+            "expected_bonus_data_revision":  data.expected_bonus_data_revision,
+            "result_bonus_data_revision":    result_revision,
+            "total_amount":                  str(total_amount),
+        },
+        entity_name="PayrollBonusBatchRequests",
+        correlation_id=batch_correlation_id,
+    )
+
+    events = await _get_bonus_events_in_order(created_ids, company_id, db)
+    response = BonusBatchResponse(
+        period_id=period_id,
+        branch_id=branch_id,
+        batch_request_id=batch_request_id,
+        idempotency_key=data.idempotency_key,
+        batch_correlation_id=batch_correlation_id,
+        expected_bonus_data_revision=data.expected_bonus_data_revision,
+        result_bonus_data_revision=result_revision,
+        created_event_count=len(created_ids),
+        created_event_ids=created_ids,
+        events=events,
+        replayed=False,
+    )
+    return response, True
 
 
 # ---------------------------------------------------------------------------

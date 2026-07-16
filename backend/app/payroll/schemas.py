@@ -672,6 +672,99 @@ class BonusSummaryResponse(BaseModel):
     bonus_data_revision: int
 
 
+# ---------------------------------------------------------------------------
+# CP-3B2b — create-only transactional bonus batch
+# ---------------------------------------------------------------------------
+
+# NUMERIC(18,2): at most 16 integer digits and exactly 2 fractional digits.
+_BONUS_AMOUNT_MAX_EXCLUSIVE = Decimal("10") ** 16   # 10_000_000_000_000_000.00
+
+
+def _validate_positive_numeric_18_2(v: Decimal) -> Decimal:
+    """Shared amount validator for batch items: positive, fits NUMERIC(18,2),
+    at most two decimal places (no silent rounding).  Returns the value
+    quantized to two decimals so downstream canonical hashing is deterministic.
+    """
+    if not v.is_finite():
+        raise ValueError("Bonus amount must be a finite number.")
+    if v <= 0:
+        raise ValueError("Bonus amount must be positive (> 0).")
+    if abs(v) >= _BONUS_AMOUNT_MAX_EXCLUSIVE:
+        raise ValueError("Bonus amount exceeds the maximum allowed (NUMERIC(18,2)).")
+    quantized = v.quantize(Decimal("0.01"))
+    if quantized != v:
+        raise ValueError("Bonus amount may have at most two decimal places.")
+    return quantized
+
+
+class BonusBatchItem(BaseModel):
+    """One create-only bonus row inside a batch (CP-3B2b)."""
+    driver_id: int
+    amount: Decimal
+    reason: str | None = None
+    notes: str | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def amount_valid(cls, v: Decimal) -> Decimal:
+        return _validate_positive_numeric_18_2(v)
+
+
+class BonusBatchCreate(BaseModel):
+    """
+    Payload for POST /payroll/periods/{period_id}/bonuses/batch (CP-3B2b).
+
+    Create-only: every item creates a separate bonus event.  Duplicate driver
+    rows are allowed (each is its own event).  Item order is significant — it
+    is part of the request hash, so the same items in a different order form a
+    different request for idempotency purposes.
+    """
+    idempotency_key: str
+    expected_bonus_data_revision: int
+    items: list[BonusBatchItem]
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def idempotency_key_valid(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("idempotency_key must be non-empty.")
+        if len(v) > 200:
+            raise ValueError("idempotency_key must be at most 200 characters.")
+        return v
+
+    @field_validator("expected_bonus_data_revision")
+    @classmethod
+    def expected_revision_valid(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("expected_bonus_data_revision must be >= 0.")
+        return v
+
+    @field_validator("items")
+    @classmethod
+    def items_valid(cls, v: list) -> list:
+        if len(v) < 1:
+            raise ValueError("items must contain at least one bonus.")
+        if len(v) > 100:
+            raise ValueError("items must contain at most 100 bonuses.")
+        return v
+
+
+class BonusBatchResponse(BaseModel):
+    """Result of a bonus batch apply or idempotent replay (CP-3B2b)."""
+    period_id: int
+    branch_id: int
+    batch_request_id: int
+    idempotency_key: str
+    batch_correlation_id: str
+    expected_bonus_data_revision: int
+    result_bonus_data_revision: int
+    created_event_count: int
+    created_event_ids: list[int]
+    events: list[BonusEventResponse]
+    replayed: bool
+
+
 class RateLookupResult(BaseModel):
     """
     Result of GET /payroll/rates/lookup — the single rate that applies to a

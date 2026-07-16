@@ -251,7 +251,10 @@ async def _snapshot_entry(driver_id: int) -> dict:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_alembic_head_is_0059() -> None:
+async def test_alembic_head_is_current() -> None:
+    # CP-3B2a introduced migration 0059; CP-3B2b later added 0060, which is now
+    # the head. This test only asserts the chain is linear and that 0059 is
+    # applied (i.e. head is 0059 or a later revision that builds on it).
     import subprocess, sys, pathlib
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "heads"],
@@ -260,7 +263,8 @@ async def test_alembic_head_is_0059() -> None:
     )
     lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
     assert len(lines) == 1, f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
-    assert "0059" in lines[0], f"Expected head 0059, got: {lines[0]}"
+    head_rev = lines[0].split()[0]
+    assert head_rev >= "0059", f"Expected head >= 0059, got: {lines[0]}"
 
 
 @pytest.mark.asyncio
