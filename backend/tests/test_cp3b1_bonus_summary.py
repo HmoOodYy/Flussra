@@ -1058,12 +1058,24 @@ async def test_cross_branch_contaminated_event_excluded(
     cp3b1_drivers: dict[str, int],
 ) -> None:
     """A same-company PayrollBonusEvents row with the correct PayrollPeriodID
-    but a WRONG BranchID (contamination — nothing at the DB layer enforces
-    BranchID == the period's own branch on this table) must not contribute
-    to the driver's total, event list, or the top-level aggregates.
+    but a WRONG BranchID must not contribute to the driver's total, event
+    list, or the top-level aggregates.
 
     This is the exact scenario Codex P1 Fix 1 flagged: aggregation filtered
-    by PeriodID + CompanyID only, missing BranchID.
+    by PeriodID + CompanyID only, missing BranchID. The read-side BranchID
+    filter added for that fix is exercised here directly (bypassing the ORM
+    layer with a raw UPDATE) as a defense-in-depth check.
+
+    As of CP-3B2a, a second, independent defense also exists: a DB-level
+    ownership trigger on PayrollBonusEvents rejects any INSERT/UPDATE whose
+    CompanyID/BranchID does not match the owning PayrollPeriods row — so the
+    contaminated row can no longer even be inserted through normal SQL. That
+    trigger is asserted separately in
+    test_cp3b2a_bonus_batch_safety.py::test_mismatched_branch_insert_rejected.
+    To keep exercising this file's own read-side BranchID filter, the
+    contaminated row is produced here via UPDATE while the trigger is
+    disabled — simulating pre-CP-3B2a contamination or a future bulk-load
+    path that bypasses the trigger.
     """
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3b1_branch_id, start, end)
@@ -1072,20 +1084,29 @@ async def test_cross_branch_contaminated_event_excluded(
     )
 
     # Legitimate same-branch bonus.
-    await _post_bonus(client, auth_token, period_id, cp3b1_drivers["alpha"], "50.00")
+    good_event_id = await _post_bonus(client, auth_token, period_id, cp3b1_drivers["alpha"], "50.00")
 
-    # Contaminated row: same PayrollPeriodID + CompanyID, but BranchID = HQ
-    # (a different real branch), same DriverID. Only PeriodID/CompanyID
-    # ownership is FK-enforced on this table — BranchID consistency is not.
+    # Contaminated row: insert a second Active event normally (passes the
+    # CP-3B2a ownership trigger because BranchID is correct at insert time),
+    # then flip its BranchID to HQ via a direct UPDATE with the trigger
+    # temporarily disabled — simulating contamination that predates the
+    # trigger or a bypass path, which is exactly what the read-side BranchID
+    # filter defends against independently of the trigger.
+    bad_event_id = await _post_bonus(client, auth_token, period_id, cp3b1_drivers["alpha"], "9999.00")
+    await db_conn.execute(_text(
+        "ALTER TABLE payroll.payrollbonusevents DISABLE TRIGGER trg_bonusevents_ownership"
+    ))
     await db_conn.execute(
         _text("""
-            INSERT INTO payroll.payrollbonusevents
-                (companyid, branchid, payrollperiodid, driverid,
-                 amount, status, createdbyuserid, createdatutc, datarevision)
-            VALUES (1, :bid, :pid, :did, 9999.00, 'Active', 1, NOW(), 1)
+            UPDATE payroll.payrollbonusevents
+            SET    branchid = :bid
+            WHERE  payrollbonuseventid = :beid
         """),
-        {"bid": hq_branch_id, "pid": period_id, "did": cp3b1_drivers["alpha"]},
+        {"bid": hq_branch_id, "beid": bad_event_id},
     )
+    await db_conn.execute(_text(
+        "ALTER TABLE payroll.payrollbonusevents ENABLE TRIGGER trg_bonusevents_ownership"
+    ))
     await db_conn.commit()
 
     r = await _get_summary(client, auth_token, period_id)
@@ -1101,6 +1122,7 @@ async def test_cross_branch_contaminated_event_excluded(
     assert row["active_event_count"] == 1
     assert row["voided_event_count"] == 0
     assert len(row["events"]) == 1, "Contaminated cross-branch row must not appear in events[]"
+    assert row["events"][0]["bonus_event_id"] == good_event_id
     assert all(Decimal(e["amount"]) != Decimal("9999.00") for e in row["events"])
 
     assert Decimal(summary["active_bonus_total"]) == Decimal("50.00")

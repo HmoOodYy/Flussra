@@ -140,6 +140,7 @@ async def _write_line_audit(
     old_value: dict | None = None,
     new_value: dict | None = None,
     entity_name: str = "PayrollDraftLines",
+    correlation_id: str | None = None,
 ) -> None:
     """
     Insert one row into audit.AuditLog for a draft-line, period-pay, or bonus-event mutation.
@@ -155,6 +156,13 @@ async def _write_line_audit(
       BONUS_EVENT_UPDATED   — bonus event fields changed (CP-3A)
       BONUS_EVENT_VOIDED    — bonus event voided (CP-3A)
 
+    correlation_id: optional UUID string (CP-3B2a).  audit.AuditLog.CorrelationID
+    defaults to gen_random_uuid() per row; when correlation_id is supplied,
+    this row's CorrelationID is set to that value instead, so every audit row
+    written by one logical operation (e.g. a future bonus batch) can share a
+    single BatchCorrelationID. When not supplied, behavior is unchanged —
+    the INSERT omits the column entirely and the table default applies.
+
     Module-level so tests can monkeypatch it to verify that all preceding
     writes roll back when this raises.
     """
@@ -169,29 +177,46 @@ async def _write_line_audit(
         "BONUS_EVENT_UPDATED": "Bonus event updated",
         "BONUS_EVENT_VOIDED":  "Bonus event voided",
     }
-    await db.execute(
-        text("""
-            INSERT INTO audit.auditlog
-                (companyid, branchid, actoruserid, actioncode,
-                 entityschema, entityname, entityid,
-                 oldvaluejson, newvaluejson, reason, sourcetype)
-            VALUES
-                (:cid, :bid, :uid, :action_code,
-                 'payroll', :entity_name, :eid,
-                 :old_val, :new_val, :reason, 'Application')
-        """),
-        {
-            "cid":         company_id,
-            "bid":         branch_id,
-            "uid":         user_id,
-            "action_code": action_code,
-            "entity_name": entity_name,
-            "eid":         str(line_id),
-            "old_val":     json.dumps(old_value)  if old_value  is not None else None,
-            "new_val":     json.dumps(new_value)  if new_value  is not None else None,
-            "reason":      _LINE_AUDIT_REASONS.get(action_code, action_code),
-        },
-    )
+    params = {
+        "cid":         company_id,
+        "bid":         branch_id,
+        "uid":         user_id,
+        "action_code": action_code,
+        "entity_name": entity_name,
+        "eid":         str(line_id),
+        "old_val":     json.dumps(old_value)  if old_value  is not None else None,
+        "new_val":     json.dumps(new_value)  if new_value  is not None else None,
+        "reason":      _LINE_AUDIT_REASONS.get(action_code, action_code),
+    }
+    if correlation_id is not None:
+        params["correlation_id"] = correlation_id
+        await db.execute(
+            text("""
+                INSERT INTO audit.auditlog
+                    (companyid, branchid, actoruserid, actioncode,
+                     entityschema, entityname, entityid,
+                     oldvaluejson, newvaluejson, reason, sourcetype, correlationid)
+                VALUES
+                    (:cid, :bid, :uid, :action_code,
+                     'payroll', :entity_name, :eid,
+                     :old_val, :new_val, :reason, 'Application', :correlation_id)
+            """),
+            params,
+        )
+    else:
+        await db.execute(
+            text("""
+                INSERT INTO audit.auditlog
+                    (companyid, branchid, actoruserid, actioncode,
+                     entityschema, entityname, entityid,
+                     oldvaluejson, newvaluejson, reason, sourcetype)
+                VALUES
+                    (:cid, :bid, :uid, :action_code,
+                     'payroll', :entity_name, :eid,
+                     :old_val, :new_val, :reason, 'Application')
+            """),
+            params,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -8509,6 +8534,64 @@ async def list_bonus_events(
     ]
 
 
+async def _increment_bonus_data_revision(
+    db: AsyncConnection,
+    *,
+    company_id: int,
+    period_id: int,
+    expected_bonus_data_revision: int | None = None,
+) -> int:
+    """
+    Atomically increment payroll.PayrollPeriods.BonusDataRevision by 1 and
+    return the new value (CP-3B2a).
+
+    This is the period-level bonus-mutation concurrency token. Every
+    successful bonus create/update/void increments it exactly once, in the
+    same transaction as the event write. It is intentionally NOT derived
+    from MAX(PayrollBonusEvents.DataRevision) — a voided or superseded
+    event's per-row revision is not a reliable period-wide aggregate.
+
+    With expected_bonus_data_revision supplied, the UPDATE is predicated on
+    the current value matching it; zero rows means another writer already
+    moved the revision, and this raises 409. This is the guard a future
+    bonus batch (CP-3B2b) will use. Without it (today's single-event
+    mutation paths), the UPDATE is unconditional and only fails to find a
+    row if the period itself vanished mid-transaction — which cannot happen
+    under the FOR UPDATE lock already held by every caller of this helper
+    via _lock_period_for_mutation.
+    """
+    params: dict = {"pid": period_id, "cid": company_id}
+    where_extra = ""
+    if expected_bonus_data_revision is not None:
+        where_extra = "AND bonusdatarevision = :expected"
+        params["expected"] = expected_bonus_data_revision
+
+    result = await db.execute(
+        text(f"""
+            UPDATE payroll.payrollperiods
+            SET    bonusdatarevision = bonusdatarevision + 1
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              {where_extra}
+            RETURNING bonusdatarevision
+        """),
+        params,
+    )
+    row = result.first()
+    if row is None:
+        if expected_bonus_data_revision is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Bonus data has been modified by another request. "
+                    f"Expected revision {expected_bonus_data_revision}. "
+                    "Re-fetch and retry."
+                ),
+            )
+        raise HTTPException(status_code=404, detail="Payroll period not found.")
+    return int(row[0])
+
+
 async def create_bonus_event(
     period_id: int,
     company_id: int,
@@ -8562,6 +8645,11 @@ async def create_bonus_event(
     )
     new_id = insert_result.scalar_one()
 
+    # CP-3B2a: one successful create = period BonusDataRevision +1, in the
+    # same transaction as the insert. A later failure (e.g. audit write)
+    # rolls this back along with the event insert.
+    await _increment_bonus_data_revision(db, company_id=company_id, period_id=period_id)
+
     await _write_line_audit(
         db,
         company_id=company_id,
@@ -8605,7 +8693,10 @@ async def update_bonus_event(
     if event.status == "Voided":
         raise HTTPException(status_code=422, detail="Cannot update a voided bonus event.")
 
-    # Optimistic concurrency: if caller provided data_revision, it must match.
+    # Friendlier early 409 when the caller supplied a stale revision. This is
+    # NOT the actual concurrency guard — a concurrent writer could still slip
+    # in between this check and the UPDATE below. The atomic WHERE-clause
+    # predicate on the UPDATE itself (CP-3B2a) is what actually enforces it.
     if data.data_revision is not None and data.data_revision != event.data_revision:
         raise HTTPException(
             status_code=409,
@@ -8623,6 +8714,7 @@ async def update_bonus_event(
         "beid": bonus_event_id,
         "company_id": company_id,
         "period_id": period_id,
+        "branch_id": period.branch_id,
         "user_id": user_id,
     }
     old_snap: dict = {}
@@ -8650,17 +8742,46 @@ async def update_bonus_event(
 
     await _lock_period_for_mutation(period_id, company_id, db)
 
+    # CP-3B2a: atomic predicate. Always scoped by period/company/branch AND
+    # Status='Active' (a concurrent void between the checks above and this
+    # UPDATE must not silently overwrite a now-voided event). When the caller
+    # supplied data_revision, it is also part of the WHERE clause — this is
+    # the real optimistic-concurrency guard, not the earlier pre-check.
+    where_parts = [
+        "payrollbonuseventid = :beid",
+        "companyid           = :company_id",
+        "payrollperiodid     = :period_id",
+        "branchid            = :branch_id",
+        "status              = 'Active'",
+    ]
+    if data.data_revision is not None:
+        where_parts.append("datarevision = :expected_data_revision")
+        params["expected_data_revision"] = data.data_revision
+
     set_clause = ", ".join(set_parts)
-    await db.execute(
+    where_clause = " AND ".join(where_parts)
+    result = await db.execute(
         text(f"""
             UPDATE payroll.payrollbonusevents
             SET    {set_clause}
-            WHERE  payrollbonuseventid = :beid
-              AND  companyid           = :company_id
-              AND  payrollperiodid     = :period_id
+            WHERE  {where_clause}
+            RETURNING payrollbonuseventid
         """),
         params,
     )
+    if result.first() is None:
+        # Stale revision or concurrently voided between the fetch above and
+        # this UPDATE. Neither the event nor the period's BonusDataRevision
+        # was changed by this request.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Bonus event has been modified by another request. "
+                "Re-fetch and retry."
+            ),
+        )
+
+    await _increment_bonus_data_revision(db, company_id=company_id, period_id=period_id)
 
     await _write_line_audit(
         db,
@@ -8702,13 +8823,18 @@ async def void_bonus_event(
     if event.period_id != period_id:
         raise HTTPException(status_code=404, detail="Bonus event not found in this period.")
 
-    # Idempotent: already voided → return as-is.
+    # Idempotent: already voided → return as-is. No revision bump — this
+    # request changed nothing.
     if event.status == "Voided":
         return event
 
     await _lock_period_for_mutation(period_id, company_id, db)
 
-    await db.execute(
+    # CP-3B2a: atomic predicate — Status='Active' in the WHERE clause means a
+    # concurrent void between the check above and this UPDATE affects zero
+    # rows here, which we then treat as the same idempotent case (re-fetch
+    # and return the now-Voided state without bumping the revision again).
+    result = await db.execute(
         text("""
             UPDATE payroll.payrollbonusevents
             SET    status          = 'Voided',
@@ -8720,14 +8846,23 @@ async def void_bonus_event(
             WHERE  payrollbonuseventid = :beid
               AND  companyid           = :company_id
               AND  payrollperiodid     = :period_id
+              AND  branchid            = :branch_id
+              AND  status              = 'Active'
+            RETURNING payrollbonuseventid
         """),
         {
             "beid":       bonus_event_id,
             "company_id": company_id,
             "period_id":  period_id,
+            "branch_id":  period.branch_id,
             "user_id":    user_id,
         },
     )
+    if result.first() is None:
+        # Concurrently voided between the fetch above and this UPDATE.
+        return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
+
+    await _increment_bonus_data_revision(db, company_id=company_id, period_id=period_id)
 
     await _write_line_audit(
         db,
@@ -8950,6 +9085,17 @@ async def get_bonus_summary(
         )
     )
 
+    # CP-3B2a: bonus_data_revision comes straight from PayrollPeriods, never
+    # from MAX(PayrollBonusEvents.DataRevision).
+    revision_row = (await db.execute(
+        text(
+            "SELECT bonusdatarevision FROM payroll.payrollperiods "
+            "WHERE payrollperiodid = :pid AND companyid = :cid"
+        ),
+        {"pid": period_id, "cid": company_id},
+    )).first()
+    bonus_data_revision = int(revision_row[0]) if revision_row is not None else 0
+
     return BonusSummaryResponse(
         period_id=period_id,
         branch_id=period.branch_id,
@@ -8958,6 +9104,7 @@ async def get_bonus_summary(
         drivers=drivers,
         active_event_count=sum(d.active_event_count for d in drivers),
         active_bonus_total=sum((d.total_bonus for d in drivers), Decimal("0")),
+        bonus_data_revision=bonus_data_revision,
     )
 
 

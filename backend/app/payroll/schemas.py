@@ -666,6 +666,10 @@ class BonusSummaryResponse(BaseModel):
     drivers: list[BonusSummaryDriver]
     active_event_count: int
     active_bonus_total: Decimal
+    # CP-3B2a: period-level bonus-mutation concurrency token, sourced from
+    # PayrollPeriods.BonusDataRevision — never derived from
+    # MAX(PayrollBonusEvents.DataRevision).
+    bonus_data_revision: int
 
 
 class RateLookupResult(BaseModel):
