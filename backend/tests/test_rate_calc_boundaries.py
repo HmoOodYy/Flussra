@@ -20,6 +20,7 @@ preview, 2089 cp5 eligibility).
 
 All dates are in 2082-06-xx or 2082-07-xx range.
 """
+import contextlib
 import pytest
 import pytest_asyncio
 import httpx
@@ -191,38 +192,145 @@ async def _create_and_approve_rate(
     return rate_id
 
 
-async def _activate_bonus(
+@contextlib.asynccontextmanager
+async def _activated_pay_item_restored(
     client: httpx.AsyncClient,
     token: str,
+    direct_db,
     branch_id: int,
-) -> None:
-    """Activate the BONUS pay item for a branch if not already active."""
-    # Try branch-specific list first
-    items_resp = await client.get(
-        f"/settings/branches/{branch_id}/pay-items",
-        headers=auth(token),
-    )
-    if items_resp.status_code == 200:
-        for item in items_resp.json():
-            if item.get("pay_item_code") == "BONUS":
-                if not item.get("is_active", False):
-                    await client.patch(
-                        f"/settings/branches/{branch_id}/pay-items/{item['pay_item_id']}",
-                        json={"is_active": True},
-                        headers=auth(token),
-                    )
-                return
-    # Fall back to global pay items list
-    all_items = await client.get("/settings/pay-items", headers=auth(token))
-    if all_items.status_code == 200:
-        for item in all_items.json():
-            if item.get("pay_item_code") == "BONUS":
-                await client.patch(
-                    f"/settings/branches/{branch_id}/pay-items/{item['pay_item_id']}",
-                    json={"is_active": True},
-                    headers=auth(token),
+    pay_item_code: str,
+):
+    """
+    Temporarily activates a system PayItem for a branch via the real
+    settings API (matching production behavior), then restores BOTH:
+
+      A. the exact pre-test `payroll.BranchPayItemConfig` row state — any
+         row the activation created is deleted, and any row that already
+         existed has its mutated fields restored to their captured original
+         values;
+      B. the exact pre-test `audit.AuditLog` state for that activation.
+
+    Audit contract (confirmed by reading `app/settings/service.py`, not
+    assumed): `_upsert_pay_item_config` calls `_write_settings_audit` with
+    `entity_name="BranchPayItemConfig"` and
+    `entity_id=f"{branch_id}:{pay_item_id}"` — a composite string keyed on
+    branch+pay-item, NOT the config row's surrogate ConfigID. Every
+    create/update/version of that one branch+pay-item pair shares the SAME
+    EntityID, so ConfigID-based ownership (as used for BranchPayItemConfig
+    rows themselves) cannot disambiguate audit rows. Instead this uses an
+    AuditID watermark: the exact set of `audit.AuditLog.AuditID`s matching
+    that EntityName/EntityID is captured before activation, and only the IDs
+    that appear afterward (`after - before`) are treated as test-created and
+    deleted — CreatedAtUtc range is intentionally not used as the sole
+    ownership boundary.
+    """
+    headers = auth(token)
+    items_resp = await client.get(f"/settings/branches/{branch_id}/pay-items", headers=headers)
+    assert items_resp.status_code == 200, f"List branch pay items failed: {items_resp.text}"
+    item = next((i for i in items_resp.json() if i.get("pay_item_code") == pay_item_code), None)
+    assert item is not None, f"{pay_item_code} pay item not found for branch {branch_id}"
+    pay_item_id = item["pay_item_id"]
+
+    company_row = (await direct_db.execute(
+        _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+        {"bid": branch_id},
+    )).mappings().first()
+    company_id = company_row["companyid"]
+    audit_entity_id = f"{branch_id}:{pay_item_id}"
+
+    async def _config_snapshot():
+        rows = (await direct_db.execute(
+            _text("""
+                SELECT configid, isactive, effectivefrom, effectiveto, notes
+                FROM   payroll.branchpayitemconfig
+                WHERE  companyid = :cid AND branchid = :bid AND payitemid = :piid
+            """),
+            {"cid": company_id, "bid": branch_id, "piid": pay_item_id},
+        )).mappings().all()
+        return {r["configid"]: dict(r) for r in rows}
+
+    async def _audit_id_set():
+        rows = (await direct_db.execute(
+            _text("""
+                SELECT auditid FROM audit.auditlog
+                WHERE  entityname = 'BranchPayItemConfig' AND entityid = :eid
+            """),
+            {"eid": audit_entity_id},
+        )).mappings().all()
+        return {r["auditid"] for r in rows}
+
+    config_before = await _config_snapshot()
+    audit_ids_before = await _audit_id_set()
+
+    try:
+        if not item.get("is_active", False):
+            patch_resp = await client.patch(
+                f"/settings/branches/{branch_id}/pay-items/{pay_item_id}",
+                json={"is_active": True},
+                headers=headers,
+            )
+            assert patch_resp.status_code == 200, f"Activate {pay_item_code} failed: {patch_resp.text}"
+        yield pay_item_id
+    finally:
+        config_after = await _config_snapshot()
+
+        # Delete BranchPayItemConfig rows this activation created.
+        for cfg_id in config_after.keys() - config_before.keys():
+            await direct_db.execute(
+                _text("DELETE FROM payroll.branchpayitemconfig WHERE configid = :id"),
+                {"id": cfg_id},
+            )
+        # Restore mutated fields on rows that already existed; defensively
+        # re-insert any pre-existing row the activation somehow removed
+        # (not expected — PATCH /pay-items only inserts/updates, never
+        # deletes — but restoration must not assume that holds).
+        for cfg_id, original in config_before.items():
+            if cfg_id in config_after:
+                await direct_db.execute(
+                    _text("""
+                        UPDATE payroll.branchpayitemconfig
+                        SET    isactive = :active, effectivefrom = :eff_from,
+                               effectiveto = :eff_to, notes = :notes
+                        WHERE  configid = :id
+                    """),
+                    {"active": original["isactive"], "eff_from": original["effectivefrom"],
+                     "eff_to": original["effectiveto"], "notes": original["notes"], "id": cfg_id},
                 )
-                return
+            else:
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.branchpayitemconfig
+                            (configid, companyid, branchid, payitemid,
+                             isactive, effectivefrom, effectiveto, notes)
+                        VALUES (:id, :cid, :bid, :piid, :active, :eff_from, :eff_to, :notes)
+                    """),
+                    {"id": cfg_id, "cid": company_id, "bid": branch_id, "piid": pay_item_id,
+                     "active": original["isactive"], "eff_from": original["effectivefrom"],
+                     "eff_to": original["effectiveto"], "notes": original["notes"]},
+                )
+
+        restored = await _config_snapshot()
+        assert restored == config_before, (
+            f"BranchPayItemConfig for {pay_item_code}/branch {branch_id} was not "
+            f"fully restored after test: before={config_before}, after={restored}"
+        )
+
+        # Delete only the settings AuditLog rows this activation created —
+        # exact EntityName/EntityID plus the AuditID watermark diff, never a
+        # broad delete for the branch or pay item.
+        audit_ids_after = await _audit_id_set()
+        created_audit_ids = audit_ids_after - audit_ids_before
+        if created_audit_ids:
+            await direct_db.execute(
+                _text("DELETE FROM audit.auditlog WHERE auditid = ANY(:ids)"),
+                {"ids": list(created_audit_ids)},
+            )
+
+        final_audit_ids = await _audit_id_set()
+        assert final_audit_ids == audit_ids_before, (
+            f"Settings AuditLog for BranchPayItemConfig entity_id={audit_entity_id!r} "
+            f"was not fully restored: before={audit_ids_before}, after={final_audit_ids}"
+        )
 
 
 async def _add_hours_line(
@@ -1156,7 +1264,7 @@ class TestRateCalculationBoundaries:
             await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
-    async def test_period_pay_direct_money_still_works(
+    async def test_period_pay_adjustment_direct_money_still_works(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1165,54 +1273,198 @@ class TestRateCalculationBoundaries:
         direct_db,
     ):
         """
-        Regression: Period-pay (Bonus, Adjustment) lines still accept `amount`.
-        Phase 4C must NOT block period-scope pay lines — they use a separate schema
+        Current contract: generic Period-pay direct-money entry (ADJUSTMENT,
+        RateBehavior='Fixed' at the catalog level) still accepts `amount` via
+        the dedicated `/period-pay` endpoint. Phase 4C must NOT block
+        period-scope pay lines — they use a separate schema
         (PeriodPayLineCreate) with an `amount` field, not `rate_amount`.
+
+        (Replaces the stale pre-CP-3A version of this test, which exercised
+        BONUS through `/period-pay` — CP-3A moved canonical bonus creation to
+        the dedicated Bonus Events API; see
+        `test_period_pay_bonus_rejected_redirects_to_bonus_events_api` and
+        `test_canonical_bonus_event_creation_succeeds` below for that path.)
+
+        ADJUSTMENT activation is wrapped in `_activated_pay_item_restored` so
+        the shared branch's `BranchPayItemConfig` row is restored to its
+        exact pre-test state afterward, rather than left permanently active.
         """
         headers = auth(auth_token)
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        await _activate_bonus(session_client, auth_token, paytest_branch_id)
+
+        async with _activated_pay_item_restored(
+            session_client, auth_token, direct_db, paytest_branch_id, "ADJUSTMENT",
+        ):
+            pid = await _open_period(
+                session_client, auth_token, paytest_branch_id, db=direct_db,
+                start=MISC_START, end=MISC_END,
+            )
+            try:
+                # First add a daily line (DailyNote) so the period is non-empty
+                r = await session_client.post(
+                    f"/payroll/periods/{pid}/lines",
+                    json={
+                        "driver_id": paytest_driver_id,
+                        "work_date": DATE_AUG05,
+                        "line_type": "DailyNote",
+                        "quantity":  1,
+                        "notes":     "filler",
+                    },
+                    headers=headers,
+                )
+                assert r.status_code == 201, f"Add PTO line failed: {r.text}"
+
+                adj_resp = await session_client.post(
+                    f"/payroll/periods/{pid}/period-pay",
+                    json={
+                        "driver_id": paytest_driver_id,
+                        "line_type": "ADJUSTMENT",
+                        "amount":    "150.00",
+                        "notes":     "Phase 4C regression check",
+                    },
+                    headers=headers,
+                )
+                assert adj_resp.status_code == 201, (
+                    f"Period-pay ADJUSTMENT line must still be accepted: {adj_resp.text}"
+                )
+                adj_line = adj_resp.json()
+                assert Decimal(str(adj_line["calculated_amount"])) == Decimal("150.00"), (
+                    f"ADJUSTMENT calculated_amount must match entered amount: {adj_line['calculated_amount']}"
+                )
+                assert adj_line["needs_manager_review"] is False
+            finally:
+                await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+
+    @pytest.mark.asyncio
+    async def test_period_pay_bonus_rejected_redirects_to_bonus_events_api(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_branch_id: int,
+        paytest_driver_id: int,
+        direct_db,
+    ):
+        """
+        Current CP-3A contract: generic `/period-pay` rejects BONUS with 422
+        and directs the caller to the canonical Bonus Events API.
+
+        No BONUS activation is performed here: `add_period_pay_line`'s
+        `canonical_period_lt == "BONUS"` guard (service.py) raises 422
+        unconditionally, before any branch-activation check ever runs — so
+        activating the pay item is unneeded setup that would otherwise leave
+        BranchPayItemConfig/settings-audit state to restore for no test value.
+        """
+        headers = auth(auth_token)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
         pid = await _open_period(
             session_client, auth_token, paytest_branch_id, db=direct_db,
             start=MISC_START, end=MISC_END,
         )
         try:
-            # First add a daily line (DailyNote) so the period is non-empty
-            r = await session_client.post(
-                f"/payroll/periods/{pid}/lines",
-                json={
-                    "driver_id": paytest_driver_id,
-                    "work_date": DATE_AUG05,
-                    "line_type": "DailyNote",
-                    "quantity":  1,
-                    "notes":     "filler",
-                },
-                headers=headers,
-            )
-            assert r.status_code == 201, f"Add PTO line failed: {r.text}"
-
-            # Add a period-pay Bonus line via the dedicated endpoint
             bonus_resp = await session_client.post(
                 f"/payroll/periods/{pid}/period-pay",
                 json={
                     "driver_id": paytest_driver_id,
                     "line_type": "BONUS",
                     "amount":    "150.00",
-                    "notes":     "Phase 4C regression check",
+                    "notes":     "CP-3A rejection check",
+                },
+                headers=headers,
+            )
+            assert bonus_resp.status_code == 422, (
+                f"Generic period-pay must reject BONUS; got {bonus_resp.status_code}: {bonus_resp.text}"
+            )
+            detail = bonus_resp.json()["detail"]
+            assert "/bonuses" in detail, (
+                f"Error must direct the caller to the canonical Bonus Events API "
+                f"(a path containing '/bonuses'); got: {detail}"
+            )
+        finally:
+            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+
+    @pytest.mark.asyncio
+    async def test_canonical_bonus_event_creation_succeeds(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_branch_id: int,
+        paytest_driver_id: int,
+        direct_db,
+    ):
+        """
+        Current CP-3A contract: canonical bonus creation goes through
+        `POST /periods/{id}/bonuses`, not the generic period-pay endpoint.
+
+        Cleanup note: the product `DELETE /periods/{id}/bonuses/{event_id}`
+        endpoint correctly VOIDS a bonus event rather than physically
+        deleting it (see `void_bonus_event` in app/payroll/service.py) — that
+        is the correct business behavior and must not be used as this test's
+        final cleanup, since it would leave a permanent Voided
+        PayrollBonusEvents row (plus its BONUS_EVENT_ADDED/BONUS_EVENT_VOIDED
+        audit rows) in the shared AUTOCOMMIT test database. Instead this test
+        hard-deletes its own exact test-owned row and audit rows directly,
+        and verifies both are gone.
+        """
+        headers = auth(auth_token)
+        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+
+        pid = await _open_period(
+            session_client, auth_token, paytest_branch_id, db=direct_db,
+            start=MISC_START, end=MISC_END,
+        )
+        bonus_event_id = None
+        try:
+            bonus_resp = await session_client.post(
+                f"/payroll/periods/{pid}/bonuses",
+                json={
+                    "driver_id": paytest_driver_id,
+                    "amount":    "150.00",
+                    "reason":    "Phase 4 canonical bonus check",
                 },
                 headers=headers,
             )
             assert bonus_resp.status_code == 201, (
-                f"Period-pay Bonus line must still be accepted: {bonus_resp.text}"
+                f"Canonical bonus event creation must succeed: {bonus_resp.text}"
             )
-            bonus_line = bonus_resp.json()
-            from decimal import Decimal
-            assert Decimal(str(bonus_line["calculated_amount"])) == Decimal("150.00"), (
-                f"Bonus calculated_amount must match entered amount: {bonus_line['calculated_amount']}"
-            )
-            assert bonus_line["needs_manager_review"] is False
+            bonus_event = bonus_resp.json()
+            bonus_event_id = bonus_event["bonus_event_id"]
+            assert Decimal(str(bonus_event["amount"])) == Decimal("150.00")
+            assert bonus_event["status"] == "Active"
         finally:
+            if bonus_event_id is not None:
+                # Bonus audit rows (BONUS_EVENT_ADDED, and BONUS_EVENT_VOIDED
+                # if a void ever ran) are written by _write_line_audit with
+                # entity_name="PayrollBonusEvents" and entity_id=str(bonus_event_id)
+                # — confirmed by reading create_bonus_event/void_bonus_event
+                # in app/payroll/service.py, not assumed. create_bonus_event
+                # never passes a correlation_id, so no batch-correlation rows
+                # exist to clean up for this single-event test.
+                await direct_db.execute(
+                    _text(
+                        "DELETE FROM audit.auditlog "
+                        "WHERE entityname = 'PayrollBonusEvents' AND entityid = :eid"
+                    ),
+                    {"eid": str(bonus_event_id)},
+                )
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :id"),
+                    {"id": bonus_event_id},
+                )
+                residue = (await direct_db.execute(
+                    _text("""
+                        SELECT
+                            (SELECT COUNT(*) FROM payroll.payrollbonusevents
+                                WHERE payrollbonuseventid = :id) AS bonus_rows,
+                            (SELECT COUNT(*) FROM audit.auditlog
+                                WHERE entityname = 'PayrollBonusEvents' AND entityid = :eid) AS audit_rows
+                    """),
+                    {"id": bonus_event_id, "eid": str(bonus_event_id)},
+                )).mappings().first()
+                assert residue["bonus_rows"] == 0 and residue["audit_rows"] == 0, (
+                    f"BonusEvent {bonus_event_id} residue after hard-clean: {dict(residue)} "
+                    f"— no active or Voided test bonus row (or its audit rows) may remain."
+                )
             await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
