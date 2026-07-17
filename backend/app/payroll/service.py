@@ -4374,6 +4374,31 @@ async def _write_finalization_audit(
     )
 
 
+# ---------------------------------------------------------------------------
+# CP-3C: min/max base classification
+# ---------------------------------------------------------------------------
+# LineTypes excluded from the minimum/maximum pay comparison base, used by
+# finalize_period's Step 3b SQL aggregation (below). BONUS is excluded here
+# via a CASE-based conditional SUM, not a WHERE-clause row filter, so that a
+# bonus-only driver still appears in the earned-base aggregation with a base
+# of 0 — excluding via WHERE would silently drop that driver from min/max
+# processing entirely. SYS_MIN_TOPUP/SYS_MAX_CAP are excluded because they
+# are the min/max adjustment itself, not source pay.
+#
+# get_finalization_preview enforces the identical rule (bonus excluded from
+# the comparison base, added back in only after min/max) but cannot reuse
+# this constant directly: preview never builds a unified LineType-tagged row
+# set to filter — SYS_MIN_TOPUP/SYS_MAX_CAP don't exist as preview "lines" at
+# all (only finalize_period ever writes them), and bonus is already read from
+# a separate bonus_events_preview list rather than a DraftLines/FinalLines
+# scan. Preview instead keeps bonus in its own `driver_bonus` accumulator,
+# structurally excluded from `driver_daily`/`driver_period` (see
+# get_finalization_preview below). Both paths implement the same *rule*; this
+# constant is the executable form only where finalize_period's data shape
+# (a single LineType-tagged table) makes it applicable.
+_MINMAX_BASE_EXCLUDED_LINETYPES = ("BONUS", "SYS_MIN_TOPUP", "SYS_MAX_CAP")
+
+
 async def finalize_period(
     period_id: int,
     company_id: int,
@@ -4873,17 +4898,28 @@ async def finalize_period(
         },
     )
 
-    # Step 3b — Per-driver earned pay from PayrollFinalLines (excludes system lines).
+    # Step 3b — Per-driver normal_base from PayrollFinalLines (excludes BONUS and the
+    # system adjustment types themselves).
     # Reading from PayrollFinalLines uses the exact FinalAmount that was written in Step 3
     # (including the COALESCE(calculatedamount, qty * rateamount) logic), not raw draft state.
+    #
+    # CP-3C: normal_base (the min/max comparison base) is computed with a CASE-based
+    # conditional sum, NOT a WHERE-clause row filter — a WHERE filter would silently
+    # drop a bonus-only driver from this aggregation entirely (no non-BONUS rows to
+    # match), and that driver would then never reach the min/max loop below and so
+    # never receive a minimum top-up. The CASE form keeps every driver with any final
+    # line in the result, with normal_base correctly at 0 for a bonus-only driver.
+    # Bonus itself is not re-summed here — it already exists as its own BONUS final
+    # line from Step 3-bonus above, so it flows into the ledger's per-driver total
+    # unchanged; only its exclusion from the min/max comparison is new.
     earned_result = await db.execute(
-        text("""
+        text(f"""
             SELECT driverid,
-                   SUM(finalamount) AS earned
+                   SUM(CASE WHEN linetype IN {_MINMAX_BASE_EXCLUDED_LINETYPES}
+                            THEN 0 ELSE finalamount END) AS normal_base
             FROM   payroll.payrollfinallines
             WHERE  payrollperiodid = :period_id
               AND  companyid       = :company_id
-              AND  linetype NOT IN ('SYS_MIN_TOPUP', 'SYS_MAX_CAP')
             GROUP BY driverid
         """),
         {"period_id": period_id, "company_id": company_id},
@@ -5444,6 +5480,7 @@ async def get_finalization_preview(
     # FinalAmount = COALESCE(calculatedamount, quantity * COALESCE(rateamount, 0))
     driver_daily:  dict[int, Decimal] = {}
     driver_period: dict[int, Decimal] = {}
+    driver_bonus:  dict[int, Decimal] = {}
     driver_names:  dict[int, str | None] = {}
     driver_counts: dict[int, int] = {}
 
@@ -5465,18 +5502,18 @@ async def get_finalization_preview(
         else:  # Period
             driver_period[drv] = driver_period.get(drv, Decimal("0")) + amt
 
-    # ── Add bonus event amounts to driver_period (CP-3A) ────────────────────
-    # Bonus events are finalized as Period-scope lines.  Add their amounts to
-    # driver_period so that Min/Max and gross totals are computed identically
-    # to what finalize_period will produce.  (CP-3C known debt: BONUS still
-    # enters the min/max base here — fix in CP-3C.)
+    # ── CP-3C: bonus tracked separately, never folded into driver_period ────
+    # Bonus events are finalized as Period-scope lines, but they must NOT enter
+    # the min/max comparison base (that was the CP-3C bug — see below). Kept in
+    # its own accumulator so it can be added back in only after min/max, exactly
+    # matching finalize_period's Step 3b/3c ordering.
     for be in bonus_events_preview:
         drv = be.driver_id
         driver_names.setdefault(drv, be.driver_name)
         driver_counts[drv] = driver_counts.get(drv, 0) + 1
-        driver_period[drv] = driver_period.get(drv, Decimal("0")) + be.amount
+        driver_bonus[drv] = driver_bonus.get(drv, Decimal("0")) + be.amount
 
-    all_driver_ids = set(driver_daily) | set(driver_period)
+    all_driver_ids = set(driver_daily) | set(driver_period) | set(driver_bonus)
 
     # ── Min/Max pay rules — same lookup as finalize Step 3c ─────────────────
     period_start = period.start_date
@@ -5484,7 +5521,10 @@ async def get_finalization_preview(
     driver_sys_adj: dict[int, Decimal] = {}
 
     for drv_id in all_driver_ids:
-        earned = (
+        # CP-3C: normal_base excludes bonus by construction — driver_period never
+        # receives bonus amounts (see driver_bonus above). This is the exact
+        # min/max comparison base finalize_period's Step 3b now also computes.
+        normal_base = (
             driver_daily.get(drv_id, Decimal("0"))
             + driver_period.get(drv_id, Decimal("0"))
         )
@@ -5537,38 +5577,53 @@ async def get_finalization_preview(
                 continue
 
         adj = Decimal("0")
+        # This driver's total bonus — added to gross_before + adjustment_amount
+        # below so final_pay here always equals this driver's true total pay
+        # (the same value FinalizationPreviewDriverTotal.final_pay reports and
+        # the finalized ledger will sum to), never a bonus-free intermediate.
+        drv_bonus_total = driver_bonus.get(drv_id, Decimal("0"))
 
-        if min_amount is not None and earned < min_amount:
-            delta = min_amount - earned  # always > 0
+        if min_amount is not None and normal_base < min_amount:
+            delta = min_amount - normal_base  # always > 0
             adj += delta
             sys_adjustments.append(FinalizationPreviewSysAdjustment(
                 driver_id=drv_id,
                 driver_name=driver_names.get(drv_id),
                 adjustment_type="SYS_MIN_TOPUP",
-                gross_before=earned,
+                gross_before=normal_base,
                 adjustment_amount=delta,
-                final_pay=earned + delta,
+                bonus_total=drv_bonus_total,
+                final_pay=normal_base + delta + drv_bonus_total,
             ))
 
-        if max_amount is not None and earned > max_amount:
-            delta = max_amount - earned  # always < 0
+        if max_amount is not None and normal_base > max_amount:
+            delta = max_amount - normal_base  # always < 0
             adj += delta
             sys_adjustments.append(FinalizationPreviewSysAdjustment(
                 driver_id=drv_id,
                 driver_name=driver_names.get(drv_id),
                 adjustment_type="SYS_MAX_CAP",
-                gross_before=earned,
+                gross_before=normal_base,
                 adjustment_amount=delta,
-                final_pay=earned + delta,
+                bonus_total=drv_bonus_total,
+                final_pay=normal_base + delta + drv_bonus_total,
             ))
 
         driver_sys_adj[drv_id] = adj
 
     # ── Build driver totals ──────────────────────────────────────────────────
+    # CP-3C: gross_pay is normal gross only (daily_pay + period_pay, both
+    # bonus-free by construction — see driver_bonus above). final_pay is the
+    # true total pay: normal gross + sys_adjustment (min/max, normal-only) +
+    # bonus_total (added back in only after min/max is applied). Before CP-3C,
+    # gross_pay/final_pay both silently included bonus inside the min/max base;
+    # bonus_total is new so callers can see the bonus component explicitly
+    # instead of it being folded into gross_pay as it previously was.
     driver_totals: list[FinalizationPreviewDriverTotal] = []
     for drv_id in sorted(all_driver_ids):
         daily  = driver_daily.get(drv_id, Decimal("0"))
         period_p = driver_period.get(drv_id, Decimal("0"))
+        bonus  = driver_bonus.get(drv_id, Decimal("0"))
         gross  = daily + period_p
         adj    = driver_sys_adj.get(drv_id, Decimal("0"))
         driver_totals.append(FinalizationPreviewDriverTotal(
@@ -5578,7 +5633,8 @@ async def get_finalization_preview(
             period_pay=period_p,
             gross_pay=gross,
             sys_adjustment=adj,
-            final_pay=gross + adj,
+            bonus_total=bonus,
+            final_pay=gross + adj + bonus,
             line_count=driver_counts.get(drv_id, 0),
         ))
 

@@ -1175,24 +1175,40 @@ class FinalizationPreviewLine(BaseModel):
 
 
 class FinalizationPreviewSysAdjustment(BaseModel):
-    """A SYS_MIN_TOPUP or SYS_MAX_CAP row that would be written by finalization."""
+    """A SYS_MIN_TOPUP or SYS_MAX_CAP row that would be written by finalization.
+
+    CP-3C: final_pay here is the driver's actual total final pay — the same
+    value as this driver's FinalizationPreviewDriverTotal.final_pay and the
+    same value the finalized ledger will sum to for this driver. It is NOT
+    "normal pay after just this one adjustment" (gross_before + adjustment_amount
+    alone) — bonus_total is included so a caller reading only this list still
+    sees the true payout, not a bonus-free intermediate figure.
+    """
     driver_id: int
     driver_name: str | None
     adjustment_type: str          # "SYS_MIN_TOPUP" or "SYS_MAX_CAP"
-    gross_before: Decimal
-    adjustment_amount: Decimal    # positive for top-up, negative for cap
-    final_pay: Decimal
+    gross_before: Decimal         # normal_base only — excludes bonus
+    adjustment_amount: Decimal    # positive for top-up, negative for cap; computed on gross_before (bonus-free)
+    bonus_total: Decimal = Decimal("0")   # this driver's total Active bonus, added after min/max
+    final_pay: Decimal            # gross_before + adjustment_amount + bonus_total (this driver's true total)
 
 
 class FinalizationPreviewDriverTotal(BaseModel):
-    """Aggregated pay summary for one driver in the preview."""
+    """Aggregated pay summary for one driver in the preview.
+
+    CP-3C: gross_pay is normal pay only (daily_pay + period_pay) — bonus is
+    never folded into it. sys_adjustment (min/max) is computed from that same
+    bonus-free base. bonus_total is added back in only after min/max, so
+    final_pay = gross_pay + sys_adjustment + bonus_total.
+    """
     driver_id: int
     driver_name: str | None
     daily_pay: Decimal
     period_pay: Decimal
-    gross_pay: Decimal
-    sys_adjustment: Decimal       # sum of SYS_MIN_TOPUP / SYS_MAX_CAP deltas
-    final_pay: Decimal
+    gross_pay: Decimal            # normal pay only — excludes bonus
+    sys_adjustment: Decimal       # sum of SYS_MIN_TOPUP / SYS_MAX_CAP deltas, computed on gross_pay (bonus-free)
+    bonus_total: Decimal = Decimal("0")   # sum of Active canonical PayrollBonusEvents for this driver
+    final_pay: Decimal            # gross_pay + sys_adjustment + bonus_total
     line_count: int
 
 

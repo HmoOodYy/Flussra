@@ -617,9 +617,30 @@ class TestFinalizationPreview:
         direct_db,
     ):
         """CP-3A: Bonus event (POST /bonuses) appears in bonus_events field of preview.
-        BONUS must NOT appear in lines (DraftLines).  Bonus amounts counted in period_pay."""
+        BONUS must NOT appear in lines (DraftLines).
+
+        CP-3C: bonus is tracked in bonus_total, never folded into period_pay/
+        gross_pay (those represent normal pay only, excluded from the min/max
+        base) — final_pay is the only field that includes bonus."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
+
+        # Baseline: preview before the bonus exists, so period_pay/gross_pay's
+        # exact pre-bonus value is known and can be asserted unchanged after.
+        baseline_resp = await session_client.get(
+            f"/payroll/periods/{pid}/finalization-preview",
+            headers=headers,
+        )
+        assert baseline_resp.status_code == 200
+        baseline_row = next(
+            (t for t in baseline_resp.json()["driver_totals"] if t["driver_id"] == paytest_driver_id),
+            None,
+        )
+        # paytest_driver_id may have no lines yet in this shared period at this
+        # point in the class — treat that as a zero baseline rather than failing.
+        baseline_period_pay = Decimal(str(baseline_row["period_pay"])) if baseline_row else Decimal("0")
+        baseline_gross_pay = Decimal(str(baseline_row["gross_pay"])) if baseline_row else Decimal("0")
+        baseline_final_pay = Decimal(str(baseline_row["final_pay"])) if baseline_row else Decimal("0")
 
         # Force back to Open to add the bonus event
         await direct_db.execute(
@@ -655,10 +676,29 @@ class TestFinalizationPreview:
         bonus_in_lines = [l for l in body["lines"] if l["line_type"] == "BONUS"]
         assert not bonus_in_lines, "BONUS DraftLines must not appear in preview lines after CP-3A"
 
-        # period_pay in driver total must include bonus amount
         totals = body["driver_totals"]
         assert len(totals) >= 1
-        assert Decimal(str(totals[0]["period_pay"])) >= Decimal("50.00")
+        driver_row = next(t for t in totals if t["driver_id"] == paytest_driver_id)
+
+        # bonus_total contains the bonus.
+        assert Decimal(str(driver_row["bonus_total"])) >= Decimal("50.00")
+
+        # period_pay and gross_pay are UNCHANGED by the bonus — they must not
+        # have silently absorbed it (the exact CP-3C bug this test now guards
+        # against: bonus was previously folded into period_pay/gross_pay).
+        assert Decimal(str(driver_row["period_pay"])) == baseline_period_pay, (
+            "period_pay must exclude bonus — it must equal its pre-bonus value"
+        )
+        assert Decimal(str(driver_row["gross_pay"])) == baseline_gross_pay, (
+            "gross_pay must exclude bonus — it must equal its pre-bonus value"
+        )
+
+        # final_pay DOES include the bonus — it must have grown by exactly the
+        # bonus amount relative to its pre-bonus value (no min/max rule is
+        # active here, so no adjustment is in play).
+        assert Decimal(str(driver_row["final_pay"])) == baseline_final_pay + Decimal("50.00"), (
+            "final_pay must include bonus"
+        )
 
     @pytest.mark.asyncio
     async def test_preview_excludes_void_lines(
