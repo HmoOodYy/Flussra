@@ -202,7 +202,7 @@ CP-2B added `PayrollPeriodDays` (snapshotted period calendar). CP-2C added `Payr
 - CP-2D1: selected status is now stored through `PayrollPeriodDriverDayEntryState` using `StatusKeyID` (FK). Code-text-only storage was the pre-CP-2D1 baseline; it no longer applies to new writes. Historical reads resolve via `StatusKeyID`; deactivated keys referenced in existing canonical rows are pre-fetched from a deactivated key map.
 - `DailyStatus` and `DailyNote` pseudo-line dual-write is preserved for finalization legacy compatibility only.
 - Status is not a Pay Item. `PTO_STATUS` was removed in commit `236a506` and must not return. Current status payment uses `StatusRateColumns` and CP-2D2 derived system payment lines; it is eligibility-aware and is suppressed for Draft periods.
-- There is no effective-dated `StatusKeyPayRule` domain (future Phase 3+ work).
+- There is no effective-dated `StatusKeyPayRule` domain. It remains unimplemented future work — a separate backend rule domain, not part of Phase 4 and not automatically a generic Calculated Method (see "Phase 4 Status payment boundary").
 
 ### 3.8 Off-driver behavior today
 
@@ -626,21 +626,22 @@ Snapshot:
 
 This snapshot controls grid/report columns for the period. Reordering settings affects only later periods.
 
-### 7.5 Normalized daily status
+### 7.5 Normalized daily status (updated: canonical entry-state model)
 
-Introduce `PayrollDailyStatuses` or equivalent:
+The canonical per-driver/per-day Status selection already lives in `PayrollPeriodDriverDayEntryState`. Phase 4 must extend or reference that existing entry-state model rather than introduce `PayrollDailyStatuses` or another parallel Status source. Compatibility `DailyStatus` and derived payment lines remain projections; they must not become competing source-of-truth records.
 
-- company/branch/period/driver/work date;
-- StatusKeyID;
-- snapshot code, label, off flag, allowance category metadata;
-- active/void state;
-- actor/timestamps;
-- data revision;
-- unique active business key for period/driver/date.
+- One driver/day has one canonical selected `StatusKeyID` (in `PayrollPeriodDriverDayEntryState`).
+- Phase 4 calculation resolution reads that canonical entry-state fact.
+- Compatibility `DailyStatus` DraftLines remain projections/outputs only.
+- Derived `STATUS_PAYMENT` lines remain financial compatibility projections, not source truth.
+- Future snapshot work may freeze the resolved status-related values by value (see "Phase 4 Status payment boundary").
+- No second status persistence model is introduced.
+
+Phase 4 may snapshot payroll-payment inputs and resolved payment results. Allowance-category linkage, entitlement deduction, allowance rules, and usage ledger belong to the future DAC domain; Phase 4 must not store allowance-ledger authority inside its payroll calculation snapshot model. The future DAC domain may independently reference the same canonical StatusKey selection.
 
 Daily notes should be a typed operational record or typed field, not a fake Pay Item line.
 
-Future `StatusKeyPayRules` should be effective-dated and independently map a Status Key to financial behavior. Allowance-category mapping remains separate.
+Future `StatusKeyPayRules` should be effective-dated and independently map a Status Key to financial behavior. Allowance-category mapping remains separate, through future `StatusKeyAllowanceRules` (future DAC architecture, not implemented by Phase 4).
 
 ### 7.6 Bonus events (updated: CP-3C)
 
@@ -995,7 +996,7 @@ There is no user-operated Recalculate button. Calculation is invoked by backend 
 
 ### 9.8 Rounding decision required before implementation
 
-The calculation core must establish one documented money rounding policy, including line precision, per-day aggregation, per-driver aggregation, and currency rounding. Current Decimal behavior is not yet a complete product contract.
+CP-4A must establish and test an explicit numeric compatibility contract that preserves the current 4-decimal calculation behavior, including line precision, quantization boundaries, Decimal context, and rounding mode. Final payable-total currency rounding and reconciliation are separate product decisions that must be resolved before CP-4C snapshot design; CP-4A must not introduce a new 2-decimal payout rule.
 
 ---
 
@@ -2475,7 +2476,7 @@ Backfilling historical status identity from free-text codes may be ambiguous. Am
 
 **Status:** `Pending`
 
-- [ ] P4A: extract pure/versioned daily calculation core.
+- [ ] P4A: extract pure/versioned daily calculation core (authoritative PerUnit; Status-payment caller kept separate; direct/manual and M13c legacy behaviors via non-core compatibility adapters).
 - [ ] P4B: add Open/Returned calculation preview.
 - [ ] P4C: add calculation snapshots and source/config hashes.
 - [ ] P4D: submit captures snapshot/revision.
@@ -2505,7 +2506,7 @@ Guarantee that expected income, review, approval, finalization, and ledger are d
 
 - date-specific rate changes;
 - mid-period eligibility;
-- every supported rate behavior;
+- each characterization group (authoritative PerUnit core, Status-payment caller, direct/manual boundaries, M13c legacy adapters);
 - status-generated pay;
 - min/max then bonus;
 - preview/submission/approval/finalization parity;
@@ -2535,6 +2536,170 @@ This phase changes the highest-risk financial path. Parallel “old vs new” pa
 - [ ] No current-rate lookup occurs after approval during finalization.
 - [ ] Decimal/rounding policy tested.
 - [ ] Existing locked-ledger triggers preserved.
+
+### Phase 4 calculation-authority classification
+
+Not every existing `RateBehavior` implementation becomes a first-class method inside the new CP-4A calculation core. The authoritative classification is:
+
+- **A. Current authoritative daily calculation core:** `PerUnit`.
+- **B. Separate current derived calculation caller:** Status-derived payment (a system calculation lane, not a `RateBehavior` method).
+- **C. Current direct/manual financial boundaries outside the daily method core:** `EnteredAmount`; Fixed/manual/fallback behavior.
+- **D. Legacy M13c compatibility algorithms:** `OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`.
+- **E. Future-only reserved behavior/domain:** `Calculated` (schema-legal but explicitly rejected downstream — reserved for a future automated calculation engine); future Calculated Methods; future `StatusKeyPayRule`.
+- **F. Non-core/retired compatibility value:** `None` — preserve safely if encountered, but do not promote it into the new core or the future method model.
+
+Current `RateBehavior` values do not equal future `CalculatedMethod` identities. Classification here governs CP-4A scope only; it deprecates nothing and removes nothing.
+
+**Operational CDPI boundary (current state):**
+
+- CDPI operationally implements `PerUnit` only.
+- Advanced registered keys (`OrdinalTier`, `Block`, `RangeBracket`, `RangeProgressive`) may exist as placeholders/adapters in the CDPI registry, but they are not approved or operational Calculated Methods.
+- Modern custom Daily PayItem creation is restricted to `PerUnit`.
+- `OrdinalTier`, `RangeBracket`, `RangeProgressive`, and `Block` are not supported for new modern creation.
+- Their old M13c algorithms remain for legacy compatibility if historical/pre-existing rows require them.
+- Existing code presence and test coverage do not promote them into the future method domain.
+- This docs classification does not remove or deprecate the legacy algorithms.
+
+**CP-4A implementation boundary:**
+
+1. Extract `PerUnit` into the authoritative pure daily calculation core.
+2. Preserve Decimal-only numeric compatibility.
+3. Keep Status payment as a separate current derived calculation caller, not a `RateBehavior` method.
+4. Preserve `EnteredAmount` and Fixed/manual contracts as direct/non-core boundaries.
+5. Route M13c advanced behaviors (`OrdinalTier`/`RangeBracket`/`RangeProgressive`/`Block`) through a legacy compatibility adapter.
+6. Keep `Calculated` out of scope as future automated calculation work.
+7. Do not create `CalculatedMethodID`.
+8. Do not introduce a formula DSL.
+9. Do not introduce speculative method dependency ordering.
+10. Do not add new final payable 2dp rounding.
+11. Require exact Decimal and result-contract parity before caller cutover.
+
+### Phase 4 calculation compatibility characterization gate
+
+**Status:** Prerequisite — not a lifecycle feature, does not mark Phase 4 `In Progress`.
+
+Before CP-4A production extraction or any caller cutover:
+
+- Focused characterization tests must lock the current numeric and compatibility behavior of each characterization group below (authoritative core, Status-payment caller, direct/manual boundaries, and legacy adapters). Characterizing a path locks its current behavior; it does not promote that path into the new core.
+- **No production calculation behavior changes as a result of this gate.** Characterization tests observe and pin down current behavior; they do not alter it.
+- Current `RateBehavior` values (`PerUnit`, `EnteredAmount`, `Fixed`, `OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`, `None`) are **existing calculation paths**, not approved future `CalculatedMethod` identities. Future Calculated Methods remain a separate product/domain concept whose relationship to PayItem, RateBehavior, rate slots, source inputs, and method configuration is designed deliberately later — not implied by this gate.
+- CP-4A is a **behavior-preserving extraction**, not a rewrite or a cleanup.
+- Caller cutover (any live code path switching from the current calculation logic to the extracted core) is blocked until old-vs-new exact Decimal and result-contract parity is proven by the characterization suite.
+
+**Required characterization areas:**
+
+*Authoritative CP-4A core characterization:*
+
+- PerUnit 4dp monetary rounding (single multiply, quantize once to `Decimal("0.0001")`).
+- Exact preview/finalization/ledger Decimal and result-contract parity (not merely equal after display rounding).
+- The status-derived payment integration boundary where applicable.
+- Min/max comparisons and adjustment deltas at 4dp (no explicit rounding on the delta today).
+- The 4dp normal total plus 2dp bonus total combination in `final_pay` (no reconciling rounding step exists today).
+- Actual HTTP/JSON Decimal serialization behavior (4dp for calculation fields, 2dp for bonus fields — an existing, intentional asymmetry, not a bug to characterize away).
+- The Decimal-only calculation-core boundary (no float conversion anywhere in the arithmetic path).
+
+*Separate current calculation-caller characterization (Status payment):*
+
+- Status payment as a derived system calculation: canonical StatusKey selection → resolved paid hours (current `HoursValue` compatibility) → resolved status rate → derived monetary result (`HoursValue × resolved rate`, quantized once to 4dp).
+
+*Direct/manual compatibility characterization:*
+
+- EnteredAmount compatibility (no quantization applied — the user-supplied amount passes through verbatim).
+- Fixed/None/manual compatibility (Fixed and None are dispatched by the current compatibility path but currently return no computed amount; their downstream fallback/manual behavior must be characterized separately).
+- The legacy/manual fallback: `CalculatedAmount IS NULL -> Quantity * RateAmount`, computed by the finalization/preview COALESCE pattern rather than by the rate-behavior dispatch.
+- PostgreSQL `NUMERIC(18,4)` coercion behavior at insert time.
+
+*Legacy-adapter characterization (M13c compatibility algorithms):*
+
+- OrdinalTier sum-then-quantize (tier contributions summed at full precision, quantized once at the end).
+- RangeBracket (single multiply, quantize once).
+- RangeProgressive sum-then-quantize (tier-slice contributions summed at full precision, quantized once at the end).
+- Block count rounding (Floor/Ceiling/NearestHalfUp on the raw block count) and monetary rounding (quantize once after `blocks × amount`) — these are two independent rounding decisions, not one.
+
+Legacy characterization exists to preserve old data and old execution behavior. It does not mean those behaviors become first-class CP-4A methods or approved future Calculated Methods.
+
+### CP-4A numeric compatibility contract
+
+Applies to CP-4A (P4A) only. This is a compatibility contract, not a redesign — it does not claim every current path follows the same quantization rule, and it explicitly preserves the known fallback caveat below.
+
+1. CP-4A is a behavior-preserving extraction.
+2. Arithmetic in the pure core uses `Decimal` only.
+3. Float calculation inputs and outputs are prohibited in the core.
+4. Current formula intermediate precision is preserved (no new intermediate rounding is introduced anywhere it doesn't already exist).
+5. Current computed-line behavior quantizes a completed calculated line **once**, to `Decimal("0.0001")` — this is the existing per-line convention, not a new one.
+6. Current compatibility rounding is `ROUND_HALF_EVEN` (Python's implicit `decimal` module default, never previously set explicitly anywhere in the codebase). CP-4A should make this mode explicit in the extracted core rather than continuing to rely on Python's implicit context default.
+7. Decimal context precision/traps must be treated as compatibility inputs and locked by characterization tests before extraction, not assumed.
+8. OrdinalTier and RangeProgressive aggregate their tier/component contributions at full intermediate precision **before** the single line-level quantization — this sum-then-quantize order must not be changed to a round-each-component-first order (doing so would change stored historical amounts, not merely refactor code).
+9. Block's Floor/Ceiling/NearestHalfUp quantity/block-count rounding remains a separate, independent decision from the block's monetary-amount quantization — the two must not be conflated into one rounding step.
+10. Min/max uses the existing 4dp calculated-line amounts as its comparison base; the adjustment delta itself is not currently quantized, and CP-4A must not introduce a new quantization step there.
+11. Canonical bonus remains a 2dp amount, added after min/max, per the CP-3C-corrected order.
+12. **CP-4A adds no new final-payout `0.01` quantization.** Whether a final-payout rounding step should ever exist is a deferred product decision (see below), not something CP-4A decides unilaterally.
+13. EnteredAmount, Fixed, None/manual, and the legacy fallback path must preserve their actual current behavior exactly and must **not** be forced through a universal quantization step they don't currently pass through.
+14. Current `RateBehavior` values must not be declared or persisted as future `CalculatedMethod` identities as part of CP-4A.
+15. No live caller may cut over from the current calculation logic to the extracted core until exact old-vs-new Decimal and result-contract parity is proven by the characterization suite.
+
+**Known fallback caveat (must be characterized, not resolved, by CP-4A):** preview currently computes `Quantity * RateAmount` in Python when `CalculatedAmount IS NULL`; finalization writes the equivalent SQL product directly into a `NUMERIC(18,4)` column. This path can diverge *before* PostgreSQL's column-scale coercion applies, whenever the raw product carries more than four decimal places, because the Python-side and SQL-side computations are two independent expressions of the same fallback, not one shared code path. Characterization tests must lock this path's current behavior before CP-4A decides how its compatibility adapter represents it — this is not resolved by this contract.
+
+### Phase 4 decisions safely deferred
+
+These are intentionally deferred and do not block CP-4A:
+
+**A. Final payable-total rounding to 2 decimals.**
+Current rule during CP-4A: authoritative financial calculations remain at the current 4dp behavior; CP-4A must not add a new payout-rounding step. Before CP-4C's snapshot design, a decision is needed on whether future payable reconciliation uses (a) presentation/export formatting only, (b) separate unrounded and payable totals, or (c) a typed `SYS_ROUNDING_ADJUSTMENT` line. **No option is approved yet.**
+
+**B. Future Calculated Methods domain.**
+Current rule during CP-4A: the current `RateBehavior` dispatch may be wrapped by an internal compatibility adapter inside the extracted core. Do not create a `CalculatedMethodID`; do not equate `RateBehavior` with future Calculated Methods; do not introduce a formula DSL; do not introduce method dependency ordering speculatively. This domain remains a separate, later, deliberate design exercise.
+
+### Phase 4 Status payment boundary
+
+Alignment with the accepted future architecture (`DRIVER_ALLOWANCE_TRACKING_FUTURE_PLAN.md` — future-only, read-only reference):
+
+- Status is a System Status Entry Channel, not a PayItem.
+- There is one Status column and one canonical selected StatusKey per driver/day.
+- Current canonical status input is the driver/day entry-state record, not a monetary PayItem.
+- Current status-derived payment is a separate financial calculation lane (a derived system calculation caller, not a `RateBehavior` method).
+- The compatibility `DailyStatus`/derived draft-line representation must not become the future source of truth.
+- Future `StatusKeyPayRule` is a separate backend rule domain.
+- Future `StatusKeyPayRule` is not automatically a generic Calculated Method.
+- Future Status payment may resolve: paid-hours policy; no-payment policy; rate type/rate slot; effective date; rule revision.
+- Status allowance deduction remains a completely separate future DAC lane.
+- Paid payroll hours do not necessarily equal deducted allowance hours.
+- AllowanceCategory is never a payroll-rate source.
+
+Conceptual split:
+
+```
+StatusKey
+→ optional payroll-payment effect through future StatusKeyPayRule
+→ optional allowance-deduction effect through future StatusKeyAllowanceRules
+```
+
+The two effects are independent. `StatusKeyAllowanceRules` is future DAC architecture and is not implemented by Phase 4.
+
+**Current-state clarifications relative to the accepted DAC future plan.** The DAC plan is future-only and contains historical "current system" findings from before later Current Payroll work; the newer current state is:
+
+- Status selection is canonical through the driver/day entry-state model.
+- `DailyStatus` draft-line representation is compatibility output, not the future authoritative source.
+- Current Status payment exists as a derived system calculation.
+- `PTO_STATUS` has been removed (commit `236a506`) and must not return.
+- Status payment must not be modeled as a user-configurable Status PayItem.
+- Future `StatusKeyPayRule` remains unimplemented.
+- DAC allowance categories, entitlements, usage ledger, and adjustment flow remain future-only and must not be started in Phase 4.
+
+**Status-payment snapshot implications (architecture note only — nothing implemented here).** Phase 4 must not preclude the future correct snapshot model. For status-derived payment, future submitted snapshots may need to freeze by value:
+
+- StatusKeyID;
+- StatusCode/name snapshot;
+- the canonical selected status fact;
+- paid-hours rule or the current compatibility `HoursValue`;
+- effective `StatusKeyPayRule` revision when implemented;
+- resolved RateType/rate-slot identity;
+- resolved DriverRate identity and amount;
+- WorkDate/effective-date context;
+- calculation version;
+- derived amount and classification.
+
+For future allowance behavior, separate snapshots/ledger metadata may include: allowance-rule revision; AllowanceCategory; deduction-hours rule; resolved deduction amount. Payroll-payment data and allowance-ledger data must not be combined.
 
 ### Phase 5 — Current Payroll Hub and Calculation Reports
 
@@ -2742,10 +2907,12 @@ Each unit must be executed as a separate, reviewable prompt. Claude must not com
 | CP-3B2a | Bonus batch safety foundation — **Done with Notes** (`5feacf5`) | migration, payroll service/schemas, tests | batch endpoint, batch writer, idempotent replay, frontend | DB ownership hardening, revision bump/atomicity, downgrade guards | `BonusDataRevision`/`PayrollBonusBatchRequests`/ownership trigger exist; no batch endpoint at CP-3B2a completion — the endpoint was added later by CP-3B2b (see that row below) |
 | CP-3B2b | Create-only transactional batch endpoint — **Done with Notes** (`0124718`) | payroll service/router/schemas, migration, tests | frontend aggregation, update-batch, void-batch, reconciliation | idempotency, batch correlation, revision/concurrency, rollback | Revision-safe, all-or-nothing batch behavior — implemented and tested |
 | CP-3C | Financial classification and min/max fix — **Done with Notes** (`90a6dbe`) | payroll/pay-item/calculation paths and tests | hardcoded UI totals or bonus opt-in to min/max | min/max boundary cases with and without bonus | Bonus is excluded from min/max in preview and final paths — implemented and tested |
-| CP-4A | Extract versioned calculation core | payroll calculation module and tests | manual recalc or frontend calculation | daily effective-rate, eligibility, behavior, rounding cases | Daily/date-effective deterministic results from one core |
-| CP-4B | Open/Returned calculation preview | payroll read contracts and tests | writes during preview or Draft money | parity, blocker, scope, Prepared denial | Backend expected-income breakdown with no source mutation |
-| CP-4C | Immutable submission snapshot | payroll/review, focused migration, tests | mutable snapshots or UI-only freeze | submit revision, snapshot immutability, rate-change cases | Submitted revision, inputs, and totals are frozen |
-| CP-4D | Approval/finalization snapshot parity | payroll/review/finalization and tests | current-rate re-resolution after approval | post-submit rate/rule changes and final parity | Finalization equals approved snapshot despite later changes |
+| CP-4A | P4A — calculation-core compatibility extraction (authoritative PerUnit core; Status-payment caller; direct/manual and M13c legacy behaviors via non-core adapters) — **Pending** | payroll calculation module and characterization tests | manual recalc, frontend calculation, snapshot schema, new final-payout rounding, promoting legacy behaviors into the core | daily effective-rate, eligibility, authoritative/caller/direct-manual/legacy-adapter characterization groups, rounding boundaries (see Phase 4 characterization gate below) | Authoritative PerUnit calculation and the current Status-payment caller integrate with exact Decimal and result-contract parity, while direct/manual boundaries and M13c legacy behaviors retain exact compatibility through explicit non-core adapters |
+| CP-4B | P4B — Open/Returned calculation preview — **Pending** | payroll read contracts and tests | writes during preview or Draft money | parity, blocker, scope, Prepared denial | Backend expected-income breakdown with no source mutation |
+| CP-4C | P4C — calculation snapshot schema, hashes, and immutability — **Pending** | payroll/review, focused migration, tests | mutable snapshots or UI-only freeze | submit revision, snapshot immutability, rate-change cases | Snapshot schema exists and is immutable; nothing yet reads/writes it in the live lifecycle |
+| CP-4D | P4D — Submit captures an immutable snapshot revision — **Pending** | payroll/review submit path and tests | binding approval to the snapshot, finalization changes | submit creates exactly one snapshot revision; resubmission creates a new revision; stale-revision conflicts | Every InReview period has exactly one associated immutable snapshot |
+| CP-4E | P4E — review/approval binds to the submitted snapshot identity — **Pending** | payroll/review approval path and tests | re-resolving live rates at approval, finalization changes | Approved values proven frozen even if rates change afterward | Approval reads the existing snapshot rather than recomputing; approval identity is bound to the snapshot |
+| CP-4F | P4F — finalization consumes the approved snapshot and projects it to FinalLines — **Pending** | payroll finalization module and tests | current-rate re-resolution after approval | post-submit rate/rule changes do not alter final parity; old-vs-new parity proven before cutover | Finalization equals the approved snapshot despite later rate/rule changes; only one engine remains authoritative after cutover |
 | CP-5A | Current Payroll Hub | payroll read API and tests | frontend aggregation or N+1 official contract | company/branch scope, slot/status/capability matrix | Complete scope, slots, metrics, and capabilities in one response |
 | CP-5B | Off-driver contracts | payroll read API and tests | driver-day count as Hub KPI | fully-off denominator and selected-day detail cases | Fully-off KPI and selected-day list remain distinct |
 | CP-5C | Calculation report bundle | payroll report API and tests | frontend sums or mutable config for frozen reports | dynamic columns and Drivers/Work/Pay/Mixed parity | All required report totals are backend-owned |
@@ -2859,7 +3026,7 @@ Every implementation unit receives the following base gate plus its phase-specif
 These do not block CP-0A but must be resolved before their listed phases.
 
 1. **SemiMonthly boundaries and pay-date behavior** — confirm supported patterns and holiday/weekend adjustment rules before Phase 2A.
-2. **Money rounding policy** — line/day/driver/currency rounding before Phase 4A.
+2. **Money rounding policy** — numeric compatibility characterization must be completed before CP-4A so the existing 4-decimal calculation behavior can be preserved exactly. Final payable-total rounding and reconciliation are separate product decisions that must be resolved before CP-4C snapshot design; no 2-decimal payout mechanism is approved yet.
 3. **Self-approval default and exceptions** — recommended default is disabled before Phase 4C.
 4. **Cancellation policy for InReview/Approved** — recommended default is no direct cancellation without a dedicated privileged command and reason.
 5. **Returned backlog policy** — this plan recommends blocking newer submit and further Prepared creation while allowing current Open saves.
