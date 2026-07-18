@@ -25,6 +25,10 @@ from app.core.service import (
     _check_branch_access, _build_in_clause, _check_permission, _check_any_permission,
     _require_not_driver_role, _has_any_permission,
 )
+from app.payroll.calculation.per_unit import (
+    PerUnitInput as _PerUnitInput,
+    calculate_per_unit as _calculate_per_unit,
+)
 from app.payroll.schemas import (
     PeriodSummary, PeriodCreate, PeriodStatusChange, NextPeriodDates, PeriodEntryCount,
     _VALID_TRANSITIONS,
@@ -2801,7 +2805,10 @@ async def _compute_calculated_amount(
         return _CalcResult(None, True, rate_behavior="PerUnit")
 
     resolved_amt = Decimal(str(rate_row["amount"]))
-    calculated   = (quantity * resolved_amt).quantize(Decimal("0.0001"))
+    # CP-4A: authoritative PerUnit multiply/quantize now lives in the pure core.
+    calculated = _calculate_per_unit(
+        _PerUnitInput(quantity=quantity, rate_amount=resolved_amt)
+    ).calculated_amount
     return _CalcResult(
         calculated,
         False,
