@@ -2476,7 +2476,7 @@ Backfilling historical status identity from free-text codes may be ambiguous. Am
 
 **Status:** `Pending`
 
-- [ ] P4A: extract pure/versioned daily calculation core (authoritative PerUnit; Status-payment caller kept separate; direct/manual and M13c legacy behaviors via non-core compatibility adapters).
+- [ ] P4A: extract pure/versioned daily calculation core (authoritative PerUnit only; Status-payment caller kept separate; direct/manual boundaries preserved; dormant M13c legacy methods left completely untouched and out of scope).
 - [ ] P4B: add Open/Returned calculation preview.
 - [ ] P4C: add calculation snapshots and source/config hashes.
 - [ ] P4D: submit captures snapshot/revision.
@@ -2506,7 +2506,7 @@ Guarantee that expected income, review, approval, finalization, and ledger are d
 
 - date-specific rate changes;
 - mid-period eligibility;
-- each characterization group (authoritative PerUnit core, Status-payment caller, direct/manual boundaries, M13c legacy adapters);
+- each characterization group in the approved CP-4A scope (authoritative PerUnit core, Status-payment caller, direct/manual boundaries) — dormant M13c legacy methods (`OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`) are out of CP-4A scope and require no further characterization (see "Phase 4 calculation compatibility characterization gate");
 - status-generated pay;
 - min/max then bonus;
 - preview/submission/approval/finalization parity;
@@ -2544,7 +2544,7 @@ Not every existing `RateBehavior` implementation becomes a first-class method in
 - **A. Current authoritative daily calculation core:** `PerUnit`.
 - **B. Separate current derived calculation caller:** Status-derived payment (a system calculation lane, not a `RateBehavior` method).
 - **C. Current direct/manual financial boundaries outside the daily method core:** `EnteredAmount`; Fixed/manual/fallback behavior.
-- **D. Legacy M13c compatibility algorithms:** `OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`.
+- **D. Dormant M13c legacy methods (out of CP-4A scope):** `OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`. Product decision: these remain dormant legacy code, completely untouched by CP-4A — no extraction, no adapter, no caller cutover, no additional characterization, no deletion, no redesign. Their existence must not block CP-4A. Their possible removal or cleanup is a later, separately approved task. This is not a today deletion or deprecation decision.
 - **E. Future-only reserved behavior/domain:** `Calculated` (schema-legal but explicitly rejected downstream — reserved for a future automated calculation engine); future Calculated Methods; future `StatusKeyPayRule`.
 - **F. Non-core/retired compatibility value:** `None` — preserve safely if encountered, but do not promote it into the new core or the future method model.
 
@@ -2556,9 +2556,9 @@ Current `RateBehavior` values do not equal future `CalculatedMethod` identities.
 - Advanced registered keys (`OrdinalTier`, `Block`, `RangeBracket`, `RangeProgressive`) may exist as placeholders/adapters in the CDPI registry, but they are not approved or operational Calculated Methods.
 - Modern custom Daily PayItem creation is restricted to `PerUnit`.
 - `OrdinalTier`, `RangeBracket`, `RangeProgressive`, and `Block` are not supported for new modern creation.
-- Their old M13c algorithms remain for legacy compatibility if historical/pre-existing rows require them.
+- Their old M13c algorithms remain dormant legacy code for historical/pre-existing rows; CP-4A leaves them completely untouched (see classification D above).
 - Existing code presence and test coverage do not promote them into the future method domain.
-- This docs classification does not remove or deprecate the legacy algorithms.
+- This docs classification does not remove or deprecate the legacy algorithms today.
 
 **CP-4A implementation boundary:**
 
@@ -2566,7 +2566,7 @@ Current `RateBehavior` values do not equal future `CalculatedMethod` identities.
 2. Preserve Decimal-only numeric compatibility.
 3. Keep Status payment as a separate current derived calculation caller, not a `RateBehavior` method.
 4. Preserve `EnteredAmount` and Fixed/manual contracts as direct/non-core boundaries.
-5. Route M13c advanced behaviors (`OrdinalTier`/`RangeBracket`/`RangeProgressive`/`Block`) through a legacy compatibility adapter.
+5. Leave the dormant M13c legacy methods (`OrdinalTier`/`RangeBracket`/`RangeProgressive`/`Block`) completely untouched: no extraction into the calculation core, no new legacy compatibility adapter, no caller cutover, no additional characterization Slice, no deletion, no redesign. Their existence must not block CP-4A; their possible removal or cleanup is a later, separately approved task.
 6. Keep `Calculated` out of scope as future automated calculation work.
 7. Do not create `CalculatedMethodID`.
 8. Do not introduce a formula DSL.
@@ -2574,17 +2574,29 @@ Current `RateBehavior` values do not equal future `CalculatedMethod` identities.
 10. Do not add new final payable 2dp rounding.
 11. Require exact Decimal and result-contract parity before caller cutover.
 
+**Pure-core exclusions.** The pure PerUnit core accepts already-resolved typed Decimal inputs and returns a deterministic typed result. It contains no database/SQL access, permissions, audit, persistence, workflow, HTTP/request handling, or dry_run logic. Specifically, it contains no:
+
+- database access;
+- SQL;
+- permissions;
+- audit writes;
+- persistence;
+- workflow/status transitions;
+- HTTP/request handling;
+- dry_run branching.
+
 ### Phase 4 calculation compatibility characterization gate
 
-**Status:** Prerequisite — not a lifecycle feature, does not mark Phase 4 `In Progress`.
+**Status:** Prerequisite — not a lifecycle feature, does not mark Phase 4 `In Progress`. **Closed for the approved CP-4A scope** (see "Characterization gate closure" below). Closing this prerequisite does not itself mark Phase 4 or CP-4A implementation as started — Phase 4 remains `Pending` until production CP-4A implementation begins.
 
 Before CP-4A production extraction or any caller cutover:
 
-- Focused characterization tests must lock the current numeric and compatibility behavior of each characterization group below (authoritative core, Status-payment caller, direct/manual boundaries, and legacy adapters). Characterizing a path locks its current behavior; it does not promote that path into the new core.
+- Focused characterization tests must lock the current numeric and compatibility behavior of each characterization group below (authoritative core, Status-payment caller, direct/manual boundaries). Characterizing a path locks its current behavior; it does not promote that path into the new core.
 - **No production calculation behavior changes as a result of this gate.** Characterization tests observe and pin down current behavior; they do not alter it.
 - Current `RateBehavior` values (`PerUnit`, `EnteredAmount`, `Fixed`, `OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`, `None`) are **existing calculation paths**, not approved future `CalculatedMethod` identities. Future Calculated Methods remain a separate product/domain concept whose relationship to PayItem, RateBehavior, rate slots, source inputs, and method configuration is designed deliberately later — not implied by this gate.
 - CP-4A is a **behavior-preserving extraction**, not a rewrite or a cleanup.
 - Caller cutover (any live code path switching from the current calculation logic to the extracted core) is blocked until old-vs-new exact Decimal and result-contract parity is proven by the characterization suite.
+- The dormant M13c legacy methods (`OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`) are **out of the approved CP-4A scope** and are not required by this gate — see classification D above and "Characterization gate closure" below. This gate does not claim every possible calculation path in the codebase is characterized; it states the gate is closed for the approved authoritative CP-4A scope specifically.
 
 **Required characterization areas:**
 
@@ -2609,14 +2621,16 @@ Before CP-4A production extraction or any caller cutover:
 - The legacy/manual fallback: `CalculatedAmount IS NULL -> Quantity * RateAmount`, computed by the finalization/preview COALESCE pattern rather than by the rate-behavior dispatch.
 - PostgreSQL `NUMERIC(18,4)` coercion behavior at insert time.
 
-*Legacy-adapter characterization (M13c compatibility algorithms):*
+**Dormant M13c legacy methods are excluded from this gate.** `OrdinalTier`, `RangeBracket`, `RangeProgressive`, and `Block` are not characterized further by CP-4A and are not a prerequisite for closing this gate — they remain dormant legacy code outside the current Phase 4 implementation scope (see classification D above and the CP-4A implementation boundary). No characterization Slice targeting these four methods is required or planned as part of CP-4A.
 
-- OrdinalTier sum-then-quantize (tier contributions summed at full precision, quantized once at the end).
-- RangeBracket (single multiply, quantize once).
-- RangeProgressive sum-then-quantize (tier-slice contributions summed at full precision, quantized once at the end).
-- Block count rounding (Floor/Ceiling/NearestHalfUp on the raw block count) and monetary rounding (quantize once after `blocks × amount`) — these are two independent rounding decisions, not one.
+**Characterization gate closure.**
 
-Legacy characterization exists to preserve old data and old execution behavior. It does not mean those behaviors become first-class CP-4A methods or approved future Calculated Methods.
+The characterization prerequisite for the approved CP-4A scope (authoritative PerUnit core, Status-payment caller, direct/manual boundaries) is closed by two completed characterization Slices:
+
+- **Characterization Slice 1** (commit `46d71d2`): PerUnit numeric behavior; Decimal context and rounding; EnteredAmount; Fixed/None; manual/fallback preview-vs-finalization behavior; PostgreSQL `NUMERIC(18,4)` coercion; HTTP Decimal serialization.
+- **Characterization Slice 2** (commit `5ee38c2`): canonical Status source; status-derived payment identity and formula; rate resolution; missing-rate behavior; status payment min/max participation; current preview/finalization divergence; `PTO_STATUS` absence; Status not being a PayItem; DAC/`StatusKeyPayRule` boundaries.
+
+No characterization Slice 3 is required. This closes the characterization prerequisite for the newly approved CP-4A scope only — it does not claim every possible calculation path in the codebase is characterized, and it does not itself mark Phase 4 or CP-4A implementation as started. Phase 4 remains `Pending` until production CP-4A implementation begins.
 
 ### CP-4A numeric compatibility contract
 
@@ -2629,16 +2643,15 @@ Applies to CP-4A (P4A) only. This is a compatibility contract, not a redesign �
 5. Current computed-line behavior quantizes a completed calculated line **once**, to `Decimal("0.0001")` — this is the existing per-line convention, not a new one.
 6. Current compatibility rounding is `ROUND_HALF_EVEN` (Python's implicit `decimal` module default, never previously set explicitly anywhere in the codebase). CP-4A should make this mode explicit in the extracted core rather than continuing to rely on Python's implicit context default.
 7. Decimal context precision/traps must be treated as compatibility inputs and locked by characterization tests before extraction, not assumed.
-8. OrdinalTier and RangeProgressive aggregate their tier/component contributions at full intermediate precision **before** the single line-level quantization — this sum-then-quantize order must not be changed to a round-each-component-first order (doing so would change stored historical amounts, not merely refactor code).
-9. Block's Floor/Ceiling/NearestHalfUp quantity/block-count rounding remains a separate, independent decision from the block's monetary-amount quantization — the two must not be conflated into one rounding step.
-10. Min/max uses the existing 4dp calculated-line amounts as its comparison base; the adjustment delta itself is not currently quantized, and CP-4A must not introduce a new quantization step there.
-11. Canonical bonus remains a 2dp amount, added after min/max, per the CP-3C-corrected order.
-12. **CP-4A adds no new final-payout `0.01` quantization.** Whether a final-payout rounding step should ever exist is a deferred product decision (see below), not something CP-4A decides unilaterally.
-13. EnteredAmount, Fixed, None/manual, and the legacy fallback path must preserve their actual current behavior exactly and must **not** be forced through a universal quantization step they don't currently pass through.
-14. Current `RateBehavior` values must not be declared or persisted as future `CalculatedMethod` identities as part of CP-4A.
-15. No live caller may cut over from the current calculation logic to the extracted core until exact old-vs-new Decimal and result-contract parity is proven by the characterization suite.
+8. The dormant M13c legacy methods (`OrdinalTier`, `RangeBracket`, `RangeProgressive`, `Block`) are out of the approved CP-4A scope and this contract does not apply to them — they are left completely untouched, per the CP-4A implementation boundary and classification D above. This contract makes no claim about their rounding behavior.
+9. Min/max uses the existing 4dp calculated-line amounts as its comparison base; the adjustment delta itself is not currently quantized, and CP-4A must not introduce a new quantization step there.
+10. Canonical bonus remains a 2dp amount, added after min/max, per the CP-3C-corrected order.
+11. **CP-4A adds no new final-payout `0.01` quantization.** Whether a final-payout rounding step should ever exist is a deferred product decision (see below), not something CP-4A decides unilaterally.
+12. EnteredAmount, Fixed, None/manual, and the legacy fallback path must preserve their actual current behavior exactly and must **not** be forced through a universal quantization step they don't currently pass through.
+13. Current `RateBehavior` values must not be declared or persisted as future `CalculatedMethod` identities as part of CP-4A.
+14. No live caller may cut over from the current calculation logic to the extracted core until exact old-vs-new Decimal and result-contract parity is proven by the characterization suite.
 
-**Known fallback caveat (must be characterized, not resolved, by CP-4A):** preview currently computes `Quantity * RateAmount` in Python when `CalculatedAmount IS NULL`; finalization writes the equivalent SQL product directly into a `NUMERIC(18,4)` column. This path can diverge *before* PostgreSQL's column-scale coercion applies, whenever the raw product carries more than four decimal places, because the Python-side and SQL-side computations are two independent expressions of the same fallback, not one shared code path. Characterization tests must lock this path's current behavior before CP-4A decides how its compatibility adapter represents it — this is not resolved by this contract.
+**Known fallback caveat (must be characterized, not resolved, by CP-4A):** preview currently computes `Quantity * RateAmount` in Python when `CalculatedAmount IS NULL`; finalization writes the equivalent SQL product directly into a `NUMERIC(18,4)` column. This path can diverge *before* PostgreSQL's column-scale coercion applies, whenever the raw product carries more than four decimal places, because the Python-side and SQL-side computations are two independent expressions of the same fallback, not one shared code path. Characterization tests must lock this path's current behavior before CP-4A decides how its non-core compatibility boundary represents it — this fallback remains outside the authoritative PerUnit core and is not resolved by this contract.
 
 ### Phase 4 decisions safely deferred
 
@@ -2648,7 +2661,7 @@ These are intentionally deferred and do not block CP-4A:
 Current rule during CP-4A: authoritative financial calculations remain at the current 4dp behavior; CP-4A must not add a new payout-rounding step. Before CP-4C's snapshot design, a decision is needed on whether future payable reconciliation uses (a) presentation/export formatting only, (b) separate unrounded and payable totals, or (c) a typed `SYS_ROUNDING_ADJUSTMENT` line. **No option is approved yet.**
 
 **B. Future Calculated Methods domain.**
-Current rule during CP-4A: the current `RateBehavior` dispatch may be wrapped by an internal compatibility adapter inside the extracted core. Do not create a `CalculatedMethodID`; do not equate `RateBehavior` with future Calculated Methods; do not introduce a formula DSL; do not introduce method dependency ordering speculatively. This domain remains a separate, later, deliberate design exercise.
+Current rule during CP-4A: only the current PerUnit calculation path is extracted into the authoritative pure calculation core. EnteredAmount, Fixed/None/manual, and the `CalculatedAmount`-null `Quantity × RateAmount` fallback remain non-core compatibility boundaries. `OrdinalTier`, `RangeBracket`, `RangeProgressive`, and `Block` remain untouched outside CP-4A: no extraction, adapter, caller cutover, additional characterization, deletion, or redesign. Do not create a `CalculatedMethodID`; do not equate `RateBehavior` with future Calculated Methods; do not introduce a formula DSL; do not introduce method dependency ordering speculatively. This domain remains a separate, later, deliberate design exercise.
 
 ### Phase 4 Status payment boundary
 
@@ -2907,7 +2920,7 @@ Each unit must be executed as a separate, reviewable prompt. Claude must not com
 | CP-3B2a | Bonus batch safety foundation — **Done with Notes** (`5feacf5`) | migration, payroll service/schemas, tests | batch endpoint, batch writer, idempotent replay, frontend | DB ownership hardening, revision bump/atomicity, downgrade guards | `BonusDataRevision`/`PayrollBonusBatchRequests`/ownership trigger exist; no batch endpoint at CP-3B2a completion — the endpoint was added later by CP-3B2b (see that row below) |
 | CP-3B2b | Create-only transactional batch endpoint — **Done with Notes** (`0124718`) | payroll service/router/schemas, migration, tests | frontend aggregation, update-batch, void-batch, reconciliation | idempotency, batch correlation, revision/concurrency, rollback | Revision-safe, all-or-nothing batch behavior — implemented and tested |
 | CP-3C | Financial classification and min/max fix — **Done with Notes** (`90a6dbe`) | payroll/pay-item/calculation paths and tests | hardcoded UI totals or bonus opt-in to min/max | min/max boundary cases with and without bonus | Bonus is excluded from min/max in preview and final paths — implemented and tested |
-| CP-4A | P4A — calculation-core compatibility extraction (authoritative PerUnit core; Status-payment caller; direct/manual and M13c legacy behaviors via non-core adapters) — **Pending** | payroll calculation module and characterization tests | manual recalc, frontend calculation, snapshot schema, new final-payout rounding, promoting legacy behaviors into the core | daily effective-rate, eligibility, authoritative/caller/direct-manual/legacy-adapter characterization groups, rounding boundaries (see Phase 4 characterization gate below) | Authoritative PerUnit calculation and the current Status-payment caller integrate with exact Decimal and result-contract parity, while direct/manual boundaries and M13c legacy behaviors retain exact compatibility through explicit non-core adapters |
+| CP-4A | P4A — calculation-core compatibility extraction (authoritative PerUnit core only; Status-payment caller kept separate; direct/manual boundaries preserved; dormant M13c legacy methods left completely untouched and out of scope) — **Pending** | payroll calculation module and characterization tests | manual recalc, frontend calculation, snapshot schema, new final-payout rounding, extracting/adapting/deleting/redesigning the dormant M13c legacy methods | daily effective-rate, eligibility, authoritative/caller/direct-manual characterization groups (closed by Slice 1 `46d71d2` and Slice 2 `5ee38c2`; no Slice 3), rounding boundaries (see Phase 4 characterization gate below) | Authoritative PerUnit calculation and the current Status-payment caller integrate with exact Decimal and result-contract parity, while direct/manual boundaries retain exact compatibility; the dormant M13c legacy methods (`OrdinalTier`/`RangeBracket`/`RangeProgressive`/`Block`) remain completely untouched, uncharacterized further, not adapted, and not deleted |
 | CP-4B | P4B — Open/Returned calculation preview — **Pending** | payroll read contracts and tests | writes during preview or Draft money | parity, blocker, scope, Prepared denial | Backend expected-income breakdown with no source mutation |
 | CP-4C | P4C — calculation snapshot schema, hashes, and immutability — **Pending** | payroll/review, focused migration, tests | mutable snapshots or UI-only freeze | submit revision, snapshot immutability, rate-change cases | Snapshot schema exists and is immutable; nothing yet reads/writes it in the live lifecycle |
 | CP-4D | P4D — Submit captures an immutable snapshot revision — **Pending** | payroll/review submit path and tests | binding approval to the snapshot, finalization changes | submit creates exactly one snapshot revision; resubmission creates a new revision; stale-revision conflicts | Every InReview period has exactly one associated immutable snapshot |
