@@ -1237,6 +1237,71 @@ class FinalizationPreviewResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# CP-4B: Open/Returned live read-only calculation preview.
+#
+# Distinct from FinalizationPreviewResponse above: that contract is
+# Approved-only and mirrors exactly what finalize_period would write.
+# This contract is for Open/Returned periods only, is always provisional
+# (current source/config, not a submitted snapshot), and deliberately
+# omits a period-wide calculation_version -- a single version would
+# misrepresent the several distinct calculation lanes it aggregates
+# (PerUnit, EnteredAmount/manual, canonical Status, bonus, min/max).
+# ---------------------------------------------------------------------------
+
+class CalculationPreviewLine(BaseModel):
+    """One virtual financial line contributing to a driver's CP-4B total."""
+    source_type: str                       # "DraftLine" | "StatusEntryState" | "BonusEvent"
+    source_id: str | None
+    line_type: str
+    work_date: date | None
+    pay_item_id: int | None = None
+    rate_column_id: int | None = None      # StatusRateColumnID for Status lines only
+    driver_id: int
+    quantity: Decimal | None
+    resolved_rate: Decimal | None
+    calculated_amount: Decimal | None
+    needs_manager_review: bool
+    blocker_reason: str | None = None
+
+
+class CalculationPreviewDriverTotal(BaseModel):
+    """One driver's provisional expected-pay breakdown."""
+    driver_id: int
+    driver_name: str | None
+    daily_pay: Decimal
+    status_pay: Decimal
+    period_pay: Decimal
+    normal_base: Decimal
+    minimum_adjustment: Decimal
+    maximum_adjustment: Decimal
+    bonus_total: Decimal
+    expected_pay: Decimal
+    needs_manager_review: bool
+    blockers: list[str]
+    lines: list[CalculationPreviewLine]
+
+
+class CalculationPreviewResponse(BaseModel):
+    """
+    Read-only provisional expected-income breakdown for an Open/Returned
+    period, calculated live from current effective source/config. Never a
+    submitted snapshot (see CP-4C+ for the future immutable-snapshot read).
+    """
+    payroll_period_id: int
+    company_id: int
+    branch_id: int
+    branch_name: str | None
+    status: str
+    provisional: bool = True
+    financials_available: bool = True
+    has_blockers: bool
+    blockers: list[str]
+    warnings: list[str]
+    drivers: list[CalculationPreviewDriverTotal]
+    total_expected_pay: Decimal
+
+
+# ---------------------------------------------------------------------------
 # CP-1C: Branch-locked candidate-based period creation schemas
 # No PayDate field anywhere in these schemas.
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from app.payroll.schemas import (
     DayGridResponse, DayGridSaveRequest,
     DriversOffResponse,
     FinalizationPreviewResponse,
+    CalculationPreviewResponse,
     CandidatePreviewResponse, PeriodCreationRequest, PeriodCreationResponse,
     CurrentWorkflowResponse,
 )
@@ -441,6 +442,35 @@ async def get_finalization_preview(
     db: DbDep,
 ) -> FinalizationPreviewResponse:
     return await service.get_finalization_preview(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+    )
+
+
+@router.get(
+    "/periods/{period_id}/calculation-preview",
+    response_model=CalculationPreviewResponse,
+    summary="Open/Returned live read-only calculation preview (CP-4B)",
+    description=(
+        "Returns a read-only, live provisional expected-income breakdown "
+        "for an **Open** or **Returned** period, calculated from current "
+        "effective source/config data. Never a submitted snapshot. "
+        "Makes **no** DB mutations."
+    ),
+    responses={
+        403: {"description": "ODA/driver-role user, or no payroll.view/payroll.entry permission"},
+        404: {"description": "Period not found"},
+        422: {"description": "Period is not in Open or Returned status"},
+    },
+)
+async def get_calculation_preview(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> CalculationPreviewResponse:
+    return await service.get_calculation_preview(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

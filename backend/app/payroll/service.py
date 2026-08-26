@@ -13,7 +13,7 @@ import json
 import math
 import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Any, NamedTuple
 
 from fastapi import HTTPException, status
@@ -5668,6 +5668,423 @@ async def get_finalization_preview(
         sys_adjustment_count=len(sys_adjustments),
         final_line_count_estimate=len(preview_lines) + len(sys_adjustments) + len(bonus_events_preview),
         driver_count=len(all_driver_ids),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CP-4B — Open/Returned live read-only calculation preview
+# ---------------------------------------------------------------------------
+
+# CP-4B fix (Codex P2): exact identity predicate for the persisted Status-
+# payment compatibility projection DraftLine written by
+# `_sync_status_payment_for_entry_state`. LineType cannot be hardcoded here
+# (it is the mapped RateType's RateCode, which is data-driven per company/
+# StatusRateColumn configuration) — the projection is instead uniquely
+# identified by the combination of SourceType='System' and a SourceID that
+# matches the exact 'STATUS_PAYMENT:{entry_state_id}:{status_key_id}:
+# {status_rate_column_id}' format (three integer segments), not merely a
+# SourceID text prefix. A prefix-only match could incorrectly exclude an
+# unrelated line whose SourceID happens to start with the same text but has
+# a different SourceType or a malformed/foreign suffix.
+_STATUS_PAYMENT_PROJECTION_SQL = (
+    "(dl.sourcetype = 'System' "
+    "AND dl.sourceid ~ '^STATUS_PAYMENT:[0-9]+:[0-9]+:[0-9]+$')"
+)
+
+
+async def get_calculation_preview(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> "CalculationPreviewResponse":
+    """
+    Read-only, live provisional expected-income breakdown for an Open or
+    Returned period, calculated from CURRENT effective source/config data.
+
+    Distinct from `get_finalization_preview` above (Approved-only, mirrors
+    exactly what `finalize_period` will write): this is a live preview for
+    the two lifecycle statuses that still allow correction/entry. It is
+    never a submitted snapshot -- InReview/Approved/Locked/Archived/
+    Cancelled all remain out of scope (see the CP-4C+ future snapshot
+    contract for those).
+
+    Absolute read-only guarantee: no INSERT/UPDATE/DELETE, no audit write,
+    no period/source/derived-state mutation of any kind. Does not call
+    `_refresh_draft_calculations`, `_sync_status_payment_for_entry_state`,
+    `_refresh_status_payment_lines`, or `finalize_period`.
+
+    Reuses, unchanged:
+      - `_compute_draft_line_preview_amounts` -> `_compute_calculated_amount`
+        -> CP-4A's `calculate_per_unit` for daily PerUnit lines (and the
+        existing EnteredAmount/Fixed/None/manual dispatch for the rest);
+      - the canonical PayrollBonusEvents Active-only read;
+      - the CP-3C minimum/maximum-then-bonus ordering.
+
+    Adds, new to CP-4B:
+      - `_resolve_live_status_payment_lines`, which reads the canonical
+        `PayrollPeriodDriverDayEntryState.StatusKeyID` selection directly
+        and resolves the CURRENT applicable DriverRate live -- the stored
+        STATUS_PAYMENT/STATUS_PAY compatibility-projection DraftLine is
+        excluded from the stored-line aggregation below and is never used
+        as live truth, so a stale projection can never be double-counted.
+
+    Driver inclusion is financial-source-driven only (a driver with a
+    current daily line, a canonical selected Status, a non-BONUS period-pay
+    line, or an Active bonus event) -- not a full eligible-driver roster.
+    """
+    from app.payroll.schemas import (
+        CalculationPreviewResponse,
+        CalculationPreviewDriverTotal,
+        CalculationPreviewLine,
+    )
+
+    # ODA guard — driver-role users cannot access Current Payroll screens.
+    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
+    if own_driver_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Current Payroll is not accessible to driver-role users.",
+        )
+
+    # Load period — raises 404 if not found or not accessible (branch/company scoped).
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # Lifecycle guard: exactly Open/Returned, using the existing exact allow-list.
+    if period.status not in ENTRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Calculation preview requires an Open or Returned period. "
+                f"Current status: '{period.status}'."
+            ),
+        )
+
+    # Permission gate: payroll.view OR payroll.entry (NOT payroll.finalize —
+    # that stays reserved for the Approved-only finalization-preview route).
+    await _check_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
+    )
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+
+    # ── CP-4B fix (Codex P1): shared structural blockers (duplicate active
+    # Daily lines, driver eligibility violations, contaminated/foreign
+    # RateType references, unresolvable rate mapping) — the SAME read-only
+    # checks enforced by finalize_period / get_finalization_preview. These
+    # checks are structural, not Approved-specific (none of them reference
+    # period.status), so they apply directly and unmodified to Open/Returned
+    # periods. Surfacing them here prevents a preview from looking
+    # financially complete (has_blockers=false) while a structural condition
+    # that would block finalize_period is silently present.
+    blockers.extend(await _validate_period_can_finalize(
+        period_id=period_id,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        period_start=period.start_date,
+        period_end=period.end_date,
+        db=db,
+    ))
+
+    # ── Daily/period-pay lines: virtual (unpersisted) rate refresh, exactly
+    # like get_finalization_preview — but excluding the persisted
+    # STATUS_PAYMENT/STATUS_PAY compatibility projection and legacy BONUS
+    # lines, since Status and Bonus are supplied live/canonically below.
+    refreshed_calcs = await _compute_draft_line_preview_amounts(
+        period_id, company_id, period.start_date, db
+    )
+    refreshed_line_ids: set[int] = set(refreshed_calcs.keys())
+
+    lines_result = await db.execute(
+        text(f"""
+            SELECT
+                dl.draftlineid,
+                dl.driverid,
+                e.fullname          AS drivername,
+                dl.workdate,
+                dl.linetype,
+                dl.linescope,
+                dl.quantity,
+                dl.rateamount,
+                dl.calculatedamount,
+                dl.needsmanagerreview,
+                dl.sourcetype,
+                dl.sourceid
+            FROM   payroll.payrolldraftlines dl
+            LEFT JOIN core.drivers   d ON d.driverid   = dl.driverid
+            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            WHERE  dl.payrollperiodid = :period_id
+              AND  dl.companyid       = :company_id
+              AND  dl.status         != 'Void'
+              AND  dl.linetype       != 'BONUS'
+              AND  dl.linetype       NOT IN ('DailyStatus', 'DailyNote')
+              AND  NOT {_STATUS_PAYMENT_PROJECTION_SQL}
+            ORDER BY dl.driverid, dl.workdate NULLS LAST, dl.draftlineid
+        """),
+        {"period_id": period_id, "company_id": company_id},
+    )
+    raw_lines = lines_result.mappings().fetchall()
+
+    driver_names: dict[int, str | None] = {}
+    driver_daily: dict[int, Decimal] = {}
+    driver_period: dict[int, Decimal] = {}
+    driver_status: dict[int, Decimal] = {}
+    driver_bonus: dict[int, Decimal] = {}
+    driver_line_nmr: dict[int, bool] = {}
+    driver_lines: dict[int, list["CalculationPreviewLine"]] = {}
+
+    stale_count = 0
+    for r in raw_lines:
+        lid = int(r["draftlineid"])
+        drv = int(r["driverid"])
+        driver_names.setdefault(drv, r["drivername"])
+        driver_lines.setdefault(drv, [])
+
+        stored_calc = Decimal(str(r["calculatedamount"])) if r["calculatedamount"] is not None else None
+        qty = Decimal(str(r["quantity"])) if r["quantity"] is not None else Decimal("0")
+        rate = Decimal(str(r["rateamount"])) if r["rateamount"] is not None else None
+
+        if lid in refreshed_calcs:
+            _cr = refreshed_calcs[lid]
+            effective_calc = _cr.calculated_amount
+            effective_nmr = _cr.needs_manager_review
+            resolved_rate = _cr.resolved_rate_amount
+            if effective_calc != stored_calc:
+                stale_count += 1
+        else:
+            effective_calc = stored_calc
+            effective_nmr = bool(r["needsmanagerreview"])
+            resolved_rate = rate
+
+        if effective_nmr:
+            driver_line_nmr[drv] = True
+
+        amt = effective_calc if effective_calc is not None else qty * (rate if rate is not None else Decimal("0"))
+
+        if r["linescope"] == "Daily":
+            driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amt
+        else:
+            driver_period[drv] = driver_period.get(drv, Decimal("0")) + amt
+
+        driver_lines[drv].append(CalculationPreviewLine(
+            source_type=r["sourcetype"] or "DraftLine",
+            source_id=r["sourceid"],
+            line_type=r["linetype"],
+            work_date=r["workdate"],
+            driver_id=drv,
+            quantity=qty,
+            resolved_rate=resolved_rate,
+            calculated_amount=effective_calc,
+            needs_manager_review=effective_nmr,
+            blocker_reason=(
+                "Calculated amount unresolved or manually flagged for manager review."
+                if effective_nmr else None
+            ),
+        ))
+
+    if stale_count > 0:
+        warnings.append(
+            f"{stale_count} line(s) had stale stored calculations. "
+            f"Preview amounts reflect the latest effective-dated rates."
+        )
+
+    # ── Canonical live Status-derived pay (CP-4B) — never the stored
+    # STATUS_PAYMENT/STATUS_PAY projection, which was already excluded above.
+    live_status_lines = await _resolve_live_status_payment_lines(
+        period_id, company_id, period.branch_id, db,
+    )
+    for sl in live_status_lines:
+        drv = sl.driver_id
+        driver_names.setdefault(drv, None)
+        driver_lines.setdefault(drv, [])
+
+        amt = sl.calculated_amount if sl.calculated_amount is not None else Decimal("0")
+        driver_status[drv] = driver_status.get(drv, Decimal("0")) + amt
+
+        if sl.needs_manager_review:
+            driver_line_nmr[drv] = True
+
+        driver_lines[drv].append(CalculationPreviewLine(
+            source_type="StatusEntryState",
+            source_id=f"STATUS_LIVE:{drv}:{sl.work_date}:{sl.status_key_id}",
+            line_type=sl.line_type,
+            work_date=sl.work_date,
+            driver_id=drv,
+            rate_column_id=sl.status_rate_column_id,
+            quantity=sl.hours_value,
+            resolved_rate=sl.resolved_rate_amount,
+            calculated_amount=sl.calculated_amount,
+            needs_manager_review=sl.needs_manager_review,
+            blocker_reason=(
+                "No applicable approved DriverRate found for this driver's "
+                "selected Status as of its work date."
+                if sl.needs_manager_review else None
+            ),
+        ))
+
+    # ── Canonical Active bonus (never Voided; never legacy BONUS DraftLines).
+    bonus_result = await db.execute(
+        text("""
+            SELECT
+                be.payrollbonuseventid,
+                be.driverid,
+                e.fullname  AS drivername,
+                be.amount
+            FROM   payroll.payrollbonusevents be
+            LEFT JOIN core.drivers   d ON d.driverid   = be.driverid
+            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            WHERE  be.payrollperiodid = :period_id
+              AND  be.companyid       = :company_id
+              AND  be.status          = 'Active'
+            ORDER BY be.driverid, be.payrollbonuseventid
+        """),
+        {"period_id": period_id, "company_id": company_id},
+    )
+    for b in bonus_result.mappings().fetchall():
+        drv = int(b["driverid"])
+        driver_names.setdefault(drv, b["drivername"])
+        driver_lines.setdefault(drv, [])
+        amt = Decimal(str(b["amount"]))
+        driver_bonus[drv] = driver_bonus.get(drv, Decimal("0")) + amt
+        driver_lines[drv].append(CalculationPreviewLine(
+            source_type="BonusEvent",
+            source_id=str(b["payrollbonuseventid"]),
+            line_type="BONUS",
+            work_date=None,
+            driver_id=drv,
+            quantity=None,
+            resolved_rate=None,
+            calculated_amount=amt,
+            needs_manager_review=False,
+        ))
+
+    # ── Financial-source-driven driver union (CP-4B: not a full roster).
+    all_driver_ids = (
+        set(driver_daily) | set(driver_period) | set(driver_status) | set(driver_bonus)
+    )
+
+    if not all_driver_ids:
+        warnings.append("No current financial source lines for this period.")
+
+    # ── Minimum/maximum: same as-of-period-start rule and ordering as
+    # get_finalization_preview — normal base excludes bonus by construction;
+    # bonus is added back in only after minimum/maximum is applied (CP-3C).
+    period_start = period.start_date
+    driver_blockers: dict[int, list[str]] = {}
+    driver_min_adj: dict[int, Decimal] = {}
+    driver_max_adj: dict[int, Decimal] = {}
+
+    for drv_id in all_driver_ids:
+        normal_base = (
+            driver_daily.get(drv_id, Decimal("0"))
+            + driver_status.get(drv_id, Decimal("0"))
+            + driver_period.get(drv_id, Decimal("0"))
+        )
+
+        min_row = (await db.execute(
+            text("""
+                SELECT amount FROM payroll.driverpayrules
+                WHERE  driverid      = :did
+                  AND  companyid     = :cid
+                  AND  ruletype      = 'MinimumPay'
+                  AND  status        IN ('Active', 'Ended')
+                  AND  effectivefrom <= :as_of
+                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
+                ORDER BY effectivefrom DESC
+                LIMIT 1
+            """),
+            {"did": drv_id, "cid": company_id, "as_of": period_start},
+        )).mappings().first()
+        max_row = (await db.execute(
+            text("""
+                SELECT amount FROM payroll.driverpayrules
+                WHERE  driverid      = :did
+                  AND  companyid     = :cid
+                  AND  ruletype      = 'MaximumPay'
+                  AND  status        IN ('Active', 'Ended')
+                  AND  effectivefrom <= :as_of
+                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
+                ORDER BY effectivefrom DESC
+                LIMIT 1
+            """),
+            {"did": drv_id, "cid": company_id, "as_of": period_start},
+        )).mappings().first()
+
+        min_amount = Decimal(str(min_row["amount"])) if min_row else None
+        max_amount = Decimal(str(max_row["amount"])) if max_row else None
+
+        if min_amount is not None and max_amount is not None and min_amount > max_amount:
+            driver_blockers.setdefault(drv_id, []).append(
+                f"Minimum pay ({min_amount}) exceeds maximum pay ({max_amount}). "
+                f"Correct the pay rules before this driver's total can be trusted."
+            )
+            driver_min_adj[drv_id] = Decimal("0")
+            driver_max_adj[drv_id] = Decimal("0")
+            continue
+
+        if min_amount is not None and normal_base < min_amount:
+            driver_min_adj[drv_id] = min_amount - normal_base
+        else:
+            driver_min_adj[drv_id] = Decimal("0")
+
+        if max_amount is not None and normal_base > max_amount:
+            driver_max_adj[drv_id] = max_amount - normal_base
+        else:
+            driver_max_adj[drv_id] = Decimal("0")
+
+    # ── Assemble driver totals.
+    driver_totals: list[CalculationPreviewDriverTotal] = []
+    for drv_id in sorted(all_driver_ids):
+        daily = driver_daily.get(drv_id, Decimal("0"))
+        status_pay = driver_status.get(drv_id, Decimal("0"))
+        period_pay = driver_period.get(drv_id, Decimal("0"))
+        normal_base = daily + status_pay + period_pay
+        min_adj = driver_min_adj.get(drv_id, Decimal("0"))
+        max_adj = driver_max_adj.get(drv_id, Decimal("0"))
+        bonus = driver_bonus.get(drv_id, Decimal("0"))
+        expected_pay = normal_base + min_adj + max_adj + bonus
+        drv_blockers = driver_blockers.get(drv_id, [])
+        drv_nmr = driver_line_nmr.get(drv_id, False)
+
+        driver_totals.append(CalculationPreviewDriverTotal(
+            driver_id=drv_id,
+            driver_name=driver_names.get(drv_id),
+            daily_pay=daily,
+            status_pay=status_pay,
+            period_pay=period_pay,
+            normal_base=normal_base,
+            minimum_adjustment=min_adj,
+            maximum_adjustment=max_adj,
+            bonus_total=bonus,
+            expected_pay=expected_pay,
+            needs_manager_review=drv_nmr,
+            blockers=drv_blockers,
+            lines=driver_lines.get(drv_id, []),
+        ))
+        if drv_blockers:
+            blockers.extend(f"Driver {drv_id}: {b}" for b in drv_blockers)
+        if drv_nmr:
+            blockers.append(
+                f"Driver {drv_id}: one or more lines require manager review "
+                f"(calculation unresolved or manually flagged)."
+            )
+
+    total_expected_pay = sum((dt.expected_pay for dt in driver_totals), Decimal("0"))
+
+    return CalculationPreviewResponse(
+        payroll_period_id=period_id,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        branch_name=period.branch_name,
+        status=period.status,
+        provisional=True,
+        financials_available=True,
+        has_blockers=(len(blockers) > 0),
+        blockers=blockers,
+        warnings=warnings,
+        drivers=driver_totals,
+        total_expected_pay=total_expected_pay,
     )
 
 
@@ -11771,6 +12188,33 @@ async def _void_entry_state_field(
 # CP-2D2: Status payment sync helpers
 # =============================================================================
 
+def _calculate_status_payment_amount(
+    hours_value: "Decimal | None",
+    resolved_rate: "Decimal | None",
+) -> "Decimal | None":
+    """
+    Pure Status-payment arithmetic (CP-4B fix-forward): the exact single
+    operation shared by the write-based synchronizer
+    (`_sync_status_payment_for_entry_state`) and the CP-4B read-only live
+    Status resolver (`_resolve_live_status_payment_lines`), so the two can
+    never independently drift.
+
+    `HoursValue x DriverRate.Amount`, quantized once to `Decimal("0.0001")`
+    with explicit `ROUND_HALF_EVEN` -- identical to the ambient-context
+    behavior this replaces (Python's implicit default rounding mode is
+    already `ROUND_HALF_EVEN`; making it explicit here does not change any
+    result). Returns `None` under the same truthiness guard the original
+    inline expression used: no resolved rate, or a falsy (zero) hours value.
+
+    Contains no SQL, no persistence, no workflow -- callers remain
+    responsible for resolving `hours_value`/`resolved_rate` and for any
+    write/void/upsert behavior.
+    """
+    if resolved_rate is None or not hours_value:
+        return None
+    return (hours_value * resolved_rate).quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+
+
 async def _sync_status_payment_for_entry_state(
     company_id: int,
     branch_id: int,
@@ -11894,11 +12338,7 @@ async def _sync_status_payment_for_entry_state(
     rate_row = rate_result.mappings().first()
     resolved_rate    = Decimal(str(rate_row["amount"])) if rate_row else None
     resolved_rate_id = rate_row["driverrateid"] if rate_row else None
-    calc_amount = (
-        (hours_value * resolved_rate).quantize(Decimal("0.0001"))
-        if (resolved_rate is not None and hours_value)
-        else None
-    )
+    calc_amount = _calculate_status_payment_amount(hours_value, resolved_rate)
     needs_review = resolved_rate is None
 
     new_source_id = (
@@ -11992,6 +12432,119 @@ async def _sync_status_payment_for_entry_state(
             "snap":   source_snapshot,
         },
     )
+
+
+class _LiveStatusLine(NamedTuple):
+    """One canonically-resolved, read-only, live Status-derived pay line
+    (CP-4B). Distinct from the persisted STATUS_PAYMENT compatibility
+    projection DraftLine, which may be stale."""
+    driver_id: int
+    work_date: "date"
+    status_key_id: int
+    status_rate_column_id: "int | None"
+    line_type: str
+    hours_value: Decimal
+    resolved_rate_amount: "Decimal | None"
+    calculated_amount: "Decimal | None"
+    needs_manager_review: bool
+
+
+async def _resolve_live_status_payment_lines(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+) -> "list[_LiveStatusLine]":
+    """
+    CP-4B read-only resolver: computes current, live Status-derived pay for
+    every canonical selected Status in this period, directly from
+    `PayrollPeriodDriverDayEntryState.StatusKeyID` -- never from the
+    persisted STATUS_PAYMENT/STATUS_PAY compatibility-projection DraftLine,
+    which is a write-time snapshot that can go stale after an effective-
+    dated rate change (see `_sync_status_payment_for_entry_state`, which
+    only re-runs on save/submit/finalize, not on every read).
+
+    Uses the exact same rate-resolution rule as the synchronizer (Approved
+    or Superseded `DriverRates`, effective-dated as-of the entry's own
+    `WorkDate`, most-recent `EffectiveFrom` wins -- Pending rates are
+    excluded by the `status IN ('Approved','Superseded')` filter) and
+    shares its arithmetic via `_calculate_status_payment_amount`, so this
+    can never independently drift from the persisted-write formula.
+
+    Guarantees: no INSERT/UPDATE/DELETE; no audit write; no mutation of the
+    canonical entry-state rows or any StatusKey/StatusRateColumns row.
+    A StatusKey with no configured `StatusRateColumnID` (a non-payment
+    status, e.g. an off-reason with no rate) is not a blocker and is simply
+    omitted -- it never expected a payment line.
+    """
+    rows = (await db.execute(
+        text("""
+            SELECT
+                ppdes.driverid,
+                ppdes.workdate,
+                sk.statuskeyid,
+                sk.hoursvalue,
+                sk.statusratecolumnid,
+                src.ratetypeid,
+                rt.ratecode
+            FROM   payroll.payrollperioddriverdayentrystate ppdes
+            JOIN   payroll.payrollstatuskeys sk ON sk.statuskeyid = ppdes.statuskeyid
+            LEFT JOIN payroll.statusratecolumns src ON src.statusratecolumnid = sk.statusratecolumnid
+            LEFT JOIN payroll.ratetypes rt ON rt.ratetypeid = src.ratetypeid
+            WHERE  ppdes.payrollperiodid = :pid
+              AND  ppdes.companyid       = :cid
+              AND  ppdes.branchid        = :bid
+              AND  ppdes.isvoided        = FALSE
+              AND  ppdes.statuskeyid IS NOT NULL
+            ORDER BY ppdes.driverid, ppdes.workdate
+        """),
+        {"pid": period_id, "cid": company_id, "bid": branch_id},
+    )).mappings().all()
+
+    results: list[_LiveStatusLine] = []
+    for row in rows:
+        src_rate_type_id = row["ratetypeid"]
+        if src_rate_type_id is None:
+            # No configured Status rate column -- this status never expects
+            # a payment line; not a blocker, simply not applicable.
+            continue
+
+        hv = row["hoursvalue"]
+        hours_value = Decimal(str(hv)) if hv is not None else Decimal("0")
+
+        rate_row = (await db.execute(
+            text("""
+                SELECT amount
+                FROM   payroll.driverrates
+                WHERE  driverid      = :did
+                  AND  ratetypeid    = :rtid
+                  AND  companyid     = :cid
+                  AND  status        IN ('Approved', 'Superseded')
+                  AND  effectivefrom <= :dt
+                  AND  (effectiveto IS NULL OR effectiveto >= :dt)
+                ORDER BY effectivefrom DESC
+                LIMIT 1
+            """),
+            {
+                "did": row["driverid"], "rtid": src_rate_type_id,
+                "cid": company_id, "dt": row["workdate"],
+            },
+        )).mappings().first()
+        resolved_rate = Decimal(str(rate_row["amount"])) if rate_row else None
+
+        results.append(_LiveStatusLine(
+            driver_id=row["driverid"],
+            work_date=row["workdate"],
+            status_key_id=row["statuskeyid"],
+            status_rate_column_id=row["statusratecolumnid"],
+            line_type=row["ratecode"] or "STATUS_PAY",
+            hours_value=hours_value,
+            resolved_rate_amount=resolved_rate,
+            calculated_amount=_calculate_status_payment_amount(hours_value, resolved_rate),
+            needs_manager_review=(resolved_rate is None),
+        ))
+
+    return results
 
 
 async def _refresh_status_payment_lines(
