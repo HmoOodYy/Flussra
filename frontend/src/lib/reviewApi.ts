@@ -2,7 +2,12 @@
  * Typed wrappers for review API calls.
  */
 import apiClient from './apiClient';
-import type { ReviewItemSummary, ReviewItemDetail, ReviewDecideRequest } from '../types/review';
+import type {
+  ReviewItemSummary,
+  ReviewItemDetail,
+  ReviewDecideRequest,
+  ReviewPayrollSnapshot,
+} from '../types/review';
 
 export async function getReviewItems(
   status?: string,
@@ -17,6 +22,11 @@ export async function getReviewItems(
 
 export async function getReviewItem(itemId: number): Promise<ReviewItemDetail> {
   const resp = await apiClient.get<ReviewItemDetail>(`/review/items/${itemId}`);
+  return resp.data;
+}
+
+export async function getReviewItemPayrollSnapshot(itemId: number): Promise<ReviewPayrollSnapshot> {
+  const resp = await apiClient.get<ReviewPayrollSnapshot>(`/review/items/${itemId}/payroll-snapshot`);
   return resp.data;
 }
 

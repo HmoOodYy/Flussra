@@ -43,6 +43,41 @@ export interface ReviewItemDetail extends ReviewItemSummary {
   decisions: ReviewDecision[];
 }
 
+export interface ReviewPayrollSnapshotDriverTotal {
+  driver_id: number;
+  driver_code_snapshot: string | null;
+  driver_name_snapshot: string | null;
+  daily_pay: string;
+  status_pay: string;
+  period_pay: string;
+  minimum_adjustment: string;
+  maximum_adjustment: string;
+  bonus_total: string;
+  expected_pay: string;
+}
+
+export interface ReviewPayrollSnapshotLine {
+  driver_id: number;
+  source_type: string;
+  line_type: string;
+  line_scope: string | null;
+  work_date: string | null;
+  pay_item_id: number | null;
+  quantity: string | null;
+  resolved_rate_amount: string | null;
+  calculated_amount: string;
+}
+
+export interface ReviewPayrollSnapshot {
+  review_item_id: number;
+  payroll_period_id: number;
+  revision_number: number;
+  captured_at_utc: string;
+  total_expected_pay: string;
+  driver_totals: ReviewPayrollSnapshotDriverTotal[];
+  lines: ReviewPayrollSnapshotLine[];
+}
+
 export interface ReviewDecideRequest {
   decision: string; // 'Approved' | 'Rejected' | 'EditRequested' | 'Comment'
   decision_reason?: string;

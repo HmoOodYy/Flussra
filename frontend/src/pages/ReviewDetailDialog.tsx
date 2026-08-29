@@ -1,7 +1,7 @@
 /**
  * ReviewDetailDialog — full review dialog for an InReview payroll period.
  *
- * Shows period summary, NMR blockers, driver totals, period pay, and
+ * Shows the immutable submitted payroll packet and
  * provides Approve / Return-for-Correction actions.
  *
  * Security: this component only receives data that the parent (ReviewPage)
@@ -9,13 +9,12 @@
  * the frontend disables Approve when the backend would reject it anyway.
  */
 import { useEffect, useState, useCallback } from 'react';
-import { decideReviewItem } from '../lib/reviewApi';
+import { decideReviewItem, getReviewItemPayrollSnapshot } from '../lib/reviewApi';
 import { useAuth } from '../store/authStore';
 import { canDecideReview } from '../lib/permissions';
 import { PeriodStatusBadge } from '../components/StatusBadge';
-import { getDriverPeriodSummary, getPeriodPayLines, getDraftLines } from '../lib/payrollApi';
-import type { ReviewItemSummary } from '../types/review';
-import type { PeriodSummary, DriverPeriodSummary, PeriodPayLine, DraftLineSummary } from '../types/payroll';
+import type { ReviewItemSummary, ReviewPayrollSnapshot } from '../types/review';
+import type { PeriodSummary } from '../types/payroll';
 import styles from './ReviewDetailDialog.module.css';
 
 interface Props {
@@ -40,25 +39,8 @@ function fmtDate(d: string): string {
   return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-/** Aggregate DriverPeriodSummary[] (which is per driver×lineType) into per-driver totals */
-function buildDriverTotalsMap(rows: DriverPeriodSummary[]): Map<number, { name: string; gross: number; lines: number }> {
-  const map = new Map<number, { name: string; gross: number; lines: number }>();
-  for (const r of rows) {
-    const cur = map.get(r.driver_id) ?? { name: r.driver_name, gross: 0, lines: 0 };
-    cur.gross += parseFloat(r.total_calculated_amount) || 0;
-    cur.lines += r.line_count;
-    map.set(r.driver_id, cur);
-  }
-  return map;
-}
-
 export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) {
-  const pid = period.payroll_period_id;
-  const hasNmr = period.draft_lines_needing_attention > 0;
-
-  const [driverRows, setDriverRows] = useState<DriverPeriodSummary[] | null>(null);
-  const [payLines, setPayLines] = useState<PeriodPayLine[] | null>(null);
-  const [nmrLines, setNmrLines] = useState<DraftLineSummary[]>([]);
+  const [snapshot, setSnapshot] = useState<ReviewPayrollSnapshot | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const [actionState, setActionState] = useState<ActionState>('idle');
@@ -67,18 +49,13 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
 
   const load = useCallback(async () => {
     try {
-      const [ds, pp, allLines] = await Promise.all([
-        getDriverPeriodSummary(pid),
-        getPeriodPayLines(pid),
-        hasNmr ? getDraftLines(pid) : Promise.resolve([] as DraftLineSummary[]),
-      ]);
-      setDriverRows(ds);
-      setPayLines(pp);
-      setNmrLines(allLines.filter(l => l.needs_manager_review && l.status !== 'Void'));
+      setLoadErr(null);
+      setSnapshot(await getReviewItemPayrollSnapshot(item.review_item_id));
     } catch {
-      setLoadErr('Failed to load period details.');
+      setSnapshot(null);
+      setLoadErr('Failed to load the submitted payroll snapshot.');
     }
-  }, [pid, hasNmr]);
+  }, [item.review_item_id]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -128,8 +105,7 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
   const { user } = useAuth();
   const userCanDecide = user ? canDecideReview(user) : false;
 
-  const driverTotals = driverRows ? buildDriverTotalsMap(driverRows) : null;
-  const bonusLines = payLines?.filter(l => l.status !== 'Void') ?? [];
+  const periodLines = snapshot?.lines.filter(line => line.line_scope === 'Period') ?? [];
   const busy = actionState !== 'idle';
 
   return (
@@ -174,17 +150,15 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
           <div className={styles.kpiRow}>
             <div className={styles.kpiChip}>
               <span className={styles.kpiLabel}>Drivers</span>
-              <span className={styles.kpiValue}>{period.draft_drivers}</span>
+              <span className={styles.kpiValue}>{snapshot?.driver_totals.length ?? '—'}</span>
             </div>
             <div className={styles.kpiChip}>
               <span className={styles.kpiLabel}>Lines</span>
-              <span className={styles.kpiValue}>{period.draft_lines}</span>
+              <span className={styles.kpiValue}>{snapshot?.lines.length ?? '—'}</span>
             </div>
             <div className={styles.kpiChip}>
-              <span className={styles.kpiLabel}>Needs Attention</span>
-              <span className={styles.kpiValue} style={{ color: hasNmr ? '#dc2626' : undefined }}>
-                {period.draft_lines_needing_attention}
-              </span>
+              <span className={styles.kpiLabel}>Expected Pay</span>
+              <span className={styles.kpiValue}>{fmt(snapshot?.total_expected_pay)}</span>
             </div>
             <div className={styles.kpiChip}>
               <span className={styles.kpiLabel}>Submitted by</span>
@@ -194,48 +168,15 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
             </div>
           </div>
 
-          {/* NMR Blockers */}
-          {hasNmr && (
-            <div className={styles.section}>
-              <h3 className={styles.sectionTitle}>Lines Requiring Manager Review</h3>
-              {nmrLines.length > 0 ? (
-                <div className={styles.blockerBox}>
-                  <p className={styles.blockerTitle}>
-                    ⚠ {nmrLines.length} line{nmrLines.length !== 1 ? 's' : ''} need manager review
-                    — approval is blocked until resolved.
-                  </p>
-                  <ul className={styles.blockerList}>
-                    {nmrLines.slice(0, 10).map(l => (
-                      <li key={l.draft_line_id}>
-                        <span className={styles.nmrLineType}>{l.line_type}</span>
-                        {l.driver_name && <> — {l.driver_name}</>}
-                        {l.work_date && <> on {fmtDate(l.work_date)}</>}
-                        {l.notes && <> · {l.notes}</>}
-                      </li>
-                    ))}
-                    {nmrLines.length > 10 && <li>…and {nmrLines.length - 10} more</li>}
-                  </ul>
-                </div>
-              ) : (
-                <div className={styles.blockerBox}>
-                  <p className={styles.blockerTitle}>
-                    ⚠ {period.draft_lines_needing_attention} line(s) flagged for attention.
-                    Approve is disabled — reload or resolve before approving.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
           {/* Load error */}
           {loadErr && <div className={styles.errorMsg}>{loadErr}</div>}
 
           {/* Driver totals */}
           <div className={styles.section}>
             <h3 className={styles.sectionTitle}>Driver Totals</h3>
-            {!driverTotals ? (
+            {!snapshot ? (
               <p className={styles.loadingMsg}>Loading…</p>
-            ) : driverTotals.size === 0 ? (
+            ) : snapshot.driver_totals.length === 0 ? (
               <p className={styles.emptyMsg}>No driver lines.</p>
             ) : (
               <table className={styles.table}>
@@ -247,11 +188,11 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
                   </tr>
                 </thead>
                 <tbody>
-                  {Array.from(driverTotals.values()).map((d, i) => (
-                    <tr key={i}>
-                      <td>{d.name}</td>
-                      <td className={styles.right}>{d.lines}</td>
-                      <td className={styles.right}>{fmt(d.gross)}</td>
+                  {snapshot.driver_totals.map(d => (
+                    <tr key={d.driver_id}>
+                      <td>{d.driver_name_snapshot ?? d.driver_code_snapshot ?? `Driver ${d.driver_id}`}</td>
+                      <td className={styles.right}>{snapshot.lines.filter(line => line.driver_id === d.driver_id).length}</td>
+                      <td className={styles.right}>{fmt(d.expected_pay)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -260,18 +201,17 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
           </div>
 
           {/* Period pay / bonus */}
-          {payLines != null && bonusLines.length > 0 && (
+          {periodLines.length > 0 && (
             <div className={styles.section}>
               <h3 className={styles.sectionTitle}>Period Pay / Bonus</h3>
-              {bonusLines.map(l => (
-                <div key={l.draft_line_id} className={styles.payRow}>
+              {periodLines.map((line, index) => (
+                <div key={`${line.driver_id}-${line.line_type}-${index}`} className={styles.payRow}>
                   <span>
-                    {l.line_type}
-                    {l.driver_name && <> — <em>{l.driver_name}</em></>}
-                    {l.notes && <> · {l.notes}</>}
+                    {line.line_type}
+                    {line.work_date && <> · {fmtDate(line.work_date)}</>}
                   </span>
                   <span className={styles.payAmount}>
-                    {fmt(l.calculated_amount ?? l.rate_amount)}
+                    {fmt(line.calculated_amount)}
                   </span>
                 </div>
               ))}
@@ -314,8 +254,8 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
                 <button
                   className={styles.btnApprove}
                   onClick={handleApprove}
-                  disabled={busy || hasNmr}
-                  title={hasNmr ? 'Cannot approve: lines need manager review' : 'Approve this period'}
+                  disabled={busy || !snapshot}
+                  title={snapshot ? 'Approve the submitted payroll snapshot' : 'Submitted payroll snapshot unavailable'}
                 >
                   {actionState === 'approving' ? 'Approving…' : 'Approve Period'}
                 </button>

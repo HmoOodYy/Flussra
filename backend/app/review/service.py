@@ -46,24 +46,37 @@ Review workflow integration status (as of M7):
 All database access is raw parameterised SQL via sqlalchemy.text().
 """
 import json
+
 from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import (
-    _check_branch_access, _build_in_clause, _check_permission, _check_any_permission,
-    _require_not_driver_role, _has_any_permission,
+    _build_in_clause,
+    _check_any_permission,
+    _check_branch_access,
+    _check_permission,
+    _has_any_permission,
+    _require_not_driver_role,
 )
-from app.payroll.service import _write_period_status_audit, _acquire_branch_workflow_lock  # M16, CP-1D
+from app.payroll.service import (  # M16, CP-1D
+    _acquire_branch_workflow_lock,
+    _write_period_status_audit,
+)
 from app.review.schemas import (
-    ReviewItemSummary,
-    ReviewItemDetail,
+    _DECIDABLE_STATUSES,
+    ReviewDecide,
     ReviewDecisionSummary,
     ReviewItemCreate,
-    ReviewDecide,
-    _DECIDABLE_STATUSES,
+    ReviewItemDetail,
+    ReviewItemSummary,
+    ReviewPayrollSnapshot,
+    ReviewPayrollSnapshotDriverTotal,
+    ReviewPayrollSnapshotLine,
 )
+
+_REVIEW_READ_PERMISSIONS = ["payroll.view", "payroll.entry", "payroll.finalize", "review.decide"]
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +233,118 @@ def _row_to_detail(item_row, decision_rows: list) -> ReviewItemDetail:
     )
 
 
+def _period_approval_id(row) -> int:
+    if row.get("entityschema") != "payroll" or row.get("entityname") != "PayrollPeriods":
+        raise HTTPException(
+            status_code=422,
+            detail="PeriodApproval review item has unexpected entity metadata. Cannot apply period write-back.",
+        )
+    try:
+        period_id = int(row["entityid"])
+        if period_id <= 0:
+            raise ValueError
+        return period_id
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="PeriodApproval review item has an invalid entity_id.",
+        )
+
+
+async def _load_period_approval_context(
+    db: AsyncConnection,
+    *,
+    company_id: int,
+    review_item_row,
+    lock_period: bool,
+    require_snapshot: bool,
+) -> dict:
+    """Validate the period and optional immutable packet linked by one review item."""
+    period_id = _period_approval_id(review_item_row)
+    period_lock = " FOR UPDATE" if lock_period else ""
+    period_result = await db.execute(
+        text(f"""
+            SELECT payrollperiodid, branchid, status
+            FROM payroll.payrollperiods
+            WHERE payrollperiodid = :period_id
+              AND companyid = :company_id
+              AND branchid = :branch_id{period_lock}
+        """),
+        {
+            "period_id": period_id,
+            "company_id": company_id,
+            "branch_id": int(review_item_row["branchid"]),
+        },
+    )
+    period = period_result.mappings().first()
+    if period is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"PeriodApproval review item references period {period_id} which does not "
+                "exist in this company and branch."
+            ),
+        )
+
+    snapshot_id = review_item_row.get("payrollcalculationsnapshotid")
+    if snapshot_id is None:
+        if require_snapshot:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "SNAPSHOT_REQUIRED_FOR_APPROVAL: this historical PeriodApproval item "
+                    "has no submitted immutable calculation snapshot. Return and resubmit "
+                    "the period before approval."
+                ),
+            )
+        return {"period": period, "period_id": period_id, "snapshot": None}
+
+    snapshot_result = await db.execute(
+        text("""
+            SELECT payrollcalculationsnapshotid, payrollperiodid, revisionnumber,
+                   createdatutc, totalexpectedpay, snapshothash
+            FROM payroll.payrollcalculationsnapshots
+            WHERE payrollcalculationsnapshotid = :snapshot_id
+              AND companyid = :company_id
+              AND branchid = :branch_id
+        """),
+        {
+            "snapshot_id": snapshot_id,
+            "company_id": company_id,
+            "branch_id": int(review_item_row["branchid"]),
+        },
+    )
+    snapshot = snapshot_result.mappings().first()
+    if snapshot is None:
+        raise HTTPException(
+            status_code=422,
+            detail="PeriodApproval review item references an unavailable calculation snapshot.",
+        )
+    if int(snapshot["payrollperiodid"]) != period_id:
+        raise HTTPException(
+            status_code=422,
+            detail="PeriodApproval review item snapshot does not belong to its payroll period.",
+        )
+    return {"period": period, "period_id": period_id, "snapshot": snapshot}
+
+
+async def _require_review_read_access(
+    db: AsyncConnection,
+    *,
+    company_id: int,
+    user_id: int,
+    branch_id: int,
+) -> None:
+    await _require_not_driver_role(company_id, user_id, db)
+    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    if not can_see_all and branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this branch.",
+        )
+    await _check_any_permission(company_id, user_id, branch_id, _REVIEW_READ_PERMISSIONS, db)
+
+
 # ---------------------------------------------------------------------------
 # Public service functions
 # ---------------------------------------------------------------------------
@@ -373,6 +498,121 @@ async def get_review_item_by_id(
     decision_rows = dec_result.mappings().all()
 
     return _row_to_detail(row, decision_rows)
+
+
+async def get_review_item_payroll_snapshot(
+    review_item_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> ReviewPayrollSnapshot:
+    """Return only the immutable packet linked to one PeriodApproval review item."""
+    item_result = await db.execute(
+        text("""
+            SELECT reviewitemid, companyid, branchid, requesttype, entityschema,
+                   entityname, entityid, payrollcalculationsnapshotid
+            FROM review.managerreviewitems
+            WHERE reviewitemid = :review_item_id
+              AND companyid = :company_id
+        """),
+        {"review_item_id": review_item_id, "company_id": company_id},
+    )
+    item = item_result.mappings().first()
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Review item {review_item_id} not found.",
+        )
+    await _require_review_read_access(
+        db,
+        company_id=company_id,
+        user_id=user_id,
+        branch_id=int(item["branchid"]),
+    )
+    if item["requesttype"] != "PeriodApproval":
+        raise HTTPException(
+            status_code=422,
+            detail="This review item is not a PeriodApproval item.",
+        )
+    context = await _load_period_approval_context(
+        db,
+        company_id=company_id,
+        review_item_row=item,
+        lock_period=False,
+        require_snapshot=True,
+    )
+    snapshot = context["snapshot"]
+    assert snapshot is not None
+    snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
+
+    total_result = await db.execute(
+        text("""
+            SELECT driverid, drivercodesnapshot, drivernamesnapshot,
+                   dailypay, statuspay, periodpay, minimumadjustment,
+                   maximumadjustment, bonustotal, expectedpay
+            FROM payroll.payrollcalculationdrivertotals
+            WHERE payrollcalculationsnapshotid = :snapshot_id
+              AND companyid = :company_id
+              AND branchid = :branch_id
+            ORDER BY driverid
+        """),
+        {"snapshot_id": snapshot_id, "company_id": company_id, "branch_id": item["branchid"]},
+    )
+    driver_totals = [
+        ReviewPayrollSnapshotDriverTotal(
+            driver_id=row["driverid"],
+            driver_code_snapshot=row["drivercodesnapshot"],
+            driver_name_snapshot=row["drivernamesnapshot"],
+            daily_pay=row["dailypay"],
+            status_pay=row["statuspay"],
+            period_pay=row["periodpay"],
+            minimum_adjustment=row["minimumadjustment"],
+            maximum_adjustment=row["maximumadjustment"],
+            bonus_total=row["bonustotal"],
+            expected_pay=row["expectedpay"],
+        )
+        for row in total_result.mappings().all()
+    ]
+    line_result = await db.execute(
+        text("""
+            SELECT totals.driverid, lines.sourcetype, lines.linetype, lines.linescope,
+                   lines.workdate, lines.payitemid, lines.quantity,
+                   lines.resolvedrateamount, lines.calculatedamount
+            FROM payroll.payrollcalculationsnapshotlines lines
+            JOIN payroll.payrollcalculationdrivertotals totals
+              ON totals.payrollcalculationdrivertotalid = lines.payrollcalculationdrivertotalid
+            WHERE totals.payrollcalculationsnapshotid = :snapshot_id
+              AND totals.companyid = :company_id
+              AND totals.branchid = :branch_id
+            ORDER BY totals.driverid, lines.workdate NULLS LAST, lines.linescope,
+                     lines.linetype, lines.sourcetype, lines.sourceid,
+                     lines.payrollcalculationsnapshotlineid
+        """),
+        {"snapshot_id": snapshot_id, "company_id": company_id, "branch_id": item["branchid"]},
+    )
+    lines = [
+        ReviewPayrollSnapshotLine(
+            driver_id=row["driverid"],
+            source_type=row["sourcetype"],
+            line_type=row["linetype"],
+            line_scope=row["linescope"],
+            work_date=row["workdate"],
+            pay_item_id=row["payitemid"],
+            quantity=row["quantity"],
+            resolved_rate_amount=row["resolvedrateamount"],
+            calculated_amount=row["calculatedamount"],
+        )
+        for row in line_result.mappings().all()
+    ]
+    return ReviewPayrollSnapshot(
+        review_item_id=review_item_id,
+        payroll_period_id=context["period_id"],
+        revision_number=snapshot["revisionnumber"],
+        captured_at_utc=snapshot["createdatutc"],
+        total_expected_pay=snapshot["totalexpectedpay"],
+        driver_totals=driver_totals,
+        lines=lines,
+    )
 
 
 async def create_review_item(
@@ -568,7 +808,8 @@ async def decide_review_item(
     result = await db.execute(
         text("""
             SELECT reviewitemid, branchid, status, requestedbyuserid,
-                   requesttype, entityschema, entityname, entityid
+                   requesttype, entityschema, entityname, entityid,
+                   payrollcalculationsnapshotid
             FROM   review.managerreviewitems
             WHERE  reviewitemid = :iid AND companyid = :cid
             FOR UPDATE
@@ -642,6 +883,40 @@ async def decide_review_item(
             ),
         )
 
+    period_context: dict | None = None
+    snapshot_audit_identity: dict[str, object] = {}
+    if data.decision != "Comment" and row.get("requesttype") == "PeriodApproval":
+        # A returned historical item is never a valid approval target.  New
+        # submissions always create a distinct Pending item with a new snapshot.
+        if row["status"] != "Pending":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "PeriodApproval decisions require a Pending review item. "
+                    "This review item is historical or already resolved."
+                ),
+            )
+        period_context = await _load_period_approval_context(
+            db,
+            company_id=company_id,
+            review_item_row=row,
+            lock_period=True,
+            require_snapshot=data.decision == "Approved",
+        )
+        if period_context["period"]["status"] != "InReview":
+            raise HTTPException(
+                status_code=422,
+                detail="Period is no longer in InReview status. The review decision was not recorded.",
+            )
+        snapshot = period_context["snapshot"]
+        if snapshot is not None:
+            snapshot_audit_identity = {
+                "payroll_period_id": period_context["period_id"],
+                "payroll_calculation_snapshot_id": snapshot["payrollcalculationsnapshotid"],
+                "revision_number": snapshot["revisionnumber"],
+                "snapshot_hash": snapshot["snapshothash"],
+            }
+
     # Insert the decision record.
     await db.execute(
         text("""
@@ -693,6 +968,7 @@ async def decide_review_item(
                 "status":   data.decision,
                 "decision": data.decision,
                 "reason":   data.decision_reason,
+                **snapshot_audit_identity,
             },
         )
 
@@ -721,90 +997,11 @@ async def decide_review_item(
     await _require_not_driver_role(company_id, user_id, db)
 
     if data.decision != "Comment" and row.get("requesttype") == "PeriodApproval":
-        # Validate entity fields set by the auto-create path.
-        if row.get("entityschema") != "payroll" or row.get("entityname") != "PayrollPeriods":
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "PeriodApproval review item has unexpected entity metadata. "
-                    "Cannot apply period write-back."
-                ),
-            )
-        try:
-            period_id = int(row["entityid"])
-            if period_id <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=422,
-                detail="PeriodApproval review item has an invalid entity_id.",
-            )
-
-        # Validate the linked period: must exist, same company, same branch as
-        # the review item, and currently InReview.  This is a pre-flight check
-        # that produces a clear error message before we attempt the atomic UPDATE.
-        period_check = await db.execute(
-            text("""
-                SELECT payrollperiodid, branchid, status
-                FROM   payroll.payrollperiods
-                WHERE  payrollperiodid = :pid
-                  AND  companyid       = :cid
-            """),
-            {"pid": period_id, "cid": company_id},
-        )
-        period_pre = period_check.mappings().first()
-        if period_pre is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"PeriodApproval review item references period {period_id} "
-                    f"which does not exist in this company."
-                ),
-            )
-        if int(period_pre["branchid"]) != int(row["branchid"]):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"PeriodApproval review item branch ({row['branchid']}) does not "
-                    f"match the linked period's branch ({period_pre['branchid']}). "
-                    f"Cannot apply write-back."
-                ),
-            )
-
-        # CP-6: NMR guard for Approved decisions.
-        #
-        # The InReview submission guard (transition_period_status) already blocks
-        # submission when NeedsManagerReview lines exist, so InReview periods
-        # should normally have 0 NMR lines.  However, if a rate was voided or
-        # modified after submission (a rare but possible edge case), NMR lines
-        # could reappear.  The backend is the authority; we enforce the check
-        # here so that approving via the review interface never bypasses it.
-        #
-        # Return/Reject (EditRequested) are NOT blocked by NMR lines — the
-        # reviewer is explicitly returning the period for correction, which is
-        # the correct action when NMR lines exist.
-        if data.decision == "Approved":
-            nmr_check = await db.execute(
-                text("""
-                    SELECT COUNT(*) AS cnt
-                    FROM   payroll.payrolldraftlines
-                    WHERE  payrollperiodid    = :pid
-                      AND  companyid          = :cid
-                      AND  status            != 'Void'
-                      AND  needsmanagerreview  = TRUE
-                """),
-                {"pid": period_id, "cid": company_id},
-            )
-            nmr_count = int(nmr_check.scalar_one())
-            if nmr_count > 0:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Cannot approve: {nmr_count} draft line(s) require manager "
-                        f"review (NeedsManagerReview=True). Resolve these lines before "
-                        f"approving the period."
-                    ),
-                )
+        # CP-4E validates the immutable ReviewItem-linked packet before any
+        # decision write.  Approval deliberately performs no live financial
+        # validation or calculation: CP-4D already froze that packet at submit.
+        assert period_context is not None
+        period_id = int(period_context["period_id"])
 
         # Map decision → new period status
         # CP-1A: Rejected and EditRequested now return to Returned (not Open).

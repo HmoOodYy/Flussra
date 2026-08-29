@@ -7,18 +7,19 @@ action-level permission checks are enforced inside the service layer.
 """
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.review.schemas import (
-    ReviewItemSummary,
-    ReviewItemDetail,
-    ReviewItemCreate,
-    ReviewDecide,
-    _VALID_STATUSES,
-)
+from app.dependencies import get_current_user, get_db
 from app.review import service
-from app.dependencies import get_db, get_current_user
+from app.review.schemas import (
+    _VALID_STATUSES,
+    ReviewDecide,
+    ReviewItemCreate,
+    ReviewItemDetail,
+    ReviewItemSummary,
+    ReviewPayrollSnapshot,
+)
 
 router = APIRouter()
 
@@ -79,6 +80,29 @@ async def get_review_item(
     db: DbDep,
 ) -> ReviewItemDetail:
     return await service.get_review_item_by_id(
+        review_item_id=item_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+    )
+
+
+@router.get(
+    "/items/{item_id}/payroll-snapshot",
+    response_model=ReviewPayrollSnapshot,
+    summary="Get the immutable submitted payroll packet for a PeriodApproval review item",
+    responses={
+        403: {"description": "No access to this item's branch or review data"},
+        404: {"description": "Review item not found"},
+        422: {"description": "Item is not linked to a valid submitted payroll snapshot"},
+    },
+)
+async def get_review_item_payroll_snapshot(
+    item_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> ReviewPayrollSnapshot:
+    return await service.get_review_item_payroll_snapshot(
         review_item_id=item_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

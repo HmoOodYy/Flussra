@@ -7,7 +7,7 @@ Tests cover:
   3.  Operational reviewer can approve a clean InReview period (->'Approved)
   4.  Period becomes Approved after review approval
   5.  Approved period can then be finalized (existing finalize flow)
-  6.  Period with NeedsManagerReview lines cannot be approved (422)
+  6.  Post-submit live NeedsManagerReview drift does not replace the submitted snapshot
   7.  Return (EditRequested) works ->' period goes to Open
   8.  Driver/ODA user is blocked from GET /review/items (403)
   9.  Branch-scoped user cannot approve another branch's period (403)
@@ -17,11 +17,10 @@ Tests cover:
 
 Isolation: all periods use dates in 2091 to avoid conflicts with other test suites.
 """
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -69,6 +68,7 @@ async def _create_open_period(
 ) -> int:
     """Insert an Open period directly. CP-1D: POST requires existing Open (B1 guard)."""
     import datetime
+
     from sqlalchemy import text as _sqla_text
     assert direct_db is not None, "_create_open_period requires direct_db after CP-1D"
     # Cancel any existing Open so ux_payrollperiods_oneopenperbranch doesn't fire.
@@ -507,18 +507,19 @@ class TestReviewApprove:
 # 6. NMR blocker
 # ---------------------------------------------------------------------------
 
-class TestReviewNMRBlocker:
+class TestReviewSnapshotBinding:
 
     @pytest.mark.asyncio
-    async def test_approve_blocked_when_nmr_lines_exist(
+    async def test_approve_binds_submitted_snapshot_despite_post_submit_nmr_drift(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp6_clean: int,
         paytest_driver_id: int,
         direct_db,
+        monkeypatch,
     ):
-        """Period with NeedsManagerReview lines ->' approve returns 422."""
+        """A post-submit live NMR flag cannot redefine the submitted packet."""
         pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
 
         # Add a line before InReview
@@ -534,27 +535,62 @@ class TestReviewNMRBlocker:
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
+        snapshot_id = (await direct_db.execute(
+            _text("""
+                SELECT payrollcalculationsnapshotid
+                FROM review.managerreviewitems
+                WHERE reviewitemid = :review_id
+            """),
+            {"review_id": review_id},
+        )).scalar_one()
+        assert snapshot_id is not None
+        snapshot_count = (await direct_db.execute(
+            _text("""
+                SELECT COUNT(*) FROM payroll.payrollcalculationsnapshots
+                WHERE payrollperiodid = :period_id
+            """),
+            {"period_id": pid},
+        )).scalar_one()
+        assert snapshot_count == 1
 
-        # Force NMR=True on the line (as if a rate was voided after submission)
+        # Simulate a live change after CP-4D captured the submitted packet.
         await direct_db.execute(
             _text("UPDATE payroll.payrolldraftlines SET needsmanagerreview = TRUE "
                   "WHERE draftlineid = :lid"),
             {"lid": line_id},
         )
 
+        import app.payroll.service as payroll_service
+
+        async def _unexpected_live_calculation(*_args, **_kwargs):
+            raise AssertionError("approval must not rebuild live payroll calculations")
+
+        monkeypatch.setattr(payroll_service, "_build_live_calculation_packet", _unexpected_live_calculation)
+
         dec = await session_client.post(
             f"/review/items/{review_id}/decide",
             json={"decision": "Approved"},
             headers=auth(auth_token),
         )
-        assert dec.status_code == 422, f"Expected 422 (NMR blocker), got {dec.status_code}"
-        assert "manager review" in dec.json()["detail"].lower()
+        assert dec.status_code == 200, f"Approval failed: {dec.text}"
+        assert dec.json()["status"] == "Approved"
+        assert (await direct_db.execute(
+            _text("""
+                SELECT payrollcalculationsnapshotid FROM review.managerreviewitems
+                WHERE reviewitemid = :review_id
+            """),
+            {"review_id": review_id},
+        )).scalar_one() == snapshot_id
+        assert (await direct_db.execute(
+            _text("""
+                SELECT COUNT(*) FROM payroll.payrollcalculationsnapshots
+                WHERE payrollperiodid = :period_id
+            """),
+            {"period_id": pid},
+        )).scalar_one() == snapshot_count
 
-        # Period must still be InReview
-        period_resp = await session_client.get(
-            f"/payroll/periods/{pid}", headers=auth(auth_token)
-        )
-        assert period_resp.json()["status"] == "InReview"
+        period_resp = await session_client.get(f"/payroll/periods/{pid}", headers=auth(auth_token))
+        assert period_resp.json()["status"] == "Approved"
 
     @pytest.mark.asyncio
     async def test_approve_succeeds_when_no_nmr_lines(

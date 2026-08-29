@@ -1,9 +1,10 @@
 """
 Pydantic schemas for the review domain — manager review items and decisions.
 """
-from datetime import datetime
-from pydantic import BaseModel, field_validator
+from datetime import date, datetime
+from decimal import Decimal
 
+from pydantic import BaseModel, field_validator
 
 # ---------------------------------------------------------------------------
 # Constants — mirror the CHECK constraints in the schema
@@ -70,6 +71,45 @@ class ReviewItemDetail(ReviewItemSummary):
     old_value_json: str | None = None
     new_value_json: str | None = None
     decisions: list[ReviewDecisionSummary] = []
+
+
+# ---------------------------------------------------------------------------
+# Immutable submitted payroll packet (CP-4E)
+# ---------------------------------------------------------------------------
+
+class ReviewPayrollSnapshotDriverTotal(BaseModel):
+    driver_id: int
+    driver_code_snapshot: str | None = None
+    driver_name_snapshot: str | None = None
+    daily_pay: Decimal
+    status_pay: Decimal
+    period_pay: Decimal
+    minimum_adjustment: Decimal
+    maximum_adjustment: Decimal
+    bonus_total: Decimal
+    expected_pay: Decimal
+
+
+class ReviewPayrollSnapshotLine(BaseModel):
+    driver_id: int
+    source_type: str
+    line_type: str
+    line_scope: str | None = None
+    work_date: date | None = None
+    pay_item_id: int | None = None
+    quantity: Decimal | None = None
+    resolved_rate_amount: Decimal | None = None
+    calculated_amount: Decimal
+
+
+class ReviewPayrollSnapshot(BaseModel):
+    review_item_id: int
+    payroll_period_id: int
+    revision_number: int
+    captured_at_utc: datetime
+    total_expected_pay: Decimal
+    driver_totals: list[ReviewPayrollSnapshotDriverTotal]
+    lines: list[ReviewPayrollSnapshotLine]
 
 
 # ---------------------------------------------------------------------------
