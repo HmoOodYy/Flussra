@@ -375,32 +375,6 @@ async def _activated_pay_item_restored(
         )
 
 
-async def _verify_trigger_enabled(direct_db, table: str, trigger: str) -> None:
-    """
-    Reads pg_trigger directly to confirm a trigger is enabled ('O' = origin,
-    i.e. fires normally) after a disable/re-enable cycle. Used as a hard
-    guarantee, not an assumption, that cleanup never leaves a trigger off.
-    """
-    row = (await direct_db.execute(
-        _text("""
-            SELECT t.tgenabled
-            FROM   pg_trigger t
-            JOIN   pg_class c ON c.oid = t.tgrelid
-            WHERE  c.relname = :table AND t.tgname = :trigger
-        """),
-        {"table": table, "trigger": trigger},
-    )).mappings().first()
-    assert row is not None, f"Trigger {trigger} on {table} not found"
-    tgenabled = row["tgenabled"]
-    tgenabled = tgenabled.decode() if isinstance(tgenabled, bytes) else tgenabled
-    assert tgenabled == "O", (
-        f"Trigger {trigger} on {table} must be enabled ('O') after cleanup; "
-        f"got tgenabled={tgenabled!r} — a disabled trigger here would "
-        f"silently remove an immutability guarantee for every later test in "
-        f"this session."
-    )
-
-
 async def _delete_period_and_children(
     direct_db,
     period_id: int,
@@ -417,12 +391,6 @@ async def _delete_period_and_children(
     in cleanup elsewhere; the ephemeral per-session test database is
     discarded afterward).
 
-    `was_locked=True` only when the period actually reached Locked status
-    (i.e. finalize_period ran) — `trg_final_line_immutable` blocks both
-    UPDATE and DELETE on PayrollFinalLines once Locked, so it must be
-    disabled to remove those rows. `trg_period_status_revert` only guards
-    `UPDATE OF status`, never `DELETE`, so it is never touched here.
-
     Review-domain audit rows (`REVIEW_ITEM_CREATED` / `REVIEW_ITEM_DECIDED`,
     both written by `app/review/service.py`'s `_write_review_audit` with
     `EntityName='ManagerReviewItems'` and `EntityID=str(review_item_id)` —
@@ -431,11 +399,10 @@ async def _delete_period_and_children(
     that exact `EntityName` + exact captured IDs — never a broad delete that
     could reach another entity type's audit rows.
 
-    Reliable even when called from an outer `finally` after a failed
-    assertion: the trigger disable/re-enable is wrapped in its own
-    try/finally so restoration always runs, and is verified afterward via
-    `_verify_trigger_enabled` — never left disabled regardless of what
-    happens during the deletes themselves.
+    Snapshot-backed periods are retained instead: immutable snapshot history
+    and protected FinalLines remain intact, while exact test-owned review
+    rows and status-entry rows are removed. Open/Returned snapshot periods
+    are cancelled; Locked/Archived periods remain in their terminal state.
     """
     draft_line_ids = [
         r["draftlineid"] for r in (await direct_db.execute(
@@ -456,11 +423,21 @@ async def _delete_period_and_children(
         )).mappings().all()
     ]
 
-    if was_locked:
-        await direct_db.execute(
-            _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-        )
-    try:
+    snapshot_status = (await direct_db.execute(
+        _text("""
+            SELECT p.status
+            FROM payroll.payrollperiods p
+            WHERE p.payrollperiodid = :pid
+              AND EXISTS (
+                  SELECT 1
+                  FROM payroll.payrollcalculationsnapshots s
+                  WHERE s.payrollperiodid = p.payrollperiodid
+              )
+        """),
+        {"pid": period_id},
+    )).scalar_one_or_none()
+
+    if snapshot_status is not None:
         await direct_db.execute(
             _text("DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid"),
             {"eid": str(period_id)},
@@ -495,24 +472,53 @@ async def _delete_period_and_children(
                 ),
                 {"ids": review_item_ids},
             )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )
-    finally:
-        if was_locked:
+        if snapshot_status not in ("Locked", "Archived"):
             await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
+                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                {"pid": period_id},
             )
-            await _verify_trigger_enabled(direct_db, "payrollfinallines", "trg_final_line_immutable")
+        return
+
+    await direct_db.execute(
+        _text("DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid"),
+        {"eid": str(period_id)},
+    )
+    if draft_line_ids:
+        await direct_db.execute(
+            _text(
+                "DELETE FROM audit.auditlog "
+                "WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)"
+            ),
+            {"ids": [str(i) for i in draft_line_ids]},
+        )
+    if review_item_ids:
+        await direct_db.execute(
+            _text(
+                "DELETE FROM audit.auditlog "
+                "WHERE entityname = 'ManagerReviewItems' AND entityid = ANY(:ids)"
+            ),
+            {"ids": [str(i) for i in review_item_ids]},
+        )
+        await direct_db.execute(
+            _text("DELETE FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)"),
+            {"ids": review_item_ids},
+        )
+        await direct_db.execute(
+            _text("DELETE FROM review.managerreviewitems WHERE reviewitemid = ANY(:ids)"),
+            {"ids": review_item_ids},
+        )
+    await direct_db.execute(
+        _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
+        {"pid": period_id},
+    )
+    await direct_db.execute(
+        _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
+        {"pid": period_id},
+    )
+    await direct_db.execute(
+        _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+        {"pid": period_id},
+    )
 
     # Residue verification: confirm no rows remain under this exact period_id
     # marker (and its captured review-item IDs) in any of the tables this

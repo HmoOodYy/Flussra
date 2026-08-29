@@ -65,15 +65,50 @@ def _week_2094(offset: int = 0) -> tuple[datetime.date, datetime.date]:
 
 
 async def _clean(db: AsyncConnection, branch_id: int) -> None:
-    """Delete all periods (cascade removes snapshot rows) for this branch."""
+    """Remove mutable CP-2C setup while retaining immutable submit history."""
+    # CP-4D snapshots deliberately restrict period deletion.  A prior CP-2C
+    # submit test can therefore leave immutable history behind; cancel its
+    # non-final period to keep candidate generation isolated, but never delete
+    # the snapshot-backed period or any snapshot row.
     await db.execute(
-        _text("DELETE FROM payroll.payrolldraftlines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
+        _text("""
+            UPDATE payroll.payrollperiods period
+            SET status = 'Cancelled'
+            WHERE period.branchid = :bid
+              AND period.status IN ('Open', 'InReview', 'Approved', 'Returned')
+              AND EXISTS (
+                  SELECT 1
+                  FROM payroll.payrollcalculationsnapshots snapshot
+                  WHERE snapshot.payrollperiodid = period.payrollperiodid
+                    AND snapshot.companyid = period.companyid
+                    AND snapshot.branchid = period.branchid
+              )
+        """),
         {"bid": branch_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
+        _text("DELETE FROM payroll.payrolldraftlines "
+              "WHERE payrollperiodid IN "
+              "(SELECT period.payrollperiodid FROM payroll.payrollperiods period "
+              " WHERE period.branchid = :bid "
+              "   AND NOT EXISTS (SELECT 1 FROM payroll.payrollcalculationsnapshots snapshot "
+              "                   WHERE snapshot.payrollperiodid = period.payrollperiodid "
+              "                     AND snapshot.companyid = period.companyid "
+              "                     AND snapshot.branchid = period.branchid))"),
+        {"bid": branch_id},
+    )
+    await db.execute(
+        _text("""
+            DELETE FROM payroll.payrollperiods period
+            WHERE period.branchid = :bid
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM payroll.payrollcalculationsnapshots snapshot
+                  WHERE snapshot.payrollperiodid = period.payrollperiodid
+                    AND snapshot.companyid = period.companyid
+                    AND snapshot.branchid = period.branchid
+              )
+        """),
         {"bid": branch_id},
     )
     await db.commit()

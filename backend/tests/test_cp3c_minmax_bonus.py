@@ -61,41 +61,7 @@ async def _insert_period_db(
     end: datetime.date,
     status: str = "Open",
 ) -> int:
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    for child_table in (
-        "payroll.payrollfinallines",
-        "payroll.payrolldraftlines",
-        "payroll.payrollbonusbatchrequests",
-        "payroll.payrollbonusevents",
-        "payroll.payrollperioddriverdayentrystate",
-        "payroll.payrollperioddrivereligibility",
-        "payroll.payrollperiodeligibilitysnapshots",
-    ):
-        await db.execute(
-            _text(f"""
-                DELETE FROM {child_table}
-                WHERE payrollperiodid IN (
-                    SELECT payrollperiodid FROM payroll.payrollperiods
-                    WHERE branchid = :bid AND periodcode LIKE 'CP3C-%'
-                )
-            """),
-            {"bid": branch_id},
-        )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid AND periodcode LIKE 'CP3C-%'"),
-        {"bid": branch_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    await _cleanup_mutable_cp3c_periods(db, branch_id)
 
     code = f"CP3C-{_RUN_ID}-{branch_id}-{start.isoformat()}"
     r = (await db.execute(
@@ -113,18 +79,53 @@ async def _insert_period_db(
     return r["payrollperiodid"]
 
 
-async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
+async def _cleanup_mutable_cp3c_periods(db: AsyncConnection, branch_id: int) -> None:
+    """Release CP-3C workflow slots without deleting immutable snapshots."""
+    period_filter = """
+        SELECT period.payrollperiodid
+        FROM payroll.payrollperiods period
+        WHERE period.branchid = :bid
+          AND period.periodcode LIKE 'CP3C-%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM payroll.payrollcalculationsnapshots snapshot
+              WHERE snapshot.payrollperiodid = period.payrollperiodid
+                AND snapshot.companyid = period.companyid
+                AND snapshot.branchid = period.branchid
+          )
+    """
+    await db.execute(_text("""
+        UPDATE payroll.payrollperiods
+        SET status = 'Cancelled', currentreturnreviewitemid = NULL
+        WHERE branchid = :bid
+          AND periodcode LIKE 'CP3C-%'
+          AND status IN ('Open', 'InReview', 'Approved', 'Returned')
+    """), {"bid": branch_id})
+    for child_table in (
+        "payroll.payrollfinallines",
+        "payroll.payrolldraftlines",
+        "payroll.payrollbonusbatchrequests",
+        "payroll.payrollbonusevents",
+        "payroll.payrollperioddriverdayentrystate",
+        "payroll.payrollperioddrivereligibility",
+        "payroll.payrollperiodeligibilitysnapshots",
+    ):
+        await db.execute(_text(
+            f"DELETE FROM {child_table} WHERE payrollperiodid IN ({period_filter})"
+        ), {"bid": branch_id})
     await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
+        f"DELETE FROM payroll.payrollperiods WHERE payrollperiodid IN ({period_filter})"
+    ), {"bid": branch_id})
+    await db.commit()
+
+
+async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
     await db.execute(
         _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', "
-              "currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
+              "currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid "
+              "AND status IN ('Open', 'InReview', 'Approved', 'Returned')"),
         {"pid": period_id},
     )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
     await db.commit()
 
 
@@ -168,9 +169,6 @@ async def _inject_adjustment_line(
     amount (bypasses branch pay-item activation) — the same technique CP-3A's
     own test_non_bonus_period_pay_unaffected uses to seed a specific normal-pay
     dollar figure without depending on rate resolution."""
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
     row = (await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
@@ -185,9 +183,6 @@ async def _inject_adjustment_line(
         """),
         {"bid": branch_id, "pid": period_id, "did": driver_id, "amount": amount, "linetype": linetype},
     )).mappings().first()
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
     await db.commit()
     assert row is not None
     return row["draftlineid"]

@@ -7,6 +7,7 @@ read functions filter by the user's allowed branches directly in the query.
 """
 import base64
 import calendar as _calendar
+from functools import wraps
 import hashlib
 import hmac as _hmac_mod
 import json
@@ -14,11 +15,12 @@ import math
 import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_EVEN
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError as SAIntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import (
@@ -26,8 +28,15 @@ from app.core.service import (
     _require_not_driver_role, _has_any_permission,
 )
 from app.payroll.calculation.per_unit import (
+    PER_UNIT_CALCULATION_VERSION,
     PerUnitInput as _PerUnitInput,
     calculate_per_unit as _calculate_per_unit,
+)
+from app.payroll.snapshot_hash import (
+    CURRENT_PAYROLL_CALCULATION_VERSION,
+    canonical_json,
+    calculate_snapshot_hash,
+    calculate_source_config_hash,
 )
 from app.payroll.schemas import (
     PeriodSummary, PeriodCreate, PeriodStatusChange, NextPeriodDates, PeriodEntryCount,
@@ -81,6 +90,22 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     #   Approved exits only via POST /finalize (→ Locked).
     ("Locked",   "Archived"):   "payroll.finalize",
 }
+
+
+def _translate_submit_transaction_failures(func):
+    """Map retryable PostgreSQL submit/resubmit transaction failures to 409."""
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except DBAPIError as exc:
+            if _is_retryable_transaction_failure(exc):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Payroll changed concurrently. Refresh and retry the submission.",
+                ) from exc
+            raise
+    return wrapped
 
 _PERIOD_AUDIT_REASONS: dict[str, str] = {
     "PERIOD_STATUS_CHANGED": "Payroll period status changed",
@@ -894,6 +919,7 @@ async def get_period_entry_count(
 # Status change
 # ---------------------------------------------------------------------------
 
+@_translate_submit_transaction_failures
 async def change_period_status(
     company_id: int,
     user_id: int,
@@ -901,6 +927,10 @@ async def change_period_status(
     change: PeriodStatusChange,
     db: AsyncConnection,
 ) -> PeriodSummary:
+    # CP-4D: must be the first SQL on this request connection for submission.
+    if change.status == "InReview":
+        await _set_submit_transaction_isolation(db)
+
     # Load (and access-check) the existing period
     existing = await get_period_by_id(company_id, user_id, period_id, db)
 
@@ -1175,6 +1205,16 @@ async def change_period_status(
                 ),
             )
 
+        packet = await _build_live_calculation_packet(existing, company_id, db)
+        snapshot_id = await _capture_calculation_snapshot(
+            period=existing,
+            company_id=company_id,
+            user_id=user_id,
+            packet=packet,
+            db=db,
+            context="Submit",
+        )
+
         # Auto-create the PeriodApproval review item inside this transaction.
         # The review item is owned by the submitting user; AllowSelfApproval
         # applies when the same user later tries to approve it.
@@ -1191,11 +1231,11 @@ async def change_period_status(
                     INSERT INTO review.managerreviewitems
                         (companyid, branchid, requestedbyuserid,
                          requesttype, entityschema, entityname, entityid,
-                         title, description, priority, status)
+                         title, description, priority, status, payrollcalculationsnapshotid)
                     VALUES
                         (:cid, :bid, :uid,
                          'PeriodApproval', 'payroll', 'PayrollPeriods', :eid,
-                         :title, :description, 'Normal', 'Pending')
+                         :title, :description, 'Normal', 'Pending', :snapshot_id)
                     RETURNING reviewitemid
                 """),
                 {
@@ -1203,6 +1243,7 @@ async def change_period_status(
                     "bid":         existing.branch_id,
                     "uid":         user_id,
                     "eid":         str(period_id),
+                    "snapshot_id": snapshot_id,
                     "title":       f"Payroll Period Approval: {existing.period_name} ({existing.branch_name})",
                     "description": (
                         f"Period {existing.period_name} ({existing.period_code}) has been "
@@ -1487,6 +1528,7 @@ async def _check_inreview_slot_available(
 # CP-1A: Resubmission
 # ===========================================================================
 
+@_translate_submit_transaction_failures
 async def resubmit_period(
     company_id: int,
     user_id: int,
@@ -1511,6 +1553,9 @@ async def resubmit_period(
       7. Write audits (review item created + period status changed).
       8. Return refreshed PeriodSummary.
     """
+    # CP-4D: must precede every resubmission database helper.
+    await _set_submit_transaction_isolation(db)
+
     # ── Step 1: driver/ODA guard ─────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)
     own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
@@ -1566,6 +1611,16 @@ async def resubmit_period(
     await _check_inreview_slot_available(company_id, existing.branch_id, period_id, db)
 
     # ── Step 4: run submission guards (same as Open→InReview) ────────────── #
+
+    # Keep Returned resubmission in parity with first submission. The stored
+    # projection remains compatibility-only; the captured packet uses live PPDES.
+    await _refresh_status_payment_lines(
+        period_id=period_id,
+        company_id=company_id,
+        branch_id=existing.branch_id,
+        user_id=user_id,
+        db=db,
+    )
 
     # Refresh draft calculations so the guards see current rates.
     await _refresh_draft_calculations(
@@ -1692,6 +1747,16 @@ async def resubmit_period(
             ),
         )
 
+    packet = await _build_live_calculation_packet(existing, company_id, db)
+    snapshot_id = await _capture_calculation_snapshot(
+        period=existing,
+        company_id=company_id,
+        user_id=user_id,
+        packet=packet,
+        db=db,
+        context="Resubmit",
+    )
+
     # ── Step 5: create new Pending PeriodApproval review item ────────────── #
     try:
         ri_result = await db.execute(
@@ -1699,11 +1764,11 @@ async def resubmit_period(
                 INSERT INTO review.managerreviewitems
                     (companyid, branchid, requestedbyuserid,
                      requesttype, entityschema, entityname, entityid,
-                     title, description, priority, status)
+                     title, description, priority, status, payrollcalculationsnapshotid)
                 VALUES
                     (:cid, :bid, :uid,
                      'PeriodApproval', 'payroll', 'PayrollPeriods', :eid,
-                     :title, :description, 'Normal', 'Pending')
+                     :title, :description, 'Normal', 'Pending', :snapshot_id)
                 RETURNING reviewitemid
             """),
             {
@@ -1711,6 +1776,7 @@ async def resubmit_period(
                 "bid":         existing.branch_id,
                 "uid":         user_id,
                 "eid":         str(period_id),
+                "snapshot_id": snapshot_id,
                 "title":       f"Payroll Period Resubmission: {existing.period_name} ({existing.branch_name})",
                 "description": (
                     f"Period {existing.period_name} ({existing.period_code}) has been "
@@ -5692,12 +5758,77 @@ _STATUS_PAYMENT_PROJECTION_SQL = (
 )
 
 
-async def get_calculation_preview(
-    period_id: int,
+@dataclass(frozen=True)
+class _CalculationPacketLine:
+    """Persistence-grade result from the live CP-4B calculation assembly."""
+
+    source_type: str
+    source_id: str | None
+    line_type: str
+    line_scope: str | None
+    work_date: date | None
+    driver_id: int
+    quantity: Decimal | None
+    resolved_rate_amount: Decimal | None
+    calculated_amount: Decimal | None
+    needs_manager_review: bool
+    blocker_reason: str | None
+    pay_item_id: int | None = None
+    rate_column_id: int | None = None
+    rate_type_id: int | None = None
+    driver_rate_id: int | None = None
+    bonus_event_id: int | None = None
+    source_evidence: dict[str, Any] | None = None
+    snapshot_source_type: str | None = None
+    snapshot_source_id: str | None = None
+    snapshot_calculated_amount: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class _CalculationPacketDriverTotal:
+    driver_id: int
+    driver_code: str | None
+    driver_name: str | None
+    daily_pay: Decimal
+    status_pay: Decimal
+    period_pay: Decimal
+    minimum_adjustment: Decimal
+    maximum_adjustment: Decimal
+    bonus_total: Decimal
+    expected_pay: Decimal
+    needs_manager_review: bool
+    blockers: list[str]
+    lines: list[_CalculationPacketLine]
+
+
+@dataclass(frozen=True)
+class _LiveCalculationPacket:
+    payroll_period_id: int
+    company_id: int
+    branch_id: int
+    status: str
+    blockers: list[str]
+    warnings: list[str]
+    drivers: list[_CalculationPacketDriverTotal]
+    total_expected_pay: Decimal
+
+
+def _is_retryable_transaction_failure(exc: DBAPIError) -> bool:
+    """PostgreSQL transaction failures which are safe for the client to retry."""
+    return getattr(exc.orig, "sqlstate", None) in {"40001", "40P01"}
+
+
+async def _set_submit_transaction_isolation(db: AsyncConnection) -> None:
+    """Set the submit/resubmit request transaction before any database read."""
+    await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+
+
+
+async def _build_live_calculation_packet(
+    period: PeriodSummary,
     company_id: int,
-    user_id: int,
     db: AsyncConnection,
-) -> "CalculationPreviewResponse":
+) -> _LiveCalculationPacket:
     """
     Read-only, live provisional expected-income breakdown for an Open or
     Returned period, calculated from CURRENT effective source/config data.
@@ -5733,38 +5864,7 @@ async def get_calculation_preview(
     current daily line, a canonical selected Status, a non-BONUS period-pay
     line, or an Active bonus event) -- not a full eligible-driver roster.
     """
-    from app.payroll.schemas import (
-        CalculationPreviewResponse,
-        CalculationPreviewDriverTotal,
-        CalculationPreviewLine,
-    )
-
-    # ODA guard — driver-role users cannot access Current Payroll screens.
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="Current Payroll is not accessible to driver-role users.",
-        )
-
-    # Load period — raises 404 if not found or not accessible (branch/company scoped).
-    period = await get_period_by_id(company_id, user_id, period_id, db)
-
-    # Lifecycle guard: exactly Open/Returned, using the existing exact allow-list.
-    if period.status not in ENTRY_ALLOWED_STATUSES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Calculation preview requires an Open or Returned period. "
-                f"Current status: '{period.status}'."
-            ),
-        )
-
-    # Permission gate: payroll.view OR payroll.entry (NOT payroll.finalize —
-    # that stays reserved for the Approved-only finalization-preview route).
-    await _check_any_permission(
-        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
-    )
+    period_id = period.payroll_period_id
 
     blockers: list[str] = []
     warnings: list[str] = []
@@ -5801,6 +5901,8 @@ async def get_calculation_preview(
             SELECT
                 dl.draftlineid,
                 dl.driverid,
+                d.drivercode,
+                pi.payitemid,
                 e.fullname          AS drivername,
                 dl.workdate,
                 dl.linetype,
@@ -5814,6 +5916,14 @@ async def get_calculation_preview(
             FROM   payroll.payrolldraftlines dl
             LEFT JOIN core.drivers   d ON d.driverid   = dl.driverid
             LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            LEFT JOIN LATERAL (
+                SELECT pi.payitemid
+                FROM payroll.payitems pi
+                WHERE pi.payitemcode = dl.linetype
+                  AND (pi.companyid IS NULL OR pi.companyid = dl.companyid)
+                ORDER BY CASE WHEN pi.companyid = dl.companyid THEN 0 ELSE 1 END
+                LIMIT 1
+            ) pi ON TRUE
             WHERE  dl.payrollperiodid = :period_id
               AND  dl.companyid       = :company_id
               AND  dl.status         != 'Void'
@@ -5827,18 +5937,20 @@ async def get_calculation_preview(
     raw_lines = lines_result.mappings().fetchall()
 
     driver_names: dict[int, str | None] = {}
+    driver_codes: dict[int, str | None] = {}
     driver_daily: dict[int, Decimal] = {}
     driver_period: dict[int, Decimal] = {}
     driver_status: dict[int, Decimal] = {}
     driver_bonus: dict[int, Decimal] = {}
     driver_line_nmr: dict[int, bool] = {}
-    driver_lines: dict[int, list["CalculationPreviewLine"]] = {}
+    driver_lines: dict[int, list[_CalculationPacketLine]] = {}
 
     stale_count = 0
     for r in raw_lines:
         lid = int(r["draftlineid"])
         drv = int(r["driverid"])
         driver_names.setdefault(drv, r["drivername"])
+        driver_codes.setdefault(drv, r["drivercode"])
         driver_lines.setdefault(drv, [])
 
         stored_calc = Decimal(str(r["calculatedamount"])) if r["calculatedamount"] is not None else None
@@ -5867,20 +5979,48 @@ async def get_calculation_preview(
         else:
             driver_period[drv] = driver_period.get(drv, Decimal("0")) + amt
 
-        driver_lines[drv].append(CalculationPreviewLine(
+        driver_lines[drv].append(_CalculationPacketLine(
             source_type=r["sourcetype"] or "DraftLine",
             source_id=r["sourceid"],
             line_type=r["linetype"],
+            line_scope=r["linescope"],
             work_date=r["workdate"],
             driver_id=drv,
             quantity=qty,
-            resolved_rate=resolved_rate,
+            resolved_rate_amount=resolved_rate,
             calculated_amount=effective_calc,
             needs_manager_review=effective_nmr,
             blocker_reason=(
                 "Calculated amount unresolved or manually flagged for manager review."
                 if effective_nmr else None
             ),
+            rate_type_id=(
+                _cr.rate_type_id if lid in refreshed_calcs else None
+            ),
+            pay_item_id=(int(r["payitemid"]) if r["payitemid"] is not None else None),
+            driver_rate_id=(
+                _cr.driver_rate_id if lid in refreshed_calcs else None
+            ),
+            source_evidence={
+                "DraftLineID": lid,
+                "StoredSourceType": r["sourcetype"],
+                "StoredSourceID": r["sourceid"],
+                "StoredCalculatedAmount": stored_calc,
+                "StoredRateAmount": rate,
+                "RateBehavior": (
+                    _cr.rate_behavior if lid in refreshed_calcs else "Stored"
+                ),
+                "PerUnitCalculationVersion": (
+                    PER_UNIT_CALCULATION_VERSION
+                    if lid in refreshed_calcs and _cr.rate_behavior == "PerUnit"
+                    else None
+                ),
+            },
+            snapshot_source_type="DraftLine",
+            snapshot_source_id=str(lid),
+            # Preserve CP-4B's historical public NULL CalculatedAmount while
+            # freezing the actual fallback amount used in the packet total.
+            snapshot_calculated_amount=amt,
         ))
 
     if stale_count > 0:
@@ -5905,15 +6045,15 @@ async def get_calculation_preview(
         if sl.needs_manager_review:
             driver_line_nmr[drv] = True
 
-        driver_lines[drv].append(CalculationPreviewLine(
+        driver_lines[drv].append(_CalculationPacketLine(
             source_type="StatusEntryState",
             source_id=f"STATUS_LIVE:{drv}:{sl.work_date}:{sl.status_key_id}",
             line_type=sl.line_type,
+            line_scope="Daily",
             work_date=sl.work_date,
             driver_id=drv,
-            rate_column_id=sl.status_rate_column_id,
             quantity=sl.hours_value,
-            resolved_rate=sl.resolved_rate_amount,
+            resolved_rate_amount=sl.resolved_rate_amount,
             calculated_amount=sl.calculated_amount,
             needs_manager_review=sl.needs_manager_review,
             blocker_reason=(
@@ -5921,6 +6061,21 @@ async def get_calculation_preview(
                 "selected Status as of its work date."
                 if sl.needs_manager_review else None
             ),
+            rate_type_id=sl.rate_type_id,
+            rate_column_id=sl.status_rate_column_id,
+            driver_rate_id=sl.driver_rate_id,
+            source_evidence={
+                "PayrollPeriodDriverDayEntryStateID": sl.entry_state_id,
+                "StatusKeyID": sl.status_key_id,
+                "StatusCode": sl.status_code,
+                "StatusRateColumnID": sl.status_rate_column_id,
+                "HoursValue": sl.hours_value,
+                "WorkDate": sl.work_date,
+                "RateTypeID": sl.rate_type_id,
+                "DriverRateID": sl.driver_rate_id,
+            },
+            snapshot_source_type="StatusEntryState",
+            snapshot_source_id=str(sl.entry_state_id),
         ))
 
     # ── Canonical Active bonus (never Voided; never legacy BONUS DraftLines).
@@ -5929,8 +6084,12 @@ async def get_calculation_preview(
             SELECT
                 be.payrollbonuseventid,
                 be.driverid,
+                d.drivercode,
                 e.fullname  AS drivername,
-                be.amount
+                be.amount,
+                be.reason,
+                be.notes,
+                be.datarevision
             FROM   payroll.payrollbonusevents be
             LEFT JOIN core.drivers   d ON d.driverid   = be.driverid
             LEFT JOIN core.employees e ON e.employeeid = d.employeeid
@@ -5944,19 +6103,31 @@ async def get_calculation_preview(
     for b in bonus_result.mappings().fetchall():
         drv = int(b["driverid"])
         driver_names.setdefault(drv, b["drivername"])
+        driver_codes.setdefault(drv, b["drivercode"])
         driver_lines.setdefault(drv, [])
         amt = Decimal(str(b["amount"]))
         driver_bonus[drv] = driver_bonus.get(drv, Decimal("0")) + amt
-        driver_lines[drv].append(CalculationPreviewLine(
+        driver_lines[drv].append(_CalculationPacketLine(
             source_type="BonusEvent",
             source_id=str(b["payrollbonuseventid"]),
             line_type="BONUS",
+            line_scope="Period",
             work_date=None,
             driver_id=drv,
             quantity=None,
-            resolved_rate=None,
+            resolved_rate_amount=None,
             calculated_amount=amt,
             needs_manager_review=False,
+            blocker_reason=None,
+            bonus_event_id=int(b["payrollbonuseventid"]),
+            source_evidence={
+                "PayrollBonusEventID": int(b["payrollbonuseventid"]),
+                "Amount": amt,
+                "Reason": b["reason"],
+                "Notes": b["notes"],
+                "DataRevision": b["datarevision"],
+                "Status": "Active",
+            },
         ))
 
     # ── Financial-source-driven driver union (CP-4B: not a full roster).
@@ -5966,6 +6137,20 @@ async def get_calculation_preview(
 
     if not all_driver_ids:
         warnings.append("No current financial source lines for this period.")
+    else:
+        driver_identity_result = await db.execute(
+            text("""
+                SELECT d.driverid, d.drivercode, e.fullname
+                FROM core.drivers d
+                JOIN core.employees e ON e.employeeid = d.employeeid
+                WHERE d.companyid = :cid
+                  AND d.driverid = ANY(:driver_ids)
+            """),
+            {"cid": company_id, "driver_ids": sorted(all_driver_ids)},
+        )
+        for identity in driver_identity_result.mappings().all():
+            driver_names.setdefault(int(identity["driverid"]), identity["fullname"])
+            driver_codes.setdefault(int(identity["driverid"]), identity["drivercode"])
 
     # ── Minimum/maximum: same as-of-period-start rule and ordering as
     # get_finalization_preview — normal base excludes bonus by construction;
@@ -5974,6 +6159,8 @@ async def get_calculation_preview(
     driver_blockers: dict[int, list[str]] = {}
     driver_min_adj: dict[int, Decimal] = {}
     driver_max_adj: dict[int, Decimal] = {}
+    driver_min_rule: dict[int, Any] = {}
+    driver_max_rule: dict[int, Any] = {}
 
     for drv_id in all_driver_ids:
         normal_base = (
@@ -5984,7 +6171,8 @@ async def get_calculation_preview(
 
         min_row = (await db.execute(
             text("""
-                SELECT amount FROM payroll.driverpayrules
+                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
+                FROM payroll.driverpayrules
                 WHERE  driverid      = :did
                   AND  companyid     = :cid
                   AND  ruletype      = 'MinimumPay'
@@ -5998,7 +6186,8 @@ async def get_calculation_preview(
         )).mappings().first()
         max_row = (await db.execute(
             text("""
-                SELECT amount FROM payroll.driverpayrules
+                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
+                FROM payroll.driverpayrules
                 WHERE  driverid      = :did
                   AND  companyid     = :cid
                   AND  ruletype      = 'MaximumPay'
@@ -6013,6 +6202,10 @@ async def get_calculation_preview(
 
         min_amount = Decimal(str(min_row["amount"])) if min_row else None
         max_amount = Decimal(str(max_row["amount"])) if max_row else None
+        if min_row is not None:
+            driver_min_rule[drv_id] = min_row
+        if max_row is not None:
+            driver_max_rule[drv_id] = max_row
 
         if min_amount is not None and max_amount is not None and min_amount > max_amount:
             driver_blockers.setdefault(drv_id, []).append(
@@ -6034,7 +6227,7 @@ async def get_calculation_preview(
             driver_max_adj[drv_id] = Decimal("0")
 
     # ── Assemble driver totals.
-    driver_totals: list[CalculationPreviewDriverTotal] = []
+    driver_totals: list[_CalculationPacketDriverTotal] = []
     for drv_id in sorted(all_driver_ids):
         daily = driver_daily.get(drv_id, Decimal("0"))
         status_pay = driver_status.get(drv_id, Decimal("0"))
@@ -6047,13 +6240,62 @@ async def get_calculation_preview(
         drv_blockers = driver_blockers.get(drv_id, [])
         drv_nmr = driver_line_nmr.get(drv_id, False)
 
-        driver_totals.append(CalculationPreviewDriverTotal(
+        if min_adj != 0:
+            min_rule = driver_min_rule[drv_id]
+            driver_lines[drv_id].append(_CalculationPacketLine(
+                source_type="System",
+                source_id=str(min_rule["driverpayruleid"]),
+                line_type="SYS_MIN_TOPUP",
+                line_scope="Period",
+                work_date=None,
+                driver_id=drv_id,
+                quantity=Decimal("1"),
+                resolved_rate_amount=None,
+                calculated_amount=min_adj,
+                needs_manager_review=False,
+                blocker_reason=None,
+                source_evidence={
+                    "DriverPayRuleID": int(min_rule["driverpayruleid"]),
+                    "RuleType": "MinimumPay",
+                    "RuleAmount": Decimal(str(min_rule["amount"])),
+                    "RuleStatus": min_rule["status"],
+                    "EffectiveFrom": min_rule["effectivefrom"],
+                    "EffectiveTo": min_rule["effectiveto"],
+                    "NormalBase": normal_base,
+                },
+            ))
+        if max_adj != 0:
+            max_rule = driver_max_rule[drv_id]
+            driver_lines[drv_id].append(_CalculationPacketLine(
+                source_type="System",
+                source_id=str(max_rule["driverpayruleid"]),
+                line_type="SYS_MAX_CAP",
+                line_scope="Period",
+                work_date=None,
+                driver_id=drv_id,
+                quantity=Decimal("1"),
+                resolved_rate_amount=None,
+                calculated_amount=max_adj,
+                needs_manager_review=False,
+                blocker_reason=None,
+                source_evidence={
+                    "DriverPayRuleID": int(max_rule["driverpayruleid"]),
+                    "RuleType": "MaximumPay",
+                    "RuleAmount": Decimal(str(max_rule["amount"])),
+                    "RuleStatus": max_rule["status"],
+                    "EffectiveFrom": max_rule["effectivefrom"],
+                    "EffectiveTo": max_rule["effectiveto"],
+                    "NormalBase": normal_base,
+                },
+            ))
+
+        driver_totals.append(_CalculationPacketDriverTotal(
             driver_id=drv_id,
+            driver_code=driver_codes.get(drv_id),
             driver_name=driver_names.get(drv_id),
             daily_pay=daily,
             status_pay=status_pay,
             period_pay=period_pay,
-            normal_base=normal_base,
             minimum_adjustment=min_adj,
             maximum_adjustment=max_adj,
             bonus_total=bonus,
@@ -6072,20 +6314,351 @@ async def get_calculation_preview(
 
     total_expected_pay = sum((dt.expected_pay for dt in driver_totals), Decimal("0"))
 
-    return CalculationPreviewResponse(
+    return _LiveCalculationPacket(
         payroll_period_id=period_id,
         company_id=company_id,
         branch_id=period.branch_id,
-        branch_name=period.branch_name,
         status=period.status,
-        provisional=True,
-        financials_available=True,
-        has_blockers=(len(blockers) > 0),
         blockers=blockers,
         warnings=warnings,
         drivers=driver_totals,
         total_expected_pay=total_expected_pay,
     )
+
+
+async def get_calculation_preview(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> "CalculationPreviewResponse":
+    """Adapt the shared live packet to CP-4B's unchanged public contract."""
+    from app.payroll.schemas import (
+        CalculationPreviewResponse,
+        CalculationPreviewDriverTotal,
+        CalculationPreviewLine,
+    )
+
+    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
+    if own_driver_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Current Payroll is not accessible to driver-role users.",
+        )
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+    if period.status not in ENTRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Calculation preview requires an Open or Returned period. "
+                f"Current status: '{period.status}'."
+            ),
+        )
+    await _check_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
+    )
+    packet = await _build_live_calculation_packet(period, company_id, db)
+    return CalculationPreviewResponse(
+        payroll_period_id=packet.payroll_period_id,
+        company_id=packet.company_id,
+        branch_id=packet.branch_id,
+        branch_name=period.branch_name,
+        status=packet.status,
+        provisional=True,
+        financials_available=True,
+        has_blockers=bool(packet.blockers),
+        blockers=packet.blockers,
+        warnings=packet.warnings,
+        drivers=[
+            CalculationPreviewDriverTotal(
+                driver_id=driver.driver_id,
+                driver_name=driver.driver_name,
+                daily_pay=driver.daily_pay,
+                status_pay=driver.status_pay,
+                period_pay=driver.period_pay,
+                normal_base=driver.daily_pay + driver.status_pay + driver.period_pay,
+                minimum_adjustment=driver.minimum_adjustment,
+                maximum_adjustment=driver.maximum_adjustment,
+                bonus_total=driver.bonus_total,
+                expected_pay=driver.expected_pay,
+                needs_manager_review=driver.needs_manager_review,
+                blockers=driver.blockers,
+                lines=[
+                    CalculationPreviewLine(
+                        source_type=line.source_type,
+                        source_id=line.source_id,
+                        line_type=line.line_type,
+                        work_date=line.work_date,
+                        pay_item_id=line.pay_item_id,
+                        rate_column_id=line.rate_column_id,
+                        driver_id=line.driver_id,
+                        quantity=line.quantity,
+                        resolved_rate=line.resolved_rate_amount,
+                        calculated_amount=line.calculated_amount,
+                        needs_manager_review=line.needs_manager_review,
+                        blocker_reason=line.blocker_reason,
+                    )
+                    for line in driver.lines
+                ],
+            )
+            for driver in packet.drivers
+        ],
+        total_expected_pay=packet.total_expected_pay,
+    )
+
+
+def _packet_driver_totals_for_hash(
+    packet: _LiveCalculationPacket,
+) -> list[dict[str, Any]]:
+    """Project the shared live packet into CP-4C's hash contract."""
+    return [
+        {
+            "DriverID": driver.driver_id,
+            "DriverCodeSnapshot": driver.driver_code,
+            "DriverNameSnapshot": driver.driver_name,
+            "DailyPay": driver.daily_pay,
+            "StatusPay": driver.status_pay,
+            "PeriodPay": driver.period_pay,
+            "MinimumAdjustment": driver.minimum_adjustment,
+            "MaximumAdjustment": driver.maximum_adjustment,
+            "BonusTotal": driver.bonus_total,
+            "ExpectedPay": driver.expected_pay,
+            "Lines": [
+                {
+                    "SourceType": line.snapshot_source_type or line.source_type,
+                    "SourceID": line.snapshot_source_id if line.snapshot_source_id is not None else line.source_id,
+                    "LineType": line.line_type,
+                    "LineScope": line.line_scope,
+                    "WorkDate": line.work_date,
+                    "PayItemID": line.pay_item_id,
+                    "RateTypeID": line.rate_type_id,
+                    "DriverRateID": line.driver_rate_id,
+                    "BonusEventID": line.bonus_event_id,
+                    "Quantity": line.quantity,
+                    "ResolvedRateAmount": line.resolved_rate_amount,
+                    "CalculatedAmount": (
+                        line.snapshot_calculated_amount
+                        if line.snapshot_calculated_amount is not None
+                        else line.calculated_amount
+                    ),
+                    "SourceEvidenceJSONB": line.source_evidence or {},
+                }
+                for line in driver.lines
+            ],
+        }
+        for driver in packet.drivers
+    ]
+
+
+async def _capture_calculation_snapshot(
+    *,
+    period: PeriodSummary,
+    company_id: int,
+    user_id: int,
+    packet: _LiveCalculationPacket,
+    db: AsyncConnection,
+    context: str,
+) -> int:
+    """Persist one complete immutable CP-4D submission packet.
+
+    The caller already owns the period/workflow locks.  This writer performs no
+    calculation and never uses generated IDs in either hash.
+    """
+    if packet.blockers:
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot submit an incomplete calculation packet: " + "; ".join(packet.blockers),
+        )
+    if any(
+        line.snapshot_calculated_amount is None and line.calculated_amount is None
+        for driver in packet.drivers
+        for line in driver.lines
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot submit: an authoritative calculation line is unresolved.",
+        )
+
+    eligibility_rows = (await db.execute(
+        text("""
+            SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
+                   hiredatesnapshot, terminationdatesnapshot,
+                   drivereffectivefromsnapshot, drivereffectivetosnapshot,
+                   drivercodesnapshot, drivernamesnapshot
+            FROM payroll.payrollperioddrivereligibility
+            WHERE payrollperiodid = :pid AND companyid = :cid AND branchid = :bid
+            ORDER BY driverid
+        """),
+        {"pid": period.payroll_period_id, "cid": company_id, "bid": period.branch_id},
+    )).mappings().all()
+
+    source_config_payload = {
+        "PacketContract": "cp4d-source-config-v1",
+        "PayrollPeriod": {
+            "PayrollPeriodID": period.payroll_period_id,
+            "CompanyID": company_id,
+            "BranchID": period.branch_id,
+            "PeriodCode": period.period_code,
+            "PeriodType": period.period_type,
+            "StartDate": period.start_date,
+            "EndDate": period.end_date,
+        },
+        "Eligibility": [dict(row) for row in eligibility_rows],
+        "Sources": [
+            {
+                "DriverID": driver.driver_id,
+                "Lines": [
+                    {
+                        "SourceType": line.snapshot_source_type or line.source_type,
+                        "SourceID": line.snapshot_source_id if line.snapshot_source_id is not None else line.source_id,
+                        "LineType": line.line_type,
+                        "LineScope": line.line_scope,
+                        "WorkDate": line.work_date,
+                        "Quantity": line.quantity,
+                        "ResolvedRateAmount": line.resolved_rate_amount,
+                        "SourceEvidenceJSONB": line.source_evidence or {},
+                    }
+                    for line in driver.lines
+                ],
+            }
+            for driver in packet.drivers
+        ],
+    }
+    source_config_hash = calculate_source_config_hash(source_config_payload)
+    revision_result = await db.execute(
+        text("""
+            SELECT COALESCE(MAX(revisionnumber), 0) + 1
+            FROM payroll.payrollcalculationsnapshots
+            WHERE payrollperiodid = :pid
+        """),
+        {"pid": period.payroll_period_id},
+    )
+    revision_number = int(revision_result.scalar_one())
+    hash_totals = _packet_driver_totals_for_hash(packet)
+    snapshot_hash = calculate_snapshot_hash(
+        company_id=company_id,
+        branch_id=period.branch_id,
+        payroll_period_id=period.payroll_period_id,
+        revision_number=revision_number,
+        calculation_version=CURRENT_PAYROLL_CALCULATION_VERSION,
+        source_config_hash=source_config_hash,
+        driver_totals=hash_totals,
+    )
+
+    header_result = await db.execute(
+        text("""
+            INSERT INTO payroll.payrollcalculationsnapshots
+                (companyid, branchid, payrollperiodid, revisionnumber,
+                 calculationversion, sourceconfighash, snapshothash,
+                 createdbyuserid, totalexpectedpay)
+            VALUES
+                (:cid, :bid, :pid, :revision, :version, :source_hash,
+                 :snapshot_hash, :uid, :total)
+            RETURNING payrollcalculationsnapshotid
+        """),
+        {
+            "cid": company_id,
+            "bid": period.branch_id,
+            "pid": period.payroll_period_id,
+            "revision": revision_number,
+            "version": CURRENT_PAYROLL_CALCULATION_VERSION,
+            "source_hash": source_config_hash,
+            "snapshot_hash": snapshot_hash,
+            "uid": user_id,
+            "total": packet.total_expected_pay,
+        },
+    )
+    snapshot_id = int(header_result.scalar_one())
+
+    for driver, hash_total in zip(packet.drivers, hash_totals, strict=True):
+        driver_result = await db.execute(
+            text("""
+                INSERT INTO payroll.payrollcalculationdrivertotals
+                    (payrollcalculationsnapshotid, companyid, branchid, driverid,
+                     drivercodesnapshot, drivernamesnapshot, dailypay, statuspay,
+                     periodpay, minimumadjustment, maximumadjustment, bonustotal,
+                     expectedpay)
+                VALUES
+                    (:snapshot_id, :cid, :bid, :driver_id, :driver_code, :driver_name,
+                     :daily, :status, :period, :minimum, :maximum, :bonus, :expected)
+                RETURNING payrollcalculationdrivertotalid
+            """),
+            {
+                "snapshot_id": snapshot_id,
+                "cid": company_id,
+                "bid": period.branch_id,
+                "driver_id": driver.driver_id,
+                "driver_code": driver.driver_code,
+                "driver_name": driver.driver_name,
+                "daily": driver.daily_pay,
+                "status": driver.status_pay,
+                "period": driver.period_pay,
+                "minimum": driver.minimum_adjustment,
+                "maximum": driver.maximum_adjustment,
+                "bonus": driver.bonus_total,
+                "expected": driver.expected_pay,
+            },
+        )
+        driver_total_id = int(driver_result.scalar_one())
+        for line in hash_total["Lines"]:
+            await db.execute(
+                text("""
+                    INSERT INTO payroll.payrollcalculationsnapshotlines
+                        (payrollcalculationdrivertotalid, sourcetype, sourceid,
+                         linetype, linescope, workdate, payitemid, ratetypeid,
+                         driverrateid, bonuseventid, quantity, resolvedrateamount,
+                         calculatedamount, sourceevidencejsonb)
+                    VALUES
+                        (:driver_total_id, :source_type, :source_id, :line_type,
+                         :line_scope, :work_date, :pay_item_id, :rate_type_id,
+                         :driver_rate_id, :bonus_event_id, :quantity, :resolved_rate,
+                         :calculated_amount, CAST(:evidence AS jsonb))
+                """),
+                {
+                    "driver_total_id": driver_total_id,
+                    "source_type": line["SourceType"],
+                    "source_id": line["SourceID"],
+                    "line_type": line["LineType"],
+                    "line_scope": line["LineScope"],
+                    "work_date": line["WorkDate"],
+                    "pay_item_id": line["PayItemID"],
+                    "rate_type_id": line["RateTypeID"],
+                    "driver_rate_id": line["DriverRateID"],
+                    "bonus_event_id": line["BonusEventID"],
+                    "quantity": line["Quantity"],
+                    "resolved_rate": line["ResolvedRateAmount"],
+                    "calculated_amount": line["CalculatedAmount"],
+                    "evidence": canonical_json(line["SourceEvidenceJSONB"]),
+                },
+            )
+
+    await db.execute(
+        text("""
+            INSERT INTO audit.auditlog
+                (companyid, branchid, actoruserid, actioncode,
+                 entityschema, entityname, entityid, newvaluejson, reason, sourcetype)
+            VALUES
+                (:cid, :bid, :uid, 'CALCULATION_SNAPSHOT_CAPTURED',
+                 'payroll', 'PayrollCalculationSnapshots', :snapshot_id, :new_value,
+                 :reason, 'Application')
+        """),
+        {
+            "cid": company_id,
+            "bid": period.branch_id,
+            "uid": user_id,
+            "snapshot_id": str(snapshot_id),
+            "new_value": json.dumps({
+                "payroll_period_id": period.payroll_period_id,
+                "snapshot_id": snapshot_id,
+                "revision_number": revision_number,
+                "source_config_hash": source_config_hash,
+                "snapshot_hash": snapshot_hash,
+                "context": context,
+            }),
+            "reason": "Immutable calculation snapshot captured for review submission",
+        },
+    )
+    return snapshot_id
 
 
 # ---------------------------------------------------------------------------
@@ -12439,9 +13012,13 @@ class _LiveStatusLine(NamedTuple):
     (CP-4B). Distinct from the persisted STATUS_PAYMENT compatibility
     projection DraftLine, which may be stale."""
     driver_id: int
+    entry_state_id: int
     work_date: "date"
     status_key_id: int
+    status_code: str
     status_rate_column_id: "int | None"
+    rate_type_id: int | None
+    driver_rate_id: int | None
     line_type: str
     hours_value: Decimal
     resolved_rate_amount: "Decimal | None"
@@ -12481,8 +13058,10 @@ async def _resolve_live_status_payment_lines(
         text("""
             SELECT
                 ppdes.driverid,
+                ppdes.payrollperioddriverdayentrystateid,
                 ppdes.workdate,
                 sk.statuskeyid,
+                sk.statuscode,
                 sk.hoursvalue,
                 sk.statusratecolumnid,
                 src.ratetypeid,
@@ -12514,7 +13093,7 @@ async def _resolve_live_status_payment_lines(
 
         rate_row = (await db.execute(
             text("""
-                SELECT amount
+                SELECT driverrateid, amount
                 FROM   payroll.driverrates
                 WHERE  driverid      = :did
                   AND  ratetypeid    = :rtid
@@ -12534,9 +13113,13 @@ async def _resolve_live_status_payment_lines(
 
         results.append(_LiveStatusLine(
             driver_id=row["driverid"],
+            entry_state_id=row["payrollperioddriverdayentrystateid"],
             work_date=row["workdate"],
             status_key_id=row["statuskeyid"],
+            status_code=row["statuscode"],
             status_rate_column_id=row["statusratecolumnid"],
+            rate_type_id=src_rate_type_id,
+            driver_rate_id=(int(rate_row["driverrateid"]) if rate_row else None),
             line_type=row["ratecode"] or "STATUS_PAY",
             hours_value=hours_value,
             resolved_rate_amount=resolved_rate,

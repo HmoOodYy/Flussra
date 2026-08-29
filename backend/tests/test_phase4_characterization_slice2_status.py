@@ -518,24 +518,6 @@ async def _advance_to_approved(
     assert dec.status_code == 200, f"Review decision failed: {dec.text}"
 
 
-async def _verify_trigger_enabled(direct_db, table: str, trigger: str) -> None:
-    row = (await direct_db.execute(
-        _text("""
-            SELECT t.tgenabled
-            FROM   pg_trigger t
-            JOIN   pg_class c ON c.oid = t.tgrelid
-            WHERE  c.relname = :table AND t.tgname = :trigger
-        """),
-        {"table": table, "trigger": trigger},
-    )).mappings().first()
-    assert row is not None, f"Trigger {trigger} on {table} not found"
-    tgenabled = row["tgenabled"]
-    tgenabled = tgenabled.decode() if isinstance(tgenabled, bytes) else tgenabled
-    assert tgenabled == "O", (
-        f"Trigger {trigger} on {table} must be enabled ('O') after cleanup; got {tgenabled!r}"
-    )
-
-
 async def _delete_period_and_children(
     direct_db,
     period_id: int,
@@ -543,14 +525,10 @@ async def _delete_period_and_children(
     was_locked: bool = False,
 ) -> None:
     """
-    Hard-deletes every test-owned row for one period. Mirrors the helper of
-    the same name in test_phase4_characterization_slice1.py, extended for
-    this Slice's Status domain: `PayrollPeriodDriverDayEntryState` rows
-    cascade automatically via `ON DELETE CASCADE` back to `PayrollPeriods`
-    (`migrations/sql/0054_canonical_daily_entry_state.sql`,
-    `fk_PPDES_Period`) — confirmed by reading that migration, not assumed —
-    so no separate PPDES delete statement is needed; the residue check below
-    still explicitly re-verifies the cascade ran.
+    Remove mutable test state for one period without bypassing immutable
+    financial history. Snapshot-backed finalized periods cannot be deleted by
+    design; their exact PPDES/review rows are removed and the test period is
+    cancelled so it cannot affect later Status or pay-rule scenarios.
     """
     draft_line_ids = [
         r["draftlineid"] for r in (await direct_db.execute(
@@ -577,11 +555,22 @@ async def _delete_period_and_children(
         )).mappings().all()
     ]
 
-    if was_locked:
-        await direct_db.execute(
-            _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-        )
-    try:
+    snapshot_exists = (await direct_db.execute(
+        _text("""
+            SELECT EXISTS(
+                SELECT 1
+                FROM payroll.payrollcalculationsnapshots
+                WHERE payrollperiodid = :pid
+            )
+        """),
+        {"pid": period_id},
+    )).scalar_one()
+
+    if snapshot_exists:
+        snapshot_status = (await direct_db.execute(
+            _text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )).scalar_one()
         await direct_db.execute(
             _text("DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid"),
             {"eid": str(period_id)},
@@ -611,25 +600,75 @@ async def _delete_period_and_children(
                 {"ids": review_item_ids},
             )
         await direct_db.execute(
+            _text(
+                "DELETE FROM payroll.payrollperioddriverdayentrystate "
+                "WHERE payrollperiodid = :pid"
+            ),
+            {"pid": period_id},
+        )
+        if snapshot_status not in ("Locked", "Archived"):
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                {"pid": period_id},
+            )
+        residue = (await direct_db.execute(
+            _text("""
+                SELECT
+                    (SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid) AS status,
+                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate
+                        WHERE payrollperiodid = :pid) AS ppdes,
+                    (SELECT COUNT(*) FROM review.managerreviewitems
+                        WHERE reviewitemid = ANY(:review_ids)) AS review_items
+            """),
+            {"pid": period_id, "review_ids": review_item_ids or [-1]},
+        )).mappings().one()
+        assert residue["status"] in ("Cancelled", "Locked", "Archived")
+        assert residue["ppdes"] == 0
+        assert residue["review_items"] == 0
+        return
+
+    await direct_db.execute(
+            _text("DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid"),
+            {"eid": str(period_id)},
+        )
+    if draft_line_ids:
+        await direct_db.execute(
+                _text(
+                    "DELETE FROM audit.auditlog "
+                    "WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)"
+                ),
+                {"ids": [str(i) for i in draft_line_ids]},
+        )
+    if review_item_ids:
+        await direct_db.execute(
+                _text(
+                    "DELETE FROM audit.auditlog "
+                    "WHERE entityname = 'ManagerReviewItems' AND entityid = ANY(:ids)"
+                ),
+                {"ids": [str(i) for i in review_item_ids]},
+        )
+        await direct_db.execute(
+                _text("DELETE FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)"),
+                {"ids": review_item_ids},
+        )
+        await direct_db.execute(
+                _text("DELETE FROM review.managerreviewitems WHERE reviewitemid = ANY(:ids)"),
+                {"ids": review_item_ids},
+        )
+    await direct_db.execute(
             _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
             {"pid": period_id},
-        )
-        await direct_db.execute(
+    )
+    await direct_db.execute(
             _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
             {"pid": period_id},
-        )
-        # Deleting the period cascades PayrollPeriodDriverDayEntryState rows
-        # (fk_PPDES_Period ON DELETE CASCADE).
-        await direct_db.execute(
+    )
+    # Deleting the period cascades PayrollPeriodDriverDayEntryState rows
+    # (fk_PPDES_Period ON DELETE CASCADE).
+    await direct_db.execute(
             _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
             {"pid": period_id},
-        )
-    finally:
-        if was_locked:
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-            )
-            await _verify_trigger_enabled(direct_db, "payrollfinallines", "trg_final_line_immutable")
+    )
 
     residue = (await direct_db.execute(
         _text("""
@@ -1592,6 +1631,9 @@ class TestPreviewFinalizationDivergence:
         paytest_branch_id: int, direct_db,
     ):
         headers = auth(auth_token)
+        period_start = "2099-02-02"
+        period_end = "2099-02-08"
+        work_date = "2099-02-02"
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 Divergence")
         async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
@@ -1603,13 +1645,14 @@ class TestPreviewFinalizationDivergence:
                 rate_a_id = await stack.enter_async_context(
                     _owned_driver_rate(
                         direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
-                        "20.0000", "2098-01-01",
+                        "20.0000", "2099-01-01",
                     )
                 )
                 pid = await stack.enter_async_context(
                     _owned_period(
                         session_client, auth_token, paytest_branch_id,
-                        PERIOD_A_START, PERIOD_A_END, direct_db, suffix="-divergence",
+                        period_start, period_end, direct_db,
+                        suffix=f"-divergence-{uuid.uuid4().hex[:8]}",
                     )
                 )
                 code_row = (await direct_db.execute(
@@ -1619,14 +1662,14 @@ class TestPreviewFinalizationDivergence:
                 status_code = code_row["statuscode"]
 
                 save_resp = await _save_day_grid(
-                    session_client, auth_token, pid, driver_id, DATE_FEB02, status_code,
+                    session_client, auth_token, pid, driver_id, work_date, status_code,
                 )
                 assert save_resp.status_code == 200
 
                 # Capture the exact Status source identity BEFORE finalization
                 # -- this is the strong selector used to locate the final line
                 # later, not driver+amount (Codex P2 strengthening note).
-                entry_state = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+                entry_state = await _get_entry_state_row(direct_db, pid, driver_id, work_date)
                 assert entry_state is not None
                 entry_state_id = entry_state["payrollperioddriverdayentrystateid"]
 
@@ -1669,7 +1712,7 @@ class TestPreviewFinalizationDivergence:
                 rate_b_id = await stack.enter_async_context(
                     _owned_driver_rate(
                         direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
-                        "30.0000", "2098-01-01",
+                        "30.0000", "2099-01-01",
                     )
                 )
 

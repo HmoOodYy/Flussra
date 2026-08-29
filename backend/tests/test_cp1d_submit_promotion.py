@@ -53,7 +53,13 @@ def _dates_2095(offset_weeks: int = 0) -> tuple[datetime.date, datetime.date]:
 
 
 async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
-    """Cancel all active periods on branch and delete all 2095+ test periods (FK-safe order)."""
+    """Cancel active periods and delete only 2095 test periods without snapshots.
+
+    Successful CP-4D submissions create immutable snapshots with a restrictive
+    period foreign key.  Snapshot-backed periods are retained in the ephemeral
+    test database after being cancelled, which releases their workflow slots
+    without treating immutable history as test-cleanup data.
+    """
     p = {"bid": branch_id}
     # 1. Cancel ALL active periods on this branch (no date filter) so no stale InReview/Returned
     # period from a prior test blocks the next test's submit. Dates may fall outside 2095 due to
@@ -101,12 +107,22 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
         """),
         p,
     )
-    # 6. Delete periods
+    # 6. Delete mutable test periods. Immutable snapshot-backed periods remain
+    # cancelled so the next test has no active workflow-slot contention.
     await direct_db.execute(
-        _text(
-            "DELETE FROM payroll.payrollperiods "
-            "WHERE branchid = :bid AND startdate >= '2095-01-01' AND startdate < '2096-01-01'"
-        ),
+        _text("""
+            DELETE FROM payroll.payrollperiods AS period
+            WHERE period.branchid = :bid
+              AND period.startdate >= '2095-01-01'
+              AND period.startdate < '2096-01-01'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM payroll.payrollcalculationsnapshots AS snapshot
+                  WHERE snapshot.payrollperiodid = period.payrollperiodid
+                    AND snapshot.companyid = period.companyid
+                    AND snapshot.branchid = period.branchid
+              )
+        """),
         p,
     )
     # 7. Ensure branchpayrollsettings row exists (required by CP-2A ensure_current_schedule_version).
@@ -120,6 +136,36 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
         """),
         {"cid": _COMPANY_ID, "bid": branch_id},
     )
+
+
+async def _ensure_prepared_creation_setup(
+    client: httpx.AsyncClient,
+    token: str,
+    direct_db: AsyncConnection,
+    branch_id: int,
+) -> None:
+    """Ensure the weekly setup required by candidate tests without rewriting history."""
+    response = await client.put(
+        f"/settings/branches/{branch_id}/payroll-setup",
+        json={"payroll_frequency": "Week", "anchor_start_date": "2095-01-06"},
+        headers=_auth(token),
+    )
+    if response.status_code in (200, 201):
+        return
+
+    assert response.status_code == 409, f"payroll setup failed: {response.text}"
+    assert "existing payroll periods" in response.text, response.text
+    settings = (await direct_db.execute(
+        _text("""
+            SELECT payrollfrequency, isactive
+            FROM payroll.branchpayrollsettings
+            WHERE companyid = :cid AND branchid = :bid
+        """),
+        {"cid": _COMPANY_ID, "bid": branch_id},
+    )).mappings().first()
+    assert settings is not None
+    assert settings["payrollfrequency"] == "Week"
+    assert settings["isactive"] is True
 
 
 async def _insert_open_period(
@@ -1106,13 +1152,11 @@ class TestCandidateReplayAfterPromotion:
         """
         await _clean(direct_db, paytest_branch_id)
 
-        # Ensure payroll setup exists for the branch (PREPARED_CREATION preview requires it).
-        setup_r = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={"payroll_frequency": "Week", "anchor_start_date": "2095-01-06"},
-            headers=_auth(auth_token),
+        # PREPARED_CREATION requires an active weekly setup. Immutable history
+        # may correctly reject rewriting its original test anchor.
+        await _ensure_prepared_creation_setup(
+            session_client, auth_token, direct_db, paytest_branch_id,
         )
-        assert setup_r.status_code in (200, 201), f"payroll setup failed: {setup_r.text}"
 
         # Step 1: Insert Open period.
         op_start, op_end = _dates_2095(72)
@@ -1680,12 +1724,9 @@ class TestDeterministicLockBoundary:
         """
         await _clean(direct_db, paytest_branch_id)
 
-        setup_r = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={"payroll_frequency": "Week", "anchor_start_date": "2095-01-06"},
-            headers=_auth(auth_token),
+        await _ensure_prepared_creation_setup(
+            session_client, auth_token, direct_db, paytest_branch_id,
         )
-        assert setup_r.status_code in (200, 201), f"setup: {setup_r.text}"
 
         op_start, op_end = _dates_2095(140)
         await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "D2-OP")
