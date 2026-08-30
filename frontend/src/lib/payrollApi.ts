@@ -8,7 +8,6 @@ import type {
   DayGridSaveRequest,
   PeriodPayLine,
   AddPeriodPayLineRequest,
-  StatusTransitionRequest,
   PeriodSummary,
   NextPeriodDates,
   EligibleDriver,
@@ -99,16 +98,24 @@ export async function saveDayGrid(
 }
 
 // ---------------------------------------------------------------------------
-// CP-2 — Period status transition
+// Current Payroll lifecycle actions
 // ---------------------------------------------------------------------------
 
-export async function transitionPeriodStatus(
+export async function submitPeriod(
   periodId: number,
-  req: StatusTransitionRequest,
 ): Promise<PeriodSummary> {
+  // This is the backend's canonical Open submit route. Its CP-4D service path
+  // captures the immutable snapshot and creates the Pending review item.
   const resp = await apiClient.patch<PeriodSummary>(
     `/payroll/periods/${periodId}/status`,
-    req,
+    { status: 'InReview' },
+  );
+  return resp.data;
+}
+
+export async function resubmitPeriod(periodId: number): Promise<PeriodSummary> {
+  const resp = await apiClient.post<PeriodSummary>(
+    `/payroll/periods/${periodId}/resubmissions`,
   );
   return resp.data;
 }

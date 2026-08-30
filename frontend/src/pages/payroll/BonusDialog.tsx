@@ -20,7 +20,7 @@ import styles from './BonusDialog.module.css';
 // Constants
 // ---------------------------------------------------------------------------
 
-const BONUS_EDITABLE_STATUSES = new Set(['Open', 'InReview']);
+const BONUS_EDITABLE_STATUSES = new Set(['Open']);
 
 // ---------------------------------------------------------------------------
 // Helpers

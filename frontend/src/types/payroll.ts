@@ -2,6 +2,7 @@ export type PeriodStatus =
   | 'Draft'
   | 'Open'
   | 'InReview'
+  | 'Returned'
   | 'Approved'
   | 'Locked'
   | 'Cancelled'
@@ -357,6 +358,7 @@ export const STATUS_COLORS: Record<PeriodStatus, { bg: string; color: string; bo
   Draft:     { bg: '#f9fafb', color: '#374151', border: '#e5e7eb' },
   Open:      { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
   InReview:  { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  Returned:  { bg: '#fff7ed', color: '#9a3412', border: '#fed7aa' },
   Approved:  { bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
   Locked:    { bg: '#f0fdfa', color: '#0f766e', border: '#99f6e4' },
   Cancelled: { bg: '#fef2f2', color: '#991b1b', border: '#fecaca' },

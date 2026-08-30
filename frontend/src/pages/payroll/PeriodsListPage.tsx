@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useState, useCallback } from 'react';
 import apiClient from '../../lib/apiClient';
-import { transitionPeriodStatus } from '../../lib/payrollApi';
+import { resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
 import { useAuth } from '../../store/authStore';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
@@ -17,16 +17,27 @@ import { FinalizationPreviewDialog } from './FinalizationPreviewDialog';
 import styles from './PeriodsListPage.module.css';
 
 // ── Current Payroll status policy ─────────────────────────────────────────────
-// Active entry work: Draft and Open only.
+// Active entry work: Draft (Prepared), Open, and Returned.
 // Approved: shown separately in "Ready to Finalize" — not mixed with entry work.
 // InReview: belongs to the Review page, not Current Payroll.
 // Cancelled / Locked / Archived: never shown on this page.
 //
-// The filterStatus dropdown is a client-side refinement within Draft + Open.
+// The filterStatus dropdown is a client-side refinement within the active states.
 // No status is sent to the backend; we always fetch all, then split here.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type ActiveFilter = '' | 'Draft' | 'Open';   // '' = both Draft and Open
+type ActiveFilter = '' | 'Draft' | 'Open' | 'Returned';
+
+function getWorkflowErrorDetail(error: unknown, fallback: string): string {
+  const detail =
+    (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === 'string') return message;
+  }
+  return fallback;
+}
 
 // ── Reducers ──────────────────────────────────────────────────────────────────
 
@@ -81,16 +92,27 @@ function PeriodCard({
   const [transitioning,  setTransitioning]  = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
 
-  async function handleTransition(newStatus: string) {
+  async function handleSubmit() {
     setTransitioning(true);
     setTransitionError(null);
     try {
-      await transitionPeriodStatus(p.payroll_period_id, { status: newStatus });
+      await submitPeriod(p.payroll_period_id);
       onReload();
     } catch (e: unknown) {
-      const detail =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setTransitionError(detail ?? `Failed to transition to ${newStatus}.`);
+      setTransitionError(getWorkflowErrorDetail(e, 'Failed to submit this period for review.'));
+    } finally {
+      setTransitioning(false);
+    }
+  }
+
+  async function handleResubmit() {
+    setTransitioning(true);
+    setTransitionError(null);
+    try {
+      await resubmitPeriod(p.payroll_period_id);
+      onReload();
+    } catch (e: unknown) {
+      setTransitionError(getWorkflowErrorDetail(e, 'Failed to resubmit this period for review.'));
     } finally {
       setTransitioning(false);
     }
@@ -98,13 +120,14 @@ function PeriodCard({
 
   const isDraft    = p.status === 'Draft';
   const isOpen     = p.status === 'Open';
+  const isReturned = p.status === 'Returned';
   const isApproved = p.status === 'Approved';
-  // Entry controls apply to Open periods only (InReview excluded from this page)
-  const isEnterable = isOpen;
+  const isEnterable = isOpen || isReturned;
 
   const nextAction = (() => {
-    if (isDraft)    return { text: 'Open this period to begin payroll entry', style: styles.nextActionPrompt };
+    if (isDraft)    return { text: 'Prepared — backend workflow will promote this period when eligible', style: styles.nextActionPrompt };
     if (isOpen)     return { text: 'Enter daily payroll, then submit for review when ready', style: styles.nextAction };
+    if (isReturned) return { text: 'Returned for correction — update payroll source entries, then resubmit for review', style: styles.nextAction };
     if (isApproved) return { text: 'Approved — awaiting finalization', style: styles.nextActionPrompt };
     return null;
   })();
@@ -160,25 +183,25 @@ function PeriodCard({
         {canEntry && isEnterable && (
           <button className={styles.actionBtn} onClick={onDriversOff}>Drivers Off</button>
         )}
-        {canEntry && isEnterable && (
+        {canEntry && isOpen && (
           <button className={styles.actionBtn} onClick={onBonus}>Bonus</button>
-        )}
-        {canEntry && isDraft && (
-          <button
-            className={styles.workflowBtn}
-            disabled={transitioning}
-            onClick={() => void handleTransition('Open')}
-          >
-            {transitioning ? 'Opening…' : 'Open Period'}
-          </button>
         )}
         {canEntry && isOpen && (
           <button
             className={styles.workflowBtn}
             disabled={transitioning}
-            onClick={() => void handleTransition('InReview')}
+            onClick={() => void handleSubmit()}
           >
             {transitioning ? 'Submitting…' : 'Submit for Review'}
+          </button>
+        )}
+        {canEntry && isReturned && (
+          <button
+            className={styles.workflowBtn}
+            disabled={transitioning}
+            onClick={() => void handleResubmit()}
+          >
+            {transitioning ? 'Resubmitting…' : 'Resubmit for Review'}
           </button>
         )}
 
@@ -210,8 +233,7 @@ export function PeriodsListPage() {
   const [branchesSt,  dispatchBranches] = useReducer(branchesReducer, { branches: [], loading: true });
   const [periodsSt,   dispatchPeriods]  = useReducer(periodsReducer,  { periods: [], loading: true, error: '' });
 
-  // filterStatus is a client-side refinement within the Draft+Open active list.
-  // '' = show both Draft and Open (default).
+  // filterStatus is a client-side refinement within active work.
   const [filterStatus,    setFilterStatus]    = useState<ActiveFilter>('');
   const [filterBranchId,  setFilterBranchId]  = useState<string>('');
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -238,10 +260,10 @@ export function PeriodsListPage() {
       const params: Record<string, string> = {};
       if (filterBranchId) params.branch_id = filterBranchId;
       const { data } = await apiClient.get<PeriodSummary[]>('/payroll/periods', { params });
-      // Current Payroll only cares about Draft, Open, and Approved.
+      // Current Payroll surfaces Draft, Open, Returned, and Approved.
       // InReview → Review page.  Cancelled / Locked / Archived → never shown here.
       const relevant = data.filter(
-        (p) => p.status === 'Draft' || p.status === 'Open' || p.status === 'Approved'
+        (p) => p.status === 'Draft' || p.status === 'Open' || p.status === 'Returned' || p.status === 'Approved'
       );
       dispatchPeriods({ type: 'FETCH_OK', periods: relevant });
     } catch {
@@ -273,14 +295,15 @@ export function PeriodsListPage() {
   }
 
   // ── Client-side split ─────────────────────────────────────────────────────
-  // activePeriods: Draft + Open, refined by filterStatus dropdown.
+  // activePeriods: Draft + Open + Returned, refined by filterStatus dropdown.
   // approvedPeriods: always shown in their own "Ready to Finalize" section.
 
   const activePeriods: PeriodSummary[] = periodsSt.periods.filter((p) => {
-    if (p.status !== 'Draft' && p.status !== 'Open') return false;
+    if (p.status !== 'Draft' && p.status !== 'Open' && p.status !== 'Returned') return false;
     if (filterStatus === 'Draft') return p.status === 'Draft';
     if (filterStatus === 'Open')  return p.status === 'Open';
-    return true; // '' = both
+    if (filterStatus === 'Returned') return p.status === 'Returned';
+    return true;
   });
 
   const approvedPeriods: PeriodSummary[] = periodsSt.periods.filter(
@@ -314,9 +337,10 @@ export function PeriodsListPage() {
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value as ActiveFilter)}
         >
-          <option value="">Draft &amp; Open</option>
-          <option value="Draft">Draft only</option>
+          <option value="">Prepared, Open &amp; Returned</option>
+          <option value="Draft">Prepared only</option>
           <option value="Open">Open only</option>
+          <option value="Returned">Returned only</option>
         </select>
       </label>
 

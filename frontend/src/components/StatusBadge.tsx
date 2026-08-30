@@ -37,15 +37,22 @@ const PERIOD_STATUS_COLOR: Record<string, Color> = {
   Draft:     'gray',
   Open:      'blue',
   InReview:  'amber',
+  Returned:  'orange',
   Approved:  'green',
   Locked:    'teal',
   Cancelled: 'red',
   Archived:  'purple',
 };
 
+const PERIOD_STATUS_LABEL: Record<string, string> = {
+  Draft: 'Prepared',
+  InReview: 'In Review',
+  Returned: 'Returned for Correction',
+};
+
 export function PeriodStatusBadge({ status }: { status: string }) {
   const color = PERIOD_STATUS_COLOR[status] ?? 'gray';
-  return <StatusBadge label={status} color={color} />;
+  return <StatusBadge label={PERIOD_STATUS_LABEL[status] ?? status} color={color} />;
 }
 
 export function LineStatusBadge({ status, needsReview }: { status: string; needsReview: boolean }) {

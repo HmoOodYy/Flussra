@@ -18,7 +18,7 @@ import styles from './PeriodDetailPage.module.css';
 // Constants
 // ---------------------------------------------------------------------------
 
-const EDITABLE_STATUSES = new Set(['Open', 'InReview']);
+const EDITABLE_STATUSES = new Set(['Open', 'Returned']);
 
 // ---------------------------------------------------------------------------
 // Date helpers
@@ -277,9 +277,11 @@ export function PeriodDetailPage() {
 
   const readOnlyBanner = (() => {
     if (period.status === 'Draft')
-      return 'This period is Draft — open it from the payroll hub to begin entry.';
+      return 'This period is Prepared — read-only until the backend workflow promotes it to Open.';
     if (period.status === 'InReview')
       return 'This period is in review — grid is read-only while awaiting approval.';
+    if (period.status === 'Returned')
+      return 'This period was returned for correction. Update its live source entries, then resubmit it for review.';
     if (period.status === 'Approved')
       return 'This period is Approved — read-only. Finalize from the payroll hub.';
     if (!isEditable)
