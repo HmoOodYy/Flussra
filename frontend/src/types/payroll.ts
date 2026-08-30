@@ -57,6 +57,103 @@ export interface NextPeriodDates {
   custom_interval_days: number | null;
 }
 
+// ── Current workflow and candidate-based period creation ───────────────────
+
+export type PeriodCandidateMode = 'OPEN_CREATION' | 'PREPARED_CREATION';
+
+export interface PeriodCandidate {
+  candidate_key: string;
+  target_status: 'Open' | 'Draft';
+  start_date: string;
+  end_date: string;
+  period_type: string;
+  label: string;
+  creatable: boolean;
+  blocked_reason: string | null;
+}
+
+export interface PeriodCandidatePreview {
+  mode: PeriodCandidateMode;
+  selected: PeriodCandidate;
+  navigation: {
+    previous_cursor: string | null;
+    next_cursor: string | null;
+  };
+}
+
+export interface PeriodCreationResult {
+  result: 'CREATED' | 'ALREADY_EXISTS';
+  payroll_period_id: number;
+  branch_id: number;
+  period_code: string;
+  period_name: string;
+  period_type: string;
+  start_date: string;
+  end_date: string;
+  status: PeriodStatus;
+  created_at_utc: string | null;
+}
+
+export interface WorkflowCapability {
+  allowed: boolean;
+  reason_code: string | null;
+  reason_message: string | null;
+}
+
+export interface WorkflowSlotPeriod {
+  period_id: number;
+  branch_id: number;
+  branch_name: string;
+  status: PeriodStatus;
+  display_status: string;
+  period_name: string;
+  period_code: string;
+  period_type: string;
+  start_date: string;
+  end_date: string;
+  submitted_at_utc: string | null;
+  current_return_review_item_id: number | null;
+  is_active_workflow_slot: boolean;
+  is_read_only: boolean;
+  read_only_reason_code: string | null;
+  lifecycle_position: number;
+}
+
+export interface WorkflowAlert {
+  code: string;
+  severity: 'blocker' | 'warning' | 'info';
+  title: string;
+  message: string;
+  related_period_id: number | null;
+  affected_action_codes: string[];
+}
+
+export interface BranchCurrentWorkflow {
+  branch_id: number;
+  branch_name: string;
+  setup_status: 'complete' | 'missing' | 'incomplete' | 'inactive';
+  slots: {
+    open: WorkflowSlotPeriod | null;
+    prepared: WorkflowSlotPeriod | null;
+    in_review: WorkflowSlotPeriod | null;
+    returned: WorkflowSlotPeriod | null;
+  };
+  capabilities: {
+    can_view_current_workflow: WorkflowCapability;
+    can_create_open_candidate: WorkflowCapability;
+    can_create_prepared_candidate: WorkflowCapability;
+    can_view_candidates: WorkflowCapability;
+  };
+  alerts: WorkflowAlert[];
+}
+
+export interface CurrentWorkflow {
+  scope: 'company' | 'branch';
+  company_id: number;
+  requested_branch_id: number | null;
+  branches: BranchCurrentWorkflow[];
+}
+
 // ── Draft lines ──────────────────────────────────────────────────────────────
 
 export interface DraftLineSummary {

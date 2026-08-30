@@ -1,10 +1,10 @@
 import { useEffect, useReducer, useState, useCallback } from 'react';
 import apiClient from '../../lib/apiClient';
-import { resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
+import { getCurrentWorkflow, resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
 import { useAuth } from '../../store/authStore';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
-import type { PeriodSummary } from '../../types/payroll';
+import type { BranchCurrentWorkflow, CurrentWorkflow, PeriodSummary, WorkflowSlotPeriod } from '../../types/payroll';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { SectionCard } from '../../components/ui/SectionCard';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -60,16 +60,28 @@ type PeriodsState = { periods: PeriodSummary[]; loading: boolean; error: string 
 type PeriodsAction =
   | { type: 'FETCH_START' }
   | { type: 'FETCH_OK';    periods: PeriodSummary[] }
-  | { type: 'FETCH_ERROR'; error: string }
-  | { type: 'PREPEND';     period: PeriodSummary };
+  | { type: 'FETCH_ERROR'; error: string };
 
 function periodsReducer(s: PeriodsState, a: PeriodsAction): PeriodsState {
   switch (a.type) {
     case 'FETCH_START': return { ...s, loading: true,  error: '' };
     case 'FETCH_OK':    return { periods: a.periods, loading: false, error: '' };
     case 'FETCH_ERROR': return { ...s, loading: false, error: a.error };
-    case 'PREPEND':     return { ...s, periods: [a.period, ...s.periods] };
     default:            return s;
+  }
+}
+
+type WorkflowState = { data: CurrentWorkflow | null; loading: boolean; error: string };
+type WorkflowAction =
+  | { type: 'FETCH_START' }
+  | { type: 'FETCH_OK'; data: CurrentWorkflow }
+  | { type: 'FETCH_ERROR'; error: string };
+
+function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
+  switch (action.type) {
+    case 'FETCH_START': return { ...state, loading: true, error: '' };
+    case 'FETCH_OK': return { data: action.data, loading: false, error: '' };
+    case 'FETCH_ERROR': return { ...state, loading: false, error: action.error };
   }
 }
 
@@ -123,6 +135,7 @@ function PeriodCard({
   const isReturned = p.status === 'Returned';
   const isApproved = p.status === 'Approved';
   const isEnterable = isOpen || isReturned;
+  const isGridEnterable = isDraft || isEnterable;
 
   const nextAction = (() => {
     if (isDraft)    return { text: 'Prepared — backend workflow will promote this period when eligible', style: styles.nextActionPrompt };
@@ -176,7 +189,7 @@ function PeriodCard({
       <div className={styles.cardActions}>
         {/* View/Enter Payroll — always visible for non-finalized periods */}
         <button className={styles.primaryActionBtn} onClick={onViewPayroll}>
-          {isEnterable ? 'Enter Payroll' : 'View Payroll'}
+          {isDraft ? 'Prepare Payroll' : isGridEnterable ? 'Enter Payroll' : 'View Payroll'}
         </button>
 
         {/* Entry-only actions — require payroll.entry */}
@@ -220,6 +233,66 @@ function PeriodCard({
   );
 }
 
+function WorkflowSlot({
+  title,
+  period,
+  emptyMessage,
+}: {
+  title: string;
+  period: WorkflowSlotPeriod | null;
+  emptyMessage: string;
+}) {
+  return (
+    <div className={styles.workflowSlot}>
+      <span className={styles.workflowSlotLabel}>{title}</span>
+      {period ? (
+        <>
+          <div className={styles.workflowSlotNameRow}>
+            <strong>{period.period_name || period.period_code}</strong>
+            <PeriodStatusBadge status={period.status} />
+          </div>
+          <span className={styles.workflowSlotMeta}>{period.start_date} - {period.end_date}</span>
+        </>
+      ) : (
+        <span className={styles.workflowSlotEmpty}>{emptyMessage}</span>
+      )}
+    </div>
+  );
+}
+
+function WorkflowBranch({ branch }: { branch: BranchCurrentWorkflow }) {
+  const { open, prepared } = branch.slots;
+  const creationCapability = branch.capabilities.can_create_open_candidate.allowed
+    ? branch.capabilities.can_create_open_candidate
+    : branch.capabilities.can_create_prepared_candidate;
+  const workflowHint = open && prepared
+    ? 'The prepared period automatically becomes Open after the current Open period is locked.'
+    : open
+      ? 'The next period can be prepared when backend workflow availability allows it.'
+      : prepared
+        ? 'This prepared period is waiting for backend workflow promotion.'
+        : creationCapability.allowed
+          ? 'No active period exists. Create a backend-approved payroll candidate to begin.'
+          : creationCapability.reason_message ?? 'No payroll candidate is available for this branch.';
+
+  return (
+    <div className={styles.workflowBranch}>
+      <div className={styles.workflowBranchHeader}>
+        <strong>{branch.branch_name}</strong>
+        <span className={styles.workflowSetup}>Setup: {branch.setup_status}</span>
+      </div>
+      <div className={styles.workflowSlots}>
+        <WorkflowSlot title="Current Payroll" period={open} emptyMessage="No Open payroll period" />
+        <WorkflowSlot title="Next Payroll" period={prepared} emptyMessage="No Prepared payroll period" />
+      </div>
+      <p className={styles.workflowHint}>{workflowHint}</p>
+      {branch.alerts.map((alert) => (
+        <p key={alert.code} className={styles.workflowAlert}>{alert.message}</p>
+      ))}
+    </div>
+  );
+}
+
 // ── Main page ────────────────────────────────────────────────────────────────
 
 export function PeriodsListPage() {
@@ -232,6 +305,7 @@ export function PeriodsListPage() {
 
   const [branchesSt,  dispatchBranches] = useReducer(branchesReducer, { branches: [], loading: true });
   const [periodsSt,   dispatchPeriods]  = useReducer(periodsReducer,  { periods: [], loading: true, error: '' });
+  const [workflowSt,  dispatchWorkflow] = useReducer(workflowReducer, { data: null, loading: true, error: '' });
 
   // filterStatus is a client-side refinement within active work.
   const [filterStatus,    setFilterStatus]    = useState<ActiveFilter>('');
@@ -275,10 +349,34 @@ export function PeriodsListPage() {
     void fetchPeriods();
   }, [fetchPeriods]);
 
-  function handleCreated(period: PeriodSummary) {
+  const workflowBranchId = isAllBranches
+    ? (filterBranchId ? Number(filterBranchId) : undefined)
+    : user?.branch_ids?.[0];
+
+  const fetchWorkflow = useCallback(async () => {
+    dispatchWorkflow({ type: 'FETCH_START' });
+    try {
+      dispatchWorkflow({ type: 'FETCH_OK', data: await getCurrentWorkflow(workflowBranchId) });
+    } catch (error: unknown) {
+      dispatchWorkflow({
+        type: 'FETCH_ERROR',
+        error: getWorkflowErrorDetail(error, 'Failed to load current payroll workflow.'),
+      });
+    }
+  }, [workflowBranchId]);
+
+  useEffect(() => {
+    void fetchWorkflow();
+  }, [fetchWorkflow]);
+
+  const refreshHub = useCallback(() => {
+    void fetchPeriods();
+    void fetchWorkflow();
+  }, [fetchPeriods, fetchWorkflow]);
+
+  function handleCreated() {
     setShowCreateModal(false);
-    dispatchPeriods({ type: 'PREPEND', period });
-    setEntryDialogPeriodId(period.payroll_period_id);
+    refreshHub();
   }
 
   const modalDefaultBranchId: number | null = isAllBranches
@@ -309,6 +407,15 @@ export function PeriodsListPage() {
   const approvedPeriods: PeriodSummary[] = periodsSt.periods.filter(
     (p) => p.status === 'Approved'
   );
+  const workflowBranches = workflowSt.data?.branches ?? [];
+  const workflowCanCreate = workflowBranches.some((branch) =>
+    branch.capabilities.can_create_open_candidate.allowed
+    || branch.capabilities.can_create_prepared_candidate.allowed,
+  );
+  const blockedCreateReason = workflowBranches.find((branch) =>
+    !branch.capabilities.can_create_open_candidate.allowed
+    && !branch.capabilities.can_create_prepared_candidate.allowed,
+  )?.capabilities.can_create_open_candidate.reason_message;
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -321,7 +428,7 @@ export function PeriodsListPage() {
         onDriversOff={() => setDriversOffDialogPeriodId(p.payroll_period_id)}
         onBonus={() => setBonusDialogPeriodId(p.payroll_period_id)}
         onFinalize={() => setFinalizeDialogPeriodId(p.payroll_period_id)}
-        onReload={() => void fetchPeriods()}
+        onReload={refreshHub}
         canEntry={userCanEntry}
         canFinalize={userCanFinalize}
       />
@@ -374,12 +481,32 @@ export function PeriodsListPage() {
           <button
             className={styles.createBtn}
             onClick={() => setShowCreateModal(true)}
-            disabled={branchesSt.loading}
+            disabled={branchesSt.loading || workflowSt.loading || !workflowCanCreate}
+            title={!workflowCanCreate ? (blockedCreateReason ?? 'No payroll candidate is currently available.') : undefined}
           >
-            + Create Period
+            + Create Payroll
           </button>
         </div>
       )}
+
+      {/* ── Current workflow slots ───────────────────────────────────── */}
+      <SectionCard
+        title="Current Payroll Workflow"
+        subtitle="Open payroll is active now. Prepared payroll is the next period and promotes automatically."
+        padded={false}
+      >
+        {workflowSt.loading ? (
+          <p className={styles.stateMsg}>Loading current workflow...</p>
+        ) : workflowSt.error ? (
+          <div className={styles.sectionPad}><ErrorState message={workflowSt.error} /></div>
+        ) : workflowBranches.length === 0 ? (
+          <p className={styles.stateMsg}>No accessible payroll workflow is available for this branch.</p>
+        ) : (
+          <div className={styles.workflowBranchList}>
+            {workflowBranches.map((branch) => <WorkflowBranch key={branch.branch_id} branch={branch} />)}
+          </div>
+        )}
+      </SectionCard>
 
       {/* ── Active Payroll Periods ────────────────────────────────────── */}
       <SectionCard
@@ -470,7 +597,7 @@ export function PeriodsListPage() {
           periodId={finalizeDialogPeriodId}
           periodName={findPeriod(finalizeDialogPeriodId)?.period_name}
           onClose={() => setFinalizeDialogPeriodId(null)}
-          onFinalized={() => { void fetchPeriods(); }}
+          onFinalized={refreshHub}
         />
       )}
     </div>

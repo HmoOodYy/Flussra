@@ -21,6 +21,10 @@ import type {
   FinalLineSummary,
   DraftLineSummary,
   DriverPeriodSummary,
+  CurrentWorkflow,
+  PeriodCandidateMode,
+  PeriodCandidatePreview,
+  PeriodCreationResult,
 } from '../types/payroll';
 
 // ---------------------------------------------------------------------------
@@ -35,6 +39,38 @@ export async function getNextPeriodDates(branchId: number): Promise<NextPeriodDa
 }
 
 export type { NextPeriodDates };
+
+// ---------------------------------------------------------------------------
+// Current workflow and candidate-based period creation
+// ---------------------------------------------------------------------------
+
+export async function getCurrentWorkflow(branchId?: number): Promise<CurrentWorkflow> {
+  const params = branchId == null ? undefined : { branch_id: String(branchId) };
+  const resp = await apiClient.get<CurrentWorkflow>('/payroll/current-workflow', { params });
+  return resp.data;
+}
+
+export async function getPeriodCandidate(
+  branchId: number,
+  mode: PeriodCandidateMode,
+): Promise<PeriodCandidatePreview> {
+  const resp = await apiClient.get<PeriodCandidatePreview>(
+    `/payroll/branches/${branchId}/period-candidates`,
+    { params: { mode } },
+  );
+  return resp.data;
+}
+
+export async function createPeriodFromCandidate(
+  branchId: number,
+  candidateKey: string,
+): Promise<PeriodCreationResult> {
+  const resp = await apiClient.post<PeriodCreationResult>(
+    `/payroll/branches/${branchId}/period-creations`,
+    { candidate_key: candidateKey },
+  );
+  return resp.data;
+}
 
 // ---------------------------------------------------------------------------
 // Period list (used by Review page)

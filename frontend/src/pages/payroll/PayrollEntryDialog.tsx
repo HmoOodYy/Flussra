@@ -23,7 +23,7 @@ import styles from './PayrollEntryDialog.module.css';
 // Constants
 // ---------------------------------------------------------------------------
 
-const EDITABLE_STATUSES = new Set(['Open', 'Returned']);
+const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
 
 // ---------------------------------------------------------------------------
 // Date helpers
@@ -255,7 +255,7 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
           {grid && (() => {
             const s = grid.period.status;
             if (s === 'Draft')
-              return <div className={styles.readOnlyBanner}>This period is <strong>Prepared</strong> — read-only until the backend workflow promotes it to Open.</div>;
+              return <div className={styles.readOnlyBanner}>This period is <strong>Prepared</strong> — operational source entry is available, but it cannot be submitted until the backend workflow promotes it to Open.</div>;
             if (s === 'InReview')
               return <div className={styles.readOnlyBanner}>This period is <strong>In Review</strong> — grid is read-only while awaiting approval.</div>;
             if (s === 'Returned')
