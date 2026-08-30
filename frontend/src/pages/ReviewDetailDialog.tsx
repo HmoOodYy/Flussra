@@ -1,75 +1,146 @@
 /**
- * ReviewDetailDialog — full review dialog for an InReview payroll period.
+ * ReviewDetailDialog - immutable financial packet for one ReviewItem.
  *
- * Shows the immutable submitted payroll packet and
- * provides Approve / Return-for-Correction actions.
- *
- * Security: this component only receives data that the parent (ReviewPage)
- * fetched from the backend.  All authorization is enforced by the backend;
- * the frontend disables Approve when the backend would reject it anyway.
+ * The dialog deliberately reads ReviewItem history and its linked submitted
+ * snapshot. It never reads mutable payroll source data as review authority.
  */
-import { useEffect, useState, useCallback } from 'react';
-import { decideReviewItem, getReviewItemPayrollSnapshot } from '../lib/reviewApi';
+import { useEffect, useState } from 'react';
+import { decideReviewItem, getReviewItem, getReviewItemPayrollSnapshot } from '../lib/reviewApi';
 import { useAuth } from '../store/authStore';
 import { canDecideReview } from '../lib/permissions';
-import { PeriodStatusBadge } from '../components/StatusBadge';
-import type { ReviewItemSummary, ReviewPayrollSnapshot } from '../types/review';
-import type { PeriodSummary } from '../types/payroll';
+import type {
+  ReviewItemDetail,
+  ReviewItemSummary,
+  ReviewPayrollSnapshot,
+  ReviewPayrollSnapshotLine,
+} from '../types/review';
 import styles from './ReviewDetailDialog.module.css';
 
 interface Props {
   item: ReviewItemSummary;
-  period: PeriodSummary;
   onClose: () => void;
   onDecided: () => void;
 }
 
 type ActionState = 'idle' | 'approving' | 'returning';
 
-function fmt(v: string | number | null | undefined): string {
-  if (v == null) return '—';
-  const n = typeof v === 'string' ? parseFloat(v) : v;
-  if (isNaN(n)) return '—';
-  return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+function formatMoney(value: string | null | undefined): string {
+  if (value == null) return 'Not resolved';
+  const numeric = Number(value);
+  return Number.isFinite(numeric)
+    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
+    : value;
 }
 
-function fmtDate(d: string): string {
-  // "2085-03-03" → "Mar 3, 2085"
-  const dt = new Date(d + 'T00:00:00');
-  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+function formatQuantity(value: string | null): string {
+  if (value == null) return '-';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toLocaleString(undefined, { maximumFractionDigits: 4 }) : value;
 }
 
-export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) {
+function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? value
+    : date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return '-';
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.valueOf())
+    ? value
+    : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function statusLabel(status: string): string {
+  if (status === 'EditRequested') return 'Returned for Correction';
+  return status;
+}
+
+function lineLabel(line: ReviewPayrollSnapshotLine): string {
+  if (line.line_type === 'SYS_MIN_TOPUP') return 'Minimum top-up';
+  if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
+  if (line.source_type === 'StatusEntryState') return 'Status payment';
+  if (line.source_type === 'BonusEvent') return 'Bonus event';
+  return line.line_type;
+}
+
+function errorDetail(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string') {
+    if (detail.includes('SNAPSHOT_REQUIRED_FOR_APPROVAL')) {
+      return 'A submitted payroll snapshot is required before this legacy review item can be approved. Return it for correction and resubmit the payroll.';
+    }
+    return detail;
+  }
+  return fallback;
+}
+
+function historicalMessage(status: string): string | null {
+  if (status === 'Pending') return null;
+  if (status === 'EditRequested' || status === 'Rejected') {
+    return 'This review revision was returned for correction and is historical. A newer resubmission, when present, has its own Pending review item.';
+  }
+  if (status === 'Approved') return 'This review revision is approved history and is no longer actionable.';
+  return 'This review item is historical and is no longer actionable.';
+}
+
+export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
+  const [detail, setDetail] = useState<ReviewItemDetail | null>(null);
   const [snapshot, setSnapshot] = useState<ReviewPayrollSnapshot | null>(null);
-  const [loadErr, setLoadErr] = useState<string | null>(null);
-
+  const [loading, setLoading] = useState(true);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [actionState, setActionState] = useState<ActionState>('idle');
   const [returnReason, setReturnReason] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setLoadErr(null);
-      setSnapshot(await getReviewItemPayrollSnapshot(item.review_item_id));
-    } catch {
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      setLoading(true);
+      setDetail(null);
       setSnapshot(null);
-      setLoadErr('Failed to load the submitted payroll snapshot.');
+      setDetailError(null);
+      setSnapshotError(null);
+      const [detailResult, snapshotResult] = await Promise.allSettled([
+        getReviewItem(item.review_item_id),
+        getReviewItemPayrollSnapshot(item.review_item_id),
+      ]);
+      if (!active) return;
+
+      if (detailResult.status === 'fulfilled') {
+        setDetail(detailResult.value);
+      } else {
+        setDetailError(errorDetail(detailResult.reason, 'Failed to load review item history.'));
+      }
+      if (snapshotResult.status === 'fulfilled') {
+        setSnapshot(snapshotResult.value);
+      } else {
+        setSnapshotError(errorDetail(snapshotResult.reason, 'Failed to load the submitted payroll snapshot.'));
+      }
+      setLoading(false);
     }
+    void load();
+    return () => { active = false; };
   }, [item.review_item_id]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
-
-  // Keyboard: Esc closes (only when not mid-action)
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape' && actionState === 'idle') onClose();
+    function onKey(event: KeyboardEvent) {
+      if (event.key === 'Escape' && actionState === 'idle') onClose();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose, actionState]);
+  }, [actionState, onClose]);
+
+  const { user } = useAuth();
+  const userCanDecide = user ? canDecideReview(user) : false;
+  const reviewItem = detail ?? item;
+  const isPending = reviewItem.status === 'Pending';
+  const canAct = detail?.status === 'Pending' && userCanDecide;
+  const busy = actionState !== 'idle';
 
   async function handleApprove() {
     setActionState('approving');
@@ -77,193 +148,213 @@ export function ReviewDetailDialog({ item, period, onClose, onDecided }: Props) 
     try {
       await decideReviewItem(item.review_item_id, { decision: 'Approved' });
       onDecided();
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Approval failed. Please try again.';
-      setActionError(msg);
+    } catch (error: unknown) {
+      setActionError(errorDetail(error, 'Approval failed. Please try again.'));
       setActionState('idle');
     }
   }
 
   async function handleReturn() {
+    const reason = returnReason.trim();
+    if (!reason) {
+      setActionError('A return reason is required before this payroll can be returned for correction.');
+      return;
+    }
     setActionState('returning');
     setActionError(null);
     try {
       await decideReviewItem(item.review_item_id, {
         decision: 'EditRequested',
-        decision_reason: returnReason.trim() || undefined,
+        decision_reason: reason,
       });
       onDecided();
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Return action failed. Please try again.';
-      setActionError(msg);
+    } catch (error: unknown) {
+      setActionError(errorDetail(error, 'Return action failed. Please try again.'));
       setActionState('idle');
     }
   }
 
-  const { user } = useAuth();
-  const userCanDecide = user ? canDecideReview(user) : false;
-
-  const periodLines = snapshot?.lines.filter(line => line.line_scope === 'Period') ?? [];
-  const busy = actionState !== 'idle';
+  const decisionHistory = detail?.decisions ?? [];
+  const finalReason = detail?.final_decision_reason ?? item.final_decision_reason;
+  const driverNames = new Map(snapshot?.driver_totals.map((driver) => [
+    driver.driver_id,
+    driver.driver_name_snapshot ?? driver.driver_code_snapshot ?? `Driver ${driver.driver_id}`,
+  ]));
 
   return (
-    <div className={styles.overlay} onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
-      <div className={styles.dialog} role="dialog" aria-modal="true" aria-label="Review Period">
-
-        {/* Header */}
-        <div className={styles.header}>
+    <div className={styles.overlay} onClick={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <div className={styles.dialog} role="dialog" aria-modal="true" aria-label="Payroll review">
+        <header className={styles.header}>
           <div className={styles.headerLeft}>
-            <h2 className={styles.dialogTitle}>
-              {period.period_name}
-              <span style={{ marginLeft: '0.6rem', verticalAlign: 'middle' }}>
-                <PeriodStatusBadge status={period.status} />
-              </span>
-            </h2>
+            <div className={styles.titleRow}>
+              <h2 className={styles.dialogTitle}>{reviewItem.title}</h2>
+              <span className={isPending ? styles.pendingBadge : styles.historyBadge}>{statusLabel(reviewItem.status)}</span>
+            </div>
             <div className={styles.headerMeta}>
-              <span>{period.branch_name}</span>
-              <span className={styles.metaSep}>·</span>
-              <span>{fmtDate(period.start_date)} – {fmtDate(period.end_date)}</span>
-              <span className={styles.metaSep}>·</span>
-              <span>{period.period_type}</span>
-              {period.pay_date && (
-                <>
-                  <span className={styles.metaSep}>·</span>
-                  <span>Pay: {fmtDate(period.pay_date)}</span>
-                </>
-              )}
+              <span>{reviewItem.branch_name ?? 'Branch unavailable'}</span>
+              {reviewItem.entity_id && <><span className={styles.metaSep}>/</span><span>Payroll period #{reviewItem.entity_id}</span></>}
+              <span className={styles.metaSep}>/</span>
+              <span>Submitted {formatTimestamp(reviewItem.created_at_utc)}</span>
+              {reviewItem.requested_by && <><span className={styles.metaSep}>/</span><span>Submitted by {reviewItem.requested_by}</span></>}
             </div>
           </div>
-          <button className={styles.closeBtn} onClick={onClose} disabled={busy} aria-label="Close">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
+          <button className={styles.closeBtn} onClick={onClose} disabled={busy} aria-label="Close">x</button>
+        </header>
 
-        {/* Body */}
         <div className={styles.body}>
+          {historicalMessage(reviewItem.status) && <div className={styles.historyNotice}>{historicalMessage(reviewItem.status)}</div>}
+          {detailError && <div className={styles.errorMsg}>{detailError}</div>}
+          {snapshotError && <div className={styles.errorMsg}>{snapshotError}</div>}
 
-          {/* KPI chips */}
-          <div className={styles.kpiRow}>
-            <div className={styles.kpiChip}>
-              <span className={styles.kpiLabel}>Drivers</span>
-              <span className={styles.kpiValue}>{snapshot?.driver_totals.length ?? '—'}</span>
-            </div>
-            <div className={styles.kpiChip}>
-              <span className={styles.kpiLabel}>Lines</span>
-              <span className={styles.kpiValue}>{snapshot?.lines.length ?? '—'}</span>
-            </div>
-            <div className={styles.kpiChip}>
-              <span className={styles.kpiLabel}>Expected Pay</span>
-              <span className={styles.kpiValue}>{fmt(snapshot?.total_expected_pay)}</span>
-            </div>
-            <div className={styles.kpiChip}>
-              <span className={styles.kpiLabel}>Submitted by</span>
-              <span className={styles.kpiValue} style={{ fontSize: '0.85rem' }}>
-                {item.requested_by ?? '—'}
-              </span>
-            </div>
-          </div>
-
-          {/* Load error */}
-          {loadErr && <div className={styles.errorMsg}>{loadErr}</div>}
-
-          {/* Driver totals */}
-          <div className={styles.section}>
-            <h3 className={styles.sectionTitle}>Driver Totals</h3>
-            {!snapshot ? (
-              <p className={styles.loadingMsg}>Loading…</p>
-            ) : snapshot.driver_totals.length === 0 ? (
-              <p className={styles.emptyMsg}>No driver lines.</p>
-            ) : (
-              <table className={styles.table}>
-                <thead>
-                  <tr>
-                    <th>Driver</th>
-                    <th className={styles.right}>Lines</th>
-                    <th className={styles.right}>Gross Pay</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {snapshot.driver_totals.map(d => (
-                    <tr key={d.driver_id}>
-                      <td>{d.driver_name_snapshot ?? d.driver_code_snapshot ?? `Driver ${d.driver_id}`}</td>
-                      <td className={styles.right}>{snapshot.lines.filter(line => line.driver_id === d.driver_id).length}</td>
-                      <td className={styles.right}>{fmt(d.expected_pay)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          {/* Period pay / bonus */}
-          {periodLines.length > 0 && (
-            <div className={styles.section}>
-              <h3 className={styles.sectionTitle}>Period Pay / Bonus</h3>
-              {periodLines.map((line, index) => (
-                <div key={`${line.driver_id}-${line.line_type}-${index}`} className={styles.payRow}>
-                  <span>
-                    {line.line_type}
-                    {line.work_date && <> · {fmtDate(line.work_date)}</>}
-                  </span>
-                  <span className={styles.payAmount}>
-                    {fmt(line.calculated_amount)}
-                  </span>
+          {loading ? (
+            <p className={styles.loadingMsg}>Loading submitted payroll snapshot...</p>
+          ) : snapshot ? (
+            <>
+              <section className={styles.snapshotIdentity}>
+                <div>
+                  <span className={styles.identityLabel}>Submitted payroll snapshot</span>
+                  <strong>Revision {snapshot.revision_number}</strong>
                 </div>
-              ))}
-            </div>
-          )}
+                <div>
+                  <span className={styles.identityLabel}>Captured at</span>
+                  <strong>{formatTimestamp(snapshot.captured_at_utc)}</strong>
+                </div>
+                <div>
+                  <span className={styles.identityLabel}>Expected payroll</span>
+                  <strong>{formatMoney(snapshot.total_expected_pay)}</strong>
+                </div>
+              </section>
 
-          {/* Action error */}
+              <section className={styles.section}>
+                <h3 className={styles.sectionTitle}>Driver Totals</h3>
+                {snapshot.driver_totals.length === 0 ? (
+                  <p className={styles.emptyMsg}>No driver totals were captured.</p>
+                ) : (
+                  <div className={styles.tableWrap}>
+                    <table className={styles.table}>
+                      <thead>
+                        <tr>
+                          <th>Driver</th>
+                          <th className={styles.right}>Daily</th>
+                          <th className={styles.right}>Status</th>
+                          <th className={styles.right}>Period</th>
+                          <th className={styles.right}>Min</th>
+                          <th className={styles.right}>Max</th>
+                          <th className={styles.right}>Bonus</th>
+                          <th className={styles.right}>Expected Pay</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {snapshot.driver_totals.map((driver) => (
+                          <tr key={driver.driver_id}>
+                            <td>{driver.driver_name_snapshot ?? driver.driver_code_snapshot ?? `Driver ${driver.driver_id}`}</td>
+                            <td className={styles.right}>{formatMoney(driver.daily_pay)}</td>
+                            <td className={styles.right}>{formatMoney(driver.status_pay)}</td>
+                            <td className={styles.right}>{formatMoney(driver.period_pay)}</td>
+                            <td className={styles.right}>{formatMoney(driver.minimum_adjustment)}</td>
+                            <td className={styles.right}>{formatMoney(driver.maximum_adjustment)}</td>
+                            <td className={styles.right}>{formatMoney(driver.bonus_total)}</td>
+                            <td className={`${styles.right} ${styles.expectedPay}`}>{formatMoney(driver.expected_pay)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section className={styles.section}>
+                <h3 className={styles.sectionTitle}>Submitted Financial Lines</h3>
+                {snapshot.lines.length === 0 ? (
+                  <p className={styles.emptyMsg}>No financial lines were captured.</p>
+                ) : (
+                  <div className={styles.tableWrap}>
+                    <table className={styles.table}>
+                      <thead>
+                        <tr>
+                          <th>Driver</th>
+                          <th>Source</th>
+                          <th>Line</th>
+                          <th>Date</th>
+                          <th className={styles.right}>Quantity</th>
+                          <th className={styles.right}>Resolved Rate</th>
+                          <th className={styles.right}>Calculated Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {snapshot.lines.map((line, index) => (
+                          <tr key={`${line.driver_id}-${line.source_type}-${line.line_type}-${index}`}>
+                            <td>{driverNames.get(line.driver_id) ?? `Driver ${line.driver_id}`}</td>
+                            <td>{line.source_type}</td>
+                            <td>{lineLabel(line)}</td>
+                            <td>{formatDate(line.work_date)}</td>
+                            <td className={styles.right}>{formatQuantity(line.quantity)}</td>
+                            <td className={styles.right}>{line.resolved_rate_amount == null ? '-' : formatMoney(line.resolved_rate_amount)}</td>
+                            <td className={styles.right}>{formatMoney(line.calculated_amount)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </>
+          ) : null}
+
+          <section className={styles.section}>
+            <h3 className={styles.sectionTitle}>Review History</h3>
+            {decisionHistory.length > 0 ? (
+              <div className={styles.decisionList}>
+                {decisionHistory.map((decision) => (
+                  <div key={decision.review_decision_id} className={styles.decisionRow}>
+                    <strong>{statusLabel(decision.decision)}</strong>
+                    <span>{decision.decided_by ?? 'Reviewer'} / {formatTimestamp(decision.created_at_utc)}</span>
+                    {decision.decision_reason && <p>{decision.decision_reason}</p>}
+                  </div>
+                ))}
+              </div>
+            ) : finalReason ? (
+              <p className={styles.decisionFallback}>{finalReason}</p>
+            ) : (
+              <p className={styles.emptyMsg}>No decision has been recorded for this review item.</p>
+            )}
+          </section>
+
           {actionError && <div className={styles.errorMsg}>{actionError}</div>}
-
         </div>
 
-        {/* Footer */}
-        <div className={styles.footer}>
+        <footer className={styles.footer}>
           <div className={styles.footerLeft}>
-            {userCanDecide && (
+            {canAct && (
               <input
                 className={styles.reasonInput}
-                placeholder="Reason for return (optional)"
+                placeholder="Reason for return (required)"
                 value={returnReason}
-                onChange={e => setReturnReason(e.target.value)}
+                onChange={(event) => setReturnReason(event.target.value)}
                 disabled={busy}
                 aria-label="Return reason"
               />
             )}
           </div>
           <div className={styles.footerRight}>
-            <button className={styles.btnClose} onClick={onClose} disabled={busy}>
-              Close
-            </button>
-            {userCanDecide && (
+            <button className={styles.btnClose} onClick={onClose} disabled={busy}>Close</button>
+            {canAct && (
               <>
-                <button
-                  className={styles.btnReturn}
-                  onClick={handleReturn}
-                  disabled={busy}
-                  title="Return period to Open for corrections (EditRequested)"
-                >
-                  {actionState === 'returning' ? 'Returning…' : 'Return for Correction'}
+                <button className={styles.btnReturn} onClick={handleReturn} disabled={busy} title="Return this submitted revision for correction">
+                  {actionState === 'returning' ? 'Returning...' : 'Return for Correction'}
                 </button>
                 <button
                   className={styles.btnApprove}
                   onClick={handleApprove}
                   disabled={busy || !snapshot}
-                  title={snapshot ? 'Approve the submitted payroll snapshot' : 'Submitted payroll snapshot unavailable'}
+                  title={snapshot ? 'Approve this submitted payroll snapshot' : 'A submitted payroll snapshot is required before approval'}
                 >
-                  {actionState === 'approving' ? 'Approving…' : 'Approve Period'}
+                  {actionState === 'approving' ? 'Approving...' : 'Approve Period'}
                 </button>
               </>
             )}
           </div>
-        </div>
-
+        </footer>
       </div>
     </div>
   );

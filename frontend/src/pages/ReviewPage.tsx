@@ -1,33 +1,34 @@
 /**
- * ReviewPage — payroll period review queue.
+ * ReviewPage - payroll PeriodApproval queue and historical review items.
  *
- * Shows InReview payroll periods that have a Pending review item.
- * Reviewers can open each period for a detailed review and approve
- * or return it for corrections.
- *
- * Security:
- * - Backend enforces all authorization (403 for ODA/driver users).
- * - Branch scoping is enforced by the backend and reflected in the filter.
+ * ReviewItem state is the queue authority. Financial detail is loaded only
+ * from the immutable snapshot linked to the selected ReviewItem.
  */
 import { useEffect, useState, useCallback } from 'react';
 import apiClient from '../lib/apiClient';
 import { getReviewItems } from '../lib/reviewApi';
-import { getPeriods } from '../lib/payrollApi';
 import type { ReviewItemSummary } from '../types/review';
-import type { PeriodSummary } from '../types/payroll';
 import type { Branch } from '../types/core';
 import { ReviewDetailDialog } from './ReviewDetailDialog';
 import { useAuth } from '../store/authStore';
 import styles from './ReviewPage.module.css';
 
-interface ReviewCard {
-  item: ReviewItemSummary;
-  period: PeriodSummary;
+type QueueView = 'active' | 'history';
+
+function fmtTimestamp(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? value
+    : date.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-function fmtDate(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+function statusLabel(status: string): string {
+  if (status === 'EditRequested') return 'Returned for Correction';
+  return status;
+}
+
+function isPeriodApproval(item: ReviewItemSummary): boolean {
+  return item.request_type === 'PeriodApproval' && item.entity_schema === 'payroll' && item.entity_name === 'PayrollPeriods';
 }
 
 export function ReviewPage() {
@@ -36,51 +37,30 @@ export function ReviewPage() {
 
   const [branches, setBranches] = useState<Branch[]>([]);
   const [filterBranchId, setFilterBranchId] = useState<string>('');
-
-  const [cards, setCards] = useState<ReviewCard[]>([]);
+  const [queueView, setQueueView] = useState<QueueView>('active');
+  const [items, setItems] = useState<ReviewItemSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [openCard, setOpenCard] = useState<ReviewCard | null>(null);
+  const [openItem, setOpenItem] = useState<ReviewItemSummary | null>(null);
 
-  // Load branch list for AllCompanyBranches users
   useEffect(() => {
     if (!isAllBranches) return;
-    apiClient.get<Branch[]>('/core/branches').then(r => setBranches(r.data)).catch(() => {});
+    apiClient.get<Branch[]>('/core/branches').then((response) => setBranches(response.data)).catch(() => {});
   }, [isAllBranches]);
 
   const branchParam = isAllBranches
     ? (filterBranchId ? Number(filterBranchId) : undefined)
-    : (user?.branch_ids?.[0]);
+    : user?.branch_ids?.[0];
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [periods, items] = await Promise.all([
-        getPeriods('InReview', branchParam),
-        getReviewItems('Pending', branchParam),
-      ]);
-
-      // Match each InReview period to its Pending PeriodApproval review item
-      const itemsByPeriodId = new Map(
-        items
-          .filter(i => i.entity_name === 'PayrollPeriods' && i.entity_schema === 'payroll')
-          .map(i => [Number(i.entity_id), i]),
-      );
-
-      const matched: ReviewCard[] = periods
-        .map(p => {
-          const it = itemsByPeriodId.get(p.payroll_period_id);
-          return it ? { item: it, period: p } : null;
-        })
-        .filter((c): c is ReviewCard => c !== null);
-
-      setCards(matched);
-    } catch (e: unknown) {
-      const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to load review queue.';
-      setError(msg);
+      const reviewItems = await getReviewItems(undefined, branchParam);
+      setItems(reviewItems.filter(isPeriodApproval));
+    } catch (loadError: unknown) {
+      const detail = (loadError as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : 'Failed to load review queue.');
     } finally {
       setLoading(false);
     }
@@ -92,22 +72,23 @@ export function ReviewPage() {
   }, [load]);
 
   function handleDecided() {
-    setOpenCard(null);
+    setOpenItem(null);
     void load();
   }
 
+  const activeItems = items.filter((item) => item.status === 'Pending');
+  const historicalItems = items.filter((item) => item.status !== 'Pending');
+  const visibleItems = queueView === 'active' ? activeItems : historicalItems;
   const fixedBranchName = !isAllBranches
-    ? (branches.find(b => b.branch_id === user?.branch_ids?.[0])?.branch_name ?? 'Your branch')
+    ? (branches.find((branch) => branch.branch_id === user?.branch_ids?.[0])?.branch_name ?? 'Your branch')
     : null;
 
   return (
     <div className={styles.page}>
-
-      {/* Header */}
       <div className={styles.headerRow}>
         <div className={styles.titleBlock}>
           <h1 className={styles.pageTitle}>Review</h1>
-          <span className={styles.pageSubtitle}>Payroll periods awaiting approval</span>
+          <span className={styles.pageSubtitle}>Submitted payroll snapshots awaiting review</span>
         </div>
 
         {isAllBranches ? (
@@ -117,11 +98,11 @@ export function ReviewPage() {
               <select
                 className={styles.filterSelect}
                 value={filterBranchId}
-                onChange={e => setFilterBranchId(e.target.value)}
+                onChange={(event) => setFilterBranchId(event.target.value)}
               >
                 <option value="">All branches</option>
-                {branches.map(b => (
-                  <option key={b.branch_id} value={b.branch_id}>{b.branch_name}</option>
+                {branches.map((branch) => (
+                  <option key={branch.branch_id} value={branch.branch_id}>{branch.branch_name}</option>
                 ))}
               </select>
             </label>
@@ -131,89 +112,78 @@ export function ReviewPage() {
         )}
       </div>
 
-      {/* Content */}
+      <div className={styles.tabs} role="tablist" aria-label="Review queue">
+        <button
+          className={queueView === 'active' ? styles.tabActive : styles.tab}
+          onClick={() => setQueueView('active')}
+          role="tab"
+          aria-selected={queueView === 'active'}
+        >
+          Pending ({activeItems.length})
+        </button>
+        <button
+          className={queueView === 'history' ? styles.tabActive : styles.tab}
+          onClick={() => setQueueView('history')}
+          role="tab"
+          aria-selected={queueView === 'history'}
+        >
+          History ({historicalItems.length})
+        </button>
+      </div>
+
       {loading ? (
-        <div className={styles.loadingMsg}>Loading review queue…</div>
+        <div className={styles.loadingMsg}>Loading review queue...</div>
       ) : error ? (
         <p className={styles.errorMsg}>{error}</p>
-      ) : cards.length === 0 ? (
+      ) : visibleItems.length === 0 ? (
         <div className={styles.emptyState}>
-          <p className={styles.emptyTitle}>No periods pending review</p>
+          <p className={styles.emptyTitle}>{queueView === 'active' ? 'No periods pending review' : 'No historical payroll reviews'}</p>
           <p className={styles.emptyHint}>
-            Periods submitted for review (InReview status) will appear here.
+            {queueView === 'active'
+              ? 'Submitted payroll snapshots will appear here when they need a decision.'
+              : 'Returned and approved review decisions remain available here as history.'}
           </p>
         </div>
       ) : (
         <div className={styles.cardList}>
-          {cards.map(({ item, period }) => {
-            const hasAttention = period.draft_lines_needing_attention > 0;
+          {visibleItems.map((item) => {
+            const isPending = item.status === 'Pending';
             return (
-              <div key={item.review_item_id} className={styles.card}>
+              <article key={item.review_item_id} className={styles.card}>
                 <div className={styles.cardInfo}>
                   <div className={styles.cardNameRow}>
-                    <span className={styles.cardName}>{period.period_name}</span>
-                    <span className={styles.reviewBadge}>InReview</span>
+                    <span className={styles.cardName}>{item.title}</span>
+                    <span className={isPending ? styles.pendingBadge : styles.historyBadge}>{statusLabel(item.status)}</span>
                   </div>
                   <div className={styles.cardMeta}>
-                    <span>{period.branch_name}</span>
-                    <span className={styles.metaSep}>·</span>
-                    <span>{period.period_type}</span>
-                    <span className={styles.metaSep}>·</span>
-                    <span>{fmtDate(period.start_date)} – {fmtDate(period.end_date)}</span>
-                    {period.pay_date && (
-                      <>
-                        <span className={styles.metaSep}>·</span>
-                        <span>Pay {fmtDate(period.pay_date)}</span>
-                      </>
-                    )}
-                    {item.requested_by && (
-                      <>
-                        <span className={styles.metaSep}>·</span>
-                        <span>Submitted by {item.requested_by}</span>
-                      </>
-                    )}
+                    <span>{item.branch_name ?? 'Branch unavailable'}</span>
+                    <span className={styles.metaSep}>/</span>
+                    <span>Submitted {fmtTimestamp(item.created_at_utc)}</span>
+                    {item.requested_by && <><span className={styles.metaSep}>/</span><span>Submitted by {item.requested_by}</span></>}
+                    {item.entity_id && <><span className={styles.metaSep}>/</span><span>Payroll period #{item.entity_id}</span></>}
                   </div>
-                  <div className={styles.cardStats}>
-                    <span className={styles.statChip}>
-                      <span className={styles.statLabel}>Drivers</span>
-                      <span className={styles.statValue}>{period.draft_drivers}</span>
-                    </span>
-                    <span className={styles.statChip}>
-                      <span className={styles.statLabel}>Lines</span>
-                      <span className={styles.statValue}>{period.draft_lines}</span>
-                    </span>
-                    <span className={`${styles.statChip}${hasAttention ? ' ' + styles.statChipWarn : ''}`}>
-                      <span className={styles.statLabel}>Needs Attention</span>
-                      <span className={styles.statValue}>
-                        {period.draft_lines_needing_attention}
-                      </span>
-                    </span>
-                  </div>
+                  {item.final_decision_reason && (
+                    <p className={styles.decisionReason}>{item.final_decision_reason}</p>
+                  )}
                 </div>
                 <div className={styles.cardActions}>
-                  <button
-                    className={styles.openBtn}
-                    onClick={() => setOpenCard({ item, period })}
-                  >
-                    Open Review
+                  <button className={styles.openBtn} onClick={() => setOpenItem(item)}>
+                    {isPending ? 'Open Review' : 'View History'}
                   </button>
                 </div>
-              </div>
+              </article>
             );
           })}
         </div>
       )}
 
-      {/* Review detail dialog */}
-      {openCard && (
+      {openItem && (
         <ReviewDetailDialog
-          item={openCard.item}
-          period={openCard.period}
-          onClose={() => setOpenCard(null)}
+          item={openItem}
+          onClose={() => setOpenItem(null)}
           onDecided={handleDecided}
         />
       )}
-
     </div>
   );
 }
