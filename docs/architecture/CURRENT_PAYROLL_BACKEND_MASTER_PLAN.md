@@ -7,7 +7,7 @@
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
 **Current migration head after implemented units:** Alembic `0062` (CP-4D submitted calculation snapshot capture; CP-4F added no migration)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`).
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `In Progress`; RP-1 is its completed internal report-authority foundation, not a new official phase. Phases 6 and 7 remain `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -554,6 +554,7 @@ Not allowed:
 - No trusted Current Payroll aggregate.
 - Existing period list pagination/filtering is not a hub contract.
 - Existing off count is driver-day rows, not fully-off drivers.
+- ~~No lifecycle financial-authority foundation for future reports.~~ Resolved by RP-1: future report services can resolve `SOURCE_ONLY`, `LIVE`, exact ReviewItem-linked submitted/approved snapshots, or `FINAL_LINES` without choosing an authority client-side or selecting a latest snapshot.
 - No Drivers Report, Period Work, Period Pay, or Mixed Summary backend contract.
 - No finalized information-library contract.
 
@@ -858,7 +859,9 @@ GET /payroll/periods/{id}/reports/period-pay
 GET /payroll/periods/{id}/reports/mixed
 ```
 
-Open/Returned use current preview. InReview/Approved use submitted snapshot. Locked/Archived use final snapshots.
+Open/Returned use live backend calculation. InReview uses the exact submitted ReviewItem-linked snapshot; Approved uses the exact approved ReviewItem-linked snapshot. Locked/Archived use FinalLines.
+
+**Implementation status:** these routes remain planned and are not implemented. RP-1 (`187d552e00ff26f2bd55015c8072a861e93cca7e` — `feat: add payroll report authority resolver`) now provides the internal lifecycle financial-authority resolver future report services must use. Frontend clients must never choose live vs. snapshot vs. FinalLines authority.
 
 The canonical response shape should be driver-centric:
 
@@ -1242,7 +1245,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Done with Notes | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Done with Notes | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Complete (CP-4A–CP-4F Completed) | Claude | Codex calculation parity review |
-| Phase 5 | Hub and calculation-report contracts | Pending | Claude | Codex contract/security review |
+| Phase 5 | Hub and calculation-report contracts | In Progress | Claude | Codex contract/security review |
 | Phase 6 | Finalized payroll information library and audit | Pending | Claude | Codex ledger immutability review |
 | Phase 7 | Constraint, permission, performance, and rollout hardening | Pending | Claude | Codex release review |
 
@@ -2833,7 +2836,7 @@ For future allowance behavior, separate snapshots/ledger metadata may include: a
 
 ### Phase 5 — Current Payroll Hub and Calculation Reports
 
-**Status:** `Pending`
+**Status:** `In Progress`
 
 - [ ] P5A: Current Payroll Hub aggregate.
 - [ ] P5B: fully-off driver KPI.
@@ -2842,9 +2845,40 @@ For future allowance behavior, separate snapshots/ledger metadata may include: a
 - [ ] P5E: Period Work/Pay/Mixed views.
 - [ ] P5F: capabilities/read-only reasons.
 
+#### Post-Phase-4 frontend/core alignment and RP-1 foundation
+
+The completed frontend/product alignment slices below are not separate backend roadmap phases. They align the frontend with the completed Phase 0–4 backend foundation:
+
+- FE-1: `61ad686dde96e2b22c9b9602d369b4ce9c7ae4e5` — `fix: align current payroll lifecycle ui`
+- FE-2: `984306433443ed169d8cd3a8c9194a2d7a24e5d2` — `fix: align bonus and pay item frontend contracts`
+- FE-3: `500fce3e6d76cc8c980a36eb6c3cc0ebd3db4954` — `feat: align payroll hub with workflow candidates`
+- FE-4: `123ce6613bc263dc7ce078f5b6bcbd0c97fa0ff0` — `feat: add live payroll calculation preview`
+- FE-5: `7995e465cf3e381a7c343679ab9da1b2f77694f1` — `feat: align payroll review with snapshot history`
+- FE-6: `135487a2586e872b6047e2d9a2404f7c0f1997b7` — `fix: align finalization and locked payroll history`
+
+The final audit was `CORE_WORKFLOW_PASS_WITH_NOTES` with no P0 or P1 findings and the closure verdict `SAFE_TO_CLOSE_CURRENT_PAYROLL_CORE_WORKFLOW`.
+
+Validated core journey:
+
+```text
+Create -> Prepared/Open -> Source Entry -> Live Expected Payroll -> Submit -> InReview
+-> Review -> Return for Correction when needed -> Correction -> Resubmit -> Approve
+-> Finalization Preview -> Finalize -> Locked -> Locked/Archived History
+```
+
+Financial authority is lifecycle-bound: Draft/Prepared is source-only; Open/Returned uses live backend calculation; InReview uses the exact submitted ReviewItem-linked immutable snapshot; Approved uses the exact approved ReviewItem-linked immutable snapshot; Locked/Archived uses FinalLines. No frontend financial calculation authority exists.
+
+**RP-1 Report Financial Authority Resolver — Complete.** Commit `187d552e00ff26f2bd55015c8072a861e93cca7e` (`feat: add payroll report authority resolver`) added `backend/app/payroll/reporting.py` and `backend/tests/test_report_authority_resolver.py`. It is an internal Phase 5 reporting foundation, primarily for the future CP-5C report bundle under official P5D/P5E; it is not a new official phase and does not implement Period Pay.
+
+RP-1 mapping is `Draft -> SOURCE_ONLY`, `Open/Returned -> LIVE`, `InReview -> SUBMITTED_SNAPSHOT`, `Approved -> APPROVED_SNAPSHOT`, `Locked/Archived -> FINAL_LINES`, and `Cancelled -> UNAVAILABLE`. InReview and Approved resolve the exact ReviewItem-linked snapshot, never a latest snapshot. RP-1 adds no financial calculation, report rows, public endpoint, or migration. Independent review: `PASS_WITH_NOTES`, P0 none, P1 none, `SAFE_TO_COMMIT_RP1`. Evidence: RP-1 13 passed; CP-4E regression 12 passed; CP-4F regression 8 passed; Ruff and compile/import passed. P2: an explicit InReview ambiguity test remains missing, though the shared cardinality path fails closed.
+
+**Execution order:** CP-5A Current Payroll Hub is next. CP-5B then delivers the distinct official P5B fully-off KPI and P5C selected-day off-driver contract; it must not reuse the period off-row count. CP-5C then begins the calculation-report bundle under official P5D/P5E, reusing RP-1 rather than recreating authority selection. Do not start RP-2 Period Pay before CP-5C.
+
 **Objective**
 
 Expose complete backend-owned workflow and financial read contracts without frontend aggregation.
+
+CP-1E current-workflow, FE-3 workflow slots, and FE-4 live calculation preview are useful foundations only. They do not close P5A: the official Hub still requires one trusted backend-owned aggregate with relevant workflow slots, metrics, expected-income information where allowed, fully-off KPI, blockers/warnings, and capabilities/reason codes.
 
 **Allowed backend areas**
 
