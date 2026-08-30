@@ -1,17 +1,17 @@
 /**
- * FinalizationPreviewDialog — CP-3B
+ * FinalizationPreviewDialog - CP-4F approved snapshot finalization.
  *
- * Shows a read-only preview of what finalize_period would do for an Approved
- * period.  If can_finalize=true, the user can confirm and execute finalization.
+ * Shows the exact immutable payroll packet approved by review before it is
+ * projected into FinalLines and the period is locked.
  *
  * Rules:
  *  - Opened only from Approved period cards on the Current Payroll hub.
- *  - All monetary values come from the backend — no frontend computation.
+ *  - All monetary values come from the approved-packet backend response.
  *  - If blockers exist, the Finalize button is disabled.
  *  - On success the hub refreshes and the period becomes Locked.
  *  - No manual Min/Max/Adjustment controls — those are backend-only.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { getFinalizationPreview, finalizePeriod } from '../../lib/payrollApi';
 import type {
   FinalizationPreviewResponse,
@@ -26,22 +26,50 @@ import styles from './FinalizationPreviewDialog.module.css';
 // ---------------------------------------------------------------------------
 
 function fmt(v: string | null | undefined): string {
-  if (v == null) return '—';
-  const n = parseFloat(v);
-  return isNaN(n) ? String(v) : `$${n.toFixed(2)}`;
+  if (v == null) return '-';
+  const n = Number(v);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
 }
 
 function fmtAdj(v: string): string {
-  const n = parseFloat(v);
-  if (isNaN(n)) return String(v);
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
   const abs = Math.abs(n).toFixed(2);
   return n >= 0 ? `+$${abs}` : `-$${abs}`;
 }
 
 function fmtQty(v: string | null | undefined): string {
-  if (v == null) return '—';
-  const n = parseFloat(v);
-  return isNaN(n) ? String(v) : n.toFixed(2);
+  if (v == null) return '-';
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(v);
+}
+
+function hasNonZero(value: string): boolean {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric !== 0;
+}
+
+function previewError(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string') {
+    if (detail.includes('SNAPSHOT_REQUIRED_FOR_FINALIZATION')) {
+      return 'This approved payroll does not have the required submitted snapshot and cannot be finalized.';
+    }
+    if (detail.includes('APPROVED_SNAPSHOT_NOT_FOUND_FOR_FINALIZATION')) {
+      return 'This approved payroll does not have a usable approved snapshot and cannot be finalized.';
+    }
+    if (detail.includes('APPROVED_SNAPSHOT_INTEGRITY_ERROR')) {
+      return 'The approved payroll packet could not be verified and cannot be finalized.';
+    }
+    return detail;
+  }
+  return fallback;
+}
+
+function lineLabel(line: FinalizationPreviewLine): string {
+  if (line.line_type === 'SYS_MIN_TOPUP') return 'Minimum top-up';
+  if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
+  return line.line_type;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,8 +123,10 @@ function DriverTotalsTable({ rows }: { rows: FinalizationPreviewDriverTotal[] })
         <tr>
           <th>Driver</th>
           <th className={styles.numCol}>Daily Pay</th>
+          <th className={styles.numCol}>Status</th>
           <th className={styles.numCol}>Period Pay</th>
           <th className={styles.numCol}>Sys Adj</th>
+          <th className={styles.numCol}>Bonus</th>
           <th className={styles.numCol}>Final Pay</th>
           <th className={styles.numCol}>Lines</th>
         </tr>
@@ -106,10 +136,12 @@ function DriverTotalsTable({ rows }: { rows: FinalizationPreviewDriverTotal[] })
           <tr key={r.driver_id}>
             <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
             <td className={styles.numCol}>{fmt(r.daily_pay)}</td>
+            <td className={styles.numCol}>{fmt(r.status_pay)}</td>
             <td className={styles.numCol}>{fmt(r.period_pay)}</td>
-            <td className={`${styles.numCol} ${parseFloat(r.sys_adjustment) !== 0 ? styles.adjCell : ''}`}>
-              {parseFloat(r.sys_adjustment) !== 0 ? fmtAdj(r.sys_adjustment) : '—'}
+            <td className={`${styles.numCol} ${hasNonZero(r.sys_adjustment) ? styles.adjCell : ''}`}>
+              {hasNonZero(r.sys_adjustment) ? fmtAdj(r.sys_adjustment) : '-'}
             </td>
+            <td className={styles.numCol}>{fmt(r.bonus_total)}</td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay)}</td>
             <td className={styles.numCol}>{r.line_count}</td>
           </tr>
@@ -152,7 +184,7 @@ function SysAdjustmentsTable({ rows }: { rows: FinalizationPreviewSysAdjustment[
 }
 
 function LineDetailsTable({ rows }: { rows: FinalizationPreviewLine[] }) {
-  if (rows.length === 0) return <div className={styles.emptyMsg}>No draft lines.</div>;
+  if (rows.length === 0) return <div className={styles.emptyMsg}>No approved financial lines.</div>;
   return (
     <table className={styles.table}>
       <thead>
@@ -165,21 +197,19 @@ function LineDetailsTable({ rows }: { rows: FinalizationPreviewLine[] }) {
           <th className={styles.numCol}>Rate</th>
           <th className={styles.numCol}>Calculated</th>
           <th className={styles.numCol}>Final</th>
-          <th>Review</th>
         </tr>
       </thead>
       <tbody>
         {rows.map((r) => (
-          <tr key={r.source_key} className={r.needs_manager_review ? styles.reviewRow : undefined}>
+          <tr key={r.source_key}>
             <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
-            <td className={styles.dateCell}>{r.work_date ?? '—'}</td>
-            <td>{r.line_type}</td>
+            <td className={styles.dateCell}>{r.work_date ?? '-'}</td>
+            <td>{lineLabel(r)}</td>
             <td>{r.line_scope}</td>
             <td className={styles.numCol}>{fmtQty(r.quantity)}</td>
             <td className={styles.numCol}>{fmt(r.rate_amount)}</td>
             <td className={styles.numCol}>{fmt(r.calculated_amount)}</td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_amount)}</td>
-            <td>{r.needs_manager_review ? <span className={styles.reviewFlag}>&#9888;</span> : null}</td>
           </tr>
         ))}
       </tbody>
@@ -232,10 +262,10 @@ function ConfirmFinalize({ preview, onConfirm, onCancel, finalizing }: ConfirmFi
       <div className={styles.confirmBox}>
         <div className={styles.confirmTitle}>Confirm Finalization</div>
         <p className={styles.confirmText}>
-          You are about to finalize <strong>{preview.period_name}</strong>. This will:
+          You are about to lock <strong>{preview.period_name}</strong> using its approved payroll packet. This will:
         </p>
         <ul className={styles.confirmList}>
-          <li>Write <strong>{preview.final_line_count_estimate}</strong> final payroll lines</li>
+          <li>Project <strong>{preview.final_line_count_estimate}</strong> approved financial lines into locked history</li>
           <li>Lock the period — no further edits</li>
           <li>Total gross: <strong>{fmt(preview.total_final_gross)}</strong></li>
           <li>Drivers paid: <strong>{preview.driver_count}</strong></li>
@@ -262,7 +292,8 @@ interface FinalizationPreviewDialogProps {
   periodId: number;
   periodName?: string;
   onClose: () => void;
-  onFinalized: () => void; // called after successful finalization → hub refreshes
+  onFinalized: () => void;
+  onStateConflict: () => void;
 }
 
 export function FinalizationPreviewDialog({
@@ -270,6 +301,7 @@ export function FinalizationPreviewDialog({
   periodName,
   onClose,
   onFinalized,
+  onStateConflict,
 }: FinalizationPreviewDialogProps) {
   const [preview, setPreview] = useState<FinalizationPreviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -280,29 +312,32 @@ export function FinalizationPreviewDialog({
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
   const [finalizeSuccess, setFinalizeSuccess] = useState(false);
 
-  const fetchPreview = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const data = await getFinalizationPreview(periodId);
-      setPreview(data);
-    } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      if (status === 403) {
-        setLoadError('Access denied. You do not have permission to view finalization data.');
-      } else if (status === 422) {
-        setLoadError(detail ?? 'This period is not in Approved status and cannot be previewed.');
-      } else {
-        setLoadError(detail ?? 'Failed to load finalization preview.');
+  useEffect(() => {
+    let active = true;
+    async function loadPreview() {
+      setLoading(true);
+      setPreview(null);
+      setLoadError(null);
+      setFinalizeError(null);
+      setFinalizeSuccess(false);
+      try {
+        const data = await getFinalizationPreview(periodId);
+        if (active) setPreview(data);
+      } catch (error: unknown) {
+        if (!active) return;
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        setLoadError(
+          status === 403
+            ? 'Access denied. You do not have permission to view finalization data.'
+            : previewError(error, 'Failed to load the approved payroll packet.'),
+        );
+      } finally {
+        if (active) setLoading(false);
       }
-    } finally {
-      setLoading(false);
     }
+    void loadPreview();
+    return () => { active = false; };
   }, [periodId]);
-
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void fetchPreview(); }, [fetchPreview]);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -322,25 +357,20 @@ export function FinalizationPreviewDialog({
       onFinalized(); // trigger hub refresh
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setShowConfirm(false);
       if (status === 403) {
         setFinalizeError('Access denied. You do not have permission to finalize this period.');
+      } else if (status === 409 || status === 422) {
+        setPreview(null);
+        setLoadError(previewError(err, 'This payroll is no longer available for finalization. The payroll hub has been refreshed.'));
+        onStateConflict();
       } else {
-        setFinalizeError(detail ?? 'Finalization failed. The period was not locked.');
+        setFinalizeError(previewError(err, 'Finalization failed. The period was not locked.'));
       }
     } finally {
       setFinalizing(false);
     }
   }
-
-  // Derived
-  const periodPayTotal = preview
-    ? preview.driver_totals.reduce((s, d) => s + parseFloat(d.period_pay), 0)
-    : 0;
-  const sysTotal = preview
-    ? preview.sys_adjustments.reduce((s, a) => s + parseFloat(a.adjustment_amount), 0)
-    : 0;
 
   return (
     <div
@@ -358,14 +388,16 @@ export function FinalizationPreviewDialog({
         <div className={styles.dialogHeader}>
           <div>
             <div className={styles.dialogTitle}>
-              Finalization Preview
-              {periodName ? <span className={styles.dialogSubtitle}> — {periodName}</span> : null}
+              Approved Payroll Finalization
+              {periodName ? <span className={styles.dialogSubtitle}> - {periodName}</span> : null}
             </div>
             {preview && (
               <div className={styles.headerMeta}>
                 <span>{preview.branch_name ?? ''}</span>
                 {preview.branch_name && <span className={styles.metaSep}>·</span>}
                 <span className={styles.statusPill}>{preview.period_status}</span>
+                <span className={styles.metaSep}>·</span>
+                <span>Approved immutable payroll packet</span>
               </div>
             )}
           </div>
@@ -386,7 +418,7 @@ export function FinalizationPreviewDialog({
               <div className={styles.successTitle}>Period Finalized</div>
               <p className={styles.successText}>
                 <strong>{preview.period_name}</strong> has been locked.{' '}
-                {preview.final_line_count_estimate} final payroll lines were written.
+                {preview.final_line_count_estimate} approved financial lines were written to locked history.
               </p>
               <button className={styles.doneBtn} onClick={onClose}>Close</button>
             </div>
@@ -395,15 +427,8 @@ export function FinalizationPreviewDialog({
               {/* ── KPIs ─────────────────────────────────────────── */}
               <div className={styles.kpiRow}>
                 <KpiCard label="Drivers Paid" value={String(preview.driver_count)} />
-                <KpiCard
-                  label="Period Pay / Bonus"
-                  value={periodPayTotal !== 0 ? `$${periodPayTotal.toFixed(2)}` : '—'}
-                />
-                <KpiCard
-                  label="System Adjustments"
-                  value={sysTotal !== 0 ? fmtAdj(sysTotal.toFixed(2)) : 'None'}
-                />
-                <KpiCard label="Final Gross" value={fmt(preview.total_final_gross)} />
+                <KpiCard label="Approved Total" value={fmt(preview.total_final_gross)} />
+                <KpiCard label="Bonus Events" value={String(preview.bonus_event_count)} />
                 <KpiCard label="Final Lines" value={String(preview.final_line_count_estimate)} />
               </div>
 
@@ -430,7 +455,7 @@ export function FinalizationPreviewDialog({
               {/* ── Line Details ─────────────────────────────── */}
               <Section
                 title="Line Details"
-                badge={`${preview.draft_line_count} draft`}
+                badge={preview.final_line_count_estimate}
                 defaultOpen={false}
               >
                 <LineDetailsTable rows={preview.lines} />

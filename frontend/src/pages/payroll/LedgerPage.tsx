@@ -8,7 +8,7 @@
  * Security: Ledger is operational/admin only.  Driver/ODA access is blocked
  * by the backend (403 on final-lines endpoint).  Frontend shows 403 cleanly.
  */
-import { useEffect, useReducer, useState, useCallback } from 'react';
+import { useEffect, useReducer, useState, useCallback, useRef } from 'react';
 import apiClient from '../../lib/apiClient';
 import { useAuth } from '../../store/authStore';
 import type { Branch } from '../../types/core';
@@ -22,9 +22,9 @@ import styles from './LedgerPage.module.css';
 // ---------------------------------------------------------------------------
 
 function fmt(v: string | null | undefined): string {
-  if (v == null || v === '0' || v === '0.00') return '—';
-  const n = parseFloat(v);
-  return isNaN(n) ? String(v) : `$${n.toFixed(2)}`;
+  if (v == null) return '-';
+  const n = Number(v);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
 }
 
 // ---------------------------------------------------------------------------
@@ -71,10 +71,6 @@ interface LedgerCardProps {
 }
 
 function LedgerCard({ period: p, onViewSummary }: LedgerCardProps) {
-  const grossValue = parseFloat(p.final_gross ?? '0');
-  const showGross = grossValue > 0;
-  const showDrivers = p.final_driver_count > 0;
-
   return (
     <div className={styles.card}>
       {/* Left: period info */}
@@ -97,24 +93,18 @@ function LedgerCard({ period: p, onViewSummary }: LedgerCardProps) {
           )}
         </div>
         <div className={styles.cardStats}>
-          {showGross && (
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Final Gross</span>
-              <span className={styles.statValue}>{fmt(p.final_gross)}</span>
-            </span>
-          )}
-          {showDrivers && (
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Drivers</span>
-              <span className={styles.statValue}>{p.final_driver_count}</span>
-            </span>
-          )}
-          {p.final_lines > 0 && (
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Lines</span>
-              <span className={styles.statValue}>{p.final_lines}</span>
-            </span>
-          )}
+          <span className={styles.statChip}>
+            <span className={styles.statLabel}>Final Gross</span>
+            <span className={styles.statValue}>{fmt(p.final_gross)}</span>
+          </span>
+          <span className={styles.statChip}>
+            <span className={styles.statLabel}>Drivers</span>
+            <span className={styles.statValue}>{p.final_driver_count}</span>
+          </span>
+          <span className={styles.statChip}>
+            <span className={styles.statLabel}>Lines</span>
+            <span className={styles.statValue}>{p.final_lines}</span>
+          </span>
         </div>
       </div>
 
@@ -144,6 +134,7 @@ export function LedgerPage() {
   const [filterStatus,   setFilterStatus]   = useState<LedgerStatus>('Locked');
   const [filterBranchId, setFilterBranchId] = useState<string>('');
   const [summaryPeriod,  setSummaryPeriod]  = useState<PeriodSummary | null>(null);
+  const periodRequestId = useRef(0);
 
   // Load branches for AllCompanyBranches users
   useEffect(() => {
@@ -155,14 +146,19 @@ export function LedgerPage() {
   }, []);
 
   const fetchPeriods = useCallback(async () => {
+    const requestId = ++periodRequestId.current;
     dispatchPeriods({ type: 'FETCH_START' });
     try {
       const params: Record<string, string> = { status: filterStatus };
       if (filterBranchId) params.branch_id = filterBranchId;
       const { data } = await apiClient.get<PeriodSummary[]>('/payroll/periods', { params });
-      dispatchPeriods({ type: 'FETCH_OK', periods: data });
+      if (requestId === periodRequestId.current) {
+        dispatchPeriods({ type: 'FETCH_OK', periods: data });
+      }
     } catch {
-      dispatchPeriods({ type: 'FETCH_ERROR', error: 'Failed to load ledger periods.' });
+      if (requestId === periodRequestId.current) {
+        dispatchPeriods({ type: 'FETCH_ERROR', error: 'Failed to load ledger periods.' });
+      }
     }
   }, [filterStatus, filterBranchId]);
 
@@ -187,7 +183,10 @@ export function LedgerPage() {
           <select
             className={styles.filterSelect}
             value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value as LedgerStatus)}
+            onChange={(e) => {
+              setSummaryPeriod(null);
+              setFilterStatus(e.target.value as LedgerStatus);
+            }}
           >
             {LEDGER_STATUSES.map((s) => (
               <option key={s} value={s}>{s}</option>
@@ -201,7 +200,10 @@ export function LedgerPage() {
             <select
               className={styles.filterSelect}
               value={filterBranchId}
-              onChange={(e) => setFilterBranchId(e.target.value)}
+              onChange={(e) => {
+                setSummaryPeriod(null);
+                setFilterBranchId(e.target.value);
+              }}
             >
               <option value="">All branches</option>
               {branchesSt.branches.map((b) => (

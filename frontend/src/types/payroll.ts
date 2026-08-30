@@ -460,7 +460,7 @@ export interface FinalizationPreviewLine {
   quantity: string | null;
   rate_amount: string | null;
   calculated_amount: string | null;
-  /** Backend-computed: COALESCE(calculated_amount, quantity * COALESCE(rate_amount, 0)) */
+  /** Exact approved-snapshot amount that Finalize projects into FinalLines. */
   final_amount: string;
   needs_manager_review: boolean;
 }
@@ -482,6 +482,7 @@ export interface FinalizationPreviewDriverTotal {
   period_pay: string;
   gross_pay: string;
   sys_adjustment: string;
+  bonus_total: string;
   final_pay: string;
   line_count: number;
 }
@@ -501,6 +502,7 @@ export interface FinalizationPreviewResponse {
   total_final_gross: string;
   draft_line_count: number;
   sys_adjustment_count: number;
+  bonus_event_count: number;
   final_line_count_estimate: number;
   driver_count: number;
 }

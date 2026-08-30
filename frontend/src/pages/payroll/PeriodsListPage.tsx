@@ -635,6 +635,7 @@ export function PeriodsListPage() {
           periodName={findPeriod(finalizeDialogPeriodId)?.period_name}
           onClose={() => setFinalizeDialogPeriodId(null)}
           onFinalized={refreshHub}
+          onStateConflict={refreshHub}
         />
       )}
     </div>

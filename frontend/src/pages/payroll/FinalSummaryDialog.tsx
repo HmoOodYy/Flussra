@@ -5,10 +5,10 @@
  * Opens from the Ledger page.  No edit, no recalculate, no finalize.
  *
  * All monetary values come from the backend (FinalLineSummary.final_amount).
- * Summaries are computed from the already-locked final amounts — not from
- * drafts, rates, or any payroll formula.
+ * Driver grouping is display-only over immutable FinalLines, never drafts,
+ * rates, or a payroll formula.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { getFinalLines } from '../../lib/payrollApi';
 import type { FinalLineSummary, PeriodSummary } from '../../types/payroll';
 import styles from './FinalSummaryDialog.module.css';
@@ -18,18 +18,19 @@ import styles from './FinalSummaryDialog.module.css';
 // ---------------------------------------------------------------------------
 
 function fmt(v: string | number | null | undefined): string {
-  if (v == null) return '—';
-  const n = typeof v === 'number' ? v : parseFloat(String(v));
-  return isNaN(n) ? String(v) : `$${n.toFixed(2)}`;
+  if (v == null) return '-';
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
 }
 
 function fmtQty(v: string | null | undefined): string {
-  if (v == null) return '—';
-  const n = parseFloat(v);
-  return isNaN(n) ? String(v) : n.toFixed(2);
+  if (v == null) return '-';
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(v);
 }
 
-// Derive aggregated driver totals from the flat final-lines list
+// Display-only grouping of immutable FinalLines. Financial authority remains
+// the persisted FinalLine rows and period aggregates returned by the backend.
 interface DriverTotal {
   driver_id: number;
   driver_name: string;
@@ -43,7 +44,7 @@ interface DriverTotal {
 function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
   const map = new Map<number, DriverTotal>();
   for (const line of lines) {
-    const amt = parseFloat(line.final_amount);
+    const amt = Number(line.final_amount);
     if (!map.has(line.driver_id)) {
       map.set(line.driver_id, {
         driver_id: line.driver_id,
@@ -56,6 +57,7 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
       });
     }
     const dt = map.get(line.driver_id)!;
+    if (!Number.isFinite(amt)) continue;
     if (line.line_type.startsWith('SYS_')) {
       dt.sys_adjustment += amt;
     } else if (line.line_scope === 'Period') {
@@ -67,6 +69,14 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
     dt.line_count++;
   }
   return Array.from(map.values()).sort((a, b) => a.driver_name.localeCompare(b.driver_name));
+}
+
+function lineLabel(line: FinalLineSummary): string {
+  if (line.line_type === 'SYS_MIN_TOPUP') return 'Minimum top-up';
+  if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
+  if (line.source_type === 'StatusEntryState') return 'Status payment';
+  if (line.source_type === 'BonusEvent') return 'Bonus event';
+  return line.line_type;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +139,7 @@ function DriverTotalsTable({ rows }: { rows: DriverTotal[] }) {
             <td className={`${styles.numCol} ${r.sys_adjustment !== 0 ? styles.adjCell : ''}`}>
               {r.sys_adjustment !== 0
                 ? `${r.sys_adjustment >= 0 ? '+' : ''}$${Math.abs(r.sys_adjustment).toFixed(2)}`
-                : '—'}
+                : '-'}
             </td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay)}</td>
             <td className={styles.numCol}>{r.line_count}</td>
@@ -163,7 +173,7 @@ function SysAdjTable({ lines }: { lines: FinalLineSummary[] }) {
               </span>
             </td>
             <td className={`${styles.numCol} ${styles.adjCell}`}>{fmt(l.final_amount)}</td>
-            <td>{l.notes ?? '—'}</td>
+            <td>{l.notes ?? '-'}</td>
           </tr>
         ))}
       </tbody>
@@ -188,9 +198,9 @@ function PeriodPayTable({ lines }: { lines: FinalLineSummary[] }) {
         {periodLines.map((l) => (
           <tr key={l.final_line_id}>
             <td className={styles.nameCell}>{l.driver_name}</td>
-            <td>{l.line_type}</td>
+            <td>{lineLabel(l)}</td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount)}</td>
-            <td>{l.notes ?? '—'}</td>
+            <td>{l.notes ?? '-'}</td>
           </tr>
         ))}
       </tbody>
@@ -217,9 +227,9 @@ function LineDetailsTable({ lines }: { lines: FinalLineSummary[] }) {
         {dailyLines.map((l) => (
           <tr key={l.final_line_id}>
             <td className={styles.nameCell}>{l.driver_name}</td>
-            <td className={styles.dateCell}>{l.work_date ?? '—'}</td>
+            <td className={styles.dateCell}>{l.work_date ?? '-'}</td>
             <td>
-              {l.line_type}
+              {lineLabel(l)}
               {l.rate_behavior && (
                 <span style={{ fontSize: '0.7rem', color: '#64748b', marginLeft: 4 }}>
                   ({l.rate_behavior})
@@ -250,27 +260,31 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const fetchLines = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const data = await getFinalLines(period.payroll_period_id);
-      setLines(data);
-    } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      if (status === 403) {
-        setLoadError('Access denied. You do not have permission to view this period\'s final lines.');
-      } else {
-        setLoadError(detail ?? 'Failed to load final lines.');
+  useEffect(() => {
+    let active = true;
+    async function loadLines() {
+      setLoading(true);
+      setLines([]);
+      setLoadError(null);
+      try {
+        const data = await getFinalLines(period.payroll_period_id);
+        if (active) setLines(data);
+      } catch (err: unknown) {
+        if (!active) return;
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        setLoadError(
+          status === 403
+            ? 'Access denied. You do not have permission to view this period\'s final lines.'
+            : detail ?? 'Failed to load final lines.',
+        );
+      } finally {
+        if (active) setLoading(false);
       }
-    } finally {
-      setLoading(false);
     }
+    void loadLines();
+    return () => { active = false; };
   }, [period.payroll_period_id]);
-
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void fetchLines(); }, [fetchLines]);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -280,13 +294,10 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  // Derived from locked final_amount values — not payroll recalculation
-  const totalGross = lines.reduce((s, l) => s + parseFloat(l.final_amount), 0);
   const driverTotals = buildDriverTotals(lines);
   const sysCount = lines.filter((l) => l.line_type.startsWith('SYS_')).length;
   const periodPayCount = lines.filter((l) => l.line_scope === 'Period' && !l.line_type.startsWith('SYS_')).length;
   const dailyCount = lines.filter((l) => l.line_scope === 'Daily' && !l.line_type.startsWith('SYS_')).length;
-  const driverCount = new Set(lines.map((l) => l.driver_id)).size;
 
   return (
     <div className={styles.backdrop} onClick={onClose}>
@@ -333,16 +344,16 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
             <div className={styles.emptyBox}>
               <p>No final lines found for this period.</p>
               <p className={styles.emptyHint}>
-                This period may not have been finalized, or the data may have been archived.
+                Locked and archived history is displayed from persisted FinalLines.
               </p>
             </div>
           ) : (
             <>
               {/* ── KPIs ─────────────────────────────────────────── */}
               <div className={styles.kpiRow}>
-                <KpiCard label="Drivers Paid" value={String(driverCount)} />
-                <KpiCard label="Final Gross" value={fmt(totalGross)} />
-                <KpiCard label="Total Lines" value={String(lines.length)} />
+                <KpiCard label="Drivers Paid" value={String(period.final_driver_count)} />
+                <KpiCard label="Final Gross" value={fmt(period.final_gross)} />
+                <KpiCard label="Total Lines" value={String(period.final_lines)} />
                 {sysCount > 0 && (
                   <KpiCard label="Sys Adjustments" value={String(sysCount)} />
                 )}
@@ -388,7 +399,7 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
 
         {/* ── Footer ─────────────────────────────────────────────────── */}
         <div className={styles.dialogFooter}>
-          <span className={styles.readOnlyLabel}>Read-only — finalized payroll</span>
+          <span className={styles.readOnlyLabel}>Read-only - FinalLines-backed payroll history</span>
           <button className={styles.closeFooterBtn} onClick={onClose}>Close</button>
         </div>
       </div>
