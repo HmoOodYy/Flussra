@@ -220,6 +220,60 @@ export interface AddPeriodPayLineRequest {
   notes?: string;
 }
 
+// ---------------------------------------------------------------------------
+// CP-3A — Canonical bonus events
+// ---------------------------------------------------------------------------
+
+export interface BonusEvent {
+  bonus_event_id: number;
+  driver_id: number;
+  amount: string;
+  reason: string | null;
+  notes: string | null;
+  status: 'Active' | 'Voided';
+  data_revision: number;
+}
+
+export interface BonusEventCreate {
+  driver_id: number;
+  amount: string;
+  reason?: string | null;
+  notes?: string | null;
+}
+
+export interface BonusEventUpdate {
+  amount?: string;
+  reason?: string | null;
+  notes?: string | null;
+  data_revision?: number;
+}
+
+export interface BonusSummaryCapabilities {
+  can_create: boolean;
+  can_update: boolean;
+  can_void: boolean;
+  reason_codes: string[];
+}
+
+export interface BonusSummaryDriver {
+  driver_id: number;
+  driver_code: string | null;
+  driver_name: string | null;
+  total_bonus: string;
+  active_event_count: number;
+  events: BonusEvent[];
+  capabilities: BonusSummaryCapabilities;
+}
+
+export interface BonusSummary {
+  period_id: number;
+  period_status: string;
+  active_event_count: number;
+  active_bonus_total: string;
+  bonus_data_revision: number;
+  drivers: BonusSummaryDriver[];
+}
+
 export interface StatusTransitionRequest {
   status: string;
   notes?: string;

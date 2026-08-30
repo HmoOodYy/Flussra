@@ -269,7 +269,7 @@ export interface CustomPayItem {
 }
 
 export type WizardValueType = 'Time' | 'Number' | 'Money';
-export type WizardRateMethod = 'PerUnit' | 'OrdinalTier' | 'Block' | 'RangeBracket' | 'RangeProgressive';
+export type WizardRateMethod = 'PerUnit';
 
 export interface CustomPayItemCreate {
   /** Optional — backend auto-generates a CPI_ prefixed code when omitted. Not shown in the UI. */
@@ -345,6 +345,8 @@ export type CdpiCalcMethodKey =
   | 'RangeBracket'
   | 'RangeProgressive';
 
+export type SupportedCdpiCalcMethodKey = 'PerUnit';
+
 export type CdpiDecideAction = 'ReturnToDraft' | 'Reject' | 'Approve';
 
 /** Read-side representation of a CDPI request row (backend: CdpiRequestSummary). */
@@ -375,7 +377,7 @@ export interface CdpiRequestCreatePayload {
   item_name?: string | null;
   input_type?: CdpiInputType | null;
   unit?: string | null;
-  calc_method_key?: CdpiCalcMethodKey | null;
+  calc_method_key?: SupportedCdpiCalcMethodKey | null;
   notes?: string | null;
 }
 
@@ -385,7 +387,7 @@ export interface CdpiRequestUpdatePayload {
   item_name?: string | null;
   input_type?: CdpiInputType | null;
   unit?: string | null;
-  calc_method_key?: CdpiCalcMethodKey | null;
+  calc_method_key?: SupportedCdpiCalcMethodKey | null;
   notes?: string | null;
 }
 
@@ -405,7 +407,7 @@ export interface CdpiDecidePayload {
 export interface CdpiDirectCreatePayload {
   item_name: string;
   input_type: CdpiInputType;
-  calc_method_key: CdpiCalcMethodKey;
+  calc_method_key: SupportedCdpiCalcMethodKey;
   unit?: string | null;
   notes?: string | null;
 }

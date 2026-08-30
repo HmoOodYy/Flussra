@@ -183,7 +183,7 @@ function PeriodCard({
         {canEntry && isEnterable && (
           <button className={styles.actionBtn} onClick={onDriversOff}>Drivers Off</button>
         )}
-        {canEntry && isOpen && (
+        {canEntry && isEnterable && (
           <button className={styles.actionBtn} onClick={onBonus}>Bonus</button>
         )}
         {canEntry && isOpen && (

@@ -8,6 +8,10 @@ import type {
   DayGridSaveRequest,
   PeriodPayLine,
   AddPeriodPayLineRequest,
+  BonusEvent,
+  BonusEventCreate,
+  BonusEventUpdate,
+  BonusSummary,
   PeriodSummary,
   NextPeriodDates,
   EligibleDriver,
@@ -121,7 +125,7 @@ export async function resubmitPeriod(periodId: number): Promise<PeriodSummary> {
 }
 
 // ---------------------------------------------------------------------------
-// CP-2 — Period pay lines (Bonus panel)
+// CP-2 — Generic period pay compatibility APIs (not canonical BonusEvents)
 // ---------------------------------------------------------------------------
 
 export async function getPeriodPayLines(
@@ -154,6 +158,50 @@ export async function voidPeriodPayLine(
 ): Promise<PeriodPayLine> {
   const resp = await apiClient.delete<PeriodPayLine>(
     `/payroll/periods/${periodId}/period-pay/${lineId}`,
+  );
+  return resp.data;
+}
+
+// ---------------------------------------------------------------------------
+// CP-3A — Canonical BonusEvents
+// ---------------------------------------------------------------------------
+
+export async function getBonusSummary(periodId: number): Promise<BonusSummary> {
+  const resp = await apiClient.get<BonusSummary>(
+    `/payroll/periods/${periodId}/bonuses/summary`,
+  );
+  return resp.data;
+}
+
+export async function createBonusEvent(
+  periodId: number,
+  req: BonusEventCreate,
+): Promise<BonusEvent> {
+  const resp = await apiClient.post<BonusEvent>(
+    `/payroll/periods/${periodId}/bonuses`,
+    req,
+  );
+  return resp.data;
+}
+
+export async function updateBonusEvent(
+  periodId: number,
+  bonusEventId: number,
+  req: BonusEventUpdate,
+): Promise<BonusEvent> {
+  const resp = await apiClient.patch<BonusEvent>(
+    `/payroll/periods/${periodId}/bonuses/${bonusEventId}`,
+    req,
+  );
+  return resp.data;
+}
+
+export async function voidBonusEvent(
+  periodId: number,
+  bonusEventId: number,
+): Promise<BonusEvent> {
+  const resp = await apiClient.delete<BonusEvent>(
+    `/payroll/periods/${periodId}/bonuses/${bonusEventId}`,
   );
   return resp.data;
 }

@@ -28,9 +28,12 @@ import styles from './PayItemsPage.module.css';
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const RATE_BEHAVIOR_LABELS: Record<string, string> = {
-  PerUnit: 'Per Unit', EnteredAmount: 'Entered Amount', Fixed: 'Fixed Amount',
-  Calculated: 'Calculated', None: 'None', OrdinalTier: 'Ordinal Tier',
-  RangeBracket: 'Range Bracket', RangeProgressive: 'Range Progressive', Block: 'Block',
+  PerUnit: 'Per Unit', EnteredAmount: 'Entered Amount', Fixed: 'Fixed Amount (Compatibility)',
+  Calculated: 'Calculated (Reserved)', None: 'None (Compatibility)',
+  OrdinalTier: 'Legacy / Unsupported: Ordinal Tier',
+  RangeBracket: 'Legacy / Unsupported: Range Bracket',
+  RangeProgressive: 'Legacy / Unsupported: Range Progressive',
+  Block: 'Legacy / Unsupported: Block',
 };
 
 // ─── Wizard constants ─────────────────────────────────────────────────────────
@@ -40,10 +43,8 @@ interface RateMethodDef {
   label:   string;
   desc:    string;
   example: string;
-  // How many rate name inputs to start with (for fixed-count methods)
-  // undefined means dynamic (user can add/remove, starting at 2)
+  // Number of rate-name inputs required by the supported method.
   fixedCount?: number;
-  rateLabels?: string[];   // labels for each input when fixed (OrdinalTier)
 }
 
 const RATE_METHODS: RateMethodDef[] = [
@@ -53,32 +54,6 @@ const RATE_METHODS: RateMethodDef[] = [
     desc:    'Each unit is paid at one fixed rate.',
     example: 'e.g. $X per mile, $X per hour',
     fixedCount: 1,
-  },
-  {
-    value:   'OrdinalTier',
-    label:   'Different rate by item number',
-    desc:    '1st item has one rate, 2nd has another, 3rd and beyond use the last rate.',
-    example: 'e.g. 1st load $X, 2nd load $Y, 3rd+ load $Z',
-    fixedCount:  3,
-    rateLabels: ['1st item rate name', '2nd item rate name', '3rd+ item rate name'],
-  },
-  {
-    value:   'Block',
-    label:   'Pay by blocks',
-    desc:    'Each block of quantity has its own rate.',
-    example: 'e.g. first 10 at $X/unit, next 10 at $Y/unit',
-  },
-  {
-    value:   'RangeBracket',
-    label:   'One rate based on total range',
-    desc:    'The total value falls into a bracket — that bracket\'s single rate applies to all.',
-    example: 'e.g. 50–100 total → use the "Mid Range" rate for everything',
-  },
-  {
-    value:   'RangeProgressive',
-    label:   'Progressive range rates',
-    desc:    'Each range is paid at its own rate; only that portion is paid at that rate.',
-    example: 'e.g. first 50 at $X, next 50 at $Y, remainder at $Z',
   },
 ];
 
@@ -96,18 +71,13 @@ interface MethodDisplayConfig {
 interface Step2SectionConfig {
   question: string;
   hint:     string;
-  normal:   MethodDisplayConfig[];
-  advanced: {
-    label:       string;
-    supportText: string;
-    methods:     MethodDisplayConfig[];
-  };
+  methods:  MethodDisplayConfig[];
 }
 
 const STEP2_TIME: Step2SectionConfig = {
   question: 'How should pay be calculated?',
   hint: 'This is immutable after creation — it defines how the calculation engine turns entered hours into pay.',
-  normal: [
+  methods: [
     {
       value:          'PerUnit',
       label:          'Same hourly rate',
@@ -115,69 +85,19 @@ const STEP2_TIME: Step2SectionConfig = {
       popoverExample: '1.5 hours × $20 per hour = $30',
     },
   ],
-  advanced: {
-    label:       'Advanced methods',
-    supportText: 'Use these when the hourly rate changes based on the entered total or time ranges.',
-    methods: [
-      {
-        value:          'RangeBracket',
-        label:          'One rate based on total hours',
-        popoverExpl:    'The total hours select one hourly rate, and that rate applies to all entered hours.',
-        popoverExample: '0–4 hours: $18/hour\nMore than 4 hours: $20/hour\n5 hours × $20 = $100',
-      },
-      {
-        value:          'RangeProgressive',
-        label:          'Different rates by hour range',
-        popoverExpl:    'Each portion of the entered hours is paid using the rate for its own range.',
-        popoverExample: 'First 4 hours × $18 = $72\nNext 1 hour × $20 = $20\nTotal = $92',
-      },
-    ],
-  },
 };
 
 const STEP2_NUMBER: Step2SectionConfig = {
   question: 'How should pay be calculated?',
   hint: 'This is immutable after creation — it defines how the calculation engine turns entered quantities into pay.',
-  normal: [
+  methods: [
     {
       value:          'PerUnit',
       label:          'Same rate for every unit',
       popoverExpl:    'Every entered unit is paid using the same rate.',
       popoverExample: '5 units × $20 = $100',
     },
-    {
-      value:          'OrdinalTier',
-      label:          'Different rate by item number',
-      popoverExpl:    'The first unit can earn one amount, the second another, and later units can use a different amount.',
-      popoverExample: '1st unit = $35\n2nd unit = $30\n3rd and later = $25\n4 units = $35 + $30 + $25 + $25 = $115',
-      badge:          'Whole numbers only',
-    },
   ],
-  advanced: {
-    label:       'Advanced methods',
-    supportText: 'Use these when payment depends on blocks, totals, or quantity ranges.',
-    methods: [
-      {
-        value:          'Block',
-        label:          'Fixed amount per block',
-        popoverExpl:    'The quantity is divided into equal blocks, and each counted block pays one fixed amount.',
-        popoverExample: 'Block size: 5\nAmount per block: $14\nQuantity entered: 10\n2 blocks × $14 = $28',
-        popoverNote:    'Partial blocks are handled using the rounding rule configured later in Pay Rates.',
-      },
-      {
-        value:          'RangeBracket',
-        label:          'One rate based on total quantity',
-        popoverExpl:    'The total quantity selects one rate, and that rate applies to the full quantity.',
-        popoverExample: '0–100 units: $10 per unit\n101–200 units: $12 per unit\n150 units × $12 = $1,800',
-      },
-      {
-        value:          'RangeProgressive',
-        label:          'Different rates by quantity range',
-        popoverExpl:    'Each portion of the quantity is paid using the rate for its own range.',
-        popoverExample: 'First 100 units × $10 = $1,000\nNext 50 units × $12 = $600\nTotal = $1,600',
-      },
-    ],
-  },
 };
 
 // Default rate names for each method
@@ -185,7 +105,7 @@ function defaultRateNames(method: WizardRateMethod): string[] {
   const def = RATE_METHODS.find(m => m.value === method);
   if (!def) return [''];
   if (def.fixedCount !== undefined) return Array(def.fixedCount).fill('');
-  return ['', ''];  // dynamic: start with 2
+  return [''];
 }
 
 // ─── Wizard state / reducer ───────────────────────────────────────────────────
@@ -227,11 +147,7 @@ function wizardReducer(s: WizardState, a: WizardAction): WizardState {
     case 'SET_STEP':  return { ...s, step: a.step };
     case 'SET_SCOPE': return { ...s, scope: a.scope, value_type: null, rate_method: null, rate_names: [] };
     case 'SET_VALUE_TYPE': {
-      let rate_method: WizardRateMethod | null = a.vt === 'Money' ? null : s.rate_method;
-      // OrdinalTier and Block are not valid for Time/Hours
-      if (a.vt === 'Time' && (rate_method === 'OrdinalTier' || rate_method === 'Block')) {
-        rate_method = null;
-      }
+      const rate_method: WizardRateMethod | null = a.vt === 'Money' ? null : s.rate_method;
       const rate_names = rate_method ? s.rate_names : [];
       return { ...s, value_type: a.vt, rate_method, rate_names };
     }
@@ -2308,9 +2224,6 @@ function WizardStep2({
   dispatch: React.Dispatch<WizardAction>;
 }) {
   const config = value_type === 'Time' ? STEP2_TIME : STEP2_NUMBER;
-  const isAdvancedInitiallyOpen = value_type !== null && value_type !== 'Money'
-    && rate_method !== null && config.advanced.methods.some(m => m.value === rate_method);
-  const [advancedOpen, setAdvancedOpen] = useState(isAdvancedInitiallyOpen);
 
   if (!value_type || value_type === 'Money') return <div className={styles.wizardStep} />;
 
@@ -2320,43 +2233,15 @@ function WizardStep2({
       <p className={styles.wizardHint}>{config.hint}</p>
 
       <div className={styles.rateMethods}>
-        {config.normal.map(m => (
+        {config.methods.map(m => (
           <MethodCard
             key={m.value}
             config={m}
             selected={rate_method === m.value}
             onSelect={() => dispatch({ type: 'SET_RATE_METHOD', method: m.value })}
-            disabled={m.value !== 'PerUnit'}
+            disabled={false}
           />
         ))}
-      </div>
-
-      <div className={styles.advancedSection}>
-        <button
-          type="button"
-          className={styles.advancedToggle}
-          onClick={() => setAdvancedOpen(o => !o)}
-          aria-expanded={advancedOpen}
-        >
-          <span className={styles.advancedToggleArrow}>{advancedOpen ? '▾' : '▸'}</span>
-          {config.advanced.label}
-        </button>
-        {advancedOpen && (
-          <>
-            <p className={styles.advancedSupportText}>{config.advanced.supportText}</p>
-            <div className={styles.rateMethods}>
-              {config.advanced.methods.map(m => (
-                <MethodCard
-                  key={m.value}
-                  config={m}
-                  selected={false}
-                  onSelect={() => {/* disabled — not selectable */}}
-                  disabled
-                />
-              ))}
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
