@@ -505,6 +505,56 @@ export interface FinalizationPreviewResponse {
   driver_count: number;
 }
 
+// ---------------------------------------------------------------------------
+// CP-4B — Open/Returned live calculation preview
+// ---------------------------------------------------------------------------
+
+export interface CalculationPreviewLine {
+  source_type: string;
+  source_id: string | null;
+  line_type: string;
+  work_date: string | null;
+  pay_item_id: number | null;
+  rate_column_id: number | null;
+  driver_id: number;
+  quantity: string | null;
+  resolved_rate: string | null;
+  calculated_amount: string | null;
+  needs_manager_review: boolean;
+  blocker_reason: string | null;
+}
+
+export interface CalculationPreviewDriver {
+  driver_id: number;
+  driver_name: string | null;
+  daily_pay: string;
+  status_pay: string;
+  period_pay: string;
+  normal_base: string;
+  minimum_adjustment: string;
+  maximum_adjustment: string;
+  bonus_total: string;
+  expected_pay: string;
+  needs_manager_review: boolean;
+  blockers: string[];
+  lines: CalculationPreviewLine[];
+}
+
+export interface CalculationPreviewResponse {
+  payroll_period_id: number;
+  company_id: number;
+  branch_id: number;
+  branch_name: string | null;
+  status: 'Open' | 'Returned';
+  provisional: boolean;
+  financials_available: boolean;
+  has_blockers: boolean;
+  blockers: string[];
+  warnings: string[];
+  drivers: CalculationPreviewDriver[];
+  total_expected_pay: string;
+}
+
 export const STATUS_COLORS: Record<PeriodStatus, { bg: string; color: string; border: string }> = {
   Draft:     { bg: '#f9fafb', color: '#374151', border: '#e5e7eb' },
   Open:      { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },

@@ -13,6 +13,7 @@ import { CreatePeriodModal } from '../../components/CreatePeriodModal';
 import { PayrollEntryDialog } from './PayrollEntryDialog';
 import { DriversOffDialog } from './DriversOffDialog';
 import { BonusDialog } from './BonusDialog';
+import { CalculationPreviewDialog } from './CalculationPreviewDialog';
 import { FinalizationPreviewDialog } from './FinalizationPreviewDialog';
 import styles from './PeriodsListPage.module.css';
 
@@ -92,14 +93,16 @@ interface PeriodCardProps {
   onViewPayroll: () => void;
   onDriversOff: () => void;
   onBonus: () => void;
+  onPreview: () => void;
   onFinalize: () => void;
   onReload: () => void;
   canEntry: boolean;
+  canPreview: boolean;
   canFinalize: boolean;
 }
 
 function PeriodCard({
-  period: p, onViewPayroll, onDriversOff, onBonus, onFinalize, onReload, canEntry, canFinalize,
+  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReload, canEntry, canPreview, canFinalize,
 }: PeriodCardProps) {
   const [transitioning,  setTransitioning]  = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
@@ -191,6 +194,10 @@ function PeriodCard({
         <button className={styles.primaryActionBtn} onClick={onViewPayroll}>
           {isDraft ? 'Prepare Payroll' : isGridEnterable ? 'Enter Payroll' : 'View Payroll'}
         </button>
+
+        {canPreview && isEnterable && (
+          <button className={styles.actionBtn} onClick={onPreview}>View Expected Payroll</button>
+        )}
 
         {/* Entry-only actions — require payroll.entry */}
         {canEntry && isEnterable && (
@@ -301,6 +308,9 @@ export function PeriodsListPage() {
   const isAllBranches   = user?.scope_type === 'AllCompanyBranches';
   const userCanCreate   = user ? canCreatePeriod(user)   : false;
   const userCanEntry    = user ? canEntryPayroll(user)   : false;
+  const userCanPreview  = user ? user.active_permissions.some(
+    (permission) => permission === 'payroll.view' || permission === 'payroll.entry',
+  ) : false;
   const userCanFinalize = user ? canFinalizePayroll(user): false;
 
   const [branchesSt,  dispatchBranches] = useReducer(branchesReducer, { branches: [], loading: true });
@@ -316,6 +326,7 @@ export function PeriodsListPage() {
   const [entryDialogPeriodId,      setEntryDialogPeriodId]      = useState<number | null>(null);
   const [driversOffDialogPeriodId, setDriversOffDialogPeriodId] = useState<number | null>(null);
   const [bonusDialogPeriodId,      setBonusDialogPeriodId]      = useState<number | null>(null);
+  const [calculationPreviewPeriodId, setCalculationPreviewPeriodId] = useState<number | null>(null);
   const [finalizeDialogPeriodId,   setFinalizeDialogPeriodId]   = useState<number | null>(null);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
@@ -424,12 +435,26 @@ export function PeriodsListPage() {
       <PeriodCard
         key={p.payroll_period_id}
         period={p}
-        onViewPayroll={() => setEntryDialogPeriodId(p.payroll_period_id)}
-        onDriversOff={() => setDriversOffDialogPeriodId(p.payroll_period_id)}
-        onBonus={() => setBonusDialogPeriodId(p.payroll_period_id)}
+        onViewPayroll={() => {
+          setCalculationPreviewPeriodId(null);
+          setEntryDialogPeriodId(p.payroll_period_id);
+        }}
+        onDriversOff={() => {
+          setCalculationPreviewPeriodId(null);
+          setDriversOffDialogPeriodId(p.payroll_period_id);
+        }}
+        onBonus={() => {
+          setCalculationPreviewPeriodId(null);
+          setBonusDialogPeriodId(p.payroll_period_id);
+        }}
+        onPreview={() => setCalculationPreviewPeriodId(p.payroll_period_id)}
         onFinalize={() => setFinalizeDialogPeriodId(p.payroll_period_id)}
-        onReload={refreshHub}
+        onReload={() => {
+          setCalculationPreviewPeriodId(null);
+          refreshHub();
+        }}
         canEntry={userCanEntry}
+        canPreview={userCanPreview}
         canFinalize={userCanFinalize}
       />
     );
@@ -591,6 +616,18 @@ export function PeriodsListPage() {
           />
         );
       })()}
+
+      {calculationPreviewPeriodId != null && (
+        <CalculationPreviewDialog
+          periodId={calculationPreviewPeriodId}
+          periodName={findPeriod(calculationPreviewPeriodId)?.period_name}
+          onClose={() => setCalculationPreviewPeriodId(null)}
+          onLifecycleChanged={() => {
+            setCalculationPreviewPeriodId(null);
+            refreshHub();
+          }}
+        />
+      )}
 
       {finalizeDialogPeriodId != null && (
         <FinalizationPreviewDialog

@@ -18,6 +18,7 @@ import type {
   EligibleDriversResponse,
   DriversOffResponse,
   FinalizationPreviewResponse,
+  CalculationPreviewResponse,
   FinalLineSummary,
   DraftLineSummary,
   DriverPeriodSummary,
@@ -265,6 +266,19 @@ export type { EligibleDriver };
 export async function getDriversOff(periodId: number): Promise<DriversOffResponse> {
   const resp = await apiClient.get<DriversOffResponse>(
     `/payroll/periods/${periodId}/drivers-off`,
+  );
+  return resp.data;
+}
+
+// ---------------------------------------------------------------------------
+// CP-4B — Open/Returned live calculation preview
+// ---------------------------------------------------------------------------
+
+export async function getCalculationPreview(
+  periodId: number,
+): Promise<CalculationPreviewResponse> {
+  const resp = await apiClient.get<CalculationPreviewResponse>(
+    `/payroll/periods/${periodId}/calculation-preview`,
   );
   return resp.data;
 }
