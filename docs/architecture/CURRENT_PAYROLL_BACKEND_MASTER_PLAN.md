@@ -5,9 +5,9 @@
 **Plan status:** Active planning baseline  
 **Source baseline reviewed:** Git commit `bb491cc600335b4c0a69b63692717b21ae361d62` (`2026-06-18`)  
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
-**Current migration head after implemented units:** Alembic `0062` (CP-4D submitted calculation snapshot capture)
+**Current migration head after implemented units:** Alembic `0062` (CP-4D submitted calculation snapshot capture; CP-4F added no migration)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; CP-3A, CP-3B1, CP-3B2a, CP-3B2b, and CP-3C are all `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `In Progress` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F remains `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`).
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -94,7 +94,7 @@ Test files included:
 | Initial payroll schema | `migrations/sql/0001_initial_schema.sql` |
 | Locked-ledger database guards | `migrations/versions/0035_locked_ledger_immutability.py` |
 
-Passing tests validate current behavior. They do not prove compliance with requirements that current tests do not assert, including approval binding to the submitted immutable revision or finalization from an approved calculation snapshot. CP-4D now directly covers immutable submitted revisions. **Bonus exclusion from min/max is now directly covered:** CP-3C added a focused 17-test suite (`test_cp3c_minmax_bonus.py`) that directly asserts minimum/maximum with and without bonus, bonus-only drivers, preview/finalization/ledger parity, batch-created bonus events, active-vs-voided bonuses, STATUS_PAYMENT and non-BONUS ADJUSTMENT classification, and legacy BONUS DraftLine exclusion. The older `test_m15.py` suite remains stale CP-1C/CP-3A debt (legacy period-creation helper and generic BONUS `/period-pay` assumptions) and is not a clean regression suite on its own, but CP-3C's own coverage now directly proves the corrected formula.
+Passing tests validate current behavior, but they do not prove requirements that no current test asserts. CP-4D through CP-4F now directly cover submitted immutable revisions, snapshot-bound approval, and finalization from the approved snapshot. **Bonus exclusion from min/max is now directly covered:** CP-3C added a focused 17-test suite (`test_cp3c_minmax_bonus.py`) that directly asserts minimum/maximum with and without bonus, bonus-only drivers, preview/finalization/ledger parity, batch-created bonus events, active-vs-voided bonuses, STATUS_PAYMENT and non-BONUS ADJUSTMENT classification, and legacy BONUS DraftLine exclusion. The older `test_m15.py` suite remains stale CP-1C/CP-3A debt (legacy period-creation helper and generic BONUS `/period-pay` assumptions) and is not a clean regression suite on its own, but CP-3C's own coverage now directly proves the corrected formula.
 
 ---
 
@@ -216,11 +216,11 @@ The day grid itself contains per-day `is_off` fields, but there is no dedicated 
 
 - Draft (Prepared) lines store `RateAmount = NULL` and `CalculatedAmount = NULL`; CP-2F suppresses all financial fields for Draft. Open/Returned lines can store `RateAmount` and `CalculatedAmount`.
 - Submission refreshes rate-dependent calculations.
-- Approved finalization preview virtually resolves current rates and mirrors finalization.
-- Finalization again refreshes/resolves current rates and writes final lines.
-- CP-4B added a read-only Open/Returned expected-income endpoint. CP-4D captures an immutable submitted calculation snapshot on Submit/Resubmit, and CP-4E makes that exact linked snapshot the review/approval financial authority. CP-4F finalization consumption remains pending.
+- Approved finalization preview reads the exact approved immutable snapshot.
+- Finalization projects that same approved snapshot into FinalLines without refreshing or resolving mutable financial inputs.
+- CP-4B added a read-only Open/Returned expected-income endpoint. CP-4D captures an immutable submitted calculation snapshot on Submit/Resubmit, CP-4E makes that exact linked snapshot the review/approval financial authority, and CP-4F makes it the finalization-preview and FinalLine financial authority.
 - Submitted calculation snapshots now exist for CP-4D Submit/Resubmit. Historical InReview/Approved periods are not backfilled.
-- Finalization can use rates approved after review, so the finalized amount can differ from what the reviewer saw.
+- Post-approval rates or other mutable financial-source changes cannot alter the approved preview or finalized amount.
 - ~~Current min/max calculations sum all non-system final lines, including BONUS.~~ **Resolved by CP-3C.** Min/max calculations now exclude BONUS from the comparison base in both finalization and finalization preview.
 
 Current, enforced calculation order (both `finalize_period` and `get_finalization_preview`):
@@ -231,7 +231,7 @@ normal pay -> apply minimum/maximum -> add bonus
 
 The previously-documented conflicting order (`normal pay + bonus -> apply minimum/maximum`) was the pre-CP-3C bug and no longer describes current behavior.
 
-Phase 4 remains responsible for the broader unified calculation-core and immutable-snapshot architecture (submitted calculation snapshot and post-review rate re-resolution). CP-4B now provides the Open/Returned expected-income endpoint; CP-3C only corrected the min/max/bonus ordering bug within the existing finalization and preview code paths and did not extract a calculation core or add snapshot machinery.
+Phase 4 completed the unified calculation-core and immutable-snapshot authority chain. CP-4B provides the Open/Returned expected-income endpoint; CP-4F consumes the approved immutable packet for finalization rather than post-review rate/configuration re-resolution.
 
 ### 3.10 Bonus today (updated: CP-3C)
 
@@ -243,8 +243,8 @@ Phase 4 remains responsible for the broader unified calculation-core and immutab
 - Full actor/time/reason/notes/update/void metadata fields exist on `PayrollBonusEvents`.
 - Bonus mutation is allowed only for Open and Returned periods. Draft/InReview/Approved/Locked/Archived/Cancelled reject bonus mutation.
 - Bonus create validates CP-2E snapshot-aware driver eligibility and branch ownership (same guard as non-BONUS period-pay).
-- Finalization reads active `PayrollBonusEvents` directly and writes them as `BONUS` `PayrollFinalLines` with `BonusEventID` linkage. Voided events are excluded.
-- Finalization preview reads canonical bonus events and exposes them in the `bonus_events` list. BONUS does not appear in the `lines` (DraftLine) list.
+- Submit captures Active `PayrollBonusEvents` in the immutable calculation packet; CP-4F projects that captured bonus line into `PayrollFinalLines` without rereading current events. Voided events are excluded at capture.
+- Approved finalization preview reads the captured normalized bonus lines rather than current bonus-event state.
 - Ledger receives bonus through final lines as before.
 - **CP-3B1 (Done with Notes):** `GET /payroll/periods/{id}/bonuses/summary` adds a zero-inclusive, backend-owned bonus summary. The driver roster comes strictly from the CP-2E `PayrollPeriodDriverEligibility` snapshot (gated by the `PayrollPeriodEligibilitySnapshots` marker) — every snapshot-eligible driver appears even with zero bonus events, and `PayrollBonusEvents` are aggregated onto that roster, never used to expand it. Periods without a snapshot marker return a controlled `422` (`BONUS_SUMMARY_UNAVAILABLE_NO_ELIGIBILITY_SNAPSHOT`); there is no live-roster fallback. Event aggregation is scoped by `PayrollPeriodID`, `CompanyID`, and `BranchID` together, so a same-company cross-branch row cannot contaminate a driver's total. Capabilities (`can_create`/`can_update`/`can_void`) are computed per driver, not period-wide: `can_create` is false for an `IncludedByExistingData` driver who would be rejected by `POST /bonuses` (no existing period-pay source), and `can_update`/`can_void` require at least one Active event. The existing `GET /bonuses` event-list endpoint is unchanged.
 - **CP-3B2a (Done with Notes):** the safety foundation for the transactional bonus batch. `payroll.PayrollPeriods.BonusDataRevision` (`BIGINT NOT NULL DEFAULT 0`) is a period-level bonus-mutation concurrency token: every successful single-event `POST`/`PATCH`/`DELETE` on `/bonuses` increments it exactly once, in the same transaction as the event write. Idempotent void (an already-Voided event) does not bump it again. `PATCH /bonuses/{id}` enforces its optimistic-concurrency check via an atomic SQL predicate (`UPDATE ... WHERE ... AND DataRevision = :expected RETURNING ...`) rather than a read-then-write check with no predicate on the write itself — a stale `data_revision` returns `409` with no event or period-revision side effects. `GET /bonuses/summary` exposes `bonus_data_revision`, sourced directly from `PayrollPeriods.BonusDataRevision` (never `MAX(PayrollBonusEvents.DataRevision)`). A DB-level ownership trigger on `PayrollBonusEvents` rejects any insert/update whose `CompanyID`/`BranchID` doesn't match the owning period (closing the CP-3A P2 gap). `_write_line_audit` gained an optional `correlation_id` parameter.
@@ -257,10 +257,10 @@ Phase 4 remains responsible for the broader unified calculation-core and immutab
 - InReview source data is read-only. Open is the normal initial current-payroll entry/calculation state; Returned is a previously submitted period that remains editable for correction and uses the live CP-4B preview.
 - `SubmittedAtUtc` is populated on successful Submit/Resubmit.
 - CP-4D captures the submitted immutable calculation snapshot; CP-4E review financial display reads that ReviewItem-linked packet, and approval refers to that exact linked snapshot identity rather than live payroll financial data.
-- Current review financial authority is `ManagerReviewItems.PayrollCalculationSnapshotID` -> immutable submitted financial packet. Open/Returned remain live operational calculation states; finalization does not consume the approved snapshot until CP-4F.
+- Current review and approved financial authority is `ManagerReviewItems.PayrollCalculationSnapshotID` -> immutable submitted financial packet. Open/Returned remain live operational calculation states; CP-4F finalization preview and FinalLine projection consume the exact Approved ReviewItem-linked packet.
 - Rejected/EditRequested resolves the historical ReviewItem and moves the period to Returned, preserving its existing immutable snapshot. Corrections remain live in Returned; Resubmit captures a new snapshot revision, creates a new Pending PeriodApproval, and returns the period to InReview.
 - Manual InReview→Open/Cancelled is blocked. InReview exits only through the PeriodApproval review decision: Approved -> Approved; Rejected/EditRequested -> Returned.
-- Approved has no direct PATCH transition back to InReview; the finalization snapshot-consumption cutover remains CP-4F.
+- Approved has no direct PATCH transition back to InReview; CP-4F finalization consumes its exact approved snapshot before moving the period to Locked.
 
 ### 3.12 Transition concurrency today
 
@@ -270,14 +270,14 @@ Draft cancellation now requires the transition-specific `payroll.finalize` permi
 
 ### 3.13 Finalization and ledger today
 
-Strong existing foundation:
+Current CP-4F finalization foundation:
 
-- Approved-only finalization;
-- transaction-level branch advisory lock;
-- rate refresh and structural blocker validation;
-- atomic Approved→Locked claim;
-- immutable final lines;
-- immutable Locked/Archived status rules;
+- Approved-only finalization through exactly one approved snapshot-linked PeriodApproval ReviewItem;
+- transaction-level branch/workflow and PayrollPeriod locking;
+- structural reconciliation of persisted snapshot header, DriverTotals, SnapshotLines, and tenant/review/period identity;
+- atomic SnapshotLine-to-FinalLine projection, audit, and Approved→Locked transition;
+- immutable final lines and immutable Locked/Archived status rules;
+- no live rates, DraftLines, Status, BonusEvents, NeedsManagerReview, or min/max calculation as financial authority.
 - source-rate/rule snapshot data;
 - finalization audit event;
 - ledger totals from final lines.
@@ -407,7 +407,7 @@ One backend calculation core produces:
 - finalization inputs;
 - final report/ledger values.
 
-Open/Returned previews are recomputed read-only for current source/config versions. Submit persists an immutable snapshot. InReview and Approved read that exact snapshot. CP-4F finalization must consume the approved snapshot and must not re-resolve newer rates.
+Open/Returned previews are recomputed read-only for current source/config versions. Submit persists an immutable snapshot. InReview and Approved read that exact snapshot. CP-4F finalization preview and FinalLines consume the approved snapshot without re-resolving newer rates.
 
 ### AD-9 — Finalized periods are never reopened
 
@@ -521,8 +521,8 @@ Not allowed:
 - ~~No Open/Returned expected-income contract.~~ Resolved by CP-4B: Open/Returned now have a backend-owned, read-only live calculation preview.
 - ~~No calculation input/version contract.~~ Resolved for submitted packets by CP-4C/CP-4D: `current-payroll-v1`, `SourceConfigHash`, `SnapshotHash`, normalized immutable outputs, and source evidence are captured at Submit/Resubmit.
 - ~~No submitted calculation snapshot.~~ Resolved by CP-4D: successful Submit/Resubmit atomically captures an immutable revision and links the new Pending PeriodApproval review item to it.
-- Review and finalization can observe different rate/config inputs.
-- ~~Bonus incorrectly participates in min/max.~~ Resolved by CP-3C (`90a6dbe`): current finalization and approved finalization preview exclude canonical bonus events from the min/max base and add them afterward (`normal pay -> minimum/maximum -> add bonus`). CP-4D captures the submitted calculation packet and CP-4E binds review/approval to it; finalization consumption remains CP-4F work.
+- ~~Review and finalization can observe different rate/config inputs.~~ Resolved by CP-4F: Approved preview and finalization consume the exact Approved ReviewItem-linked snapshot.
+- ~~Bonus incorrectly participates in min/max.~~ Resolved by CP-3C (`90a6dbe`): current finalization and approved finalization preview exclude canonical bonus events from the min/max base and add them afterward (`normal pay -> minimum/maximum -> add bonus`). CP-4D captures the submitted calculation packet, CP-4E binds review/approval to it, and CP-4F projects that captured result without live recomputation.
 - Current preview response cannot support required dynamic report views.
 - Current day grid exposes financial calculated amounts directly.
 
@@ -577,7 +577,7 @@ Recommended fields:
 - `LastStatusReason`
 - optional `ReturnedAtUtc`, `ReturnedByUserID`
 
-`PayrollPeriods.ApprovedCalculationSnapshotID` is not recommended and does not exist. The Approved PeriodApproval `ManagerReviewItems` row and its non-null `PayrollCalculationSnapshotID` are the durable approved financial identity. CP-4F will locate that Approved PeriodApproval row for the PayrollPeriod and use its linked immutable snapshot as finalization authority; no migration `0063`, period-level duplicate pointer, or historical backfill is required.
+`PayrollPeriods.ApprovedCalculationSnapshotID` is not recommended and does not exist. The Approved PeriodApproval `ManagerReviewItems` row and its non-null `PayrollCalculationSnapshotID` are the durable approved financial identity. CP-4F locates that Approved PeriodApproval row for the PayrollPeriod and uses its linked immutable snapshot as finalization authority; no migration `0063`, period-level duplicate pointer, or historical backfill is required.
 
 Add `Returned` to the period status constraint. Do not add Prepared.
 
@@ -693,7 +693,7 @@ Implemented normalized snapshot model:
 - CP-4D captures the header, totals, lines, hashes, and a linked Pending PeriodApproval atomically on Submit/Resubmit. No `SourceDataRevision`, PayrollPeriods snapshot pointer, or historical backfill was introduced.
 - CP-4E uses the linked snapshot as the immutable review/approval financial authority. It added no migration: Alembic head remains `0062` and no duplicate period-level approved-snapshot pointer exists.
 
-Open/Returned previews remain live and read-only. CP-4E binds snapshot-backed review/approval to the exact submitted snapshot; CP-4F must make finalization consume that approved snapshot.
+Open/Returned previews remain live and read-only. CP-4E binds snapshot-backed review/approval to the exact submitted snapshot; CP-4F finalization consumes that approved snapshot.
 
 ### 7.8 Final information snapshots
 
@@ -1146,12 +1146,12 @@ Submit must atomically:
 ### 13.3 Finalization
 
 - Approved-only.
-- CP-4F must use the approved CalculationSnapshotID.
-- CP-4F must not resolve newer current rates/rules/configuration.
-- Rechecks structural snapshot integrity and idempotency.
-- Writes FinalLines and final metadata atomically.
+- Requires exactly one Approved PeriodApproval ReviewItem with a non-null linked snapshot matching the target period, company, and branch; missing, ambiguous, or corrupt identity fails closed.
+- Uses the approved CalculationSnapshotID and does not resolve newer current rates/rules/configuration.
+- Rechecks persisted snapshot structural integrity and duplicate-finalization state without recomputing its hash or financial inputs.
+- Writes FinalLines, concise immutable provenance, and finalization audit metadata atomically.
 - Moves Approved→Locked.
-- Captures all calculation, rate, rule, bonus, status, actor, and configuration snapshots needed for final reports.
+- Projects the submitted snapshot's existing captured calculation, rate, rule, bonus, Status, and configuration evidence; it creates no snapshot or revision.
 
 ### 13.4 Ledger
 
@@ -1186,7 +1186,7 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 
 1. ~~**InReview is editable.**~~ **Resolved by CP-0A.** Normal source entry is limited to Open/Returned (with controlled Draft pre-entry); InReview source data is read-only.
 2. ~~No immutable submitted revision/snapshot.~~ **Resolved by CP-4D/CP-4E.** Submit/Resubmit captures the durable immutable revision, and snapshot-backed review/approval binds to that exact ReviewItem-linked identity.
-3. **Finalization can re-resolve newer rates after review.** Final pay may differ from reviewed pay.
+3. ~~**Finalization can re-resolve newer rates after review.**~~ **Resolved by CP-4F.** Approved finalization preview and FinalLines consume the exact Approved ReviewItem-linked immutable snapshot; final pay cannot differ from the reviewed packet because of post-approval live rate/configuration drift.
 4. **Lifecycle writes are not uniformly concurrency-safe.** Stale transitions can bypass the state graph.
 5. ~~Bonus participates in current min/max earnings.~~ **Resolved by CP-3C.** `finalize_period` and `get_finalization_preview` both now exclude bonus from the min/max comparison base and add it back in only after minimum/maximum is applied.
 
@@ -1241,7 +1241,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | Phase 1 | Lifecycle slots, Returned state, smart creation | Done with Notes | Claude | Codex lifecycle review |
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Done with Notes | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Done with Notes | Claude | Codex financial-rule review |
-| Phase 4 | Unified calculation core and immutable review snapshot | In Progress (CP-4A–CP-4E Completed; CP-4F Pending) | Claude | Codex calculation parity review |
+| Phase 4 | Unified calculation core and immutable review snapshot | Complete (CP-4A–CP-4F Completed) | Claude | Codex calculation parity review |
 | Phase 5 | Hub and calculation-report contracts | Pending | Claude | Codex contract/security review |
 | Phase 6 | Finalized payroll information library and audit | Pending | Claude | Codex ledger immutability review |
 | Phase 7 | Constraint, permission, performance, and rollout hardening | Pending | Claude | Codex release review |
@@ -1663,7 +1663,7 @@ No phase may be marked Done unless implementation exists, required tests ran suc
 - [x] P3B2b: Create-only transactional batch endpoint (idempotent replay, all-or-nothing writes). — **Done with Notes**
 - [x] P3C: Min/max formula correction (bonus excluded from min/max base). — **Done with Notes**
 
-Phase 3 is complete. All five units (CP-3A, CP-3B1, CP-3B2a, CP-3B2b, CP-3C) are Done with Notes; no phase-scoped P0/P1 blocker remains. Phase 4 (unified calculation core and immutable review snapshot) was Pending at Phase 3's close — Phase 3's closure did not itself start Phase 4 work. Phase 4 is now `In Progress`; CP-4A through CP-4E are Completed, and CP-4F remains Pending.
+Phase 3 is complete. All five units (CP-3A, CP-3B1, CP-3B2a, CP-3B2b, CP-3C) are Done with Notes; no phase-scoped P0/P1 blocker remains. Phase 4 was Pending at Phase 3's historical close; it has since completed CP-4A through CP-4F.
 
 ### CP-3A completion note
 
@@ -1960,7 +1960,7 @@ total_pay = normal_after_minmax + total_bonus
 **Units closed:** CP-3A, CP-3B1, CP-3B2a, CP-3B2b, CP-3C — all Done with Notes; no phase-scoped P0/P1 blocker remains.
 **Commits:** `ade9234` (CP-3A), `7a34a52` (CP-3B1), `5feacf5` (CP-3B2a), `0124718` (CP-3B2b), `90a6dbe` (CP-3C).
 
-Phase 3 (Canonical Bonus Domain and Min/Max Classification) is complete: bonus events are canonicalized as `payroll.PayrollBonusEvents` with full CRUD, a zero-inclusive summary, a create-only transactional batch with idempotency/revision safety, and a corrected min/max formula that excludes bonus from the comparison base and adds it back only after minimum/maximum is applied. Phase 4 (unified calculation core and immutable review snapshot) followed that closure and is now `In Progress`; CP-4A through CP-4E are complete, while CP-4F remains Pending.
+Phase 3 (Canonical Bonus Domain and Min/Max Classification) is complete: bonus events are canonicalized as `payroll.PayrollBonusEvents` with full CRUD, a zero-inclusive summary, a create-only transactional batch with idempotency/revision safety, and a corrected min/max formula that excludes bonus from the comparison base and adds it back only after minimum/maximum is applied. Phase 4 followed that closure and has since completed CP-4A through CP-4F.
 
 ---
 
@@ -2477,14 +2477,14 @@ Backfilling historical status identity from free-text codes may be ambiguous. Am
 
 ### Phase 4 — Unified Calculation Core and Immutable Review Snapshot
 
-**Status:** `In Progress` — CP-4A through CP-4E are `Completed`; CP-4F remains `Pending`.
+**Status:** `Complete` — CP-4A through CP-4F are `Completed`.
 
 - [x] P4A: extract pure/versioned daily calculation core (authoritative PerUnit only; Status-payment caller kept separate; direct/manual boundaries preserved; dormant M13c legacy methods left completely untouched and out of scope). — **Completed** (commit `9b76aa9`; see "CP-4A completion record" immediately below).
 - [x] P4B: add Open/Returned calculation preview. — **Completed** (commit `f3988b7`; see "CP-4B completion record" immediately below).
 - [x] P4C: add calculation snapshots and source/config hashes. — **Completed** (commit `d7f6b9e`; see "CP-4C completion record" below).
 - [x] P4D: submit captures snapshot/revision. — **Completed** (commit `9e4c32f`; see "CP-4D completion record" below).
 - [x] P4E: approval binds to snapshot. — **Completed** (commit `e332d02`; see "CP-4E completion record" below).
-- [ ] P4F: finalization consumes approved snapshot. — **Pending**.
+- [x] P4F: finalization consumes approved snapshot. — **Completed** (commit `434f673`; see "CP-4F completion record" below).
 
 ### CP-4A completion record
 
@@ -2500,7 +2500,7 @@ CP-4A is closed. Implementation commit: `9b76aa9` — "feat: add cp-4a perunit c
 - Independent review: final Codex verdict `PASS_WITH_NOTES`, no P0/P1 blockers, recommendation "commit CP-4A".
 - Test evidence: CP-4A focused suite 51 passed (run successfully twice); Phase 4 Characterization Slice 1 21 passed; Phase 4 Characterization Slice 2 24 passed; rate calculation boundaries 15 passed; financial regression group 155 passed (status payment, prepared operational entry, CP-3C min/max and bonus behavior, finalization preview, ledger behavior).
 - Known non-blocking environment note: the `testing.common.database: failed to shutdown the server automatically` warning observed during test runs is existing Windows/Python test-infrastructure debt, not a CP-4A calculation failure, and is not CP-4A product behavior.
-- Closing CP-4A did not close Phase 4: CP-4B through CP-4E have since completed. CP-4F remains Pending.
+- CP-4A was the first Phase 4 unit; the completed Phase 4 closure record below supersedes its then-future CP-4B through CP-4F wording.
 
 ### CP-4B completion record
 
@@ -2517,7 +2517,7 @@ CP-4B is closed. Implementation commit: `f3988b7` — "feat: add cp-4b calculati
 - Independent review result: `PASS_WITH_NOTES`, with no P0/P1 blockers; recommendation was to commit CP-4B.
 - Test evidence: CP-4B focused suite 72 collected and 72 passed, run successfully twice; P7 5 passed; P8 5 passed; CP-4A 51 passed; Phase 4 Characterization Slice 1 21 passed; Phase 4 Characterization Slice 2 24 passed; rate boundaries 15 passed; CP-2D2 45 passed; CP-3A 26 passed; CP-3C 17 passed; finalization preview 28 passed; ledger 19 passed.
 - Known non-blocking notes: route-specific `EnteredAmount` coverage and route-specific `CalculatedAmount IS NULL -> Quantity × RateAmount` fallback coverage remain P2 test gaps; both inherit unchanged lower-level behavior and were not blockers to CP-4B closure. Windows/Python `testing.postgresql` shutdown behavior may leave ephemeral PostgreSQL processes after pytest sessions; this remains environment/test-infrastructure debt, not a CP-4B lifecycle defect.
-- CP-4B closure did not close Phase 4: CP-4C through CP-4E have since completed. CP-4F remains Pending.
+- CP-4B was an intermediate Phase 4 closure; CP-4C through CP-4F subsequently completed.
 
 ### CP-4C completion record
 
@@ -2534,10 +2534,10 @@ CP-4C is closed. Implementation commit: `d7f6b9e` — "feat: add cp-4c calculati
 - Status remains a System Status Entry Channel, not a PayItem; `PTO_STATUS`, `StatusKeyPayRule`, and DAC were not introduced. Canonical `PayrollBonusEvents` remains the bonus source (Active contributes; Voided does not), and bonus remains after min/max. The schema supports existing `SYS_MIN_TOPUP` and `SYS_MAX_CAP` system lines without performing calculations: daily + Status + non-BONUS period pay, then minimum, then maximum, then bonus.
 - Persistence is DB-enforced immutable. One reusable PostgreSQL trigger function rejects every `UPDATE` and `DELETE` on all three tables after insertion; `INSERT` remains permitted. No trigger bypass/test mode or `ON DELETE CASCADE` was added.
 - No snapshot backfill occurred. Existing InReview/Approved periods receive no synthetic snapshots, Locked/Archived history is untouched, and CP-4C does not manufacture historical authority from mutable data.
-- CP-4C did not implement Submit/Resubmit capture, snapshot pointers on `PayrollPeriods`, Review snapshot reads, approval binding, finalization-from-snapshot, FinalLine projection changes, public snapshot endpoints, frontend changes, manual Recalculate, DAC, `StatusKeyPayRule`, or a future calculated-method framework. CP-4D subsequently added the first normal lifecycle writer; the remaining review/approval/finalization consumption work remains deferred.
+- CP-4C did not implement Submit/Resubmit capture, snapshot pointers on `PayrollPeriods`, Review snapshot reads, approval binding, finalization-from-snapshot, FinalLine projection changes, public snapshot endpoints, frontend changes, manual Recalculate, DAC, `StatusKeyPayRule`, or a future calculated-method framework. CP-4D subsequently added the first normal lifecycle writer, and CP-4E/CP-4F subsequently completed review/approval binding and finalization consumption.
 - Independent final review: `PASS_WITH_NOTES`, no P0/P1 blockers, recommendation `SAFE_TO_COMMIT_CP4C`. Test evidence: CP-4C focused suite 33 collected and 33 passed; relevant current regression suites totaled 588 passing tests across CP-4A, CP-4B, characterization Slices 1/2, rate boundaries, Status, bonuses, min/max, finalization preview, ledger, Returned lifecycle, Review, schedule versioning, and eligibility snapshots. This does not claim the entire repository suite is green.
 - Known non-blocking debt: Windows `testing.postgresql` shutdown warnings remain environment/test-infrastructure debt. Three historical suites retain obsolete expectations independent of CP-4C: CP-1B hardcodes Alembic head `0055`; CP-2B hardcodes head `0054`; CP-2C hardcodes head `0055` and expects the retired generic Period Pay BONUS path. Their repair is not CP-4D work unless separately prioritized.
-- CP-4C closure did not close Phase 4. CP-4D subsequently added atomic Submit/Resubmit snapshot capture, and CP-4E bound review/approval to that exact snapshot. CP-4F remains FinalLine projection from the approved stored snapshot without live rate/config re-resolution.
+- CP-4C established the schema foundation; CP-4D through CP-4F subsequently completed capture, approval binding, and exact FinalLine projection from the approved stored snapshot.
 
 ### CP-4D completion record
 
@@ -2553,17 +2553,17 @@ CP-4D is closed. Implementation commit: `9e4c32f` — "feat: capture cp-4d submi
 - Source evidence is constructed for Daily PerUnit, canonical Status, non-BONUS period pay/manual, Active BonusEvent, `SYS_MIN_TOPUP`, and `SYS_MAX_CAP`. `SourceConfigHash` records deterministic source/config evidence; `SnapshotHash` records immutable packet semantics, with CP-4C canonicalization and no generated surrogate IDs in semantic hash identity.
 - Snapshot capture writes `CALCULATION_SNAPSHOT_CAPTURED` audit metadata with the snapshot identity, revision, and hashes; it does not duplicate the full packet into AuditLog.
 - No historical snapshot backfill occurs. Existing legacy InReview/Approved periods may remain without a snapshot link, Locked/Archived remain unchanged, and legacy Returned periods may enter with revision 1 without a synthetic prior revision.
-- CP-4D itself did not implement approval binding, Review snapshot reads, finalization from snapshot, FinalLine projection changes, public snapshot APIs, frontend changes, manual Recalculate, or CP-4E/CP-4F behavior. CP-4E subsequently implemented the focused review/approval binding and review display; finalization consumption remains CP-4F.
+- CP-4D itself did not implement approval binding, Review snapshot reads, finalization from snapshot, FinalLine projection changes, public snapshot APIs, frontend changes, manual Recalculate, or CP-4E/CP-4F behavior. CP-4E subsequently implemented the focused review/approval binding and review display; CP-4F subsequently completed finalization consumption.
 - Independent review: `PASS_WITH_NOTES`, no P0/P1 blockers, recommendation `SAFE_TO_COMMIT_CP4D`. Evidence: CP-4D 27 passed; CP-4B 72 passed; CP-1D 37 passed; CP-3A 26 passed; CP-3C 17 passed; Phase 4 Slice 1 21 passed; Phase 4 Slice 2 24 passed; CP-2C 34 passed with two known stale failures; CP-1B 11 passed with one known stale failure. This does not claim the entire repository suite is green.
 - Known non-blocking notes: Windows `testing.postgresql` process/shutdown exhaustion during extended regression execution; `SourceConfigHash` currently includes some explanatory derived/stored `SourceEvidenceJSONB` values; valid-zero Submit coverage uses a DailyNote-only zero-total period rather than a zero-valued financial line; some rich evidence tests construct internal capture packets rather than exercising every evidence type end-to-end; and deterministic retry seams exist while real two-connection timing coverage remains limited.
 - CP-4D updated several existing tests only for immutable-history isolation: they retain snapshot-backed periods and clean mutable state without weakening restrictive FKs, deleting snapshots, disabling triggers, changing product assertions, or modifying conftest/shared fixtures.
-- CP-4D closure does not close Phase 4. CP-4E subsequently bound review/approval semantics to the exact submitted immutable snapshot. CP-4F remains finalization projection from the approved stored snapshot without live rate/config re-resolution.
+- CP-4D established lifecycle capture; CP-4E and CP-4F subsequently completed approval binding and finalization projection from the exact approved stored snapshot.
 
 ### CP-4E completion record
 
 CP-4E is closed. Implementation commit: `e332d02` — "feat: bind cp-4e approval to submitted snapshot". Alembic head remains `0062`; CP-4E introduced no migration.
 
-- The authority chain is now: Open/Returned live calculation -> Submit/Resubmit -> immutable snapshot revision -> Pending PeriodApproval linked to `PayrollCalculationSnapshotID` -> snapshot-backed review -> approval of that exact linked snapshot -> Approved. CP-4F remains responsible for consuming the approved snapshot during finalization.
+- The authority chain is now: Open/Returned live calculation -> Submit/Resubmit -> immutable snapshot revision -> Pending PeriodApproval linked to `PayrollCalculationSnapshotID` -> snapshot-backed review -> approval of that exact linked snapshot -> Approved -> snapshot-backed finalization preview -> exact FinalLine projection -> Locked.
 - `review.ManagerReviewItems.PayrollCalculationSnapshotID` remains the CP-4D submitted-packet identity and is now also the financial packet an Approved PeriodApproval decision refers to. No `PayrollPeriods.ApprovedCalculationSnapshotID`, migration `0063`, or other duplicate pointer was introduced.
 - Legacy Pending PeriodApproval items with `PayrollCalculationSnapshotID IS NULL` cannot be approved: approval fails closed with `SNAPSHOT_REQUIRED_FOR_APPROVAL`. Return/EditRequested remains available; a Returned legacy period can Resubmit into CP-4D revision 1 and its new snapshot-linked Pending item follows the normal CP-4E path. No legacy snapshot backfill occurred; legacy Approved, Locked, and Archived records remain untouched.
 - `GET /review/items/{item_id}/payroll-snapshot` is a review-scoped immutable read, not a generic snapshot browser. It takes only the ReviewItem identity, derives the linked snapshot server-side, enforces review permission and company/branch scope, preserves ODA/driver-role restrictions, requires a snapshot-backed PeriodApproval, and verifies the snapshot period matches the ReviewItem period.
@@ -2575,6 +2575,30 @@ CP-4E is closed. Implementation commit: `e332d02` — "feat: bind cp-4e approval
 - Implementation scope was limited to `backend/app/review/router.py`, `backend/app/review/schemas.py`, `backend/app/review/service.py`, focused CP-4E/CP-6 tests, and the focused review frontend API, types, and `ReviewDetailDialog`; no migration or payroll service change was required.
 - Independent review: `PASS_WITH_NOTES`, no P0/P1 blockers, recommendation `SAFE_TO_COMMIT_CP4E`. Evidence: CP-4E 12 passed; CP-6 19 passed; Review 32 passed; Returned lifecycle 30 passed; CP-1D 37 passed; CP-4B 72 passed; CP-4C 33 passed; CP-4D 27 passed; finalization preview 28 passed; ledger 19 passed; CP-0C transition permissions 10 passed; branch access 11 passed; and permission catalog 15 passed. Frontend `npm run build` passed; `npm run lint` passed with one pre-existing DashboardPage exhaustive-deps warning. This does not claim the entire repository suite is green.
 - Known non-blocking debt: `test_security_matrix.py` retains a stale generic BONUS period-pay expectation (31 passed / 1 stale failure); `test_cp1b_inreview_slot.py` retains its old Alembic-head `0055` expectation (11 passed / 1 stale failure); Windows `testing.postgresql` shutdown behavior remains environment debt; the DashboardPage lint warning and Vite large-chunk warning are pre-existing; source/config hash semantic clarity, valid-zero coverage shape, constructed-packet evidence coverage, and real two-connection timing coverage remain P2 follow-up.
+
+### CP-4F completion record
+
+CP-4F is closed. Implementation commit: `434f673` — "feat: finalize payroll from approved snapshot". Alembic head remains `0062`; CP-4F added no migration `0063`, no `PayrollPeriods` approved-snapshot pointer, no `FinalizedFromSnapshotID`, and no generic snapshot-schema expansion.
+
+- Phase 4's completed financial authority chain is: Open/Returned -> live calculation; Submit/Resubmit -> immutable `PayrollCalculationSnapshot` revision; InReview -> submitted ReviewItem-linked snapshot; Approved -> Approved PeriodApproval ReviewItem-linked snapshot; finalization preview -> that exact approved snapshot; Finalize -> deterministic projection of that exact snapshot into FinalLines; Locked/Archived -> FinalLines and ledger as operational history with the approved snapshot retained as their financial origin/provenance.
+- CP-4F guarantees that the money written into FinalLines and locked payroll history is the exact immutable financial packet the reviewer approved. Finalization no longer financially re-derives an approved payroll from mutable live data.
+- Finalization requires exactly one Approved `PeriodApproval` ReviewItem for the target period with matching entity, company, branch, non-null `PayrollCalculationSnapshotID`, and a linked snapshot whose `PayrollPeriodID` matches. Missing, ambiguous, or corrupt identity fails closed; it does not choose a latest snapshot or use a duplicate period-level pointer.
+- A legacy Approved PeriodApproval with `PayrollCalculationSnapshotID IS NULL` fails closed with `SNAPSHOT_REQUIRED_FOR_FINALIZATION`. There is no live-calculation fallback, synthetic snapshot, backfill, migration remediation, or new Approved-to-Returned correction path. Existing Locked/Archived history is untouched.
+- Snapshot-backed Approved preview/finalization does not financially rerun DraftLines, current DriverRates/rate resolution, PerUnit, Status resolution, current BonusEvents, NeedsManagerReview, min/max, CP-4B live calculation, or Submit-time financial blockers. It structurally reconciles persisted snapshot header, DriverTotals, SnapshotLines, and review/period/tenant identity without recomputing `SnapshotHash`, then projects persisted values into FinalLines.
+- SnapshotLines are the detailed projection authority; DriverTotals and the header provide stored per-driver and period-total reconciliation. Supported lines include daily PerUnit/DraftLine-backed payment, canonical Status, non-BONUS period/manual pay, Active BonusEvent, `SYS_MIN_TOPUP`, and `SYS_MAX_CAP`. Amount, applicable quantity/rate, date/scope, source/pay-item metadata, and captured evidence/provenance are projected without live financial re-resolution.
+- Existing `NUMERIC(18,4)` and Decimal semantics are preserved for snapshot values and FinalLines. CP-4F adds no float arithmetic, 2dp payout rounding, or gratuitous requantization. The CP-3A assertion adjustment is representation-only Decimal comparison, not a changed rounding contract.
+- FinalLine provenance records concise immutable origin including snapshot ID, revision, persisted hash, snapshot line/source identity, and captured evidence where applicable. `PAYROLL_FINALIZED` audit metadata identifies the period, Approved ReviewItem, snapshot, revision, and persisted hash; the packet/hash is not recomputed or duplicated in audit. Finalize neither updates, deletes, creates, revises, nor rehashes a snapshot.
+- Finalization runs atomically in the normal request transaction with existing branch/workflow and period locking, Approved ReviewItem lookup/locking, workflow/permission/tenant validation, packet reconciliation, projection, audit, and Approved->Locked transition. No CP-4D-style `REPEATABLE READ` was added. A successful finalization leaves the period no longer Approved, blocking a second projection; focused tests also prove a failure rolls back partial FinalLines, status transition, and success audit/state.
+- Finalization-preview now reads the same approved immutable packet Finalize consumes: review packet X -> Approved preview X -> Finalize X. Post-approval live drift cannot change either result. Open/Returned remain CP-4B live-calculation states; CP-4F does not freeze them before successful Submit/Resubmit.
+- The minimal public/frontend compatibility change makes finalization-preview `draft_line_id` nullable and supplies a stable backend `source_key`, so Status/system/non-DraftLine snapshot rows do not receive invented DraftLine IDs. `FinalizationPreviewDialog` and payroll types render, group, and format this data; they do not calculate totals or choose snapshot authority.
+- Older tests that encoded Approved live-recalculation behavior were classified and migrated rather than disabled: Approved asserts frozen snapshot authority; Open/Returned retains live authority; workflow/security/integrity remains live. CP-2D2 test cleanup now retains immutable history, and legacy direct-Approved/no-snapshot finalization fails closed. Canonical Status remains EntryState authority before Submit and the captured Status line becomes financial authority after Submit/Approve.
+- Implementation scope: `backend/app/payroll/schemas.py`, `backend/app/payroll/service.py`, `backend/tests/test_cp2d2_status_payment.py`, `backend/tests/test_cp3a_bonus_events.py`, `backend/tests/test_cp4f_finalization_snapshot_projection.py`, `backend/tests/test_finalization_preview.py`, `backend/tests/test_payroll_trust_p7.py`, `backend/tests/test_payroll_trust_p8.py`, `backend/tests/test_rate_calc_boundaries.py`, `frontend/src/pages/payroll/FinalizationPreviewDialog.tsx`, and `frontend/src/types/payroll.ts`. No migration, router, conftest, or shared fixture changed.
+- Independent review: `PASS_WITH_NOTES`, no P0/P1 blockers, recommendation `SAFE_TO_COMMIT_CP4F`. Evidence: CP-4F focused 8 passed; finalization preview 28; rate boundaries 15; P7 5; P8 5; CP-3A 26; CP-3C 17; CP-2D2 Status 45; CP-4B 72; CP-4C 33; CP-4D 27; CP-4E 12; Review 32; CP-6 19; Returned lifecycle 30; CP-1D 37; ledger 19; branch access 11; permission catalog 15; transition permissions 10. Frontend build passed; lint passed with the pre-existing DashboardPage exhaustive-deps warning. Security matrix remained 31 passed / 1 known stale generic BONUS expectation. This does not claim the full repository suite is green.
+- Non-blocking P2/environment debt remains: the stale security-matrix generic BONUS expectation; Windows `testing.postgresql` shutdown warnings; the existing DashboardPage lint warning; the Vite large-chunk warning; and non-runtime stale wording in router/finalization-preview/P8 comments. These are not Phase 4 correctness blockers.
+
+**Phase 4 closure:** CP-4A calculation core, CP-4B Open/Returned live preview, CP-4C immutable snapshot/hash foundation, CP-4D Submit/Resubmit capture, CP-4E snapshot-backed review/approval, and CP-4F snapshot-backed preview/finalization are complete. The final invariant is: **Calculate -> Freeze -> Review -> Approve -> Finalize uses one immutable financial packet after Submit.**
+
+Phase 4 completion does not close the broader backend/product backlog. Transition concurrency hardening, Off-day/Add Day activation, future Status pay-rule/usage-limit work, audit append-only/completeness, Current Payroll Hub/report contracts, client-supplied standard-date validation, SemiMonthly cadence, broader tenant integrity, finalized-library metadata, and broader frontend alignment remain separately prioritized roadmap work. The next direction is end-to-end Current Payroll product alignment and hardening according to the existing roadmap, not another calculation/snapshot abstraction phase; no follow-on implementation is started here.
 
 **Objective**
 
@@ -2680,7 +2704,7 @@ Current `RateBehavior` values do not equal future `CalculatedMethod` identities.
 
 ### Phase 4 calculation compatibility characterization gate
 
-**Status:** Prerequisite — not itself a lifecycle feature. **Closed for the approved CP-4A scope** (see "Characterization gate closure" below); closing this prerequisite did not by itself mark Phase 4 or CP-4A implementation as started. Production CP-4A implementation has since completed (commit `9b76aa9`), followed by CP-4B completion (commit `f3988b7`), CP-4C schema/integrity completion (commit `d7f6b9e`), CP-4D Submit snapshot capture (commit `9e4c32f`), and CP-4E review/approval binding (commit `e332d02`); Phase 4 overall is `In Progress` and CP-4F remains Pending.
+**Status:** Prerequisite — not itself a lifecycle feature. **Closed for the approved CP-4A scope** (see "Characterization gate closure" below); closing this prerequisite did not by itself mark Phase 4 or CP-4A implementation as started. Production CP-4A implementation has since completed (commit `9b76aa9`), followed by CP-4B (commit `f3988b7`), CP-4C (commit `d7f6b9e`), CP-4D (commit `9e4c32f`), CP-4E (commit `e332d02`), and CP-4F finalization projection (commit `434f673`); Phase 4 overall is `Complete`.
 
 Before CP-4A production extraction or any caller cutover:
 
@@ -2711,7 +2735,7 @@ Before CP-4A production extraction or any caller cutover:
 
 - EnteredAmount compatibility (no quantization applied — the user-supplied amount passes through verbatim).
 - Fixed/None/manual compatibility (Fixed and None are dispatched by the current compatibility path but currently return no computed amount; their downstream fallback/manual behavior must be characterized separately).
-- The legacy/manual fallback: `CalculatedAmount IS NULL -> Quantity * RateAmount`, computed by the finalization/preview COALESCE pattern rather than by the rate-behavior dispatch.
+- The legacy/manual fallback: `CalculatedAmount IS NULL -> Quantity * RateAmount`, computed by the live calculation/preview COALESCE pattern before snapshot capture rather than by the rate-behavior dispatch.
 - PostgreSQL `NUMERIC(18,4)` coercion behavior at insert time.
 
 **Dormant M13c legacy methods are excluded from this gate.** `OrdinalTier`, `RangeBracket`, `RangeProgressive`, and `Block` are not characterized further by CP-4A and are not a prerequisite for closing this gate — they remain dormant legacy code outside the current Phase 4 implementation scope (see classification D above and the CP-4A implementation boundary). No characterization Slice targeting these four methods is required or planned as part of CP-4A.
@@ -3018,7 +3042,7 @@ Each unit must be executed as a separate, reviewable prompt. Claude must not com
 | CP-4C | P4C — calculation snapshot schema, hashes, and immutability — **Completed** (commit `d7f6b9e`) | focused migration, pure hash utility, and focused tests | lifecycle integration, mutable snapshots, UI-only freeze, snapshot APIs, frontend | schema/tenant integrity, immutable UPDATE/DELETE guards, rollback-only test isolation, canonical hash behavior | Three additive immutable tables plus deterministic hashing exist; no normal lifecycle path reads or writes them until CP-4D |
 | CP-4D | P4D — Submit captures an immutable snapshot revision — **Completed** (commit `9e4c32f`) | payroll/review submit path and tests | binding approval to the snapshot, finalization changes | submit creates exactly one snapshot revision; resubmission creates a new revision; stale-revision conflicts | Every new InReview submission has exactly one associated immutable snapshot; independently reviewed with no P0/P1 blockers |
 | CP-4E | P4E — review/approval binds to the submitted snapshot identity — **Completed** (commit `e332d02`) | payroll/review approval path and focused frontend/tests | re-resolving live rates at approval, finalization changes | Approved values proven frozen even if rates change afterward | Review reads and approval binds to the exact existing ReviewItem-linked snapshot rather than recomputing |
-| CP-4F | P4F — finalization consumes the approved snapshot and projects it to FinalLines — **Pending** | payroll finalization module and tests | current-rate re-resolution after approval | post-submit rate/rule changes do not alter final parity; old-vs-new parity proven before cutover | Finalization equals the approved snapshot despite later rate/rule changes; only one engine remains authoritative after cutover |
+| CP-4F | P4F — finalization consumes the approved snapshot and projects it to FinalLines — **Completed** (commit `434f673`) | payroll finalization module and tests | current-rate re-resolution after approval | post-submit rate/rule changes do not alter final parity | Finalization equals the approved snapshot despite later rate/rule changes; one immutable packet is authoritative after Submit |
 | CP-5A | Current Payroll Hub | payroll read API and tests | frontend aggregation or N+1 official contract | company/branch scope, slot/status/capability matrix | Complete scope, slots, metrics, and capabilities in one response |
 | CP-5B | Off-driver contracts | payroll read API and tests | driver-day count as Hub KPI | fully-off denominator and selected-day detail cases | Fully-off KPI and selected-day list remain distinct |
 | CP-5C | Calculation report bundle | payroll report API and tests | frontend sums or mutable config for frozen reports | dynamic columns and Drivers/Work/Pay/Mixed parity | All required report totals are backend-owned |
