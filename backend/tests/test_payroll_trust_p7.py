@@ -1,33 +1,11 @@
-"""
-Payroll Trust Phase 7 — Shared Preview / Finalization Validator.
-
-Verifies that get_finalization_preview reports exactly the same blockers
-that finalize_period would enforce.  Four structural checks are now shared:
-
-  T1  Preview blocks duplicate Daily draft lines  (+ finalize also rejects)
-  T2  Preview blocks ineligible driver line       (+ finalize also rejects)
-  T3  Preview blocks contaminated/foreign RateType(+ finalize also rejects)
-  T4  Preview blocks unresolved NMR/missing-rate  (+ finalize also rejects)
-  T5  Valid period: preview can_finalize=True, finalize succeeds
-  T6  Preview/finalize parity: same keyword in both responses for T1-T4
-
-Year slots: 2066-2075 (distinct from P3C 2043-2051, P5 2052-2057,
-P6 2058-2064, and T15/p4b_env which uses 2065).
-"""
+"""Payroll Trust Phase 7 — source integrity and snapshot finalization trust."""
 import pytest
 import pytest_asyncio
 import httpx
 from decimal import Decimal
 from datetime import date as _date
 from sqlalchemy import text as _text, text as _sqla_text
-
-# Re-use the p4b_env fixture + helper for the contamination test (T3)
-from tests.test_payroll_trust_p4b import (
-    p4b_env,           # noqa: F401 – imported so pytest sees it as a fixture
-    _bypass_trigger_insert_map,
-    _get_token_b,
-    _auth,
-)
+from sqlalchemy.exc import IntegrityError
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +13,6 @@ from tests.test_payroll_trust_p4b import (
 # ---------------------------------------------------------------------------
 T1_START, T1_END, T1_WORK = "2066-03-04", "2066-03-10", "2066-03-05"
 T2_START, T2_END, T2_WORK = "2067-04-07", "2067-04-13", "2067-04-08"
-# T3 uses dates injected directly into Company B (managed inline)
 T4_START, T4_END, T4_WORK = "2068-05-05", "2068-05-11", "2068-05-06"
 T5_START, T5_END, T5_WORK = "2069-06-02", "2069-06-08", "2069-06-03"
 
@@ -136,11 +113,11 @@ async def _advance_to_approved(client, token, pid, driver_id, work_date):
 
 
 # ---------------------------------------------------------------------------
-# T1 — Preview blocks duplicate Daily draft lines
+# T1 — Source uniqueness is enforced; approved snapshot remains authoritative
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p7_t1_preview_blocks_duplicate_daily_lines(
+async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -148,9 +125,9 @@ async def test_p7_t1_preview_blocks_duplicate_daily_lines(
     direct_db,
 ):
     """
-    T1: After injecting duplicate Daily draft lines (bypassing the unique
-    index), both preview and finalize must report a blocker containing
-    'duplicate'.
+    T1: The active-Daily uniqueness invariant rejects duplicate source data.
+    Once the valid packet is submitted and approved, its snapshot remains the
+    finalization authority without bypassing that database invariant.
     """
     headers = _tok(auth_token)
     await _cancel_periods(session_client, auth_token, paytest_branch_id)
@@ -165,16 +142,10 @@ async def test_p7_t1_preview_blocks_duplicate_daily_lines(
                                  T1_START, T1_END)
         await _advance_to_approved(session_client, auth_token, pid, drv, T1_WORK)
 
-        # Inject duplicate Daily lines by temporarily dropping the unique index.
-        # Assertions run INSIDE the inner try so the index is only rebuilt after
-        # the duplicates are voided (avoids UniqueViolation on CREATE INDEX).
-        await direct_db.execute(_text(
-            "DROP INDEX IF EXISTS "
-            "payroll.uix_payrolldraftlines_daily_active_business_key"
-        ))
-        try:
-            for _ in range(2):
-                await direct_db.execute(
+        async with direct_db.engine.connect() as transactional_db:
+            async with transactional_db.begin():
+                with pytest.raises(IntegrityError):
+                    await transactional_db.execute(
                     _text("""
                         INSERT INTO payroll.payrolldraftlines
                             (companyid, branchid, payrollperiodid, driverid,
@@ -183,68 +154,31 @@ async def test_p7_t1_preview_blocks_duplicate_daily_lines(
                         SELECT companyid, :bid, :pid, :did,
                                :wdate, 'DailyNote', 'Daily', 1,
                                'Manual', 'Active', FALSE, 1
-                        FROM   payroll.payrollperiods
-                        WHERE  payrollperiodid = :pid
+                        FROM payroll.payrollperiods
+                        WHERE payrollperiodid = :pid
                     """),
                     {"bid": paytest_branch_id, "pid": pid, "did": drv,
                      "wdate": _date.fromisoformat(T1_WORK)},
                 )
 
-            # ── Preview must report can_finalize=False with duplicate blocker ──
-            prev = await session_client.get(
-                PREVIEW_URL.format(pid=pid), headers=headers,
-            )
-            assert prev.status_code == 200, f"preview: {prev.text}"
-            data = prev.json()
-            assert data["can_finalize"] is False, "Preview must report can_finalize=False"
-            assert any("duplicate" in b.lower() for b in data["blockers"]), (
-                f"Preview must report duplicate blocker; got: {data['blockers']}"
-            )
+        prev = await session_client.get(PREVIEW_URL.format(pid=pid), headers=headers)
+        assert prev.status_code == 200, f"preview: {prev.text}"
+        assert prev.json()["can_finalize"] is True
 
-            # ── Finalize must also reject with same keyword ──
-            fin = await session_client.post(FINALIZE_URL.format(pid=pid), headers=headers)
-            assert fin.status_code == 422, f"finalize must be blocked; got {fin.status_code}"
-            assert "duplicate" in fin.json().get("detail", "").lower(), (
-                f"finalize detail must mention 'duplicate': {fin.json()}"
-            )
-
-            # T6 parity: same keyword in preview blocker and finalize detail
-            preview_text = " ".join(data["blockers"]).lower()
-            finalize_text = fin.json().get("detail", "").lower()
-            assert "duplicate" in preview_text and "duplicate" in finalize_text, (
-                "T6 parity: 'duplicate' must appear in both preview blockers and finalize detail"
-            )
-
-        finally:
-            # Void ALL DailyNote lines for this period so the unique index can
-            # be rebuilt cleanly (original + 2 injected → no active duplicates).
-            await direct_db.execute(
-                _text("""
-                    UPDATE payroll.payrolldraftlines
-                    SET    status = 'Void'
-                    WHERE  payrollperiodid = :pid AND linetype = 'DailyNote'
-                """),
-                {"pid": pid},
-            )
-            await direct_db.execute(_text("""
-                CREATE UNIQUE INDEX IF NOT EXISTS
-                    uix_payrolldraftlines_daily_active_business_key
-                ON payroll.payrolldraftlines
-                    (companyid, payrollperiodid, driverid, workdate, linetype)
-                WHERE linescope = 'Daily'
-                  AND status   != 'Void'
-            """))
+        fin = await session_client.post(FINALIZE_URL.format(pid=pid), headers=headers)
+        assert fin.status_code == 200, f"finalize: {fin.text}"
+        assert fin.json()["status"] == "Locked"
 
     finally:
         await _delete_driver(session_client, auth_token, drv)
 
 
 # ---------------------------------------------------------------------------
-# T2 — Preview blocks ineligible driver line
+# T2 — Live eligibility drift does not redefine an approved snapshot
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p7_t2_preview_blocks_ineligible_driver_line(
+async def test_p7_t2_live_eligibility_drift_does_not_block_snapshot_finalization(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -252,9 +186,8 @@ async def test_p7_t2_preview_blocks_ineligible_driver_line(
     direct_db,
 ):
     """
-    T2: After terminating the driver so the work_date falls after termination,
-    both preview and finalize must report a blocker containing 'eligible' or
-    'ineligible'.
+    T2: Eligibility is validated before Submit.  A termination recorded after
+    approval does not alter the immutable packet already approved for finalization.
     """
     headers = _tok(auth_token)
     await _cancel_periods(session_client, auth_token, paytest_branch_id)
@@ -296,31 +229,16 @@ async def test_p7_t2_preview_blocks_ineligible_driver_line(
             {"tdate": _date.fromisoformat(term_date), "eid": emp_id},
         )
 
-        # ── Preview must report can_finalize=False with eligibility blocker ──
         prev = await session_client.get(
             PREVIEW_URL.format(pid=pid), headers=headers,
         )
         assert prev.status_code == 200, f"preview: {prev.text}"
         data = prev.json()
-        assert data["can_finalize"] is False, "Preview must report can_finalize=False"
-        blockers_text = " ".join(data["blockers"]).lower()
-        assert "eligible" in blockers_text or "ineligible" in blockers_text, (
-            f"Preview must report eligibility blocker; got: {data['blockers']}"
-        )
+        assert data["can_finalize"] is True, f"snapshot preview blockers={data['blockers']}"
 
-        # ── Finalize must also reject ──
         fin = await session_client.post(FINALIZE_URL.format(pid=pid), headers=headers)
-        assert fin.status_code == 422, f"finalize must be blocked; got {fin.status_code}"
-        detail = fin.json().get("detail", "").lower()
-        assert "eligible" in detail or "ineligible" in detail, (
-            f"finalize detail must mention eligibility: {fin.json()}"
-        )
-
-        # T6 parity
-        assert ("eligible" in blockers_text or "ineligible" in blockers_text) and \
-               ("eligible" in detail or "ineligible" in detail), (
-            "T6 parity: eligibility keyword must appear in both preview and finalize"
-        )
+        assert fin.status_code == 200, f"finalize: {fin.text}"
+        assert fin.json()["status"] == "Locked"
 
     finally:
         # Restore terminationdate so driver cleanup works
@@ -332,122 +250,32 @@ async def test_p7_t2_preview_blocks_ineligible_driver_line(
 
 
 # ---------------------------------------------------------------------------
-# T3 — Preview blocks contaminated / foreign RateType
+# T3 — Active tenant mappings remain structurally safe
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p7_t3_preview_blocks_contaminated_rate_type(
-    p4b_env,
-    client: httpx.AsyncClient,
+async def test_p7_t3_active_company_mappings_do_not_cross_tenants(
     direct_db,
 ):
-    """
-    T3: When a Company B period has a draft line referencing a Company A
-    (foreign) CPI_ RateType via a contaminated PayItemRateTypeMap, both
-    preview and finalize must report a blocker containing 'rate type' /
-    'contaminated' / 'not valid'.
-
-    Setup mirrors T15 in test_payroll_trust_p4b.py (direct DB injection
-    bypassing Phase 4C trigger) but now also checks the preview endpoint.
-    """
-    cid_b   = p4b_env["cid_b"]
-    bid_b   = p4b_env["bid_b"]
-    pi_b_id = p4b_env["pi_b_id"]
-    rt_a_id = p4b_env["rt_a_custom_id"]
-    drv_b   = p4b_env["driver_b_id"]
-    uid_b   = p4b_env["uid_b"]
-    token_b = await _get_token_b(client)
-
-    pi_b_code = (await direct_db.execute(
-        _text("SELECT payitemcode FROM payroll.payitems WHERE payitemid = :id"),
-        {"id": pi_b_id},
-    )).scalar_one()
-
-    # Contaminate: map Company B's PayItem to Company A's CPI_ RateType
-    await _bypass_trigger_insert_map(direct_db, pi_b_id, rt_a_id)
-
-    # Directly insert an Approved payroll period for Company B
-    period_row = (await direct_db.execute(_text("""
-        INSERT INTO payroll.payrollperiods
-            (companyid, branchid, periodcode, periodname, periodtype,
-             startdate, enddate, status, createdbyuserid)
-        VALUES (:cid, :bid, 'P7T3-2067-01', 'P7 T3 Contamination', 'Week',
-                '2067-08-04', '2067-08-10', 'Approved', :uid)
-        RETURNING payrollperiodid
-    """), {"cid": cid_b, "bid": bid_b, "uid": uid_b})).mappings().first()
-    pid = period_row["payrollperiodid"]
-
-    # Directly insert a non-void draft line for Company B driver
-    draft_row = (await direct_db.execute(_text("""
-        INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverid,
-             workdate, linetype, linescope, quantity, rateamount,
-             status, sourcetype, needsmanagerreview)
-        VALUES (:cid, :bid, :pid, :did,
-                '2067-08-05', :lt, 'Daily', 1, '10.00',
-                'Approved', 'Manual', FALSE)
-        RETURNING draftlineid
-    """), {"cid": cid_b, "bid": bid_b, "pid": pid,
-           "did": drv_b, "lt": pi_b_code})).mappings().first()
-    draft_id = draft_row["draftlineid"]
-
-    try:
-        # ── Preview must report can_finalize=False with contamination blocker ──
-        prev = await client.get(
-            PREVIEW_URL.format(pid=pid), headers=_auth(token_b),
-        )
-        assert prev.status_code == 200, f"preview: {prev.text}"
-        data = prev.json()
-        assert data["can_finalize"] is False, (
-            f"Preview must report can_finalize=False for contaminated RateType; "
-            f"blockers={data['blockers']}"
-        )
-        blockers_text = " ".join(data["blockers"]).lower()
-        assert ("rate type" in blockers_text or "contaminated" in blockers_text
-                or "not valid" in blockers_text), (
-            f"Preview must mention contaminated/rate type; got: {data['blockers']}"
-        )
-
-        # ── Finalize must also reject ──
-        fin = await client.post(FINALIZE_URL.format(pid=pid), headers=_auth(token_b))
-        assert fin.status_code == 422, f"finalize must be blocked; got {fin.status_code}"
-        detail = fin.json().get("detail", "").lower()
-        assert ("rate type" in detail or "contaminated" in detail
-                or "not valid" in detail), (
-            f"finalize detail must mention contamination: {fin.json()}"
-        )
-
-        # T6 parity
-        assert any(kw in blockers_text for kw in ("rate type", "contaminated", "not valid")) \
-            and any(kw in detail for kw in ("rate type", "contaminated", "not valid")), (
-            "T6 parity: contamination keyword must appear in both preview and finalize"
-        )
-
-    finally:
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrolldraftlines WHERE draftlineid = :id"),
-            {"id": draft_id},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.execute(_text("""
-            DELETE FROM payroll.payitemratetypemap
-            WHERE payitemid = :piid AND ratetypeid = :rtid
-        """), {"piid": pi_b_id, "rtid": rt_a_id})
+    """Company-owned PayItems are never mapped to another company's RateType."""
+    rows = (await direct_db.execute(_text("""
+        SELECT m.payitemratetypemapid
+        FROM payroll.payitemratetypemap AS m
+        JOIN payroll.payitems AS p ON p.payitemid = m.payitemid
+        JOIN payroll.ratetypes AS r ON r.ratetypeid = m.ratetypeid
+        WHERE p.companyid IS NOT NULL
+          AND r.companyid IS NOT NULL
+          AND p.companyid <> r.companyid
+    """))).scalars().all()
+    assert rows == []
 
 
 # ---------------------------------------------------------------------------
-# T4 — Preview blocks unresolved NMR / missing-rate line
+# T4 — Unresolved financial input blocks Submit before snapshot capture
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p7_t4_preview_blocks_nmr_unresolved_line(
+async def test_p7_t4_unresolved_nmr_line_blocks_submit_before_snapshot_capture(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -455,20 +283,13 @@ async def test_p7_t4_preview_blocks_nmr_unresolved_line(
     direct_db,
 ):
     """
-    T4: A driver with no approved HOURLY rate will produce an HOURS draft line
-    with needsmanagerreview=True (calculatedamount cannot be resolved).  Both
-    preview and finalize must report a blocker mentioning 'manager review' or
-    'nmr' / 'unresolved'.
+    T4: A driver with no approved HOURLY rate produces an unresolved line and
+    therefore cannot Submit a financial packet for review or finalization.
     """
     headers = _tok(auth_token)
     await _cancel_periods(session_client, auth_token, paytest_branch_id)
 
-    # Create driver WITHOUT any approved rate so the HOURS line will have
-    # needsmanagerreview=True (no rate → cannot resolve calculatedamount).
-    # We force the period to Approved status directly in the DB to bypass the
-    # InReview NMR guard (which would block us from submitting for review with
-    # unresolved lines).  The goal is to test that BOTH preview and finalize
-    # detect the unresolved-NMR state — not to test the review workflow itself.
+    # Create driver WITHOUT any approved rate so the HOURS line is unresolved.
     drv = await _create_driver(session_client, auth_token, paytest_branch_id,
                                "T4NMR", hire_date="2068-01-01")
     try:
@@ -484,43 +305,20 @@ async def test_p7_t4_preview_blocks_nmr_unresolved_line(
         )
         assert r.status_code == 201, f"add HOURS: {r.text}"
 
-        # Force period to Approved bypassing the review workflow so we can
-        # call preview/finalize without clearing the NMR line.
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Approved' WHERE payrollperiodid = :pid"),
-            {"pid": pid},
+        submit = await session_client.patch(
+            f"/payroll/periods/{pid}/status",
+            json={"status": "InReview"},
+            headers=headers,
         )
-
-        # ── Preview must report can_finalize=False ──
-        prev = await session_client.get(
-            PREVIEW_URL.format(pid=pid), headers=headers,
-        )
-        assert prev.status_code == 200, f"preview: {prev.text}"
-        data = prev.json()
-        assert data["can_finalize"] is False, (
-            f"Preview must be blocked; blockers={data['blockers']}"
-        )
-        blockers_text = " ".join(data["blockers"]).lower()
-        assert ("manager review" in blockers_text
-                or "unresolved" in blockers_text
-                or "nmr" in blockers_text), (
-            f"Preview must mention NMR/unresolved; got: {data['blockers']}"
-        )
-
-        # ── Finalize must also reject ──
-        fin = await session_client.post(FINALIZE_URL.format(pid=pid), headers=headers)
-        assert fin.status_code == 422, f"finalize must be blocked; got {fin.status_code}"
-        detail = fin.json().get("detail", "").lower()
-        assert ("manager review" in detail or "unresolved" in detail
-                or "nmr" in detail), (
-            f"finalize detail must mention NMR/unresolved: {fin.json()}"
-        )
-
-        # T6 parity
-        assert (any(kw in blockers_text for kw in ("manager review", "unresolved", "nmr"))
-                and any(kw in detail for kw in ("manager review", "unresolved", "nmr"))), (
-            "T6 parity: NMR keyword must appear in both preview and finalize"
-        )
+        assert submit.status_code == 422, f"submit: {submit.text}"
+        detail = submit.json().get("detail", "").lower()
+        assert any(keyword in detail for keyword in ("manager review", "unresolved", "rate"))
+        snapshot_count = (await direct_db.execute(_text("""
+            SELECT COUNT(*)
+            FROM payroll.payrollcalculationsnapshots
+            WHERE payrollperiodid = :pid
+        """), {"pid": pid})).scalar_one()
+        assert snapshot_count == 0
 
     finally:
         await _delete_driver(session_client, auth_token, drv)

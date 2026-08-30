@@ -1156,7 +1156,8 @@ class DriversOffResponse(BaseModel):
 
 class FinalizationPreviewLine(BaseModel):
     """One draft line as it would appear in FinalLines after finalization."""
-    draft_line_id: int
+    draft_line_id: int | None
+    source_key: str
     driver_id: int
     driver_name: str | None
     work_date: date | None
@@ -1204,6 +1205,7 @@ class FinalizationPreviewDriverTotal(BaseModel):
     driver_id: int
     driver_name: str | None
     daily_pay: Decimal
+    status_pay: Decimal = Decimal("0")
     period_pay: Decimal
     gross_pay: Decimal            # normal pay only — excludes bonus
     sys_adjustment: Decimal       # sum of SYS_MIN_TOPUP / SYS_MAX_CAP deltas, computed on gross_pay (bonus-free)

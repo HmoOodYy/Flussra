@@ -170,7 +170,7 @@ function LineDetailsTable({ rows }: { rows: FinalizationPreviewLine[] }) {
       </thead>
       <tbody>
         {rows.map((r) => (
-          <tr key={r.draft_line_id} className={r.needs_manager_review ? styles.reviewRow : undefined}>
+          <tr key={r.source_key} className={r.needs_manager_review ? styles.reviewRow : undefined}>
             <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
             <td className={styles.dateCell}>{r.work_date ?? '—'}</td>
             <td>{r.line_type}</td>

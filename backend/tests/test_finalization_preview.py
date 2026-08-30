@@ -154,42 +154,23 @@ async def _add_line_to_approved_period(
     work_date: str = "2085-01-07",
 ) -> dict:
     """
-    Force period Open (bypassing the blocked Approved->InReview->Open API path),
-    add a draft line, then re-approve via the normal review flow.
-    Returns the created draft line dict.
+    Return an existing submitted source line for a snapshot-backed Approved period.
 
-    CP-0C: Approved->InReview is a blocked transition (left InReview with no
-    active PeriodApproval review item).  Use direct_db to force Open instead.
-
-    Phase 4C: manual rate_amount is blocked for PerUnit lines.
-    PerUnit line types (Hours, Miles, etc.) require an approved DriverRate.
-    Use DailyNote for lines that need no rate, or set up an approved rate first.
+    CP-4F deliberately forbids the old test pattern of reopening an Approved
+    period, adding live source data, and manufacturing a second approved review
+    item.  Callers that mutate the returned live row now prove that preview and
+    finalization remain bound to the original approved snapshot.
     """
-    headers = auth(token)
-    # Force to Open via direct DB - Approved->InReview is now blocked in production.
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
-        {"pid": period_id},
-    )
-    payload: dict = {
-        "driver_id": driver_id,
-        "work_date": work_date,
-        "line_type": line_type,
-        "quantity":  quantity,
-    }
-    if line_type == "DailyNote":
-        payload["notes"] = "filler"
-
-    r = await client.post(
-        f"/payroll/periods/{period_id}/lines",
-        json=payload,
-        headers=headers,
-    )
-    assert r.status_code == 201, f"add line failed: {r.text}"
-    line = r.json()
-
-    await _advance_to_approved(client, token, period_id, driver_id, work_date)
-    return line
+    row = (await direct_db.execute(_text("""
+        SELECT draftlineid
+        FROM payroll.payrolldraftlines
+        WHERE payrollperiodid = :pid
+          AND status != 'Void'
+        ORDER BY draftlineid
+        LIMIT 1
+    """), {"pid": period_id})).mappings().first()
+    assert row is not None, "Snapshot fixture must retain its submitted source line"
+    return {"draft_line_id": row["draftlineid"]}
 
 
 async def _create_role_with_perms(
@@ -264,8 +245,10 @@ async def _create_user_with_role(
 # ---------------------------------------------------------------------------
 
 async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
-    """Cancel Locked/Archived/InReview/Approved/Returned periods bypassing blocked PATCH paths."""
-    # CP-1A: InReview and Approved cannot be cancelled via PATCH; use direct DB.
+    """Clean mutable workflow rows without mutating immutable finalized history."""
+    # CP-4F: Locked/Archived periods may now have immutable snapshot history.
+    # This suite creates unique period codes, so they are retained rather than
+    # bypassing immutable triggers merely to reuse a shared fixture period.
     await direct_db.execute(
         _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
               "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
@@ -277,23 +260,6 @@ async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
               "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
               "WHERE branchid = :bid AND status = 'Returned'"),
         {"bid": branch_id},
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-    )
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
     )
 
 
@@ -348,21 +314,25 @@ async def cp3a_approved_period(
     direct_db,
 ) -> dict:
     """
-    Approved period on PAYTEST, with the dummy line voided so tests start clean.
+    Approved period on PAYTEST with one submitted DailyNote source line.
     """
     headers = auth(auth_token)
     branch_id = cp3a_clean
 
+    # Each function-scoped fixture owns a distinct period.  Finalized history
+    # remains protected by CP-4C/CP-4F rather than being reset through DDL.
+    period_suffix = next(_preview_driver_counter)
+    period_code = f"CP3A-0106-{period_suffix}"
     # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft->Open blocked).
     row = (await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (1, :bid, 'Open', 'CP3A-2085-0106', 'CP3A Preview Test 2085', 'Week', :start, :end)
+            VALUES (1, :bid, 'Open', :period_code, 'CP3A Preview Test 2085', 'Week', :start, :end)
             ON CONFLICT DO NOTHING
             RETURNING payrollperiodid
         """),
-        {"bid": branch_id,
+        {"bid": branch_id, "period_code": period_code,
          "start": datetime.date(2085, 1, 6),
          "end": datetime.date(2085, 1, 12)},
     )).mappings().first()
@@ -370,19 +340,13 @@ async def cp3a_approved_period(
         row = (await direct_db.execute(
             _text(
                 "SELECT payrollperiodid FROM payroll.payrollperiods "
-                "WHERE branchid = :bid AND periodcode = 'CP3A-2085-0106'"
+                    "WHERE branchid = :bid AND periodcode = :period_code"
             ),
-            {"bid": branch_id},
+            {"bid": branch_id, "period_code": period_code},
         )).mappings().first()
     pid = row["payrollperiodid"]
 
     await _advance_to_approved(session_client, auth_token, pid, paytest_driver_id)
-
-    # Void the dummy line so the period is logically empty -" tests add their own
-    await direct_db.execute(
-        _text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE payrollperiodid = :pid"),
-        {"pid": pid},
-    )
 
     period_resp = await session_client.get(f"/payroll/periods/{pid}", headers=headers)
     return period_resp.json()
@@ -477,7 +441,7 @@ class TestFinalizationPreview:
     # -- Blocker tests --------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_preview_blocks_on_needs_manager_review(
+    async def test_preview_ignores_post_submit_needs_manager_review_drift(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -485,7 +449,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Period with a NeedsManagerReview=TRUE line ->' can_finalize=False, blockers non-empty."""
+        """Post-submit NMR drift does not redefine the approved snapshot."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
@@ -512,12 +476,11 @@ class TestFinalizationPreview:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["can_finalize"] is False
-        assert len(body["blockers"]) > 0
-        assert any("manager review" in b.lower() for b in body["blockers"])
+        assert body["can_finalize"] is True
+        assert body["blockers"] == []
 
     @pytest.mark.asyncio
-    async def test_preview_blocks_on_zero_calculation(
+    async def test_preview_ignores_post_submit_unresolved_calculation_drift(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -525,7 +488,7 @@ class TestFinalizationPreview:
         preview_driver_id: int,
         direct_db,
     ):
-        """PerUnit line with NULL calculatedamount AND NULL rateamount ->' blocker."""
+        """Live unresolved calculation drift does not alter the approved packet."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
@@ -560,13 +523,13 @@ class TestFinalizationPreview:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["can_finalize"] is False
-        assert len(body["blockers"]) > 0
+        assert body["can_finalize"] is True
+        assert body["blockers"] == []
 
     # -- Content tests --------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_preview_includes_daily_lines(
+    async def test_preview_does_not_synthesize_post_submit_daily_lines(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -574,7 +537,7 @@ class TestFinalizationPreview:
         preview_driver_id: int,
         direct_db,
     ):
-        """HOURS line appears in lines list and amount is reflected in driver_totals."""
+        """Approved preview exposes only submitted normalized financial lines."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         # Approve HOURLY rate for preview_driver_id at $20/hr
@@ -596,18 +559,13 @@ class TestFinalizationPreview:
             assert resp.status_code == 200
             body = resp.json()
 
-            line_types = [l["line_type"] for l in body["lines"]]
-            assert "HOURS" in line_types
-
-            # Driver total should have daily_pay = 8 * 20 = 160
-            totals = body["driver_totals"]
-            assert len(totals) >= 1
-            assert Decimal(str(totals[0]["daily_pay"])) == Decimal("160.00")
+            assert not any(l["line_type"] == "HOURS" for l in body["lines"])
+            assert Decimal(str(body["total_final_gross"])) == Decimal("0")
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=auth(auth_token))
 
     @pytest.mark.asyncio
-    async def test_preview_includes_bonus_period_lines(
+    async def test_preview_does_not_synthesize_post_submit_bonus_events(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -616,49 +574,9 @@ class TestFinalizationPreview:
         paytest_branch_id: int,
         direct_db,
     ):
-        """CP-3A: Bonus event (POST /bonuses) appears in bonus_events field of preview.
-        BONUS must NOT appear in lines (DraftLines).
-
-        CP-3C: bonus is tracked in bonus_total, never folded into period_pay/
-        gross_pay (those represent normal pay only, excluded from the min/max
-        base) — final_pay is the only field that includes bonus."""
+        """Only a BonusEvent captured at Submit belongs to the approved packet."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
-
-        # Baseline: preview before the bonus exists, so period_pay/gross_pay's
-        # exact pre-bonus value is known and can be asserted unchanged after.
-        baseline_resp = await session_client.get(
-            f"/payroll/periods/{pid}/finalization-preview",
-            headers=headers,
-        )
-        assert baseline_resp.status_code == 200
-        baseline_row = next(
-            (t for t in baseline_resp.json()["driver_totals"] if t["driver_id"] == paytest_driver_id),
-            None,
-        )
-        # paytest_driver_id may have no lines yet in this shared period at this
-        # point in the class — treat that as a zero baseline rather than failing.
-        baseline_period_pay = Decimal(str(baseline_row["period_pay"])) if baseline_row else Decimal("0")
-        baseline_gross_pay = Decimal(str(baseline_row["gross_pay"])) if baseline_row else Decimal("0")
-        baseline_final_pay = Decimal(str(baseline_row["final_pay"])) if baseline_row else Decimal("0")
-
-        # Force back to Open to add the bonus event
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.commit()
-
-        bonus_resp = await session_client.post(
-            f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "50.00"},
-            headers=headers,
-        )
-        assert bonus_resp.status_code == 201, f"Bonus event creation failed: {bonus_resp.text}"
-        bonus_event_id = bonus_resp.json()["bonus_event_id"]
-
-        # Re-approve
-        await _advance_to_approved(session_client, auth_token, pid, paytest_driver_id)
 
         resp = await session_client.get(
             f"/payroll/periods/{pid}/finalization-preview",
@@ -666,42 +584,11 @@ class TestFinalizationPreview:
         )
         assert resp.status_code == 200
         body = resp.json()
-
-        # Bonus event must appear in bonus_events list
-        assert body["bonus_event_count"] >= 1
-        be_ids = [be["bonus_event_id"] for be in body["bonus_events"]]
-        assert bonus_event_id in be_ids, f"Created bonus event not in preview bonus_events: {body['bonus_events']}"
-
-        # BONUS must NOT appear in lines (DraftLines)
-        bonus_in_lines = [l for l in body["lines"] if l["line_type"] == "BONUS"]
-        assert not bonus_in_lines, "BONUS DraftLines must not appear in preview lines after CP-3A"
-
-        totals = body["driver_totals"]
-        assert len(totals) >= 1
-        driver_row = next(t for t in totals if t["driver_id"] == paytest_driver_id)
-
-        # bonus_total contains the bonus.
-        assert Decimal(str(driver_row["bonus_total"])) >= Decimal("50.00")
-
-        # period_pay and gross_pay are UNCHANGED by the bonus — they must not
-        # have silently absorbed it (the exact CP-3C bug this test now guards
-        # against: bonus was previously folded into period_pay/gross_pay).
-        assert Decimal(str(driver_row["period_pay"])) == baseline_period_pay, (
-            "period_pay must exclude bonus — it must equal its pre-bonus value"
-        )
-        assert Decimal(str(driver_row["gross_pay"])) == baseline_gross_pay, (
-            "gross_pay must exclude bonus — it must equal its pre-bonus value"
-        )
-
-        # final_pay DOES include the bonus — it must have grown by exactly the
-        # bonus amount relative to its pre-bonus value (no min/max rule is
-        # active here, so no adjustment is in play).
-        assert Decimal(str(driver_row["final_pay"])) == baseline_final_pay + Decimal("50.00"), (
-            "final_pay must include bonus"
-        )
+        assert body["bonus_event_count"] == 0
+        assert not any(line["line_type"] == "BONUS" for line in body["lines"])
 
     @pytest.mark.asyncio
-    async def test_preview_excludes_void_lines(
+    async def test_preview_ignores_post_submit_void_source_drift(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -709,24 +596,16 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Void lines must not appear in lines list and must not count toward totals."""
+        """Voiding a live source row after Submit does not rewrite the snapshot."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        # Add two lines: one valid, one we'll void
-        line_keep = await _add_line_to_approved_period(
+        line = await _add_line_to_approved_period(
             session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="DailyNote", quantity="1.00", work_date="2085-01-07",
         )
-        line_void = await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="DailyNote", quantity="1.00", work_date="2085-01-08",
-        )
-
-        # Void the second line directly
         await direct_db.execute(
             _text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :lid"),
-            {"lid": line_void["draft_line_id"]},
+            {"lid": line["draft_line_id"]},
         )
 
         resp = await session_client.get(
@@ -736,15 +615,8 @@ class TestFinalizationPreview:
         assert resp.status_code == 200
         body = resp.json()
 
-        ids = [l["draft_line_id"] for l in body["lines"]]
-        assert line_keep["draft_line_id"] in ids
-        assert line_void["draft_line_id"] not in ids
-
-        # Voided line must NOT appear in totals (DailyNote has $0 final_amount anyway)
-        gross = Decimal(str(body["total_final_gross"]))
-        assert line_void["draft_line_id"] not in ids, (
-            f"Void line leaked into preview lines: {gross}"
-        )
+        assert body["can_finalize"] is True
+        assert Decimal(str(body["total_final_gross"])) == Decimal("0")
 
     @pytest.mark.asyncio
     async def test_preview_can_finalize_true_when_clean(
@@ -1068,6 +940,7 @@ class TestFinalizationPreview:
         mileage_rate_id = await _create_and_approve_rate(
             session_client, auth_token, paytest_driver_id, rts["MILEAGE"], "0.50"
         )
+        finalized = False
         try:
             await _add_line_to_approved_period(
                 session_client, auth_token, pid, paytest_driver_id, direct_db,
@@ -1097,6 +970,7 @@ class TestFinalizationPreview:
             )
             assert fin_resp.status_code == 200
             assert fin_resp.json()["status"] == "Locked"
+            finalized = True
 
             # Step 4: sum final lines (excluding SYS adjustments)
             agg = await direct_db.execute(
@@ -1116,35 +990,12 @@ class TestFinalizationPreview:
                 f"actual finalized sum ({final_sum})"
             )
 
-            # Cleanup: the period is now Locked and cannot be cancelled via the API.
-            # Force-cancel via direct DB so cp3a_clean teardown can reuse branch/dates
-            # without triggering the strict overlap guard on subsequent tests.
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-            ))
-            # Phase 5: delete payrollfinallines for this period so that the rates
-            # (which are referenced by driverrateid) can be voided in the finally block.
-            # The trigger is already disabled for this block.
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-            ))
         finally:
-            await session_client.delete(f"/payroll/rates/{hourly_rate_id}", headers=headers)
-            await session_client.delete(f"/payroll/rates/{mileage_rate_id}", headers=headers)
+            # A finalized packet retains its immutable FinalLines and their rate
+            # provenance. It must not be dismantled by test cleanup.
+            if not finalized:
+                await session_client.delete(f"/payroll/rates/{hourly_rate_id}", headers=headers)
+                await session_client.delete(f"/payroll/rates/{mileage_rate_id}", headers=headers)
 
 # ===========================================================================
 # POST /finalize -" Driver/ODA security boundary
@@ -1396,16 +1247,8 @@ class TestPreviewResponseShape:
             assert resp.status_code == 200, resp.text
             preview = resp.json()
 
-            hours_line = next(
-                (l for l in preview["lines"] if l["line_type"] in ("HOURS", "Hours")),
-                None,
-            )
-            assert hours_line is not None, "HOURS line not found in preview lines"
-            assert "final_amount" in hours_line, "final_amount field missing from preview line"
-            # 8 * 20 = 160
-            assert Decimal(str(hours_line["final_amount"])) == Decimal("160.00"), (
-                f"Expected 160.00, got {hours_line['final_amount']}"
-            )
+            assert all("final_amount" in line for line in preview["lines"])
+            assert Decimal(str(preview["total_final_gross"])) == Decimal("0")
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
 
@@ -1439,7 +1282,7 @@ class TestPreviewResponseShape:
         sys_n = preview["sys_adjustment_count"]
         est   = preview["final_line_count_estimate"]
 
-        assert isinstance(draft, int) and draft >= 1
+        assert isinstance(draft, int) and draft == 0
         assert sys_n == 0, f"Expected 0 SYS adjustments, got {sys_n}"
         assert est == draft, f"final_line_count_estimate {est} != draft_line_count {draft}"
 
@@ -1499,13 +1342,11 @@ class TestPreviewResponseShape:
         draft = preview["draft_line_count"]
         est   = preview["final_line_count_estimate"]
 
-        assert sys_n >= 1, f"Expected at least 1 SYS row (MIN_TOPUP), got {sys_n}"
+        assert sys_n == 0, f"Post-submit pay-rule drift must not create SYS rows: {sys_n}"
         assert est == draft + sys_n, (
             f"final_line_count_estimate {est} != draft {draft} + sys {sys_n}"
         )
-        # And a SYS_MIN_TOPUP must appear in sys_adjustments
-        types = {a["adjustment_type"] for a in preview["sys_adjustments"]}
-        assert "SYS_MIN_TOPUP" in types
+        assert preview["sys_adjustments"] == []
 
     @pytest.mark.asyncio
     async def test_preview_sys_adjustment_amount_is_correct(
@@ -1806,7 +1647,7 @@ class TestPreviewFinalizeConsistencyCP5:
     """
 
     @pytest.mark.asyncio
-    async def test_preview_shows_refreshed_amount_when_rate_changed_post_approval(
+    async def test_preview_preserves_submitted_amount_when_rate_changed_post_approval(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1816,7 +1657,7 @@ class TestPreviewFinalizeConsistencyCP5:
         """
         After period reaches Approved with calc=$160 (8h x $20):
           1. Void old $20 rate, create+approve $35 rate (same effective date).
-          2. Preview must show calc=$280, not stale $160.
+          2. Preview must retain the approved snapshot calc=$160, not live $280.
           3. Preview must NOT write anything to payrolldraftlines.
         """
         pid, line_id, old_rate_id, rate_type_id, driver_id = cp5_consistency_period
@@ -1851,19 +1692,18 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200, resp.text
             preview = resp.json()
 
-            # Preview must show refreshed amount $280 (8 x $35)
+            # Preview must retain submitted amount $160 (8 x $20)
             hours_line = next(
                 (l for l in preview["lines"] if l["line_type"] in ("HOURS", "Hours")),
                 None,
             )
             assert hours_line is not None, "HOURS line not in preview"
-            assert Decimal(str(hours_line["final_amount"])) == Decimal("280.00"), (
-                f"Expected refreshed $280, got {hours_line['final_amount']}"
+            assert Decimal(str(hours_line["final_amount"])) == Decimal("160.00"), (
+                f"Expected submitted $160, got {hours_line['final_amount']}"
             )
 
-            # Total gross must reflect refreshed amount
-            assert Decimal(str(preview["total_final_gross"])) == Decimal("280.00"), (
-                f"Expected total_final_gross=$280, got {preview['total_final_gross']}"
+            assert Decimal(str(preview["total_final_gross"])) == Decimal("160.00"), (
+                f"Expected snapshot total_final_gross=$160, got {preview['total_final_gross']}"
             )
 
             # Preview must NOT have mutated the stored calculatedamount
@@ -2004,12 +1844,12 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200
             preview = resp.json()
 
-            # Refreshed gross = $280 > min $200 -> no SYS_MIN_TOPUP
+            # Post-submit rate/rule changes do not re-run minimum-pay calculation.
             assert preview["sys_adjustment_count"] == 0, (
                 f"Expected no SYS adjustments (gross $280 > min $200), "
                 f"got: {preview['sys_adjustments']}"
             )
-            assert Decimal(str(preview["total_final_gross"])) == Decimal("280.00")
+            assert Decimal(str(preview["total_final_gross"])) == Decimal("160.00")
 
         finally:
             await session_client.post(
@@ -2029,15 +1869,13 @@ class TestPreviewFinalizeConsistencyCP5:
         direct_db,
     ):
         """
-        Negative-test: if preview were NOT refreshed (used stale $160 gross),
-        a MinimumPay=$200 rule would produce a SYS_MIN_TOPUP.
-        After the fix, preview uses refreshed gross=$280 and no topup appears.
-        (This test documents the bug that the fix prevents.)
+        A post-submit rate/rule change must not synthesize a new SYS adjustment
+        in the approved immutable packet.
         """
         pid, line_id, old_rate_id, rate_type_id, driver_id = cp5_consistency_period
         headers = auth(auth_token)
 
-        # Replace rate: $20 -> $35 (gross should be $280, not $160)
+        # Replace live rate after the $160 packet was approved.
         await _void_rate(session_client, auth_token, old_rate_id)
         new_rate_id = await _create_and_approve_rate_preview(
             session_client, auth_token,
@@ -2046,8 +1884,7 @@ class TestPreviewFinalizeConsistencyCP5:
             effective_from="2085-03-03",
         )
 
-        # MinimumPay = $250 (above refreshed $280? No - $280 > $250 still no topup)
-        # Let's use $300 > $280 so topup IS expected (to verify it's the refreshed gross)
+        # This rule is also introduced after Submit and is not snapshot authority.
         rule_resp = await session_client.post(
             "/payroll/driver-pay-rules",
             json={
@@ -2071,19 +1908,9 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200
             preview = resp.json()
 
-            # Refreshed gross = $280 < min $300 -> SYS_MIN_TOPUP = $20
-            assert preview["sys_adjustment_count"] == 1, (
-                "Expected 1 SYS_MIN_TOPUP (gross $280 < min $300)"
-            )
-            adj = preview["sys_adjustments"][0]
-            assert adj["adjustment_type"] == "SYS_MIN_TOPUP"
-            # gross_before must be refreshed $280, not stale $160
-            assert Decimal(str(adj["gross_before"])) == Decimal("280.00"), (
-                f"gross_before must be refreshed $280, got {adj['gross_before']}"
-            )
-            assert Decimal(str(adj["adjustment_amount"])) == Decimal("20.00"), (
-                f"topup must be $20 ($300 - $280), got {adj['adjustment_amount']}"
-            )
+            assert preview["sys_adjustment_count"] == 0
+            assert preview["sys_adjustments"] == []
+            assert Decimal(str(preview["total_final_gross"])) == Decimal("160.00")
 
         finally:
             await session_client.post(
@@ -2137,21 +1964,17 @@ class TestPreviewFinalizeConsistencyCP5:
             assert resp.status_code == 200
             preview = resp.json()
 
-            # Period is blocked by manager-NMR
-            assert preview["can_finalize"] is False
-            assert any("manager review" in b.lower() for b in preview["blockers"])
+            assert preview["can_finalize"] is True
+            assert preview["blockers"] == []
 
-            # The preview line must show the stored calc=$160 (not refreshed $280)
-            # and NMR=True
+            # The preview line must show the submitted calc=$160, not live $280.
             hours_line = next(
                 (l for l in preview["lines"] if l["line_type"] in ("HOURS", "Hours")),
                 None,
             )
             assert hours_line is not None
-            assert hours_line["needs_manager_review"] is True
-            # Stored calc=$160 honoured - not overridden to $280
             assert Decimal(str(hours_line["calculated_amount"])) == Decimal("160.0000"), (
-                f"Manager-guarded calc must remain $160, got {hours_line['calculated_amount']}"
+                f"Submitted calc must remain $160, got {hours_line['calculated_amount']}"
             )
 
         finally:

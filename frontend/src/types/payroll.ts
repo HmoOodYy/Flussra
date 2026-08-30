@@ -298,7 +298,8 @@ export interface FinalLineSummary {
 // ---------------------------------------------------------------------------
 
 export interface FinalizationPreviewLine {
-  draft_line_id: number;
+  draft_line_id: number | null;
+  source_key: string;
   driver_id: number;
   driver_name: string | null;
   work_date: string | null;
@@ -325,6 +326,7 @@ export interface FinalizationPreviewDriverTotal {
   driver_id: number;
   driver_name: string | null;
   daily_pay: string;
+  status_pay: string;
   period_pay: string;
   gross_pay: string;
   sys_adjustment: string;

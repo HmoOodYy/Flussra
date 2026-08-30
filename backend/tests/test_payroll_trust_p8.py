@@ -419,11 +419,11 @@ async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
 
 
 # ---------------------------------------------------------------------------
-# T5 — Preview/finalize parity for draft line with unresolvable rate mapping
+# T5 — Unresolvable rate mapping blocks Submit before snapshot capture
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p8_t5_preview_finalize_parity_unresolvable_mapping(
+async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -432,8 +432,7 @@ async def test_p8_t5_preview_finalize_parity_unresolvable_mapping(
     """
     T5: A draft line whose PayItem has ratebehavior='PerUnit' but NO
     PayItemRateTypeMap entry has an unresolvable rate behavior.
-    Both preview (can_finalize=False) and finalize (422) must report the same
-    blocker mentioning 'rate behavior', 'mapping', or 'unresolvable' — parity.
+    Submit must fail before it can capture an immutable snapshot.
     """
     headers = _tok(auth_token)
     await _cancel_periods(session_client, auth_token, paytest_branch_id)
@@ -479,41 +478,23 @@ async def test_p8_t5_preview_finalize_parity_unresolvable_mapping(
         )
         assert r.status_code == 201, f"add unmapped line: {r.text}"
 
-        # Force period to Approved bypassing the review workflow so we can
-        # call preview/finalize (the line is NMR=True so InReview would block).
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Approved' WHERE payrollperiodid = :pid"),
-            {"pid": pid},
+        BLOCKER_KEYWORDS = (
+            "manager review", "unresolved", "rate behavior", "mapping", "unresolvable",
         )
-
-        # ── Preview must report can_finalize=False with mapping/behavior blocker ──
-        prev = await session_client.get(PREVIEW_URL.format(pid=pid), headers=headers)
-        assert prev.status_code == 200, f"preview: {prev.text}"
-        data = prev.json()
-        assert data["can_finalize"] is False, (
-            f"Unmapped item must block finalization; blockers={data.get('blockers')}"
+        submit = await session_client.patch(
+            f"/payroll/periods/{pid}/status",
+            json={"status": "InReview"},
+            headers=headers,
         )
-        blockers_text = " ".join(data.get("blockers", [])).lower()
-        MAPPING_KEYWORDS = ("rate behavior", "mapping", "unresolvable", "rate type mapping")
-        assert any(kw in blockers_text for kw in MAPPING_KEYWORDS), (
-            f"Preview blockers must mention rate behavior/mapping; got: {data['blockers']}"
-        )
-
-        # ── Finalize must also reject ──
-        fin = await session_client.post(FINALIZE_URL.format(pid=pid), headers=headers)
-        assert fin.status_code == 422, (
-            f"Finalize must reject unresolvable mapping; got {fin.status_code}: {fin.text}"
-        )
-        fin_detail = fin.json().get("detail", "").lower()
-        assert any(kw in fin_detail for kw in MAPPING_KEYWORDS), (
-            f"Finalize detail must mention rate behavior/mapping; got: {fin_detail!r}"
-        )
-
-        # ── T6 parity: both responses cite the same underlying reason ──
-        assert (
-            any(kw in blockers_text for kw in MAPPING_KEYWORDS)
-            and any(kw in fin_detail for kw in MAPPING_KEYWORDS)
-        ), "Parity: same underlying reason must appear in both preview and finalize"
+        assert submit.status_code == 422, f"submit: {submit.text}"
+        detail = submit.json().get("detail", "").lower()
+        assert any(kw in detail for kw in BLOCKER_KEYWORDS), detail
+        snapshot_count = (await direct_db.execute(_text("""
+            SELECT COUNT(*)
+            FROM payroll.payrollcalculationsnapshots
+            WHERE payrollperiodid = :pid
+        """), {"pid": pid})).scalar_one()
+        assert snapshot_count == 0
 
     finally:
         if pid is not None:

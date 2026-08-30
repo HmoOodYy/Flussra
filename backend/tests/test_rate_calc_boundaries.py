@@ -21,6 +21,7 @@ preview, 2089 cp5 eligibility).
 All dates are in 2082-06-xx or 2082-07-xx range.
 """
 import contextlib
+import itertools
 import pytest
 import pytest_asyncio
 import httpx
@@ -50,6 +51,7 @@ DATE_JUL05   = "2082-07-05"
 MISC_START   = "2082-08-04"
 MISC_END     = "2082-08-10"
 DATE_AUG05   = "2082-08-05"
+_period_counter = itertools.count(1)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +108,7 @@ async def _open_period(
     from sqlalchemy import text as _text
     if db is None:
         raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
-    code = f"RCB-{branch_id}-{start}"
+    code = f"RCB-{branch_id}-{start}-{next(_period_counter)}"
     row = (await db.execute(
         _text(f"""
             INSERT INTO payroll.payrollperiods
@@ -812,7 +814,7 @@ class TestRateCalculationBoundaries:
             await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
-    async def test_finalization_refreshes_stale_draft_calc(
+    async def test_finalization_projects_submitted_snapshot_despite_later_rate_change(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -820,14 +822,16 @@ class TestRateCalculationBoundaries:
         direct_db,
     ):
         """
-        Finalization auto-refreshes stale draft calculations.
+        Finalization projects the submitted immutable calculation packet.
 
         Scenario:
           1. Approve Rate A ($20), add an HOURS line → calculated_amount=$160 (8×$20).
           2. Advance period to Approved.
           3. Void Rate A, approve Rate B ($30) same effective date.
-          4. Finalize: auto-refresh must recompute → FinalAmount = 8×$30 = $240.
-             NOT stuck at $160 (stale Rate A).
+          4. Finalize: FinalAmount remains the approved $160 snapshot value.
+
+        The post-approval $30 rate remains valid live-source drift, but cannot
+        redefine the packet that Review approved.
 
         This test targets a DIFFERENT date range from the existing
         TestFinalizeAutoRefresh in test_cp5_calc_consistency.py (which uses 2089).
@@ -878,14 +882,14 @@ class TestRateCalculationBoundaries:
                 effective_from="2082-08-01",
             )
 
-            # Finalize — must auto-refresh draft calc and write FinalAmount=$240
+            # Finalize the approved snapshot, not the newly live rate.
             fin = await session_client.post(
                 f"/payroll/periods/{pid}/finalize",
                 headers=headers,
             )
             assert fin.status_code == 200, f"Finalize failed: {fin.text}"
 
-            # Check FinalLines: HOURS finalamount must be 8×$30=$240
+            # Check FinalLines: HOURS finalamount remains the submitted 8×$20=$160.
             fl = await session_client.get(
                 f"/payroll/periods/{pid}/final-lines",
                 headers=headers,
@@ -894,31 +898,14 @@ class TestRateCalculationBoundaries:
             hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found"
             final_amount = Decimal(str(hours_finals[0]["final_amount"]))
-            assert final_amount == Decimal("240.00"), (
-                f"Finalization must refresh stale calc: expected 8×$30=$240, got {final_amount}"
+            assert final_amount == Decimal("160.00"), (
+                f"Finalization must project submitted snapshot: expected 8×$20=$160, got {final_amount}"
             )
 
-            # Cleanup rate B
-            await session_client.delete(f"/payroll/rates/{rate_b_id}", headers=headers)
         finally:
-            # Force-cancel the now-Locked period via direct DB
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-            )
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-                      "WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-            )
+            # Snapshot-backed FinalLines retain their rate provenance. Do not
+            # bypass immutability or delete the finalization history in cleanup.
+            pass
 
     @pytest.mark.asyncio
     async def test_locked_ledger_immutable_after_rate_change(
@@ -1027,26 +1014,9 @@ class TestRateCalculationBoundaries:
                 f"(rate change to $99 must NOT affect locked ledger)"
             )
 
-            # Cleanup
-            await session_client.delete(f"/payroll/rates/{rate_c_id}", headers=headers)
         finally:
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-            )
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-                      "WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-            )
+            # Keep immutable ledger history and its referenced rate provenance.
+            pass
 
     @pytest.mark.asyncio
     async def test_manual_rate_amount_rejected_for_daily_line(

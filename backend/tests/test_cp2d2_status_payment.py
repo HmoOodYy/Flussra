@@ -47,40 +47,28 @@ def _week_2097(offset: int = 0) -> tuple[datetime.date, datetime.date]:
 
 
 async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
-    """Remove all periods and related rows for the branch (handles locked too)."""
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollfinallines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
+    """Remove only mutable test periods; retain immutable financial history."""
     await db.execute(
         _text("DELETE FROM payroll.payrolldraftlines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
+              "WHERE payrollperiodid IN ("
+              "  SELECT p.payrollperiodid FROM payroll.payrollperiods AS p "
+              "  WHERE p.branchid = :bid "
+              "    AND NOT EXISTS (SELECT 1 FROM payroll.payrollcalculationsnapshots AS s "
+              "                    WHERE s.payrollperiodid = p.payrollperiodid) "
+              "    AND NOT EXISTS (SELECT 1 FROM payroll.payrollfinallines AS f "
+              "                    WHERE f.payrollperiodid = p.payrollperiodid)"
+              ")"),
         {"bid": branch_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
+        _text("DELETE FROM payroll.payrollperiods AS p "
+              "WHERE p.branchid = :bid "
+              "  AND NOT EXISTS (SELECT 1 FROM payroll.payrollcalculationsnapshots AS s "
+              "                  WHERE s.payrollperiodid = p.payrollperiodid) "
+              "  AND NOT EXISTS (SELECT 1 FROM payroll.payrollfinallines AS f "
+              "                  WHERE f.payrollperiodid = p.payrollperiodid)"),
         {"bid": branch_id},
     )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
     await db.commit()
 
 
@@ -1111,7 +1099,7 @@ class TestSourceSnapshot:
         assert snap.get("formula") == "HoursValue * DriverRate.Amount"
 
     @pytest.mark.asyncio
-    async def test_finalized_line_preserves_sourcesnapshot(
+    async def test_legacy_approved_without_snapshot_fails_closed(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -1120,7 +1108,7 @@ class TestSourceSnapshot:
         cp2d2_driver_id: int,
         cp2d2_src_col_id: int,
     ):
-        """Finalized STATUS_PAYMENT line carries the SourceSnapshot from draft time."""
+        """A legacy direct-Approved Status period cannot bypass CP-4F authority."""
         start, end = _week_2097()
         pid = await _open_period_db(direct_db, cp2d2_branch_id, start, end)
         code = f"FINSNAP{start.strftime('%Y%m%d')}"
@@ -1135,7 +1123,6 @@ class TestSourceSnapshot:
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
 
-        # Advance to Approved via DB (bypass full review flow — review is tested separately)
         await direct_db.execute(
             _text("UPDATE payroll.payrollperiods SET status = 'Approved' WHERE payrollperiodid = :pid"),
             {"pid": pid},
@@ -1147,28 +1134,8 @@ class TestSourceSnapshot:
             f"/payroll/periods/{pid}/finalize",
             headers=_auth(auth_token),
         )
-        assert fin_resp.status_code in (200, 204), fin_resp.text
-
-        # Check PayrollFinalLines for the STATUS_PAYMENT line
-        final_row = (await direct_db.execute(
-            _text("""
-                SELECT sourcesnapshot
-                FROM   payroll.payrollfinallines
-                WHERE  payrollperiodid = :pid
-                  AND  sourcetype      = 'System'
-                ORDER BY draftlineid DESC
-                LIMIT 1
-            """),
-            {"pid": pid},
-        )).mappings().first()
-        assert final_row is not None, "No System final line found after finalization"
-        snap_raw = final_row["sourcesnapshot"]
-        assert snap_raw is not None, "SourceSnapshot missing from final line"
-
-        snap = json.loads(snap_raw) if isinstance(snap_raw, str) else snap_raw
-        assert snap.get("rate_code") == "STATUS_PAY"
-        assert snap.get("hours_value_used") == 8.0
-        assert snap.get("resolved_rate_amount") == 25.0
+        assert fin_resp.status_code == 422, fin_resp.text
+        assert "APPROVED_SNAPSHOT_NOT_FOUND_FOR_FINALIZATION" in fin_resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ Run from backend/:
 import datetime
 import itertools
 import uuid
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -784,11 +785,14 @@ async def test_preview_includes_bonus_events(
     assert len(preview["bonus_events"]) == 1
     be = preview["bonus_events"][0]
     assert be["bonus_event_id"] == bonus_event_id
-    assert be["amount"] == "200.00"
+    assert Decimal(str(be["amount"])) == Decimal("200.00")
 
-    # BONUS must NOT appear in the lines (DraftLines) list
+    # CP-4F exposes immutable normalized snapshot lines. BONUS is therefore
+    # present as a snapshot line, while still having no synthetic DraftLine ID.
     bonus_in_lines = [l for l in preview["lines"] if l["line_type"] == "BONUS"]
-    assert not bonus_in_lines, "BONUS DraftLines must not appear in preview lines"
+    assert len(bonus_in_lines) == 1
+    assert bonus_in_lines[0]["draft_line_id"] is None
+    assert Decimal(str(bonus_in_lines[0]["final_amount"])) == Decimal("200.00")
 
     # final_line_count_estimate must include bonus events
     assert preview["final_line_count_estimate"] >= 1
