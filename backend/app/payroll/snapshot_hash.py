@@ -1,15 +1,15 @@
 """Pure canonical serialization and hash helpers for CP-4C snapshots."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
-from decimal import Decimal
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
-
 CURRENT_PAYROLL_CALCULATION_VERSION = "current-payroll-v1"
+CURRENT_REPORT_EVIDENCE_VERSION = 1
 
 _DRIVER_TOTAL_FIELDS = (
     "DriverID",
@@ -60,7 +60,7 @@ def canonicalize(value: Any) -> Any:
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("canonical serialization requires timezone-aware datetimes")
-        utc_value = value.astimezone(timezone.utc)
+        utc_value = value.astimezone(UTC)
         return utc_value.isoformat(timespec="microseconds").replace("+00:00", "Z")
     if isinstance(value, date):
         return value.isoformat()
@@ -99,6 +99,54 @@ def sha256_hex(value: Any) -> str:
 def calculate_source_config_hash(source_config: Mapping[str, Any]) -> str:
     """Hash the CP-4D captured source/configuration packet when one exists."""
     return sha256_hex(source_config)
+
+
+_STATUS_EVIDENCE_FIELDS = (
+    "DriverID",
+    "WorkDate",
+    "PayrollPeriodDriverDayEntryStateID",
+    "StatusKeyID",
+    "StatusCodeSnapshot",
+    "StatusLabelSnapshot",
+    "StatusIsOffReasonSnapshot",
+)
+_BONUS_EVIDENCE_FIELDS = (
+    "PayrollBonusEventID",
+    "DriverID",
+    "Amount",
+    "Reason",
+    "Notes",
+    "DataRevision",
+    "CreatedByUserID",
+    "CreatorDisplayNameSnapshot",
+    "CreatedAtUtc",
+)
+
+
+def calculate_report_evidence_hash(
+    *,
+    status_entries: Sequence[Mapping[str, Any]],
+    bonus_events: Sequence[Mapping[str, Any]],
+) -> str:
+    """Hash CP-5C report-only evidence without changing financial hashes."""
+    statuses = [
+        {field: entry.get(field) for field in _STATUS_EVIDENCE_FIELDS}
+        for entry in status_entries
+    ]
+    bonuses = [
+        {field: event.get(field) for field in _BONUS_EVIDENCE_FIELDS}
+        for event in bonus_events
+    ]
+    statuses.sort(key=lambda entry: (
+        entry["DriverID"], entry["WorkDate"],
+        entry["PayrollPeriodDriverDayEntryStateID"],
+    ))
+    bonuses.sort(key=lambda event: (event["DriverID"], event["PayrollBonusEventID"]))
+    return sha256_hex({
+        "ReportEvidenceVersion": CURRENT_REPORT_EVIDENCE_VERSION,
+        "StatusEntries": statuses,
+        "BonusEvents": bonuses,
+    })
 
 
 def _line_projection(line: Mapping[str, Any]) -> dict[str, Any]:

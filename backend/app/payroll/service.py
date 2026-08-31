@@ -34,7 +34,9 @@ from app.payroll.calculation.per_unit import (
 )
 from app.payroll.snapshot_hash import (
     CURRENT_PAYROLL_CALCULATION_VERSION,
+    CURRENT_REPORT_EVIDENCE_VERSION,
     canonical_json,
+    calculate_report_evidence_hash,
     calculate_snapshot_hash,
     calculate_source_config_hash,
 )
@@ -6084,6 +6086,109 @@ async def _set_submit_transaction_isolation(db: AsyncConnection) -> None:
 
 
 
+async def _load_active_bonus_events(
+    period_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> list[Any]:
+    """Return the canonical Active BonusEvent selection used by CP-4B/CP-4D."""
+    result = await db.execute(
+        text("""
+            SELECT
+                be.payrollbonuseventid,
+                be.driverid,
+                d.drivercode,
+                e.fullname AS drivername,
+                be.amount,
+                be.reason,
+                be.notes,
+                be.datarevision,
+                be.createdbyuserid,
+                creator.displayname AS creatordisplaynamesnapshot,
+                be.createdatutc
+            FROM payroll.payrollbonusevents be
+            LEFT JOIN core.drivers d ON d.driverid = be.driverid
+            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            LEFT JOIN sec.users creator ON creator.userid = be.createdbyuserid
+            WHERE be.payrollperiodid = :period_id
+              AND be.companyid = :company_id
+              AND be.status = 'Active'
+            ORDER BY be.driverid, be.payrollbonuseventid
+        """),
+        {"period_id": period_id, "company_id": company_id},
+    )
+    return list(result.mappings().all())
+
+
+async def _load_report_evidence(
+    *,
+    period: PeriodSummary,
+    company_id: int,
+    db: AsyncConnection,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read CP-5C report evidence from the same CP-4D transaction view."""
+    status_result = await db.execute(
+        text("""
+            SELECT
+                ppdes.payrollperioddriverdayentrystateid,
+                ppdes.driverid,
+                ppdes.workdate,
+                ppdes.statuskeyid,
+                sk.statuscode,
+                sk.keyname,
+                sk.isoffreason
+            FROM payroll.payrollperioddriverdayentrystate ppdes
+            JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = ppdes.statuskeyid
+            WHERE ppdes.payrollperiodid = :pid
+              AND ppdes.companyid = :cid
+              AND ppdes.branchid = :bid
+              AND ppdes.isvoided = FALSE
+              AND ppdes.statuskeyid IS NOT NULL
+              AND ppdes.workdate BETWEEN :period_start AND :period_end
+            ORDER BY ppdes.driverid, ppdes.workdate,
+                     ppdes.payrollperioddriverdayentrystateid
+        """),
+        {
+            "pid": period.payroll_period_id,
+            "cid": company_id,
+            "bid": period.branch_id,
+            "period_start": period.start_date,
+            "period_end": period.end_date,
+        },
+    )
+    status_entries = [
+        {
+            "PayrollPeriodDriverDayEntryStateID": int(row["payrollperioddriverdayentrystateid"]),
+            "DriverID": int(row["driverid"]),
+            "WorkDate": row["workdate"],
+            "StatusKeyID": int(row["statuskeyid"]),
+            "StatusCodeSnapshot": row["statuscode"],
+            "StatusLabelSnapshot": row["keyname"],
+            "StatusIsOffReasonSnapshot": bool(row["isoffreason"]),
+        }
+        for row in status_result.mappings().all()
+    ]
+    bonus_events = [
+        {
+            "PayrollBonusEventID": int(row["payrollbonuseventid"]),
+            "DriverID": int(row["driverid"]),
+            "Amount": Decimal(str(row["amount"])),
+            "Reason": row["reason"],
+            "Notes": row["notes"],
+            "DataRevision": int(row["datarevision"]),
+            "CreatedByUserID": (
+                int(row["createdbyuserid"])
+                if row["createdbyuserid"] is not None
+                else None
+            ),
+            "CreatorDisplayNameSnapshot": row["creatordisplaynamesnapshot"],
+            "CreatedAtUtc": row["createdatutc"],
+        }
+        for row in await _load_active_bonus_events(period.payroll_period_id, company_id, db)
+    ]
+    return status_entries, bonus_events
+
+
 async def _build_live_calculation_packet(
     period: PeriodSummary,
     company_id: int,
@@ -6339,28 +6444,7 @@ async def _build_live_calculation_packet(
         ))
 
     # ── Canonical Active bonus (never Voided; never legacy BONUS DraftLines).
-    bonus_result = await db.execute(
-        text("""
-            SELECT
-                be.payrollbonuseventid,
-                be.driverid,
-                d.drivercode,
-                e.fullname  AS drivername,
-                be.amount,
-                be.reason,
-                be.notes,
-                be.datarevision
-            FROM   payroll.payrollbonusevents be
-            LEFT JOIN core.drivers   d ON d.driverid   = be.driverid
-            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
-            WHERE  be.payrollperiodid = :period_id
-              AND  be.companyid       = :company_id
-              AND  be.status          = 'Active'
-            ORDER BY be.driverid, be.payrollbonuseventid
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-    for b in bonus_result.mappings().fetchall():
+    for b in await _load_active_bonus_events(period_id, company_id, db):
         drv = int(b["driverid"])
         driver_names.setdefault(drv, b["drivername"])
         driver_codes.setdefault(drv, b["drivercode"])
@@ -6739,6 +6823,40 @@ async def _capture_calculation_snapshot(
             detail="Cannot submit: an authoritative calculation line is unresolved.",
         )
 
+    status_entries, bonus_events = await _load_report_evidence(
+        period=period,
+        company_id=company_id,
+        db=db,
+    )
+    snapshot_bonus_lines = sorted(
+        (
+            line.bonus_event_id,
+            line.driver_id,
+            line.snapshot_calculated_amount
+            if line.snapshot_calculated_amount is not None
+            else line.calculated_amount,
+        )
+        for driver in packet.drivers
+        for line in driver.lines
+        if line.source_type == "BonusEvent" and line.bonus_event_id is not None
+    )
+    evidence_bonus_lines = sorted(
+        (event["PayrollBonusEventID"], event["DriverID"], event["Amount"])
+        for event in bonus_events
+    )
+    if snapshot_bonus_lines != evidence_bonus_lines:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Cannot submit: captured Bonus evidence does not reconcile "
+                "with the authoritative calculation packet."
+            ),
+        )
+    report_evidence_hash = calculate_report_evidence_hash(
+        status_entries=status_entries,
+        bonus_events=bonus_events,
+    )
+
     eligibility_rows = (await db.execute(
         text("""
             SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
@@ -6810,10 +6928,12 @@ async def _capture_calculation_snapshot(
             INSERT INTO payroll.payrollcalculationsnapshots
                 (companyid, branchid, payrollperiodid, revisionnumber,
                  calculationversion, sourceconfighash, snapshothash,
+                 reportevidenceversion, reportevidencehash,
                  createdbyuserid, totalexpectedpay)
             VALUES
                 (:cid, :bid, :pid, :revision, :version, :source_hash,
-                 :snapshot_hash, :uid, :total)
+                 :snapshot_hash, :report_evidence_version, :report_evidence_hash,
+                 :uid, :total)
             RETURNING payrollcalculationsnapshotid
         """),
         {
@@ -6824,6 +6944,8 @@ async def _capture_calculation_snapshot(
             "version": CURRENT_PAYROLL_CALCULATION_VERSION,
             "source_hash": source_config_hash,
             "snapshot_hash": snapshot_hash,
+            "report_evidence_version": CURRENT_REPORT_EVIDENCE_VERSION,
+            "report_evidence_hash": report_evidence_hash,
             "uid": user_id,
             "total": packet.total_expected_pay,
         },
@@ -6892,6 +7014,65 @@ async def _capture_calculation_snapshot(
                 },
             )
 
+    for entry in status_entries:
+        await db.execute(
+            text("""
+                INSERT INTO payroll.payrollcalculationsnapshotstatusentries
+                    (payrollcalculationsnapshotid, companyid, branchid,
+                     payrollperiodid, driverid, workdate,
+                     payrollperioddriverdayentrystateid, statuskeyid,
+                     statuscodesnapshot, statuslabelsnapshot,
+                     statusisoffreasonsnapshot)
+                VALUES
+                    (:snapshot_id, :cid, :bid, :pid, :driver_id, :work_date,
+                     :entry_state_id, :status_key_id, :status_code,
+                     :status_label, :status_is_off_reason)
+            """),
+            {
+                "snapshot_id": snapshot_id,
+                "cid": company_id,
+                "bid": period.branch_id,
+                "pid": period.payroll_period_id,
+                "driver_id": entry["DriverID"],
+                "work_date": entry["WorkDate"],
+                "entry_state_id": entry["PayrollPeriodDriverDayEntryStateID"],
+                "status_key_id": entry["StatusKeyID"],
+                "status_code": entry["StatusCodeSnapshot"],
+                "status_label": entry["StatusLabelSnapshot"],
+                "status_is_off_reason": entry["StatusIsOffReasonSnapshot"],
+            },
+        )
+
+    for event in bonus_events:
+        await db.execute(
+            text("""
+                INSERT INTO payroll.payrollcalculationsnapshotbonusevents
+                    (payrollcalculationsnapshotid, companyid, branchid,
+                     payrollperiodid, payrollbonuseventid, driverid, amount,
+                     reason, notes, datarevision, createdbyuserid,
+                     creatordisplaynamesnapshot, createdatutc)
+                VALUES
+                    (:snapshot_id, :cid, :bid, :pid, :bonus_event_id, :driver_id,
+                     :amount, :reason, :notes, :data_revision, :created_by_user_id,
+                     :creator_display_name, :created_at)
+            """),
+            {
+                "snapshot_id": snapshot_id,
+                "cid": company_id,
+                "bid": period.branch_id,
+                "pid": period.payroll_period_id,
+                "bonus_event_id": event["PayrollBonusEventID"],
+                "driver_id": event["DriverID"],
+                "amount": event["Amount"],
+                "reason": event["Reason"],
+                "notes": event["Notes"],
+                "data_revision": event["DataRevision"],
+                "created_by_user_id": event["CreatedByUserID"],
+                "creator_display_name": event["CreatorDisplayNameSnapshot"],
+                "created_at": event["CreatedAtUtc"],
+            },
+        )
+
     await db.execute(
         text("""
             INSERT INTO audit.auditlog
@@ -6913,6 +7094,8 @@ async def _capture_calculation_snapshot(
                 "revision_number": revision_number,
                 "source_config_hash": source_config_hash,
                 "snapshot_hash": snapshot_hash,
+                "report_evidence_version": CURRENT_REPORT_EVIDENCE_VERSION,
+                "report_evidence_hash": report_evidence_hash,
                 "context": context,
             }),
             "reason": "Immutable calculation snapshot captured for review submission",
