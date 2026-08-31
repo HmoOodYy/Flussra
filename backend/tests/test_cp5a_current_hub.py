@@ -415,7 +415,11 @@ class TestCurrentPayrollHub:
         assert prepared["display_status"] == "Prepared"
         assert prepared["financials_available"] is False
         assert prepared["financial_summary"] is None
-        assert prepared["metrics"] == {"total_eligible_drivers": 1, "working_drivers": 0}
+        assert prepared["metrics"] == {
+            "total_eligible_drivers": 1,
+            "working_drivers": 0,
+            "fully_off_drivers": 0,
+        }
 
     async def test_open_summary_matches_cp4b_live_preview(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
@@ -447,6 +451,7 @@ class TestCurrentPayrollHub:
         assert _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"] == {
             "total_eligible_drivers": 1,
             "working_drivers": 1,
+            "fully_off_drivers": 0,
         }
 
     async def test_working_drivers_excludes_status_and_system_sources(
@@ -461,7 +466,11 @@ class TestCurrentPayrollHub:
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text
         metrics = _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"]
-        assert metrics == {"total_eligible_drivers": 1, "working_drivers": 0}
+        assert metrics == {
+            "total_eligible_drivers": 1,
+            "working_drivers": 0,
+            "fully_off_drivers": 0,
+        }
 
     @pytest.mark.parametrize("line_type", ["HOURS", "MILES", "LOADS", "PALLETS"])
     async def test_normal_daily_work_sources_count_once(
@@ -484,7 +493,11 @@ class TestCurrentPayrollHub:
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text
         metrics = _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"]
-        assert metrics == {"total_eligible_drivers": 1, "working_drivers": 1}
+        assert metrics == {
+            "total_eligible_drivers": 1,
+            "working_drivers": 1,
+            "fully_off_drivers": 0,
+        }
 
     async def test_inreview_does_not_request_live_financial_authority(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db, monkeypatch,
@@ -567,6 +580,7 @@ class TestCurrentPayrollHub:
         assert _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"] == {
             "total_eligible_drivers": 1,
             "working_drivers": 0,
+            "fully_off_drivers": 0,
         }
 
     async def test_snapshot_driver_date_window_gates_working_metric(
@@ -627,6 +641,7 @@ class TestCurrentPayrollHub:
         assert _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"] == {
             "total_eligible_drivers": 1,
             "working_drivers": 0,
+            "fully_off_drivers": 0,
         }
 
     async def test_bonus_and_period_financial_only_do_not_count_as_working(
@@ -648,6 +663,7 @@ class TestCurrentPayrollHub:
         assert _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"] == {
             "total_eligible_drivers": 1,
             "working_drivers": 0,
+            "fully_off_drivers": 0,
         }
 
     async def test_driver_and_oda_users_cannot_read_hub(

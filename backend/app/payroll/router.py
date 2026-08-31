@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
-from app.payroll import current_hub, service
+from app.payroll import current_hub, off_drivers, service
 from app.payroll.schemas import (
     BatchRateRequest,
     BatchRateSaveResult,
@@ -47,6 +47,7 @@ from app.payroll.schemas import (
     FinalizationPreviewResponse,
     FinalLineSummary,
     NextPeriodDates,
+    OffDriversSummaryResponse,
     PeriodCreate,
     PeriodCreationRequest,
     PeriodCreationResponse,
@@ -58,6 +59,7 @@ from app.payroll.schemas import (
     PeriodSummary,
     RateLookupResult,
     RateTypeSummary,
+    SelectedDayOffDriversResponse,
 )
 
 router = APIRouter()
@@ -1453,6 +1455,57 @@ async def get_period_drivers_off(
         period_id=period_id,
         entries=entries,
         total_count=len(entries),
+    )
+
+
+# ---------------------------------------------------------------------------
+# CP-5B — Official Fully-Off and selected-day Off-driver contracts
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/periods/{period_id}/off-drivers/summary",
+    response_model=OffDriversSummaryResponse,
+    summary="Get the distinct fully-off drivers for a payroll period",
+    responses={
+        403: {"description": "ODA/Driver user or no payroll.view/payroll.entry permission"},
+        404: {"description": "Period not found"},
+    },
+)
+async def get_period_off_drivers_summary(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> OffDriversSummaryResponse:
+    return await off_drivers.get_off_drivers_summary(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+    )
+
+
+@router.get(
+    "/periods/{period_id}/off-drivers",
+    response_model=SelectedDayOffDriversResponse,
+    summary="Get Off drivers for one payroll period work date",
+    responses={
+        400: {"description": "work_date outside period bounds or period day snapshot"},
+        403: {"description": "ODA/Driver user or no payroll.view/payroll.entry permission"},
+        404: {"description": "Period not found"},
+    },
+)
+async def get_period_off_drivers(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+    work_date: date = Query(..., description="Date inside the payroll period"),
+) -> SelectedDayOffDriversResponse:
+    return await off_drivers.get_selected_day_off_drivers(
+        period_id=period_id,
+        work_date=work_date,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
     )
 
 

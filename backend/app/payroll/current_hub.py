@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.payroll import service
+from app.payroll import off_drivers, service
 from app.payroll.schemas import (
     CurrentPayrollHubBranch,
     CurrentPayrollHubDriverSummary,
@@ -110,7 +110,11 @@ async def _period_metrics(
         db=db,
     )
     if not eligible_ids:
-        return CurrentPayrollHubMetrics(total_eligible_drivers=0, working_drivers=0)
+        return CurrentPayrollHubMetrics(
+            total_eligible_drivers=0,
+            working_drivers=0,
+            fully_off_drivers=0,
+        )
 
     # Working is operational daily entry, never Status, Bonus, system money, or
     # a financial total. Every source must be inside the period bounds. CP-2E
@@ -180,9 +184,11 @@ async def _period_metrics(
         }
     else:
         working_ids = {int(row["driverid"]) for row in rows}
+    fully_off = await off_drivers.resolve_fully_off_drivers(slot, company_id, db)
     return CurrentPayrollHubMetrics(
         total_eligible_drivers=len(eligible_ids),
         working_drivers=len(working_ids),
+        fully_off_drivers=len(fully_off),
     )
 
 

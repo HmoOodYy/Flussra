@@ -1,0 +1,394 @@
+"""CP-5B read model for period Fully-Off and selected-day Off drivers."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from types import SimpleNamespace
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from app.payroll import service
+from app.payroll.schemas import (
+    FullyOffDriverSummary,
+    OffDriversSummaryResponse,
+    SelectedDayOffDriver,
+    SelectedDayOffDriversResponse,
+)
+
+_NON_WORK_DAILY_LINE_TYPES = (
+    "DailyStatus",
+    "DailyNote",
+    "STATUS_PAYMENT",
+    "STATUS_PAY",
+    "BONUS",
+    "ADJUSTMENT",
+    "MINIMUM",
+    "MAXIMUM",
+    "SYS_MIN_TOPUP",
+    "SYS_MAX_CAP",
+)
+
+
+@dataclass(frozen=True)
+class _DriverIdentity:
+    driver_id: int
+    driver_name: str
+    driver_code: str | None
+
+
+@dataclass(frozen=True)
+class _StatusEntry:
+    status_key_id: int | None
+    status_code: str | None
+    status_label: str | None
+    is_off_reason: bool
+    note: str | None
+
+
+def _period_id(period) -> int:
+    value = getattr(period, "payroll_period_id", None)
+    if value is None:
+        value = period.period_id
+    return int(value)
+
+
+async def _readable_period(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+):
+    """Apply the established Current Payroll read boundary before new reads."""
+    await service._require_not_driver_role(company_id, user_id, db)
+    period = await service.get_period_by_id(company_id, user_id, period_id, db)
+    await service._check_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
+    )
+    return period
+
+
+async def _scheduled_work_days(period, db: AsyncConnection) -> set[date]:
+    """Read the immutable calendar when present; derive the legacy schedule otherwise."""
+    rows = (await db.execute(
+        text("""
+            SELECT workdate, isdefaultworkday, isaddedworkday
+            FROM payroll.payrollperioddays
+            WHERE payrollperiodid = :period_id
+            ORDER BY workdate
+        """),
+        {"period_id": _period_id(period)},
+    )).mappings().all()
+    if rows:
+        return {
+            row["workdate"]
+            for row in rows
+            if row["isdefaultworkday"] or row["isaddedworkday"]
+        }
+
+    mask = (await db.execute(
+        text("""
+            SELECT sv.normaldaysoffmask
+            FROM payroll.payrollperiods p
+            LEFT JOIN payroll.payrollscheduleversions sv
+              ON sv.scheduleversionid = p.scheduleversionid
+            WHERE p.payrollperiodid = :period_id
+        """),
+        {"period_id": _period_id(period)},
+    )).scalar_one_or_none() or 0
+    days: set[date] = set()
+    current = period.start_date
+    while current <= period.end_date:
+        day_of_week = (current.weekday() + 1) % 7
+        if not (int(mask) & (1 << day_of_week)):
+            days.add(current)
+        current += timedelta(days=1)
+    return days
+
+
+async def _eligible_driver_days(
+    period,
+    company_id: int,
+    db: AsyncConnection,
+    *,
+    candidate_days: set[date] | None = None,
+) -> dict[int, tuple[_DriverIdentity, set[date]]]:
+    """Return date-level eligibility using the Fully-Off denominator or a selected date."""
+    eligible_dates = candidate_days if candidate_days is not None else await _scheduled_work_days(period, db)
+    if not eligible_dates:
+        return {}
+
+    if await service._period_has_driver_eligibility_snapshot(_period_id(period), db):
+        rows = (await db.execute(
+            text("""
+                SELECT pde.driverid,
+                       COALESCE(NULLIF(pde.drivernamesnapshot, ''), e.fullname, '') AS drivername,
+                       COALESCE(NULLIF(pde.drivercodesnapshot, ''), d.drivercode) AS drivercode,
+                       pde.iseligibleforperiod, pde.eligibilityreasoncode,
+                       pde.hiredatesnapshot, pde.terminationdatesnapshot,
+                       pde.drivereffectivefromsnapshot, pde.drivereffectivetosnapshot
+                FROM payroll.payrollperioddrivereligibility pde
+                LEFT JOIN core.drivers d ON d.driverid = pde.driverid
+                LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+                WHERE pde.payrollperiodid = :period_id
+                  AND pde.companyid = :company_id
+                  AND pde.branchid = :branch_id
+                  AND pde.iseligibleforperiod = TRUE
+                ORDER BY COALESCE(NULLIF(pde.drivernamesnapshot, ''), e.fullname, ''),
+                         COALESCE(NULLIF(pde.drivercodesnapshot, ''), d.drivercode),
+                         pde.driverid
+            """),
+            {
+                "period_id": _period_id(period),
+                "company_id": company_id,
+                "branch_id": period.branch_id,
+            },
+        )).mappings().all()
+        output: dict[int, tuple[_DriverIdentity, set[date]]] = {}
+        for row in rows:
+            snapshot = SimpleNamespace(**dict(row))
+            eligible_days = {
+                work_date for work_date in eligible_dates
+                if service._is_snapshot_row_eligible_for_workdate(snapshot, work_date)
+            }
+            if eligible_days:
+                driver_id = int(row["driverid"])
+                output[driver_id] = (
+                    _DriverIdentity(driver_id, row["drivername"], row["drivercode"]),
+                    eligible_days,
+                )
+        return output
+
+    rows = (await db.execute(
+        text("""
+            SELECT d.driverid, e.fullname AS drivername, d.drivercode,
+                   d.driverstatus, d.effectivefrom, d.effectiveto,
+                   e.employmentstatus, e.hiredate, e.terminationdate
+            FROM core.drivers d
+            JOIN core.employees e ON e.employeeid = d.employeeid
+            WHERE d.companyid = :company_id
+              AND d.branchid = :branch_id
+              AND e.employmentstatus = 'Active'
+              AND (d.driverstatus = 'Active'
+                   OR (d.driverstatus = 'Transferred'
+                       AND d.effectiveto IS NOT NULL
+                       AND d.effectiveto >= :period_start))
+              AND (e.hiredate IS NULL OR e.hiredate <= :period_end)
+              AND (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
+              AND (d.effectivefrom IS NULL OR d.effectivefrom <= :period_end)
+              AND (d.effectiveto IS NULL OR d.effectiveto >= :period_start)
+            ORDER BY e.fullname, d.drivercode, d.driverid
+        """),
+        {
+            "company_id": company_id,
+            "branch_id": period.branch_id,
+            "period_start": period.start_date,
+            "period_end": period.end_date,
+        },
+    )).mappings().all()
+    output = {}
+    for row in rows:
+        eligible_days = {
+            work_date for work_date in eligible_dates
+            if (row["hiredate"] is None or row["hiredate"] <= work_date)
+            and (row["terminationdate"] is None or row["terminationdate"] >= work_date)
+            and (row["effectivefrom"] is None or row["effectivefrom"] <= work_date)
+            and (row["effectiveto"] is None or row["effectiveto"] >= work_date)
+            and (row["driverstatus"] == "Active"
+                 or (row["driverstatus"] == "Transferred"
+                     and row["effectiveto"] is not None
+                     and row["effectiveto"] >= work_date))
+        }
+        if eligible_days:
+            driver_id = int(row["driverid"])
+            output[driver_id] = (
+                _DriverIdentity(driver_id, row["drivername"], row["drivercode"]),
+                eligible_days,
+            )
+    return output
+
+
+async def _status_entries(period, company_id: int, db: AsyncConnection) -> dict[tuple[int, date], _StatusEntry]:
+    """Canonical entry state wins; DailyStatus/DailyNote is legacy compatibility only."""
+    canonical_rows = (await db.execute(
+        text("""
+            SELECT es.driverid, es.workdate, es.statuskeyid, es.notetext,
+                   es.finalizedatutc, es.statuscodesnapshot, es.statuslabelsnapshot,
+                   es.statusisoffreasonsnapshot, sk.statuscode, sk.keyname, sk.isoffreason
+            FROM payroll.payrollperioddriverdayentrystate es
+            LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = es.statuskeyid
+            WHERE es.payrollperiodid = :period_id
+              AND es.companyid = :company_id
+              AND es.isvoided = FALSE
+        """),
+        {"period_id": _period_id(period), "company_id": company_id},
+    )).mappings().all()
+    entries: dict[tuple[int, date], _StatusEntry] = {}
+    for row in canonical_rows:
+        if row["statuskeyid"] is None:
+            continue
+        frozen = row["finalizedatutc"] is not None
+        entries[(int(row["driverid"]), row["workdate"])] = _StatusEntry(
+            status_key_id=int(row["statuskeyid"]),
+            status_code=(row["statuscodesnapshot"] if frozen else row["statuscode"]),
+            status_label=(row["statuslabelsnapshot"] if frozen else row["keyname"]),
+            is_off_reason=bool(
+                row["statusisoffreasonsnapshot"] if frozen else row["isoffreason"]
+            ),
+            note=row["notetext"],
+        )
+
+    legacy_rows = (await db.execute(
+        text("""
+            SELECT ds.driverid, ds.workdate, ds.notes AS statuscode,
+                   sk.statuskeyid, sk.keyname, sk.isoffreason, dn.notes AS note
+            FROM payroll.payrolldraftlines ds
+            LEFT JOIN payroll.payrollstatuskeys sk
+              ON sk.companyid = ds.companyid
+             AND sk.branchid = ds.branchid
+             AND sk.statuscode = ds.notes
+            LEFT JOIN payroll.payrolldraftlines dn
+              ON dn.payrollperiodid = ds.payrollperiodid
+             AND dn.driverid = ds.driverid
+             AND dn.workdate = ds.workdate
+             AND dn.linetype = 'DailyNote'
+             AND dn.status != 'Void'
+            WHERE ds.payrollperiodid = :period_id
+              AND ds.companyid = :company_id
+              AND ds.linetype = 'DailyStatus'
+              AND ds.status != 'Void'
+        """),
+        {"period_id": _period_id(period), "company_id": company_id},
+    )).mappings().all()
+    for row in legacy_rows:
+        key = (int(row["driverid"]), row["workdate"])
+        entries.setdefault(key, _StatusEntry(
+            status_key_id=int(row["statuskeyid"]) if row["statuskeyid"] is not None else None,
+            status_code=row["statuscode"],
+            status_label=row["keyname"],
+            is_off_reason=bool(row["isoffreason"]),
+            note=row["note"],
+        ))
+    return entries
+
+
+async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> set[tuple[int, date]]:
+    """Use PayItem snapshot classification, never financial totals, to identify work."""
+    rows = (await db.execute(
+        text(f"""
+            SELECT DISTINCT dl.driverid, dl.workdate
+            FROM payroll.payrolldraftlines dl
+            LEFT JOIN payroll.payrollperiodpayitems pppi
+              ON pppi.payrollperiodid = dl.payrollperiodid
+             AND pppi.payitemcode = dl.linetype
+            LEFT JOIN payroll.payitems pi
+              ON pi.payitemcode = dl.linetype
+             AND (pi.companyid IS NULL OR pi.companyid = dl.companyid)
+            WHERE dl.payrollperiodid = :period_id
+              AND dl.companyid = :company_id
+              AND dl.branchid = :branch_id
+              AND dl.status != 'Void'
+              AND dl.linescope = 'Daily'
+              AND dl.workdate >= :period_start
+              AND dl.workdate <= :period_end
+              AND dl.quantity IS NOT NULL
+              AND dl.quantity <> 0
+              AND dl.sourcetype NOT IN ('System', 'BonusEvent')
+              AND dl.linetype NOT IN ({', '.join(repr(code) for code in _NON_WORK_DAILY_LINE_TYPES)})
+              AND COALESCE(pppi.itemscope, pi.itemscope) = 'Daily'
+              AND COALESCE(pppi.appearsinpayrollentry, pi.appearsinpayrollentry, FALSE) = TRUE
+              AND COALESCE(pppi.isactiveinperiod, pi.status <> 'Retired', FALSE) = TRUE
+        """),
+        {
+            "period_id": _period_id(period),
+            "company_id": company_id,
+            "branch_id": period.branch_id,
+            "period_start": period.start_date,
+            "period_end": period.end_date,
+        },
+    )).mappings().all()
+    return {(int(row["driverid"]), row["workdate"]) for row in rows}
+
+
+async def resolve_fully_off_drivers(period, company_id: int, db: AsyncConnection) -> list[FullyOffDriverSummary]:
+    """Resolve the official distinct-driver Fully-Off KPI for one payroll period."""
+    eligible = await _eligible_driver_days(period, company_id, db)
+    if not eligible:
+        return []
+    statuses, normal_work = await _status_entries(period, company_id, db), await _normal_work_pairs(
+        period, company_id, db,
+    )
+    fully_off: list[FullyOffDriverSummary] = []
+    for driver_id, (driver, days) in eligible.items():
+        if all(
+            statuses.get((driver_id, work_date), _StatusEntry(None, None, None, False, None)).is_off_reason
+            and (driver_id, work_date) not in normal_work
+            for work_date in days
+        ):
+            fully_off.append(FullyOffDriverSummary(
+                driver_id=driver.driver_id,
+                driver_code=driver.driver_code,
+                driver_name=driver.driver_name,
+                eligible_scheduled_day_count=len(days),
+                off_day_count=len(days),
+            ))
+    return fully_off
+
+
+async def get_off_drivers_summary(
+    period_id: int, company_id: int, user_id: int, db: AsyncConnection,
+) -> OffDriversSummaryResponse:
+    period = await _readable_period(period_id, company_id, user_id, db)
+    drivers = await resolve_fully_off_drivers(period, company_id, db)
+    return OffDriversSummaryResponse(
+        period_id=_period_id(period),
+        start_date=period.start_date,
+        end_date=period.end_date,
+        total_fully_off_drivers=len(drivers),
+        fully_off_drivers=drivers,
+    )
+
+
+async def get_selected_day_off_drivers(
+    period_id: int,
+    work_date: date,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> SelectedDayOffDriversResponse:
+    period = await _readable_period(period_id, company_id, user_id, db)
+    await service._validate_period_work_date(
+        _period_id(period), work_date, period.start_date, period.end_date, db,
+    )
+    eligible = await _eligible_driver_days(
+        period, company_id, db, candidate_days={work_date},
+    )
+    statuses = await _status_entries(period, company_id, db)
+    drivers: list[SelectedDayOffDriver] = []
+    for driver_id, (driver, eligible_days) in eligible.items():
+        if work_date not in eligible_days:
+            continue
+        status = statuses.get((driver_id, work_date))
+        if status is None or not status.is_off_reason:
+            continue
+        drivers.append(SelectedDayOffDriver(
+            driver_id=driver.driver_id,
+            driver_code=driver.driver_code,
+            driver_name=driver.driver_name,
+            work_date=work_date,
+            day_name=work_date.strftime("%A"),
+            status_key_id=status.status_key_id,
+            status_code=status.status_code,
+            status_label=status.status_label,
+            is_off_reason=True,
+            has_note=bool(status.note),
+            note=status.note,
+        ))
+    drivers.sort(key=lambda item: (item.driver_name or "", item.driver_code or "", item.driver_id))
+    return SelectedDayOffDriversResponse(
+        period_id=_period_id(period),
+        work_date=work_date,
+        day_name=work_date.strftime("%A"),
+        total_count=len(drivers),
+        drivers=drivers,
+    )

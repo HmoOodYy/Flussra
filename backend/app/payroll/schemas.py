@@ -1150,6 +1150,48 @@ class DriversOffResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# CP-5B — Official Fully-Off and selected-day Off-driver read contracts
+# ---------------------------------------------------------------------------
+
+class FullyOffDriverSummary(BaseModel):
+    driver_id: int
+    driver_name: str
+    driver_code: str | None = None
+    eligible_scheduled_day_count: int
+    off_day_count: int
+
+
+class OffDriversSummaryResponse(BaseModel):
+    period_id: int
+    start_date: date
+    end_date: date
+    total_fully_off_drivers: int
+    fully_off_drivers: list[FullyOffDriverSummary] = []
+
+
+class SelectedDayOffDriver(BaseModel):
+    driver_id: int
+    driver_name: str
+    driver_code: str | None = None
+    work_date: date
+    day_name: str
+    status_key_id: int | None = None
+    status_code: str | None = None
+    status_label: str | None = None
+    is_off_reason: bool = True
+    has_note: bool
+    note: str | None = None
+
+
+class SelectedDayOffDriversResponse(BaseModel):
+    period_id: int
+    work_date: date
+    day_name: str
+    total_count: int
+    drivers: list[SelectedDayOffDriver] = []
+
+
+# ---------------------------------------------------------------------------
 # CP-3A — Finalization Preview (read-only)
 # ---------------------------------------------------------------------------
 
@@ -1443,6 +1485,7 @@ class CurrentPayrollHubMetrics(BaseModel):
     """Operational, period-scoped driver counts for one active workflow slot."""
     total_eligible_drivers: int
     working_drivers: int
+    fully_off_drivers: int
 
 
 class CurrentPayrollHubDriverSummary(BaseModel):
