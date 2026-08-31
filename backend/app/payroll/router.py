@@ -11,30 +11,54 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.dependencies import get_current_user, get_db
+from app.payroll import current_hub, service
 from app.payroll.schemas import (
-    PeriodSummary, PeriodCreate, PeriodStatusChange, NextPeriodDates, PeriodEntryCount,
-    DraftLineSummary, DraftLineCreate, DraftLineUpdate,
-    DriverPeriodSummary, FinalLineSummary,
-    RateTypeSummary, DriverRateSummary, DriverRateCreate, DriverRateUpdate,
-    RateLookupResult,
-    PeriodPayLineCreate, PeriodPayLineUpdate,
-    BonusEventCreate, BonusEventUpdate, BonusEventResponse, BonusSummaryResponse,
-    BonusBatchCreate, BonusBatchResponse,
-    PeriodEligibleDriversResponse,
-    DriverPayRuleSummary, DriverPayRuleCreate, DriverPayRuleEnd, DriverPayRuleNotesUpdate,
+    BatchRateRequest,
+    BatchRateSaveResult,
+    BonusBatchCreate,
+    BonusBatchResponse,
+    BonusEventCreate,
+    BonusEventResponse,
+    BonusEventUpdate,
+    BonusSummaryResponse,
+    CalculationPreviewResponse,
+    CandidatePreviewResponse,
+    CopyRatesRequest,
+    CopyRatesResult,
+    CurrentPayrollHubResponse,
+    CurrentWorkflowResponse,
+    DayGridResponse,
+    DayGridSaveRequest,
+    DraftLineCreate,
+    DraftLineSummary,
+    DraftLineUpdate,
+    DriverPayRuleCreate,
+    DriverPayRuleEnd,
+    DriverPayRuleNotesUpdate,
+    DriverPayRuleSummary,
+    DriverPeriodSummary,
+    DriverRateCreate,
     DriverRateMatrix,
-    BatchRateRequest, BatchRateSaveResult,
     DriverRatesSummary,
-    CopyRatesRequest, CopyRatesResult,
-    DayGridResponse, DayGridSaveRequest,
+    DriverRateSummary,
+    DriverRateUpdate,
     DriversOffResponse,
     FinalizationPreviewResponse,
-    CalculationPreviewResponse,
-    CandidatePreviewResponse, PeriodCreationRequest, PeriodCreationResponse,
-    CurrentWorkflowResponse,
+    FinalLineSummary,
+    NextPeriodDates,
+    PeriodCreate,
+    PeriodCreationRequest,
+    PeriodCreationResponse,
+    PeriodEligibleDriversResponse,
+    PeriodEntryCount,
+    PeriodPayLineCreate,
+    PeriodPayLineUpdate,
+    PeriodStatusChange,
+    PeriodSummary,
+    RateLookupResult,
+    RateTypeSummary,
 )
-from app.payroll import service
-from app.dependencies import get_db, get_current_user
 
 router = APIRouter()
 
@@ -1578,6 +1602,32 @@ async def create_period_from_candidate(
 # ---------------------------------------------------------------------------
 # CP-1E: Workflow hub read endpoint
 # ---------------------------------------------------------------------------
+
+@router.get(
+    "/current",
+    response_model=CurrentPayrollHubResponse,
+    summary="Get the Current Payroll Hub for accessible branches",
+    description=(
+        "Returns the backend-owned active workflow aggregate. Open and Returned "
+        "financial summaries are live CP-4B calculation data; Prepared and InReview "
+        "do not expose live financial authority."
+    ),
+    responses={
+        403: {"description": "No branch access, driver role, or no payroll read permission"},
+    },
+)
+async def get_current_payroll_hub(
+    token: TokenDep,
+    db: DbDep,
+    branch_id: int | None = Query(None, description="Scope to a specific branch (optional)"),
+) -> CurrentPayrollHubResponse:
+    return await current_hub.get_current_payroll_hub(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        branch_id=branch_id,
+        db=db,
+    )
+
 
 @router.get(
     "/current-workflow",

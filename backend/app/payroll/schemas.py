@@ -7,7 +7,6 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Period summary (used for list and single-period responses)
 # ---------------------------------------------------------------------------
@@ -1434,3 +1433,65 @@ class CurrentWorkflowResponse(BaseModel):
     company_id: int
     requested_branch_id: int | None = None
     branches: list[BranchWorkflowEntry] = []
+
+
+# ---------------------------------------------------------------------------
+# CP-5A: Current Payroll Hub
+# ---------------------------------------------------------------------------
+
+class CurrentPayrollHubMetrics(BaseModel):
+    """Operational, period-scoped driver counts for one active workflow slot."""
+    total_eligible_drivers: int
+    working_drivers: int
+
+
+class CurrentPayrollHubDriverSummary(BaseModel):
+    """A compact, authority-backed expected-income driver summary."""
+    driver_id: int
+    driver_code: str | None = None
+    driver_name: str | None = None
+    expected_pay: Decimal
+
+
+class CurrentPayrollHubFinancialSummary(BaseModel):
+    """Compact CP-4B live calculation data for an Open or Returned slot only."""
+    authority_kind: str = "LIVE"
+    total_expected_pay: Decimal
+    normal_pay: Decimal
+    bonus_total: Decimal
+    system_adjustments: Decimal
+    has_blockers: bool
+    blockers: list[str] = []
+    warnings: list[str] = []
+    top_drivers: list[CurrentPayrollHubDriverSummary] = []
+
+
+class CurrentPayrollHubPeriodSlot(WorkflowSlotItem):
+    """Workflow slot metadata plus only the financial authority valid for its state."""
+    financials_available: bool
+    financial_summary: CurrentPayrollHubFinancialSummary | None = None
+    metrics: CurrentPayrollHubMetrics
+
+
+class CurrentPayrollHubSlots(BaseModel):
+    open: CurrentPayrollHubPeriodSlot | None = None
+    prepared: CurrentPayrollHubPeriodSlot | None = None
+    in_review: CurrentPayrollHubPeriodSlot | None = None
+    returned: CurrentPayrollHubPeriodSlot | None = None
+
+
+class CurrentPayrollHubBranch(BaseModel):
+    branch_id: int
+    branch_name: str
+    setup_status: str
+    slots: CurrentPayrollHubSlots
+    capabilities: BranchWorkflowCapabilities
+    alerts: list[WorkflowAlert] = []
+
+
+class CurrentPayrollHubResponse(BaseModel):
+    scope: str
+    company_id: int
+    requested_branch_id: int | None = None
+    generated_at_utc: datetime
+    branches: list[CurrentPayrollHubBranch] = []
