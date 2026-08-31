@@ -7,7 +7,7 @@
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
 **Current migration head after implemented units:** Alembic `0062` (CP-4D submitted calculation snapshot capture; CP-4F added no migration)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `In Progress`; RP-1 is its completed internal report-authority foundation, not a new official phase. Phases 6 and 7 remain `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `In Progress`; CP-5A is `Completed` (commit `5d05756`), and RP-1 is its completed internal report-authority foundation, not a new official phase. Phases 6 and 7 remain `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -551,8 +551,8 @@ Not allowed:
 
 ### 6.7 Hub and reports
 
-- No trusted Current Payroll aggregate.
-- Existing period list pagination/filtering is not a hub contract.
+- ~~No trusted Current Payroll aggregate.~~ Resolved by CP-5A: `GET /payroll/current` is the company-scoped Hub aggregate with optional branch filtering, Open/Prepared/InReview/Returned slots, reused CP-1E alerts/capabilities, eligible/Working Drivers metrics, and Open/Returned CP-4B financial summaries. `/payroll/current-workflow` remains compatible.
+- ~~Existing period list pagination/filtering is not a hub contract.~~ Resolved for the Hub by CP-5A's dedicated current-workflow aggregate; reports and later Hub extensions remain separate contracts.
 - Existing off count is driver-day rows, not fully-off drivers.
 - ~~No lifecycle financial-authority foundation for future reports.~~ Resolved by RP-1: future report services can resolve `SOURCE_ONLY`, `LIVE`, exact ReviewItem-linked submitted/approved snapshots, or `FINAL_LINES` without choosing an authority client-side or selecting a latest snapshot.
 - No Drivers Report, Period Work, Period Pay, or Mixed Summary backend contract.
@@ -736,7 +736,9 @@ GET /payroll/current
 GET /payroll/current?branch_id={branch_id}
 ```
 
-Response responsibilities:
+**Implemented by CP-5A** (`5d05756` — `feat: add current payroll hub`). The current Hub is company-scoped with optional `branch_id`, honors current-payroll read/branch access, preserves company isolation and driver/`OwnDriverDataOnly` denial, and does not require `reports.view`.
+
+Current response responsibilities:
 
 - caller scope and accessible branches;
 - Open, Prepared, InReview, and Returned period slots;
@@ -744,13 +746,14 @@ Response responsibilities:
 - period dates/name/status/display status;
 - total eligible drivers;
 - working drivers;
-- fully-off driver KPI;
-- expected normal pay, bonus, adjustments, and total expected income where allowed;
-- top expected-income drivers;
-- blockers/warnings;
+- Open/Returned compact CP-4B financial summaries: expected normal pay, bonus, adjustments, total expected income, calculation blockers/warnings, and top expected-income drivers;
+- Prepared source/workflow-only behavior with no financial authority; InReview does not use live calculation;
 - action capabilities and read-only reason codes;
-- period/source/calculation revision;
-- no frontend aggregation across payroll endpoints.
+- no frontend aggregation across payroll endpoints; `/payroll/current-workflow` remains compatible.
+
+Working Drivers is a Hub metric, not a Daily Grid roster rule: it counts distinct period-eligible drivers with at least one genuine normal daily operational work/activity source (for example Hours, Miles, Loads, Pallets, or another normal Daily PayItem value) inside the period and on an eligible driver date. Status alone, Bonus, system or period-level financial adjustments, and eligibility with no work data do not qualify. CP-2E periods use the canonical snapshotted driver-date eligibility window; legacy periods use established legacy eligibility semantics. Eligible drivers may still appear in the Daily Grid without work data.
+
+The separate fully-off-driver KPI and selected-day off-driver detail remain CP-5B work. Drivers Report, Period Work, Period Pay, and Mixed Summary remain later CP-5C/P5D-P5E work.
 
 ### 8.2 Smart period creation
 
@@ -1202,7 +1205,7 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 5. No SemiMonthly cadence. Durable schedule versioning was resolved by CP-2A.
 6. ~~No period-day/calendar/Add Day snapshot.~~ Period-day snapshot resolved by CP-2B (`PayrollPeriodDays`). Add Day activation workflow remains pending.
 7. ~~Prepared pre-entry cannot be enabled safely through current response contracts.~~ Resolved by CP-2F.
-8. No backend Current Payroll Hub contract.
+8. ~~No backend Current Payroll Hub contract.~~ Resolved by CP-5A: `GET /payroll/current` provides the backend-owned aggregate; distinct fully-off and report contracts remain pending.
 9. ~~No Open/Returned expected-income contract.~~ Resolved by CP-4B: Open/Returned now have a backend-owned, read-only live calculation preview; Draft/Prepared remains source-only with no financial preview.
 10. No calculation/report contracts for required views.
 11. ~~Bonus is generic Period Pay with competing unused storage.~~ Resolved by CP-3A: canonical `PayrollBonusEvents` domain; generic Period Pay blocks BONUS; legacy BONUS DraftLines hidden/blocked from period-pay paths. The min/max debt noted here at the time is now also resolved — see P0 #5 above (CP-3C).
@@ -2838,7 +2841,7 @@ For future allowance behavior, separate snapshots/ledger metadata may include: a
 
 **Status:** `In Progress`
 
-- [ ] P5A: Current Payroll Hub aggregate.
+- [x] P5A: Current Payroll Hub aggregate — completed by CP-5A (`5d05756`).
 - [ ] P5B: fully-off driver KPI.
 - [ ] P5C: selected-day off-driver contract.
 - [ ] P5D: Drivers Report.
@@ -2872,13 +2875,19 @@ Financial authority is lifecycle-bound: Draft/Prepared is source-only; Open/Retu
 
 RP-1 mapping is `Draft -> SOURCE_ONLY`, `Open/Returned -> LIVE`, `InReview -> SUBMITTED_SNAPSHOT`, `Approved -> APPROVED_SNAPSHOT`, `Locked/Archived -> FINAL_LINES`, and `Cancelled -> UNAVAILABLE`. InReview and Approved resolve the exact ReviewItem-linked snapshot, never a latest snapshot. RP-1 adds no financial calculation, report rows, public endpoint, or migration. Independent review: `PASS_WITH_NOTES`, P0 none, P1 none, `SAFE_TO_COMMIT_RP1`. Evidence: RP-1 13 passed; CP-4E regression 12 passed; CP-4F regression 8 passed; Ruff and compile/import passed. P2: an explicit InReview ambiguity test remains missing, though the shared cardinality path fails closed.
 
-**Execution order:** CP-5A Current Payroll Hub is next. CP-5B then delivers the distinct official P5B fully-off KPI and P5C selected-day off-driver contract; it must not reuse the period off-row count. CP-5C then begins the calculation-report bundle under official P5D/P5E, reusing RP-1 rather than recreating authority selection. Do not start RP-2 Period Pay before CP-5C.
+**CP-5A Current Payroll Hub — Complete.** Commit `5d05756` (`feat: add current payroll hub`) added `backend/app/payroll/current_hub.py`, `backend/app/payroll/router.py`, `backend/app/payroll/schemas.py`, and `backend/tests/test_cp5a_current_hub.py`. It implements `GET /payroll/current` with optional `branch_id`: a backend-owned company/branch-scoped aggregate for Open, Prepared/Draft, InReview, and Returned slots. It reuses CP-1E alerts/capabilities; returns total eligible and Working Drivers metrics; returns compact live CP-4B expected-income summaries, blockers/warnings, and top drivers only for Open/Returned; gives Prepared no financial authority; and does not use live calculation for InReview. It adds no frontend, migration, or report implementation, and leaves `/payroll/current-workflow` compatible.
+
+Working Drivers is explicitly distinct operational source truth, not expected-pay totals or Daily Grid membership: a distinct period-eligible driver qualifies with one non-zero normal daily work/activity source inside the period and within the applicable CP-2E snapshot or legacy driver-date eligibility window. Status-only, Bonus-only, system/period-level financial-only, and eligible-with-no-data cases are excluded. An eligible driver remains visible in the Daily Grid even with no work data.
+
+Independent CP-5A review after the pre-commit fix was `PASS_WITH_NOTES`, P0 none, P1 none, `SAFE_TO_COMMIT_CP5A`. The initial P1 allowing out-of-period or driver-date-ineligible daily rows to count as Working Drivers was fixed before commit and is not unresolved debt. Focused evidence: CP-5A 17 passed. Relevant regressions: CP-1E 43 passed; CP-4B 72 passed; CP-2E 75 passed with existing warnings only; Returned lifecycle 30 passed; branch access plus permission catalog 26 passed; RP-1 13 passed; Ruff and compile/import passed. P2: existing Windows `testing.postgresql` automatic-shutdown warning, and future Hub growth should watch multi-branch/slot-by-slot live-calculation cost; neither blocks Phase 5.
+
+**Execution order:** CP-5B is next and delivers the distinct official P5B fully-off KPI and P5C selected-day off-driver contract; it must not reuse the period off-row count. CP-5C then begins the calculation-report bundle under official P5D/P5E, reusing RP-1 rather than recreating authority selection. Do not start RP-2 Period Pay before CP-5C.
 
 **Objective**
 
 Expose complete backend-owned workflow and financial read contracts without frontend aggregation.
 
-CP-1E current-workflow, FE-3 workflow slots, and FE-4 live calculation preview are useful foundations only. They do not close P5A: the official Hub still requires one trusted backend-owned aggregate with relevant workflow slots, metrics, expected-income information where allowed, fully-off KPI, blockers/warnings, and capabilities/reason codes.
+CP-1E current-workflow, FE-3 workflow slots, and FE-4 live calculation preview were useful foundations. CP-5A now closes the trusted backend-owned aggregate for its implemented workflow slots, metrics, expected-income information where allowed, blockers/warnings, and capabilities/reason codes. The distinct fully-off KPI and selected-day detail remain CP-5B work.
 
 **Allowed backend areas**
 
@@ -3077,7 +3086,7 @@ Each unit must be executed as a separate, reviewable prompt. Claude must not com
 | CP-4D | P4D — Submit captures an immutable snapshot revision — **Completed** (commit `9e4c32f`) | payroll/review submit path and tests | binding approval to the snapshot, finalization changes | submit creates exactly one snapshot revision; resubmission creates a new revision; stale-revision conflicts | Every new InReview submission has exactly one associated immutable snapshot; independently reviewed with no P0/P1 blockers |
 | CP-4E | P4E — review/approval binds to the submitted snapshot identity — **Completed** (commit `e332d02`) | payroll/review approval path and focused frontend/tests | re-resolving live rates at approval, finalization changes | Approved values proven frozen even if rates change afterward | Review reads and approval binds to the exact existing ReviewItem-linked snapshot rather than recomputing |
 | CP-4F | P4F — finalization consumes the approved snapshot and projects it to FinalLines — **Completed** (commit `434f673`) | payroll finalization module and tests | current-rate re-resolution after approval | post-submit rate/rule changes do not alter final parity | Finalization equals the approved snapshot despite later rate/rule changes; one immutable packet is authoritative after Submit |
-| CP-5A | Current Payroll Hub | payroll read API and tests | frontend aggregation or N+1 official contract | company/branch scope, slot/status/capability matrix | Complete scope, slots, metrics, and capabilities in one response |
+| CP-5A | Current Payroll Hub — **Completed** (commit `5d05756`) | `GET /payroll/current`, typed Hub schemas, and focused tests | frontend aggregation or N+1 official contract; fully-off KPI/selected-day off detail; reports | company/branch scope, slot/status/capability matrix; CP-2E date-window Working Drivers | Company-scoped optional-branch aggregate serves Open/Prepared/InReview/Returned slots, CP-1E alerts/capabilities, eligibility/Working Drivers metrics, and Open/Returned CP-4B summaries without frontend financial authority |
 | CP-5B | Off-driver contracts | payroll read API and tests | driver-day count as Hub KPI | fully-off denominator and selected-day detail cases | Fully-off KPI and selected-day list remain distinct |
 | CP-5C | Calculation report bundle | payroll report API and tests | frontend sums or mutable config for frozen reports | dynamic columns and Drivers/Work/Pay/Mixed parity | All required report totals are backend-owned |
 | CP-6A | Finalized report library | ledger/report API and tests | Locked reopen or current-config recalculation | config mutation after finalization and report parity | Final reports read immutable snapshots |
