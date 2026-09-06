@@ -3045,6 +3045,28 @@ Make Locked/Archived payroll a complete immutable information library, not only 
 
 Do not rely solely on mutable AuditLog joins for user roles/responsibility; snapshot what the finalized library promises to preserve.
 
+#### Phase 6 product decision lock
+
+**Core principle:** Finalize/snapshot once; read immutable history cheaply thereafter. Phase 6 must reuse existing immutable sources where sufficient and add persistence only for historical facts the library promises but cannot already preserve safely. It must not rebuild history from mutable current configuration or snapshot the entire live payroll database.
+
+**Permissions:** `ledger.view` is the base permission for finalized-library overview, finalized reports, Off/Status, and rates/rules/Bonus-used information. `ledger.audit.view` is additionally required for finalized audit/security detail; the audit route requires both permissions. Phase 6 does not use `payroll.view` or payroll-entry permissions as its library permission. Canonical company/branch/tenant scope remains mandatory, and driver-role/`OwnDriverDataOnly` access remains fail-closed under the established historical-report security model.
+
+**Participant history:** P6E must preserve by value the minimal workflow participant/responsibility evidence needed to explain Submit, Review/Return where applicable, Approve, and Finalize: actor identity, display identity, action, timestamp, and relevant action-role/responsibility identity. It must not depend solely on current User names or current role assignments, and it must not snapshot an entire User profile. Exact persistence design and capture timing remain architecture work.
+
+**Rates/rules used:** P6C preserves only definitions actually used by finalized payroll, never the full company rate catalog. The finalized Rates Used view must explain the used identity, related PayItem identity, resolved value, applicable effective/work-date context, calculation/rate behavior, and the rule/tier information needed to explain the calculation. Existing FinalLines/SnapshotLines provenance must be reused first. A normalized immutable used-definition set plus references is preferred over copying the same definition for every driver; exact tables and columns remain architecture work.
+
+**Source, Status, and Bonus history:** Phase 6 preserves only source history required for finalized reports, Off/Status, rates/rules used, Bonus detail, and participant/audit explanation. Reuse FinalLines, the originating Calculation Snapshot, PayrollPeriodPayItems, frozen Status evidence, frozen Bonus evidence, and immutable provenance before adding persistence; never use mutable DraftLines to fabricate final truth or mirror every operational source table. Status remains not a PayItem and reuses frozen Status evidence where sufficient. Bonus remains canonical PayrollBonusEvents; evidence-enabled snapshots already preserve BonusEvent/driver identity, amount, reason, notes, revision, creator identity/display snapshot, and `CreatedAtUtc`, and that evidence must be reused rather than creating another Bonus domain.
+
+**Legacy availability:** Missing immutable information is `UNAVAILABLE`, never reconstructed from current User, Rate, Status, or other mutable rows. Responses must distinguish `AVAILABLE`, `EMPTY`, and `UNAVAILABLE`: a new evidence-enabled snapshot with zero Status rows is available and empty; a legacy period without captured Status history is unavailable. A legacy finalized period may still return a truthful FinalLines section while participant-role or Status evidence is unavailable; section-level availability/reason schema remains architecture work.
+
+**Correction boundary:** Locked and Archived payroll never reopen. Any future correction is a separate correction record/workflow linked to the original finalized-period identity; it must not update or replace original FinalLines or snapshot history. P6F establishes this boundary only. Correction calculation, statuses, approval, posting, and detailed permissions remain separately scoped future work.
+
+**Read architecture:** `GET /payroll/finalized/{period_id}/overview` is intentionally lightweight: finalized period/total/driver summary, finalization identity/time, available sections/capabilities, and relevant immutable provenance/version metadata only. Detailed audit, Rates Used, Off/Status, and report rows load on demand through their defined endpoints. Readers must be batched, set-based, and period-scoped, avoiding per-driver/date/Status/Bonus/rate/report-cell queries. Immutable Locked/Archived provenance should permit future version-keyed caching, without requiring a specific cache implementation in Phase 6.
+
+**Reuse-first persistence audit:** The architecture plan must classify every promised field as already available from FinalLines, the originating Calculation Snapshot, PayrollPeriodPayItems, Status evidence, Bonus evidence, immutable workflow/audit data, or missing. Only missing facts create new persistence. P6E has an approved going-forward persistence requirement for minimal participant/responsibility history; legacy missing participant-role evidence is unavailable with no backfill. P6C must identify only the minimum additional immutable used-rate/rule metadata still required. P6B must first satisfy Off/Status from frozen Status evidence plus final/snapshot provenance and add only truly required missing fields.
+
+**Audit and Phase 7 boundary:** P6D presents the immutable actor/time/reason/security facts the finalized library promises. Phase 7 retains broad append-only audit hardening, constraint validation, permission cleanup, load/performance validation, migration rehearsal, rollout, and reconciliation. Phase 6 remains `Pending`; no implementation, migration, frontend work, or Phase 7 scope is implied by this decision lock. The next task after review and commit is a separate Phase 6 architecture plan covering minimal persistence, typed legacy availability, route/read-model decomposition, security enforcement, migration scope, and implementation order.
+
 **Codex review checklist**
 
 - [ ] Every final view reads immutable data.
@@ -3266,7 +3288,7 @@ These do not block CP-0A but must be resolved before their listed phases.
 5. **Returned backlog policy** — this plan recommends blocking newer submit and further Prepared creation while allowing current Open saves.
 6. **Historical employment intervals** — confirm whether suspension/inactive/reinstatement ranges must affect payroll eligibility; if yes, effective-dated employment history is required.
 7. **Custom-period authority** — define which role may create exceptions and whether company approval is required.
-8. **Correction workflow boundary** — define future correction records/permissions, while retaining the rule that finalized periods never reopen.
+8. ~~**Correction workflow boundary**~~ — resolved for Phase 6: a future correction is a separate workflow linked to the original finalized-period identity, and finalized periods never reopen. Detailed correction records, calculation, approval, posting, and permissions remain separately scoped future product decisions.
 
 ---
 
