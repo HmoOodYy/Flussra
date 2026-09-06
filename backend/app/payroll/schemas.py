@@ -1538,3 +1538,91 @@ class CurrentPayrollHubResponse(BaseModel):
     requested_branch_id: int | None = None
     generated_at_utc: datetime
     branches: list[CurrentPayrollHubBranch] = []
+
+
+# ---------------------------------------------------------------------------
+# CP-5C: Calculation reports. These are semantic read models, not export rows.
+# ---------------------------------------------------------------------------
+
+class ReportMetadata(BaseModel):
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    branch_id: int
+    report_type: str
+    authority_kind: str
+    financials_available: bool
+    unavailable_reason: str | None = None
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    snapshot_hash: str | None = None
+    report_evidence_available: bool
+    report_evidence_version: int | None = None
+    report_evidence_hash: str | None = None
+    blockers: list[str] = []
+    warnings: list[str] = []
+    generated_at_utc: datetime
+
+
+class ReportColumn(BaseModel):
+    pay_item_id: int
+    code: str
+    label: str
+    category: str
+    data_type: str
+    unit: str | None = None
+    scope: str
+    sort_order: int
+
+
+class ReportWorkSection(BaseModel):
+    daily_rows: list[dict] = []
+    status_entries: list[dict] = []
+    status_summaries: list[dict] = []
+
+
+class ReportPaySection(BaseModel):
+    daily_pay: Decimal
+    status_pay: Decimal
+    period_pay: Decimal
+    minimum_adjustment: Decimal
+    maximum_adjustment: Decimal
+    bonus_total: Decimal
+    total_pay: Decimal
+    driver_code: str | None = None
+    driver_name: str | None = None
+    financial_lines: list[dict] = []
+
+
+class ReportDriver(BaseModel):
+    driver_id: int
+    driver_code: str | None = None
+    driver_name: str | None = None
+    work: ReportWorkSection
+    pay: ReportPaySection | None = None
+    bonus_events: list[dict] = []
+
+
+class CalculationReportResponse(BaseModel):
+    metadata: ReportMetadata
+    columns: list[ReportColumn] = []
+    drivers: list[ReportDriver] = []
+    work_totals: dict[str, Decimal] = {}
+    pay_totals: dict[str, Decimal] | None = None
+
+
+class DriversReportResponse(CalculationReportResponse):
+    pass
+
+
+class PeriodWorkReportResponse(CalculationReportResponse):
+    pass
+
+
+class PeriodPayReportResponse(CalculationReportResponse):
+    pass
+
+
+class MixedReportResponse(CalculationReportResponse):
+    pass
