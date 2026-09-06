@@ -32,6 +32,10 @@ from app.payroll.calculation.per_unit import (
     PerUnitInput as _PerUnitInput,
     calculate_per_unit as _calculate_per_unit,
 )
+from app.payroll.immutable_evidence import (
+    capture_snapshot_used_rate_definitions,
+    capture_workflow_action_evidence,
+)
 from app.payroll.snapshot_hash import (
     CURRENT_PAYROLL_CALCULATION_VERSION,
     CURRENT_REPORT_EVIDENCE_VERSION,
@@ -1216,6 +1220,16 @@ async def change_period_status(
             db=db,
             context="Submit",
         )
+        await capture_workflow_action_evidence(
+            company_id=company_id,
+            branch_id=existing.branch_id,
+            period_id=period_id,
+            snapshot_id=snapshot_id,
+            action_code="SUBMITTED",
+            user_id=user_id,
+            required_permission_code="payroll.entry",
+            db=db,
+        )
 
         # Auto-create the PeriodApproval review item inside this transaction.
         # The review item is owned by the submitting user; AllowSelfApproval
@@ -1757,6 +1771,16 @@ async def resubmit_period(
         packet=packet,
         db=db,
         context="Resubmit",
+    )
+    await capture_workflow_action_evidence(
+        company_id=company_id,
+        branch_id=existing.branch_id,
+        period_id=period_id,
+        snapshot_id=snapshot_id,
+        action_code="RESUBMITTED",
+        user_id=user_id,
+        required_permission_code="payroll.entry",
+        db=db,
     )
 
     # ── Step 5: create new Pending PeriodApproval review item ────────────── #
@@ -5943,6 +5967,17 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
         raise HTTPException(status_code=422, detail="Period could not be claimed for finalization — its status may have changed concurrently.")
     await _project_approved_snapshot_final_lines(packet=packet, period_id=period_id, company_id=company_id, branch_id=period.branch_id, user_id=user_id, db=db)
     snapshot = packet["snapshot"]
+    await capture_workflow_action_evidence(
+        company_id=company_id,
+        branch_id=period.branch_id,
+        period_id=period_id,
+        snapshot_id=int(snapshot["payrollcalculationsnapshotid"]),
+        review_item_id=int(packet["review"]["reviewitemid"]),
+        action_code="FINALIZED",
+        user_id=user_id,
+        required_permission_code="payroll.finalize",
+        db=db,
+    )
     await _write_finalization_audit(
         db, company_id=company_id, branch_id=period.branch_id, user_id=user_id,
         period_id=period_id, line_count=len(packet["lines"]),
@@ -6951,6 +6986,20 @@ async def _capture_calculation_snapshot(
         },
     )
     snapshot_id = int(header_result.scalar_one())
+    snapshot_lines = [
+        {**line, "DriverID": hash_total["DriverID"]}
+        for hash_total in hash_totals
+        for line in hash_total["Lines"]
+    ]
+    used_rate_definition_ids = await capture_snapshot_used_rate_definitions(
+        snapshot_id=snapshot_id,
+        company_id=company_id,
+        branch_id=period.branch_id,
+        period_id=period.payroll_period_id,
+        snapshot_line_rows=snapshot_lines,
+        db=db,
+    )
+    snapshot_line_ordinal = 0
 
     for driver, hash_total in zip(packet.drivers, hash_totals, strict=True):
         driver_result = await db.execute(
@@ -6989,12 +7038,12 @@ async def _capture_calculation_snapshot(
                         (payrollcalculationdrivertotalid, sourcetype, sourceid,
                          linetype, linescope, workdate, payitemid, ratetypeid,
                          driverrateid, bonuseventid, quantity, resolvedrateamount,
-                         calculatedamount, sourceevidencejsonb)
+                         calculatedamount, sourceevidencejsonb, usedratedefinitionid)
                     VALUES
                         (:driver_total_id, :source_type, :source_id, :line_type,
                          :line_scope, :work_date, :pay_item_id, :rate_type_id,
                          :driver_rate_id, :bonus_event_id, :quantity, :resolved_rate,
-                         :calculated_amount, CAST(:evidence AS jsonb))
+                         :calculated_amount, CAST(:evidence AS jsonb), :used_rate_definition_id)
                 """),
                 {
                     "driver_total_id": driver_total_id,
@@ -7011,8 +7060,10 @@ async def _capture_calculation_snapshot(
                     "resolved_rate": line["ResolvedRateAmount"],
                     "calculated_amount": line["CalculatedAmount"],
                     "evidence": canonical_json(line["SourceEvidenceJSONB"]),
+                    "used_rate_definition_id": used_rate_definition_ids.get(snapshot_line_ordinal),
                 },
             )
+            snapshot_line_ordinal += 1
 
     for entry in status_entries:
         await db.execute(

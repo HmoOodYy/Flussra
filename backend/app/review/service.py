@@ -60,6 +60,7 @@ from app.core.service import (
     _has_any_permission,
     _require_not_driver_role,
 )
+from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.service import (  # M16, CP-1D
     _acquire_branch_workflow_lock,
     _write_period_status_audit,
@@ -918,13 +919,14 @@ async def decide_review_item(
             }
 
     # Insert the decision record.
-    await db.execute(
+    decision_result = await db.execute(
         text("""
             INSERT INTO review.managerreviewdecisions (
                 reviewitemid, decidedbyuserid, decision, decisionreason
             ) VALUES (
                 :iid, :uid, :decision, :reason
             )
+            RETURNING reviewdecisionid
         """),
         {
             "iid":      review_item_id,
@@ -933,6 +935,7 @@ async def decide_review_item(
             "reason":   data.decision_reason,
         },
     )
+    review_decision_id = int(decision_result.scalar_one())
 
     # For substantive decisions (not Comment), update the item status,
     # record the final decision metadata, and write to the audit log.
@@ -971,6 +974,27 @@ async def decide_review_item(
                 **snapshot_audit_identity,
             },
         )
+        if row.get("requesttype") == "PeriodApproval":
+            action_code = {
+                "Approved": "REVIEW_APPROVED",
+                "EditRequested": "REVIEW_EDIT_REQUESTED",
+                "Rejected": "REVIEW_REJECTED",
+            }[data.decision]
+            assert period_context is not None
+            snapshot_id = row.get("payrollcalculationsnapshotid")
+            await capture_workflow_action_evidence(
+                company_id=company_id,
+                branch_id=int(row["branchid"]),
+                period_id=int(period_context["period_id"]),
+                snapshot_id=(int(snapshot_id) if snapshot_id is not None else None),
+                review_item_id=review_item_id,
+                review_decision_id=review_decision_id,
+                action_code=action_code,
+                user_id=user_id,
+                required_permission_code="review.decide",
+                reason_snapshot=data.decision_reason,
+                db=db,
+            )
 
     # M16: PeriodApproval write-back.
     #

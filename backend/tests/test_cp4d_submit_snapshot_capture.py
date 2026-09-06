@@ -95,9 +95,54 @@ async def cp4d_db(test_database_url):
                 "pid": period_id, "did": driver_id, "work_date": date(2088, 1, 1),
                 "source_id": f"CP4D:{marker}",
             })).scalar_one()
+            rate_type_id = int((await seed.execute(text("""
+                SELECT ratetypeid FROM payroll.ratetypes
+                WHERE isactive = TRUE
+                ORDER BY ratetypeid
+                LIMIT 1
+            """))).scalar_one())
+            driver_rate_id = (await seed.execute(text("""
+                INSERT INTO payroll.driverrates
+                    (companyid, branchid, driverid, ratetypeid, amount, effectivefrom,
+                     status, createdbyuserid)
+                VALUES (:cid, :bid, :did, :rate_type_id, 12.5000, :effective_from,
+                        'Approved', :uid)
+                RETURNING driverrateid
+            """), {
+                "cid": seed_ids["company_id"], "bid": seed_ids["branch_id"],
+                "did": driver_id, "rate_type_id": rate_type_id,
+                "effective_from": date(2088, 1, 1), "uid": seed_ids["user_id"],
+            })).scalar_one()
+            minimum_rule_id = (await seed.execute(text("""
+                INSERT INTO payroll.driverpayrules
+                    (companyid, branchid, driverid, ruletype, amount, effectivefrom,
+                     status, createdbyuserid)
+                VALUES (:cid, :bid, :did, 'MinimumPay', 2.0000, :effective_from,
+                        'Active', :uid)
+                RETURNING driverpayruleid
+            """), {
+                "cid": seed_ids["company_id"], "bid": seed_ids["branch_id"],
+                "did": driver_id, "effective_from": date(2088, 1, 1),
+                "uid": seed_ids["user_id"],
+            })).scalar_one()
+            maximum_rule_id = (await seed.execute(text("""
+                INSERT INTO payroll.driverpayrules
+                    (companyid, branchid, driverid, ruletype, amount, effectivefrom,
+                     status, createdbyuserid)
+                VALUES (:cid, :bid, :did, 'MaximumPay', 1.0000, :effective_from,
+                        'Active', :uid)
+                RETURNING driverpayruleid
+            """), {
+                "cid": seed_ids["company_id"], "bid": seed_ids["branch_id"],
+                "did": driver_id, "effective_from": date(2088, 1, 1),
+                "uid": seed_ids["user_id"],
+            })).scalar_one()
             seed_ids.update({
                 "employee_id": int(employee_id), "driver_id": int(driver_id),
                 "period_id": int(period_id), "line_id": int(line_id),
+                "rate_type_id": rate_type_id, "driver_rate_id": int(driver_rate_id),
+                "minimum_rule_id": int(minimum_rule_id),
+                "maximum_rule_id": int(maximum_rule_id),
             })
 
         async with engine.connect() as conn:
@@ -108,6 +153,13 @@ async def cp4d_db(test_database_url):
                 if outer.is_active:
                     await outer.rollback()
         async with engine.begin() as cleanup:
+            await cleanup.execute(text("""
+                DELETE FROM payroll.driverpayrules
+                WHERE driverpayruleid IN (:minimum_rule_id, :maximum_rule_id)
+            """), seed_ids)
+            await cleanup.execute(text("""
+                DELETE FROM payroll.driverrates WHERE driverrateid = :driver_rate_id
+            """), seed_ids)
             await cleanup.execute(text("DELETE FROM payroll.payrolldraftlines WHERE draftlineid = :id"), {"id": seed_ids["line_id"]})
             await cleanup.execute(text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :id"), {"id": seed_ids["period_id"]})
             await cleanup.execute(text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": seed_ids["driver_id"]})
@@ -134,8 +186,8 @@ def _packet(db: SimpleNamespace) -> _LiveCalculationPacket:
         calculated_amount=Decimal("25.0000"),
         needs_manager_review=False,
         blocker_reason=None,
-        rate_type_id=1,
-        driver_rate_id=1,
+        rate_type_id=db.rate_type_id,
+        driver_rate_id=db.driver_rate_id,
         source_evidence={"DraftLineID": db.line_id, "PerUnitCalculationVersion": "cp4a-per-unit-v1"},
     )
     total = _CalculationPacketDriverTotal(
@@ -239,7 +291,7 @@ def _semantic_packet(db: SimpleNamespace) -> _LiveCalculationPacket:
         calculated_amount=Decimal("2.0000"),
         needs_manager_review=False,
         blocker_reason=None,
-        source_evidence={"DriverPayRuleID": 801, "RuleType": "MinimumPay"},
+        source_evidence={"DriverPayRuleID": db.minimum_rule_id, "RuleType": "MinimumPay"},
     )
     maximum = _CalculationPacketLine(
         source_type="System",
@@ -253,7 +305,7 @@ def _semantic_packet(db: SimpleNamespace) -> _LiveCalculationPacket:
         calculated_amount=Decimal("-1.0000"),
         needs_manager_review=False,
         blocker_reason=None,
-        source_evidence={"DriverPayRuleID": 802, "RuleType": "MaximumPay"},
+        source_evidence={"DriverPayRuleID": db.maximum_rule_id, "RuleType": "MaximumPay"},
     )
     bonus = _CalculationPacketLine(
         source_type="BonusEvent",
@@ -538,13 +590,13 @@ async def test_capture_allocates_per_period_revisions_without_surrogate_hash_inp
 
 @pytest.mark.asyncio
 async def test_capture_failure_after_header_insert_rolls_back_all_snapshot_rows(cp4d_db):
-    """A child FK failure cannot leave an immutable orphan header behind."""
+    """A child/evidence scope failure cannot leave an immutable orphan header behind."""
     period = await _period(cp4d_db)
     original = _packet(cp4d_db)
     impossible_driver = replace(original.drivers[0], driver_id=999_999_999)
     invalid_packet = replace(original, drivers=[impossible_driver])
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises((HTTPException, IntegrityError)):
         async with cp4d_db.conn.begin_nested():
             await _capture_calculation_snapshot(
                 period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,

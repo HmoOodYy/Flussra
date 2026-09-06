@@ -66,7 +66,32 @@ async def cp4f_db(test_database_url):
                         'DailyNote', 1, 'User', :source_id, 'Active', FALSE, 'Daily')
                 RETURNING draftlineid
             """), {**ids, "period_id": period_id, "driver_id": driver_id, "work_date": date(2089, 1, 1), "source_id": f"CP4F:{marker}"})).scalar_one()
-            ids.update({"employee_id": int(employee_id), "driver_id": int(driver_id), "period_id": int(period_id), "line_id": int(line_id)})
+            minimum_rule_id = (await seed.execute(text("""
+                INSERT INTO payroll.driverpayrules
+                    (companyid, branchid, driverid, ruletype, amount, effectivefrom,
+                     status, createdbyuserid)
+                VALUES (:company_id, :branch_id, :driver_id, 'MinimumPay', 2.0000,
+                        :effective_from, 'Active', :user_id)
+                RETURNING driverpayruleid
+            """), {
+                **ids, "driver_id": driver_id, "effective_from": date(2089, 1, 1),
+            })).scalar_one()
+            maximum_rule_id = (await seed.execute(text("""
+                INSERT INTO payroll.driverpayrules
+                    (companyid, branchid, driverid, ruletype, amount, effectivefrom,
+                     status, createdbyuserid)
+                VALUES (:company_id, :branch_id, :driver_id, 'MaximumPay', 1.0000,
+                        :effective_from, 'Active', :user_id)
+                RETURNING driverpayruleid
+            """), {
+                **ids, "driver_id": driver_id, "effective_from": date(2089, 1, 1),
+            })).scalar_one()
+            ids.update({
+                "employee_id": int(employee_id), "driver_id": int(driver_id),
+                "period_id": int(period_id), "line_id": int(line_id),
+                "minimum_rule_id": int(minimum_rule_id),
+                "maximum_rule_id": int(maximum_rule_id),
+            })
         async with engine.connect() as conn:
             outer = await conn.begin()
             try:
@@ -75,6 +100,10 @@ async def cp4f_db(test_database_url):
                 if outer.is_active:
                     await outer.rollback()
         async with engine.begin() as cleanup:
+            await cleanup.execute(text("""
+                DELETE FROM payroll.driverpayrules
+                WHERE driverpayruleid IN (:minimum_rule_id, :maximum_rule_id)
+            """), ids)
             await cleanup.execute(text("DELETE FROM payroll.payrolldraftlines WHERE draftlineid = :id"), {"id": ids["line_id"]})
             await cleanup.execute(text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :id"), {"id": ids["period_id"]})
             await cleanup.execute(text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": ids["driver_id"]})
@@ -108,8 +137,8 @@ def _all_line_types_packet(db) -> _LiveCalculationPacket:
         _CalculationPacketLine("DraftLine", str(db.line_id), "DailyNote", "Daily", date(2089, 1, 1), db.driver_id, Decimal("1"), None, Decimal("25"), False, None, source_evidence={"DraftLineID": db.line_id}),
         _CalculationPacketLine("StatusEntryState", "501", "STATUS_PAY", "Daily", date(2089, 1, 2), db.driver_id, Decimal("3"), Decimal("6"), Decimal("18"), False, None, source_evidence={"StatusKeyID": 101}),
         _CalculationPacketLine("Manual", "period-pay:701", "Adjustment", "Period", None, db.driver_id, None, None, Decimal("10"), False, None, source_evidence={"EnteredAmount": Decimal("10")}),
-        _CalculationPacketLine("System", "801", "SYS_MIN_TOPUP", "Period", None, db.driver_id, Decimal("1"), None, Decimal("2"), False, None, source_evidence={"DriverPayRuleID": 801}),
-        _CalculationPacketLine("System", "802", "SYS_MAX_CAP", "Period", None, db.driver_id, Decimal("1"), None, Decimal("-1"), False, None, source_evidence={"DriverPayRuleID": 802}),
+        _CalculationPacketLine("System", "801", "SYS_MIN_TOPUP", "Period", None, db.driver_id, Decimal("1"), None, Decimal("2"), False, None, source_evidence={"DriverPayRuleID": db.minimum_rule_id}),
+        _CalculationPacketLine("System", "802", "SYS_MAX_CAP", "Period", None, db.driver_id, Decimal("1"), None, Decimal("-1"), False, None, source_evidence={"DriverPayRuleID": db.maximum_rule_id}),
         _CalculationPacketLine("BonusEvent", "901", "BONUS", "Period", None, db.driver_id, None, None, Decimal("5"), False, None, source_evidence={"PayrollBonusEventID": 901, "Status": "Active"}),
     ]
     total = _CalculationPacketDriverTotal(
