@@ -7,7 +7,7 @@
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
 **Current migration head after implemented units:** Alembic `0063` (CP-5C frozen report-evidence persistence; CP-4F added no migration)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) remains `In Progress`; CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). The next separate task is formal Phase 5 closure. Phases 6 and 7 remain `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `Complete`: CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). Phase 6 is the next implementation direction and remains `Pending`; Phase 7 remains `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -562,7 +562,7 @@ Not allowed:
 - ~~Existing period list pagination/filtering is not a hub contract.~~ Resolved for the Hub by CP-5A's dedicated current-workflow aggregate; reports and later Hub extensions remain separate contracts.
 - ~~Existing off count is driver-day rows, not fully-off drivers.~~ Resolved by CP-5B: the distinct fully-off-driver KPI and selected-day off-driver contract are backend-owned; the legacy driver-day count remains compatibility-only.
 - ~~No lifecycle financial-authority foundation for future reports.~~ Resolved by RP-1: future report services can resolve `SOURCE_ONLY`, `LIVE`, exact ReviewItem-linked submitted/approved snapshots, or `FINAL_LINES` without choosing an authority client-side or selecting a latest snapshot.
-- No Drivers Report, Period Work, Period Pay, or Mixed Summary backend contract.
+- ~~No Drivers Report, Period Work, Period Pay, or Mixed Summary backend contract.~~ Resolved by CP-5C: all four backend-owned calculation report contracts are implemented.
 - No finalized information-library contract.
 
 ---
@@ -1301,7 +1301,7 @@ Allowed phase statuses are `Pending`, `In Progress`, and `Done`.
 | Phase 2 | Schedule, calendar, pay-item, eligibility, and status snapshots | Done with Notes | Claude | Codex data-model review |
 | Phase 3 | Canonical bonus domain and min/max classification | Done with Notes | Claude | Codex financial-rule review |
 | Phase 4 | Unified calculation core and immutable review snapshot | Complete (CP-4A–CP-4F Completed) | Claude | Codex calculation parity review |
-| Phase 5 | Hub and calculation-report contracts | In Progress | Claude | Codex contract/security review |
+| Phase 5 | Hub and calculation-report contracts | Complete | Claude | Codex contract/security review |
 | Phase 6 | Finalized payroll information library and audit | Pending | Claude | Codex ledger immutability review |
 | Phase 7 | Constraint, permission, performance, and rollout hardening | Pending | Claude | Codex release review |
 
@@ -2892,7 +2892,7 @@ For future allowance behavior, separate snapshots/ledger metadata may include: a
 
 ### Phase 5 — Current Payroll Hub and Calculation Reports
 
-**Status:** `In Progress`
+**Status:** `Complete`
 
 - [x] P5A: Current Payroll Hub aggregate — completed by CP-5A (`5d05756`).
 - [x] P5B: fully-off driver KPI — completed by CP-5B (`9ecb300`).
@@ -2924,7 +2924,7 @@ Create -> Prepared/Open -> Source Entry -> Live Expected Payroll -> Submit -> In
 
 Financial authority is lifecycle-bound: Draft/Prepared is source-only; Open/Returned uses live backend calculation; InReview uses the exact submitted ReviewItem-linked immutable snapshot; Approved uses the exact approved ReviewItem-linked immutable snapshot; Locked/Archived uses FinalLines. No frontend financial calculation authority exists.
 
-**RP-1 Report Financial Authority Resolver — Complete.** Commit `187d552e00ff26f2bd55015c8072a861e93cca7e` (`feat: add payroll report authority resolver`) added `backend/app/payroll/reporting.py` and `backend/tests/test_report_authority_resolver.py`. It is an internal Phase 5 reporting foundation, primarily for the future CP-5C report bundle under official P5D/P5E; it is not a new official phase and does not implement Period Pay.
+**RP-1 Report Financial Authority Resolver — Complete.** Commit `187d552e00ff26f2bd55015c8072a861e93cca7e` (`feat: add payroll report authority resolver`) added `backend/app/payroll/reporting.py` and `backend/tests/test_report_authority_resolver.py`. It is an internal Phase 5 reporting foundation reused by the CP-5C report bundle under official P5D/P5E; it is not a new official phase.
 
 RP-1 mapping is `Draft -> SOURCE_ONLY`, `Open/Returned -> LIVE`, `InReview -> SUBMITTED_SNAPSHOT`, `Approved -> APPROVED_SNAPSHOT`, `Locked/Archived -> FINAL_LINES`, and `Cancelled -> UNAVAILABLE`. InReview and Approved resolve the exact ReviewItem-linked snapshot, never a latest snapshot. RP-1 adds no financial calculation, report rows, public endpoint, or migration. Independent review: `PASS_WITH_NOTES`, P0 none, P1 none, `SAFE_TO_COMMIT_RP1`. Evidence: RP-1 13 passed; CP-4E regression 12 passed; CP-4F regression 8 passed; Ruff and compile/import passed. P2: an explicit InReview ambiguity test remains missing, though the shared cardinality path fails closed.
 
@@ -2940,7 +2940,9 @@ Independent CP-5B review was `PASS_WITH_NOTES`, P0 none, P1 none, `SAFE_TO_COMMI
 
 **CP-5C frozen report-evidence remedy closure:** The dedicated immutable Status/Bonus evidence tables and `ReportEvidenceVersion`/`ReportEvidenceHash` markers are implemented by `1a106b8` (migration `0063`). The requirement applies to new snapshots; legacy snapshots retain explicit unavailable evidence markers with no synthetic historical truth. Product decisions and persistence architecture are resolved, and the persistence blocker is closed.
 
-**CP-5C Calculation Report Bundle — Complete.** Commit `23bf68f` (`feat: add current payroll calculation reports`) implements Drivers Report, Period Work, Period Pay, and Mixed under official P5D/P5E, reusing RP-1 rather than recreating lifecycle authority. It is independently reviewed `PASS_WITH_NOTES` with P0 none, P1 none, and `SAFE_TO_COMMIT_CP5C`. Phase 5 remains `In Progress`; its formal closure is the next separate task.
+**CP-5C Calculation Report Bundle — Complete.** Commit `23bf68f` (`feat: add current payroll calculation reports`) implements Drivers Report, Period Work, Period Pay, and Mixed under official P5D/P5E, reusing RP-1 rather than recreating lifecycle authority. It is independently reviewed `PASS_WITH_NOTES` with P0 none, P1 none, and `SAFE_TO_COMMIT_CP5C`.
+
+**Formal Phase 5 closure — Complete.** CP-5A, CP-5B, and CP-5C are complete; the frozen report-evidence blocker is closed by `1a106b8` (Alembic `0063`), and CP-5C implementation and documentation are recorded by `23bf68f` and `b194f6d`. Their independent reviews record no Phase 5 P0 or P1 blocker. Accepted Phase 5 P2/P3 and environment debt remain non-blocking, including `AppearsInReports` row/totals visibility semantics, Prepared live-Status report coverage, CP-5A/CP-5B same-process isolation, CP-2C stale expectations, CP-2E asyncio warnings, and Windows `testing.postgresql` shutdown warnings. Backend-owned Hub, off-driver, and calculation-report contracts are complete. Phase 6 is the next implementation direction and remains Pending; no Phase 6 work is implied or started here.
 
 **Objective**
 
@@ -2990,11 +2992,11 @@ Hub KPI definitions must not reuse current day-grid `worked/off` counters or per
 
 **Codex review checklist**
 
-- [ ] Every metric definition traced to backend query/calculation.
-- [ ] Scope and permission filtering reviewed per branch.
-- [ ] No hidden frontend dependency required.
-- [ ] Frozen statuses read snapshots.
-- [ ] Performance query plan reviewed for realistic branch counts.
+- [x] Every metric definition traced to backend query/calculation.
+- [x] Scope and permission filtering reviewed per branch.
+- [x] No hidden frontend dependency required.
+- [x] Frozen statuses read snapshots.
+- [x] Performance query plan reviewed for realistic branch counts; ongoing multi-branch cost monitoring remains non-blocking P2 debt.
 
 ### Phase 6 — Finalized Payroll Information Library
 
