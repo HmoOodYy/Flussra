@@ -7,7 +7,7 @@
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
 **Current migration head after implemented units:** Alembic `0063` (CP-5C frozen report-evidence persistence; CP-4F added no migration)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `In Progress`; CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, and the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`). The CP-5C Calculation Report Bundle remains pending and is next. Phases 6 and 7 remain `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) remains `In Progress`; CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). The next separate task is formal Phase 5 closure. Phases 6 and 7 remain `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -760,7 +760,7 @@ Current response responsibilities:
 
 Working Drivers is a Hub metric, not a Daily Grid roster rule: it counts distinct period-eligible drivers with at least one genuine normal daily operational work/activity source (for example Hours, Miles, Loads, Pallets, or another normal Daily PayItem value) inside the period and on an eligible driver date. Status alone, Bonus, system or period-level financial adjustments, and eligibility with no work data do not qualify. CP-2E periods use the canonical snapshotted driver-date eligibility window; legacy periods use established legacy eligibility semantics. Eligible drivers may still appear in the Daily Grid without work data.
 
-The separate fully-off-driver KPI and selected-day off-driver detail are implemented by CP-5B. Drivers Report, Period Work, Period Pay, and Mixed Summary remain later CP-5C/P5D-P5E work.
+The separate fully-off-driver KPI and selected-day off-driver detail are implemented by CP-5B. Drivers Report, Period Work, Period Pay, and Mixed Summary are implemented by the completed CP-5C Calculation Report Bundle.
 
 ### 8.2 Smart period creation
 
@@ -873,7 +873,7 @@ GET /payroll/periods/{id}/reports/mixed
 
 Open/Returned use live backend calculation. InReview uses the exact submitted ReviewItem-linked snapshot; Approved uses the exact approved ReviewItem-linked snapshot. Locked/Archived use FinalLines.
 
-**Implementation status:** these routes remain planned and are not implemented. RP-1 (`187d552e00ff26f2bd55015c8072a861e93cca7e` — `feat: add payroll report authority resolver`) provides the internal lifecycle financial-authority resolver future report services must use. Frontend clients must never choose live vs. snapshot vs. FinalLines authority. The CP-5C frozen report-evidence persistence remedy is complete; the Calculation Report Bundle itself remains pending.
+**Implementation status:** CP-5C implements these backend-owned calculation/report read models in commit `23bf68f` (`feat: add current payroll calculation reports`). It reuses RP-1 (`187d552e00ff26f2bd55015c8072a861e93cca7e` — `feat: add payroll report authority resolver`) rather than owning a second lifecycle authority resolver. Frontend clients must never choose live vs. snapshot vs. FinalLines authority. The report bundle is not a Phase 6 finalized-information-library route.
 
 The canonical response shape should be driver-centric:
 
@@ -897,7 +897,7 @@ Evidence is captured atomically inside the same CP-4D `REPEATABLE READ` Submit/R
 
 Locked/Archived financial authority remains FinalLines. CP-5C Status/Bonus report evidence may remain snapshot-owned where CP-4F provenance deterministically identifies the originating calculation snapshot; it is not duplicated into FinalLines merely because a period locks. The remedy changes CP-4D capture. CP-4E approval and CP-4F finalization remain unchanged unless implementation discovery proves a necessary narrow adjustment. It does not implement any Phase 6 finalized-information-library route, rate library, full source library, audit/security library, participant/role history, or correction workflow.
 
-The remedy shipped in migration `0063` with no historical backfill. Legacy snapshots retain unavailable report-evidence markers and must not be reconstructed from mutable Status, Bonus, or User data. The persistence blocker is closed; CP-5C report implementation remains pending.
+The remedy shipped in migration `0063` with no historical backfill. Legacy snapshots retain unavailable report-evidence markers and must not be reconstructed from mutable Status, Bonus, or User data. The persistence blocker is closed.
 
 **CP-5C frozen report-evidence remedy closure.** Implementation commit: `1a106b8e8adb0ca2e89cba1726a7cc8f0e43debd` — `feat: persist frozen payroll report evidence`. The remedy captures Status and Bonus evidence atomically within the existing CP-4D `REPEATABLE READ` Submit/Resubmit transaction for each exact snapshot revision. Returned → Resubmit creates independent evidence, while prior revisions remain immutable. The tables use the existing snapshot no-UPDATE/no-DELETE trigger pattern and enforce snapshot/company/branch/period/driver scope integrity.
 
@@ -907,9 +907,25 @@ Independent review: `PASS_WITH_NOTES`; P0 none; P1 none; final recommendation `S
 
 Non-blocking notes: CP-5A + CP-5B retain pre-existing same-process test isolation/order debt although each passes independently; `service.py` retains broad pre-existing Ruff debt while the focused CP-5C code/hash/migration checks pass; Status capture relies on canonical validated source-write invariants plus period/company/branch/date scope rather than duplicating the full CP-2E predicate; and the Windows `testing.postgresql` shutdown warning remains environment debt.
 
-Prepared/Draft is source-only: CP-5C may expose the operational/source portion of Drivers Report and Period Work, but must not invoke live calculation or expose expected-pay money. Period Pay and Mixed's financial section are unavailable. Cancelled periods expose no CP-5C reports and must not fall back to source data.
+Prepared/Draft is source-only: Drivers Report exposes operational/source data, Period Work is available, Period Pay is explicitly unavailable, and Mixed exposes work with an unavailable financial section. Prepared reporting must not invoke live calculation or expose expected-pay money; unavailable financials are not zero. Cancelled periods expose no CP-5C reports and must not fall back to source data.
 
 CP-5C report routes use `reports.view` and preserve company/branch scope, tenant isolation, driver-role denial, and `OwnDriverDataOnly` denial. `payroll.view` is not additionally required solely for report access. The lifecycle authority remains Draft/Prepared source-only; Open/Returned live; InReview exact submitted ReviewItem-linked snapshot; Approved exact approved ReviewItem-linked snapshot; Locked/Archived immutable final/frozen financial authority; Cancelled unavailable.
+
+**CP-5C Calculation Report Bundle — Complete.** Commit `23bf68f` (`feat: add current payroll calculation reports`) changed `backend/app/payroll/report_read_model.py`, `backend/app/payroll/router.py`, `backend/app/payroll/schemas.py`, and `backend/tests/test_cp5c_reports.py` (`4 files changed, 1479 insertions(+), 1 deletion(-)`). It introduced no migration, frontend work, or Phase 6 work; Alembic remains `0063`. Independent review: `PASS_WITH_NOTES`; P0 none; P1 none; final recommendation `SAFE_TO_COMMIT_CP5C`.
+
+The four public routes are `GET /payroll/periods/{period_id}/reports/drivers`, `GET /payroll/periods/{period_id}/reports/period-work`, `GET /payroll/periods/{period_id}/reports/period-pay`, and `GET /payroll/periods/{period_id}/reports/mixed`. They use a shared, batched report read model with no separate payroll engine or per-driver/day/status/bonus N+1 loops identified. Mixed reuses normalized Work and Pay semantics, so its totals reconcile with Period Work and Period Pay rather than following a third calculation path.
+
+Open and Returned obtain financial authority from the shared CP-4B live packet; Returned reflects corrected current source, not prior submitted snapshot money. InReview resolves only the exact submitted ReviewItem-linked snapshot and Approved only the exact approved snapshot: neither selects a latest snapshot or recalculates live financial data. Locked and Archived use FinalLines as financial authority and locate report-only Status/Bonus history through the deterministically linked originating immutable calculation snapshot, without duplicating evidence into FinalLines or rebuilding history from mutable rows.
+
+For `ReportEvidenceVersion = 1`, frozen Status/Bonus evidence is available even when it has legitimate zero rows. For legacy `ReportEvidenceVersion = NULL`, missing report-only evidence is explicitly unavailable, not zero or empty, and is never rebuilt from current Status, Bonus, or User data. Status remains a separate source channel, not a PayItem: live reports use canonical driver-day Status, frozen reports use immutable Status evidence, summaries are backend-owned, and no-pay Status entries remain reportable. Bonus remains canonical `PayrollBonusEvents` live; frozen detail comes from immutable snapshot evidence (event and driver identity, amount, creator/giver identity and frozen display identity, `CreatedAtUtc`, reason, notes, and revision where available), while financial Bonus totals remain authoritative financial-line values.
+
+Dynamic report columns come from frozen `PayrollPeriodPayItems` metadata, preserving period order, label, and unit against later current PayItem rename or retirement. Period Work is operational aggregation only: it neither calculates pay nor treats Bonus or min/max as work. Its implementation resolves the period-snapshotted PayItem identity through `PayrollPeriodPayItems`, because `PayrollDraftLines` does not own `PayItemID`. Period Pay aggregates authoritative financial lines only; it does not resolve rates, multiply work by rates, replay min/max, recalculate Bonus or Status pay, or otherwise create report-local financial authority. Characterization covers an effective-dated example of `3 x $10 + 3 x $20 = $90`, rather than the incorrect `6 x $20 = $120`; reports return the authoritative `$90`. Minimum/maximum adjustments remain authoritative system lines and Bonus remains distinct.
+
+Official totals and lifecycle/capability metadata are backend-owned. Frontend clients do not sum official financial totals, calculate Bonus/min/max, multiply work by rates, or choose lifecycle authority. LIVE CP-4B blockers/warnings propagate as report metadata; normal calculation blockers do not become unrelated authorization/not-found failures and do not cause reports to fabricate money. Access requires `reports.view`, not `payroll.view` solely for reports, and preserves company/branch scope, foreign-company denial, inaccessible-branch denial, driver-role denial, and `OwnDriverDataOnly` denial. The current public creation path has no supported non-BONUS manual period-level EnteredAmount fixture, so that endpoint case is N/A rather than fabricated through invalid SQL or a restored generic BONUS path.
+
+Accepted validation evidence: CP-5C focused 24 passed; CP-5C + RP-1 + frozen evidence 45 passed; CP-4B 72 passed; CP-4D/CP-4E/CP-4F/RP-1 combined 60 passed; CP-2D2 + CP-2E + CP-3A Bonus 146 passed with 12 existing warnings; CP-5A 17 passed; CP-5B 12 passed; Branch access 11 passed; Permission catalog 15 passed; CP-2C 34 passed with 2 known stale failures; Ruff and compile/import passed. This does not claim the full backend suite is green.
+
+Non-blocking CP-5C notes: `AppearsInReports` filters dynamic report columns, while row/totals payloads are not independently filtered for hidden-column semantics; Prepared source-only reports currently omit live Status evidence; and pre-existing CP-2C stale Alembic/BONUS expectations, Windows `testing.postgresql` shutdown warnings, CP-2E asyncio-marker warnings, and CP-5A/CP-5B same-process isolation debt remain outside CP-5C. These are not CP-5C P0/P1 blockers.
 
 ### 8.10 Finalized information library
 
@@ -1242,9 +1258,9 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 5. No SemiMonthly cadence. Durable schedule versioning was resolved by CP-2A.
 6. ~~No period-day/calendar/Add Day snapshot.~~ Period-day snapshot resolved by CP-2B (`PayrollPeriodDays`). Add Day activation workflow remains pending.
 7. ~~Prepared pre-entry cannot be enabled safely through current response contracts.~~ Resolved by CP-2F.
-8. ~~No backend Current Payroll Hub contract.~~ Resolved by CP-5A: `GET /payroll/current` provides the backend-owned aggregate. The distinct fully-off and selected-day off-driver contracts are resolved by CP-5B; report contracts remain pending.
+8. ~~No backend Current Payroll Hub contract.~~ Resolved by CP-5A: `GET /payroll/current` provides the backend-owned aggregate. The distinct fully-off and selected-day off-driver contracts are resolved by CP-5B; the four calculation report contracts are resolved by CP-5C.
 9. ~~No Open/Returned expected-income contract.~~ Resolved by CP-4B: Open/Returned now have a backend-owned, read-only live calculation preview; Draft/Prepared remains source-only with no financial preview.
-10. No calculation/report contracts for required views.
+10. ~~No calculation/report contracts for required views.~~ Resolved by CP-5C: Drivers Report, Period Work, Period Pay, and Mixed are implemented as backend-owned report contracts.
 11. ~~Bonus is generic Period Pay with competing unused storage.~~ Resolved by CP-3A: canonical `PayrollBonusEvents` domain; generic Period Pay blocks BONUS; legacy BONUS DraftLines hidden/blocked from period-pay paths. The min/max debt noted here at the time is now also resolved — see P0 #5 above (CP-3C).
 12. ~~Status is mutable code text and historical labels can disappear.~~ Resolved by CP-2D1: canonical `PayrollPeriodDriverDayEntryState` stores `StatusKeyID`; finalization freezes label/off-reason snapshots. Remaining future work: per-period StatusKey availability snapshot.
 13. ~~Current employment status can hide historical eligibility.~~ Resolved by CP-2E canonical eligibility snapshot.
@@ -2881,9 +2897,9 @@ For future allowance behavior, separate snapshots/ledger metadata may include: a
 - [x] P5A: Current Payroll Hub aggregate — completed by CP-5A (`5d05756`).
 - [x] P5B: fully-off driver KPI — completed by CP-5B (`9ecb300`).
 - [x] P5C: selected-day off-driver contract — completed by CP-5B (`9ecb300`).
-- [ ] P5D: Drivers Report.
-- [ ] P5E: Period Work/Pay/Mixed views.
-- [ ] P5F: capabilities/read-only reasons.
+- [x] P5D: Drivers Report — completed by CP-5C (`23bf68f`).
+- [x] P5E: Period Work/Pay/Mixed views — completed by CP-5C (`23bf68f`).
+- [x] P5F: report capabilities/read-only reasons — completed by CP-5C (`23bf68f`).
 
 #### Post-Phase-4 frontend/core alignment and RP-1 foundation
 
@@ -2922,15 +2938,15 @@ Independent CP-5A review after the pre-commit fix was `PASS_WITH_NOTES`, P0 none
 
 Independent CP-5B review was `PASS_WITH_NOTES`, P0 none, P1 none, `SAFE_TO_COMMIT_CP5B`. Evidence: CP-5B 12 passed; CP-5A 17 passed; CP-2D2 45 passed; CP-2E 75 passed with existing warnings only; branch access plus permission catalog 26 passed; Ruff and compile/import passed; Alembic remains `0062`. P2: direct new-endpoint ODA/foreign-period coverage remains to be added despite reuse of canonical guards; low-risk PayItem snapshot/live metadata fallback hardening remains for impossible/corrupt post-CP-2C rows; pre-existing stale-test/environment debt remains outside CP-5B. These do not block Phase 5.
 
-**CP-5C frozen report-evidence remedy closure:** The dedicated immutable Status/Bonus evidence tables and `ReportEvidenceVersion`/`ReportEvidenceHash` markers are implemented by `1a106b8` (migration `0063`). The requirement applies to new snapshots; legacy snapshots retain explicit unavailable evidence markers with no synthetic historical truth. Product decisions and persistence architecture are resolved, and the persistence blocker is closed. CP-5C report routes remain unimplemented.
+**CP-5C frozen report-evidence remedy closure:** The dedicated immutable Status/Bonus evidence tables and `ReportEvidenceVersion`/`ReportEvidenceHash` markers are implemented by `1a106b8` (migration `0063`). The requirement applies to new snapshots; legacy snapshots retain explicit unavailable evidence markers with no synthetic historical truth. Product decisions and persistence architecture are resolved, and the persistence blocker is closed.
 
-**Execution order:** CP-5C is next: implement the calculation-report bundle under official P5D/P5E, reusing RP-1 rather than recreating authority selection. Drivers Report, Period Work, Period Pay, and Mixed/Work+Pay views remain pending. Do not start RP-2 Period Pay before CP-5C.
+**CP-5C Calculation Report Bundle — Complete.** Commit `23bf68f` (`feat: add current payroll calculation reports`) implements Drivers Report, Period Work, Period Pay, and Mixed under official P5D/P5E, reusing RP-1 rather than recreating lifecycle authority. It is independently reviewed `PASS_WITH_NOTES` with P0 none, P1 none, and `SAFE_TO_COMMIT_CP5C`. Phase 5 remains `In Progress`; its formal closure is the next separate task.
 
 **Objective**
 
 Expose complete backend-owned workflow and financial read contracts without frontend aggregation.
 
-CP-1E current-workflow, FE-3 workflow slots, and FE-4 live calculation preview were useful foundations. CP-5A closes the trusted backend-owned aggregate for its implemented workflow slots, metrics, expected-income information where allowed, blockers/warnings, and capabilities/reason codes. CP-5B closes the distinct fully-off KPI and selected-day detail; CP-5C remains the next calculation-report unit.
+CP-1E current-workflow, FE-3 workflow slots, and FE-4 live calculation preview were useful foundations. CP-5A closes the trusted backend-owned aggregate for its implemented workflow slots, metrics, expected-income information where allowed, blockers/warnings, and capabilities/reason codes. CP-5B closes the distinct fully-off KPI and selected-day detail; CP-5C closes the calculation-report bundle.
 
 **Allowed backend areas**
 
@@ -3131,7 +3147,7 @@ Each unit must be executed as a separate, reviewable prompt. Claude must not com
 | CP-4F | P4F — finalization consumes the approved snapshot and projects it to FinalLines — **Completed** (commit `434f673`) | payroll finalization module and tests | current-rate re-resolution after approval | post-submit rate/rule changes do not alter final parity | Finalization equals the approved snapshot despite later rate/rule changes; one immutable packet is authoritative after Submit |
 | CP-5A | Current Payroll Hub — **Completed** (commit `5d05756`) | `GET /payroll/current`, typed Hub schemas, and focused tests | frontend aggregation or N+1 official contract; fully-off KPI/selected-day off detail; reports | company/branch scope, slot/status/capability matrix; CP-2E date-window Working Drivers | Company-scoped optional-branch aggregate serves Open/Prepared/InReview/Returned slots, CP-1E alerts/capabilities, eligibility/Working Drivers metrics, and Open/Returned CP-4B summaries without frontend financial authority |
 | CP-5B | Off-driver contracts — **Completed** (commit `9ecb300`) | `off_drivers` resolver, payroll read API, Hub integration, and focused tests | driver-day count as Hub KPI, frontend/Add Day/report expansion | calendar/eligibility denominator, Status/work classification, and selected-day detail cases | Fully-off KPI and selected-day list are distinct backend-owned contracts; Hub reuses the shared resolver without financial calculation |
-| CP-5C | Calculation report bundle — **Pending: frozen report-evidence remedy completed** (commit `1a106b8`) | payroll report API and tests | frontend sums or mutable source reconstruction for frozen reports | dynamic columns, persisted frozen Status/Bonus evidence, and Drivers/Work/Pay/Mixed parity | All required report totals and historical evidence are backend-owned; legacy unavailable evidence is explicit rather than invented |
+| CP-5C | Calculation report bundle — **Completed** (commit `23bf68f`) | payroll report API and tests | frontend sums or mutable source reconstruction for frozen reports | dynamic columns, persisted frozen Status/Bonus evidence, and Drivers/Work/Pay/Mixed parity | All required report totals and historical evidence are backend-owned; legacy unavailable evidence is explicit rather than invented |
 | CP-6A | Finalized report library | ledger/report API and tests | Locked reopen or current-config recalculation | config mutation after finalization and report parity | Final reports read immutable snapshots |
 | CP-6B | Final audit/security library | audit/ledger/permission paths and tests | mutable audit promises or broad entry permission | actor/rate/review/role snapshot and access matrix | Required actor, rate, review, and role details are preserved |
 | CP-7A | Constraint and permission hardening | migrations/auth/schema tests | destructive cleanup without audit | constraint validation and least-privilege matrix | Legacy constraints validated; permissions least-privilege |
