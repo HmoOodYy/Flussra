@@ -7,7 +7,7 @@
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
 **Current migration head after implemented units:** Alembic `0064` (Phase 6 immutable-evidence foundation; CP-5C frozen report-evidence persistence is `0063`)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `Complete`: CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). Phase 6 is `In Progress`: its internal immutable-evidence foundation is `Complete` (commit `de3d8e8`), and P6A is next. Phase 7 remains `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `Complete`: CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). Phase 6 is `In Progress`: its internal immutable-evidence foundation is `Complete` (commit `de3d8e8`) and P6A finalized overview and reports is `Complete` (commit `0452b3c`); P6B is next. Phase 7 remains `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -929,6 +929,8 @@ Non-blocking CP-5C notes: `AppearsInReports` filters dynamic report columns, whi
 
 ### 8.10 Finalized information library
 
+P6A implements the finalized Overview and finalized calculation report routes below. The Off/Status, Rates Used, and audit routes remain planned Phase 6 work.
+
 ```text
 GET /payroll/finalized/{period_id}/overview
 GET /payroll/finalized/{period_id}/off-drivers
@@ -937,7 +939,7 @@ GET /payroll/finalized/{period_id}/reports/{view}
 GET /payroll/finalized/{period_id}/audit
 ```
 
-Every endpoint reads immutable final snapshot data, never current mutable settings.
+Implemented P6A endpoints read immutable final snapshot data, never current mutable settings.
 
 ---
 
@@ -1268,7 +1270,7 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 15. ~~Review return/manual transition paths can orphan workflow state.~~ Resolved by CP-0C/CP-1A.
 16. ~~Draft cancellation lacks a transition-specific action permission.~~ Resolved by CP-0C.
 17. Fourteen tenant-integrity constraints remain unvalidated.
-18. Finalized information-library metadata remains incomplete beyond the completed immutable-evidence foundation; public finalized-library contracts remain Phase 6 work.
+18. Finalized information-library metadata remains incomplete beyond the completed immutable-evidence foundation and P6A overview/report contracts; Off/Status, Rates Used, audit/security, participant read, and correction-boundary library contracts remain Phase 6 work.
 
 ### P2 — Important follow-up
 
@@ -1276,7 +1278,7 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 2. Effective-dated status pay rules are missing.
 3. Audit old/new detail is incomplete for several mutations.
 4. Audit append-only database enforcement is missing.
-5. `ledger.view` and `ledger.audit.view` are seeded; public finalized-library permission enforcement remains Phase 6 work.
+5. `ledger.view` and `ledger.audit.view` are seeded; P6A enforces `ledger.view`, while the additive audit permission contract remains P6D work.
 6. Current dormant payroll tables create source-of-truth ambiguity.
 7. Calculation rounding policy is not a formal contract.
 8. Historical employee inactive/suspension intervals may require a dedicated history model.
@@ -3002,7 +3004,7 @@ Hub KPI definitions must not reuse current day-grid `worked/off` counters or per
 
 **Status:** `In Progress`
 
-- [ ] P6A: final overview and reports.
+- [x] P6A: final overview and reports.
 - [ ] P6B: final off/status source snapshot views.
 - [ ] P6C: rates/rules/bonus used views.
 - [ ] P6D: security/audit detail.
@@ -3057,7 +3059,21 @@ Used-rate/rule evidence is descriptive provenance only, not a calculation engine
 
 The foundation uses batched rate/rule reads and bounded per-action participant capture, preserving future period/snapshot-scoped set-based reads without claiming public-library load testing. Review evidence included focused foundation, CP-4D, CP-4E, CP-4F, frozen Status/Bonus, CP-5C reports, and permission/branch regressions; compile passed and `0064` is the sole Alembic head. Accepted non-blocking notes remain broad Ruff/style/import debt, the Windows `testing.postgresql` shutdown warning, and Git LF/CRLF/global-ignore advisories.
 
-No historical backfill occurred. Older finalized periods without this evidence remain `UNAVAILABLE` for dependent future library sections while immutable FinalLines money remains valid. This foundation implements no finalized overview, Off/Status, Rates Used, reports, or audit route; no frontend, correction workflow, cache, Status/Bonus persistence, DraftLine mirror, or Phase 7 hardening. P6A-P6F remain incomplete official units. The next approved implementation slice is **P6A**: finalized overview and the finalized mapping of Drivers/Period Work/Period Pay/Mixed from FinalLines and originating evidence.
+No historical backfill occurred. Older finalized periods without this evidence remain `UNAVAILABLE` for dependent future library sections while immutable FinalLines money remains valid. This foundation implemented no finalized overview, Off/Status, Rates Used, reports, or audit route; no frontend, correction workflow, cache, Status/Bonus persistence, DraftLine mirror, or Phase 7 hardening. The subsequently completed P6A supplies the overview and four finalized report views; P6B-P6F remain incomplete official units.
+
+#### P6A — Finalized overview and reports — Complete
+
+Implementation commit: `0452b3c` — `feat: add finalized payroll overview and reports` (`4 files changed, 948 insertions(+), 1 deletion(-)`). It added `GET /payroll/finalized/{period_id}/overview` and `GET /payroll/finalized/{period_id}/reports/{view}` for `drivers`, `period-work`, `period-pay`, and `mixed`; Alembic remains `0064`, with no migration `0065`, frontend, new Status/Bonus persistence, cache, correction workflow, or later Phase 6 route.
+
+P6A is a read-only Locked/Archived library slice. `PayrollFinalLines` remains the sole finalized-money authority: P6A never invokes LIVE calculation, resolves current rates, multiplies work by rates, replays min/max, recalculates Bonus, or rebuilds money from current configuration. It validates the one deterministic `PayrollFinalLines.SourceSnapshot` identity and loads that exact originating snapshot; it never chooses a latest snapshot. Missing or inconsistent legacy provenance/evidence is `UNAVAILABLE` and fail-closed, never reconstructed from mutable rows.
+
+Overview intentionally uses a bounded, period-scoped FinalLines aggregate for final summary/provenance/section availability and does not eagerly load report rows, Status, Bonus, Rates Used, audit, or Off-driver detail. The lazy child reports use FinalLines for money plus the exact originating immutable snapshot and frozen evidence for descriptive history. Driver display identity comes from immutable snapshot/eligibility evidence where available, and PayItem code/label/unit/order/report visibility comes from `PayrollPeriodPayItems`, not mutable current PayItems. Status remains not a PayItem; Status descriptive history uses frozen Status evidence, FinalLines remains Bonus-money authority, and frozen Bonus evidence supplies Bonus description.
+
+P6A requires `ledger.view`; `payroll.view` alone and `ledger.audit.view` alone do not substitute. It preserves scoped company/branch/tenant access and fail-closed Driver and `OwnDriverDataOnly` denial. Other lifecycle states fail closed; Locked/Archived never reopen. The routes perform no intentional writes, snapshot capture, legacy repair, cache write, payroll mutation, or lifecycle change.
+
+Independent review: `PASS_WITH_NOTES`; P0 none; P1 none; `SAFE_TO_COMMIT_P6A`. Focused evidence recorded 7 passing P6A tests: all views, Archived, Driver/ODA and company/branch route guards, PayItem rename/retirement resistance, and return → correction → resubmit → approve → finalize exact-revision provenance. Immutable-evidence, CP-4D/CP-4E/CP-4F, frozen Status/Bonus, CP-5C, permission, and branch regressions passed; focused Ruff and compile passed; `0064` is the sole Alembic head. Accepted non-blocking notes remain the broad shared report payload, partial direct provenance/lifecycle matrix coverage, bounded duplicate FinalLines/provenance reads, and Git LF/CRLF/global-ignore environment advisories.
+
+P6A does not implement `GET /payroll/finalized/{period_id}/off-drivers`, `GET /payroll/finalized/{period_id}/rates-used`, or `GET /payroll/finalized/{period_id}/audit`; P6B, P6C, P6D, P6E, P6F, and Phase 7 remain incomplete. The next approved implementation slice is **P6B**: finalized Off/Status source snapshot views using frozen Status, PeriodDays, and eligibility with explicit legacy availability.
 
 #### Phase 6 product decision lock
 
@@ -3079,7 +3095,7 @@ No historical backfill occurred. Older finalized periods without this evidence r
 
 **Reuse-first persistence audit:** The architecture plan classifies every promised field as already available from FinalLines, the originating Calculation Snapshot, PayrollPeriodPayItems, Status evidence, Bonus evidence, immutable workflow/audit data, or missing. Only missing facts create new persistence. The `0064` foundation satisfies the approved going-forward P6E participant/responsibility and P6C used-rate/rule evidence requirements; legacy missing evidence remains unavailable with no backfill. P6B must first satisfy Off/Status from frozen Status evidence plus final/snapshot provenance and add only truly required missing fields.
 
-**Audit and Phase 7 boundary:** P6D presents the immutable actor/time/reason/security facts the finalized library promises. Phase 7 retains broad append-only audit hardening, constraint validation, permission cleanup, load/performance validation, migration rehearsal, rollout, and reconciliation. This decision lock predated implementation; the completed `0064` foundation starts Phase 6 without starting frontend, public routes, or Phase 7 scope. The next implementation slice is the already-approved P6A read-model/route work.
+**Audit and Phase 7 boundary:** P6D presents the immutable actor/time/reason/security facts the finalized library promises. Phase 7 retains broad append-only audit hardening, constraint validation, permission cleanup, load/performance validation, migration rehearsal, rollout, and reconciliation. This decision lock predated implementation; the completed `0064` foundation and P6A started Phase 6 without frontend or Phase 7 scope. The next implementation slice is the already-approved P6B Off/Status read-model/route work.
 
 #### Phase 6 architecture plan
 
@@ -3149,7 +3165,7 @@ All routes lazy-load their own child domain. They batch by period/snapshot and u
 **Implementation order:**
 
 1. **INTERNAL IMPLEMENTATION FOUNDATION:** migration `0064` and atomic capture of P6E participant evidence plus P6C used-rate/rule definitions; no Phase 6 routes, frontend, cache, or correction workflow.
-2. **P6A:** finalized overview and the finalized mapping of the existing Drivers/Period Work/Period Pay/Mixed views using FinalLines plus originating evidence.
+2. **P6A — Complete:** finalized overview and the finalized mapping of the existing Drivers/Period Work/Period Pay/Mixed views using FinalLines plus originating evidence.
 3. **P6B:** finalized Off/Status source snapshot view using frozen Status, PeriodDays, and eligibility, with explicit legacy availability.
 4. **P6C:** Rates Used and Bonus-used presentation from the captured used definitions and existing Bonus evidence.
 5. **P6D:** lazy finalized audit/security detail using participant evidence and immutable workflow/audit facts.
@@ -3157,7 +3173,7 @@ All routes lazy-load their own child domain. They batch by period/snapshot and u
 
 **First implementation slice — Complete:** the internal immutable-evidence foundation shipped in commit `de3d8e8` with `0064`, atomic capture, permission seeds, and focused tests. It implemented no public finalized route, frontend, cache, correction entity, or Phase 7 hardening. It unlocks P6A/P6C/P6D while P6B can reuse existing frozen Status/calendar/eligibility evidence.
 
-Phase 5 remains `Complete`. Phase 6 is `In Progress`: the internal foundation is complete and P6A is next, but P6A-P6F are not complete. Phase 7 remains `Pending` and retains broad append-only audit hardening, constraint validation, permission cleanup, load testing, migration rehearsal, reconciliation, and rollout.
+Phase 5 remains `Complete`. Phase 6 is `In Progress`: the internal foundation and P6A are complete; P6B is next, while P6B-P6F remain incomplete. Phase 7 remains `Pending` and retains broad append-only audit hardening, constraint validation, permission cleanup, load testing, migration rehearsal, reconciliation, and rollout.
 
 **Codex review checklist**
 
