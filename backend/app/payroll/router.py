@@ -12,7 +12,13 @@ from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
-from app.payroll import current_hub, off_drivers, report_read_model, service
+from app.payroll import (
+    current_hub,
+    finalized_library_read_model,
+    off_drivers,
+    report_read_model,
+    service,
+)
 from app.payroll.schemas import (
     BatchRateRequest,
     BatchRateSaveResult,
@@ -46,6 +52,8 @@ from app.payroll.schemas import (
     DriversOffResponse,
     DriversReportResponse,
     FinalizationPreviewResponse,
+    FinalizedCalculationReportResponse,
+    FinalizedOverviewResponse,
     FinalLineSummary,
     MixedReportResponse,
     NextPeriodDates,
@@ -556,6 +564,37 @@ async def get_period_pay_report(period_id: int, token: TokenDep, db: DbDep) -> P
 async def get_mixed_report(period_id: int, token: TokenDep, db: DbDep) -> MixedReportResponse:
     return await report_read_model.build_report(
         report_type="mixed", period_id=period_id, company_id=int(token["cid"]),
+        user_id=int(token["sub"]), db=db,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P6A: Finalized Payroll Information Library. Locked/Archived only.
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/finalized/{period_id}/overview",
+    response_model=FinalizedOverviewResponse,
+    summary="Get the lightweight finalized payroll overview",
+)
+async def get_finalized_overview(
+    period_id: int, token: TokenDep, db: DbDep,
+) -> FinalizedOverviewResponse:
+    return await finalized_library_read_model.build_overview(
+        period_id=period_id, company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
+    )
+
+
+@router.get(
+    "/finalized/{period_id}/reports/{view}",
+    response_model=FinalizedCalculationReportResponse,
+    summary="Get an immutable finalized payroll report",
+)
+async def get_finalized_report(
+    period_id: int, view: str, token: TokenDep, db: DbDep,
+) -> FinalizedCalculationReportResponse:
+    return await finalized_library_read_model.build_finalized_report(
+        report_type=view, period_id=period_id, company_id=int(token["cid"]),
         user_id=int(token["sub"]), db=db,
     )
 

@@ -1626,3 +1626,69 @@ class PeriodPayReportResponse(CalculationReportResponse):
 
 class MixedReportResponse(CalculationReportResponse):
     pass
+
+
+# ---------------------------------------------------------------------------
+# P6A: Finalized Payroll Information Library. These contracts are read-only
+# projections over FinalLines plus the exact originating immutable snapshot.
+# ---------------------------------------------------------------------------
+
+class FinalizedSectionAvailability(BaseModel):
+    state: str
+    reason_code: str | None = None
+
+
+class FinalizedFinancialSummary(BaseModel):
+    total_pay: Decimal
+    final_line_count: int
+    driver_count: int
+
+
+class FinalizedSnapshotProvenance(BaseModel):
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    snapshot_hash: str | None = None
+    source_config_hash: str | None = None
+
+
+class FinalizedOverviewResponse(BaseModel):
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    company_id: int
+    branch_id: int
+    branch_name: str
+    finalized_at_utc: datetime | None = None
+    finalized_by_user_id: int | None = None
+    financial_summary: FinalizedFinancialSummary
+    snapshot_provenance: FinalizedSnapshotProvenance
+    section_availability: dict[str, FinalizedSectionAvailability]
+    generated_at_utc: datetime
+
+
+class FinalizedReportMetadata(BaseModel):
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    branch_id: int
+    report_type: str
+    authority_kind: str = "FINAL_LINES"
+    financials_available: bool
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    snapshot_hash: str | None = None
+    report_evidence_available: bool
+    report_evidence_version: int | None = None
+    report_evidence_hash: str | None = None
+    section_availability: dict[str, FinalizedSectionAvailability]
+    generated_at_utc: datetime
+
+
+class FinalizedCalculationReportResponse(BaseModel):
+    metadata: FinalizedReportMetadata
+    columns: list[ReportColumn] = []
+    drivers: list[ReportDriver] = []
+    work_totals: dict[str, Decimal] = {}
+    pay_totals: dict[str, Decimal] | None = None
