@@ -55,6 +55,7 @@ from app.payroll.schemas import (
     FinalizedCalculationReportResponse,
     FinalizedOffDriversResponse,
     FinalizedOverviewResponse,
+    FinalizedRatesUsedResponse,
     FinalLineSummary,
     MixedReportResponse,
     NextPeriodDates,
@@ -609,6 +610,19 @@ async def get_finalized_off_drivers(
     period_id: int, token: TokenDep, db: DbDep,
 ) -> FinalizedOffDriversResponse:
     return await finalized_library_read_model.build_finalized_off_drivers(
+        period_id=period_id, company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
+    )
+
+
+@router.get(
+    "/finalized/{period_id}/rates-used",
+    response_model=FinalizedRatesUsedResponse,
+    summary="Get immutable rates, rules, and Bonus evidence used by finalized payroll",
+)
+async def get_finalized_rates_used(
+    period_id: int, token: TokenDep, db: DbDep,
+) -> FinalizedRatesUsedResponse:
+    return await finalized_library_read_model.build_finalized_rates_used(
         period_id=period_id, company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
     )
 

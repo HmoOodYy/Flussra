@@ -1727,3 +1727,72 @@ class FinalizedOffDriversResponse(BaseModel):
     total_fully_off_drivers: int
     fully_off_drivers: list[FullyOffDriverSummary] = []
     status_entries: list[FinalizedOffStatusEntry] = []
+
+
+class FinalizedUsedRateDefinition(BaseModel):
+    used_rate_definition_id: int
+    driver_id: int
+    driver_name: str | None = None
+    driver_code: str | None = None
+    evidence_kind: str
+    source_type: str
+    pay_item_id: int | None = None
+    pay_item_code: str | None = None
+    pay_item_label: str | None = None
+    rate_type_id: int | None = None
+    rate_type_code: str | None = None
+    rate_type_name: str | None = None
+    unit_name: str | None = None
+    driver_rate_id: int | None = None
+    driver_pay_rule_id: int | None = None
+    rate_behavior: str | None = None
+    rate_amount: Decimal | None = None
+    effective_from: date | None = None
+    effective_to: date | None = None
+    rate_status: str | None = None
+    block_size: Decimal | None = None
+    rounding_rule: str | None = None
+    rule_type: str | None = None
+    rule_amount: Decimal | None = None
+    rule_status: str | None = None
+    definition_fingerprint: str
+    snapshot_line_ids: list[int] = []
+    line_use_count: int
+
+
+class FinalizedBonusEventEvidence(BaseModel):
+    bonus_event_id: int
+    driver_id: int
+    driver_name: str | None = None
+    driver_code: str | None = None
+    amount: Decimal
+    reason: str | None = None
+    notes: str | None = None
+    data_revision: int
+    creator_user_id: int | None = None
+    creator_display_name: str | None = None
+    created_at_utc: datetime
+
+
+class FinalizedRatesUsedMetadata(BaseModel):
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    branch_id: int
+    authority_kind: str = "FINALIZED_RATE_RULE_EVIDENCE"
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    snapshot_hash: str | None = None
+    rate_evidence_available: bool
+    report_evidence_available: bool
+    report_evidence_version: int | None = None
+    report_evidence_hash: str | None = None
+    section_availability: dict[str, FinalizedSectionAvailability]
+    generated_at_utc: datetime
+
+
+class FinalizedRatesUsedResponse(BaseModel):
+    metadata: FinalizedRatesUsedMetadata
+    used_rate_definitions: list[FinalizedUsedRateDefinition] = []
+    bonus_events: list[FinalizedBonusEventEvidence] = []

@@ -196,7 +196,7 @@ async def test_overview_and_all_reports_use_final_lines_and_exact_snapshot(
     assert Decimal(overview_body["financial_summary"]["total_pay"]) == Decimal("20")
     assert overview_body["snapshot_provenance"]["snapshot_id"] == snapshot_id
     assert overview_body["section_availability"]["financials"]["state"] == "AVAILABLE"
-    assert overview_body["section_availability"]["rates_used"]["reason_code"] == "P6C_NOT_IMPLEMENTED"
+    assert overview_body["section_availability"]["rates_used"]["state"] == "AVAILABLE"
     assert "drivers" not in overview_body
     assert "columns" not in overview_body
     for view in ("drivers", "period-work", "period-pay", "mixed"):
