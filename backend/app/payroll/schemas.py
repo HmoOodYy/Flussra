@@ -1692,3 +1692,38 @@ class FinalizedCalculationReportResponse(BaseModel):
     drivers: list[ReportDriver] = []
     work_totals: dict[str, Decimal] = {}
     pay_totals: dict[str, Decimal] | None = None
+
+
+class FinalizedOffStatusEntry(BaseModel):
+    driver_id: int
+    driver_name: str | None = None
+    driver_code: str | None = None
+    work_date: date
+    status_key_id: int
+    status_code: str
+    status_label: str
+    is_off_reason: bool
+
+
+class FinalizedOffDriversMetadata(BaseModel):
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    branch_id: int
+    authority_kind: str = "FINALIZED_STATUS_SNAPSHOT"
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    snapshot_hash: str | None = None
+    report_evidence_available: bool
+    report_evidence_version: int | None = None
+    report_evidence_hash: str | None = None
+    section_availability: dict[str, FinalizedSectionAvailability]
+    generated_at_utc: datetime
+
+
+class FinalizedOffDriversResponse(BaseModel):
+    metadata: FinalizedOffDriversMetadata
+    total_fully_off_drivers: int
+    fully_off_drivers: list[FullyOffDriverSummary] = []
+    status_entries: list[FinalizedOffStatusEntry] = []

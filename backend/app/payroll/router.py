@@ -53,6 +53,7 @@ from app.payroll.schemas import (
     DriversReportResponse,
     FinalizationPreviewResponse,
     FinalizedCalculationReportResponse,
+    FinalizedOffDriversResponse,
     FinalizedOverviewResponse,
     FinalLineSummary,
     MixedReportResponse,
@@ -596,6 +597,19 @@ async def get_finalized_report(
     return await finalized_library_read_model.build_finalized_report(
         report_type=view, period_id=period_id, company_id=int(token["cid"]),
         user_id=int(token["sub"]), db=db,
+    )
+
+
+@router.get(
+    "/finalized/{period_id}/off-drivers",
+    response_model=FinalizedOffDriversResponse,
+    summary="Get immutable finalized Off and Status evidence",
+)
+async def get_finalized_off_drivers(
+    period_id: int, token: TokenDep, db: DbDep,
+) -> FinalizedOffDriversResponse:
+    return await finalized_library_read_model.build_finalized_off_drivers(
+        period_id=period_id, company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
     )
 
 

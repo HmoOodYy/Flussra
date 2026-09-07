@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
-from app.payroll import report_read_model
+from app.payroll import report_read_model, service
 
 _REPORT_TYPES = {"drivers", "period-work", "period-pay", "mixed"}
 _FINALIZED_STATUSES = {"Locked", "Archived"}
@@ -214,6 +215,34 @@ async def _snapshot_work_and_drivers(
     return drivers, work_rows
 
 
+async def _finalized_off_status_availability(
+    period: dict[str, Any], snapshot: dict[str, Any] | None,
+    provenance: dict[str, str | None], db: AsyncConnection,
+) -> dict[str, str | None]:
+    """Expose P6B capability without reading the finalized Off/Status payload."""
+    if snapshot is None:
+        return _availability("UNAVAILABLE", provenance["reason_code"])
+    if snapshot["reportevidenceversion"] is None:
+        return _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
+    for table, reason_code in (
+        ("payroll.payrollperioddays", "PERIOD_CALENDAR_UNAVAILABLE"),
+        ("payroll.payrollperiodeligibilitysnapshots", "ELIGIBILITY_SNAPSHOT_UNAVAILABLE"),
+        ("payroll.payrollperiodpayitems", "PERIOD_PAY_ITEM_SNAPSHOT_UNAVAILABLE"),
+    ):
+        exists = (await db.execute(text(f"""
+            SELECT 1
+            FROM {table}
+            WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
+            LIMIT 1
+        """), {
+            "period_id": period["payrollperiodid"], "company_id": period["companyid"],
+            "branch_id": period["branchid"],
+        })).first()
+        if exists is None:
+            return _availability("UNAVAILABLE", reason_code)
+    return _availability("AVAILABLE")
+
+
 def _work_totals(work_rows: list[dict[str, Any]]) -> dict[str, Decimal]:
     totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for row in work_rows:
@@ -239,6 +268,9 @@ async def build_overview(
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
     financial_summary = await _financial_summary(period, db)
     snapshot, provenance = await _originating_snapshot(period, db)
+    off_status_availability = await _finalized_off_status_availability(
+        period, snapshot, provenance, db,
+    )
     if snapshot is None:
         evidence = _availability("UNAVAILABLE", provenance["reason_code"])
     elif snapshot["reportevidenceversion"] is None:
@@ -261,7 +293,7 @@ async def build_overview(
         "section_availability": {
             "financials": _availability(financial_state), "snapshot_provenance": provenance,
             "report_evidence": evidence, "reports": _availability(financial_state),
-            "off_status": _availability("UNAVAILABLE", "P6B_NOT_IMPLEMENTED"),
+            "off_status": off_status_availability,
             "rates_used": _availability("UNAVAILABLE", "P6C_NOT_IMPLEMENTED"),
             "audit": _availability("UNAVAILABLE", "P6D_NOT_IMPLEMENTED"),
         },
@@ -347,4 +379,226 @@ async def build_finalized_report(
         },
         "columns": columns, "drivers": result_drivers,
         "work_totals": _work_totals(work_rows), "pay_totals": _pay_totals(financial_totals),
+    }
+
+
+async def _finalized_scheduled_work_days(
+    period: dict[str, Any], db: AsyncConnection,
+) -> tuple[set[date] | None, dict[str, str | None]]:
+    rows = (await db.execute(text("""
+        SELECT workdate, isdefaultworkday, isaddedworkday
+        FROM payroll.payrollperioddays
+        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
+        ORDER BY workdate
+    """), {
+        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
+        "branch_id": period["branchid"],
+    })).mappings().all()
+    if not rows:
+        return None, _availability("UNAVAILABLE", "PERIOD_CALENDAR_UNAVAILABLE")
+    return {
+        row["workdate"] for row in rows if row["isdefaultworkday"] or row["isaddedworkday"]
+    }, _availability("AVAILABLE")
+
+
+async def _finalized_eligible_driver_days(
+    period: dict[str, Any], snapshot_id: int, scheduled_days: set[date], db: AsyncConnection,
+) -> tuple[dict[int, dict[str, Any]] | None, dict[str, str | None]]:
+    marker = (await db.execute(text("""
+        SELECT 1
+        FROM payroll.payrollperiodeligibilitysnapshots
+        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
+    """), {
+        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
+        "branch_id": period["branchid"],
+    })).first()
+    if marker is None:
+        return None, _availability("UNAVAILABLE", "ELIGIBILITY_SNAPSHOT_UNAVAILABLE")
+    rows = (await db.execute(text("""
+        SELECT pde.driverid, pde.drivercodesnapshot, pde.drivernamesnapshot,
+               pde.iseligibleforperiod, pde.eligibilityreasoncode,
+               pde.hiredatesnapshot, pde.terminationdatesnapshot,
+               pde.drivereffectivefromsnapshot, pde.drivereffectivetosnapshot,
+               dt.drivercodesnapshot AS total_driver_code,
+               dt.drivernamesnapshot AS total_driver_name
+        FROM payroll.payrollperioddrivereligibility pde
+        LEFT JOIN payroll.payrollcalculationdrivertotals dt
+          ON dt.payrollcalculationsnapshotid = :snapshot_id
+         AND dt.companyid = pde.companyid AND dt.branchid = pde.branchid
+         AND dt.driverid = pde.driverid
+        WHERE pde.payrollperiodid = :period_id
+          AND pde.companyid = :company_id AND pde.branchid = :branch_id
+          AND pde.iseligibleforperiod = TRUE
+        ORDER BY pde.driverid
+    """), {
+        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
+        "company_id": period["companyid"], "branch_id": period["branchid"],
+    })).mappings().all()
+    result: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        # This legacy inclusion reason needs mutable-source date checks in CP-5B.
+        # Finalized reads must fail closed instead of recreating those checks from live rows.
+        if row["eligibilityreasoncode"] == "IncludedByExistingData":
+            return None, _availability("UNAVAILABLE", "ELIGIBILITY_DATE_WINDOW_UNAVAILABLE")
+        eligibility = SimpleNamespace(**dict(row))
+        days = {
+            work_date for work_date in scheduled_days
+            if service._is_snapshot_row_eligible_for_workdate(eligibility, work_date)
+        }
+        if days:
+            driver_id = int(row["driverid"])
+            result[driver_id] = {
+                "driver_id": driver_id,
+                "driver_code": row["drivercodesnapshot"] or row["total_driver_code"],
+                "driver_name": row["drivernamesnapshot"] or row["total_driver_name"],
+                "eligible_days": days,
+            }
+    return result, _availability("EMPTY" if not result else "AVAILABLE")
+
+
+async def _finalized_status_entries(
+    snapshot: dict[str, Any] | None, period: dict[str, Any], db: AsyncConnection,
+) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+    if snapshot is None:
+        return [], _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
+    if snapshot["reportevidenceversion"] is None:
+        return [], _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
+    rows = (await db.execute(text("""
+        SELECT driverid, workdate, statuskeyid, statuscodesnapshot, statuslabelsnapshot,
+               statusisoffreasonsnapshot
+        FROM payroll.payrollcalculationsnapshotstatusentries
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+          AND companyid = :company_id AND branchid = :branch_id
+          AND payrollperiodid = :period_id
+        ORDER BY driverid, workdate
+    """), {
+        "snapshot_id": snapshot["payrollcalculationsnapshotid"],
+        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
+        "branch_id": period["branchid"],
+    })).mappings().all()
+    return [{
+        "driver_id": int(row["driverid"]), "work_date": row["workdate"],
+        "status_key_id": int(row["statuskeyid"]), "status_code": row["statuscodesnapshot"],
+        "status_label": row["statuslabelsnapshot"], "is_off_reason": bool(row["statusisoffreasonsnapshot"]),
+    } for row in rows], _availability("EMPTY" if not rows else "AVAILABLE")
+
+
+async def _finalized_normal_work_pairs(
+    period: dict[str, Any], snapshot_id: int, db: AsyncConnection,
+) -> tuple[set[tuple[int, date]] | None, dict[str, str | None]]:
+    pay_item_snapshot = (await db.execute(text("""
+        SELECT 1
+        FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
+        LIMIT 1
+    """), {
+        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
+        "branch_id": period["branchid"],
+    })).first()
+    if pay_item_snapshot is None:
+        return None, _availability("UNAVAILABLE", "PERIOD_PAY_ITEM_SNAPSHOT_UNAVAILABLE")
+    rows = (await db.execute(text("""
+        SELECT DISTINCT dt.driverid, sl.workdate
+        FROM payroll.payrollcalculationsnapshotlines sl
+        JOIN payroll.payrollcalculationdrivertotals dt
+          ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
+        JOIN payroll.payrollperiodpayitems pppi
+          ON pppi.payrollperiodid = :period_id
+         AND pppi.companyid = :company_id AND pppi.branchid = :branch_id
+         AND (pppi.payitemid = sl.payitemid OR pppi.payitemcode = sl.linetype)
+        WHERE dt.payrollcalculationsnapshotid = :snapshot_id
+          AND dt.companyid = :company_id AND dt.branchid = :branch_id
+          AND sl.sourcetype = 'DraftLine' AND sl.linescope = 'Daily'
+          AND sl.workdate IS NOT NULL AND sl.quantity IS NOT NULL AND sl.quantity <> 0
+          AND sl.linetype NOT IN ('DailyStatus', 'DailyNote', 'STATUS_PAYMENT', 'STATUS_PAY',
+                                  'BONUS', 'ADJUSTMENT', 'MINIMUM', 'MAXIMUM',
+                                  'SYS_MIN_TOPUP', 'SYS_MAX_CAP')
+          AND pppi.itemscope = 'Daily' AND pppi.appearsinpayrollentry = TRUE
+          AND pppi.isactiveinperiod = TRUE
+    """), {
+        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
+        "company_id": period["companyid"], "branch_id": period["branchid"],
+    })).mappings().all()
+    return {(int(row["driverid"]), row["workdate"]) for row in rows}, _availability("AVAILABLE")
+
+
+async def build_finalized_off_drivers(
+    *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
+) -> dict[str, Any]:
+    """Build P6B's full-period immutable Off/Status source projection."""
+    period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
+    snapshot, provenance = await _originating_snapshot(period, db)
+    statuses, status_availability = await _finalized_status_entries(snapshot, period, db)
+    calendar_days, calendar_availability = await _finalized_scheduled_work_days(period, db)
+    eligibility: dict[int, dict[str, Any]] | None = None
+    eligibility_availability = _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
+    normal_work: set[tuple[int, date]] | None = None
+    work_availability = _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
+    if snapshot is not None and calendar_days is not None:
+        snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
+        eligibility, eligibility_availability = await _finalized_eligible_driver_days(
+            period, snapshot_id, calendar_days, db,
+        )
+        normal_work, work_availability = await _finalized_normal_work_pairs(period, snapshot_id, db)
+
+    drivers = eligibility or {}
+    identities = {
+        driver_id: (driver["driver_name"], driver["driver_code"])
+        for driver_id, driver in drivers.items()
+    }
+    status_by_driver_day = {(row["driver_id"], row["work_date"]): row for row in statuses}
+    frozen_statuses = [{
+        **row,
+        "driver_name": identities.get(row["driver_id"], (None, None))[0],
+        "driver_code": identities.get(row["driver_id"], (None, None))[1],
+    } for row in statuses]
+
+    can_resolve_off = (
+        snapshot is not None and calendar_days is not None and eligibility is not None
+        and normal_work is not None and status_availability["state"] in {"AVAILABLE", "EMPTY"}
+    )
+    fully_off = []
+    if can_resolve_off:
+        for driver in drivers.values():
+            days = driver["eligible_days"]
+            off_days = sum(
+                1 for work_date in days
+                if status_by_driver_day.get((driver["driver_id"], work_date), {}).get("is_off_reason")
+                and (driver["driver_id"], work_date) not in normal_work
+            )
+            if off_days == len(days):
+                fully_off.append({
+                    "driver_id": driver["driver_id"], "driver_name": driver["driver_name"] or "",
+                    "driver_code": driver["driver_code"], "eligible_scheduled_day_count": len(days),
+                    "off_day_count": off_days,
+                })
+    off_availability = (
+        _availability("EMPTY" if not fully_off else "AVAILABLE") if can_resolve_off
+        else _availability("UNAVAILABLE", next(
+            availability["reason_code"] for availability in (
+                provenance, status_availability, calendar_availability,
+                eligibility_availability, work_availability,
+            ) if availability["state"] == "UNAVAILABLE"
+        ))
+    )
+    return {
+        "metadata": {
+            "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
+            "period_name": period["periodname"], "period_status": period["status"],
+            "branch_id": int(period["branchid"]),
+            "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
+            "revision_number": None if snapshot is None else int(snapshot["revisionnumber"]),
+            "snapshot_hash": None if snapshot is None else str(snapshot["snapshothash"]),
+            "report_evidence_available": snapshot is not None and snapshot["reportevidenceversion"] is not None,
+            "report_evidence_version": None if snapshot is None else snapshot["reportevidenceversion"],
+            "report_evidence_hash": None if snapshot is None else snapshot["reportevidencehash"],
+            "section_availability": {
+                "snapshot_provenance": provenance, "status_evidence": status_availability,
+                "period_calendar": calendar_availability, "eligibility": eligibility_availability,
+                "normal_work": work_availability, "off_drivers": off_availability,
+            },
+            "generated_at_utc": datetime.now(UTC),
+        },
+        "total_fully_off_drivers": len(fully_off), "fully_off_drivers": fully_off,
+        "status_entries": frozen_statuses,
     }
