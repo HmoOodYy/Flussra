@@ -7,7 +7,7 @@
 **Database migration baseline (original planning baseline):** Alembic `0047 (head)` — this was the migration head when this document's original planning baseline was reviewed; it is not the current head.  
 **Current migration head after implemented units:** Alembic `0064` (Phase 6 immutable-evidence foundation; CP-5C frozen report-evidence persistence is `0063`)
 **Last source revalidation:** 2026-06-19  
-**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `Complete`: CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). Phase 6 is `In Progress`: its internal immutable-evidence foundation is `Complete` (commit `de3d8e8`), P6A finalized overview and reports is `Complete` (commit `0452b3c`), and P6B finalized Off/Status history is `Complete` (commit `0a7d412`); P6C is next. Phase 7 remains `Pending`.
+**Implementation status:** Phase 0 is `Done with Notes`; Phase 1 is `Done with Notes`; CP-1A, CP-1B, CP-1C, CP-1D, and CP-1E are `Done with Notes`; Phase 2 is `Done with Notes`; CP-2A, CP-2B, CP-2C, CP-2D1, CP-2D2, CP-2E, and CP-2F are `Done with Notes`; Phase 3 is `Done with Notes`; Phase 4 (unified calculation core and immutable review snapshot) is `Complete` — CP-4A is `Completed` (commit `9b76aa9`), CP-4B is `Completed` (commit `f3988b7`), CP-4C is `Completed` (commit `d7f6b9e`), CP-4D is `Completed` (commit `9e4c32f`), CP-4E is `Completed` (commit `e332d02`), and CP-4F is `Completed` (commit `434f673`). Phase 5 (Current Payroll Hub and calculation reports) is `Complete`: CP-5A is `Completed` (commit `5d05756`), CP-5B is `Completed` (commit `9ecb300`), RP-1 is its completed internal report-authority foundation, the CP-5C frozen report-evidence persistence remedy is `Completed` (commit `1a106b8`), and CP-5C Calculation Report Bundle is `Completed` (commit `23bf68f`). Phase 6 is `In Progress`: its internal immutable-evidence foundation is `Complete` (commit `de3d8e8`), P6A finalized overview and reports is `Complete` (commit `0452b3c`), P6B finalized Off/Status history is `Complete` (commit `0a7d412`), and P6C rates/rules/Bonus-used views is `Complete` (commit `ed10312`); P6D is next. Phase 7 remains `Pending`.
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
@@ -929,7 +929,7 @@ Non-blocking CP-5C notes: `AppearsInReports` filters dynamic report columns, whi
 
 ### 8.10 Finalized information library
 
-P6A implements the finalized Overview and finalized calculation report routes below. P6B implements the finalized Off/Status route; Rates Used and audit remain planned Phase 6 work.
+P6A implements the finalized Overview and calculation report routes below. P6B implements finalized Off/Status history, and P6C implements finalized Rates Used; audit remains planned Phase 6 work.
 
 ```text
 GET /payroll/finalized/{period_id}/overview
@@ -1270,7 +1270,7 @@ Financial audit records and calculation snapshots must be append-only/immutable 
 15. ~~Review return/manual transition paths can orphan workflow state.~~ Resolved by CP-0C/CP-1A.
 16. ~~Draft cancellation lacks a transition-specific action permission.~~ Resolved by CP-0C.
 17. Fourteen tenant-integrity constraints remain unvalidated.
-18. Finalized information-library metadata remains incomplete beyond the completed immutable-evidence foundation, P6A overview/report contracts, and P6B Off/Status history; Rates Used, audit/security, participant read, and correction-boundary library contracts remain Phase 6 work.
+18. Finalized information-library metadata remains incomplete beyond the completed immutable-evidence foundation, P6A overview/report contracts, P6B Off/Status history, and P6C Rates Used/Bonus-used history; audit/security, participant read, and correction-boundary library contracts remain Phase 6 work.
 
 ### P2 — Important follow-up
 
@@ -3006,7 +3006,7 @@ Hub KPI definitions must not reuse current day-grid `worked/off` counters or per
 
 - [x] P6A: final overview and reports.
 - [x] P6B: final off/status source snapshot views.
-- [ ] P6C: rates/rules/bonus used views.
+- [x] P6C: rates/rules/bonus used views.
 - [ ] P6D: security/audit detail.
 - [ ] P6E: participant/role snapshot.
 - [ ] P6F: future correction boundary contract.
@@ -3059,7 +3059,7 @@ Used-rate/rule evidence is descriptive provenance only, not a calculation engine
 
 The foundation uses batched rate/rule reads and bounded per-action participant capture, preserving future period/snapshot-scoped set-based reads without claiming public-library load testing. Review evidence included focused foundation, CP-4D, CP-4E, CP-4F, frozen Status/Bonus, CP-5C reports, and permission/branch regressions; compile passed and `0064` is the sole Alembic head. Accepted non-blocking notes remain broad Ruff/style/import debt, the Windows `testing.postgresql` shutdown warning, and Git LF/CRLF/global-ignore advisories.
 
-No historical backfill occurred. Older finalized periods without this evidence remain `UNAVAILABLE` for dependent future library sections while immutable FinalLines money remains valid. This foundation implemented no finalized overview, Off/Status, Rates Used, reports, or audit route; no frontend, correction workflow, cache, Status/Bonus persistence, DraftLine mirror, or Phase 7 hardening. The subsequently completed P6A supplies the overview and four finalized report views, and P6B supplies finalized Off/Status history; P6C-P6F remain incomplete official units.
+No historical backfill occurred. Older finalized periods without this evidence remain `UNAVAILABLE` for dependent future library sections while immutable FinalLines money remains valid. This foundation implemented no finalized overview, Off/Status, Rates Used, reports, or audit route; no frontend, correction workflow, cache, Status/Bonus persistence, DraftLine mirror, or Phase 7 hardening. The subsequently completed P6A supplies the overview and four finalized report views, P6B supplies finalized Off/Status history, and P6C supplies Rates Used/Bonus-used history; P6D-P6F remain incomplete official units.
 
 #### P6A — Finalized overview and reports — Complete
 
@@ -3073,7 +3073,7 @@ P6A requires `ledger.view`; `payroll.view` alone and `ledger.audit.view` alone d
 
 Independent review: `PASS_WITH_NOTES`; P0 none; P1 none; `SAFE_TO_COMMIT_P6A`. Focused evidence recorded 7 passing P6A tests: all views, Archived, Driver/ODA and company/branch route guards, PayItem rename/retirement resistance, and return → correction → resubmit → approve → finalize exact-revision provenance. Immutable-evidence, CP-4D/CP-4E/CP-4F, frozen Status/Bonus, CP-5C, permission, and branch regressions passed; focused Ruff and compile passed; `0064` is the sole Alembic head. Accepted non-blocking notes remain the broad shared report payload, partial direct provenance/lifecycle matrix coverage, bounded duplicate FinalLines/provenance reads, and Git LF/CRLF/global-ignore environment advisories.
 
-P6A does not implement `GET /payroll/finalized/{period_id}/off-drivers`, `GET /payroll/finalized/{period_id}/rates-used`, or `GET /payroll/finalized/{period_id}/audit`; P6A's later P6B follow-on now supplies finalized Off/Status history, while P6C-P6F and Phase 7 remain incomplete. The next approved implementation slice is **P6C**: Rates Used and Bonus-used presentation from captured used definitions and existing Bonus evidence.
+P6A itself did not implement `GET /payroll/finalized/{period_id}/off-drivers`, `GET /payroll/finalized/{period_id}/rates-used`, or `GET /payroll/finalized/{period_id}/audit`; P6B subsequently supplied finalized Off/Status history and P6C subsequently supplied Rates Used/Bonus-used history. P6D-P6F and Phase 7 remain incomplete.
 
 #### P6B — Finalized Off/Status source snapshot views — Complete
 
@@ -3087,6 +3087,24 @@ The route requires `ledger.view`; `payroll.view` or `ledger.audit.view` alone ar
 
 Accepted non-blocking notes remain the known combined-process fixture-isolation/open-period uniqueness collisions, bounded duplicate overview availability/provenance reads, nullable display identity outside the immutable eligible roster, and Git LF/CRLF/global-ignore environment advisories. P6B preserves CP-5B Current Payroll Off-driver behavior and P6A Overview/reports; it adds no P6C-P6F route or implementation.
 
+#### P6C — Rates/rules/Bonus-used views — Complete
+
+Implementation commit: `ed10312aa2ac0a7867b012e6ceb1d04199e1a978` — `feat: add finalized rates used history` (`5 files changed, 686 insertions(+), 2 deletions(-)`). Committed files are `backend/app/payroll/finalized_library_read_model.py`, `backend/app/payroll/router.py`, `backend/app/payroll/schemas.py`, `backend/tests/test_p6a_finalized_library.py`, and `backend/tests/test_p6c_finalized_rates_used.py`. It adds only `GET /payroll/finalized/{period_id}/rates-used`; there is no standalone Bonus route, frontend work, migration `0065`, audit/participant route, correction workflow, cache, or Phase 7 work. Alembic remains `0064`. Independent review: `PASS_WITH_NOTES`; P0 none; P1 none; `SAFE_TO_COMMIT_P6C_CURRENT_ARTIFACT`. The exact committed artifact was independently reconciled and its five pre-stage git hash-object identities matched; the prior test-file line-count difference was a measurement difference, not a product issue.
+
+P6C is a read-only Locked/Archived projection. It resolves the one exact calculation snapshot identified by deterministic `PayrollFinalLines.SourceSnapshot` provenance and fails closed when provenance is missing or inconsistent; it never selects a latest/newest revision, current effective rate, or mutable live source. `PayrollFinalLines` remains the sole finalized-money authority. P6C never recalculates work times rate, replays min/max, recalculates Bonus, or publishes competing payroll totals.
+
+The route exposes only immutable `PayrollCalculationSnapshotUsedRateDefinitions` actually linked from the exact snapshot lines through `UsedRateDefinitionID`. Unused, future, unrelated, and whole-current-catalog `DriverRates`, `DriverPayRules`, and `RateTypes` are excluded; those current source IDs are provenance identifiers, not historical value authority. Snapshot lines with no applicable definition legitimately retain a NULL link, including Bonus, system, and other non-rate lines. Definitions are snapshot-revision-specific: Resubmit creates independent evidence and P6C reads only the revision that produced FinalLines.
+
+Historical fields come from the frozen `0064` evidence, including applicable source identity, DriverID, PayItem provenance, rate type metadata, amount, effective dates, status, block/rounding/calculation context, DriverPayRule type/amount/status, source type, and fingerprint. Historical Driver identity comes from immutable snapshot/eligibility identity where available; PayItem metadata comes from `PayrollPeriodPayItems`, never mutable current Driver or PayItem rows. Multiple genuinely used effective-dated definitions may coexist; P6C remains linkage-driven and does not collapse them to one current rate. Actually-used DriverPayRule evidence may be shown, but unused min/max rules are excluded and final adjustment money remains FinalLines authority.
+
+Bonus remains a separate canonical evidence domain, not a rate and not a min/max input. P6C presents frozen descriptive Bonus history from `PayrollCalculationSnapshotBonusEvents`, including where captured BonusEventID, DriverID, amount, reason, notes, revision, creator identity, frozen creator/giver display name, and `CreatedAtUtc`. That descriptive amount does not replace FinalLines money or create a competing Bonus total; no mutable current BonusEvent or User fallback is permitted.
+
+Rates/rules and Bonus sections report independent `AVAILABLE`, `EMPTY`, or `UNAVAILABLE` state. For rates, zero definitions are `AVAILABLE` plus `EMPTY` only when the exact snapshot/scope has immutable-foundation `PayrollPeriodWorkflowActionEvidence` with `SUBMITTED` or `RESUBMITTED`; legacy not-captured rate evidence is `UNAVAILABLE`. There is no invented rate-evidence-version column. Bonus continues to use `ReportEvidenceVersion`/report-evidence markers: captured zero rows are `AVAILABLE` plus `EMPTY`, while legacy missing evidence is `UNAVAILABLE`. Missing descriptive evidence never invalidates independently available FinalLines money, and nothing is reconstructed from mutable rows.
+
+P6C requires `ledger.view`; `payroll.view` alone and `ledger.audit.view` alone are insufficient. It preserves tenant/company/branch scope and fails closed for Driver and `OwnDriverDataOnly`; other lifecycle states fail closed, and Locked/Archived never reopen. Its period/snapshot-scoped reads are bounded and set-based, with no identified per-definition/driver/Bonus N+1 or mutable current rate/rule/Bonus/User reconstruction loop. GET performs no intentional evidence capture, repair/backfill, audit/cache write, payroll mutation, or lifecycle change. Bounded duplicate provenance/availability reads remain a non-blocking note.
+
+P6C preserves P6A Overview/reports and P6B Off/Status behavior; the only P6A test change updates the Rates Used availability expectation from not-implemented to available. Focused evidence: P6C 4 passed; P6A 7; P6B 6; immutable foundation 3; CP-4D 27; CP-4E 12; CP-4F 8; frozen Status/Bonus 8; RP-1 13; CP-5C 24; CP-4B 72; permission catalog 15; branch access 11; Ruff and compile passed; Alembic `0064` is the sole head. Accepted P2 notes remain direct current DriverRate, DriverPayRule, User-display, resubmit-rate, resubmit-Bonus, effective-date multi-rate, and zero-used-definition route coverage; they are non-blocking because P6C reads frozen evidence, reuses exact finalized provenance, and the immutable foundation/revision tests passed. Git LF/CRLF, global-ignore permission, Windows `testing.postgresql` shutdown, and bounded duplicate-read notes also remain non-blocking.
+
 #### Phase 6 product decision lock
 
 **Core principle:** Finalize/snapshot once; read immutable history cheaply thereafter. Phase 6 must reuse existing immutable sources where sufficient and add persistence only for historical facts the library promises but cannot already preserve safely. It must not rebuild history from mutable current configuration or snapshot the entire live payroll database.
@@ -3095,7 +3113,7 @@ Accepted non-blocking notes remain the known combined-process fixture-isolation/
 
 **Participant history:** P6E must preserve by value the minimal workflow participant/responsibility evidence needed to explain Submit, Review/Return where applicable, Approve, and Finalize: actor identity, display identity, action, timestamp, and relevant action-role/responsibility identity. It must not depend solely on current User names or current role assignments, and it must not snapshot an entire User profile. The approved persistence and capture timing are implemented by the `0064` foundation; P6E's future read contract remains separate work.
 
-**Rates/rules used:** P6C preserves only definitions actually used by finalized payroll, never the full company rate catalog. The finalized Rates Used view must explain the used identity, related PayItem identity, resolved value, applicable effective/work-date context, calculation/rate behavior, and the rule/tier information needed to explain the calculation. Existing FinalLines/SnapshotLines provenance must be reused first. The normalized immutable used-definition set plus references is implemented by `0064`; the P6C read contract remains separate work.
+**Rates/rules used:** P6C preserves only definitions actually used by finalized payroll, never the full company rate catalog. The completed Rates Used view explains the used identity, related PayItem identity, resolved value, applicable effective/work-date context, calculation/rate behavior, and captured rule/tier information from immutable evidence. Existing FinalLines/SnapshotLines provenance is reused first. The normalized immutable used-definition set plus references is implemented by `0064`, and P6C now supplies its read contract.
 
 **Source, Status, and Bonus history:** Phase 6 preserves only source history required for finalized reports, Off/Status, rates/rules used, Bonus detail, and participant/audit explanation. Reuse FinalLines, the originating Calculation Snapshot, PayrollPeriodPayItems, frozen Status evidence, frozen Bonus evidence, and immutable provenance before adding persistence; never use mutable DraftLines to fabricate final truth or mirror every operational source table. Status remains not a PayItem and reuses frozen Status evidence where sufficient. Bonus remains canonical PayrollBonusEvents; evidence-enabled snapshots already preserve BonusEvent/driver identity, amount, reason, notes, revision, creator identity/display snapshot, and `CreatedAtUtc`, and that evidence must be reused rather than creating another Bonus domain.
 
@@ -3107,7 +3125,7 @@ Accepted non-blocking notes remain the known combined-process fixture-isolation/
 
 **Reuse-first persistence audit:** The architecture plan classifies every promised field as already available from FinalLines, the originating Calculation Snapshot, PayrollPeriodPayItems, Status evidence, Bonus evidence, immutable workflow/audit data, or missing. Only missing facts create new persistence. The `0064` foundation satisfies the approved going-forward P6E participant/responsibility and P6C used-rate/rule evidence requirements; legacy missing evidence remains unavailable with no backfill. P6B satisfies Off/Status from frozen Status evidence plus final/snapshot provenance without adding persistence.
 
-**Audit and Phase 7 boundary:** P6D presents the immutable actor/time/reason/security facts the finalized library promises. Phase 7 retains broad append-only audit hardening, constraint validation, permission cleanup, load/performance validation, migration rehearsal, rollout, and reconciliation. This decision lock predated implementation; the completed `0064` foundation, P6A, and P6B started Phase 6 without frontend or Phase 7 scope. The next implementation slice is the already-approved P6C Rates Used and Bonus-used read-model/route work.
+**Audit and Phase 7 boundary:** P6D presents the immutable actor/time/reason/security facts the finalized library promises. Phase 7 retains broad append-only audit hardening, constraint validation, permission cleanup, load/performance validation, migration rehearsal, rollout, and reconciliation. This decision lock predated implementation; the completed `0064` foundation, P6A, P6B, and P6C started Phase 6 without frontend or Phase 7 scope. The next approved implementation slice is P6D lazy finalized audit/security detail.
 
 #### Phase 6 architecture plan
 
@@ -3129,7 +3147,7 @@ Accepted non-blocking notes remain the known combined-process fixture-isolation/
 | Bonus descriptive history | `PayrollCalculationSnapshotBonusEvents` with versioned report-evidence markers | Reuse; FinalLines remains financial authority. |
 | Period calendar and scheduled-day denominator | `PayrollPeriodDays` plus period driver-eligibility snapshot | Reuse for evidence-enabled finalized periods; no current schedule fallback. |
 | Workflow participant display and responsibility | Existing action IDs/timestamps plus immutable participant evidence | `0064` foundation complete for new actions; P6E read contract remains pending. |
-| Used rate/rule labels and explanatory configuration | Existing rate IDs, resolved values, behavior, and source evidence plus immutable snapshot used-definition evidence | `0064` foundation complete; P6C Rates Used read contract remains pending. |
+| Used rate/rule labels and explanatory configuration | Existing rate IDs, resolved values, behavior, and source evidence plus immutable snapshot used-definition evidence | `0064` foundation plus completed P6C Rates Used read contract. |
 | Generic audit event facts | `audit.AuditLog`, ReviewItem, PeriodApproval, and lifecycle records | Reuse event IDs/times/reasons; never use a current User join as frozen display truth. |
 
 **New persistence required in migration `0064` — Complete:** The completed migration has two additive evidence domains and the supporting catalog/index changes only:
@@ -3179,13 +3197,13 @@ All routes lazy-load their own child domain. They batch by period/snapshot and u
 1. **INTERNAL IMPLEMENTATION FOUNDATION:** migration `0064` and atomic capture of P6E participant evidence plus P6C used-rate/rule definitions; no Phase 6 routes, frontend, cache, or correction workflow.
 2. **P6A — Complete:** finalized overview and the finalized mapping of the existing Drivers/Period Work/Period Pay/Mixed views using FinalLines plus originating evidence.
 3. **P6B — Complete:** finalized Off/Status source snapshot view using frozen Status, PeriodDays, and eligibility, with explicit legacy availability.
-4. **P6C — Next:** Rates Used and Bonus-used presentation from the captured used definitions and existing Bonus evidence.
-5. **P6D:** lazy finalized audit/security detail using participant evidence and immutable workflow/audit facts.
+4. **P6C — Complete:** Rates Used and Bonus-used presentation from the captured used definitions and existing Bonus evidence.
+5. **P6D — Next:** lazy finalized audit/security detail using participant evidence and immutable workflow/audit facts.
 6. **P6F:** retain and test the never-reopen/future-linked-correction boundary only; do not implement the future correction workflow.
 
 **First implementation slice — Complete:** the internal immutable-evidence foundation shipped in commit `de3d8e8` with `0064`, atomic capture, permission seeds, and focused tests. It implemented no public finalized route, frontend, cache, correction entity, or Phase 7 hardening. It unlocked P6A/P6C/P6D, and P6B now reuses existing frozen Status/calendar/eligibility evidence.
 
-Phase 5 remains `Complete`. Phase 6 is `In Progress`: the internal foundation, P6A, and P6B are complete; P6C is next, while P6C-P6F remain incomplete. Phase 7 remains `Pending` and retains broad append-only audit hardening, constraint validation, permission cleanup, load testing, migration rehearsal, reconciliation, and rollout.
+Phase 5 remains `Complete`. Phase 6 is `In Progress`: the internal foundation, P6A, P6B, and P6C are complete; P6D is next, while P6D-P6F remain incomplete. Phase 7 remains `Pending` and retains broad append-only audit hardening, constraint validation, permission cleanup, load testing, migration rehearsal, reconciliation, and rollout.
 
 **Codex review checklist**
 
