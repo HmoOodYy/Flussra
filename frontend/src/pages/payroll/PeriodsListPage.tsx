@@ -1,10 +1,10 @@
 import { useEffect, useReducer, useState, useCallback } from 'react';
 import apiClient from '../../lib/apiClient';
-import { getCurrentWorkflow, resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
+import { getCurrentPayrollHub, resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
 import { useAuth } from '../../store/authStore';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
-import type { BranchCurrentWorkflow, CurrentWorkflow, PeriodSummary, WorkflowSlotPeriod } from '../../types/payroll';
+import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary } from '../../types/payroll';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { SectionCard } from '../../components/ui/SectionCard';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -72,10 +72,10 @@ function periodsReducer(s: PeriodsState, a: PeriodsAction): PeriodsState {
   }
 }
 
-type WorkflowState = { data: CurrentWorkflow | null; loading: boolean; error: string };
+type WorkflowState = { data: CurrentPayrollHub | null; loading: boolean; error: string };
 type WorkflowAction =
   | { type: 'FETCH_START' }
-  | { type: 'FETCH_OK'; data: CurrentWorkflow }
+  | { type: 'FETCH_OK'; data: CurrentPayrollHub }
   | { type: 'FETCH_ERROR'; error: string };
 
 function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
@@ -246,7 +246,7 @@ function WorkflowSlot({
   emptyMessage,
 }: {
   title: string;
-  period: WorkflowSlotPeriod | null;
+  period: CurrentPayrollHubPeriodSlot | null;
   emptyMessage: string;
 }) {
   return (
@@ -259,6 +259,21 @@ function WorkflowSlot({
             <PeriodStatusBadge status={period.status} />
           </div>
           <span className={styles.workflowSlotMeta}>{period.start_date} - {period.end_date}</span>
+          <div className={styles.workflowMetrics}>
+            <span>Eligible <strong>{period.metrics.total_eligible_drivers}</strong></span>
+            <span>Working <strong>{period.metrics.working_drivers}</strong></span>
+            <span>Fully off <strong>{period.metrics.fully_off_drivers}</strong></span>
+          </div>
+          {period.financials_available && period.financial_summary ? (
+            <div className={styles.workflowFinancials}>
+              <span>Expected pay <strong>{formatMoney(period.financial_summary.total_expected_pay)}</strong></span>
+              {period.financial_summary.has_blockers && (
+                <span className={styles.workflowAlert}>Calculation blocked</span>
+              )}
+            </div>
+          ) : (
+            <span className={styles.workflowUnavailable}>Financial summary unavailable for this lifecycle state</span>
+          )}
         </>
       ) : (
         <span className={styles.workflowSlotEmpty}>{emptyMessage}</span>
@@ -267,8 +282,15 @@ function WorkflowSlot({
   );
 }
 
-function WorkflowBranch({ branch }: { branch: BranchCurrentWorkflow }) {
-  const { open, prepared } = branch.slots;
+function formatMoney(value: string): string {
+  const numeric = Number(value);
+  return Number.isFinite(numeric)
+    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
+    : value;
+}
+
+function WorkflowBranch({ branch }: { branch: CurrentPayrollHubBranch }) {
+  const { open, prepared, in_review: inReview, returned } = branch.slots;
   const creationCapability = branch.capabilities.can_create_open_candidate.allowed
     ? branch.capabilities.can_create_open_candidate
     : branch.capabilities.can_create_prepared_candidate;
@@ -282,6 +304,13 @@ function WorkflowBranch({ branch }: { branch: BranchCurrentWorkflow }) {
           ? 'No active period exists. Create a backend-approved payroll candidate to begin.'
           : creationCapability.reason_message ?? 'No payroll candidate is available for this branch.';
 
+  const slots = [
+    ['Current Payroll', open, 'No Open payroll period'],
+    ['Next Payroll', prepared, 'No Prepared payroll period'],
+    ['In Review', inReview, 'No payroll in review'],
+    ['Returned', returned, 'No returned payroll'],
+  ] as const;
+
   return (
     <div className={styles.workflowBranch}>
       <div className={styles.workflowBranchHeader}>
@@ -289,8 +318,9 @@ function WorkflowBranch({ branch }: { branch: BranchCurrentWorkflow }) {
         <span className={styles.workflowSetup}>Setup: {branch.setup_status}</span>
       </div>
       <div className={styles.workflowSlots}>
-        <WorkflowSlot title="Current Payroll" period={open} emptyMessage="No Open payroll period" />
-        <WorkflowSlot title="Next Payroll" period={prepared} emptyMessage="No Prepared payroll period" />
+        {slots.map(([title, period, emptyMessage]) => (
+          <WorkflowSlot key={title} title={title} period={period} emptyMessage={emptyMessage} />
+        ))}
       </div>
       <p className={styles.workflowHint}>{workflowHint}</p>
       {branch.alerts.map((alert) => (
@@ -367,11 +397,11 @@ export function PeriodsListPage() {
   const fetchWorkflow = useCallback(async () => {
     dispatchWorkflow({ type: 'FETCH_START' });
     try {
-      dispatchWorkflow({ type: 'FETCH_OK', data: await getCurrentWorkflow(workflowBranchId) });
+      dispatchWorkflow({ type: 'FETCH_OK', data: await getCurrentPayrollHub(workflowBranchId) });
     } catch (error: unknown) {
       dispatchWorkflow({
         type: 'FETCH_ERROR',
-        error: getWorkflowErrorDetail(error, 'Failed to load current payroll workflow.'),
+        error: getWorkflowErrorDetail(error, 'Failed to load current payroll context.'),
       });
     }
   }, [workflowBranchId]);
@@ -514,14 +544,14 @@ export function PeriodsListPage() {
         </div>
       )}
 
-      {/* ── Current workflow slots ───────────────────────────────────── */}
+      {/* ── Current Payroll Hub context ───────────────────────────────── */}
       <SectionCard
-        title="Current Payroll Workflow"
-        subtitle="Open payroll is active now. Prepared payroll is the next period and promotes automatically."
+        title="Current Payroll"
+        subtitle="Open, prepared, review, and returned payroll by branch."
         padded={false}
       >
         {workflowSt.loading ? (
-          <p className={styles.stateMsg}>Loading current workflow...</p>
+          <p className={styles.stateMsg}>Loading current payroll context...</p>
         ) : workflowSt.error ? (
           <div className={styles.sectionPad}><ErrorState message={workflowSt.error} /></div>
         ) : workflowBranches.length === 0 ? (

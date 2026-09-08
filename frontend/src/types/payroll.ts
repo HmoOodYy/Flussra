@@ -154,6 +154,59 @@ export interface CurrentWorkflow {
   branches: BranchCurrentWorkflow[];
 }
 
+export interface CurrentPayrollHubMetrics {
+  total_eligible_drivers: number;
+  working_drivers: number;
+  fully_off_drivers: number;
+}
+
+export interface CurrentPayrollHubDriverSummary {
+  driver_id: number;
+  driver_code: string | null;
+  driver_name: string | null;
+  expected_pay: string;
+}
+
+export interface CurrentPayrollHubFinancialSummary {
+  authority_kind: 'LIVE';
+  total_expected_pay: string;
+  normal_pay: string;
+  bonus_total: string;
+  system_adjustments: string;
+  has_blockers: boolean;
+  blockers: string[];
+  warnings: string[];
+  top_drivers: CurrentPayrollHubDriverSummary[];
+}
+
+export interface CurrentPayrollHubPeriodSlot extends WorkflowSlotPeriod {
+  financials_available: boolean;
+  financial_summary: CurrentPayrollHubFinancialSummary | null;
+  metrics: CurrentPayrollHubMetrics;
+}
+
+export interface CurrentPayrollHubBranch {
+  branch_id: number;
+  branch_name: string;
+  setup_status: BranchCurrentWorkflow['setup_status'];
+  slots: {
+    open: CurrentPayrollHubPeriodSlot | null;
+    prepared: CurrentPayrollHubPeriodSlot | null;
+    in_review: CurrentPayrollHubPeriodSlot | null;
+    returned: CurrentPayrollHubPeriodSlot | null;
+  };
+  capabilities: BranchCurrentWorkflow['capabilities'];
+  alerts: WorkflowAlert[];
+}
+
+export interface CurrentPayrollHub {
+  scope: 'company' | 'branch';
+  company_id: number;
+  requested_branch_id: number | null;
+  generated_at_utc: string;
+  branches: CurrentPayrollHubBranch[];
+}
+
 // ── Draft lines ──────────────────────────────────────────────────────────────
 
 export interface DraftLineSummary {

@@ -106,7 +106,8 @@
 .workflowSlotMeta,
 .workflowSlotEmpty,
 .workflowHint,
-.workflowAlert {
+.workflowAlert,
+.workflowUnavailable {
   color: #6b7280;
   font-size: 0.78rem;
 }
@@ -133,6 +134,28 @@
   font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.workflowMetrics,
+.workflowFinancials {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  color: #374151;
+  font-size: 0.75rem;
+}
+
+.workflowMetrics strong,
+.workflowFinancials strong {
+  color: #111827;
+}
+
+.workflowFinancials {
+  margin-top: 0.15rem;
+}
+
+.workflowUnavailable {
+  line-height: 1.35;
 }
 
 .workflowHint,

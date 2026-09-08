@@ -23,6 +23,7 @@ import type {
   DraftLineSummary,
   DriverPeriodSummary,
   CurrentWorkflow,
+  CurrentPayrollHub,
   PeriodCandidateMode,
   PeriodCandidatePreview,
   PeriodCreationResult,
@@ -48,6 +49,12 @@ export type { NextPeriodDates };
 export async function getCurrentWorkflow(branchId?: number): Promise<CurrentWorkflow> {
   const params = branchId == null ? undefined : { branch_id: String(branchId) };
   const resp = await apiClient.get<CurrentWorkflow>('/payroll/current-workflow', { params });
+  return resp.data;
+}
+
+export async function getCurrentPayrollHub(branchId?: number): Promise<CurrentPayrollHub> {
+  const params = branchId == null ? undefined : { branch_id: String(branchId) };
+  const resp = await apiClient.get<CurrentPayrollHub>('/payroll/current', { params });
   return resp.data;
 }
 
