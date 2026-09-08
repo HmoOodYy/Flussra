@@ -60,7 +60,34 @@
   padding: 0.75rem 1rem;
 }
 
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  color: #374151;
+  font-size: 0.82rem;
+}
+
+.dateInput {
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 0.35rem 0.45rem;
+  color: #111827;
+  background: #fff;
+}
+
+.resultSummary {
+  margin-left: auto;
+  color: #6b7280;
+  text-align: right;
+}
+
 /* ── Table ── */
+.tableWrap {
+  overflow-x: auto;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -78,8 +105,7 @@
   white-space: nowrap;
 }
 .driverCell  { font-weight: 500; white-space: nowrap; }
-.weekdayCell { white-space: nowrap; color: #374151; }
-.dateCell    { white-space: nowrap; }
+.codeCell    { white-space: nowrap; color: #374151; }
 .notesCell   { color: #6b7280; font-style: italic; max-width: 220px; }
 
 /* ── States ── */
@@ -102,4 +128,21 @@
   text-align: center;
   color: #6b7280;
   font-size: 0.88rem;
+}
+
+@media (max-width: 560px) {
+  .controls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .resultSummary {
+    margin-left: 0;
+    text-align: left;
+  }
+
+  .table th,
+  .table td {
+    padding: 0.35rem;
+  }
 }

@@ -467,6 +467,28 @@ export interface DriversOffResponse {
   total_count: number;
 }
 
+export interface SelectedDayOffDriver {
+  driver_id: number;
+  driver_name: string;
+  driver_code: string | null;
+  work_date: string;
+  day_name: string;
+  status_key_id: number | null;
+  status_code: string | null;
+  status_label: string | null;
+  is_off_reason: boolean;
+  has_note: boolean;
+  note: string | null;
+}
+
+export interface SelectedDayOffDriversResponse {
+  period_id: number;
+  work_date: string;
+  day_name: string;
+  total_count: number;
+  drivers: SelectedDayOffDriver[];
+}
+
 // ---------------------------------------------------------------------------
 // CP-4 — Final Lines (Ledger)
 // ---------------------------------------------------------------------------

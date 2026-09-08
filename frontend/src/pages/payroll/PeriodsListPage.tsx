@@ -627,13 +627,19 @@ export function PeriodsListPage() {
         />
       )}
 
-      {driversOffDialogPeriodId != null && (
-        <DriversOffDialog
-          periodId={driversOffDialogPeriodId}
-          periodName={findPeriod(driversOffDialogPeriodId)?.period_name}
-          onClose={() => setDriversOffDialogPeriodId(null)}
-        />
-      )}
+      {driversOffDialogPeriodId != null && (() => {
+        const period = findPeriod(driversOffDialogPeriodId);
+        return period ? (
+          <DriversOffDialog
+            key={period.payroll_period_id}
+            periodId={period.payroll_period_id}
+            periodName={period.period_name}
+            periodStartDate={period.start_date}
+            periodEndDate={period.end_date}
+            onClose={() => setDriversOffDialogPeriodId(null)}
+          />
+        ) : null;
+      })()}
 
       {bonusDialogPeriodId != null && (() => {
         const bp = findPeriod(bonusDialogPeriodId);

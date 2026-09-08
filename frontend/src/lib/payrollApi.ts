@@ -17,6 +17,7 @@ import type {
   EligibleDriver,
   EligibleDriversResponse,
   DriversOffResponse,
+  SelectedDayOffDriversResponse,
   FinalizationPreviewResponse,
   CalculationPreviewResponse,
   FinalLineSummary,
@@ -273,6 +274,17 @@ export type { EligibleDriver };
 export async function getDriversOff(periodId: number): Promise<DriversOffResponse> {
   const resp = await apiClient.get<DriversOffResponse>(
     `/payroll/periods/${periodId}/drivers-off`,
+  );
+  return resp.data;
+}
+
+export async function getSelectedDayOffDrivers(
+  periodId: number,
+  workDate: string,
+): Promise<SelectedDayOffDriversResponse> {
+  const resp = await apiClient.get<SelectedDayOffDriversResponse>(
+    `/payroll/periods/${periodId}/off-drivers`,
+    { params: { work_date: workDate } },
   );
   return resp.data;
 }
