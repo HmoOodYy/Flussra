@@ -53,6 +53,7 @@ from app.payroll.schemas import (
     DriversReportResponse,
     FinalizationPreviewResponse,
     FinalizedCalculationReportResponse,
+    FinalizedAuditResponse,
     FinalizedOffDriversResponse,
     FinalizedOverviewResponse,
     FinalizedRatesUsedResponse,
@@ -623,6 +624,19 @@ async def get_finalized_rates_used(
     period_id: int, token: TokenDep, db: DbDep,
 ) -> FinalizedRatesUsedResponse:
     return await finalized_library_read_model.build_finalized_rates_used(
+        period_id=period_id, company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
+    )
+
+
+@router.get(
+    "/finalized/{period_id}/audit",
+    response_model=FinalizedAuditResponse,
+    summary="Get immutable finalized payroll audit and security detail",
+)
+async def get_finalized_audit(
+    period_id: int, token: TokenDep, db: DbDep,
+) -> FinalizedAuditResponse:
+    return await finalized_library_read_model.build_finalized_audit(
         period_id=period_id, company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
     )
 

@@ -4,6 +4,7 @@ pay rates / driver rate matrix).
 """
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -1796,3 +1797,81 @@ class FinalizedRatesUsedResponse(BaseModel):
     metadata: FinalizedRatesUsedMetadata
     used_rate_definitions: list[FinalizedUsedRateDefinition] = []
     bonus_events: list[FinalizedBonusEventEvidence] = []
+
+
+# ---------------------------------------------------------------------------
+# P6D: immutable finalized payroll audit/security detail.
+# ---------------------------------------------------------------------------
+
+class FinalizedAuditEvent(BaseModel):
+    event_id: int
+    domain: str
+    action_code: str
+    source_entity_type: str
+    source_entity_id: str
+    review_item_id: int | None = None
+    driver_id: int | None = None
+    work_date: date | None = None
+    pay_item_id: int | None = None
+    before_state: dict[str, Any] | None = None
+    after_state: dict[str, Any] | None = None
+    actor_user_id: int
+    actor_display_name: str
+    responsibility_context: dict[str, Any]
+    reason: str | None = None
+    correlation_id: str | None = None
+    source_revision: int | None = None
+    occurred_at_utc: datetime
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+
+
+class FinalizedWorkflowAuditEvent(BaseModel):
+    action_code: str
+    actor_user_id: int
+    actor_display_name: str
+    responsibility_context: dict[str, Any]
+    required_permission_code: str
+    reason: str | None = None
+    action_at_utc: datetime
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    review_item_id: int | None = None
+    review_decision_id: int | None = None
+
+
+class FinalizedAuditRevisionGroup(BaseModel):
+    snapshot_id: int
+    revision_number: int
+    submit_action: str | None = None
+    is_final_approved_revision: bool
+    event_ids: list[int] = []
+    review_comment_event_ids: list[int] = []
+
+
+class FinalizedAuditMetadata(BaseModel):
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    branch_id: int
+    authority_kind: str = "IMMUTABLE_PERIOD_AUDIT_EVIDENCE"
+    snapshot_id: int | None = None
+    revision_number: int | None = None
+    snapshot_hash: str | None = None
+    complete_period_chronology_available: bool
+    evidence_version: int | None = None
+    section_availability: dict[str, FinalizedSectionAvailability]
+    generated_at_utc: datetime
+
+
+class FinalizedAuditResponse(BaseModel):
+    metadata: FinalizedAuditMetadata
+    lifecycle_events: list[FinalizedWorkflowAuditEvent] = []
+    source_events: list[FinalizedAuditEvent] = []
+    status_note_events: list[FinalizedAuditEvent] = []
+    bonus_events: list[FinalizedAuditEvent] = []
+    review_events: list[FinalizedAuditEvent] = []
+    chronology: list[FinalizedAuditEvent] = []
+    revision_groups: list[FinalizedAuditRevisionGroup] = []
+    rate_rule_provenance: list[dict[str, Any]] = []

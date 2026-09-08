@@ -66,52 +66,16 @@ async def _insert_period_db(
     start: datetime.date,
     end: datetime.date,
     status: str = "Open",
-    cleanup: bool = True,
 ) -> int:
-    """Insert a period directly.
-
-    cleanup=False skips the leftover-period wipe — needed when a test
-    intentionally keeps two CP3B2A periods alive on the same branch at once
-    (the wipe matches on periodcode LIKE 'CP3B2A-%' for the whole branch, so
-    a second call with cleanup=True would delete the first test's period).
-    """
-    if cleanup:
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-        ))
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-        ))
-        for child_table in (
-            "payroll.payrollfinallines",
-            "payroll.payrolldraftlines",
-            "payroll.payrollbonusbatchrequests",
-            "payroll.payrollbonusevents",
-            "payroll.payrollperioddriverdayentrystate",
-            "payroll.payrollperioddrivereligibility",
-            "payroll.payrollperiodeligibilitysnapshots",
-        ):
-            await db.execute(
-                _text(f"""
-                    DELETE FROM {child_table}
-                    WHERE payrollperiodid IN (
-                        SELECT payrollperiodid FROM payroll.payrollperiods
-                        WHERE branchid = :bid AND periodcode LIKE 'CP3B2A-%'
-                    )
-                """),
-                {"bid": branch_id},
-            )
-        await db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid AND periodcode LIKE 'CP3B2A-%'"),
-            {"bid": branch_id},
-        )
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-        ))
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-        ))
-
+    """Insert an isolated CP3B2A period without deleting historical fixtures."""
+    if status == "Open":
+        await db.execute(_text("""
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled'
+            WHERE branchid = :bid
+              AND periodcode LIKE :run_prefix
+              AND status = 'Open'
+        """), {"bid": branch_id, "run_prefix": f"CP3B2A-{_RUN_ID}-%"})
     code = f"CP3B2A-{_RUN_ID}-{branch_id}-{start.isoformat()}"
     r = (await db.execute(
         _text("""
@@ -602,7 +566,7 @@ async def test_failed_void_wrong_period_does_not_bump_revision(
     period per branch is allowed) and must not bump either period's revision."""
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
     other_period_id = await _insert_period_db(
-        db_conn, cp3b2a_branch_id, *_week(), status="Draft", cleanup=False
+        db_conn, cp3b2a_branch_id, *_week(), status="Draft"
     )
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, other_period_id)

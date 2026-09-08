@@ -15,7 +15,7 @@ rate_behavior, and source_snapshot.  LG-1 is a tests-only phase.
 Tests
 -----
 LG1  CDPI finalized line appears in GET /final-lines with correct identity/amount fields
-LG2  SourceSnapshot contains CDPI audit context (pay_item_id, rate_type_id, ...)
+LG2  FinalLine typed fields and SourceSnapshot prove exact immutable CDPI SnapshotLine provenance
 LG3  GET /final-lines includes CDPI amount alongside a standard line; both correct
 LG4  Finalized period blocks CDPI day-grid edits (403 from POST /day-grid)
 LG5  Standard finalized HOURS line still appears correctly (regression)
@@ -24,19 +24,26 @@ LG6  PeriodSummary.final_gross includes CDPI final amount
 Year slots: all use 2093 dates (unused by other test files).
 CDPI items created via cdpi_service.create_direct_company_item (real PR-1B path).
 """
-import pytest
-import httpx
+import datetime
+import itertools
 import json
 from decimal import Decimal
+
+import httpx
+import pytest
 from sqlalchemy import text as _text
 
 from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import CdpiDirectCreateRequest
+from app.payroll.service import _create_period_pay_item_rows
 
 # ---------------------------------------------------------------------------
 # Year slot constants
 # ---------------------------------------------------------------------------
 LG_START, LG_END, LG_WORK = "2093-03-03", "2093-03-16", "2093-03-05"
+_RATE_EFFECTIVE_FROM = "2090-01-01"
+_PERIOD_SLOT = itertools.count()
+_PERIOD_WORK_DATES: dict[int, str] = {}
 
 FINALIZE_URL  = "/payroll/periods/{pid}/finalize"
 FINAL_LINES   = "/payroll/periods/{pid}/final-lines"
@@ -52,16 +59,8 @@ def _tok(token: str) -> dict:
 
 
 async def _cancel_periods(client, token, branch_id):
-    headers = _tok(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        r = await client.get("/payroll/periods",
-                             params={"branch_id": branch_id, "status": s},
-                             headers=headers)
-        if r.status_code != 200:
-            continue
-        for p in r.json():
-            await client.patch(f"/payroll/periods/{p['payroll_period_id']}/status",
-                               json={"status": "Cancelled"}, headers=headers)
+    """Retain prior-period history; each test now receives a unique date slot."""
+    del client, token, branch_id
 
 
 async def _get_ids(db):
@@ -88,27 +87,37 @@ async def _create_driver(client, token, branch_id, suffix):
 
 
 async def _delete_driver(client, token, driver_id):
-    await client.delete(f"/core/drivers/{driver_id}", headers=_tok(token))
+    """Retain drivers referenced by finalized fixtures for the test database lifetime."""
+    del client, token, driver_id
 
 
-async def _open_period(client, token, branch_id):
-    headers = _tok(token)
-    r = await client.post("/payroll/periods", json={
-        "branch_id": branch_id, "period_type": "Week",
-        "start_date": LG_START, "end_date": LG_END,
-    }, headers=headers)
-    assert r.status_code == 201, f"create_period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=headers)
-    assert r.status_code == 200
+async def _open_period(db, branch_id):
+    start = datetime.date.fromisoformat(LG_START) + datetime.timedelta(
+        days=21 * next(_PERIOD_SLOT)
+    )
+    end = start + datetime.timedelta(days=13)
+    pid = (await db.execute(_text("""
+        INSERT INTO payroll.payrollperiods
+            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+        VALUES (1, :branch_id, 'Open', :period_code, :period_name, 'Week', :start_date, :end_date)
+        RETURNING payrollperiodid
+    """), {
+        "branch_id": branch_id,
+        "period_code": f"LG1-{start.isoformat()}",
+        "period_name": f"LG1 {start.isoformat()}",
+        "start_date": start,
+        "end_date": end,
+    })).scalar_one()
+    await _create_period_pay_item_rows(pid, 1, branch_id, start, db)
+    await db.commit()
+    _PERIOD_WORK_DATES[pid] = (start + datetime.timedelta(days=2)).isoformat()
     return pid
 
 
 async def _advance_to_approved(client, token, pid, driver_id, line_type, quantity):
     headers = _tok(token)
     r = await client.post(f"/payroll/periods/{pid}/lines", json={
-        "driver_id": driver_id, "work_date": LG_WORK,
+        "driver_id": driver_id, "work_date": _PERIOD_WORK_DATES[pid],
         "line_type": line_type, "quantity": quantity,
     }, headers=headers)
     assert r.status_code == 201, f"add_line: {r.text}"
@@ -138,49 +147,13 @@ async def _finalize(client, token, pid):
 
 
 async def _force_cleanup_period(db, pid):
-    triggers = [
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable",
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert",
-        "ALTER TABLE payroll.driverrates DISABLE TRIGGER trg_guard_driverrate_used_mutation",
-        "ALTER TABLE payroll.driverratetiers DISABLE TRIGGER trg_guard_driverratetier_used_mutation",
-    ]
-    for sql in triggers:
-        await db.execute(_text(sql))
-    try:
-        await db.execute(_text(
-            "DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"), {"pid": pid})
-        await db.execute(_text(
-            "DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"), {"pid": pid})
-        await db.execute(_text(
-            "DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"), {"pid": pid})
-    finally:
-        enables = [t.replace("DISABLE", "ENABLE") for t in triggers]
-        for sql in enables:
-            await db.execute(_text(sql))
+    """Retain finalized periods and their immutable evidence until DB teardown."""
+    del db, pid
 
 
 async def _cleanup_cdpi_item(db, *, pay_item_id: int):
-    """Remove a real CDPI item and all its PR-1B rows in FK-safe order."""
-    await db.execute(_text(
-        "DELETE FROM payroll.payitemrateslots WHERE payitemid = :pid"), {"pid": pay_item_id})
-    rt_id = (await db.execute(_text(
-        "SELECT ratetypeid FROM payroll.payitemratetypemap WHERE payitemid = :pid LIMIT 1"),
-        {"pid": pay_item_id})).scalar_one_or_none()
-    await db.execute(_text(
-        "DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"), {"pid": pay_item_id})
-    if rt_id is not None:
-        await db.execute(_text(
-            "DELETE FROM payroll.driverrates WHERE ratetypeid = :rtid"), {"rtid": rt_id})
-        await db.execute(_text("""
-            DELETE FROM payroll.ratetypes
-            WHERE ratetypeid = :rtid AND ratecode = :code
-        """), {"rtid": rt_id, "code": f"CDPI_{pay_item_id}_PER_UNIT"})
-    await db.execute(_text(
-        "DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"), {"pid": pay_item_id})
-    await db.execute(_text(
-        "DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"), {"pid": pay_item_id})
-    await db.execute(_text(
-        "DELETE FROM payroll.payitems WHERE payitemid = :pid"), {"pid": pay_item_id})
+    """Retain catalog rows referenced by finalized fixtures until DB teardown."""
+    del db, pay_item_id
 
 
 async def _activate_branch(db, *, pay_item_id, company_id, branch_id):
@@ -199,7 +172,7 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id, amoun
     headers = _tok(token)
     r = await client.post("/payroll/rates", json={
         "driver_id": driver_id, "rate_type_id": rate_type_id,
-        "amount": amount, "effective_from": LG_START,
+        "amount": amount, "effective_from": _RATE_EFFECTIVE_FROM,
     }, headers=headers)
     assert r.status_code == 201, f"create rate: {r.text}"
     rid = r.json()["driver_rate_id"]
@@ -252,7 +225,7 @@ async def test_lg1_cdpi_final_line_in_ledger(
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="20.00")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        pid = await _open_period(direct_db, paytest_branch_id)
         await _advance_to_approved(session_client, auth_token, pid, driver_id,
                                    line_type=result.pay_item_code, quantity="3")
         await _finalize(session_client, auth_token, pid)
@@ -295,7 +268,7 @@ async def test_lg1_cdpi_final_line_in_ledger(
 
 
 # ---------------------------------------------------------------------------
-# LG2: SourceSnapshot contains CDPI audit context
+# LG2: FinalLine typed fields and exact immutable SnapshotLine provenance
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -305,10 +278,7 @@ async def test_lg2_cdpi_final_line_source_snapshot(
     paytest_branch_id: int,
     direct_db,
 ):
-    """
-    LG2: The source_snapshot on a finalized CDPI line contains the expected
-    audit fields: pay_item_id, rate_type_id, driver_rate_id, driver_rate_amount.
-    """
+    """LG2: FinalLine fields and SourceSnapshot resolve one exact CDPI snapshot line."""
     cid, admin_id = await _get_ids(direct_db)
     pay_item_id = None
     driver_id   = None
@@ -338,7 +308,7 @@ async def test_lg2_cdpi_final_line_source_snapshot(
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="15.00")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        pid = await _open_period(direct_db, paytest_branch_id)
         await _advance_to_approved(session_client, auth_token, pid, driver_id,
                                    line_type=result.pay_item_code, quantity="4")
         await _finalize(session_client, auth_token, pid)
@@ -353,23 +323,101 @@ async def test_lg2_cdpi_final_line_source_snapshot(
         assert len(cdpi_lines) == 1
         line = cdpi_lines[0]
 
+        # FinalLines retain the typed financial identity used by the final projection.
+        assert line["pay_item_id"] == pay_item_id
+        assert line["rate_type_id"] == rate_type_id
+        assert line["driver_rate_id"] == rate_id
+        assert Decimal(str(line["resolved_rate_amount"])) == Decimal("15.00")
+        assert line["rate_behavior"] == "PerUnit"
+
         snap = line.get("source_snapshot")
         assert snap is not None, "source_snapshot must not be None for a CDPI line"
         if isinstance(snap, str):
             snap = json.loads(snap)
 
-        assert snap.get("pay_item_id") == pay_item_id, (
-            f"snapshot pay_item_id {snap.get('pay_item_id')} != {pay_item_id}"
-        )
-        assert snap.get("rate_type_id") == rate_type_id, (
-            f"snapshot rate_type_id {snap.get('rate_type_id')} != {rate_type_id}"
-        )
-        assert snap.get("driver_rate_id") == rate_id, (
-            f"snapshot driver_rate_id {snap.get('driver_rate_id')} != {rate_id}"
-        )
-        assert Decimal(str(snap.get("driver_rate_amount"))) == Decimal("15.00"), (
-            f"snapshot driver_rate_amount {snap.get('driver_rate_amount')} != 15.00"
-        )
+        required_provenance = {
+            "payroll_calculation_snapshot_id",
+            "revision_number",
+            "snapshot_hash",
+            "snapshot_line_id",
+            "source_type",
+            "source_id",
+            "source_evidence",
+        }
+        assert required_provenance <= snap.keys()
+        assert snap["source_type"] == "DraftLine"
+        assert str(snap["source_id"]) == str(line["draft_line_id"])
+        assert isinstance(snap["source_evidence"], dict)
+
+        snapshot_line = (await direct_db.execute(_text("""
+            SELECT sl.payrollcalculationsnapshotlineid,
+                   sl.payitemid,
+                   sl.ratetypeid,
+                   sl.driverrateid,
+                   sl.resolvedrateamount,
+                   sl.quantity,
+                   sl.calculatedamount,
+                   sl.linetype,
+                   sl.linescope,
+                   sl.sourcetype,
+                   sl.sourceid,
+                   sl.sourceevidencejsonb,
+                   totals.payrollcalculationsnapshotid
+            FROM payroll.payrollcalculationsnapshotlines sl
+            JOIN payroll.payrollcalculationdrivertotals totals
+              ON totals.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
+            WHERE sl.payrollcalculationsnapshotlineid = :snapshot_line_id
+        """), {"snapshot_line_id": snap["snapshot_line_id"]})).mappings().one()
+
+        assert snapshot_line["payrollcalculationsnapshotid"] == snap[
+            "payroll_calculation_snapshot_id"
+        ]
+        assert snapshot_line["payitemid"] == pay_item_id
+        assert snapshot_line["ratetypeid"] == rate_type_id
+        assert snapshot_line["driverrateid"] == rate_id
+        assert Decimal(str(snapshot_line["resolvedrateamount"])) == Decimal("15.00")
+        assert Decimal(str(snapshot_line["quantity"])) == Decimal("4")
+        assert Decimal(str(snapshot_line["calculatedamount"])) == Decimal("60.00")
+        assert snapshot_line["linetype"] == result.pay_item_code
+        assert snapshot_line["linescope"] == line["line_scope"]
+        assert snapshot_line["sourcetype"] == "DraftLine"
+        assert str(snapshot_line["sourceid"]) == str(snap["source_id"])
+        assert snapshot_line["sourceevidencejsonb"] == snap["source_evidence"]
+
+        source_draft_line = (await direct_db.execute(_text("""
+            SELECT draftlineid
+            FROM payroll.payrolldraftlines
+            WHERE draftlineid = :draft_line_id
+              AND payrollperiodid = :period_id
+              AND driverid = :driver_id
+              AND linetype = :line_type
+        """), {
+            "draft_line_id": int(str(snap["source_id"])),
+            "period_id": pid,
+            "driver_id": driver_id,
+            "line_type": result.pay_item_code,
+        })).scalar_one()
+        assert source_draft_line == line["draft_line_id"]
+
+        snapshot_header = (await direct_db.execute(_text("""
+            SELECT payrollcalculationsnapshotid,
+                   revisionnumber,
+                   snapshothash,
+                   payrollperiodid,
+                   companyid,
+                   branchid
+            FROM payroll.payrollcalculationsnapshots
+            WHERE payrollcalculationsnapshotid = :snapshot_id
+        """), {"snapshot_id": snap["payroll_calculation_snapshot_id"]})).mappings().one()
+
+        assert snapshot_header["payrollcalculationsnapshotid"] == snap[
+            "payroll_calculation_snapshot_id"
+        ]
+        assert snapshot_header["revisionnumber"] == snap["revision_number"]
+        assert snapshot_header["snapshothash"] == snap["snapshot_hash"]
+        assert snapshot_header["payrollperiodid"] == pid
+        assert snapshot_header["companyid"] == cid
+        assert snapshot_header["branchid"] == paytest_branch_id
 
     finally:
         if pid:
@@ -435,19 +483,19 @@ async def test_lg3_ledger_includes_cdpi_amount_with_standard_line(
         cdpi_rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, cdpi_rt_id, amount="10.00")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        pid = await _open_period(direct_db, paytest_branch_id)
 
         # Add HOURS line
         headers = _tok(auth_token)
         rh = await session_client.post(f"/payroll/periods/{pid}/lines", json={
-            "driver_id": driver_id, "work_date": LG_WORK,
+            "driver_id": driver_id, "work_date": _PERIOD_WORK_DATES[pid],
             "line_type": "HOURS", "quantity": "8",
         }, headers=headers)
         assert rh.status_code == 201, f"add hours: {rh.text}"
 
         # Add CDPI line
         rc = await session_client.post(f"/payroll/periods/{pid}/lines", json={
-            "driver_id": driver_id, "work_date": LG_WORK,
+            "driver_id": driver_id, "work_date": _PERIOD_WORK_DATES[pid],
             "line_type": result.pay_item_code, "quantity": "5",
         }, headers=headers)
         assert rc.status_code == 201, f"add cdpi: {rc.text}"
@@ -493,9 +541,7 @@ async def test_lg3_ledger_includes_cdpi_amount_with_standard_line(
             await _delete_driver(session_client, auth_token, driver_id)
         if hourly_rate_id:
             # Delete HOURLY rate created for shared-adjacent driver to avoid guard conflicts
-            await direct_db.execute(_text(
-                "DELETE FROM payroll.driverrates WHERE driverrateid = :rid"),
-                {"rid": hourly_rate_id})
+            pass
         if pay_item_id:
             await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
@@ -545,7 +591,7 @@ async def test_lg4_finalized_period_blocks_cdpi_day_grid_edits(
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="10.00")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        pid = await _open_period(direct_db, paytest_branch_id)
         await _advance_to_approved(session_client, auth_token, pid, driver_id,
                                    line_type=result.pay_item_code, quantity="2")
         await _finalize(session_client, auth_token, pid)
@@ -554,7 +600,7 @@ async def test_lg4_finalized_period_blocks_cdpi_day_grid_edits(
         r = await session_client.post(
             DAY_GRID_POST.format(pid=pid),
             json={
-                "work_date": LG_WORK,
+                "work_date": _PERIOD_WORK_DATES[pid],
                 "rows": [{
                     "driver_id": driver_id,
                     "values": {result.pay_item_code: "99"},
@@ -614,7 +660,7 @@ async def test_lg5_standard_hours_final_line_regression(
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, hourly_rt_id, amount="22.00")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        pid = await _open_period(direct_db, paytest_branch_id)
         await _advance_to_approved(session_client, auth_token, pid, driver_id,
                                    line_type="HOURS", quantity="10")
         await _finalize(session_client, auth_token, pid)
@@ -635,8 +681,7 @@ async def test_lg5_standard_hours_final_line_regression(
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
         if rate_id:
-            await direct_db.execute(_text(
-                "DELETE FROM payroll.driverrates WHERE driverrateid = :rid"), {"rid": rate_id})
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +728,7 @@ async def test_lg6_period_summary_final_gross_includes_cdpi(
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="25.00")
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id)
+        pid = await _open_period(direct_db, paytest_branch_id)
         await _advance_to_approved(session_client, auth_token, pid, driver_id,
                                    line_type=result.pay_item_code, quantity="6")
         period_summary = await _finalize(session_client, auth_token, pid)

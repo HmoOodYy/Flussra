@@ -36,6 +36,11 @@ from app.payroll.immutable_evidence import (
     capture_snapshot_used_rate_definitions,
     capture_workflow_action_evidence,
 )
+from app.payroll.audit_evidence import (
+    capture_period_audit_evidence,
+    initialize_period_audit_evidence_coverage,
+    link_unmapped_audit_evidence_to_snapshot,
+)
 from app.payroll.snapshot_hash import (
     CURRENT_PAYROLL_CALCULATION_VERSION,
     CURRENT_REPORT_EVIDENCE_VERSION,
@@ -256,6 +261,33 @@ async def _write_line_audit(
             """),
             params,
         )
+
+
+async def _capture_source_evidence(
+    *, company_id: int, branch_id: int, period_id: int, user_id: int,
+    line_id: int, action_code: str, db: AsyncConnection,
+    before_state: dict[str, Any] | None, after_state: dict[str, Any] | None,
+    driver_id: int | None, work_date: date | None, line_type: str,
+) -> None:
+    """Capture one non-compatibility DraftLine mutation for P6D."""
+    pay_item_id = (await db.execute(text("""
+        SELECT payitemid
+        FROM payroll.payrollperiodpayitems
+        WHERE companyid = :company_id AND branchid = :branch_id
+          AND payrollperiodid = :period_id AND payitemcode = :line_type
+        LIMIT 1
+    """), {
+        "company_id": company_id, "branch_id": branch_id,
+        "period_id": period_id, "line_type": line_type,
+    })).scalar_one_or_none()
+    await capture_period_audit_evidence(
+        company_id=company_id, branch_id=branch_id, period_id=period_id,
+        domain="SOURCE", action_code=action_code,
+        source_entity_type="PayrollDraftLines", source_entity_id=line_id,
+        user_id=user_id, required_permission_code="payroll.entry", db=db,
+        before_state=before_state, after_state=after_state, driver_id=driver_id,
+        work_date=work_date, pay_item_id=pay_item_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +682,9 @@ async def create_period(
         },
     )
     period_id: int = insert_result.scalar_one()
+    await initialize_period_audit_evidence_coverage(
+        company_id=company_id, branch_id=data.branch_id, period_id=period_id, db=db,
+    )
 
     # CP-2B: create period-day snapshot from the schedule version's mask.
     # Read from PayrollScheduleVersions (immutable) — not from mutable BranchPayrollSettings.
@@ -1230,6 +1265,10 @@ async def change_period_status(
             required_permission_code="payroll.entry",
             db=db,
         )
+        await link_unmapped_audit_evidence_to_snapshot(
+            company_id=company_id, branch_id=existing.branch_id, period_id=period_id,
+            snapshot_id=snapshot_id, db=db,
+        )
 
         # Auto-create the PeriodApproval review item inside this transaction.
         # The review item is owned by the submitting user; AllowSelfApproval
@@ -1781,6 +1820,10 @@ async def resubmit_period(
         user_id=user_id,
         required_permission_code="payroll.entry",
         db=db,
+    )
+    await link_unmapped_audit_evidence_to_snapshot(
+        company_id=company_id, branch_id=existing.branch_id, period_id=period_id,
+        snapshot_id=snapshot_id, db=db,
     )
 
     # ── Step 5: create new Pending PeriodApproval review item ────────────── #
@@ -3707,6 +3750,19 @@ async def add_draft_line(
             "source_type": data.source_type,
         },
     )
+    if canonical_line_type not in _INFORMATIONAL_ONLY:
+        await _capture_source_evidence(
+            company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+            user_id=user_id, line_id=line_id, action_code="SOURCE_CREATED", db=db,
+            before_state=None,
+            after_state={
+                "line_type": canonical_line_type, "line_scope": "Daily",
+                "quantity": data.quantity, "rate_amount": data.rate_amount,
+                "calculated_amount": calc_amount, "source_type": data.source_type,
+                "status": "Active", "notes": data.notes,
+            },
+            driver_id=data.driver_id, work_date=data.work_date, line_type=canonical_line_type,
+        )
 
     # CP-2D1: dual-write canonical entry-state for informational lines.
     # DailyStatus: use statuskeyid from pre-validated _direct_add_sk_row (guaranteed active).
@@ -3996,6 +4052,19 @@ async def update_draft_line(
             action_code="DRAFT_LINE_UPDATED",
             new_value={k: (float(v) if isinstance(v, Decimal) else v) for k, v in fields.items()},
         )
+        if canonical_existing_lt not in _INFORMATIONAL_ONLY:
+            before_state = {
+                "line_type": line.line_type, "line_scope": line.line_scope,
+                "quantity": line.quantity, "rate_amount": line.rate_amount,
+                "calculated_amount": line.calculated_amount, "source_type": line.source_type,
+                "status": line.status, "notes": line.notes,
+            }
+            await _capture_source_evidence(
+                company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+                user_id=user_id, line_id=draft_line_id, action_code="SOURCE_UPDATED", db=db,
+                before_state=before_state, after_state={**before_state, **fields},
+                driver_id=line.driver_id, work_date=line.work_date, line_type=line.line_type,
+            )
 
         # CP-2D1: dual-write canonical entry-state for informational lines.
         # DailyStatus: notes was validated pre-mutation; use statuskeyid from that row.
@@ -4115,6 +4184,19 @@ async def void_draft_line(
         old_value={"status": "Active"},
         new_value={"status": "Void"},
     )
+    if line.line_type not in _INFORMATIONAL_ONLY:
+        await _capture_source_evidence(
+            company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+            user_id=user_id, line_id=draft_line_id, action_code="SOURCE_VOIDED", db=db,
+            before_state={
+                "line_type": line.line_type, "line_scope": line.line_scope,
+                "quantity": line.quantity, "rate_amount": line.rate_amount,
+                "calculated_amount": line.calculated_amount, "source_type": line.source_type,
+                "status": line.status, "notes": line.notes,
+            },
+            after_state={"status": "Void"}, driver_id=line.driver_id, work_date=line.work_date,
+            line_type=line.line_type,
+        )
 
     # CP-2D1: clear canonical entry-state field for informational lines.
     if line.line_type in _INFORMATIONAL_ONLY and line.work_date is not None:
@@ -9695,6 +9777,17 @@ async def add_period_pay_line(
             "amount":     float(data.amount),
         },
     )
+    await _capture_source_evidence(
+        company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+        user_id=user_id, line_id=line_id, action_code="SOURCE_CREATED", db=db,
+        before_state=None,
+        after_state={
+            "line_type": canonical_period_lt, "line_scope": "Period", "quantity": 1,
+            "calculated_amount": data.amount, "source_type": "Manual", "status": "Active",
+            "notes": data.notes,
+        },
+        driver_id=data.driver_id, work_date=None, line_type=canonical_period_lt,
+    )
 
     return await _get_line_by_id(line_id, company_id, db)
 
@@ -9871,6 +9964,17 @@ async def update_period_pay_line(
         action_code="PERIOD_PAY_UPDATED",
         new_value={k: (float(v) if isinstance(v, Decimal) else v) for k, v in fields.items()},
     )
+    before_state = {
+        "line_type": line.line_type, "line_scope": line.line_scope, "quantity": line.quantity,
+        "calculated_amount": line.calculated_amount, "source_type": line.source_type,
+        "status": line.status, "notes": line.notes,
+    }
+    await _capture_source_evidence(
+        company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+        user_id=user_id, line_id=line_id, action_code="SOURCE_UPDATED", db=db,
+        before_state=before_state, after_state={**before_state, **fields},
+        driver_id=line.driver_id, work_date=None, line_type=line.line_type,
+    )
     return await _get_line_by_id(line_id, company_id, db)
 
 
@@ -9943,6 +10047,17 @@ async def void_period_pay_line(
             action_code="PERIOD_PAY_VOIDED",
             old_value={"status": "Active"},
             new_value={"status": "Void"},
+        )
+        await _capture_source_evidence(
+            company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+            user_id=user_id, line_id=line_id, action_code="SOURCE_VOIDED", db=db,
+            before_state={
+                "line_type": line.line_type, "line_scope": line.line_scope,
+                "quantity": line.quantity, "calculated_amount": line.calculated_amount,
+                "source_type": line.source_type, "status": line.status, "notes": line.notes,
+            },
+            after_state={"status": "Void"}, driver_id=line.driver_id, work_date=None,
+            line_type=line.line_type,
         )
 
     return await _get_line_by_id(line_id, company_id, db)
@@ -10212,6 +10327,15 @@ async def create_bonus_event(
         new_value={"driver_id": data.driver_id, "amount": str(data.amount)},
         entity_name="PayrollBonusEvents",
     )
+    await capture_period_audit_evidence(
+        company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+        domain="BONUS", action_code="BONUS_CREATED", source_entity_type="PayrollBonusEvents",
+        source_entity_id=new_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
+        after_state={
+            "driver_id": data.driver_id, "amount": data.amount, "reason": data.reason,
+            "notes": data.notes, "status": "Active", "data_revision": 1,
+        }, driver_id=data.driver_id, source_revision=1,
+    )
 
     return await _get_bonus_event_by_id(new_id, company_id, db)
 
@@ -10345,6 +10469,22 @@ async def update_bonus_event(
         new_value=new_snap,
         entity_name="PayrollBonusEvents",
     )
+    await capture_period_audit_evidence(
+        company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+        domain="BONUS", action_code="BONUS_UPDATED", source_entity_type="PayrollBonusEvents",
+        source_entity_id=bonus_event_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
+        before_state={
+            "driver_id": event.driver_id, "amount": event.amount, "reason": event.reason,
+            "notes": event.notes, "status": event.status, "data_revision": event.data_revision,
+        },
+        after_state={
+            "driver_id": event.driver_id,
+            "amount": data.amount if data.amount is not None else event.amount,
+            "reason": data.reason if data.reason is not None else event.reason,
+            "notes": data.notes if data.notes is not None else event.notes,
+            "status": "Active", "data_revision": event.data_revision + 1,
+        }, driver_id=event.driver_id, source_revision=event.data_revision + 1,
+    )
 
     return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
 
@@ -10425,6 +10565,17 @@ async def void_bonus_event(
         old_value={"status": "Active"},
         new_value={"status": "Voided"},
         entity_name="PayrollBonusEvents",
+    )
+    await capture_period_audit_evidence(
+        company_id=company_id, branch_id=period.branch_id, period_id=period_id,
+        domain="BONUS", action_code="BONUS_VOIDED", source_entity_type="PayrollBonusEvents",
+        source_entity_id=bonus_event_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
+        before_state={
+            "driver_id": event.driver_id, "amount": event.amount, "reason": event.reason,
+            "notes": event.notes, "status": event.status, "data_revision": event.data_revision,
+        },
+        after_state={"status": "Voided", "data_revision": event.data_revision + 1},
+        driver_id=event.driver_id, source_revision=event.data_revision + 1,
     )
 
     return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
@@ -10691,6 +10842,16 @@ async def apply_bonus_batch(
             new_value={"driver_id": item.driver_id, "amount": str(item.amount)},
             entity_name="PayrollBonusEvents",
             correlation_id=batch_correlation_id,
+        )
+        await capture_period_audit_evidence(
+            company_id=company_id, branch_id=branch_id, period_id=period_id,
+            domain="BONUS", action_code="BONUS_CREATED", source_entity_type="PayrollBonusEvents",
+            source_entity_id=created_id, user_id=user_id, required_permission_code="payroll.entry",
+            db=db,
+            after_state={
+                "driver_id": item.driver_id, "amount": item.amount, "reason": item.reason,
+                "notes": item.notes, "status": "Active", "data_revision": 1,
+            }, driver_id=item.driver_id, correlation_id=batch_correlation_id, source_revision=1,
         )
 
     # One batch-level audit row, same correlation id.
@@ -13148,6 +13309,15 @@ async def _upsert_entry_state(
     if not set_status and not set_note:
         return
 
+    before_row = (await db.execute(text("""
+        SELECT e.payrollperioddriverdayentrystateid, e.statuskeyid, e.notetext,
+               sk.statuscode, sk.keyname AS statuslabel
+        FROM payroll.payrollperioddriverdayentrystate e
+        LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
+        WHERE e.companyid = :cid AND e.payrollperiodid = :pid
+          AND e.driverid = :did AND e.workdate = :dt
+    """), {"cid": company_id, "pid": period_id, "did": driver_id, "dt": work_date})).mappings().first()
+
     day_id_result = await db.execute(
         text(
             "SELECT payrollperioddayid FROM payroll.payrollperioddays "
@@ -13206,6 +13376,53 @@ async def _upsert_entry_state(
             "uid":    user_id,
         },
     )
+    after_row = (await db.execute(text("""
+        SELECT e.payrollperioddriverdayentrystateid, e.statuskeyid, e.notetext,
+               sk.statuscode, sk.keyname AS statuslabel
+        FROM payroll.payrollperioddriverdayentrystate e
+        LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
+        WHERE e.companyid = :cid AND e.payrollperiodid = :pid
+          AND e.driverid = :did AND e.workdate = :dt
+    """), {"cid": company_id, "pid": period_id, "did": driver_id, "dt": work_date})).mappings().one()
+
+    def status_payload(row: Any | None) -> dict[str, Any] | None:
+        if row is None or row["statuskeyid"] is None:
+            return None
+        return {
+            "status_key_id": row["statuskeyid"], "status_code": row["statuscode"],
+            "status_label": row["statuslabel"],
+        }
+
+    before_status = status_payload(before_row)
+    after_status = status_payload(after_row)
+    entry_id = int(after_row["payrollperioddriverdayentrystateid"])
+    if set_status and before_status != after_status:
+        action = "STATUS_CLEARED" if after_status is None else (
+            "STATUS_SET" if before_status is None else "STATUS_CHANGED"
+        )
+        await capture_period_audit_evidence(
+            company_id=company_id, branch_id=branch_id, period_id=period_id,
+            domain="STATUS_NOTE", action_code=action,
+            source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
+            user_id=user_id, required_permission_code="payroll.entry", db=db,
+            before_state=before_status, after_state=after_status,
+            driver_id=driver_id, work_date=work_date,
+        )
+    before_note = None if before_row is None else before_row["notetext"]
+    after_note = after_row["notetext"]
+    if set_note and before_note != after_note:
+        action = "NOTE_CLEARED" if not after_note else (
+            "NOTE_SET" if not before_note else "NOTE_CHANGED"
+        )
+        await capture_period_audit_evidence(
+            company_id=company_id, branch_id=branch_id, period_id=period_id,
+            domain="STATUS_NOTE", action_code=action,
+            source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
+            user_id=user_id, required_permission_code="payroll.entry", db=db,
+            before_state=None if before_note is None else {"note": before_note},
+            after_state=None if after_note is None else {"note": after_note},
+            driver_id=driver_id, work_date=work_date,
+        )
 
 
 async def _void_entry_state_field(
@@ -13228,6 +13445,15 @@ async def _void_entry_state_field(
     if not clear_status and not clear_note:
         return
 
+    before_row = (await db.execute(text("""
+        SELECT e.payrollperioddriverdayentrystateid, e.statuskeyid, e.notetext,
+               sk.statuscode, sk.keyname AS statuslabel
+        FROM payroll.payrollperioddriverdayentrystate e
+        LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
+        WHERE e.companyid = :cid AND e.payrollperiodid = :pid
+          AND e.driverid = :did AND e.workdate = :dt AND e.isvoided = FALSE
+    """), {"cid": company_id, "pid": period_id, "did": driver_id, "dt": work_date})).mappings().first()
+
     if clear_status and clear_note:
         set_clause = "statuskeyid = NULL, notetext = NULL, isvoided = TRUE"
     elif clear_status:
@@ -13249,6 +13475,32 @@ async def _void_entry_state_field(
         """),
         {"pid": period_id, "cid": company_id, "did": driver_id, "dt": work_date, "uid": user_id},
     )
+    if before_row is None:
+        return
+    entry_id = int(before_row["payrollperioddriverdayentrystateid"])
+    branch_id = int((await db.execute(text("""
+        SELECT branchid FROM payroll.payrollperiods WHERE payrollperiodid = :pid
+    """), {"pid": period_id})).scalar_one())
+    if clear_status and before_row["statuskeyid"] is not None:
+        await capture_period_audit_evidence(
+            company_id=company_id, branch_id=branch_id, period_id=period_id,
+            domain="STATUS_NOTE", action_code="STATUS_CLEARED",
+            source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
+            user_id=user_id, required_permission_code="payroll.entry", db=db,
+            before_state={
+                "status_key_id": before_row["statuskeyid"], "status_code": before_row["statuscode"],
+                "status_label": before_row["statuslabel"],
+            }, after_state=None, driver_id=driver_id, work_date=work_date,
+        )
+    if clear_note and before_row["notetext"]:
+        await capture_period_audit_evidence(
+            company_id=company_id, branch_id=branch_id, period_id=period_id,
+            domain="STATUS_NOTE", action_code="NOTE_CLEARED",
+            source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
+            user_id=user_id, required_permission_code="payroll.entry", db=db,
+            before_state={"note": before_row["notetext"]}, after_state=None,
+            driver_id=driver_id, work_date=work_date,
+        )
 
 
 # =============================================================================
@@ -16176,6 +16428,9 @@ async def create_period_from_candidate(
         },
     )
     new_period_id: int = insert_result.scalar_one()
+    await initialize_period_audit_evidence_coverage(
+        company_id=company_id, branch_id=branch_id, period_id=new_period_id, db=db,
+    )
 
     # Write PERIOD_CREATED audit (exactly once — never on replay)
     await _write_period_created_audit(

@@ -53,6 +53,7 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
               "WHERE payrollperiodid IN ("
               "  SELECT p.payrollperiodid FROM payroll.payrollperiods AS p "
               "  WHERE p.branchid = :bid "
+              "    AND p.status = 'Draft' "
               "    AND NOT EXISTS (SELECT 1 FROM payroll.payrollcalculationsnapshots AS s "
               "                    WHERE s.payrollperiodid = p.payrollperiodid) "
               "    AND NOT EXISTS (SELECT 1 FROM payroll.payrollfinallines AS f "
@@ -63,6 +64,7 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
     await db.execute(
         _text("DELETE FROM payroll.payrollperiods AS p "
               "WHERE p.branchid = :bid "
+              "  AND p.status = 'Draft' "
               "  AND NOT EXISTS (SELECT 1 FROM payroll.payrollcalculationsnapshots AS s "
               "                  WHERE s.payrollperiodid = p.payrollperiodid) "
               "  AND NOT EXISTS (SELECT 1 FROM payroll.payrollfinallines AS f "
@@ -95,6 +97,16 @@ async def _open_period_db(
     end: datetime.date,
     code_suffix: str = "",
 ) -> int:
+    await db.execute(
+        _text("""
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled'
+            WHERE branchid = :bid
+              AND periodcode LIKE 'CP2D2-%'
+              AND status = 'Open'
+        """),
+        {"bid": branch_id},
+    )
     code = f"CP2D2-{branch_id}-{start.isoformat()}{code_suffix}"
     r = (await db.execute(
         _text("""

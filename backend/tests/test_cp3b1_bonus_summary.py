@@ -61,42 +61,14 @@ async def _insert_period_db(
     end: datetime.date,
     status: str = "Open",
 ) -> int:
-    """Insert a period directly, first clearing leftover CP3B1 periods on the branch."""
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    for child_table in (
-        "payroll.payrollfinallines",     # must precede bonusevents (FK reference)
-        "payroll.payrolldraftlines",
-        "payroll.payrollbonusevents",
-        "payroll.payrollperioddriverdayentrystate",
-        "payroll.payrollperioddrivereligibility",
-        "payroll.payrollperiodeligibilitysnapshots",
-    ):
-        await db.execute(
-            _text(f"""
-                DELETE FROM {child_table}
-                WHERE payrollperiodid IN (
-                    SELECT payrollperiodid FROM payroll.payrollperiods
-                    WHERE branchid = :bid AND periodcode LIKE 'CP3B1-%'
-                )
-            """),
-            {"bid": branch_id},
-        )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid AND periodcode LIKE 'CP3B1-%'"),
-        {"bid": branch_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
-
+    """Insert an isolated CP3B1 period without deleting historical fixtures."""
+    await db.execute(_text("""
+        UPDATE payroll.payrollperiods
+        SET status = 'Cancelled'
+        WHERE branchid = :bid
+          AND periodcode LIKE :run_prefix
+          AND status = 'Open'
+    """), {"bid": branch_id, "run_prefix": f"CP3B1-{_RUN_ID}-%"})
     code = f"CP3B1-{_RUN_ID}-{branch_id}-{start.isoformat()}"
     r = (await db.execute(
         _text("""

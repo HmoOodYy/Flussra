@@ -60,45 +60,18 @@ async def _insert_period_db(
     start: datetime.date,
     end: datetime.date,
     status: str = "Open",
-    cleanup: bool = True,
 ) -> int:
-    if cleanup:
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-        ))
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-        ))
-        for child_table in (
-            "payroll.payrollfinallines",
-            "payroll.payrolldraftlines",
-            "payroll.payrollbonusbatchrequests",
-            "payroll.payrollbonusevents",
-            "payroll.payrollperioddriverdayentrystate",
-            "payroll.payrollperioddrivereligibility",
-            "payroll.payrollperiodeligibilitysnapshots",
-        ):
-            await db.execute(
-                _text(f"""
-                    DELETE FROM {child_table}
-                    WHERE payrollperiodid IN (
-                        SELECT payrollperiodid FROM payroll.payrollperiods
-                        WHERE branchid = :bid AND periodcode LIKE 'CP3B2B-%'
-                    )
-                """),
-                {"bid": branch_id},
-            )
-        await db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid AND periodcode LIKE 'CP3B2B-%'"),
-            {"bid": branch_id},
-        )
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-        ))
-        await db.execute(_text(
-            "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-        ))
-
+    """Insert an isolated CP3B2B period without deleting historical fixtures."""
+    if status == "Open":
+        # CP-3A and CP-3B2B share PAYTEST in the combined regression order.
+        # Retire only CP-3A's prior Open test slot; its history is retained.
+        await db.execute(_text("""
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled'
+            WHERE branchid = :bid
+              AND periodcode LIKE 'CP3A-%'
+              AND status = 'Open'
+        """), {"bid": branch_id})
     code = f"CP3B2B-{_RUN_ID}-{branch_id}-{start.isoformat()}"
     r = (await db.execute(
         _text("""

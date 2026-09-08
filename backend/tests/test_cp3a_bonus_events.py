@@ -50,49 +50,6 @@ def _week(offset: int = 0) -> tuple[datetime.date, datetime.date]:
     return start, start + datetime.timedelta(days=6)
 
 
-async def _clean_branch_periods(db: AsyncConnection, branch_id: int) -> None:
-    await _cleanup_mutable_cp3a_periods(db, branch_id)
-
-
-async def _cleanup_mutable_cp3a_periods(db: AsyncConnection, branch_id: int) -> None:
-    """Release CP-3A workflow slots without deleting immutable snapshots."""
-    period_filter = """
-        SELECT period.payrollperiodid
-        FROM payroll.payrollperiods period
-        WHERE period.branchid = :bid
-          AND period.periodcode LIKE 'CP3A-%'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM payroll.payrollcalculationsnapshots snapshot
-              WHERE snapshot.payrollperiodid = period.payrollperiodid
-                AND snapshot.companyid = period.companyid
-                AND snapshot.branchid = period.branchid
-          )
-    """
-    await db.execute(_text("""
-        UPDATE payroll.payrollperiods
-        SET status = 'Cancelled'
-        WHERE branchid = :bid
-          AND periodcode LIKE 'CP3A-%'
-          AND status IN ('Open', 'InReview', 'Approved', 'Returned')
-    """), {"bid": branch_id})
-    for child_table in (
-        "payroll.payrollfinallines",
-        "payroll.payrolldraftlines",
-        "payroll.payrollbonusevents",
-        "payroll.payrollperioddriverdayentrystate",
-        "payroll.payrollperioddrivereligibility",
-        "payroll.payrollperiodeligibilitysnapshots",
-    ):
-        await db.execute(_text(
-            f"DELETE FROM {child_table} WHERE payrollperiodid IN ({period_filter})"
-        ), {"bid": branch_id})
-    await db.execute(_text(
-        f"DELETE FROM payroll.payrollperiods WHERE payrollperiodid IN ({period_filter})"
-    ), {"bid": branch_id})
-    await db.commit()
-
-
 async def _insert_period_db(
     db: AsyncConnection,
     branch_id: int,
@@ -100,8 +57,6 @@ async def _insert_period_db(
     end: datetime.date,
     status: str = "Open",
 ) -> int:
-    await _cleanup_mutable_cp3a_periods(db, branch_id)
-
     code = f"CP3A-{_RUN_ID}-{branch_id}-{start.isoformat()}"
     r = (await db.execute(
         _text("""

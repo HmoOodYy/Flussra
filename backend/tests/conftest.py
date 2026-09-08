@@ -13,6 +13,8 @@ Run from Payroll_App_v3/backend/:
 import os
 import asyncio
 import glob as _glob
+import subprocess
+import time
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -45,6 +47,63 @@ import httpx
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
 from fastapi import FastAPI
+
+
+def _stop_test_postgresql_safely(pg: testing.postgresql.Postgresql) -> None:
+    """Stop this fixture's Windows cluster without testing.postgresql's SIGINT path."""
+    if os.name != "nt":
+        pg.stop()
+        return
+
+    process = pg.child_process
+    if process is None:
+        pg.cleanup()
+        return
+
+    data_dir = Path(pg.get_data_directory()).resolve()
+    base_dir = Path(pg.base_dir).resolve()
+    if data_dir.parent != base_dir or not (data_dir / "PG_VERSION").exists():
+        raise RuntimeError(f"Refusing to stop an unowned PostgreSQL cluster: {data_dir}")
+
+    try:
+        pg.stop()
+    except (ValueError, OSError):
+        # testing.postgresql.Postgresql forces SIGINT, unsupported by this
+        # Windows/Python process combination. pg_ctl owns the same exact data dir.
+        if _PG_BIN is None:
+            raise RuntimeError("PostgreSQL bin directory is unavailable for test cleanup")
+        pg_ctl = Path(_PG_BIN) / "pg_ctl.exe"
+        result = subprocess.run(
+            [str(pg_ctl), "stop", "-D", str(data_dir), "-m", "fast", "-w", "-t", "15"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        deadline = time.monotonic() + 15
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if process.poll() is None:
+            # PID-tree termination is limited to the Popen-owned test cluster.
+            fallback = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            process.wait(timeout=10)
+            if fallback.returncode != 0:
+                raise RuntimeError(
+                    "Could not stop the owned temporary PostgreSQL cluster: "
+                    f"pg_ctl={result.returncode} {result.stderr.strip()}; "
+                    f"taskkill={fallback.returncode} {fallback.stderr.strip()}"
+                )
+    finally:
+        if process.poll() is not None:
+            pg.child_process = None
+            pg.cleanup()
+
+    if process.poll() is None or base_dir.exists():
+        raise RuntimeError(f"Temporary PostgreSQL cleanup incomplete: {base_dir}")
 
 # All migration SQL files, applied in order.
 # conftest discovers them automatically so new migrations are picked up
@@ -266,19 +325,14 @@ def pg_instance():
     """
     Spin up a temporary PostgreSQL cluster for the entire test session.
 
-    Note: testing.postgresql stops the cluster via SIGINT on exit, but
-    Windows Python 3.14 does not support SIGINT on child processes.
-    The ValueError at teardown is harmless — the cluster process ends
-    naturally once its parent (pytest) exits.
+    Windows uses PostgreSQL's native control path because testing.postgresql
+    hardcodes SIGINT, which Python cannot send to this child process.
     """
     pg = testing.postgresql.Postgresql()
     try:
         yield pg
     finally:
-        try:
-            pg.stop()
-        except (ValueError, OSError):
-            pass  # Windows: SIGINT not supported; cluster exits with pytest
+        _stop_test_postgresql_safely(pg)
 
 
 @pytest.fixture(scope="session")

@@ -61,6 +61,10 @@ from app.core.service import (
     _require_not_driver_role,
 )
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
+from app.payroll.audit_evidence import (
+    capture_period_audit_evidence,
+    link_audit_evidence_to_snapshot,
+)
 from app.payroll.service import (  # M16, CP-1D
     _acquire_branch_workflow_lock,
     _write_period_status_audit,
@@ -936,6 +940,33 @@ async def decide_review_item(
         },
     )
     review_decision_id = int(decision_result.scalar_one())
+
+    if data.decision == "Comment" and row.get("requesttype") == "PeriodApproval":
+        snapshot_id = row.get("payrollcalculationsnapshotid")
+        try:
+            period_id = int(row["entityid"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot capture finalized audit evidence for an invalid payroll review item.",
+            ) from exc
+        if snapshot_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot capture finalized audit evidence without the ReviewItem snapshot.",
+            )
+        event_id = await capture_period_audit_evidence(
+            company_id=company_id, branch_id=int(row["branchid"]), period_id=period_id,
+            domain="REVIEW_COMMENT", action_code="REVIEW_COMMENT_ADDED",
+            source_entity_type="ManagerReviewDecisions", source_entity_id=review_decision_id,
+            user_id=user_id, required_permission_code="review.decide", db=db,
+            after_state={"comment": data.decision_reason, "review_item_id": review_item_id},
+            reason=data.decision_reason, review_item_id=review_item_id,
+        )
+        await link_audit_evidence_to_snapshot(
+            event_id=event_id, snapshot_id=int(snapshot_id), company_id=company_id,
+            branch_id=int(row["branchid"]), period_id=period_id, db=db,
+        )
 
     # For substantive decisions (not Comment), update the item status,
     # record the final decision metadata, and write to the audit log.
