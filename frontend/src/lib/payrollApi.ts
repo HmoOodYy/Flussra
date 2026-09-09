@@ -32,6 +32,10 @@ import type {
   PeriodCreationResult,
   CalculationReportResponse,
   CalculationReportView,
+  FinalizedCalculationReportResponse,
+  FinalizedPeriodListItem,
+  FinalizedOverviewResponse,
+  FinalizedReportView,
 } from '../types/payroll';
 
 // ---------------------------------------------------------------------------
@@ -97,6 +101,11 @@ export async function getPeriods(
   if (status) params.status = status;
   if (branchId != null) params.branch_id = String(branchId);
   const resp = await apiClient.get<PeriodSummary[]>('/payroll/periods', { params });
+  return resp.data;
+}
+
+export async function getPeriod(periodId: number): Promise<PeriodSummary> {
+  const resp = await apiClient.get<PeriodSummary>(`/payroll/periods/${periodId}`);
   return resp.data;
 }
 
@@ -327,6 +336,40 @@ export async function getCalculationReport(
 ): Promise<CalculationReportResponse> {
   const resp = await apiClient.get<CalculationReportResponse>(
     `/payroll/periods/${periodId}/reports/${view}`,
+  );
+  return resp.data;
+}
+
+// ---------------------------------------------------------------------------
+// P6A — Finalized Payroll Information Library
+// ---------------------------------------------------------------------------
+
+export async function getFinalizedPeriods(
+  status?: 'Locked' | 'Archived',
+  branchId?: number,
+): Promise<FinalizedPeriodListItem[]> {
+  const params: Record<string, string> = {};
+  if (status) params.status = status;
+  if (branchId != null) params.branch_id = String(branchId);
+  const resp = await apiClient.get<FinalizedPeriodListItem[]>('/payroll/finalized', { params });
+  return resp.data;
+}
+
+export async function getFinalizedOverview(
+  periodId: number,
+): Promise<FinalizedOverviewResponse> {
+  const resp = await apiClient.get<FinalizedOverviewResponse>(
+    `/payroll/finalized/${periodId}/overview`,
+  );
+  return resp.data;
+}
+
+export async function getFinalizedReport(
+  periodId: number,
+  view: FinalizedReportView,
+): Promise<FinalizedCalculationReportResponse> {
+  const resp = await apiClient.get<FinalizedCalculationReportResponse>(
+    `/payroll/finalized/${periodId}/reports/${view}`,
   );
   return resp.data;
 }

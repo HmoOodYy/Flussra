@@ -52,10 +52,11 @@ from app.payroll.schemas import (
     DriversOffResponse,
     DriversReportResponse,
     FinalizationPreviewResponse,
-    FinalizedCalculationReportResponse,
     FinalizedAuditResponse,
+    FinalizedCalculationReportResponse,
     FinalizedOffDriversResponse,
     FinalizedOverviewResponse,
+    FinalizedPeriodListItem,
     FinalizedRatesUsedResponse,
     FinalLineSummary,
     MixedReportResponse,
@@ -86,6 +87,34 @@ DbDep    = Annotated[AsyncConnection, Depends(get_db)]
 # ---------------------------------------------------------------------------
 # Periods
 # ---------------------------------------------------------------------------
+
+@router.get(
+    "/finalized",
+    response_model=list[FinalizedPeriodListItem],
+    summary="List finalized payroll periods in the ledger scope",
+)
+async def list_finalized_periods(
+    token: TokenDep,
+    db: DbDep,
+    branch_id: int | None = Query(None, description="Filter to a specific accessible branch"),
+    period_status: str | None = Query(
+        None,
+        alias="status",
+        pattern="^(Locked|Archived)$",
+        description="Locked or Archived",
+    ),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> list[FinalizedPeriodListItem]:
+    return await finalized_library_read_model.list_finalized_periods(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+        branch_id=branch_id,
+        period_status=period_status,
+        limit=limit,
+        offset=offset,
+    )
 
 @router.get(
     "/periods",

@@ -11,7 +11,12 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
+from app.core.service import (
+    _build_in_clause,
+    _check_branch_access,
+    _check_permission,
+    _require_not_driver_role,
+)
 from app.payroll import report_read_model, service
 
 _REPORT_TYPES = {"drivers", "period-work", "period-pay", "mixed"}
@@ -24,6 +29,99 @@ def _unavailable(code: str, message: str) -> HTTPException:
 
 def _availability(state: str, reason_code: str | None = None) -> dict[str, str | None]:
     return {"state": state, "reason_code": reason_code}
+
+
+async def list_finalized_periods(
+    *,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+    branch_id: int | None = None,
+    period_status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List only finalized periods visible through the ledger permission."""
+    await _require_not_driver_role(company_id, user_id, db)
+    can_see_all, accessible_branch_ids = await _check_branch_access(company_id, user_id, db)
+
+    if period_status is not None and period_status not in _FINALIZED_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail="Finalized period status must be Locked or Archived.",
+        )
+
+    if branch_id is not None and not can_see_all and branch_id not in accessible_branch_ids:
+        raise HTTPException(status_code=403, detail="Access denied to the requested branch.")
+
+    if branch_id is not None:
+        candidate_branch_ids = [branch_id]
+    elif can_see_all:
+        branch_rows = (await db.execute(text("""
+            SELECT branchid
+            FROM core.branches
+            WHERE companyid = :company_id
+            ORDER BY branchid
+        """), {"company_id": company_id})).mappings().all()
+        candidate_branch_ids = [int(row["branchid"]) for row in branch_rows]
+    else:
+        candidate_branch_ids = [int(value) for value in accessible_branch_ids]
+
+    if not candidate_branch_ids:
+        raise HTTPException(status_code=403, detail="No accessible branch for finalized payroll.")
+
+    candidate_clause, candidate_params = _build_in_clause(candidate_branch_ids, "candidate_branch")
+    permission_rows = (await db.execute(text(f"""
+        SELECT b.branchid
+        FROM core.branches b
+        WHERE b.companyid = :company_id
+          AND b.branchid IN ({candidate_clause})
+          AND sec.fn_UserHasPermission(
+              :user_id, :company_id, b.branchid, 'ledger.view'
+          )
+        ORDER BY b.branchid
+    """), {
+        "company_id": company_id,
+        "user_id": user_id,
+        **candidate_params,
+    })).mappings().all()
+    permitted_branch_ids = [int(row["branchid"]) for row in permission_rows]
+    if not permitted_branch_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have ledger.view permission on an accessible branch.",
+        )
+
+    branch_clause, branch_params = _build_in_clause(permitted_branch_ids, "finalized_branch")
+    conditions = [
+        "p.companyid = :company_id",
+        f"p.branchid IN ({branch_clause})",
+        "p.status IN ('Locked', 'Archived')",
+    ]
+    params: dict[str, Any] = {"company_id": company_id, **branch_params}
+    if period_status is not None:
+        conditions.append("p.status = :period_status")
+        params["period_status"] = period_status
+    params.update({"limit": limit, "offset": offset})
+    result = await db.execute(text(f"""
+        SELECT p.payrollperiodid AS period_id,
+               p.periodcode AS period_code,
+               p.periodname AS period_name,
+               p.status AS period_status,
+               p.periodtype AS period_type,
+               p.branchid AS branch_id,
+               b.branchname AS branch_name,
+               p.startdate AS start_date,
+               p.enddate AS end_date,
+               p.paydate AS pay_date,
+               p.lockedatutc AS finalized_at_utc
+        FROM payroll.payrollperiods p
+        JOIN core.branches b ON b.branchid = p.branchid AND b.companyid = p.companyid
+        WHERE {' AND '.join(conditions)}
+        ORDER BY p.startdate DESC, b.branchname, p.payrollperiodid DESC
+        LIMIT :limit OFFSET :offset
+    """), params)
+    return [dict(row) for row in result.mappings().all()]
 
 
 async def _period_context(

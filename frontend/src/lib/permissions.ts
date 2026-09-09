@@ -76,9 +76,25 @@ export function canViewPayrollReports(user: UserProfile): boolean {
   return !isDriverUser(user) && user.active_permissions.includes('reports.view');
 }
 
-/** Ledger: same gate as Current Payroll (backend uses _PAYROLL_READ_PERMS). */
+/** Finalized Payroll Library: backend's dedicated ledger.view contract. */
+export function canViewFinalizedLibrary(user: UserProfile): boolean {
+  return !isDriverUser(user) && user.active_permissions.includes('ledger.view');
+}
+
+/** Legacy raw FinalLines: mirror its operational backend read permissions. */
+export function canViewFinalLines(user: UserProfile): boolean {
+  return (
+    !isDriverUser(user) &&
+    _hasAny(user, ['payroll.view', 'payroll.entry', 'payroll.finalize'])
+  );
+}
+
+/**
+ * Ledger navigation remains available to either finalized-library readers or
+ * operational payroll readers while the legacy FinalLines surface is retained.
+ */
 export function canViewLedger(user: UserProfile): boolean {
-  return canViewCurrentPayroll(user);
+  return canViewFinalizedLibrary(user) || canViewFinalLines(user);
 }
 
 /**

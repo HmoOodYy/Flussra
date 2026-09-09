@@ -702,6 +702,89 @@ export interface CalculationReportResponse {
 }
 
 // ---------------------------------------------------------------------------
+// P6A — Finalized Payroll Information Library
+// ---------------------------------------------------------------------------
+
+export type FinalizedAvailabilityState = 'AVAILABLE' | 'EMPTY' | 'PARTIAL' | 'UNAVAILABLE';
+
+export interface FinalizedSectionAvailability {
+  state: FinalizedAvailabilityState;
+  reason_code: string | null;
+}
+
+export interface FinalizedFinancialSummary {
+  total_pay: string;
+  final_line_count: number;
+  driver_count: number;
+}
+
+export interface FinalizedSnapshotProvenance {
+  snapshot_id: number | null;
+  revision_number: number | null;
+  snapshot_hash: string | null;
+  source_config_hash: string | null;
+}
+
+export interface FinalizedPeriodListItem {
+  period_id: number;
+  period_code: string;
+  period_name: string;
+  period_status: PeriodStatus;
+  period_type: string;
+  branch_id: number;
+  branch_name: string;
+  start_date: string;
+  end_date: string;
+  pay_date: string | null;
+  finalized_at_utc: string | null;
+}
+
+export interface FinalizedOverviewResponse {
+  period_id: number;
+  period_code: string;
+  period_name: string;
+  period_status: string;
+  company_id: number;
+  branch_id: number;
+  branch_name: string;
+  finalized_at_utc: string | null;
+  finalized_by_user_id: number | null;
+  financial_summary: FinalizedFinancialSummary;
+  snapshot_provenance: FinalizedSnapshotProvenance;
+  section_availability: Record<string, FinalizedSectionAvailability>;
+  generated_at_utc: string;
+}
+
+export interface FinalizedReportMetadata {
+  period_id: number;
+  period_code: string;
+  period_name: string;
+  period_status: string;
+  branch_id: number;
+  report_type: string;
+  authority_kind: string;
+  financials_available: boolean;
+  snapshot_id: number | null;
+  revision_number: number | null;
+  snapshot_hash: string | null;
+  report_evidence_available: boolean;
+  report_evidence_version: number | null;
+  report_evidence_hash: string | null;
+  section_availability: Record<string, FinalizedSectionAvailability>;
+  generated_at_utc: string;
+}
+
+export interface FinalizedCalculationReportResponse {
+  metadata: FinalizedReportMetadata;
+  columns: ReportColumn[];
+  drivers: ReportDriver[];
+  work_totals: Record<string, string>;
+  pay_totals: Record<string, string> | null;
+}
+
+export type FinalizedReportView = CalculationReportView;
+
+// ---------------------------------------------------------------------------
 // CP-4B — Open/Returned live calculation preview
 // ---------------------------------------------------------------------------
 

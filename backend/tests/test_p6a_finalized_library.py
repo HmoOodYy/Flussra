@@ -490,3 +490,221 @@ async def test_legacy_final_lines_keep_money_but_report_evidence_is_unavailable(
     assert report.status_code == 200, report.text
     assert report.json()["metadata"]["report_evidence_available"] is False
     assert report.json()["metadata"]["section_availability"]["report_evidence"]["state"] == "UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_finalized_period_discovery_returns_only_minimal_locked_archived_items(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    direct_db,
+    test_database_url: str,
+):
+    period_id, _, _, _ = await _seed_finalized_period(
+        direct_db, test_database_url, paytest_branch_id,
+    )
+    await direct_db.execute(text("""
+        UPDATE payroll.payrollperiods
+        SET status = 'Archived'
+        WHERE payrollperiodid = :period_id
+    """), {"period_id": period_id})
+    non_finalized_ids = []
+    for status, start_date in (("Draft", date(2098, 4, 1)), ("Cancelled", date(2098, 5, 1))):
+        non_finalized_ids.append(int((await direct_db.execute(text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype,
+                 startdate, enddate)
+                VALUES (1, :branch_id, :status, :code, :name, 'Week', :start_date,
+                        :end_date)
+            RETURNING payrollperiodid
+        """), {
+            "branch_id": paytest_branch_id,
+            "status": status,
+                "code": f"P6A-DISCOVERY-{uuid4().hex}",
+                "name": f"P6A discovery {status}",
+                "start_date": start_date,
+                "end_date": start_date.replace(day=start_date.day + 6),
+        })).scalar_one()))
+    await direct_db.commit()
+
+    response = await session_client.get(
+        "/payroll/finalized", headers=_auth(auth_token),
+    )
+    assert response.status_code == 200, response.text
+    items = response.json()
+    target = next(item for item in items if item["period_id"] == period_id)
+    assert target["period_status"] == "Archived"
+    assert {item["period_status"] for item in items} <= {"Locked", "Archived"}
+    assert not any(item["period_id"] in non_finalized_ids for item in items)
+    assert set(target) == {
+        "period_id", "period_code", "period_name", "period_status", "period_type",
+        "branch_id", "branch_name", "start_date", "end_date", "pay_date",
+        "finalized_at_utc",
+    }
+
+    locked_only = await session_client.get(
+        "/payroll/finalized?status=Locked", headers=_auth(auth_token),
+    )
+    assert locked_only.status_code == 200, locked_only.text
+    assert all(item["period_status"] == "Locked" for item in locked_only.json())
+    archived_only = await session_client.get(
+        "/payroll/finalized?status=Archived", headers=_auth(auth_token),
+    )
+    assert archived_only.status_code == 200, archived_only.text
+    assert any(item["period_id"] == period_id for item in archived_only.json())
+    invalid_status = await session_client.get(
+        "/payroll/finalized?status=Open", headers=_auth(auth_token),
+    )
+    assert invalid_status.status_code == 422, invalid_status.text
+
+
+@pytest.mark.asyncio
+async def test_finalized_period_discovery_requires_ledger_scope_and_denies_driver_oda(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    hq_branch_id: int,
+    direct_db,
+    test_database_url: str,
+):
+    period_id, _, _, _ = await _seed_finalized_period(
+        direct_db, test_database_url, paytest_branch_id,
+    )
+    ledger_token = await _scoped_permission_token(
+        session_client, auth_token, paytest_branch_id, ["ledger.view"],
+    )
+    ledger_response = await session_client.get("/payroll/finalized", headers=_auth(ledger_token))
+    assert ledger_response.status_code == 200, ledger_response.text
+    assert any(item["period_id"] == period_id for item in ledger_response.json())
+    permission_tokens = [
+        await _scoped_permission_token(session_client, auth_token, paytest_branch_id, ["payroll.view"]),
+        await _scoped_permission_token(session_client, auth_token, paytest_branch_id, ["ledger.audit.view"]),
+        await _scoped_permission_token(session_client, auth_token, paytest_branch_id, []),
+    ]
+    for token in permission_tokens:
+        response = await session_client.get("/payroll/finalized", headers=_auth(token))
+        assert response.status_code == 403, response.text
+
+    for scope_type in ("SpecificBranch", "OwnDriverDataOnly"):
+        token = await _ledger_token_with_driver_scope(
+            session_client, auth_token, paytest_branch_id, scope_type,
+        )
+        response = await session_client.get("/payroll/finalized", headers=_auth(token))
+        assert response.status_code == 403, response.text
+        assert str(period_id) not in response.text
+
+    hq_token = await _scoped_permission_token(
+        session_client, auth_token, hq_branch_id, ["ledger.view"],
+    )
+    inaccessible = await session_client.get(
+        f"/payroll/finalized?branch_id={paytest_branch_id}", headers=_auth(hq_token),
+    )
+    assert inaccessible.status_code == 403, inaccessible.text
+    scoped_empty = await session_client.get("/payroll/finalized", headers=_auth(hq_token))
+    assert scoped_empty.status_code == 200, scoped_empty.text
+    assert all(item["branch_id"] == hq_branch_id for item in scoped_empty.json())
+    assert all(item["period_id"] != period_id for item in scoped_empty.json())
+
+
+@pytest.mark.asyncio
+async def test_finalized_period_discovery_does_not_leak_foreign_company_periods(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    direct_db,
+):
+    marker = uuid4().hex[:12]
+    company_id = int((await direct_db.execute(text("""
+        INSERT INTO core.companies
+            (companycode, companyname, legalname, status, issuspended, timezonename)
+        VALUES (:code, :name, :name, 'Active', FALSE, 'UTC')
+        RETURNING companyid
+    """), {"code": f"P6A-F-{marker}", "name": f"P6A foreign {marker}"})).scalar_one())
+    branch_id = int((await direct_db.execute(text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (:company_id, :code, :name, 'Active', TRUE)
+        RETURNING branchid
+    """), {
+        "company_id": company_id,
+        "code": f"P6A-F-{marker}",
+        "name": f"P6A foreign {marker}",
+    })).scalar_one())
+    period_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.payrollperiods
+            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+        VALUES (:company_id, :branch_id, 'Locked', :code, :name, 'Week', '2098-06-01', '2098-06-07')
+        RETURNING payrollperiodid
+    """), {
+        "company_id": company_id,
+        "branch_id": branch_id,
+        "code": f"P6A-F-{marker}",
+        "name": f"P6A foreign {marker}",
+    })).scalar_one())
+    await direct_db.commit()
+    try:
+        response = await session_client.get("/payroll/finalized", headers=_auth(auth_token))
+        assert response.status_code == 200, response.text
+        assert all(item["period_id"] != period_id for item in response.json())
+    finally:
+        await direct_db.execute(text(
+            "DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :period_id"
+        ), {"period_id": period_id})
+        await direct_db.execute(text("DELETE FROM core.branches WHERE branchid = :branch_id"), {
+            "branch_id": branch_id,
+        })
+        await direct_db.execute(text("DELETE FROM core.companies WHERE companyid = :company_id"), {
+            "company_id": company_id,
+        })
+        await direct_db.commit()
+
+
+@pytest.mark.asyncio
+async def test_finalized_and_operational_discovery_permissions_remain_separate(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    direct_db,
+    test_database_url: str,
+):
+    period_id, _, _, _ = await _seed_finalized_period(
+        direct_db, test_database_url, paytest_branch_id,
+    )
+    ledger_only = await _scoped_permission_token(
+        session_client, auth_token, paytest_branch_id, ["ledger.view"],
+    )
+    finalized_list = await session_client.get(
+        "/payroll/finalized", headers=_auth(ledger_only),
+    )
+    assert finalized_list.status_code == 200, finalized_list.text
+    assert any(item["period_id"] == period_id for item in finalized_list.json())
+    overview = await session_client.get(
+        f"/payroll/finalized/{period_id}/overview", headers=_auth(ledger_only),
+    )
+    assert overview.status_code == 200, overview.text
+    report = await session_client.get(
+        f"/payroll/finalized/{period_id}/reports/drivers", headers=_auth(ledger_only),
+    )
+    assert report.status_code == 200, report.text
+
+    both = await _scoped_permission_token(
+        session_client, auth_token, paytest_branch_id, ["ledger.view", "payroll.view"],
+    )
+    both_list = await session_client.get("/payroll/finalized", headers=_auth(both))
+    assert both_list.status_code == 200, both_list.text
+    assert any(item["period_id"] == period_id for item in both_list.json())
+
+    payroll_only = await _scoped_permission_token(
+        session_client, auth_token, paytest_branch_id, ["payroll.view"],
+    )
+    denied = await session_client.get("/payroll/finalized", headers=_auth(payroll_only))
+    assert denied.status_code == 403, denied.text
+    operational = await session_client.get(
+        f"/payroll/periods?status=Locked&branch_id={paytest_branch_id}",
+        headers=_auth(payroll_only),
+    )
+    assert operational.status_code == 200, operational.text
+    assert any(item["payroll_period_id"] == period_id for item in operational.json())
+    final_lines = await session_client.get(
+        f"/payroll/periods/{period_id}/final-lines", headers=_auth(payroll_only),
+    )
+    assert final_lines.status_code == 200, final_lines.text
+    assert final_lines.json()

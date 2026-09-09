@@ -1652,6 +1652,22 @@ class FinalizedSnapshotProvenance(BaseModel):
     source_config_hash: str | None = None
 
 
+class FinalizedPeriodListItem(BaseModel):
+    """Minimal navigation item for the ledger-owned finalized-period list."""
+
+    period_id: int
+    period_code: str
+    period_name: str
+    period_status: str
+    period_type: str
+    branch_id: int
+    branch_name: str
+    start_date: date
+    end_date: date
+    pay_date: date | None = None
+    finalized_at_utc: datetime | None = None
+
+
 class FinalizedOverviewResponse(BaseModel):
     period_id: int
     period_code: str
