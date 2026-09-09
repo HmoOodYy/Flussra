@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { getFinalizedOverview, getFinalizedReport } from '../../lib/payrollApi';
+import { getFinalizedOffDrivers, getFinalizedOverview, getFinalizedReport } from '../../lib/payrollApi';
 import type {
   FinalizedAvailabilityState,
   FinalizedCalculationReportResponse,
+  FinalizedOffDriversResponse,
   FinalizedOverviewResponse,
   FinalizedReportView,
   FinalizedSectionAvailability,
@@ -16,6 +17,8 @@ const REPORT_TABS: readonly { view: FinalizedReportView; label: string }[] = [
   { view: 'period-pay', label: 'Period Pay' },
   { view: 'mixed', label: 'Mixed' },
 ];
+
+type FinalizedLibraryTab = 'overview' | FinalizedReportView | 'off-status';
 
 const AVAILABILITY_LABELS: Record<FinalizedAvailabilityState, string> = {
   AVAILABLE: 'Available',
@@ -281,6 +284,124 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
   );
 }
 
+function OffDriverTable({ response }: { response: FinalizedOffDriversResponse }) {
+  if (response.fully_off_drivers.length === 0) return null;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Driver</th><th>Code</th><th>Eligible days</th><th>Off days</th></tr></thead>
+        <tbody>
+          {response.fully_off_drivers.map((driver) => (
+            <tr key={driver.driver_id}>
+              <td>{driver.driver_name || `Driver #${driver.driver_id}`}</td>
+              <td>{driver.driver_code ?? 'Not provided'}</td>
+              <td className={styles.numeric}>{driver.eligible_scheduled_day_count}</td>
+              <td className={styles.numeric}>{driver.off_day_count}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StatusEvidenceTable({ response }: { response: FinalizedOffDriversResponse }) {
+  if (response.status_entries.length === 0) return null;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Date</th><th>Driver</th><th>Code</th><th>Status code</th><th>Status</th><th>Off reason</th></tr></thead>
+        <tbody>
+          {response.status_entries.map((entry, index) => (
+            <tr key={`${entry.driver_id}-${entry.work_date}-${entry.status_key_id}-${index}`}>
+              <td>{entry.work_date}</td>
+              <td>{entry.driver_name ?? `Driver #${entry.driver_id}`}</td>
+              <td>{entry.driver_code ?? 'Not provided'}</td>
+              <td>{entry.status_code}</td>
+              <td>{entry.status_label}</td>
+              <td>{entry.is_off_reason ? 'Yes' : 'No'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EvidenceSectionMessage({
+  availability,
+  emptyText,
+}: {
+  availability: FinalizedSectionAvailability | undefined;
+  emptyText: string;
+}) {
+  if (!availability || availability.state === 'UNAVAILABLE') {
+    return <StateMessage>{availabilityMessage(availability, emptyText)}</StateMessage>;
+  }
+  if (availability.state === 'EMPTY') return <StateMessage>{emptyText}</StateMessage>;
+  if (availability.state === 'PARTIAL') {
+    return <StateMessage>{availabilityMessage(availability, emptyText)}</StateMessage>;
+  }
+  return null;
+}
+
+function OffStatusBody({ response }: { response: FinalizedOffDriversResponse }) {
+  const { metadata } = response;
+  const offAvailability = metadata.section_availability.off_drivers;
+  const statusAvailability = metadata.section_availability.status_evidence;
+  const availabilityEntries = Object.entries(metadata.section_availability);
+  const offUnavailable = !offAvailability || offAvailability.state === 'UNAVAILABLE';
+  const statusUnavailable = !statusAvailability || statusAvailability.state === 'UNAVAILABLE';
+  return (
+    <>
+      <div className={styles.metadataGrid}>
+        <div><span>Period</span><strong>{metadata.period_name || metadata.period_code}</strong><small>{metadata.period_code}</small></div>
+        <div><span>Status</span><strong>{metadata.period_status}</strong><small>Branch {metadata.branch_id}</small></div>
+        <div><span>Authority</span><strong>{metadata.authority_kind}</strong><small>Frozen Status evidence</small></div>
+        <div><span>Revision</span><strong>{metadata.revision_number ?? 'Not provided'}</strong><small>{metadata.snapshot_id == null ? 'No snapshot' : `Snapshot ${metadata.snapshot_id}`}</small></div>
+        <div><span>Evidence</span><strong><AvailabilityBadge availability={statusAvailability} /></strong><small>{metadata.report_evidence_version == null ? 'Version not provided' : `Version ${metadata.report_evidence_version}`}</small></div>
+      </div>
+      <div className={styles.availabilityRow}>
+        {availabilityEntries.map(([key, availability]) => (
+          <span key={key}><span className={styles.availabilityLabel}>{key.replaceAll('_', ' ')}</span><AvailabilityBadge availability={availability} /></span>
+        ))}
+      </div>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}>
+          <h3>Fully Off Drivers</h3>
+          <AvailabilityBadge availability={offAvailability} />
+        </div>
+        {offUnavailable ? <EvidenceSectionMessage availability={offAvailability} emptyText="No fully off drivers were captured." /> : (
+          <>
+            {offAvailability?.state === 'PARTIAL' && <EvidenceSectionMessage availability={offAvailability} emptyText="No fully off drivers were captured." />}
+            <div className={styles.offSummaryGrid}>
+              <div><strong>{response.total_fully_off_drivers}</strong><span>Fully off drivers</span></div>
+              <div><strong>{metadata.period_code}</strong><span>Finalized period</span></div>
+            </div>
+            {offAvailability?.state === 'EMPTY' && <EvidenceSectionMessage availability={offAvailability} emptyText="No fully off drivers were captured." />}
+            {response.fully_off_drivers.length === 0 && offAvailability?.state === 'AVAILABLE' && <StateMessage>No fully off drivers were captured.</StateMessage>}
+            <OffDriverTable response={response} />
+          </>
+        )}
+      </section>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}>
+          <h3>Status Evidence</h3>
+          <AvailabilityBadge availability={statusAvailability} />
+        </div>
+        {statusUnavailable ? <EvidenceSectionMessage availability={statusAvailability} emptyText="No Status entries were captured." /> : (
+          <>
+            {statusAvailability?.state === 'PARTIAL' && <EvidenceSectionMessage availability={statusAvailability} emptyText="No Status entries were captured." />}
+            {response.status_entries.length === 0 && statusAvailability?.state === 'AVAILABLE' && <StateMessage>No Status entries were captured.</StateMessage>}
+            {statusAvailability?.state === 'EMPTY' && <EvidenceSectionMessage availability={statusAvailability} emptyText="No Status entries were captured." />}
+            <StatusEvidenceTable response={response} />
+          </>
+        )}
+      </section>
+    </>
+  );
+}
+
 function OverviewBody({ overview }: { overview: FinalizedOverviewResponse }) {
   const summary = overview.financial_summary;
   const availabilityEntries = Object.entries(overview.section_availability);
@@ -332,7 +453,7 @@ interface FinalizedPayrollLibraryDialogProps {
 }
 
 export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayrollLibraryDialogProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | FinalizedReportView>('overview');
+  const [activeTab, setActiveTab] = useState<FinalizedLibraryTab>('overview');
   const [overview, setOverview] = useState<FinalizedOverviewResponse | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(true);
   const [overviewError, setOverviewError] = useState<string | null>(null);
@@ -341,6 +462,10 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
   const [reportError, setReportError] = useState<string | null>(null);
   const [overviewRetry, setOverviewRetry] = useState(0);
   const [reportRetry, setReportRetry] = useState(0);
+  const [offStatus, setOffStatus] = useState<FinalizedOffDriversResponse | null>(null);
+  const [offStatusLoading, setOffStatusLoading] = useState(false);
+  const [offStatusError, setOffStatusError] = useState<string | null>(null);
+  const [offStatusRetry, setOffStatusRetry] = useState(0);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -368,8 +493,26 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     }
   }, [period.payroll_period_id]);
 
+  const loadOffStatus = useCallback(async () => {
+    setOffStatusLoading(true);
+    setOffStatusError(null);
+    try {
+      setOffStatus(await getFinalizedOffDrivers(period.payroll_period_id));
+    } catch (error: unknown) {
+      setOffStatusError(errorDetail(error, 'Failed to load finalized Off and Status history.'));
+    } finally {
+      setOffStatusLoading(false);
+    }
+  }, [period.payroll_period_id]);
+
   useEffect(() => {
-    if (!overview || activeTab === 'overview') return;
+    if (!overview || activeTab !== 'off-status' || offStatus != null) return;
+    const timer = window.setTimeout(() => { void loadOffStatus(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, loadOffStatus, offStatus, offStatusRetry, overview]);
+
+  useEffect(() => {
+    if (!overview || activeTab === 'overview' || activeTab === 'off-status') return;
     const timer = window.setTimeout(() => { void loadReport(activeTab); }, 0);
     return () => window.clearTimeout(timer);
   }, [activeTab, loadReport, overview, reportRetry]);
@@ -380,12 +523,14 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
-  function selectTab(tab: 'overview' | FinalizedReportView) {
+  function selectTab(tab: FinalizedLibraryTab) {
     if (tab === activeTab) return;
     setActiveTab(tab);
     setReport(null);
     setReportError(null);
-    setReportLoading(tab !== 'overview');
+    setReportLoading(tab !== 'overview' && tab !== 'off-status');
+    setOffStatusError(null);
+    setOffStatusLoading(tab === 'off-status' && offStatus == null);
   }
 
   return (
@@ -398,11 +543,16 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
         <nav className={styles.tabs} aria-label="Finalized payroll sections" role="tablist">
           <button className={activeTab === 'overview' ? styles.activeTab : styles.tab} onClick={() => selectTab('overview')} type="button" role="tab" aria-selected={activeTab === 'overview'}>Overview</button>
           {REPORT_TABS.map((tab) => <button key={tab.view} className={activeTab === tab.view ? styles.activeTab : styles.tab} onClick={() => selectTab(tab.view)} type="button" role="tab" aria-selected={activeTab === tab.view} disabled={!overview}>{tab.label}</button>)}
+          <button className={activeTab === 'off-status' ? styles.activeTab : styles.tab} onClick={() => selectTab('off-status')} type="button" role="tab" aria-selected={activeTab === 'off-status'} disabled={!overview}>Off / Status</button>
         </nav>
         <div className={styles.body}>
           {overviewLoading ? <StateMessage>Loading finalized payroll overview…</StateMessage> : overviewError ? (
             <div className={styles.errorBox}><p>{overviewError}</p><button className={styles.retryButton} onClick={() => { setOverviewLoading(true); setOverviewError(null); setOverview(null); setActiveTab('overview'); setOverviewRetry((value) => value + 1); }} type="button">Retry</button></div>
-          ) : overview == null ? <StateMessage>Finalized overview is unavailable.</StateMessage> : activeTab === 'overview' ? <OverviewBody overview={overview} /> : reportLoading ? (
+          ) : overview == null ? <StateMessage>Finalized overview is unavailable.</StateMessage> : activeTab === 'overview' ? <OverviewBody overview={overview} /> : activeTab === 'off-status' ? offStatusLoading ? (
+            <StateMessage>Loading finalized Off and Status history…</StateMessage>
+          ) : offStatusError ? (
+            <div className={styles.errorBox}><p>{offStatusError}</p><button className={styles.retryButton} onClick={() => { setOffStatusLoading(true); setOffStatusError(null); setOffStatus(null); setOffStatusRetry((value) => value + 1); }} type="button">Retry</button></div>
+          ) : offStatus == null ? <StateMessage>Finalized Off and Status history is unavailable.</StateMessage> : <OffStatusBody response={offStatus} /> : reportLoading ? (
             <StateMessage>Loading {REPORT_TABS.find((tab) => tab.view === activeTab)?.label.toLowerCase() ?? 'report'}…</StateMessage>
           ) : reportError ? (
             <div className={styles.errorBox}><p>{reportError}</p><button className={styles.retryButton} onClick={() => { setReportLoading(true); setReportError(null); setReportRetry((value) => value + 1); }} type="button">Retry</button></div>

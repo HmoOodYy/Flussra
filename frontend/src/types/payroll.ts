@@ -784,6 +784,49 @@ export interface FinalizedCalculationReportResponse {
 
 export type FinalizedReportView = CalculationReportView;
 
+export interface FinalizedFullyOffDriver {
+  driver_id: number;
+  driver_name: string;
+  driver_code: string | null;
+  eligible_scheduled_day_count: number;
+  off_day_count: number;
+}
+
+export interface FinalizedOffStatusEntry {
+  driver_id: number;
+  driver_name: string | null;
+  driver_code: string | null;
+  work_date: string;
+  status_key_id: number;
+  status_code: string;
+  status_label: string;
+  is_off_reason: boolean;
+}
+
+export interface FinalizedOffDriversMetadata {
+  period_id: number;
+  period_code: string;
+  period_name: string;
+  period_status: string;
+  branch_id: number;
+  authority_kind: string;
+  snapshot_id: number | null;
+  revision_number: number | null;
+  snapshot_hash: string | null;
+  report_evidence_available: boolean;
+  report_evidence_version: number | null;
+  report_evidence_hash: string | null;
+  section_availability: Record<string, FinalizedSectionAvailability>;
+  generated_at_utc: string;
+}
+
+export interface FinalizedOffDriversResponse {
+  metadata: FinalizedOffDriversMetadata;
+  total_fully_off_drivers: number;
+  fully_off_drivers: FinalizedFullyOffDriver[];
+  status_entries: FinalizedOffStatusEntry[];
+}
+
 // ---------------------------------------------------------------------------
 // CP-4B — Open/Returned live calculation preview
 // ---------------------------------------------------------------------------

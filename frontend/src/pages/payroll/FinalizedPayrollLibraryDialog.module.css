@@ -84,6 +84,10 @@
 .kpiGrid > div { display: flex; min-height: 68px; flex-direction: column; justify-content: center; border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.65rem 0.75rem; background: #f8fafc; }
 .kpiGrid strong { color: #111827; font-size: 0.95rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .kpiGrid span { margin-top: 0.2rem; color: #64748b; font-size: 0.72rem; }
+.offSummaryGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem; margin-top: 0.7rem; }
+.offSummaryGrid > div { display: flex; min-height: 58px; flex-direction: column; justify-content: center; border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.55rem 0.7rem; background: #f8fafc; }
+.offSummaryGrid strong { color: #111827; font-size: 0.95rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.offSummaryGrid span { margin-top: 0.15rem; color: #64748b; font-size: 0.72rem; }
 
 .overviewSection { margin-top: 1rem; border-top: 1px solid #e5e7eb; padding-top: 0.9rem; }
 .sectionTitleRow { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
@@ -163,6 +167,7 @@
   .totals,
   .sectionList,
   .kpiGrid,
+  .offSummaryGrid,
   .provenanceGrid { grid-template-columns: 1fr; }
   .header { padding: 0.85rem 1rem; }
   .tabs { padding: 0.65rem 1rem; }
