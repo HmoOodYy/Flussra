@@ -11,6 +11,8 @@ import type {
   BonusEvent,
   BonusEventCreate,
   BonusEventUpdate,
+  BonusBatchCreate,
+  BonusBatchResponse,
   BonusSummary,
   PeriodSummary,
   NextPeriodDates,
@@ -224,6 +226,17 @@ export async function createBonusEvent(
 ): Promise<BonusEvent> {
   const resp = await apiClient.post<BonusEvent>(
     `/payroll/periods/${periodId}/bonuses`,
+    req,
+  );
+  return resp.data;
+}
+
+export async function createBonusBatch(
+  periodId: number,
+  req: BonusBatchCreate,
+): Promise<BonusBatchResponse> {
+  const resp = await apiClient.post<BonusBatchResponse>(
+    `/payroll/periods/${periodId}/bonuses/batch`,
     req,
   );
   return resp.data;

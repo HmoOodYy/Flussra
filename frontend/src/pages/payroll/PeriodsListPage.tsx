@@ -647,7 +647,6 @@ export function PeriodsListPage() {
           <BonusDialog
             periodId={bonusDialogPeriodId}
             periodName={bp?.period_name}
-            periodStatus={bp?.status ?? 'Draft'}
             onClose={() => setBonusDialogPeriodId(null)}
           />
         );

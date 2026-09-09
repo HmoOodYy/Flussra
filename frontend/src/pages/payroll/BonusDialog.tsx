@@ -2,24 +2,16 @@
  * BonusDialog — period-level bonus management modal.
  *
  * Extracted from BonusPanel in PeriodDetailPage.tsx and promoted to a
- * standalone dialog. Fetches eligible drivers itself given a periodId.
+ * standalone dialog. Fetches the backend-owned bonus summary given a periodId.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  createBonusEvent,
+  createBonusBatch,
   getBonusSummary,
   voidBonusEvent,
 } from '../../lib/payrollApi';
-import type { BonusSummary } from '../../types/payroll';
-import { useAuth } from '../../store/authStore';
-import { canEntryPayroll } from '../../lib/permissions';
+import type { BonusBatchItem, BonusSummary } from '../../types/payroll';
 import styles from './BonusDialog.module.css';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const BONUS_EDITABLE_STATUSES = new Set(['Open', 'Returned']);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,6 +34,24 @@ function getErrorDetail(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function createIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `bonus-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+interface BonusDraftRow {
+  rowId: number;
+  driverId: string;
+  amount: string;
+  reason: string;
+}
+
+function newBonusDraftRow(rowId: number): BonusDraftRow {
+  return { rowId, driverId: '', amount: '', reason: '' };
+}
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
@@ -49,7 +59,6 @@ function getErrorDetail(error: unknown, fallback: string): string {
 interface BonusDialogProps {
   periodId: number;
   periodName?: string;
-  periodStatus: string;
   onClose: () => void;
 }
 
@@ -57,26 +66,21 @@ interface BonusDialogProps {
 // Component
 // ---------------------------------------------------------------------------
 
-export function BonusDialog({ periodId, periodName, periodStatus, onClose }: BonusDialogProps) {
-  const { user } = useAuth();
-  const userCanEntry = user ? canEntryPayroll(user) : false;
+export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps) {
   const [summary, setSummary] = useState<BonusSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [showAddForm, setShowAddForm] = useState(false);
-  const [addDriverId, setAddDriverId] = useState('');
-  const [addAmount, setAddAmount] = useState('');
-  const [addReason, setAddReason] = useState('');
+  const [addRows, setAddRows] = useState<BonusDraftRow[]>([newBonusDraftRow(1)]);
+  const nextRowId = useRef(2);
+  const idempotencyKey = useRef<string | null>(null);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
   const [voidingId, setVoidingId] = useState<number | null>(null);
   const [confirmVoidId, setConfirmVoidId] = useState<number | null>(null);
   const [voidError, setVoidError] = useState<string | null>(null);
-
-  // canEdit = period status allows bonus edits AND user has payroll.entry permission.
-  const canEdit = BONUS_EDITABLE_STATUSES.has(periodStatus) && userCanEntry;
 
   const fetchSummary = useCallback(async () => {
     setLoading(true);
@@ -106,22 +110,40 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
-    if (!addDriverId || !addAmount || !addReason.trim()) return;
+    if (
+      !summary ||
+      addRows.some((row) => !row.driverId || !row.amount || !row.reason.trim())
+    ) return;
     setAddSaving(true);
     setAddError(null);
+    const requestKey = idempotencyKey.current ?? createIdempotencyKey();
+    idempotencyKey.current = requestKey;
     try {
-      await createBonusEvent(periodId, {
-        driver_id: Number(addDriverId),
-        amount: addAmount,
-        reason: addReason.trim(),
+      const items: BonusBatchItem[] = addRows.map((row) => ({
+        driver_id: Number(row.driverId),
+        amount: row.amount,
+        reason: row.reason.trim(),
+      }));
+      await createBonusBatch(periodId, {
+        idempotency_key: requestKey,
+        expected_bonus_data_revision: summary.bonus_data_revision,
+        items,
       });
       setShowAddForm(false);
-      setAddDriverId('');
-      setAddAmount('');
-      setAddReason('');
+      setAddRows([newBonusDraftRow(nextRowId.current++)]);
+      idempotencyKey.current = null;
       await fetchSummary();
     } catch (err: unknown) {
       setAddError(getErrorDetail(err, 'Failed to add bonus event.'));
+      // A response means the server definitively rejected this request. With
+      // no response, retain the key so a retry can safely replay the batch.
+      const response = (err as { response?: { status?: unknown } })?.response;
+      if (response?.status === 409) {
+        idempotencyKey.current = null;
+        await fetchSummary();
+      } else if (response) {
+        idempotencyKey.current = null;
+      }
     } finally {
       setAddSaving(false);
     }
@@ -152,7 +174,32 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
       })),
   ) ?? [];
   const eligibleDrivers = summary?.drivers.filter((driver) => driver.capabilities.can_create) ?? [];
-  const canCreate = canEdit && eligibleDrivers.length > 0;
+  const canCreate = eligibleDrivers.length > 0;
+  const canVoidAny = activeRows.some((row) => row.canVoid);
+
+  function startAddForm() {
+    idempotencyKey.current = null;
+    setAddRows([newBonusDraftRow(nextRowId.current++)]);
+    setAddError(null);
+    setShowAddForm(true);
+  }
+
+  function updateAddRow(rowId: number, field: keyof Omit<BonusDraftRow, 'rowId'>, value: string) {
+    setAddRows((rows) => rows.map((row) => (
+      row.rowId === rowId ? { ...row, [field]: value } : row
+    )));
+    idempotencyKey.current = null;
+  }
+
+  function addBonusRow() {
+    setAddRows((rows) => [...rows, newBonusDraftRow(nextRowId.current++)]);
+    idempotencyKey.current = null;
+  }
+
+  function removeBonusRow(rowId: number) {
+    setAddRows((rows) => rows.length === 1 ? rows : rows.filter((row) => row.rowId !== rowId));
+    idempotencyKey.current = null;
+  }
 
   return (
     <div className={styles.backdrop} onClick={onClose}>
@@ -172,7 +219,7 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
             {canCreate && (
               <button
                 className={styles.addBtn}
-                onClick={() => { setAddError(null); setShowAddForm(true); }}
+                onClick={startAddForm}
               >
                 + Add Bonus
               </button>
@@ -206,7 +253,7 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
                       <th className={styles.amtCol}>Amount</th>
                       <th>Reason</th>
                       <th>Status</th>
-                      {canEdit && <th>Actions</th>}
+                      {canVoidAny && <th>Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -216,7 +263,7 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
                         <td className={styles.amtCol}>{fmtAmount(event.amount)}</td>
                         <td>{event.reason ?? event.notes ?? '—'}</td>
                         <td>{event.status}</td>
-                        {canEdit && (
+                        {canVoidAny && (
                           <td className={styles.actionsCell}>
                             {!canVoid ? '—' : confirmVoidId === event.bonus_event_id ? (
                               <span className={styles.voidConfirm}>
@@ -256,51 +303,77 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
               {/* Add form */}
               {showAddForm && (
                 <div className={styles.addForm}>
-                  <h4 className={styles.addFormTitle}>Add Bonus</h4>
-                  <form onSubmit={(e) => void handleAdd(e)} className={styles.addFormFields}>
-                    <label className={styles.formLabel}>
-                      Driver
-                      <select
-                        className={styles.formSelect}
-                        value={addDriverId}
-                        onChange={(e) => setAddDriverId(e.target.value)}
-                        required
-                      >
-                        <option value="">— select driver —</option>
-                        {eligibleDrivers.map((driver) => (
-                          <option key={driver.driver_id} value={String(driver.driver_id)}>
-                            {driver.driver_name ?? driver.driver_code ?? `Driver ${driver.driver_id}`}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                  <div className={styles.addFormHeading}>
+                    <h4 className={styles.addFormTitle}>Add Bonus</h4>
+                    <button
+                      type="button"
+                      className={styles.addRowBtn}
+                      onClick={addBonusRow}
+                      aria-label="Add another bonus row"
+                    >
+                      + Add row
+                    </button>
+                  </div>
+                  <form onSubmit={(e) => void handleAdd(e)}>
+                    <div className={styles.formRows}>
+                      {addRows.map((row) => (
+                        <div className={styles.formRow} key={row.rowId}>
+                          <label className={`${styles.formLabel} ${styles.driverField}`}>
+                            Driver
+                            <select
+                              className={styles.formSelect}
+                              value={row.driverId}
+                              onChange={(e) => updateAddRow(row.rowId, 'driverId', e.target.value)}
+                              required
+                            >
+                              <option value="">— select driver —</option>
+                              {eligibleDrivers.map((driver) => (
+                                <option key={driver.driver_id} value={String(driver.driver_id)}>
+                                  {driver.driver_name ?? driver.driver_code ?? `Driver ${driver.driver_id}`}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
 
-                    <label className={styles.formLabel}>
-                      Amount ($)
-                      <input
-                        className={styles.formInput}
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        placeholder="0.00"
-                        value={addAmount}
-                        onChange={(e) => setAddAmount(e.target.value)}
-                        required
-                      />
-                    </label>
+                          <label className={styles.formLabel}>
+                            Amount ($)
+                            <input
+                              className={styles.formInput}
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              placeholder="0.00"
+                              value={row.amount}
+                              onChange={(e) => updateAddRow(row.rowId, 'amount', e.target.value)}
+                              required
+                            />
+                          </label>
 
-                    <label className={styles.formLabel} style={{ flex: 1 }}>
-                      Reason
-                      <input
-                        className={styles.formInput}
-                        type="text"
-                        placeholder="e.g. Monthly bonus"
-                        value={addReason}
-                        onChange={(e) => setAddReason(e.target.value)}
-                        required
-                        style={{ width: '100%' }}
-                      />
-                    </label>
+                          <label className={`${styles.formLabel} ${styles.reasonField}`}>
+                            Reason
+                            <input
+                              className={styles.formInput}
+                              type="text"
+                              placeholder="e.g. Monthly bonus"
+                              value={row.reason}
+                              onChange={(e) => updateAddRow(row.rowId, 'reason', e.target.value)}
+                              required
+                            />
+                          </label>
+
+                          <button
+                            type="button"
+                            className={styles.removeRowBtn}
+                            onClick={() => removeBonusRow(row.rowId)}
+                            disabled={addRows.length === 1}
+                            aria-label="Remove bonus row"
+                            title="Remove bonus row"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
 
                     {addError && <p className={styles.formError}>{addError}</p>}
 
@@ -308,16 +381,16 @@ export function BonusDialog({ periodId, periodName, periodStatus, onClose }: Bon
                       <button
                         type="button"
                         className={styles.cancelBtn}
-                        onClick={() => { setShowAddForm(false); setAddError(null); }}
+                        onClick={() => { setShowAddForm(false); setAddError(null); idempotencyKey.current = null; }}
                       >
                         Cancel
                       </button>
                       <button
                         type="submit"
                         className={styles.primaryBtn}
-                        disabled={addSaving || !addDriverId || !addAmount || !addReason.trim()}
+                        disabled={addSaving || addRows.some((row) => !row.driverId || !row.amount || !row.reason.trim())}
                       >
-                        {addSaving ? 'Saving…' : 'Save'}
+                        {addSaving ? 'Saving…' : `Save ${addRows.length} bonus${addRows.length === 1 ? '' : 'es'}`}
                       </button>
                     </div>
                   </form>
