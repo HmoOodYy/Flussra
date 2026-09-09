@@ -30,6 +30,8 @@ import type {
   PeriodCandidateMode,
   PeriodCandidatePreview,
   PeriodCreationResult,
+  CalculationReportResponse,
+  CalculationReportView,
 } from '../types/payroll';
 
 // ---------------------------------------------------------------------------
@@ -311,6 +313,20 @@ export async function getCalculationPreview(
 ): Promise<CalculationPreviewResponse> {
   const resp = await apiClient.get<CalculationPreviewResponse>(
     `/payroll/periods/${periodId}/calculation-preview`,
+  );
+  return resp.data;
+}
+
+// ---------------------------------------------------------------------------
+// CP-5C — Current Payroll calculation reports
+// ---------------------------------------------------------------------------
+
+export async function getCalculationReport(
+  periodId: number,
+  view: CalculationReportView,
+): Promise<CalculationReportResponse> {
+  const resp = await apiClient.get<CalculationReportResponse>(
+    `/payroll/periods/${periodId}/reports/${view}`,
   );
   return resp.data;
 }

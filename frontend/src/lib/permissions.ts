@@ -71,6 +71,11 @@ export function canViewCurrentPayroll(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAny(user, PAYROLL_READ);
 }
 
+/** Current Payroll reports are UI-only and require the dedicated report permission. */
+export function canViewPayrollReports(user: UserProfile): boolean {
+  return !isDriverUser(user) && user.active_permissions.includes('reports.view');
+}
+
 /** Ledger: same gate as Current Payroll (backend uses _PAYROLL_READ_PERMS). */
 export function canViewLedger(user: UserProfile): boolean {
   return canViewCurrentPayroll(user);

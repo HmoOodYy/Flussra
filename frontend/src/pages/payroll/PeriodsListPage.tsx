@@ -2,7 +2,7 @@ import { useEffect, useReducer, useState, useCallback } from 'react';
 import apiClient from '../../lib/apiClient';
 import { getCurrentPayrollHub, resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
 import { useAuth } from '../../store/authStore';
-import { canCreatePeriod, canEntryPayroll, canFinalizePayroll } from '../../lib/permissions';
+import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
 import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary } from '../../types/payroll';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
@@ -15,6 +15,7 @@ import { DriversOffDialog } from './DriversOffDialog';
 import { BonusDialog } from './BonusDialog';
 import { CalculationPreviewDialog } from './CalculationPreviewDialog';
 import { FinalizationPreviewDialog } from './FinalizationPreviewDialog';
+import { CurrentPayrollReportsDialog } from './CurrentPayrollReportsDialog';
 import styles from './PeriodsListPage.module.css';
 
 // ── Current Payroll status policy ─────────────────────────────────────────────
@@ -95,14 +96,16 @@ interface PeriodCardProps {
   onBonus: () => void;
   onPreview: () => void;
   onFinalize: () => void;
+  onReports: () => void;
   onReload: () => void;
   canEntry: boolean;
   canPreview: boolean;
   canFinalize: boolean;
+  canViewReports: boolean;
 }
 
 function PeriodCard({
-  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReload, canEntry, canPreview, canFinalize,
+  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReports, onReload, canEntry, canPreview, canFinalize, canViewReports,
 }: PeriodCardProps) {
   const [transitioning,  setTransitioning]  = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
@@ -197,6 +200,10 @@ function PeriodCard({
 
         {canPreview && isEnterable && (
           <button className={styles.actionBtn} onClick={onPreview}>View Expected Payroll</button>
+        )}
+
+        {canViewReports && (isDraft || isOpen || isReturned || isApproved) && (
+          <button className={styles.actionBtn} onClick={onReports}>Reports</button>
         )}
 
         {/* Entry-only actions — require payroll.entry */}
@@ -342,6 +349,7 @@ export function PeriodsListPage() {
     (permission) => permission === 'payroll.view' || permission === 'payroll.entry',
   ) : false;
   const userCanFinalize = user ? canFinalizePayroll(user): false;
+  const userCanViewReports = user ? canViewPayrollReports(user) : false;
 
   const [branchesSt,  dispatchBranches] = useReducer(branchesReducer, { branches: [], loading: true });
   const [periodsSt,   dispatchPeriods]  = useReducer(periodsReducer,  { periods: [], loading: true, error: '' });
@@ -358,6 +366,7 @@ export function PeriodsListPage() {
   const [bonusDialogPeriodId,      setBonusDialogPeriodId]      = useState<number | null>(null);
   const [calculationPreviewPeriodId, setCalculationPreviewPeriodId] = useState<number | null>(null);
   const [finalizeDialogPeriodId,   setFinalizeDialogPeriodId]   = useState<number | null>(null);
+  const [reportsDialogPeriodId, setReportsDialogPeriodId] = useState<number | null>(null);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -489,6 +498,7 @@ export function PeriodsListPage() {
         }}
         onPreview={() => setCalculationPreviewPeriodId(p.payroll_period_id)}
         onFinalize={() => setFinalizeDialogPeriodId(p.payroll_period_id)}
+        onReports={() => setReportsDialogPeriodId(p.payroll_period_id)}
         onReload={() => {
           setCalculationPreviewPeriodId(null);
           refreshHub();
@@ -496,6 +506,7 @@ export function PeriodsListPage() {
         canEntry={userCanEntry}
         canPreview={userCanPreview}
         canFinalize={userCanFinalize}
+        canViewReports={userCanViewReports}
       />
     );
   }
@@ -682,6 +693,14 @@ export function PeriodsListPage() {
           onClose={() => setFinalizeDialogPeriodId(null)}
           onFinalized={refreshHub}
           onStateConflict={refreshHub}
+        />
+      )}
+
+      {reportsDialogPeriodId != null && (
+        <CurrentPayrollReportsDialog
+          periodId={reportsDialogPeriodId}
+          periodName={findPeriod(reportsDialogPeriodId)?.period_name}
+          onClose={() => setReportsDialogPeriodId(null)}
         />
       )}
     </div>
