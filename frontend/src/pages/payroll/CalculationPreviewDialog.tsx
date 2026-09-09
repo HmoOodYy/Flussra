@@ -130,6 +130,7 @@ function FinancialLines({ drivers }: { drivers: CalculationPreviewDriver[] }) {
 interface CalculationPreviewDialogProps {
   periodId: number;
   periodName?: string;
+  workingDrivers?: number | null;
   onClose: () => void;
   onLifecycleChanged: () => void;
 }
@@ -137,6 +138,7 @@ interface CalculationPreviewDialogProps {
 export function CalculationPreviewDialog({
   periodId,
   periodName,
+  workingDrivers,
   onClose,
   onLifecycleChanged,
 }: CalculationPreviewDialogProps) {
@@ -224,15 +226,15 @@ export function CalculationPreviewDialog({
               <div className={styles.summary}>
                 <div>
                   <span>Expected Payroll</span>
-                  <strong>{formatMoney(preview.total_expected_pay)}</strong>
+                  <strong>{preview.financials_available ? formatMoney(preview.total_expected_pay) : 'Unavailable'}</strong>
                 </div>
                 <div>
                   <span>Period State</span>
                   <strong>{preview.status}</strong>
                 </div>
                 <div>
-                  <span>Drivers</span>
-                  <strong>{preview.drivers.length}</strong>
+                  <span>Working Drivers</span>
+                  <strong>{workingDrivers == null ? 'Unavailable' : workingDrivers}</strong>
                 </div>
                 <div>
                   <span>Calculation</span>

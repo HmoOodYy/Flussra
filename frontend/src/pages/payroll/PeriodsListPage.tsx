@@ -433,6 +433,16 @@ export function PeriodsListPage() {
     return periodsSt.periods.find((p) => p.payroll_period_id === id) ?? null;
   }
 
+  function findWorkingDrivers(periodId: number | null): number | null {
+    if (periodId == null) return null;
+    for (const branch of workflowBranches) {
+      for (const slot of [branch.slots.open, branch.slots.returned]) {
+        if (slot?.period_id === periodId) return slot.metrics.working_drivers;
+      }
+    }
+    return null;
+  }
+
   // ── Client-side split ─────────────────────────────────────────────────────
   // activePeriods: Draft + Open + Returned, refined by filterStatus dropdown.
   // approvedPeriods: always shown in their own "Ready to Finalize" section.
@@ -656,6 +666,7 @@ export function PeriodsListPage() {
         <CalculationPreviewDialog
           periodId={calculationPreviewPeriodId}
           periodName={findPeriod(calculationPreviewPeriodId)?.period_name}
+          workingDrivers={findWorkingDrivers(calculationPreviewPeriodId)}
           onClose={() => setCalculationPreviewPeriodId(null)}
           onLifecycleChanged={() => {
             setCalculationPreviewPeriodId(null);
