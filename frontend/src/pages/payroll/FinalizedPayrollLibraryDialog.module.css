@@ -157,10 +157,21 @@
 .table th { background: #f8fafc; color: #374151; font-size: 0.72rem; white-space: nowrap; }
 .table td small { display: block; margin-top: 0.15rem; color: #64748b; font-size: 0.68rem; line-height: 1.25; }
 .numeric { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.auditEventList { display: grid; gap: 0.7rem; margin-top: 0.65rem; }
+.auditEvent { border: 1px solid #e5e7eb; border-radius: 6px; padding: 0.7rem; background: #fff; }
+.auditEventHeading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.auditEventHeading > div { display: flex; flex-direction: column; gap: 0.15rem; }
+.auditEventHeading strong { color: #111827; font-size: 0.82rem; }
+.auditEventHeading span { color: #64748b; font-size: 0.72rem; }
+.auditFacts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.35rem 0.8rem; margin: 0.6rem 0 0; }
+.auditFacts > div { min-width: 0; border-top: 1px solid #f1f5f9; padding-top: 0.35rem; }
+.auditFacts dt { color: #64748b; font-size: 0.7rem; }
+.auditFacts dd { margin: 0.12rem 0 0; color: #111827; font-size: 0.75rem; overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
   .metadataGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .provenanceGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .auditFacts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 620px) {
@@ -169,7 +180,8 @@
   .sectionList,
   .kpiGrid,
   .offSummaryGrid,
-  .provenanceGrid { grid-template-columns: 1fr; }
+  .provenanceGrid,
+  .auditFacts { grid-template-columns: 1fr; }
   .header { padding: 0.85rem 1rem; }
   .tabs { padding: 0.65rem 1rem; }
   .body { padding: 0.85rem 1rem 1rem; }

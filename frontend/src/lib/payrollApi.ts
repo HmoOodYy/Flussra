@@ -38,6 +38,7 @@ import type {
   FinalizedReportView,
   FinalizedOffDriversResponse,
   FinalizedRatesUsedResponse,
+  FinalizedAuditResponse,
 } from '../types/payroll';
 
 // ---------------------------------------------------------------------------
@@ -390,6 +391,15 @@ export async function getFinalizedRatesUsed(
 ): Promise<FinalizedRatesUsedResponse> {
   const resp = await apiClient.get<FinalizedRatesUsedResponse>(
     `/payroll/finalized/${periodId}/rates-used`,
+  );
+  return resp.data;
+}
+
+export async function getFinalizedAudit(
+  periodId: number,
+): Promise<FinalizedAuditResponse> {
+  const resp = await apiClient.get<FinalizedAuditResponse>(
+    `/payroll/finalized/${periodId}/audit`,
   );
   return resp.data;
 }

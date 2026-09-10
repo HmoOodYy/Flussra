@@ -537,6 +537,18 @@ async def build_overview(
     rates_used_availability = await _finalized_rate_evidence_availability(
         period, snapshot, provenance, db,
     )
+    audit_permission = await db.execute(text("""
+        SELECT sec.fn_UserHasPermission(
+            :user_id, :company_id, :branch_id, 'ledger.audit.view'
+        )
+    """), {
+        "user_id": user_id, "company_id": period["companyid"],
+        "branch_id": period["branchid"],
+    })
+    audit_availability = (
+        _availability("AVAILABLE") if audit_permission.scalar_one()
+        else _availability("UNAVAILABLE", "AUDIT_PERMISSION_REQUIRED")
+    )
     if snapshot is None:
         evidence = _availability("UNAVAILABLE", provenance["reason_code"])
     elif snapshot["reportevidenceversion"] is None:
@@ -561,7 +573,7 @@ async def build_overview(
             "report_evidence": evidence, "reports": _availability(financial_state),
             "off_status": off_status_availability,
             "rates_used": rates_used_availability,
-            "audit": _availability("UNAVAILABLE", "P6D_NOT_IMPLEMENTED"),
+            "audit": audit_availability,
         },
         "generated_at_utc": datetime.now(UTC),
     }

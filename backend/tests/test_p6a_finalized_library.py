@@ -235,6 +235,9 @@ async def test_finalized_routes_enforce_ledger_view_and_lifecycle_scope(
     ledger_token = await _scoped_permission_token(
         session_client, auth_token, paytest_branch_id, ["ledger.view"],
     )
+    audit_token = await _scoped_permission_token(
+        session_client, auth_token, paytest_branch_id, ["ledger.view", "ledger.audit.view"],
+    )
     payroll_only_token = await _scoped_permission_token(
         session_client, auth_token, paytest_branch_id, ["payroll.view"],
     )
@@ -245,6 +248,16 @@ async def test_finalized_routes_enforce_ledger_view_and_lifecycle_scope(
         f"/payroll/finalized/{period_id}/overview", headers=_auth(ledger_token),
     )
     assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["section_availability"]["audit"] == {
+        "state": "UNAVAILABLE", "reason_code": "AUDIT_PERMISSION_REQUIRED",
+    }
+    audit_allowed = await session_client.get(
+        f"/payroll/finalized/{period_id}/overview", headers=_auth(audit_token),
+    )
+    assert audit_allowed.status_code == 200, audit_allowed.text
+    assert audit_allowed.json()["section_availability"]["audit"] == {
+        "state": "AVAILABLE", "reason_code": None,
+    }
     for token in (payroll_only_token, audit_only_token):
         denied = await session_client.get(
             f"/payroll/finalized/{period_id}/overview", headers=_auth(token),

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { getFinalizedOffDrivers, getFinalizedOverview, getFinalizedRatesUsed, getFinalizedReport } from '../../lib/payrollApi';
+import { getFinalizedAudit, getFinalizedOffDrivers, getFinalizedOverview, getFinalizedRatesUsed, getFinalizedReport } from '../../lib/payrollApi';
 import type {
   FinalizedAvailabilityState,
+  FinalizedAuditEvent,
+  FinalizedAuditResponse,
   FinalizedCalculationReportResponse,
   FinalizedOffDriversResponse,
   FinalizedOverviewResponse,
@@ -19,7 +21,11 @@ const REPORT_TABS: readonly { view: FinalizedReportView; label: string }[] = [
   { view: 'mixed', label: 'Mixed' },
 ];
 
-type FinalizedLibraryTab = 'overview' | FinalizedReportView | 'off-status' | 'rates-used';
+type FinalizedLibraryTab = 'overview' | FinalizedReportView | 'off-status' | 'rates-used' | 'audit';
+
+function isFinalizedReportView(tab: FinalizedLibraryTab): tab is FinalizedReportView {
+  return REPORT_TABS.some((item) => item.view === tab);
+}
 
 const AVAILABILITY_LABELS: Record<FinalizedAvailabilityState, string> = {
   AVAILABLE: 'Available',
@@ -513,6 +519,247 @@ function RatesUsedBody({ response }: { response: FinalizedRatesUsedResponse }) {
   );
 }
 
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) return 'Not provided';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function formatAuditValue(value: unknown): string {
+  if (value == null) return 'Not provided';
+  if (typeof value === 'object') {
+    if (Array.isArray(value)) return value.map((item) => formatAuditValue(item)).join(', ');
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${key}: ${formatAuditValue(item)}`)
+      .join('; ');
+  }
+  return formatValue(value);
+}
+
+function AuditAvailabilityList({ response }: { response: FinalizedAuditResponse }) {
+  return (
+    <div className={styles.availabilityRow}>
+      {Object.entries(response.metadata.section_availability).map(([key, availability]) => (
+        <span key={key}>
+          <span className={styles.availabilityLabel}>{key.replaceAll('_', ' ')}</span>
+          <AvailabilityBadge availability={availability} />
+          {availability.reason_code && <small>{availability.reason_code}</small>}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function AuditStateChanges({ event }: { event: FinalizedAuditEvent }) {
+  const before = event.before_state ?? {};
+  const after = event.after_state ?? {};
+  const fields = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
+  if (fields.length === 0) return <StateMessage>No field-level change details were captured.</StateMessage>;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Changed field</th><th>Before</th><th>After</th></tr></thead>
+        <tbody>{fields.map((field) => (
+          <tr key={field}>
+            <th scope="row">{field}</th>
+            <td>{formatAuditValue(before[field])}</td>
+            <td>{formatAuditValue(after[field])}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function AuditEventCard({ event }: { event: FinalizedAuditEvent }) {
+  return (
+    <article className={styles.auditEvent}>
+      <div className={styles.auditEventHeading}>
+        <div><strong>{event.action_code}</strong><span>{event.domain} · Event {event.event_id}</span></div>
+        <span>{formatDateTime(event.occurred_at_utc)}</span>
+      </div>
+      <dl className={styles.auditFacts}>
+        <div><dt>Actor</dt><dd>{event.actor_display_name || `User #${event.actor_user_id}`}</dd></div>
+        <div><dt>Responsibility</dt><dd>{formatAuditValue(event.responsibility_context)}</dd></div>
+        <div><dt>Revision</dt><dd>{event.revision_number ?? 'Not provided'}</dd></div>
+        <div><dt>Snapshot</dt><dd>{event.snapshot_id ?? 'Not provided'}</dd></div>
+        <div><dt>Source</dt><dd>{event.source_entity_type} · {event.source_entity_id}</dd></div>
+        {event.driver_id != null && <div><dt>Driver</dt><dd>{event.driver_id}</dd></div>}
+        {event.work_date != null && <div><dt>Work date</dt><dd>{event.work_date}</dd></div>}
+        {event.review_item_id != null && <div><dt>Review item</dt><dd>{event.review_item_id}</dd></div>}
+        {event.reason != null && <div><dt>Reason</dt><dd>{event.reason}</dd></div>}
+        {event.correlation_id != null && <div><dt>Correlation</dt><dd>{event.correlation_id}</dd></div>}
+      </dl>
+      <AuditStateChanges event={event} />
+    </article>
+  );
+}
+
+function AuditEventSection({
+  title,
+  availability,
+  events,
+}: {
+  title: string;
+  availability: FinalizedSectionAvailability | undefined;
+  events: FinalizedAuditEvent[];
+}) {
+  const state = availability?.state;
+  const unavailable = !availability || state === 'UNAVAILABLE';
+  return (
+    <section className={styles.section}>
+      <div className={styles.sectionTitleRow}><h3>{title}</h3><AvailabilityBadge availability={availability} /></div>
+      {unavailable ? (
+        <StateMessage>{availabilityMessage(availability, 'Immutable audit rows are unavailable.')}</StateMessage>
+      ) : state === 'EMPTY' ? (
+        <StateMessage>No captured events.</StateMessage>
+      ) : (
+        <>
+          {state === 'PARTIAL' && <StateMessage>{availabilityMessage(availability, 'Immutable audit history is partial.')}</StateMessage>}
+          {events.length === 0 ? <StateMessage>{state === 'PARTIAL' ? 'No available rows were captured for this section.' : 'No captured events.'}</StateMessage> : (
+            <div className={styles.auditEventList}>{events.map((event) => <AuditEventCard key={event.event_id} event={event} />)}</div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function LifecycleEventTable({ events }: { events: FinalizedAuditResponse['lifecycle_events'] }) {
+  if (events.length === 0) return <StateMessage>No captured lifecycle events.</StateMessage>;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Action</th><th>Actor</th><th>When</th><th>Revision</th><th>Snapshot</th><th>Reason</th></tr></thead>
+        <tbody>{events.map((event, index) => (
+          <tr key={`${event.action_code}-${event.action_at_utc}-${index}`}>
+            <td>{event.action_code}</td>
+            <td>{event.actor_display_name || `User #${event.actor_user_id}`}<small>{formatAuditValue(event.responsibility_context)}</small></td>
+            <td>{formatDateTime(event.action_at_utc)}</td>
+            <td>{event.revision_number ?? 'Not provided'}</td>
+            <td>{event.snapshot_id ?? 'Not provided'}</td>
+            <td>{event.reason ?? 'Not provided'}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function RevisionGroupsTable({ groups }: { groups: FinalizedAuditResponse['revision_groups'] }) {
+  if (groups.length === 0) return <StateMessage>No revision groups are available.</StateMessage>;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Revision</th><th>Snapshot</th><th>Submission</th><th>Final approved</th><th>Events</th><th>Review comments</th></tr></thead>
+        <tbody>{groups.map((group) => (
+          <tr key={group.snapshot_id}>
+            <td>{group.revision_number}</td>
+            <td>{group.snapshot_id}</td>
+            <td>{group.submit_action ?? 'Not provided'}</td>
+            <td>{group.is_final_approved_revision ? 'Yes' : 'No'}</td>
+            <td>{group.event_ids.length}</td>
+            <td>{group.review_comment_event_ids.length}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function RateRuleProvenanceTable({ rows }: { rows: FinalizedAuditResponse['rate_rule_provenance'] }) {
+  if (rows.length === 0) return <StateMessage>No rate/rule provenance rows are available.</StateMessage>;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Definition</th><th>Evidence kind</th><th>Fingerprint</th></tr></thead>
+        <tbody>{rows.map((row, index) => (
+          <tr key={String(row.used_rate_definition_id ?? index)}>
+            <td>{formatAuditValue(row.used_rate_definition_id)}</td>
+            <td>{formatAuditValue(row.evidence_kind)}</td>
+            <td>{formatAuditValue(row.definition_fingerprint)}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function AuditChronologyTable({ response }: { response: FinalizedAuditResponse }) {
+  const relevantAvailability = Object.entries(response.metadata.section_availability)
+    .filter(([key]) => key !== 'snapshot_provenance');
+  const hasUnavailableSections = relevantAvailability.some(([, availability]) => (
+    availability.state === 'PARTIAL' || availability.state === 'UNAVAILABLE'
+  ));
+  if (response.chronology.length === 0) {
+    return <StateMessage>{hasUnavailableSections
+      ? 'Immutable chronology rows are not fully available; see the section states above.'
+      : 'No captured chronology events.'}</StateMessage>;
+  }
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Event</th><th>When</th><th>Domain / action</th><th>Actor</th><th>Revision</th><th>Snapshot</th></tr></thead>
+        <tbody>{response.chronology.map((event) => (
+          <tr key={event.event_id}>
+            <td>{event.event_id}</td>
+            <td>{formatDateTime(event.occurred_at_utc)}</td>
+            <td>{event.domain}<small>{event.action_code}</small></td>
+            <td>{event.actor_display_name || `User #${event.actor_user_id}`}</td>
+            <td>{event.revision_number ?? 'Not provided'}</td>
+            <td>{event.snapshot_id ?? 'Not provided'}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function AuditBody({ response }: { response: FinalizedAuditResponse }) {
+  const { metadata } = response;
+  return (
+    <>
+      <div className={styles.metadataGrid}>
+        <div><span>Period</span><strong>{metadata.period_name || metadata.period_code}</strong><small>{metadata.period_code}</small></div>
+        <div><span>Status</span><strong>{metadata.period_status}</strong><small>Branch {metadata.branch_id}</small></div>
+        <div><span>Authority</span><strong>{metadata.authority_kind}</strong><small>Immutable P6D evidence</small></div>
+        <div><span>Revision</span><strong>{metadata.revision_number ?? 'Not provided'}</strong><small>{metadata.snapshot_id == null ? 'No snapshot' : `Snapshot ${metadata.snapshot_id}`}</small></div>
+        <div><span>Evidence</span><strong>{metadata.evidence_version ?? 'Not provided'}</strong><small>{metadata.complete_period_chronology_available ? 'Complete chronology available' : 'Chronology has unavailable sections'}</small></div>
+      </div>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Audit availability</h3><span className={styles.muted}>Immutable evidence only</span></div>
+        <AuditAvailabilityList response={response} />
+        <div className={styles.provenanceGrid}>
+          <div><span>Snapshot hash</span><strong title={metadata.snapshot_hash ?? undefined}>{formatHash(metadata.snapshot_hash)}</strong></div>
+          <div><span>Period chronology</span><strong>{metadata.complete_period_chronology_available ? 'Complete' : 'Partial'}</strong></div>
+          <div><span>Generated</span><strong>{formatDateTime(metadata.generated_at_utc)}</strong></div>
+        </div>
+      </section>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Workflow lifecycle</h3><span className={styles.muted}>Frozen actors and responsibility</span></div>
+        <LifecycleEventTable events={response.lifecycle_events} />
+      </section>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Evidence chronology</h3><span className={styles.muted}>Exact backend event order</span></div>
+        <AuditChronologyTable response={response} />
+      </section>
+      <AuditEventSection title="Source changes" availability={metadata.section_availability.source} events={response.source_events} />
+      <AuditEventSection title="Status and note changes" availability={metadata.section_availability.status_note} events={response.status_note_events} />
+      <AuditEventSection title="Bonus changes" availability={metadata.section_availability.bonus} events={response.bonus_events} />
+      <AuditEventSection title="Review comments and decisions" availability={metadata.section_availability.review_comment} events={response.review_events} />
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Revision groups</h3><span className={styles.muted}>Exact backend grouping</span></div>
+        <RevisionGroupsTable groups={response.revision_groups} />
+      </section>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Rate/rule provenance</h3><span className={styles.muted}>Immutable used definitions</span></div>
+        <RateRuleProvenanceTable rows={response.rate_rule_provenance} />
+      </section>
+    </>
+  );
+}
+
 function OverviewBody({ overview }: { overview: FinalizedOverviewResponse }) {
   const summary = overview.financial_summary;
   const availabilityEntries = Object.entries(overview.section_availability);
@@ -581,7 +828,15 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
   const [ratesUsedLoading, setRatesUsedLoading] = useState(false);
   const [ratesUsedError, setRatesUsedError] = useState<string | null>(null);
   const [ratesUsedRetry, setRatesUsedRetry] = useState(0);
+  const [audit, setAudit] = useState<FinalizedAuditResponse | null>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditRetry, setAuditRetry] = useState(0);
   const requestRef = useRef(0);
+  const auditRequestRef = useRef(0);
+  const auditAvailability = overview?.section_availability.audit;
+  const canViewAudit = auditAvailability != null && auditAvailability.state !== 'UNAVAILABLE';
+  const visibleTab: FinalizedLibraryTab = activeTab === 'audit' && !canViewAudit ? 'overview' : activeTab;
 
   useEffect(() => {
     let active = true;
@@ -632,6 +887,21 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     }
   }, [period.payroll_period_id]);
 
+  const loadAudit = useCallback(async () => {
+    const requestId = auditRequestRef.current + 1;
+    auditRequestRef.current = requestId;
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const data = await getFinalizedAudit(period.payroll_period_id);
+      if (auditRequestRef.current === requestId) setAudit(data);
+    } catch (error: unknown) {
+      if (auditRequestRef.current === requestId) setAuditError(errorDetail(error, 'Failed to load finalized audit history.'));
+    } finally {
+      if (auditRequestRef.current === requestId) setAuditLoading(false);
+    }
+  }, [period.payroll_period_id]);
+
   useEffect(() => {
     if (!overview || activeTab !== 'off-status' || offStatus != null) return;
     const timer = window.setTimeout(() => { void loadOffStatus(); }, 0);
@@ -645,8 +915,15 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
   }, [activeTab, loadRatesUsed, overview, ratesUsed, ratesUsedRetry]);
 
   useEffect(() => {
-    if (!overview || activeTab === 'overview' || activeTab === 'off-status' || activeTab === 'rates-used') return;
-    const timer = window.setTimeout(() => { void loadReport(activeTab); }, 0);
+    if (!overview || !canViewAudit || activeTab !== 'audit' || audit != null) return;
+    const timer = window.setTimeout(() => { void loadAudit(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, audit, auditRetry, canViewAudit, loadAudit, overview]);
+
+  useEffect(() => {
+    if (!overview || !isFinalizedReportView(activeTab)) return;
+    const reportView = activeTab;
+    const timer = window.setTimeout(() => { void loadReport(reportView); }, 0);
     return () => window.clearTimeout(timer);
   }, [activeTab, loadReport, overview, reportRetry]);
 
@@ -656,8 +933,11 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     return () => document.removeEventListener('keydown', handleKey);
   }, [onClose]);
 
+  useEffect(() => () => { auditRequestRef.current += 1; }, []);
+
   function selectTab(tab: FinalizedLibraryTab) {
     if (tab === activeTab) return;
+    auditRequestRef.current += 1;
     setActiveTab(tab);
     setReport(null);
     setReportError(null);
@@ -666,6 +946,8 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     setOffStatusLoading(tab === 'off-status' && offStatus == null);
     setRatesUsedError(null);
     setRatesUsedLoading(tab === 'rates-used' && ratesUsed == null);
+    setAuditError(null);
+    setAuditLoading(tab === 'audit' && audit == null);
   }
 
   return (
@@ -680,23 +962,28 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
           {REPORT_TABS.map((tab) => <button key={tab.view} className={activeTab === tab.view ? styles.activeTab : styles.tab} onClick={() => selectTab(tab.view)} type="button" role="tab" aria-selected={activeTab === tab.view} disabled={!overview}>{tab.label}</button>)}
           <button className={activeTab === 'off-status' ? styles.activeTab : styles.tab} onClick={() => selectTab('off-status')} type="button" role="tab" aria-selected={activeTab === 'off-status'} disabled={!overview}>Off / Status</button>
           <button className={activeTab === 'rates-used' ? styles.activeTab : styles.tab} onClick={() => selectTab('rates-used')} type="button" role="tab" aria-selected={activeTab === 'rates-used'} disabled={!overview}>Rates / Bonus</button>
+          {canViewAudit && <button className={activeTab === 'audit' ? styles.activeTab : styles.tab} onClick={() => selectTab('audit')} type="button" role="tab" aria-selected={activeTab === 'audit'}>Audit</button>}
         </nav>
         <div className={styles.body}>
           {overviewLoading ? <StateMessage>Loading finalized payroll overview…</StateMessage> : overviewError ? (
-            <div className={styles.errorBox}><p>{overviewError}</p><button className={styles.retryButton} onClick={() => { setOverviewLoading(true); setOverviewError(null); setOverview(null); setActiveTab('overview'); setOverviewRetry((value) => value + 1); }} type="button">Retry</button></div>
-          ) : overview == null ? <StateMessage>Finalized overview is unavailable.</StateMessage> : activeTab === 'overview' ? <OverviewBody overview={overview} /> : activeTab === 'off-status' ? offStatusLoading ? (
+            <div className={styles.errorBox}><p>{overviewError}</p><button className={styles.retryButton} onClick={() => { auditRequestRef.current += 1; setOverviewLoading(true); setOverviewError(null); setOverview(null); setAudit(null); setActiveTab('overview'); setOverviewRetry((value) => value + 1); }} type="button">Retry</button></div>
+          ) : overview == null ? <StateMessage>Finalized overview is unavailable.</StateMessage> : visibleTab === 'overview' ? <OverviewBody overview={overview} /> : visibleTab === 'off-status' ? offStatusLoading ? (
             <StateMessage>Loading finalized Off and Status history…</StateMessage>
           ) : offStatusError ? (
             <div className={styles.errorBox}><p>{offStatusError}</p><button className={styles.retryButton} onClick={() => { setOffStatusLoading(true); setOffStatusError(null); setOffStatus(null); setOffStatusRetry((value) => value + 1); }} type="button">Retry</button></div>
-          ) : offStatus == null ? <StateMessage>Finalized Off and Status history is unavailable.</StateMessage> : <OffStatusBody response={offStatus} /> : activeTab === 'rates-used' ? ratesUsedLoading ? (
+          ) : offStatus == null ? <StateMessage>Finalized Off and Status history is unavailable.</StateMessage> : <OffStatusBody response={offStatus} /> : visibleTab === 'rates-used' ? ratesUsedLoading ? (
             <StateMessage>Loading finalized rates and Bonus evidence…</StateMessage>
           ) : ratesUsedError ? (
             <div className={styles.errorBox}><p>{ratesUsedError}</p><button className={styles.retryButton} onClick={() => { setRatesUsedLoading(true); setRatesUsedError(null); setRatesUsed(null); setRatesUsedRetry((value) => value + 1); }} type="button">Retry</button></div>
-          ) : ratesUsed == null ? <StateMessage>Finalized rates and Bonus evidence is unavailable.</StateMessage> : <RatesUsedBody response={ratesUsed} /> : reportLoading ? (
+          ) : ratesUsed == null ? <StateMessage>Finalized rates and Bonus evidence is unavailable.</StateMessage> : <RatesUsedBody response={ratesUsed} /> : visibleTab === 'audit' ? auditLoading ? (
+            <StateMessage>Loading finalized audit history…</StateMessage>
+          ) : auditError ? (
+            <div className={styles.errorBox}><p>{auditError}</p><button className={styles.retryButton} onClick={() => { setAuditLoading(true); setAuditError(null); setAudit(null); setAuditRetry((value) => value + 1); }} type="button">Retry</button></div>
+          ) : audit == null ? <StateMessage>Finalized audit history is unavailable.</StateMessage> : <AuditBody response={audit} /> : reportLoading ? (
             <StateMessage>Loading {REPORT_TABS.find((tab) => tab.view === activeTab)?.label.toLowerCase() ?? 'report'}…</StateMessage>
           ) : reportError ? (
             <div className={styles.errorBox}><p>{reportError}</p><button className={styles.retryButton} onClick={() => { setReportLoading(true); setReportError(null); setReportRetry((value) => value + 1); }} type="button">Retry</button></div>
-          ) : report == null ? <StateMessage>No finalized report data is available.</StateMessage> : <ReportBody report={report} view={activeTab} />}
+          ) : report == null ? <StateMessage>No finalized report data is available.</StateMessage> : <ReportBody report={report} view={isFinalizedReportView(visibleTab) ? visibleTab : 'drivers'} />}
         </div>
       </div>
     </div>
