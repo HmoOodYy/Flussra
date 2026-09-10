@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { getFinalizedOffDrivers, getFinalizedOverview, getFinalizedReport } from '../../lib/payrollApi';
+import { getFinalizedOffDrivers, getFinalizedOverview, getFinalizedRatesUsed, getFinalizedReport } from '../../lib/payrollApi';
 import type {
   FinalizedAvailabilityState,
   FinalizedCalculationReportResponse,
   FinalizedOffDriversResponse,
   FinalizedOverviewResponse,
+  FinalizedRatesUsedResponse,
   FinalizedReportView,
   FinalizedSectionAvailability,
   ReportDriver,
@@ -18,7 +19,7 @@ const REPORT_TABS: readonly { view: FinalizedReportView; label: string }[] = [
   { view: 'mixed', label: 'Mixed' },
 ];
 
-type FinalizedLibraryTab = 'overview' | FinalizedReportView | 'off-status';
+type FinalizedLibraryTab = 'overview' | FinalizedReportView | 'off-status' | 'rates-used';
 
 const AVAILABILITY_LABELS: Record<FinalizedAvailabilityState, string> = {
   AVAILABLE: 'Available',
@@ -402,6 +403,116 @@ function OffStatusBody({ response }: { response: FinalizedOffDriversResponse }) 
   );
 }
 
+function rateDefinitionLabel(definition: FinalizedRatesUsedResponse['used_rate_definitions'][number]): string {
+  if (definition.evidence_kind === 'DriverRate') return 'Driver rate';
+  if (definition.evidence_kind === 'DriverPayRule') return 'Driver pay rule';
+  return definition.evidence_kind;
+}
+
+function RateDefinitionTable({ response }: { response: FinalizedRatesUsedResponse }) {
+  if (response.used_rate_definitions.length === 0) return null;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Driver</th><th>Pay item</th><th>Definition</th><th>Rate / behavior</th><th>Rule metadata</th><th>Effective</th><th>Used</th></tr></thead>
+        <tbody>
+          {response.used_rate_definitions.map((definition) => {
+            const driver = definition.driver_name || `Driver #${definition.driver_id}`;
+            const payItem = definition.pay_item_label || definition.pay_item_code || (definition.pay_item_id == null ? 'Not provided' : `PayItem #${definition.pay_item_id}`);
+            const rateType = definition.rate_type_name || definition.rate_type_code;
+            const rateDetails = [rateType, definition.unit_name, definition.rate_behavior, definition.rate_status].filter(Boolean).join(' · ');
+            const ruleDetails = [definition.rule_type, definition.rule_amount == null ? null : `Amount ${formatMoney(definition.rule_amount)}`, definition.block_size == null ? null : `Block ${definition.block_size}`, definition.rounding_rule, definition.rule_status].filter(Boolean).join(' · ');
+            const effective = definition.effective_from || definition.effective_to
+              ? `${definition.effective_from ?? 'Open'} to ${definition.effective_to ?? 'Open'}`
+              : 'Not provided';
+            return (
+              <tr key={definition.used_rate_definition_id}>
+                <td>{driver}<small>{definition.driver_code ?? `ID ${definition.driver_id}`}</small></td>
+                <td>{payItem}<small>{definition.pay_item_id == null ? 'ID not provided' : `ID ${definition.pay_item_id}`}</small></td>
+                <td>{rateDefinitionLabel(definition)}<small>{definition.source_type}</small></td>
+                <td>{definition.rate_amount == null ? 'Not provided' : formatMoney(definition.rate_amount)}<small>{rateDetails || 'Details not provided'}</small></td>
+                <td>{ruleDetails || 'Not provided'}</td>
+                <td>{effective}</td>
+                <td className={styles.numeric}>{definition.line_use_count}<small>{definition.snapshot_line_ids.length === 0 ? 'No line references' : `${definition.snapshot_line_ids.length} snapshot line${definition.snapshot_line_ids.length === 1 ? '' : 's'}`}</small></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BonusEvidenceTable({ response }: { response: FinalizedRatesUsedResponse }) {
+  if (response.bonus_events.length === 0) return null;
+  return (
+    <div className={styles.tableWrap}>
+      <table className={styles.table}>
+        <thead><tr><th>Driver</th><th>Amount</th><th>Reason</th><th>Notes</th><th>Revision</th><th>Creator</th><th>Created</th></tr></thead>
+        <tbody>
+          {response.bonus_events.map((event) => (
+            <tr key={event.bonus_event_id}>
+              <td>{event.driver_name || `Driver #${event.driver_id}`}<small>{event.driver_code ?? `ID ${event.driver_id}`}</small></td>
+              <td className={styles.numeric}>{formatMoney(event.amount)}</td>
+              <td>{event.reason ?? 'Not provided'}</td>
+              <td>{event.notes ?? 'Not provided'}</td>
+              <td className={styles.numeric}>{event.data_revision}</td>
+              <td>{event.creator_display_name ?? (event.creator_user_id == null ? 'Not provided' : `User #${event.creator_user_id}`)}</td>
+              <td>{new Date(event.created_at_utc).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RatesUsedBody({ response }: { response: FinalizedRatesUsedResponse }) {
+  const { metadata } = response;
+  const ratesAvailability = metadata.section_availability.rates_rules;
+  const bonusAvailability = metadata.section_availability.bonus_evidence;
+  const ratesUnavailable = !ratesAvailability || ratesAvailability.state === 'UNAVAILABLE';
+  const bonusUnavailable = !bonusAvailability || bonusAvailability.state === 'UNAVAILABLE';
+  return (
+    <>
+      <div className={styles.metadataGrid}>
+        <div><span>Period</span><strong>{metadata.period_name || metadata.period_code}</strong><small>{metadata.period_code}</small></div>
+        <div><span>Status</span><strong>{metadata.period_status}</strong><small>Branch {metadata.branch_id}</small></div>
+        <div><span>Authority</span><strong>{metadata.authority_kind}</strong><small>Immutable used definitions</small></div>
+        <div><span>Revision</span><strong>{metadata.revision_number ?? 'Not provided'}</strong><small>{metadata.snapshot_id == null ? 'No snapshot' : `Snapshot ${metadata.snapshot_id}`}</small></div>
+        <div><span>Evidence</span><strong><AvailabilityBadge availability={ratesAvailability} /></strong><small>{metadata.report_evidence_version == null ? 'Version not provided' : `Version ${metadata.report_evidence_version}`}</small></div>
+      </div>
+      <div className={styles.availabilityRow}>
+        {Object.entries(metadata.section_availability).map(([key, availability]) => (
+          <span key={key}><span className={styles.availabilityLabel}>{key.replaceAll('_', ' ')}</span><AvailabilityBadge availability={availability} /></span>
+        ))}
+      </div>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Rates and rules used</h3><AvailabilityBadge availability={ratesAvailability} /></div>
+        {ratesUnavailable ? <EvidenceSectionMessage availability={ratesAvailability} emptyText="No used rate or rule definitions were captured." /> : (
+          <>
+            {ratesAvailability?.state === 'PARTIAL' && <EvidenceSectionMessage availability={ratesAvailability} emptyText="No used rate or rule definitions were captured." />}
+            {ratesAvailability?.state === 'EMPTY' && <EvidenceSectionMessage availability={ratesAvailability} emptyText="No used rate or rule definitions were captured." />}
+            {ratesAvailability?.state === 'AVAILABLE' && response.used_rate_definitions.length === 0 && <StateMessage>No used rate or rule definitions were captured.</StateMessage>}
+            <RateDefinitionTable response={response} />
+          </>
+        )}
+      </section>
+      <section className={styles.section}>
+        <div className={styles.sectionTitleRow}><h3>Bonus used</h3><AvailabilityBadge availability={bonusAvailability} /></div>
+        {bonusUnavailable ? <EvidenceSectionMessage availability={bonusAvailability} emptyText="No Bonus evidence was captured." /> : (
+          <>
+            {bonusAvailability?.state === 'PARTIAL' && <EvidenceSectionMessage availability={bonusAvailability} emptyText="No Bonus evidence was captured." />}
+            {bonusAvailability?.state === 'EMPTY' && <EvidenceSectionMessage availability={bonusAvailability} emptyText="No Bonus evidence was captured." />}
+            {bonusAvailability?.state === 'AVAILABLE' && response.bonus_events.length === 0 && <StateMessage>No Bonus evidence was captured.</StateMessage>}
+            <BonusEvidenceTable response={response} />
+          </>
+        )}
+      </section>
+    </>
+  );
+}
+
 function OverviewBody({ overview }: { overview: FinalizedOverviewResponse }) {
   const summary = overview.financial_summary;
   const availabilityEntries = Object.entries(overview.section_availability);
@@ -466,6 +577,10 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
   const [offStatusLoading, setOffStatusLoading] = useState(false);
   const [offStatusError, setOffStatusError] = useState<string | null>(null);
   const [offStatusRetry, setOffStatusRetry] = useState(0);
+  const [ratesUsed, setRatesUsed] = useState<FinalizedRatesUsedResponse | null>(null);
+  const [ratesUsedLoading, setRatesUsedLoading] = useState(false);
+  const [ratesUsedError, setRatesUsedError] = useState<string | null>(null);
+  const [ratesUsedRetry, setRatesUsedRetry] = useState(0);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -505,6 +620,18 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     }
   }, [period.payroll_period_id]);
 
+  const loadRatesUsed = useCallback(async () => {
+    setRatesUsedLoading(true);
+    setRatesUsedError(null);
+    try {
+      setRatesUsed(await getFinalizedRatesUsed(period.payroll_period_id));
+    } catch (error: unknown) {
+      setRatesUsedError(errorDetail(error, 'Failed to load finalized rates and Bonus evidence.'));
+    } finally {
+      setRatesUsedLoading(false);
+    }
+  }, [period.payroll_period_id]);
+
   useEffect(() => {
     if (!overview || activeTab !== 'off-status' || offStatus != null) return;
     const timer = window.setTimeout(() => { void loadOffStatus(); }, 0);
@@ -512,7 +639,13 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
   }, [activeTab, loadOffStatus, offStatus, offStatusRetry, overview]);
 
   useEffect(() => {
-    if (!overview || activeTab === 'overview' || activeTab === 'off-status') return;
+    if (!overview || activeTab !== 'rates-used' || ratesUsed != null) return;
+    const timer = window.setTimeout(() => { void loadRatesUsed(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, loadRatesUsed, overview, ratesUsed, ratesUsedRetry]);
+
+  useEffect(() => {
+    if (!overview || activeTab === 'overview' || activeTab === 'off-status' || activeTab === 'rates-used') return;
     const timer = window.setTimeout(() => { void loadReport(activeTab); }, 0);
     return () => window.clearTimeout(timer);
   }, [activeTab, loadReport, overview, reportRetry]);
@@ -528,9 +661,11 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
     setActiveTab(tab);
     setReport(null);
     setReportError(null);
-    setReportLoading(tab !== 'overview' && tab !== 'off-status');
+    setReportLoading(tab !== 'overview' && tab !== 'off-status' && tab !== 'rates-used');
     setOffStatusError(null);
     setOffStatusLoading(tab === 'off-status' && offStatus == null);
+    setRatesUsedError(null);
+    setRatesUsedLoading(tab === 'rates-used' && ratesUsed == null);
   }
 
   return (
@@ -544,6 +679,7 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
           <button className={activeTab === 'overview' ? styles.activeTab : styles.tab} onClick={() => selectTab('overview')} type="button" role="tab" aria-selected={activeTab === 'overview'}>Overview</button>
           {REPORT_TABS.map((tab) => <button key={tab.view} className={activeTab === tab.view ? styles.activeTab : styles.tab} onClick={() => selectTab(tab.view)} type="button" role="tab" aria-selected={activeTab === tab.view} disabled={!overview}>{tab.label}</button>)}
           <button className={activeTab === 'off-status' ? styles.activeTab : styles.tab} onClick={() => selectTab('off-status')} type="button" role="tab" aria-selected={activeTab === 'off-status'} disabled={!overview}>Off / Status</button>
+          <button className={activeTab === 'rates-used' ? styles.activeTab : styles.tab} onClick={() => selectTab('rates-used')} type="button" role="tab" aria-selected={activeTab === 'rates-used'} disabled={!overview}>Rates / Bonus</button>
         </nav>
         <div className={styles.body}>
           {overviewLoading ? <StateMessage>Loading finalized payroll overview…</StateMessage> : overviewError ? (
@@ -552,7 +688,11 @@ export function FinalizedPayrollLibraryDialog({ period, onClose }: FinalizedPayr
             <StateMessage>Loading finalized Off and Status history…</StateMessage>
           ) : offStatusError ? (
             <div className={styles.errorBox}><p>{offStatusError}</p><button className={styles.retryButton} onClick={() => { setOffStatusLoading(true); setOffStatusError(null); setOffStatus(null); setOffStatusRetry((value) => value + 1); }} type="button">Retry</button></div>
-          ) : offStatus == null ? <StateMessage>Finalized Off and Status history is unavailable.</StateMessage> : <OffStatusBody response={offStatus} /> : reportLoading ? (
+          ) : offStatus == null ? <StateMessage>Finalized Off and Status history is unavailable.</StateMessage> : <OffStatusBody response={offStatus} /> : activeTab === 'rates-used' ? ratesUsedLoading ? (
+            <StateMessage>Loading finalized rates and Bonus evidence…</StateMessage>
+          ) : ratesUsedError ? (
+            <div className={styles.errorBox}><p>{ratesUsedError}</p><button className={styles.retryButton} onClick={() => { setRatesUsedLoading(true); setRatesUsedError(null); setRatesUsed(null); setRatesUsedRetry((value) => value + 1); }} type="button">Retry</button></div>
+          ) : ratesUsed == null ? <StateMessage>Finalized rates and Bonus evidence is unavailable.</StateMessage> : <RatesUsedBody response={ratesUsed} /> : reportLoading ? (
             <StateMessage>Loading {REPORT_TABS.find((tab) => tab.view === activeTab)?.label.toLowerCase() ?? 'report'}…</StateMessage>
           ) : reportError ? (
             <div className={styles.errorBox}><p>{reportError}</p><button className={styles.retryButton} onClick={() => { setReportLoading(true); setReportError(null); setReportRetry((value) => value + 1); }} type="button">Retry</button></div>

@@ -155,6 +155,7 @@
 .table th,
 .table td { border: 1px solid #e5e7eb; padding: 0.35rem 0.45rem; text-align: left; vertical-align: top; }
 .table th { background: #f8fafc; color: #374151; font-size: 0.72rem; white-space: nowrap; }
+.table td small { display: block; margin-top: 0.15rem; color: #64748b; font-size: 0.68rem; line-height: 1.25; }
 .numeric { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 @media (max-width: 900px) {

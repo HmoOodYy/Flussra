@@ -827,6 +827,75 @@ export interface FinalizedOffDriversResponse {
   status_entries: FinalizedOffStatusEntry[];
 }
 
+export interface FinalizedUsedRateDefinition {
+  used_rate_definition_id: number;
+  driver_id: number;
+  driver_name: string | null;
+  driver_code: string | null;
+  evidence_kind: string;
+  source_type: string;
+  pay_item_id: number | null;
+  pay_item_code: string | null;
+  pay_item_label: string | null;
+  rate_type_id: number | null;
+  rate_type_code: string | null;
+  rate_type_name: string | null;
+  unit_name: string | null;
+  driver_rate_id: number | null;
+  driver_pay_rule_id: number | null;
+  rate_behavior: string | null;
+  rate_amount: string | null;
+  effective_from: string | null;
+  effective_to: string | null;
+  rate_status: string | null;
+  block_size: string | null;
+  rounding_rule: string | null;
+  rule_type: string | null;
+  rule_amount: string | null;
+  rule_status: string | null;
+  definition_fingerprint: string;
+  snapshot_line_ids: number[];
+  line_use_count: number;
+}
+
+export interface FinalizedBonusEventEvidence {
+  bonus_event_id: number;
+  driver_id: number;
+  driver_name: string | null;
+  driver_code: string | null;
+  amount: string;
+  reason: string | null;
+  notes: string | null;
+  data_revision: number;
+  creator_user_id: number | null;
+  creator_display_name: string | null;
+  created_at_utc: string;
+}
+
+export interface FinalizedRatesUsedMetadata {
+  period_id: number;
+  period_code: string;
+  period_name: string;
+  period_status: string;
+  branch_id: number;
+  authority_kind: string;
+  snapshot_id: number | null;
+  revision_number: number | null;
+  snapshot_hash: string | null;
+  rate_evidence_available: boolean;
+  report_evidence_available: boolean;
+  report_evidence_version: number | null;
+  report_evidence_hash: string | null;
+  section_availability: Record<string, FinalizedSectionAvailability>;
+  generated_at_utc: string;
+}
+
+export interface FinalizedRatesUsedResponse {
+  metadata: FinalizedRatesUsedMetadata;
+  used_rate_definitions: FinalizedUsedRateDefinition[];
+  bonus_events: FinalizedBonusEventEvidence[];
+}
+
 // ---------------------------------------------------------------------------
 // CP-4B — Open/Returned live calculation preview
 // ---------------------------------------------------------------------------
