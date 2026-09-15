@@ -151,12 +151,6 @@ export interface AuthState {
   setUser: (user: UserProfile | null) => void;
   setLoading: (loading: boolean) => void;
   logout: () => void;
-  /** Returns true when the user holds this permission code. */
-  hasPermission: (code: string) => boolean;
-  /** Returns true when the user holds at least one of the given codes. */
-  hasAnyPermission: (codes: string[]) => boolean;
-  /** Returns true when the user holds ALL of the given codes. */
-  hasAllPermissions: (codes: string[]) => boolean;
 }
 
 export const AuthContext = createContext<AuthState | null>(null);
