@@ -9,12 +9,15 @@
  * app/review/router.py, and app/admin/service.py.
  */
 import type { UserProfile } from '../store/authStore';
-import { hasAuthorityPermission } from '../store/authStore.ts';
+import {
+  hasAuthorityPermission,
+  hasAuthorityPermissionAnywhere,
+} from '../store/authStore.ts';
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-function _hasAny(user: UserProfile, codes: readonly string[]): boolean {
-  return codes.some((c) => user.active_permissions.includes(c));
+function _hasAnyAuthorityPermission(user: UserProfile, codes: readonly string[]): boolean {
+  return codes.some((code) => hasAuthorityPermissionAnywhere(user.authority, code));
 }
 
 /**
@@ -83,7 +86,7 @@ const PAYRATES_ACCESS = [
 
 /** Current Payroll page: any payroll read/write permission. */
 export function canViewCurrentPayroll(user: UserProfile): boolean {
-  return !isDriverUser(user) && _hasAny(user, PAYROLL_READ);
+  return !isDriverUser(user) && _hasAnyAuthorityPermission(user, PAYROLL_READ);
 }
 
 /**
@@ -97,14 +100,14 @@ export function canViewPayrollReports(user: UserProfile, branchId: number): bool
 
 /** Finalized Payroll Library: backend's dedicated ledger.view contract. */
 export function canViewFinalizedLibrary(user: UserProfile): boolean {
-  return !isDriverUser(user) && user.active_permissions.includes('ledger.view');
+  return !isDriverUser(user) && _hasAnyAuthorityPermission(user, ['ledger.view']);
 }
 
 /** Legacy raw FinalLines: mirror its operational backend read permissions. */
 export function canViewFinalLines(user: UserProfile): boolean {
   return (
     !isDriverUser(user) &&
-    _hasAny(user, ['payroll.view', 'payroll.entry', 'payroll.finalize'])
+    _hasAnyAuthorityPermission(user, ['payroll.view', 'payroll.entry', 'payroll.finalize'])
   );
 }
 
@@ -121,12 +124,15 @@ export function canViewLedger(user: UserProfile): boolean {
  * (Reading the review queue mirrors payroll read; deciding requires review.decide.)
  */
 export function canViewReview(user: UserProfile): boolean {
-  return !isDriverUser(user) && _hasAny(user, [...PAYROLL_READ, 'review.decide']);
+  return (
+    !isDriverUser(user) &&
+    _hasAnyAuthorityPermission(user, [...PAYROLL_READ, 'review.decide'])
+  );
 }
 
 /** Pay Rates page: payrates.view/edit or admin fallback. */
 export function canViewPayRates(user: UserProfile): boolean {
-  return !isDriverUser(user) && _hasAny(user, PAYRATES_ACCESS);
+  return !isDriverUser(user) && _hasAnyAuthorityPermission(user, PAYRATES_ACCESS);
 }
 
 /**
@@ -292,10 +298,9 @@ export function canManageSettingsAdmin(user: UserProfile): boolean {
  *   1. Full settings admin — canonical company-scoped setup.manage
  *      (canManageSettingsAdmin).
  *   2. Any user with payitems.edit somewhere — needed to browse CDPI-approved
- *      items.  Note: this is a flat union check (see hasPayItemsEdit docs);
- *      actual branch/company CDPI browsing and actions are governed by the
- *      branch-aware helpers below (canManageCdpiForBranch,
- *      canReviewCdpiCompanyWide), not by this union check alone.
+ *      items.  This broad discovery check uses canonical authority, but actual
+ *      branch/company CDPI browsing and actions are governed by the scoped
+ *      helpers below (canManageCdpiForBranch, canReviewCdpiCompanyWide).
  */
 export function canViewDailyPayItems(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
@@ -316,7 +321,7 @@ const TRANSFER_READ = [
  * Mirrors backend _get_accessible_branches_for_transfers gate.
  */
 export function canViewTransfers(user: UserProfile): boolean {
-  return !isDriverUser(user) && _hasAny(user, TRANSFER_READ);
+  return !isDriverUser(user) && _hasAnyAuthorityPermission(user, TRANSFER_READ);
 }
 
 /**
@@ -342,14 +347,14 @@ export function canEditTransfers(user: UserProfile, branchId: number): boolean {
 /**
  * True when the user holds `payitems.edit` somewhere across their assignments.
  *
- * IMPORTANT: this is a flat union check — it does NOT prove which assignment
- * scope holds the permission.  Do NOT use this alone to grant branch-scoped or
- * company-scoped CDPI actions; use canManageCdpiForBranch / canReviewCdpiCompanyWide
- * which are backed by the canonical branch-aware authority contract instead.
+ * IMPORTANT: this broad discovery predicate does NOT prove which assignment
+ * scope holds the permission.  Do NOT use it alone to grant branch-scoped or
+ * company-scoped CDPI actions; use canManageCdpiForBranch or
+ * canReviewCdpiCompanyWide instead.
  */
 export function hasPayItemsEdit(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
-  return user.active_permissions.includes('payitems.edit');
+  return _hasAnyAuthorityPermission(user, ['payitems.edit']);
 }
 
 /**

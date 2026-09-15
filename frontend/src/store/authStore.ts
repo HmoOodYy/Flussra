@@ -19,7 +19,7 @@ export interface BranchPermissions {
  * Backend-owned, branch-aware permission authority (from /auth/login and
  * /auth/me).  Every list here is produced by sec.fn_UserHasPermission —
  * do NOT reconstruct role/override semantics from this data on the frontend.
- * Use hasAuthorityPermission() to query it.
+ * Use the authority helper functions below to query it.
  */
 export interface PermissionAuthority {
   /** Permissions effective at company scope; empty unless the user holds an active AllCompanyBranches assignment. */
@@ -57,6 +57,20 @@ export function hasAuthorityPermission(
   if (branchId === null) return false;
   const branch = authority.branch_permissions.find((b) => b.branch_id === branchId);
   return branch ? branch.permissions.includes(code) : false;
+}
+
+/**
+ * True when `code` is effective at company scope or on at least one concrete
+ * branch.  This supports broad UI discovery, not authorization for a specific scope.
+ */
+export function hasAuthorityPermissionAnywhere(
+  authority: PermissionAuthority,
+  code: string,
+): boolean {
+  return (
+    authority.company_permissions.includes(code) ||
+    authority.branch_permissions.some((branch) => branch.permissions.includes(code))
+  );
 }
 
 // ── Frontend user model ───────────────────────────────────────────────────────
