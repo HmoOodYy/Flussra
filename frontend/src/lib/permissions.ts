@@ -17,6 +17,28 @@ function _hasAny(user: UserProfile, codes: readonly string[]): boolean {
   return codes.some((c) => user.active_permissions.includes(c));
 }
 
+/**
+ * True when `code` is granted at company scope — i.e. via an active
+ * AllCompanyBranches assignment.  Backed by the canonical authority contract
+ * (hasAuthorityPermission), never the flat active_permissions union or
+ * coarse scope_type.
+ */
+function _hasCompanyPermission(user: UserProfile, code: string): boolean {
+  return hasAuthorityPermission(user.authority, code, null);
+}
+
+/**
+ * Company-scoped admin fallback shared by People/Role helpers — mirrors the
+ * backend's `_ensure_any_perm` admin fallback (settings.manage / setup.manage
+ * granted at company scope), independent of active_permissions/scope_type.
+ */
+function _hasCompanyAdminFallback(user: UserProfile): boolean {
+  return (
+    _hasCompanyPermission(user, 'settings.manage') ||
+    _hasCompanyPermission(user, 'setup.manage')
+  );
+}
+
 // ── Role / scope ──────────────────────────────────────────────────────────────
 
 /**
@@ -55,14 +77,6 @@ const PAYROLL_READ = [
 const PAYRATES_ACCESS = [
   'payrates.view',
   'payrates.edit',
-  'settings.manage',
-  'setup.manage',
-] as const;
-
-const PEOPLE_ACCESS = [
-  'users.view',
-  'users.edit',
-  'users.create',
   'settings.manage',
   'setup.manage',
 ] as const;
@@ -111,19 +125,32 @@ export function canViewPayRates(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAny(user, PAYRATES_ACCESS);
 }
 
-/** People page: users.view/edit/create or admin fallback. */
+/**
+ * People page: company-scoped users.view, or company admin fallback.
+ * Company-scoped, not driver-gated — a mixed Driver + valid company-admin
+ * assignment must still reach this page, so isDriverUser() is deliberately
+ * not consulted here.
+ */
 export function canViewPeople(user: UserProfile): boolean {
-  return !isDriverUser(user) && _hasAny(user, PEOPLE_ACCESS);
+  return _hasCompanyPermission(user, 'users.view') || _hasCompanyAdminFallback(user);
 }
 
-/** Settings pages: setup/settings admin or any role/user admin permission. */
+/**
+ * Settings pages: company setup/settings admin, or any company-scoped
+ * role/user admin permission.  Company-scoped via hasAuthorityPermission and
+ * authority.company_permissions (prefix inspection) — not user.has_setup_manage
+ * (which is derived from the flat active_permissions union and so cannot be
+ * trusted for a company-scope route decision) and not the flat
+ * active_permissions union directly — so a mixed Driver + valid company
+ * roles/users assignment still reaches the nested Roles route, while a
+ * branch-only settings.manage grant does not.
+ */
 export function canViewSettings(user: UserProfile): boolean {
   return (
-    !isDriverUser(user) &&
-    (user.has_setup_manage ||
-      user.active_permissions.some(
-        (p) => p.startsWith('roles.') || p.startsWith('users.')
-      ))
+    _hasCompanyAdminFallback(user) ||
+    user.authority.company_permissions.some(
+      (p) => p.startsWith('roles.') || p.startsWith('users.')
+    )
   );
 }
 
@@ -173,19 +200,66 @@ export function canEditPayRates(user: UserProfile, branchId: number): boolean {
   );
 }
 
-/** Create new people/users. */
+/** Create new people/users: company-scoped users.create, or company admin fallback. */
 export function canCreatePeople(user: UserProfile): boolean {
-  return _hasAny(user, ['users.create', 'settings.manage', 'setup.manage']);
+  return _hasCompanyPermission(user, 'users.create') || _hasCompanyAdminFallback(user);
 }
 
-/** Edit existing people (profile, role, password, extra perms, deactivate). */
+/**
+ * Edit an existing person's profile, reset their password, or edit their
+ * extra permission overrides: company-scoped users.edit, or company admin
+ * fallback.  Deliberately does NOT include users.deactivate — that permission
+ * authorizes the active-only toggle (see canTogglePeopleActive), not
+ * profile/password/override edits.
+ */
 export function canEditPeople(user: UserProfile): boolean {
-  return _hasAny(user, ['users.edit', 'users.deactivate', 'settings.manage', 'setup.manage']);
+  return _hasCompanyPermission(user, 'users.edit') || _hasCompanyAdminFallback(user);
 }
 
-/** View or edit roles and their permission assignments. */
+/**
+ * Activate/deactivate a person: company-scoped users.deactivate OR
+ * users.edit, or company admin fallback — mirrors the backend's active-only
+ * patch guard.
+ */
+export function canTogglePeopleActive(user: UserProfile): boolean {
+  return (
+    _hasCompanyPermission(user, 'users.deactivate') ||
+    _hasCompanyPermission(user, 'users.edit') ||
+    _hasCompanyAdminFallback(user)
+  );
+}
+
+/**
+ * Assign/change a person's company role: company-scoped users.edit OR
+ * roles.edit, or company admin fallback — mirrors the backend's
+ * company-role-assignment guard.
+ */
+export function canAssignPeopleRole(user: UserProfile): boolean {
+  return (
+    _hasCompanyPermission(user, 'users.edit') ||
+    _hasCompanyPermission(user, 'roles.edit') ||
+    _hasCompanyAdminFallback(user)
+  );
+}
+
+/** View roles and their permission assignments: company-scoped roles.view, or company admin fallback. */
 export function canManageRoles(user: UserProfile): boolean {
-  return _hasAny(user, ['roles.view', 'roles.edit', 'settings.manage', 'setup.manage']);
+  return _hasCompanyPermission(user, 'roles.view') || _hasCompanyAdminFallback(user);
+}
+
+/** Create a new company role: company-scoped roles.create, or company admin fallback. */
+export function canCreateRoles(user: UserProfile): boolean {
+  return _hasCompanyPermission(user, 'roles.create') || _hasCompanyAdminFallback(user);
+}
+
+/** Edit a company role's permission assignments: company-scoped roles.edit, or company admin fallback. */
+export function canEditRoles(user: UserProfile): boolean {
+  return _hasCompanyPermission(user, 'roles.edit') || _hasCompanyAdminFallback(user);
+}
+
+/** Delete a company role: company-scoped roles.delete, or company admin fallback. */
+export function canDeleteRoles(user: UserProfile): boolean {
+  return _hasCompanyPermission(user, 'roles.delete') || _hasCompanyAdminFallback(user);
 }
 
 /** Full settings admin (company, branches, payroll setup, pay items). */

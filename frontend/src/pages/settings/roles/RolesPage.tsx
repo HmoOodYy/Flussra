@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import apiClient from '../../../lib/apiClient';
 import { friendlyPermLabel } from '../../../lib/permissionLabels';
 import { useAuth } from '../../../store/authStore';
+import { canManageRoles, canCreateRoles, canEditRoles, canDeleteRoles } from '../../../lib/permissions';
 import type {
   CompanyRole,
   CompanyRoleCreate,
@@ -248,20 +249,13 @@ function groupPermissionsByDomain(perms: Permission[]): [BusinessGroup, Permissi
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-// Permission sets for roles page access control
-const ROLES_VIEW_PERMS   = ['roles.view', 'roles.edit', 'roles.create', 'roles.delete', 'settings.manage', 'setup.manage'] as const;
-const ROLES_CREATE_PERMS = ['roles.create', 'settings.manage', 'setup.manage'] as const;
-const ROLES_EDIT_PERMS   = ['roles.edit',   'settings.manage', 'setup.manage'] as const;
-const ROLES_DELETE_PERMS = ['roles.delete',  'settings.manage', 'setup.manage'] as const;
-
 export function RolesPage() {
-  const { user, hasAnyPermission } = useAuth();
+  const { user } = useAuth();
 
-  // Page is visible to anyone with any roles-related permission (all-branches scope required)
-  const isAdmin     = user?.scope_type === 'AllCompanyBranches' && hasAnyPermission([...ROLES_VIEW_PERMS]);
-  const canCreate   = user?.scope_type === 'AllCompanyBranches' && hasAnyPermission([...ROLES_CREATE_PERMS]);
-  const canEdit     = user?.scope_type === 'AllCompanyBranches' && hasAnyPermission([...ROLES_EDIT_PERMS]);
-  const canDelete   = user?.scope_type === 'AllCompanyBranches' && hasAnyPermission([...ROLES_DELETE_PERMS]);
+  const isAdmin     = !!user && canManageRoles(user);
+  const canCreate   = !!user && canCreateRoles(user);
+  const canEdit     = !!user && canEditRoles(user);
+  const canDelete   = !!user && canDeleteRoles(user);
   const readOnly    = isAdmin && !canEdit;
 
   const [rolesSt, dispatchRoles]     = useReducer(rolesReducer, { roles: [], loading: true, error: '' });

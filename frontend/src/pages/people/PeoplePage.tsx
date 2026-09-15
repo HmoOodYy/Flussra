@@ -16,7 +16,14 @@ import { useNavigate } from 'react-router-dom';
 import apiClient from '../../lib/apiClient';
 import { friendlyPermLabel } from '../../lib/permissionLabels';
 import { useAuth } from '../../store/authStore';
-import { canCreatePeople, canEditPeople, canViewTransfers } from '../../lib/permissions';
+import {
+  canCreatePeople,
+  canEditPeople,
+  canTogglePeopleActive,
+  canAssignPeopleRole,
+  canManageRoles,
+  canViewTransfers,
+} from '../../lib/permissions';
 import { TransferRequestsTab } from './TransferRequestsTab';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import type {
@@ -76,6 +83,12 @@ for (const [child, parent] of Object.entries(PERM_DEPS)) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async function fetchCompanyRoles(canList: boolean): Promise<CompanyRole[]> {
+  if (!canList) return [];
+  const r = await apiClient.get<CompanyRole[]>('/admin/company-roles');
+  return r.data;
+}
 
 function apiError(err: unknown): string {
   const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -375,25 +388,27 @@ export function PeoplePage() {
   const [st, dispatch] = useReducer(reducer, INITIAL);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load
+  // Load. /admin/company-roles requires roles.view/fallback (canManageRoles) —
+  // a users.view-only person must still be able to load the rest of the page.
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const [pR, rR, bR, permR] = await Promise.all([
+        const wantRoles = !!authUser && canManageRoles(authUser);
+        const [pR, bR, permR, roles] = await Promise.all([
           apiClient.get<UserAdmin[]>('/admin/users?include_inactive=true'),
-          apiClient.get<CompanyRole[]>('/admin/company-roles'),
           apiClient.get<Branch[]>('/core/branches'),
           apiClient.get<Permission[]>('/admin/permissions?ui_only=true'),
+          fetchCompanyRoles(wantRoles),
         ]);
-        if (!cancelled) dispatch({ type: 'LOADED', people: pR.data, roles: rR.data, branches: bR.data, allPerms: permR.data });
+        if (!cancelled) dispatch({ type: 'LOADED', people: pR.data, roles, branches: bR.data, allPerms: permR.data });
       } catch (e) {
         if (!cancelled) dispatch({ type: 'LOAD_ERR', error: apiError(e) });
       }
     }
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [authUser]);
 
   function showToast(msg: string) {
     dispatch({ type: 'TOAST', msg });
@@ -421,9 +436,13 @@ export function PeoplePage() {
 
   const selected = st.selectedId !== null ? st.people.find(p => p.user_id === st.selectedId) ?? null : null;
   const amOwner = !!(authUser && st.people.find(p => p.user_id === authUser.user_id)?.company_role_code === 'COMPANY_OWNER');
-  const userCanCreate = authUser ? canCreatePeople(authUser) : false;
-  const userCanEdit   = authUser ? canEditPeople(authUser)   : false;
-  const userCanTransfers = authUser ? canViewTransfers(authUser) : false;
+  const userCanCreate     = authUser ? canCreatePeople(authUser)       : false;
+  const userCanEditPeople = authUser ? canEditPeople(authUser)         : false;
+  const userCanToggle     = authUser ? canTogglePeopleActive(authUser) : false;
+  const userCanAssignRole = authUser ? canAssignPeopleRole(authUser)   : false;
+  const userCanManageRoles = authUser ? canManageRoles(authUser)       : false;
+  const userCanChangeRole = userCanAssignRole && userCanManageRoles;
+  const userCanTransfers  = authUser ? canViewTransfers(authUser)      : false;
   const assignableRoles = st.roles.filter(r => r.role_code !== 'COMPANY_OWNER' && r.is_active);
 
   // ── Wizard: step 1 — create user ──
@@ -439,8 +458,11 @@ export function PeoplePage() {
       const r = await apiClient.post<UserAdmin>('/admin/users', payload);
       dispatch({ type: 'ADD_PERSON', person: r.data });
       dispatch({ type: 'WIZ_USER_CREATED', user: r.data });
+      if (!userCanChangeRole) {
+        dispatch({ type: 'WIZ_STEP', step: 5 });
+      }
     } catch (e) { dispatch({ type: 'WIZ_ERROR', err: apiError(e) }); }
-  }, [st]);
+  }, [st, userCanChangeRole]);
 
   // ── Wizard: step 3 — assign role+scope ──
   const wizStep3 = useCallback(async () => {
@@ -457,13 +479,13 @@ export function PeoplePage() {
       dispatch({ type: 'UPDATE_PERSON', person: updated.data });
       dispatch({ type: 'WIZ_USER_CREATED', user: updated.data });
       dispatch({ type: 'WIZ_LOADING', val: false });
-      dispatch({ type: 'WIZ_STEP', step: 4 }); // go to extra perms
+      dispatch({ type: 'WIZ_STEP', step: userCanEditPeople ? 4 : 5 });
     } catch (e) {
       // Partial success: user created, role assignment failed
       dispatch({ type: 'WIZ_PARTIAL', user: wiz.createdUser });
       dispatch({ type: 'WIZ_ERROR', err: `Person created but role assignment failed: ${apiError(e)}` });
     }
-  }, [st]);
+  }, [st, userCanEditPeople]);
 
   // ── Wizard: step 4 — save extra perms then go to review ──
   const wizStep4 = useCallback(async () => {
@@ -707,7 +729,11 @@ export function PeoplePage() {
               branches={st.branches}
               allPerms={st.allPerms}
               amOwner={amOwner}
-              canEdit={userCanEdit}
+              canEditProfile={userCanEditPeople}
+              canToggleActive={userCanToggle}
+              canResetPassword={userCanEditPeople}
+              canChangeRole={userCanChangeRole}
+              canEditExtraPermissions={userCanEditPeople}
               onEdit={() => dispatch({ type: 'EDIT_OPEN', person: selected })}
               onToggleActive={() => dispatch({ type: 'CONFIRM_TOGGLE', userId: selected.user_id, toActive: !selected.is_active })}
               onResetPw={() => dispatch({ type: 'RESET_OPEN' })}
@@ -851,13 +877,17 @@ interface PersonDetailProps {
   branches: Branch[];
   allPerms: Permission[];
   amOwner: boolean;
-  canEdit: boolean;
+  canEditProfile: boolean;
+  canToggleActive: boolean;
+  canResetPassword: boolean;
+  canChangeRole: boolean;
+  canEditExtraPermissions: boolean;
   onEdit(): void; onToggleActive(): void; onResetPw(): void;
   onChangeRole(): void; onEditExtraPerms(): void;
   onTransfer(): void; onGoPayRates(): void;
 }
 
-function PersonDetail({ person, allPerms, amOwner, canEdit, onEdit, onToggleActive, onResetPw, onChangeRole, onEditExtraPerms, onTransfer, onGoPayRates }: PersonDetailProps) {
+function PersonDetail({ person, allPerms, amOwner, canEditProfile, canToggleActive, canResetPassword, canChangeRole, canEditExtraPermissions, onEdit, onToggleActive, onResetPw, onChangeRole, onEditExtraPerms, onTransfer, onGoPayRates }: PersonDetailProps) {
   const permByCode = new Map(allPerms.map(p => [p.permission_code, p]));
   const as = accessStatus(person);
   const isOwner = person.company_role_code === 'COMPANY_OWNER';
@@ -883,14 +913,14 @@ function PersonDetail({ person, allPerms, amOwner, canEdit, onEdit, onToggleActi
           </div>
           {/* Action buttons — horizontal row */}
           <div className={styles.dActions}>
-            {canEdit && <button className={styles.actBtn} onClick={onEdit}>Edit</button>}
-            {canEdit && (
+            {canEditProfile && <button className={styles.actBtn} onClick={onEdit}>Edit</button>}
+            {canToggleActive && (
               <button className={`${styles.actBtn}${person.is_active ? ` ${styles.actBtnDanger}` : ''}`} onClick={onToggleActive}>
                 {person.is_active ? 'Deactivate' : 'Activate'}
               </button>
             )}
-            {canEdit && <button className={styles.actBtn} onClick={onResetPw}>Reset Password</button>}
-            {canEdit && !isOwner && <button className={styles.actBtn} onClick={onChangeRole}>Change Role</button>}
+            {canResetPassword && <button className={styles.actBtn} onClick={onResetPw}>Reset Password</button>}
+            {canChangeRole && !isOwner && <button className={styles.actBtn} onClick={onChangeRole}>Change Role</button>}
             {canTransfer && <button className={`${styles.actBtn} ${styles.actBtnOwner}`} onClick={onTransfer}>Transfer Ownership</button>}
             {isDriver && <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={onGoPayRates}>Pay Rates →</button>}
           </div>
@@ -948,7 +978,7 @@ function PersonDetail({ person, allPerms, amOwner, canEdit, onEdit, onToggleActi
           <section className={styles.sec}>
             <div className={styles.secTitleRow}>
               <h3 className={styles.secTitle}>Extra Permissions</h3>
-              {canEdit && <button className={styles.secEditBtn} onClick={onEditExtraPerms}>Edit</button>}
+              {canEditExtraPermissions && <button className={styles.secEditBtn} onClick={onEditExtraPerms}>Edit</button>}
             </div>
             {person.extra_permission_codes.length === 0 ? (
               <p className={styles.emptySecMsg}>No extra permissions. Role permissions apply.</p>
