@@ -224,10 +224,12 @@ async def get_period(
     "/periods",
     response_model=PeriodSummary,
     status_code=201,
+    deprecated=True,
     summary="Create a new payroll period (starts in Draft status)",
     description=(
         "Legacy endpoint. Requires exactly one Open period on the branch (no Draft). "
-        "Use POST /payroll/branches/{branch_id}/period-candidates for candidate-based creation."
+        "Use GET /payroll/branches/{branch_id}/period-candidates followed by "
+        "POST /payroll/branches/{branch_id}/period-creations instead."
     ),
     responses={
         403: {"description": "No access to the target branch or missing payroll.period.create permission"},
