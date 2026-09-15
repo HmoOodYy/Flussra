@@ -75,25 +75,7 @@ export interface UserPasswordReset {
   must_change_password?: boolean;
 }
 
-// ─── Role Assignment CRUD ─────────────────────────────────────────────────────
-
-export interface RoleAssignmentCreate {
-  role_id: number;
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
-  branch_id?: number | null;
-  notes?: string | null;
-}
-
 // ─── Roles & Permissions ──────────────────────────────────────────────────────
-
-export interface Role {
-  role_id: number;
-  role_code: string;
-  role_name: string;
-  role_level: number;
-  is_system_role: boolean;
-  notes: string | null;
-}
 
 export interface Permission {
   permission_id: number;
