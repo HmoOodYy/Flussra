@@ -10,6 +10,24 @@ export interface BranchAccess {
   role_name: string;
 }
 
+export interface BranchPermissions {
+  readonly branch_id: number;
+  readonly permissions: readonly string[];
+}
+
+/**
+ * Backend-owned, branch-aware permission authority (from /auth/login and
+ * /auth/me).  Every list here is produced by sec.fn_UserHasPermission —
+ * do NOT reconstruct role/override semantics from this data on the frontend.
+ * Use hasAuthorityPermission() to query it.
+ */
+export interface PermissionAuthority {
+  /** Permissions effective at company scope; empty unless the user holds an active AllCompanyBranches assignment. */
+  readonly company_permissions: readonly string[];
+  /** One entry per distinct concrete branch backing an active SpecificBranch/OwnDriverDataOnly assignment. */
+  readonly branch_permissions: readonly BranchPermissions[];
+}
+
 export interface UserInfoResponse {
   user_id: number;
   username: string;
@@ -19,6 +37,26 @@ export interface UserInfoResponse {
   branches: BranchAccess[];
   /** Distinct permission codes across all active role assignments. */
   active_permissions: string[];
+  authority: PermissionAuthority;
+}
+
+/**
+ * True when `code` is granted for the given scope.
+ *
+ *   - branchId === null: company scope — only company_permissions can grant.
+ *   - branchId === a concrete branch id: granted if the permission is in
+ *     company_permissions (applies everywhere) OR in that branch's own
+ *     effective permissions list.
+ */
+export function hasAuthorityPermission(
+  authority: PermissionAuthority,
+  code: string,
+  branchId: number | null,
+): boolean {
+  if (authority.company_permissions.includes(code)) return true;
+  if (branchId === null) return false;
+  const branch = authority.branch_permissions.find((b) => b.branch_id === branchId);
+  return branch ? branch.permissions.includes(code) : false;
 }
 
 // ── Frontend user model ───────────────────────────────────────────────────────
@@ -53,6 +91,8 @@ export interface UserProfile {
    * scope_type alone cannot distinguish.
    */
   branches: readonly BranchAccess[];
+  /** Backend-owned branch-aware permission authority; query with hasAuthorityPermission(). */
+  readonly authority: PermissionAuthority;
 }
 
 // Derive the flat UserProfile from the API's UserInfoResponse
@@ -99,6 +139,7 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
       null
     ),
     branches:           info.branches,
+    authority:          info.authority,
   };
 }
 

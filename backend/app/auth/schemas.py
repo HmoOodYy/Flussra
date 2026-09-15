@@ -36,6 +36,36 @@ class BranchAccess(BaseModel):
     role_name: str
 
 
+class BranchPermissions(BaseModel):
+    """Effective permission codes for one distinct concrete branch."""
+    branch_id: int
+    permissions: list[str]
+
+
+class PermissionAuthority(BaseModel):
+    """
+    Backend-computed, branch-aware permission authority.
+
+    Distinct from `active_permissions` (a flat union kept for existing
+    consumers).  Every list here is produced by evaluating each catalogue
+    permission through sec.fn_UserHasPermission — the frontend must not
+    reconstruct role/override semantics from this data.
+    """
+    company_permissions: list[str] = []
+    """
+    Permissions effective at company scope (branch_id=NULL).  Only
+    populated when the user holds an active AllCompanyBranches assignment;
+    otherwise empty — company-scope actions must be denied.
+    """
+    branch_permissions: list[BranchPermissions] = []
+    """
+    One entry per distinct concrete branch backing an active SpecificBranch
+    or OwnDriverDataOnly assignment.  Each branch's permission list already
+    includes any company-wide grant (fn_UserHasPermission unions across all
+    of the user's active assignments for that branch).
+    """
+
+
 class UserInfo(BaseModel):
     """The logged-in user's identity, access list, and active permissions."""
     user_id: int
@@ -51,6 +81,7 @@ class UserInfo(BaseModel):
     sec.RolePermissions (legacy path) via UNION so both paths work during
     the transition period.
     """
+    authority: PermissionAuthority
 
 
 class LoginResponse(BaseModel):

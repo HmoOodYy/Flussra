@@ -4,18 +4,19 @@ Auth service — business logic for login and identity resolution.
 All database access is raw parameterised SQL via sqlalchemy.text().
 No ORM models.
 """
+from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from fastapi import HTTPException, status
-
 from app.auth.schemas import (
+    BranchAccess,
+    BranchPermissions,
     LoginRequest,
     LoginResponse,
+    PermissionAuthority,
     UserInfo,
-    BranchAccess,
 )
-from app.auth.security import hash_password, verify_password, create_access_token
+from app.auth.security import create_access_token, hash_password, verify_password
 
 # ---------------------------------------------------------------------------
 # Constant-time sentinel: prevents username enumeration via response timing.
@@ -197,6 +198,7 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
     # 4b. Load active permissions (UNION of new + legacy paths)
     # ------------------------------------------------------------------
     active_permissions = await _load_active_permissions(user_id, company_id, db)
+    authority = await _load_permission_authority(user_id, company_id, db)
 
     # ------------------------------------------------------------------
     # 5. Update last-login timestamp (write already in this transaction)
@@ -221,6 +223,7 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
             company_name=row["companyname"],
             branches=branches,
             active_permissions=active_permissions,
+            authority=authority,
         ),
     )
 
@@ -303,6 +306,89 @@ async def _load_active_permissions(
     return [r["permissioncode"] for r in result.mappings().all()]
 
 
+async def _load_permission_authority(
+    user_id: int, company_id: int, db: AsyncConnection
+) -> PermissionAuthority:
+    """
+    Build the canonical branch-aware permission authority for this user.
+
+    Every permission list is produced by evaluating the full permission
+    catalogue through sec.fn_UserHasPermission — the single source of truth
+    for role/override semantics.  Nothing here reimplements that logic.
+
+      - company_permissions: only computed when the user holds an active
+        AllCompanyBranches assignment; each catalogue code is tested with
+        branch_id=NULL.
+      - branch_permissions: one entry per distinct concrete branch backing
+        an active SpecificBranch/OwnDriverDataOnly assignment (tenant-scoped
+        via the companyid join to core.branches); each catalogue code is
+        tested with that branch's id.
+    """
+    has_company_scope_r = await db.execute(
+        text("""
+            SELECT 1
+            FROM   sec.userbranchroles
+            WHERE  userid    = :uid
+              AND  companyid = :cid
+              AND  isactive  = TRUE
+              AND  scopetype = 'AllCompanyBranches'
+            LIMIT 1
+        """),
+        {"uid": user_id, "cid": company_id},
+    )
+    company_permissions: list[str] = []
+    if has_company_scope_r.fetchone():
+        company_r = await db.execute(
+            text("""
+                SELECT p.permissioncode
+                FROM   sec.permissions AS p
+                WHERE  sec.fn_UserHasPermission(:uid, :cid, NULL, p.permissioncode)
+                ORDER BY p.permissioncode
+            """),
+            {"uid": user_id, "cid": company_id},
+        )
+        company_permissions = [r["permissioncode"] for r in company_r.mappings().all()]
+
+    branch_ids_r = await db.execute(
+        text("""
+            SELECT DISTINCT ubr.branchid
+            FROM   sec.userbranchroles AS ubr
+            JOIN   core.branches       AS b ON b.branchid = ubr.branchid AND b.companyid = ubr.companyid
+            WHERE  ubr.userid    = :uid
+              AND  ubr.companyid = :cid
+              AND  ubr.isactive  = TRUE
+              AND  ubr.scopetype IN ('SpecificBranch', 'OwnDriverDataOnly')
+              AND  ubr.branchid IS NOT NULL
+            ORDER BY ubr.branchid
+        """),
+        {"uid": user_id, "cid": company_id},
+    )
+    branch_ids = [r["branchid"] for r in branch_ids_r.mappings().all()]
+
+    branch_permissions: list[BranchPermissions] = []
+    for branch_id in branch_ids:
+        perms_r = await db.execute(
+            text("""
+                SELECT p.permissioncode
+                FROM   sec.permissions AS p
+                WHERE  sec.fn_UserHasPermission(:uid, :cid, :bid, p.permissioncode)
+                ORDER BY p.permissioncode
+            """),
+            {"uid": user_id, "cid": company_id, "bid": branch_id},
+        )
+        branch_permissions.append(
+            BranchPermissions(
+                branch_id=branch_id,
+                permissions=[r["permissioncode"] for r in perms_r.mappings().all()],
+            )
+        )
+
+    return PermissionAuthority(
+        company_permissions=company_permissions,
+        branch_permissions=branch_permissions,
+    )
+
+
 async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo:
     """
     Re-fetch the full user identity from the DB using the user_id from the JWT.
@@ -365,6 +451,7 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
         )
 
     active_permissions = await _load_active_permissions(user_id, company_id, db)
+    authority = await _load_permission_authority(user_id, company_id, db)
 
     return UserInfo(
         user_id=row["userid"],
@@ -374,4 +461,5 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
         company_name=row["companyname"],
         branches=branches,
         active_permissions=active_permissions,
+        authority=authority,
     )
