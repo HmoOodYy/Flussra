@@ -86,9 +86,13 @@ export function canViewCurrentPayroll(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAny(user, PAYROLL_READ);
 }
 
-/** Current Payroll reports are UI-only and require the dedicated report permission. */
-export function canViewPayrollReports(user: UserProfile): boolean {
-  return !isDriverUser(user) && user.active_permissions.includes('reports.view');
+/**
+ * Current Payroll reports for a specific period's branch: dedicated
+ * reports.view permission, branch-aware — mirrors the backend per-branch
+ * authority check, not the flat active_permissions union.
+ */
+export function canViewPayrollReports(user: UserProfile, branchId: number): boolean {
+  return !isDriverUser(user) && hasAuthorityPermission(user.authority, 'reports.view', branchId);
 }
 
 /** Finalized Payroll Library: backend's dedicated ledger.view contract. */
@@ -177,6 +181,18 @@ export function canEntryPayroll(user: UserProfile, branchId: number): boolean {
   return hasAuthorityPermission(user.authority, 'payroll.entry', branchId);
 }
 
+/**
+ * View Expected Payroll (calculation preview) for a specific branch.
+ * Mirrors the backend's get_calculation_preview check: payroll.view OR
+ * payroll.entry, granted either at company scope or for the given branch.
+ */
+export function canPreviewCalculation(user: UserProfile, branchId: number): boolean {
+  if (isDriverUser(user)) return false;
+  return ['payroll.view', 'payroll.entry'].some((code) =>
+    hasAuthorityPermission(user.authority, code, branchId)
+  );
+}
+
 /** Finalize button / period lifecycle admin actions for a specific branch. */
 export function canFinalizePayroll(user: UserProfile, branchId: number): boolean {
   return hasAuthorityPermission(user.authority, 'payroll.finalize', branchId);
@@ -262,20 +278,26 @@ export function canDeleteRoles(user: UserProfile): boolean {
   return _hasCompanyPermission(user, 'roles.delete') || _hasCompanyAdminFallback(user);
 }
 
-/** Full settings admin (company, branches, payroll setup, pay items). */
+/**
+ * Full settings admin (company, branches, payroll setup, pay items).
+ * Canonical company-scoped setup.manage — mirrors the backend's
+ * _ensure_company_admin, not the flat has_setup_manage union.
+ */
 export function canManageSettingsAdmin(user: UserProfile): boolean {
-  return user.has_setup_manage;
+  return _hasCompanyPermission(user, 'setup.manage');
 }
 
 /**
  * True when the user should be able to reach the Daily Pay Items page.
  *
  * Two paths:
- *   1. Full settings admin (has_setup_manage) — existing behavior, unchanged.
+ *   1. Full settings admin — canonical company-scoped setup.manage
+ *      (canManageSettingsAdmin).
  *   2. Any user with payitems.edit somewhere — needed to browse CDPI-approved
- *      items.  Note: this is a flat union check (see hasPayItemsEdit docs).
- *      Legacy mutation actions on the page remain gated behind isAdmin (which
- *      requires has_setup_manage + AllCompanyBranches) and are unaffected.
+ *      items.  Note: this is a flat union check (see hasPayItemsEdit docs);
+ *      actual branch/company CDPI browsing and actions are governed by the
+ *      branch-aware helpers below (canManageCdpiForBranch,
+ *      canReviewCdpiCompanyWide), not by this union check alone.
  */
 export function canViewDailyPayItems(user: UserProfile | null | undefined): boolean {
   if (!user) return false;

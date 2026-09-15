@@ -9,6 +9,9 @@ import {
   canDecideReview,
   canEditTransfers,
   canEditPayRates,
+  canManageSettingsAdmin,
+  canViewPayrollReports,
+  canPreviewCalculation,
 } from '../src/lib/permissions.ts';
 
 function makeAuthority(overrides: Partial<PermissionAuthority> = {}): PermissionAuthority {
@@ -283,4 +286,91 @@ test('canEditPayRates: company-wide setup.manage authorizes any concrete branch'
 test('canEditPayRates: driver and ODA users are denied despite a matching branch grant', () => {
   assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { role_code: 'DRIVER' }), 10), false);
   assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+});
+
+// ── canManageSettingsAdmin: canonical company-scoped setup.manage only ──────
+
+test('canManageSettingsAdmin: company-wide setup.manage authorizes', () => {
+  const user = companyUser('setup.manage');
+  assert.equal(canManageSettingsAdmin(user), true);
+});
+
+test('canManageSettingsAdmin: branch-scoped setup.manage does not authorize company settings', () => {
+  const user = scopedUser('setup.manage', 10);
+  assert.equal(canManageSettingsAdmin(user), false);
+});
+
+test('canManageSettingsAdmin: an unrelated AllCompanyBranches row plus branch-10-only setup.manage cannot authorize company settings', () => {
+  const user = makeUser({
+    active_permissions: ['setup.manage'], // sourced from the branch-10 grant, not company scope
+    branches: [makeBranch({ scope: 'AllCompanyBranches', branch_id: null })], // unrelated role, grants nothing itself
+    authority: makeAuthority({
+      company_permissions: ['drivers.view'],
+      branch_permissions: [{ branch_id: 10, permissions: ['setup.manage'] }],
+    }),
+  });
+  // Both legacy-derived fields say "admin"; canonical company authority does not.
+  assert.equal(user.scope_type, 'AllCompanyBranches');
+  assert.equal(user.has_setup_manage, true);
+  assert.equal(canManageSettingsAdmin(user), false);
+});
+
+// ── canPreviewCalculation: branch-aware payroll.view OR payroll.entry ───────
+
+test('canPreviewCalculation: a grant scoped to branch A does not authorize branch B', () => {
+  const user = scopedUser('payroll.view', 10);
+  assert.equal(canPreviewCalculation(user, 20), false);
+  assert.equal(canPreviewCalculation(user, 10), true);
+});
+
+test('canPreviewCalculation: payroll.entry also authorizes its own branch', () => {
+  const user = scopedUser('payroll.entry', 10);
+  assert.equal(canPreviewCalculation(user, 10), true);
+  assert.equal(canPreviewCalculation(user, 20), false);
+});
+
+test('canPreviewCalculation: company-wide grant authorizes any concrete branch', () => {
+  const user = companyUser('payroll.view');
+  assert.equal(canPreviewCalculation(user, 10), true);
+  assert.equal(canPreviewCalculation(user, 999), true);
+});
+
+test('canPreviewCalculation: driver and ODA users are denied despite a matching branch grant', () => {
+  assert.equal(canPreviewCalculation(scopedUser('payroll.view', 10, { role_code: 'DRIVER' }), 10), false);
+  assert.equal(canPreviewCalculation(scopedUser('payroll.view', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+});
+
+test('canPreviewCalculation: unioned active_permissions alone no longer authorizes the helper', () => {
+  const user = makeUser({
+    active_permissions: ['payroll.view'],
+    authority: makeAuthority(),
+  });
+  assert.equal(canPreviewCalculation(user, 10), false);
+});
+
+// ── canViewPayrollReports: branch-aware reports.view ────────────────────────
+
+test('canViewPayrollReports: a grant scoped to branch A does not authorize branch B', () => {
+  const user = scopedUser('reports.view', 10);
+  assert.equal(canViewPayrollReports(user, 20), false);
+  assert.equal(canViewPayrollReports(user, 10), true);
+});
+
+test('canViewPayrollReports: company-wide grant authorizes any concrete branch', () => {
+  const user = companyUser('reports.view');
+  assert.equal(canViewPayrollReports(user, 10), true);
+  assert.equal(canViewPayrollReports(user, 999), true);
+});
+
+test('canViewPayrollReports: driver and ODA users are denied despite a matching branch grant', () => {
+  assert.equal(canViewPayrollReports(scopedUser('reports.view', 10, { role_code: 'DRIVER' }), 10), false);
+  assert.equal(canViewPayrollReports(scopedUser('reports.view', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+});
+
+test('canViewPayrollReports: unioned active_permissions alone no longer authorizes the helper', () => {
+  const user = makeUser({
+    active_permissions: ['reports.view'],
+    authority: makeAuthority(),
+  });
+  assert.equal(canViewPayrollReports(user, 10), false);
 });

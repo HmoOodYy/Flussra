@@ -2,7 +2,7 @@ import { useEffect, useReducer, useState, useCallback } from 'react';
 import apiClient from '../../lib/apiClient';
 import { getCurrentPayrollHub, resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
 import { useAuth } from '../../store/authStore';
-import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports } from '../../lib/permissions';
+import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports, canPreviewCalculation } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
 import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary } from '../../types/payroll';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
@@ -343,10 +343,6 @@ export function PeriodsListPage() {
   const { user } = useAuth();
 
   const isAllBranches   = user?.scope_type === 'AllCompanyBranches';
-  const userCanPreview  = user ? user.active_permissions.some(
-    (permission) => permission === 'payroll.view' || permission === 'payroll.entry',
-  ) : false;
-  const userCanViewReports = user ? canViewPayrollReports(user) : false;
 
   const [branchesSt,  dispatchBranches] = useReducer(branchesReducer, { branches: [], loading: true });
   const [periodsSt,   dispatchPeriods]  = useReducer(periodsReducer,  { periods: [], loading: true, error: '' });
@@ -515,9 +511,9 @@ export function PeriodsListPage() {
           refreshHub();
         }}
         canEntry={user ? canEntryPayroll(user, p.branch_id) : false}
-        canPreview={userCanPreview}
+        canPreview={user ? canPreviewCalculation(user, p.branch_id) : false}
         canFinalize={user ? canFinalizePayroll(user, p.branch_id) : false}
-        canViewReports={userCanViewReports}
+        canViewReports={user ? canViewPayrollReports(user, p.branch_id) : false}
       />
     );
   }

@@ -4,7 +4,7 @@ import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import { createCdpiRequest, submitCdpiRequest, updateCdpiRequest, createDirectCdpiCompanyItem, listCdpiRequests, decideCdpiRequest, listCdpiBranchItems, updateCdpiBranchItem } from '../../../lib/cdpiApi';
-import { canManageCdpiForBranch, canDirectCreateCdpiCompanyItem } from '../../../lib/permissions';
+import { canManageCdpiForBranch, canDirectCreateCdpiCompanyItem, canManageSettingsAdmin } from '../../../lib/permissions';
 import { submitExistingDraft, saveAndSubmitDraft } from './cdpiDraftWorkflow';
 import type {
   BranchAdmin,
@@ -429,10 +429,7 @@ function cdpiBranchReducer(s: CdpiBranchState, a: CdpiBranchAction): CdpiBranchS
 
 export function PayItemsPage() {
   const { user } = useAuth();
-  // TODO: When /auth/me exposes explicit permission flags, prefer those over
-  // role_code derivation. Currently has_setup_manage is derived in authStore.ts
-  // from role_code === 'PAYROLL_ADMIN' on the AllCompanyBranches entry.
-  const isAdmin = user?.scope_type === 'AllCompanyBranches' && user?.has_setup_manage === true;
+  const isAdmin = !!user && canManageSettingsAdmin(user);
 
   // ── Branch mode & selector ────────────────────────────────────────────────
   const [branchMode, setBranchMode] = useState<'single' | 'all'>('single');
