@@ -395,39 +395,49 @@ async def get_periods(
     # Operational users must have payroll.view OR payroll.entry on at least one
     # accessible branch.  Branch access alone (e.g. drivers.view only) is not
     # sufficient to read payroll data.
+    #
+    # can_see_all only proves branch *access*, not which branches hold payroll
+    # permission — a user's AllCompanyBranches assignment can grant an
+    # unrelated permission while a separate SpecificBranch assignment grants
+    # payroll.view.  sec.fn_UserHasPermission never matches a SpecificBranch
+    # row when p_BranchID is NULL (SQL's `x = NULL` is NULL, not TRUE), so
+    # every candidate branch must be checked individually.
     _PAYROLL_READ_PERMS = ["payroll.view", "payroll.entry", "payroll.finalize"]
     if can_see_all:
-        await _check_any_permission(company_id, user_id, None, _PAYROLL_READ_PERMS, db)
+        candidate_rows = (await db.execute(
+            text("SELECT branchid FROM core.branches WHERE companyid = :company_id"),
+            {"company_id": company_id},
+        )).mappings().all()
+        candidate_branch_ids = [int(r["branchid"]) for r in candidate_rows]
     else:
-        permitted_branches = [
-            bid for bid in branch_ids
-            if await _has_any_permission(company_id, user_id, bid, _PAYROLL_READ_PERMS, db)
-        ]
-        if not permitted_branches:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You do not have payroll.view, payroll.entry, or payroll.finalize "
-                    "permission on any accessible branch."
-                ),
-            )
-        branch_ids = permitted_branches
+        candidate_branch_ids = branch_ids
+
+    permitted_branches = [
+        bid for bid in candidate_branch_ids
+        if await _has_any_permission(company_id, user_id, bid, _PAYROLL_READ_PERMS, db)
+    ]
+    if not permitted_branches:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "You do not have payroll.view, payroll.entry, or payroll.finalize "
+                "permission on any accessible branch."
+            ),
+        )
 
     conditions: list[str] = ["v.companyid = :company_id"]
     params: dict[str, Any] = {"company_id": company_id}
 
     if branch_id is not None:
-        if not can_see_all and branch_id not in branch_ids:
+        if branch_id not in permitted_branches:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to the requested branch.",
             )
         conditions.append("v.branchid = :branch_id")
         params["branch_id"] = branch_id
-    elif not can_see_all:
-        if not branch_ids:
-            return []
-        in_clause, in_params = _build_in_clause(branch_ids, "pb")
+    else:
+        in_clause, in_params = _build_in_clause(permitted_branches, "pb")
         conditions.append(f"v.branchid IN ({in_clause})")
         params.update(in_params)
 
