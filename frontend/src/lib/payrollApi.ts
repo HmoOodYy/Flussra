@@ -6,25 +6,15 @@ import apiClient from './apiClient';
 import type {
   DayGridResponse,
   DayGridSaveRequest,
-  PeriodPayLine,
-  AddPeriodPayLineRequest,
   BonusEvent,
-  BonusEventCreate,
-  BonusEventUpdate,
   BonusBatchCreate,
   BonusBatchResponse,
   BonusSummary,
   PeriodSummary,
-  NextPeriodDates,
-  EligibleDriver,
-  EligibleDriversResponse,
-  DriversOffResponse,
   SelectedDayOffDriversResponse,
   FinalizationPreviewResponse,
   CalculationPreviewResponse,
   FinalLineSummary,
-  DraftLineSummary,
-  DriverPeriodSummary,
   CurrentWorkflow,
   CurrentPayrollHub,
   PeriodCandidateMode,
@@ -40,19 +30,6 @@ import type {
   FinalizedRatesUsedResponse,
   FinalizedAuditResponse,
 } from '../types/payroll';
-
-// ---------------------------------------------------------------------------
-// Next period dates — from branch Payroll Setup (source of truth for creation)
-// ---------------------------------------------------------------------------
-
-export async function getNextPeriodDates(branchId: number): Promise<NextPeriodDates> {
-  const resp = await apiClient.get<NextPeriodDates>('/payroll/periods/next-period-dates', {
-    params: { branch_id: String(branchId) },
-  });
-  return resp.data;
-}
-
-export type { NextPeriodDates };
 
 // ---------------------------------------------------------------------------
 // Current workflow and candidate-based period creation
@@ -88,52 +65,6 @@ export async function createPeriodFromCandidate(
   const resp = await apiClient.post<PeriodCreationResult>(
     `/payroll/branches/${branchId}/period-creations`,
     { candidate_key: candidateKey },
-  );
-  return resp.data;
-}
-
-// ---------------------------------------------------------------------------
-// Period list (used by Review page)
-// ---------------------------------------------------------------------------
-
-export async function getPeriods(
-  status?: string,
-  branchId?: number,
-): Promise<PeriodSummary[]> {
-  const params: Record<string, string> = {};
-  if (status) params.status = status;
-  if (branchId != null) params.branch_id = String(branchId);
-  const resp = await apiClient.get<PeriodSummary[]>('/payroll/periods', { params });
-  return resp.data;
-}
-
-export async function getPeriod(periodId: number): Promise<PeriodSummary> {
-  const resp = await apiClient.get<PeriodSummary>(`/payroll/periods/${periodId}`);
-  return resp.data;
-}
-
-// ---------------------------------------------------------------------------
-// Draft lines (used by Review detail dialog)
-// ---------------------------------------------------------------------------
-
-export async function getDraftLines(
-  periodId: number,
-  opts?: { status?: string },
-): Promise<DraftLineSummary[]> {
-  const params: Record<string, string> = {};
-  if (opts?.status) params.status = opts.status;
-  const resp = await apiClient.get<DraftLineSummary[]>(
-    `/payroll/periods/${periodId}/lines`,
-    { params },
-  );
-  return resp.data;
-}
-
-export async function getDriverPeriodSummary(
-  periodId: number,
-): Promise<DriverPeriodSummary[]> {
-  const resp = await apiClient.get<DriverPeriodSummary[]>(
-    `/payroll/periods/${periodId}/lines/summary`,
   );
   return resp.data;
 }
@@ -186,44 +117,6 @@ export async function resubmitPeriod(periodId: number): Promise<PeriodSummary> {
 }
 
 // ---------------------------------------------------------------------------
-// CP-2 — Generic period pay compatibility APIs (not canonical BonusEvents)
-// ---------------------------------------------------------------------------
-
-export async function getPeriodPayLines(
-  periodId: number,
-  lineType?: string,
-): Promise<PeriodPayLine[]> {
-  const params: Record<string, string> = {};
-  if (lineType) params.line_type = lineType;
-  const resp = await apiClient.get<PeriodPayLine[]>(
-    `/payroll/periods/${periodId}/period-pay`,
-    { params },
-  );
-  return resp.data;
-}
-
-export async function addPeriodPayLine(
-  periodId: number,
-  req: AddPeriodPayLineRequest,
-): Promise<PeriodPayLine> {
-  const resp = await apiClient.post<PeriodPayLine>(
-    `/payroll/periods/${periodId}/period-pay`,
-    req,
-  );
-  return resp.data;
-}
-
-export async function voidPeriodPayLine(
-  periodId: number,
-  lineId: number,
-): Promise<PeriodPayLine> {
-  const resp = await apiClient.delete<PeriodPayLine>(
-    `/payroll/periods/${periodId}/period-pay/${lineId}`,
-  );
-  return resp.data;
-}
-
-// ---------------------------------------------------------------------------
 // CP-3A — Canonical BonusEvents
 // ---------------------------------------------------------------------------
 
@@ -234,35 +127,12 @@ export async function getBonusSummary(periodId: number): Promise<BonusSummary> {
   return resp.data;
 }
 
-export async function createBonusEvent(
-  periodId: number,
-  req: BonusEventCreate,
-): Promise<BonusEvent> {
-  const resp = await apiClient.post<BonusEvent>(
-    `/payroll/periods/${periodId}/bonuses`,
-    req,
-  );
-  return resp.data;
-}
-
 export async function createBonusBatch(
   periodId: number,
   req: BonusBatchCreate,
 ): Promise<BonusBatchResponse> {
   const resp = await apiClient.post<BonusBatchResponse>(
     `/payroll/periods/${periodId}/bonuses/batch`,
-    req,
-  );
-  return resp.data;
-}
-
-export async function updateBonusEvent(
-  periodId: number,
-  bonusEventId: number,
-  req: BonusEventUpdate,
-): Promise<BonusEvent> {
-  const resp = await apiClient.patch<BonusEvent>(
-    `/payroll/periods/${periodId}/bonuses/${bonusEventId}`,
     req,
   );
   return resp.data;
@@ -279,31 +149,8 @@ export async function voidBonusEvent(
 }
 
 // ---------------------------------------------------------------------------
-// CP-2 P1 #1 — Period-eligible drivers (stable Bonus dropdown)
-// ---------------------------------------------------------------------------
-
-export async function getEligibleDrivers(
-  periodId: number,
-): Promise<EligibleDriver[]> {
-  const resp = await apiClient.get<EligibleDriversResponse>(
-    `/payroll/periods/${periodId}/eligible-drivers`,
-  );
-  return resp.data.drivers;
-}
-
-// Re-export EligibleDriver so callers can import from payrollApi directly.
-export type { EligibleDriver };
-
-// ---------------------------------------------------------------------------
 // CP-2.5 — Period-level Drivers Off
 // ---------------------------------------------------------------------------
-
-export async function getDriversOff(periodId: number): Promise<DriversOffResponse> {
-  const resp = await apiClient.get<DriversOffResponse>(
-    `/payroll/periods/${periodId}/drivers-off`,
-  );
-  return resp.data;
-}
 
 export async function getSelectedDayOffDrivers(
   periodId: number,

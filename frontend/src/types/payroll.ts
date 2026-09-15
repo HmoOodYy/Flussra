@@ -44,19 +44,6 @@ export interface PeriodCreate {
 
 export const PERIOD_TYPES = ['Week', 'Biweek', 'Month', 'Custom'] as const;
 
-// ── Next period dates (from branch Payroll Setup) ────────────────────────────
-
-export interface NextPeriodDates {
-  branch_id: number;
-  period_type: string;
-  anchor_start_date: string;
-  last_period_end_date: string | null;
-  start_date: string | null;      // null when Custom setup is incomplete
-  end_date: string | null;        // null when Custom setup is incomplete
-  is_custom: boolean;
-  custom_interval_days: number | null;
-}
-
 // ── Current workflow and candidate-based period creation ───────────────────
 
 export type PeriodCandidateMode = 'OPEN_CREATION' | 'PREPARED_CREATION';
@@ -209,26 +196,6 @@ export interface CurrentPayrollHub {
 
 // ── Draft lines ──────────────────────────────────────────────────────────────
 
-export interface DraftLineSummary {
-  draft_line_id: number;
-  period_id: number;
-  branch_id: number;
-  driver_id: number;
-  driver_name: string;
-  work_date: string | null;
-  line_type: string;
-  line_scope: string;
-  quantity: string;               // Decimal serialized as string
-  rate_amount: string | null;
-  calculated_amount: string | null;
-  source_type: string;
-  status: string;
-  needs_manager_review: boolean;
-  notes: string | null;
-  added_by_user_id: number | null;
-  added_at_utc: string;
-}
-
 export interface DraftLineCreate {
   driver_id: number;
   work_date: string | null;
@@ -243,20 +210,6 @@ export interface DraftLineUpdate {
   quantity?: number;
   rate_amount?: number | null;
   notes?: string;
-}
-
-// ── Per-driver period summary ────────────────────────────────────────────────
-
-export interface DriverPeriodSummary {
-  driver_id: number;
-  driver_name: string;
-  period_id: number;
-  period_name: string;
-  line_type: string;
-  total_quantity: string;
-  total_calculated_amount: string;
-  line_count: number;
-  lines_needing_attention: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,37 +293,6 @@ export interface DayGridSaveRequest {
 }
 
 // ---------------------------------------------------------------------------
-// CP-2 — Period Pay Line types
-// ---------------------------------------------------------------------------
-
-export interface PeriodPayLine {
-  draft_line_id: number;
-  period_id: number;
-  branch_id: number;
-  driver_id: number;
-  driver_name: string;
-  line_type: string;
-  line_scope: string;
-  work_date: string | null;
-  quantity: string;
-  rate_amount: string | null;
-  calculated_amount: string | null;
-  source_type: string;
-  status: string;
-  needs_manager_review: boolean;
-  notes: string | null;
-  added_by_user_id: number | null;
-  added_at_utc: string;
-}
-
-export interface AddPeriodPayLineRequest {
-  driver_id: number;
-  line_type: string;
-  amount: string;
-  notes?: string;
-}
-
-// ---------------------------------------------------------------------------
 // CP-3A — Canonical bonus events
 // ---------------------------------------------------------------------------
 
@@ -382,20 +304,6 @@ export interface BonusEvent {
   notes: string | null;
   status: 'Active' | 'Voided';
   data_revision: number;
-}
-
-export interface BonusEventCreate {
-  driver_id: number;
-  amount: string;
-  reason?: string | null;
-  notes?: string | null;
-}
-
-export interface BonusEventUpdate {
-  amount?: string;
-  reason?: string | null;
-  notes?: string | null;
-  data_revision?: number;
 }
 
 export interface BonusEventResponse extends BonusEvent {
@@ -475,42 +383,12 @@ export interface StatusTransitionRequest {
 }
 
 // ---------------------------------------------------------------------------
-// CP-2 P1 #1 — Period-eligible drivers (stable Bonus dropdown source)
-// ---------------------------------------------------------------------------
-
-export interface EligibleDriver {
-  driver_id: number;
-  driver_name: string;
-  driver_code: string | null;
-}
-
-export interface EligibleDriversResponse {
-  drivers: EligibleDriver[];
-}
-
-// ---------------------------------------------------------------------------
 // CP-2 — Status colors
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // CP-2.5 — Period-level Drivers Off
 // ---------------------------------------------------------------------------
-
-export interface DriversOffEntry {
-  driver_id: number;
-  driver_name: string;
-  driver_code: string | null;
-  work_date: string;
-  status_key_code: string;
-  status_label: string | null;
-  notes: string | null;
-}
-
-export interface DriversOffResponse {
-  period_id: number;
-  entries: DriversOffEntry[];
-  total_count: number;
-}
 
 export interface SelectedDayOffDriver {
   driver_id: number;
