@@ -299,6 +299,114 @@ class TestSubmitDraft:
         finally:
             await _cleanup_requests(direct_db, draft.request_id)
 
+    async def test_resubmit_after_edit_uses_event_history_not_submitted_at_utc(self, direct_db):
+        """Event type must come from cdpirequestevents, not SubmittedAtUtc."""
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        draft = await _create_complete_draft(direct_db, company_id, hq_id, admin_id)
+        try:
+            pending = await _submit(direct_db, company_id, admin_id, draft.request_id)
+            returned = await _decide(
+                direct_db, company_id, admin_id, draft.request_id,
+                CdpiDecideAction.ReturnToDraft, pending.revision
+            )
+            edited = await cdpi_service.update_draft(
+                company_id, admin_id, draft.request_id,
+                CdpiRequestUpdate(expected_revision=returned.revision, item_name="Edited Allowance"),
+                direct_db,
+            )
+            # Directly clear the mutable SubmittedAtUtc column -- if event type
+            # were derived from it, this resubmit would misclassify as
+            # "Submitted" instead of "Resubmitted".
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.cdpirequests
+                    SET submittedatutc = NULL
+                    WHERE requestid = :rid
+                """),
+                {"rid": str(draft.request_id)},
+            )
+
+            resubmitted = await _submit(
+                direct_db, company_id, admin_id, draft.request_id,
+                revision=edited.revision
+            )
+            assert resubmitted.item_name == "Edited Allowance"
+
+            events = await _event_types(direct_db, draft.request_id)
+            assert events[-1] == "Resubmitted"
+        finally:
+            await _cleanup_requests(direct_db, draft.request_id)
+
+    async def test_branch_scoped_user_can_edit_and_resubmit_returned_draft(self, direct_db):
+        """A SpecificBranch user scoped to the request's own originating
+        branch can edit and resubmit a returned Draft -- same-branch
+        edit/resubmit authority is distinct from AllCompanyBranches admin."""
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        suffix = uuid.uuid4().hex[:6]
+        branch_user_id = await _create_test_user(
+            direct_db, company_id=company_id, username=f"hqedit_{suffix}"
+        )
+        role_id = await _create_company_role(
+            direct_db, company_id=company_id,
+            role_code=f"HQEDIT_{suffix}", perms=["payitems.edit"],
+        )
+        await _assign_role(
+            direct_db, user_id=branch_user_id, company_id=company_id,
+            role_id=role_id, scope="SpecificBranch", branch_id=hq_id,
+        )
+        draft = await _create_complete_draft(direct_db, company_id, hq_id, admin_id)
+        try:
+            pending = await _submit(direct_db, company_id, admin_id, draft.request_id)
+            returned = await _decide(
+                direct_db, company_id, admin_id, draft.request_id,
+                CdpiDecideAction.ReturnToDraft, pending.revision
+            )
+            # Edit and resubmit as the branch-scoped user (not admin) --
+            # this must succeed on the originating branch alone.
+            edited = await cdpi_service.update_draft(
+                company_id, branch_user_id, draft.request_id,
+                CdpiRequestUpdate(
+                    expected_revision=returned.revision,
+                    item_name="Branch-Edited Allowance",
+                ),
+                direct_db,
+            )
+            resubmitted = await _submit(
+                direct_db, company_id, branch_user_id, draft.request_id,
+                revision=edited.revision
+            )
+            assert resubmitted.item_name == "Branch-Edited Allowance"
+            assert resubmitted.status == "PendingCompanyApproval"
+
+            events = await _event_types(direct_db, draft.request_id)
+            assert events[-3:] == ["Submitted", "ReturnedToDraft", "Resubmitted"]
+        finally:
+            await _cleanup_requests(direct_db, draft.request_id)
+            await _cleanup_user(direct_db, branch_user_id)
+            await _cleanup_role(direct_db, role_id)
+
+    async def test_first_submit_with_synthetic_submitted_at_utc_is_not_resubmitted(self, direct_db):
+        """A non-null SubmittedAtUtc with no prior event must still be Submitted."""
+        company_id, hq_id, _, admin_id = await _get_ids(direct_db)
+        draft = await _create_complete_draft(direct_db, company_id, hq_id, admin_id)
+        try:
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.cdpirequests
+                    SET submittedatutc = now()
+                    WHERE requestid = :rid
+                """),
+                {"rid": str(draft.request_id)},
+            )
+
+            await _submit(direct_db, company_id, admin_id, draft.request_id)
+
+            events = await _event_types(direct_db, draft.request_id)
+            assert events.count("Submitted") == 1
+            assert events.count("Resubmitted") == 0
+        finally:
+            await _cleanup_requests(direct_db, draft.request_id)
+
     async def test_submit_increments_revision(self, direct_db):
         """Submit increments Revision by exactly 1."""
         company_id, hq_id, _, admin_id = await _get_ids(direct_db)

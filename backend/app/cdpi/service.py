@@ -415,7 +415,8 @@ async def submit_draft(
       4. Validate completeness: ItemName, InputType, CalcMethodKey all required.
       5. Validate CalcMethodKey is a submittable method (PerUnit only for Task 4).
       6. Determine event type: Submitted (first time) vs Resubmitted (returned
-         request re-submitted -- detected by non-null SubmittedAtUtc in Draft).
+         request re-submitted -- derived from the append-only
+         cdpirequestevents history, never the mutable SubmittedAtUtc column).
       7. Atomic conditional UPDATE:
            WHERE requestid, companyid, status='Draft', revision=expected
          Sets Status='PendingCompanyApproval', SubmittedByUserID, SubmittedAtUtc,
@@ -434,8 +435,7 @@ async def submit_draft(
     pre = (await db.execute(
         text("""
             SELECT companyid, requestingbranchid,
-                   itemname, inputtype, calcmethodkey,
-                   submittedatutc
+                   itemname, inputtype, calcmethodkey
             FROM   payroll.cdpirequests
             WHERE  requestid = :rid
         """),
@@ -477,8 +477,18 @@ async def submit_draft(
             detail=f"Cannot submit: missing required fields: {', '.join(missing)}.",
         )
 
-    # Step 6: first submit vs resubmit.
-    event_type = "Resubmitted" if pre["submittedatutc"] is not None else "Submitted"
+    # Step 6: first submit vs resubmit -- from event history, not the
+    # mutable SubmittedAtUtc column (ReturnToDraft/edits do not clear it).
+    prior_submission = (await db.execute(
+        text("""
+            SELECT 1
+            FROM   payroll.cdpirequestevents
+            WHERE  requestid = :rid AND eventtype IN ('Submitted', 'Resubmitted')
+            LIMIT  1
+        """),
+        {"rid": str(request_id)},
+    )).scalar_one_or_none()
+    event_type = "Resubmitted" if prior_submission is not None else "Submitted"
 
     # Step 7: atomic conditional UPDATE.
     updated = (await db.execute(

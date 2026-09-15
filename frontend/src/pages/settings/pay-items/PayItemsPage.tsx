@@ -3,8 +3,9 @@ import type { FormEvent, DragEvent } from 'react';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
-import { createCdpiRequest, submitCdpiRequest, createDirectCdpiCompanyItem, listCdpiRequests, decideCdpiRequest, listCdpiBranchItems, updateCdpiBranchItem } from '../../../lib/cdpiApi';
+import { createCdpiRequest, submitCdpiRequest, updateCdpiRequest, createDirectCdpiCompanyItem, listCdpiRequests, decideCdpiRequest, listCdpiBranchItems, updateCdpiBranchItem } from '../../../lib/cdpiApi';
 import { canManageCdpiForBranch, canDirectCreateCdpiCompanyItem } from '../../../lib/permissions';
+import { submitExistingDraft, saveAndSubmitDraft } from './cdpiDraftWorkflow';
 import type {
   BranchAdmin,
   BranchPayItemState,
@@ -20,6 +21,7 @@ import type {
   CdpiRequestSummary,
   CdpiDecideAction,
   CdpiStatus,
+  CdpiInputType,
   CdpiRequestListParams,
   CdpiBranchItem,
 } from '../../../types/settings';
@@ -488,6 +490,16 @@ export function PayItemsPage() {
   const [decideSaving, setDecideSaving]     = useState(false);
   const [decideError, setDecideError]       = useState('');
 
+  // ── CDPI Draft edit + resubmit ────────────────────────────────────────────
+  const [draftEditOpen, setDraftEditOpen]       = useState(false);
+  const [draftEditTarget, setDraftEditTarget]   = useState<CdpiRequestSummary | null>(null);
+  const [draftEditItemName, setDraftEditItemName]   = useState('');
+  const [draftEditInputType, setDraftEditInputType] = useState<CdpiInputType>('Number');
+  const [draftEditUnit, setDraftEditUnit]       = useState('');
+  const [draftEditNotes, setDraftEditNotes]     = useState('');
+  const [draftEditSaving, setDraftEditSaving]   = useState(false);
+  const [draftEditError, setDraftEditError]     = useState('');
+
   // ── CDPI branch controls ─────────────────────────────────────────────────
   const [cdpiBranchSt, dispatchCdpiBranch] = useReducer(cdpiBranchReducer, { items: [], loading: false, error: '' });
   const [cdpiBranchKey, setCdpiBranchKey]   = useState(0);
@@ -788,17 +800,19 @@ export function PayItemsPage() {
           notes:                wizard.notes.trim() || null,
         });
         // Step 2: submit for approval
-        try {
-          await submitCdpiRequest(draft.request_id, { expected_revision: draft.revision });
-          setCreateOpen(false);
-          dispatchWizard({ type: 'RESET' });
+        const submitResult = await submitExistingDraft({ updateCdpiRequest, submitCdpiRequest }, draft);
+        setCreateOpen(false);
+        dispatchWizard({ type: 'RESET' });
+        if (submitResult.kind === 'submitted') {
           setCdpiKey(k => k + 1);
           showToast('Request submitted for company approval.');
-        } catch (submitErr) {
-          // Draft created but submit failed — inform user of partial state
-          setCreateError(
-            `Draft was saved (ref: ${draft.request_id.slice(0, 8)}…) but could not be submitted: ` +
-            `${apiError(submitErr)}. You can submit it later once the issue is resolved.`
+        } else {
+          setPageTab('requests');
+          setCdpiFilter('Draft');
+          setCdpiKey(k => k + 1);
+          showToast(
+            `Draft saved (ref: ${submitResult.request.request_id.slice(0, 8)}…) but could not be submitted: ` +
+            `${apiError(submitResult.error)}. Find it under Requests > Draft to retry.`
           );
         }
       }
@@ -893,6 +907,57 @@ export function PayItemsPage() {
       setDecideError(apiError(e));
     } finally {
       setDecideSaving(false);
+    }
+  }
+
+  // ── CDPI Draft edit + resubmit ────────────────────────────────────────────
+  function openDraftEdit(req: CdpiRequestSummary) {
+    setDraftEditTarget(req);
+    setDraftEditItemName(req.item_name ?? '');
+    setDraftEditInputType(req.input_type ?? 'Number');
+    setDraftEditUnit(req.unit ?? '');
+    setDraftEditNotes(req.notes ?? '');
+    setDraftEditError('');
+    setDraftEditOpen(true);
+  }
+
+  async function executeDraftEditAndSubmit() {
+    if (!draftEditTarget) return;
+    const trimmedName = draftEditItemName.trim();
+    if (!trimmedName) {
+      setDraftEditError('Pay item name is required.');
+      return;
+    }
+    setDraftEditSaving(true);
+    setDraftEditError('');
+    try {
+      const result = await saveAndSubmitDraft(
+        { updateCdpiRequest, submitCdpiRequest },
+        draftEditTarget,
+        {
+          item_name:  trimmedName,
+          input_type: draftEditInputType,
+          unit:       draftEditUnit.trim(),
+          notes:      draftEditNotes.trim(),
+        },
+      );
+      setDraftEditOpen(false);
+      setDraftEditTarget(null);
+      if (result.kind === 'submitted') {
+        setCdpiKey(k => k + 1);
+        showToast('Request submitted for company approval.');
+      } else {
+        setCdpiFilter('Draft');
+        setCdpiKey(k => k + 1);
+        showToast(
+          `Draft saved (ref: ${result.request.request_id.slice(0, 8)}…) but could not be submitted: ` +
+          `${apiError(result.error)}. You can retry from Requests > Draft.`
+        );
+      }
+    } catch (e) {
+      setDraftEditError(apiError(e));
+    } finally {
+      setDraftEditSaving(false);
     }
   }
 
@@ -1463,6 +1528,16 @@ export function PayItemsPage() {
                         </button>
                       </div>
                     )}
+                    {/* Draft owner actions — requires proven branch authority over the request's own branch */}
+                    {req.status === 'Draft' && canManageCdpiForBranch(user, req.requesting_branch_id) && (
+                      <div className={styles.cdpiCardActions}>
+                        <button className={styles.btnPrimary}
+                          disabled={draftEditSaving}
+                          onClick={() => openDraftEdit(req)}>
+                          Edit and submit
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1530,6 +1605,70 @@ export function PayItemsPage() {
                   : 'Return to Draft'}
               </button>
               <button className={styles.btnSecondary} onClick={() => setDecideOpen(false)} disabled={decideSaving}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Draft edit + resubmit modal ── */}
+      {draftEditOpen && draftEditTarget && (
+        <div className={styles.modalOverlay} onClick={e => { if (e.target === e.currentTarget && !draftEditSaving) setDraftEditOpen(false); }}>
+          <div className={styles.modal}>
+            <div className={styles.modalHeader}>
+              <h2 className={styles.modalTitle}>Edit Draft Request</h2>
+              <button className={styles.modalCloseBtn} onClick={() => setDraftEditOpen(false)} disabled={draftEditSaving}><CloseIcon /></button>
+            </div>
+            <div className={styles.modalBody}>
+              <div className={styles.infoBanner}>
+                <InfoIcon />
+                <span>
+                  From {branchSt.branches.find(b => b.branch_id === draftEditTarget.requesting_branch_id)?.branch_name
+                    ?? `Branch ${draftEditTarget.requesting_branch_id}`}. Saving resubmits this request for company approval.
+                </span>
+              </div>
+              <div className={styles.formGroup} style={{ marginTop: '0.75rem' }}>
+                <label className={styles.label}>Pay Item Name <span className={styles.required}>*</span></label>
+                <input className={styles.input} maxLength={120} autoFocus
+                  value={draftEditItemName}
+                  onChange={e => setDraftEditItemName(e.target.value)}
+                  disabled={draftEditSaving} />
+              </div>
+              <div className={styles.formGroup}>
+                <label className={styles.label}>Input Type</label>
+                <select className={styles.select}
+                  value={draftEditInputType}
+                  onChange={e => setDraftEditInputType(e.target.value === 'Time' ? 'Time' : 'Number')}
+                  disabled={draftEditSaving}>
+                  <option value="Number">Number</option>
+                  <option value="Time">Time</option>
+                </select>
+              </div>
+              <div className={styles.formGroup}>
+                <label className={styles.label}>Unit <span className={styles.optional}>(optional)</span></label>
+                <input className={styles.input} maxLength={50}
+                  value={draftEditUnit}
+                  onChange={e => setDraftEditUnit(e.target.value)}
+                  disabled={draftEditSaving}
+                  placeholder={draftEditInputType === 'Time' ? 'e.g. hours' : 'e.g. loads, miles, stops'} />
+              </div>
+              <div className={styles.formGroup}>
+                <label className={styles.label}>Notes <span className={styles.optional}>(optional)</span></label>
+                <textarea className={styles.textarea} maxLength={500}
+                  value={draftEditNotes}
+                  onChange={e => setDraftEditNotes(e.target.value)}
+                  disabled={draftEditSaving} />
+              </div>
+              {draftEditError && <div className={styles.errorAlert}><AlertIcon /> {draftEditError}</div>}
+            </div>
+            <div className={styles.modalFooter}>
+              <button className={styles.btnPrimary}
+                disabled={draftEditSaving || !draftEditItemName.trim()}
+                onClick={() => void executeDraftEditAndSubmit()}>
+                {draftEditSaving ? <><SpinnerIcon /> Working…</> : 'Save and Submit'}
+              </button>
+              <button className={styles.btnSecondary} onClick={() => setDraftEditOpen(false)} disabled={draftEditSaving}>
                 Cancel
               </button>
             </div>

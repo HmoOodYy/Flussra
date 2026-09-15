@@ -597,6 +597,46 @@ class TestUpdateDraft:
             await _cleanup_user(direct_db, no_perm_id)
             await _cleanup_role(direct_db, role_id)
 
+    async def test_update_cross_branch_forbidden_403(self, direct_db):
+        """SpecificBranch HQ user cannot PATCH a Draft belonging to PAYTEST."""
+        company_id, hq_id, paytest_id, admin_id = await _get_ids(direct_db)
+        suffix = uuid.uuid4().hex[:6]
+        hq_user_id = await _create_test_user(
+            direct_db, company_id=company_id, username=f"xbr_{suffix}"
+        )
+        role_id = await _create_company_role(
+            direct_db, company_id=company_id,
+            role_code=f"XBR_{suffix}", perms=["payitems.edit"],
+        )
+        await _assign_role(
+            direct_db, user_id=hq_user_id, company_id=company_id,
+            role_id=role_id, scope="SpecificBranch", branch_id=hq_id,
+        )
+        created = await cdpi_service.create_draft(
+            company_id, admin_id,
+            CdpiRequestCreate(requesting_branch_id=paytest_id, item_name="PayTest Item"),
+            direct_db,
+        )
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await cdpi_service.update_draft(
+                    company_id, hq_user_id, created.request_id,
+                    CdpiRequestUpdate(expected_revision=1, item_name="Hijacked"),
+                    direct_db,
+                )
+            assert exc_info.value.status_code == 403
+
+            row = (await direct_db.execute(
+                _text("SELECT itemname, revision FROM payroll.cdpirequests WHERE requestid = :rid"),
+                {"rid": str(created.request_id)},
+            )).mappings().first()
+            assert row["itemname"] == "PayTest Item"
+            assert row["revision"] == 1
+        finally:
+            await _cleanup_requests(direct_db, created.request_id)
+            await _cleanup_user(direct_db, hq_user_id)
+            await _cleanup_role(direct_db, role_id)
+
     # -----------------------------------------------------------------------
     # Race-safe concurrency regression
     # -----------------------------------------------------------------------
