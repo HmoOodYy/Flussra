@@ -239,11 +239,11 @@ test('role helpers are independently gated: a roles.create-only grant cannot edi
   assert.equal(canDeleteRoles(user), false);
 });
 
-// ── canViewSettings: company-scoped authority, not union-derived has_setup_manage ──
+// ── canViewSettings: company-scoped authority, not unioned active_permissions ──
 
-test('canViewSettings: branch-only settings.manage (union-derived has_setup_manage) is denied', () => {
+test('canViewSettings: branch-only settings.manage in active_permissions is denied', () => {
   const user = branchOnlyUser('settings.manage');
-  assert.equal(user.has_setup_manage, true); // proves the flat-union trap this helper must not fall into
+  assert.deepEqual(user.active_permissions, ['settings.manage']);
   assert.equal(canViewSettings(user), false);
 });
 

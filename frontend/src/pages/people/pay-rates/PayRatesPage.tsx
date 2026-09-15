@@ -10,7 +10,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
-import { canEditPayRates } from '../../../lib/permissions';
+import { canEditPayRates, canManageSettingsAdmin } from '../../../lib/permissions';
 import type { DriverSummary, Branch } from '../../../types/core';
 import styles from './PayRatesPage.module.css';
 
@@ -1002,7 +1002,7 @@ export function PayRatesPage() {
                       <div className={styles.section}>
                         <div className={styles.emptySection}>
                           <p>This branch has no active rate items configured for driver rates.</p>
-                          {user?.has_setup_manage ? (
+                          {user !== null && canManageSettingsAdmin(user) ? (
                             <p className={styles.emptySectionHint}>
                               Go to <strong>Settings &gt; Pay Items</strong> to enable rate items for this branch.
                             </p>

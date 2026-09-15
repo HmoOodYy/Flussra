@@ -309,9 +309,8 @@ test('canManageSettingsAdmin: an unrelated AllCompanyBranches row plus branch-10
       branch_permissions: [{ branch_id: 10, permissions: ['setup.manage'] }],
     }),
   });
-  // Both legacy-derived fields say "admin"; canonical company authority does not.
   assert.equal(user.scope_type, 'AllCompanyBranches');
-  assert.equal(user.has_setup_manage, true);
+  assert.deepEqual(user.active_permissions, ['setup.manage']);
   assert.equal(canManageSettingsAdmin(user), false);
 });
 

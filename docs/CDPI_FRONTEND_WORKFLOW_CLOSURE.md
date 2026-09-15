@@ -178,9 +178,9 @@ no per-assignment permission code list. Until the auth model is extended,
 multi-branch `SpecificBranch` users with `payitems.edit` will see the helpers
 return `false`. This is documented in `permissions.ts`.
 
-### Legacy settings admin
+### Settings admin
 
-`canManageSettingsAdmin` (`has_setup_manage`) alone does not grant CDPI request
+`canManageSettingsAdmin` alone does not grant CDPI request
 creation or review. CDPI actions require `payitems.edit` with a provably safe
 scope, regardless of setup-manage status.
 

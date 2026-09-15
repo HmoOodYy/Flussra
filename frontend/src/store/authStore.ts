@@ -75,11 +75,6 @@ export interface UserProfile {
    */
   scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
   branch_ids: number[];
-  /**
-   * Derived from active_permissions (new path) or legacy PAYROLL_ADMIN
-   * role_code check (old path).  True when the user can access Settings admin.
-   */
-  has_setup_manage: boolean;
   /** All distinct permission codes from the user's active role assignments. */
   active_permissions: string[];
   /** Display name of the primary role (first AllCompanyBranches branch, or first branch). */
@@ -106,17 +101,6 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
 
   const perms: string[] = info.active_permissions ?? [];
 
-  // has_setup_manage:
-  //   1. Check new-path permission codes (settings.manage or setup.manage)
-  //   2. Fall back to legacy role_code check so existing users work before
-  //      their CompanyRoleID is populated in UserBranchRoles.
-  const hasSetupManage =
-    perms.includes('settings.manage') ||
-    perms.includes('setup.manage') ||
-    info.branches.some(
-      (b) => b.scope === 'AllCompanyBranches' && b.role_code === 'PAYROLL_ADMIN'
-    );
-
   return {
     user_id:            info.user_id,
     username:           info.username,
@@ -131,7 +115,6 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
     branch_ids:         info.branches
       .filter((b) => b.branch_id !== null)
       .map((b) => b.branch_id as number),
-    has_setup_manage:   hasSetupManage,
     active_permissions: perms,
     primary_role_name:  (
       info.branches.find((b) => b.scope === 'AllCompanyBranches')?.role_name ??

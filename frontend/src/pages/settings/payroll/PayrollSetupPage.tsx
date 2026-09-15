@@ -2,6 +2,7 @@ import { useEffect, useState, useReducer, useCallback, useMemo, useRef } from 'r
 import { useSearchParams } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
+import { canManageSettingsAdmin } from '../../../lib/permissions';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import type {
   BranchAdmin,
@@ -275,8 +276,7 @@ function keysLoadReducer(s: KeysLoadState, a: KeysLoadAction): KeysLoadState {
 
 export function PayrollSetupPage() {
   const { user } = useAuth();
-  // Backend requires AllCompanyBranches scope + setup.manage (PAYROLL_ADMIN role)
-  const canEdit = user?.scope_type === 'AllCompanyBranches' && user?.has_setup_manage === true;
+  const canEdit = user !== null && canManageSettingsAdmin(user);
 
   // ── URL params (deep-link from Company & Branches "Missing" badge) ────────
   const [searchParams] = useSearchParams();

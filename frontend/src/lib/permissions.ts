@@ -142,12 +142,10 @@ export function canViewPeople(user: UserProfile): boolean {
 /**
  * Settings pages: company setup/settings admin, or any company-scoped
  * role/user admin permission.  Company-scoped via hasAuthorityPermission and
- * authority.company_permissions (prefix inspection) — not user.has_setup_manage
- * (which is derived from the flat active_permissions union and so cannot be
- * trusted for a company-scope route decision) and not the flat
- * active_permissions union directly — so a mixed Driver + valid company
- * roles/users assignment still reaches the nested Roles route, while a
- * branch-only settings.manage grant does not.
+ * authority.company_permissions (prefix inspection), never the flat
+ * active_permissions union or coarse scope_type.  A mixed Driver + valid
+ * company roles/users assignment still reaches the nested Roles route, while
+ * a branch-only settings.manage grant does not.
  */
 export function canViewSettings(user: UserProfile): boolean {
   return (
@@ -281,7 +279,7 @@ export function canDeleteRoles(user: UserProfile): boolean {
 /**
  * Full settings admin (company, branches, payroll setup, pay items).
  * Canonical company-scoped setup.manage — mirrors the backend's
- * _ensure_company_admin, not the flat has_setup_manage union.
+ * _ensure_company_admin, not flat or coarse frontend projections.
  */
 export function canManageSettingsAdmin(user: UserProfile): boolean {
   return _hasCompanyPermission(user, 'setup.manage');

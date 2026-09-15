@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
+import { canManageSettingsAdmin } from '../../../lib/permissions';
 import type { CompanyProfile, CompanyUpdate, BranchAdmin } from '../../../types/settings';
 import { CompanyStatusBadge, BranchStatusBadge } from '../../../components/StatusBadge';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
@@ -62,7 +63,7 @@ function toForm(b: BranchAdmin): BranchForm {
 export function CompanyBranchesPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const canEdit = user?.scope_type === 'AllCompanyBranches' && user?.has_setup_manage === true;
+  const canEdit = user !== null && canManageSettingsAdmin(user);
 
   // ── Company ──────────────────────────────────────────────────────────────
   const [company, setCompany]             = useState<CompanyProfile | null>(null);
