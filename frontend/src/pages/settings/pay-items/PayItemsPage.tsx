@@ -1912,7 +1912,9 @@ export function PayItemsPage() {
                 {usageData.deletion_would_retire ? <WarnIcon /> : <InfoIcon />}
                 <span>
                   {usageData.deletion_would_retire
-                    ? `"${selSt.selectedItem.pay_item_name}" has been used in finalized or meaningful payroll data and cannot be physically deleted. It will be retired — the code is permanently locked and the item hidden from all UIs.`
+                    ? usageData.has_cdpi_definition
+                      ? `"${selSt.selectedItem.pay_item_name}" is an approved Custom Daily Pay Item and cannot be physically deleted. It will be retired — the code is permanently locked and the item hidden from all UIs.`
+                      : `"${selSt.selectedItem.pay_item_name}" has been used in finalized or meaningful payroll data and cannot be physically deleted. It will be retired — the code is permanently locked and the item hidden from all UIs.`
                     : `"${selSt.selectedItem.pay_item_name}" has no meaningful usage and will be permanently deleted.`}
                 </span>
               </div>

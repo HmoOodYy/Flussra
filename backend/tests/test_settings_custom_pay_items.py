@@ -111,6 +111,25 @@ async def _seed_legacy_item(
     return result.scalar_one()
 
 
+async def _attach_cdpi_definition(
+    db_conn,
+    *,
+    item_id: int,
+    user_id: int = 1,
+) -> None:
+    """Insert a CdpiDefinitions row for an existing PayItem, marking it as an
+    approved CDPI definition. Used to test that CDPI authority (not usage) drives
+    retire-only behaviour in the generic PayItem usage/delete flow."""
+    await db_conn.execute(
+        text("""
+            INSERT INTO payroll.cdpidefinitions
+                (payitemid, definitionschemaversion, lockedatutc, createdbyuserid)
+            VALUES (:pid, 1, NOW(), :uid)
+        """),
+        {"pid": item_id, "uid": user_id},
+    )
+
+
 async def _seed_legacy_request(
     db_conn,
     *,
@@ -943,6 +962,38 @@ class TestCustomPayItemUsage:
         assert u["can_physical_delete"]             is True
         assert u["deletion_would_retire"]           is False
 
+    async def test_approved_cdpi_is_retire_only_with_zero_usage(
+        self, client: httpx.AsyncClient, auth_token: str, db_conn
+    ):
+        """An approved CDPI PayItem must report retire-only even when draft/final/
+        driver-rate usage is all zero — CdpiDefinitions is authority, not usage."""
+        item_id = await _seed_legacy_item(
+            db_conn, code="M12_CDPI_USAGE", name="Usage Check CDPI Approved"
+        )
+        await _attach_cdpi_definition(db_conn, item_id=item_id)
+        try:
+            resp = await client.get(
+                f"/settings/pay-items/{item_id}/usage",
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200
+            u = resp.json()
+            assert u["has_meaningful_usage"]  is False
+            assert u["has_final_lines"]       is False
+            assert u["driver_rates_count"]    == 0
+            assert u["has_cdpi_definition"]   is True
+            assert u["can_physical_delete"]   is False
+            assert u["deletion_would_retire"] is True
+        finally:
+            await db_conn.execute(
+                text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+                {"pid": item_id},
+            )
+            await db_conn.execute(
+                text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": item_id},
+            )
+
 
 # ---------------------------------------------------------------------------
 # TestCustomPayItemDelete
@@ -1128,6 +1179,48 @@ class TestCustomPayItemDelete:
         get_resp = await client.get(f"/settings/pay-items/{item_id}",
                                     headers=auth(auth_token))
         assert get_resp.status_code == 404
+
+    async def test_delete_unused_approved_cdpi_retires_not_physical(
+        self, client: httpx.AsyncClient, auth_token: str, db_conn
+    ):
+        """DELETE on an unused approved CDPI PayItem must retire it instead of
+        physically deleting — a physical delete would hit fk_CdpiDefinitions_PayItem
+        (ON DELETE RESTRICT). The CdpiDefinitions row must survive."""
+        item_id = await _seed_legacy_item(
+            db_conn, code="M12_CDPI_DEL", name="Delete Unused CDPI Approved"
+        )
+        await _attach_cdpi_definition(db_conn, item_id=item_id)
+        try:
+            resp = await client.delete(
+                f"/settings/pay-items/{item_id}",
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200
+            result = resp.json()
+            assert result["deletion_type"] == "retired"
+            assert result["pay_item_id"]   == item_id
+            assert result["pay_item_code"] == "M12_CDPI_DEL"
+
+            status_row = (await db_conn.execute(
+                text("SELECT status FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": item_id},
+            )).mappings().first()
+            assert status_row["status"] == "Retired"
+
+            cdpi_count = (await db_conn.execute(
+                text("SELECT COUNT(*) AS cnt FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+                {"pid": item_id},
+            )).mappings().first()["cnt"]
+            assert cdpi_count == 1
+        finally:
+            await db_conn.execute(
+                text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
+                {"pid": item_id},
+            )
+            await db_conn.execute(
+                text("DELETE FROM payroll.payitems WHERE payitemid = :pid"),
+                {"pid": item_id},
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -1001,8 +1001,10 @@ class CustomPayItemUsage(BaseModel):
     """
     Usage check result for smart delete.
 
-    can_physical_delete  : True when no meaningful lines exist and no driver rates exist.
-    deletion_would_retire: True when meaningful or final lines exist, or driver rates exist.
+    can_physical_delete  : True when no meaningful lines exist, no driver rates exist,
+                            and the item is not an approved CDPI definition.
+    deletion_would_retire: True when meaningful or final lines exist, driver rates exist,
+                            or the item is an approved CDPI definition.
     """
     pay_item_id:                    int
     pay_item_code:                  str
@@ -1012,6 +1014,7 @@ class CustomPayItemUsage(BaseModel):
     final_line_count:               int
     non_meaningful_draft_line_count: int
     driver_rates_count:             int = 0
+    has_cdpi_definition:            bool = False
     can_physical_delete:            bool
     deletion_would_retire:          bool
 

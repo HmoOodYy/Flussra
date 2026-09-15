@@ -317,6 +317,7 @@ export interface CustomPayItemUsage {
   meaningful_draft_line_count: number;
   final_line_count: number;
   non_meaningful_draft_line_count: number;
+  has_cdpi_definition: boolean;
   can_physical_delete: boolean;
   deletion_would_retire: boolean;
 }

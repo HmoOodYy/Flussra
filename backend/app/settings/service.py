@@ -3188,6 +3188,24 @@ async def _compute_usage(
     )
     driver_rates_count = int(driver_rates_result.scalar_one() or 0)
 
+    # CdpiDefinitions is the authority for "approved CDPI" — an approved CDPI
+    # PayItem must always retire, never physically delete, regardless of usage:
+    # fk_CdpiDefinitions_PayItem is ON DELETE RESTRICT, so a physical delete
+    # would fail at the DB layer anyway. Company-scoped via the PayItems join
+    # since CdpiDefinitions itself carries no CompanyID.
+    cdpi_result = await db.execute(
+        text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM   payroll.cdpidefinitions cd
+                JOIN   payroll.payitems pi ON pi.payitemid = cd.payitemid
+                WHERE  cd.payitemid = :item_id AND pi.companyid = :company_id
+            ) AS has_cdpi
+        """),
+        {"item_id": item_id, "company_id": company_id},
+    )
+    has_cdpi_definition = bool(cdpi_result.scalar_one())
+
     has_meaningful = meaningful > 0
     has_final = final_count > 0
     has_driver_rates = driver_rates_count > 0
@@ -3201,8 +3219,9 @@ async def _compute_usage(
         final_line_count=final_count,
         non_meaningful_draft_line_count=non_meaningful,
         driver_rates_count=driver_rates_count,
-        can_physical_delete=not has_meaningful and not has_final and not has_driver_rates,
-        deletion_would_retire=has_meaningful or has_final or has_driver_rates,
+        has_cdpi_definition=has_cdpi_definition,
+        can_physical_delete=not has_meaningful and not has_final and not has_driver_rates and not has_cdpi_definition,
+        deletion_would_retire=has_meaningful or has_final or has_driver_rates or has_cdpi_definition,
     )
 
 
