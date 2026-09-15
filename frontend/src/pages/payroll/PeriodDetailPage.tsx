@@ -50,7 +50,6 @@ export function PeriodDetailPage() {
   const numericPeriodId = Number(periodId);
 
   const { user } = useAuth();
-  const userCanEntry = user ? canEntryPayroll(user) : false;
 
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [grid, setGrid] = useState<DayGridResponse | null>(null);
@@ -99,7 +98,7 @@ export function PeriodDetailPage() {
 
   // ── Save ───────────────────────────────────────────────────────────────── //
   const isEditable = grid ? EDITABLE_STATUSES.has(grid.period.status) : false;
-  const canEdit    = isEditable && userCanEntry;
+  const canEdit    = isEditable && grid !== null && user !== null && canEntryPayroll(user, grid.period.branch_id);
 
   async function handleSave() {
     if (dirtyRows.size === 0 || !grid || !selectedDate) return;

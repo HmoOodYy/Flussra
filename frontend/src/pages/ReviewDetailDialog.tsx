@@ -136,10 +136,9 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
   }, [actionState, onClose]);
 
   const { user } = useAuth();
-  const userCanDecide = user ? canDecideReview(user) : false;
   const reviewItem = detail ?? item;
   const isPending = reviewItem.status === 'Pending';
-  const canAct = detail?.status === 'Pending' && userCanDecide;
+  const canAct = detail !== null && detail.status === 'Pending' && user !== null && canDecideReview(user, detail.branch_id);
   const busy = actionState !== 'idle';
 
   async function handleApprove() {

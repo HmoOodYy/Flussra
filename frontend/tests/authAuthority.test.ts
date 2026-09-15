@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hasAuthorityPermission, toUserProfile } from '../src/store/authStore.ts';
-import type { PermissionAuthority, UserInfoResponse } from '../src/store/authStore.ts';
+import type { PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
+import {
+  canCreatePeriod,
+  canEntryPayroll,
+  canFinalizePayroll,
+  canDecideReview,
+} from '../src/lib/permissions.ts';
 
 function makeAuthority(overrides: Partial<PermissionAuthority> = {}): PermissionAuthority {
   return {
@@ -23,6 +29,10 @@ function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserIn
     authority: makeAuthority(),
     ...overrides,
   };
+}
+
+function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
+  return toUserProfile(makeUserInfoResponse(overrides));
 }
 
 // ── AllCompanyBranches: company-wide grant applies everywhere ─────────────────
@@ -118,4 +128,78 @@ test('toUserProfile: preserves active_permissions unchanged alongside authority'
   });
   const profile = toUserProfile(info);
   assert.deepEqual(profile.active_permissions, ['payroll.view', 'drivers.view']);
+});
+
+// ── permissions.ts action helpers: branch-aware authority, not active_permissions union ─────
+
+test('canEntryPayroll: a grant scoped to branch A does not authorize branch B', () => {
+  const user = makeUser({
+    active_permissions: ['payroll.entry'], // simulates the flat union still containing the code
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['payroll.entry'] }] }),
+  });
+  assert.equal(canEntryPayroll(user, 20), false);
+});
+
+test('canEntryPayroll: a grant scoped to branch B authorizes branch B', () => {
+  const user = makeUser({
+    active_permissions: ['payroll.entry'],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['payroll.entry'] }] }),
+  });
+  assert.equal(canEntryPayroll(user, 10), true);
+});
+
+test('canEntryPayroll: an AllCompanyBranches grant authorizes any concrete branch', () => {
+  const user = makeUser({
+    active_permissions: [], // deliberately empty: proves the check does not read the flat union
+    authority: makeAuthority({ company_permissions: ['payroll.entry'] }),
+  });
+  assert.equal(canEntryPayroll(user, 10), true);
+  assert.equal(canEntryPayroll(user, 999), true);
+});
+
+test('canEntryPayroll: mixed company + branch-specific assignments authorize per branch', () => {
+  const user = makeUser({
+    active_permissions: [],
+    authority: makeAuthority({
+      company_permissions: ['drivers.view'],
+      branch_permissions: [{ branch_id: 10, permissions: ['payroll.entry'] }],
+    }),
+  });
+  assert.equal(canEntryPayroll(user, 10), true);
+  assert.equal(canEntryPayroll(user, 20), false);
+});
+
+test('canEntryPayroll: unioned active_permissions alone no longer authorizes the helper', () => {
+  const user = makeUser({
+    active_permissions: ['payroll.entry'],
+    authority: makeAuthority(), // no company grant, no branch grant
+  });
+  assert.equal(canEntryPayroll(user, 10), false);
+});
+
+test('canCreatePeriod: a grant scoped to branch A does not authorize branch B', () => {
+  const user = makeUser({
+    active_permissions: ['payroll.period.create'],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['payroll.period.create'] }] }),
+  });
+  assert.equal(canCreatePeriod(user, 10), true);
+  assert.equal(canCreatePeriod(user, 20), false);
+});
+
+test('canFinalizePayroll: a grant scoped to branch A does not authorize branch B', () => {
+  const user = makeUser({
+    active_permissions: ['payroll.finalize'],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['payroll.finalize'] }] }),
+  });
+  assert.equal(canFinalizePayroll(user, 10), true);
+  assert.equal(canFinalizePayroll(user, 20), false);
+});
+
+test('canDecideReview: a grant scoped to branch A does not authorize branch B', () => {
+  const user = makeUser({
+    active_permissions: ['review.decide'],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['review.decide'] }] }),
+  });
+  assert.equal(canDecideReview(user, 10), true);
+  assert.equal(canDecideReview(user, 20), false);
 });

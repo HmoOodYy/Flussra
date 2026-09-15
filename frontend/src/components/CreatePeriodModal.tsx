@@ -60,7 +60,7 @@ function candidateReducer(_state: CandidateState, action: CandidateAction): Cand
 interface Props {
   branches: Branch[];
   defaultBranchId: number | null;
-  isAllBranches: boolean;
+  canSelectBranch: boolean;
   onCreated: () => void;
   onClose: () => void;
 }
@@ -68,11 +68,11 @@ interface Props {
 export function CreatePeriodModal({
   branches,
   defaultBranchId,
-  isAllBranches,
+  canSelectBranch,
   onCreated,
   onClose,
 }: Props) {
-  const initialBranchId = isAllBranches
+  const initialBranchId = canSelectBranch
     ? (defaultBranchId ?? 0)
     : (defaultBranchId ?? branches[0]?.branch_id ?? 0);
   const [branchId, setBranchId] = useState(initialBranchId);
@@ -145,7 +145,7 @@ export function CreatePeriodModal({
     }
   }
 
-  const fixedBranchName = !isAllBranches
+  const fixedBranchName = !canSelectBranch
     ? (branches.find((branch) => branch.branch_id === initialBranchId)?.branch_name ?? 'Your Branch')
     : null;
   const selected = candidateState.status === 'ready' ? candidateState.candidate.selected : null;
@@ -160,7 +160,7 @@ export function CreatePeriodModal({
         </div>
 
         <form onSubmit={(event) => void handleSubmit(event)} className={styles.form}>
-          {isAllBranches ? (
+          {canSelectBranch ? (
             <label className={styles.label}>
               Branch <span className={styles.required}>*</span>
               <select

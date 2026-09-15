@@ -343,12 +343,9 @@ export function PeriodsListPage() {
   const { user } = useAuth();
 
   const isAllBranches   = user?.scope_type === 'AllCompanyBranches';
-  const userCanCreate   = user ? canCreatePeriod(user)   : false;
-  const userCanEntry    = user ? canEntryPayroll(user)   : false;
   const userCanPreview  = user ? user.active_permissions.some(
     (permission) => permission === 'payroll.view' || permission === 'payroll.entry',
   ) : false;
-  const userCanFinalize = user ? canFinalizePayroll(user): false;
   const userCanViewReports = user ? canViewPayrollReports(user) : false;
 
   const [branchesSt,  dispatchBranches] = useReducer(branchesReducer, { branches: [], loading: true });
@@ -399,9 +396,10 @@ export function PeriodsListPage() {
     void fetchPeriods();
   }, [fetchPeriods]);
 
-  const workflowBranchId = isAllBranches
-    ? (filterBranchId ? Number(filterBranchId) : undefined)
-    : user?.branch_ids?.[0];
+  // Explicit filter always wins (only rendered for AllCompany users); otherwise
+  // request the full accessible workflow set so multiple SpecificBranch
+  // assignments are represented — do not pin to a single branch_ids[0].
+  const workflowBranchId = filterBranchId ? Number(filterBranchId) : undefined;
 
   const fetchWorkflow = useCallback(async () => {
     dispatchWorkflow({ type: 'FETCH_START' });
@@ -429,9 +427,19 @@ export function PeriodsListPage() {
     refreshHub();
   }
 
-  const modalDefaultBranchId: number | null = isAllBranches
-    ? (filterBranchId ? Number(filterBranchId) : null)
-    : (user?.branch_ids?.[0] ?? null);
+  const creationAuthorizedBranches: Branch[] = user
+    ? branchesSt.branches.filter((b) => canCreatePeriod(user, b.branch_id))
+    : [];
+  const userCanCreate = creationAuthorizedBranches.length > 0;
+  const canSelectCreationBranch = creationAuthorizedBranches.length > 1;
+
+  const filterSelectedBranchId = filterBranchId ? Number(filterBranchId) : null;
+  const modalDefaultBranchId: number | null =
+    filterSelectedBranchId !== null && creationAuthorizedBranches.some((b) => b.branch_id === filterSelectedBranchId)
+      ? filterSelectedBranchId
+      : creationAuthorizedBranches.length === 1
+        ? creationAuthorizedBranches[0].branch_id
+        : null;
 
   const fixedBranch = branchesSt.branches.find(
     (b) => b.branch_id === user?.branch_ids?.[0]
@@ -468,11 +476,14 @@ export function PeriodsListPage() {
     (p) => p.status === 'Approved'
   );
   const workflowBranches = workflowSt.data?.branches ?? [];
-  const workflowCanCreate = workflowBranches.some((branch) =>
+  const creationEligibleWorkflowBranches = user
+    ? workflowBranches.filter((branch) => canCreatePeriod(user, branch.branch_id))
+    : [];
+  const workflowCanCreate = creationEligibleWorkflowBranches.some((branch) =>
     branch.capabilities.can_create_open_candidate.allowed
     || branch.capabilities.can_create_prepared_candidate.allowed,
   );
-  const blockedCreateReason = workflowBranches.find((branch) =>
+  const blockedCreateReason = creationEligibleWorkflowBranches.find((branch) =>
     !branch.capabilities.can_create_open_candidate.allowed
     && !branch.capabilities.can_create_prepared_candidate.allowed,
   )?.capabilities.can_create_open_candidate.reason_message;
@@ -503,9 +514,9 @@ export function PeriodsListPage() {
           setCalculationPreviewPeriodId(null);
           refreshHub();
         }}
-        canEntry={userCanEntry}
+        canEntry={user ? canEntryPayroll(user, p.branch_id) : false}
         canPreview={userCanPreview}
-        canFinalize={userCanFinalize}
+        canFinalize={user ? canFinalizePayroll(user, p.branch_id) : false}
         canViewReports={userCanViewReports}
       />
     );
@@ -632,9 +643,9 @@ export function PeriodsListPage() {
       {/* ── Create modal ─────────────────────────────────────────────── */}
       {showCreateModal && (
         <CreatePeriodModal
-          branches={branchesSt.branches}
+          branches={creationAuthorizedBranches}
           defaultBranchId={modalDefaultBranchId}
-          isAllBranches={isAllBranches}
+          canSelectBranch={canSelectCreationBranch}
           onCreated={handleCreated}
           onClose={() => setShowCreateModal(false)}
         />

@@ -9,6 +9,7 @@
  * app/review/router.py, and app/admin/service.py.
  */
 import type { UserProfile } from '../store/authStore';
+import { hasAuthorityPermission } from '../store/authStore.ts';
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
@@ -129,33 +130,34 @@ export function canViewSettings(user: UserProfile): boolean {
 // ── Action-level guards ───────────────────────────────────────────────────────
 
 /**
- * Create payroll periods.
- * Requires the dedicated payroll.period.create permission (migration 0030).
- * This permission is separate from payroll.entry — holding one does not imply
- * the other.  Roles that should create periods must be explicitly granted this
- * code via the migration seed.
+ * Create payroll periods for a specific branch.
+ * Requires the dedicated payroll.period.create permission (migration 0030),
+ * granted either at company scope or for the given branch — see
+ * hasAuthorityPermission().  This permission is separate from payroll.entry —
+ * holding one does not imply the other.
  */
-export function canCreatePeriod(user: UserProfile): boolean {
-  return user.active_permissions.includes('payroll.period.create');
+export function canCreatePeriod(user: UserProfile, branchId: number): boolean {
+  return hasAuthorityPermission(user.authority, 'payroll.period.create', branchId);
 }
 
 /**
  * Enter/edit payroll lines, open periods, submit for review, manage Drivers Off
- * and Bonuses.  Requires payroll.entry — the operational data-entry permission.
- * Does NOT imply create-period; that requires payroll.period.create.
+ * and Bonuses for a specific branch.  Requires payroll.entry — the operational
+ * data-entry permission — granted either at company scope or for the given
+ * branch.  Does NOT imply create-period; that requires payroll.period.create.
  */
-export function canEntryPayroll(user: UserProfile): boolean {
-  return user.active_permissions.includes('payroll.entry');
+export function canEntryPayroll(user: UserProfile, branchId: number): boolean {
+  return hasAuthorityPermission(user.authority, 'payroll.entry', branchId);
 }
 
-/** Finalize button / period lifecycle admin actions. */
-export function canFinalizePayroll(user: UserProfile): boolean {
-  return user.active_permissions.includes('payroll.finalize');
+/** Finalize button / period lifecycle admin actions for a specific branch. */
+export function canFinalizePayroll(user: UserProfile, branchId: number): boolean {
+  return hasAuthorityPermission(user.authority, 'payroll.finalize', branchId);
 }
 
-/** Approve / return review items. */
-export function canDecideReview(user: UserProfile): boolean {
-  return user.active_permissions.includes('review.decide');
+/** Approve / return review items for a specific branch. */
+export function canDecideReview(user: UserProfile, branchId: number): boolean {
+  return hasAuthorityPermission(user.authority, 'review.decide', branchId);
 }
 
 /** Edit/approve pay rates. */
