@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hasAuthorityPermission, toUserProfile } from '../src/store/authStore.ts';
-import type { PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
+import type { BranchAccess, PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
 import {
   canCreatePeriod,
   canEntryPayroll,
   canFinalizePayroll,
   canDecideReview,
+  canEditTransfers,
+  canEditPayRates,
 } from '../src/lib/permissions.ts';
 
 function makeAuthority(overrides: Partial<PermissionAuthority> = {}): PermissionAuthority {
@@ -202,4 +204,83 @@ test('canDecideReview: a grant scoped to branch A does not authorize branch B', 
   });
   assert.equal(canDecideReview(user, 10), true);
   assert.equal(canDecideReview(user, 20), false);
+});
+
+// ── canEditTransfers / canEditPayRates: branch-aware authority ──────────────
+
+function makeBranch(overrides: Partial<BranchAccess> = {}): BranchAccess {
+  return {
+    branch_id: 10,
+    branch_name: 'Branch 10',
+    scope: 'SpecificBranch',
+    role_code: 'BRANCH_MANAGER',
+    role_name: 'Branch Manager',
+    ...overrides,
+  };
+}
+
+/** User granted `code` only for `grantBranchId` — active_permissions deliberately still contains it. */
+function scopedUser(code: string, grantBranchId: number, branchOverrides: Partial<BranchAccess> = {}): UserProfile {
+  return makeUser({
+    active_permissions: [code],
+    branches: [makeBranch({ branch_id: grantBranchId, ...branchOverrides })],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: grantBranchId, permissions: [code] }] }),
+  });
+}
+
+function companyUser(code: string): UserProfile {
+  return makeUser({
+    active_permissions: [],
+    branches: [makeBranch({ scope: 'AllCompanyBranches', branch_id: null })],
+    authority: makeAuthority({ company_permissions: [code] }),
+  });
+}
+
+test('canEditTransfers: branch-scoped drivers.edit denies the wrong branch and authorizes its own', () => {
+  const user = scopedUser('drivers.edit', 10);
+  assert.equal(canEditTransfers(user, 20), false);
+  assert.equal(canEditTransfers(user, 10), true);
+});
+
+test('canEditTransfers: company-wide drivers.edit authorizes any concrete branch', () => {
+  const user = companyUser('drivers.edit');
+  assert.equal(canEditTransfers(user, 10), true);
+  assert.equal(canEditTransfers(user, 999), true);
+});
+
+test('canEditTransfers: settings.manage/setup.manage grants do not serve as a fallback', () => {
+  const user = makeUser({
+    active_permissions: ['settings.manage', 'setup.manage'],
+    branches: [makeBranch({ branch_id: 10 })],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage', 'setup.manage'] }] }),
+  });
+  assert.equal(canEditTransfers(user, 10), false);
+});
+
+test('canEditTransfers: driver and ODA users are denied despite a matching branch grant', () => {
+  assert.equal(canEditTransfers(scopedUser('drivers.edit', 10, { role_code: 'DRIVER' }), 10), false);
+  assert.equal(canEditTransfers(scopedUser('drivers.edit', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+});
+
+test('canEditPayRates: branch-scoped payrates.edit denies the wrong branch and authorizes its own', () => {
+  const user = scopedUser('payrates.edit', 10);
+  assert.equal(canEditPayRates(user, 20), false);
+  assert.equal(canEditPayRates(user, 10), true);
+});
+
+test('canEditPayRates: branch-scoped settings.manage also authorizes its own branch', () => {
+  const user = scopedUser('settings.manage', 10);
+  assert.equal(canEditPayRates(user, 10), true);
+  assert.equal(canEditPayRates(user, 20), false);
+});
+
+test('canEditPayRates: company-wide setup.manage authorizes any concrete branch', () => {
+  const user = companyUser('setup.manage');
+  assert.equal(canEditPayRates(user, 10), true);
+  assert.equal(canEditPayRates(user, 999), true);
+});
+
+test('canEditPayRates: driver and ODA users are denied despite a matching branch grant', () => {
+  assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { role_code: 'DRIVER' }), 10), false);
+  assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
 });

@@ -160,9 +160,17 @@ export function canDecideReview(user: UserProfile, branchId: number): boolean {
   return hasAuthorityPermission(user.authority, 'review.decide', branchId);
 }
 
-/** Edit/approve pay rates. */
-export function canEditPayRates(user: UserProfile): boolean {
-  return _hasAny(user, ['payrates.edit', 'settings.manage', 'setup.manage']);
+/**
+ * Edit/approve pay rates, pay rules, and copy-rate actions for a specific
+ * branch.  Branch-aware — mirrors the backend per-branch authority check
+ * (payrates.edit / settings.manage / setup.manage), not the flat
+ * active_permissions union.
+ */
+export function canEditPayRates(user: UserProfile, branchId: number): boolean {
+  if (isDriverUser(user)) return false;
+  return ['payrates.edit', 'settings.manage', 'setup.manage'].some((code) =>
+    hasAuthorityPermission(user.authority, code, branchId)
+  );
 }
 
 /** Create new people/users. */
@@ -218,11 +226,14 @@ export function canViewTransfers(user: UserProfile): boolean {
 }
 
 /**
- * Transfer write actions (approve, decide, complete, cancel, create).
- * Backend enforces branch-level drivers.edit — frontend gating is UI-only.
+ * Transfer write actions (approve, decide, complete, cancel, create) for a
+ * specific branch.  Branch-aware — mirrors the backend's per-branch
+ * drivers.edit authority check exactly.  No settings.manage/setup.manage
+ * fallback: transfer backend mutation guards require drivers.edit.
  */
-export function canEditTransfers(user: UserProfile): boolean {
-  return !isDriverUser(user) && _hasAny(user, ['drivers.edit', 'settings.manage', 'setup.manage']);
+export function canEditTransfers(user: UserProfile, branchId: number): boolean {
+  if (isDriverUser(user)) return false;
+  return hasAuthorityPermission(user.authority, 'drivers.edit', branchId);
 }
 
 // ── CDPI (Custom Daily Pay Item) helpers ──────────────────────────────────────

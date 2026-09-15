@@ -157,8 +157,6 @@ export function PayRatesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
-  const canEdit = user ? canEditPayRates(user) : false;
-
   // ── Driver list state ──────────────────────────────────────────────────────
   const [drivers, setDrivers] = useState<DriverSummary[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -648,6 +646,12 @@ export function PayRatesPage() {
   const pendingCount = summary?.pending_count ?? pendingRates.length;
   const futureCount  = summary?.future_approved_count ?? 0;
 
+  // ── Derived permissions — branch-aware, keyed off the selected driver ─────
+  const canEditMatrix = user && matrix ? canEditPayRates(user, matrix.branch_id) : false;
+  const copySourceDriver = drivers.find((d) => d.driver_id === copySourceDriverId);
+  const canCopyRates =
+    canEditMatrix && !!copySourceDriver && !!user && canEditPayRates(user, copySourceDriver.branch_id);
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className={styles.page}>
@@ -794,12 +798,12 @@ export function PayRatesPage() {
                     </div>
                   </div>
                   <div className={styles.dActions}>
-                    {canEdit && !editMode && activeTab === 'current' && (
+                    {canEditMatrix && !editMode && activeTab === 'current' && (
                       <button className={styles.btnPrimary} onClick={enterEditMode}>
                         Edit Rates
                       </button>
                     )}
-                    {canEdit && !editMode && (
+                    {canEditMatrix && !editMode && (
                       <button
                         className={styles.btnSecondary}
                         onClick={() => {
@@ -1036,7 +1040,7 @@ export function PayRatesPage() {
                             <th>Current</th>
                             <th>Pending Amount</th>
                             <th>Effective From</th>
-                            {canEdit && <th>Actions</th>}
+                            {canEditMatrix && <th>Actions</th>}
                           </tr>
                         </thead>
                         <tbody>
@@ -1064,7 +1068,7 @@ export function PayRatesPage() {
                                   <strong>{fmtAmount(r.amount, r.unit_name)}</strong>
                                 </td>
                                 <td>{r.effective_from}</td>
-                                {canEdit && (
+                                {canEditMatrix && (
                                   <td>
                                     <div className={styles.actionBtns}>
                                       <button
@@ -1184,7 +1188,7 @@ export function PayRatesPage() {
                                   <span className={styles.badgeVoided}>Not set</span>
                                 )}
                                 {/* Actions */}
-                                {canEdit && !isFormOpenForThis && (
+                                {canEditMatrix && !isFormOpenForThis && (
                                   <div className={styles.payRuleActions}>
                                     {!active && (
                                       <button
@@ -1462,7 +1466,7 @@ export function PayRatesPage() {
                     <div className={styles.modalFoot}>
                       <button
                         className={styles.btnPrimary}
-                        disabled={!copySourceDriverId || !copyEffectiveFrom || copying}
+                        disabled={!copySourceDriverId || !copyEffectiveFrom || copying || !canCopyRates}
                         onClick={() => void copyFromDriver()}
                       >
                         {copying ? 'Copying…' : 'Copy Rates'}

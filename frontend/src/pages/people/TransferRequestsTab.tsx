@@ -8,7 +8,9 @@
  *
  * Permissions:
  *   - canViewTransfers  → can open this tab at all
- *   - canEditTransfers  → can approve/decide/complete/cancel/create
+ *   - canEditTransfers(user, branchId) → per-branch drivers.edit authority for
+ *     approve/decide/complete/cancel/create, mapped to the relevant source or
+ *     target branch for each action.
  *   Backend is authoritative; frontend gates are UI conveniences only.
  */
 import { useEffect, useReducer, useRef, useCallback } from 'react';
@@ -261,7 +263,7 @@ export function TransferRequestsTab({ branches }: Props) {
   const { user } = useAuth();
   const [st, dispatch] = useReducer(reducer, INITIAL);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const canEdit = user ? canEditTransfers(user) : false;
+  const canEditAnyBranch = user ? branches.some(b => canEditTransfers(user, b.branch_id)) : false;
 
   // Load on mount
   useEffect(() => {
@@ -301,17 +303,31 @@ export function TransferRequestsTab({ branches }: Props) {
     ? st.requests.find(r => r.transfer_request_id === st.selectedId) ?? null
     : null;
 
+  // Per-action authority, mapped to the branch each backend guard actually checks.
+  const canApproveSource = user && selected ? canEditTransfers(user, selected.source_branch_id) : false;
+  const canDecideTarget = user && selected ? canEditTransfers(user, selected.target_branch_id) : false;
+  const canActOnEitherBranch = user && selected
+    ? canEditTransfers(user, selected.source_branch_id) || canEditTransfers(user, selected.target_branch_id)
+    : false;
+
   // ── Create: load drivers when dialog opens ──
   const openCreate = useCallback(async () => {
     dispatch({ type: 'CREATE_OPEN' });
     dispatch({ type: 'CREATE_DRIVERS_LOADING', val: true });
     try {
       const r = await apiClient.get<PersonSummary[]>('/core/people?employee_type=Driver');
-      dispatch({ type: 'CREATE_DRIVERS', drivers: r.data.filter(p => p.driver_id != null && p.driver_status === 'Active') });
+      // Restrict to drivers whose source branch the user can edit, so the form never becomes submit-capable for an unauthorized branch.
+      dispatch({
+        type: 'CREATE_DRIVERS',
+        drivers: r.data.filter(p =>
+          p.driver_id != null && p.driver_status === 'Active' &&
+          (user ? canEditTransfers(user, p.branch_id) : false)
+        ),
+      });
     } catch {
       dispatch({ type: 'CREATE_DRIVERS', drivers: [] });
     }
-  }, []);
+  }, [user]);
 
   // ── Create submit ──
   const submitCreate = useCallback(async (e: FormEvent) => {
@@ -462,7 +478,7 @@ export function TransferRequestsTab({ branches }: Props) {
       {/* ── Right panel ── */}
       <main className={styles.right}>
         {/* Create button bar (top of right panel) */}
-        {canEdit && (
+        {canEditAnyBranch && (
           <div className={trStyles.rightTopBar}>
             <button className={styles.addBtn} onClick={openCreate}>
               + New Transfer Request
@@ -487,7 +503,10 @@ export function TransferRequestsTab({ branches }: Props) {
         ) : (
           <TransferDetail
             req={selected}
-            canEdit={canEdit}
+            canApproveSource={canApproveSource}
+            canDecideTarget={canDecideTarget}
+            canComplete={canActOnEitherBranch}
+            canCancel={canActOnEitherBranch}
             actionLoading={st.actionLoading}
             actionError={st.actionError}
             onApproveSource={() => dispatch({ type: 'APPROVE_OPEN' })}
@@ -727,7 +746,10 @@ function TransferCard({
 
 interface DetailProps {
   req: DriverTransferRequest;
-  canEdit: boolean;
+  canApproveSource: boolean;
+  canDecideTarget: boolean;
+  canComplete: boolean;
+  canCancel: boolean;
   actionLoading: boolean;
   actionError: string | null;
   onApproveSource(): void;
@@ -738,7 +760,7 @@ interface DetailProps {
 }
 
 function TransferDetail({
-  req, canEdit, actionLoading, actionError,
+  req, canApproveSource, canDecideTarget, canComplete, canCancel, actionLoading, actionError,
   onApproveSource, onDecide, onComplete, onCancel, onClearError,
 }: DetailProps) {
   const isTerminal = TRANSFER_TERMINAL.has(req.status);
@@ -773,14 +795,14 @@ function TransferDetail({
           </div>
 
           {/* Action buttons */}
-          {canEdit && !isTerminal && (
+          {!isTerminal && (canApproveSource || canDecideTarget || canComplete || canCancel) && (
             <div className={styles.dActions}>
-              {(req.status === 'PendingSourceApproval' || req.status === 'Returned') && (
+              {canApproveSource && (req.status === 'PendingSourceApproval' || req.status === 'Returned') && (
                 <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={onApproveSource} disabled={actionLoading}>
                   ✓ Approve & Forward to Target
                 </button>
               )}
-              {req.status === 'PendingTargetApproval' && (
+              {canDecideTarget && req.status === 'PendingTargetApproval' && (
                 <>
                   <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={() => onDecide('Approved')} disabled={actionLoading}>
                     ✓ Approve
@@ -793,12 +815,12 @@ function TransferDetail({
                   </button>
                 </>
               )}
-              {req.status === 'Approved' && (
+              {canComplete && req.status === 'Approved' && (
                 <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={onComplete} disabled={actionLoading}>
                   {actionLoading ? 'Completing…' : '🚀 Complete Transfer'}
                 </button>
               )}
-              {!isTerminal && (
+              {canCancel && (
                 <button className={`${styles.actBtn} ${styles.actBtnDanger}`} onClick={onCancel} disabled={actionLoading}>
                   Cancel Request
                 </button>
