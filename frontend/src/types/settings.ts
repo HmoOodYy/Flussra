@@ -49,27 +49,6 @@ export interface BranchAdmin {
   pending_approvals_count: number | null;
 }
 
-// ─── Users (admin module) ─────────────────────────────────────────────────────
-
-export interface RoleAssignment {
-  assignment_id: number;
-  user_id: number;
-  role_id: number;
-  role_name: string;
-  scope_type: string;           // AllCompanyBranches | SpecificBranch | OwnDriverDataOnly
-  branch_ids: number[];
-  is_active: boolean;
-}
-
-export interface UserAdmin {
-  user_id: number;
-  company_id: number;
-  username: string;
-  display_name: string;
-  is_active: boolean;
-  role_assignments: RoleAssignment[];
-}
-
 // ─── Payroll Setup ────────────────────────────────────────────────────────────
 
 export interface PayrollSetup {
