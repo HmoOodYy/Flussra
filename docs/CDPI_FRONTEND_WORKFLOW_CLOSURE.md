@@ -153,36 +153,33 @@ code.
 
 ### Branch CDPI actions
 
-`canManageCdpiForBranch(user, branchId)` returns `true` in two safe cases:
+`canManageCdpiForBranch(user, branchId)` queries the canonical branch-aware
+authority, equivalent to:
 
-1. **All assignments `AllCompanyBranches` + `payitems.edit`** — the flat
-   `active_permissions` union cannot be contaminated by a SpecificBranch row,
-   so `payitems.edit` is provably company-scoped.
-2. **Exactly one `SpecificBranch` assignment for the target branch +
-   `payitems.edit`** — the single assignment uniquely determines the permission
-   source.
+`hasAuthorityPermission(user.authority, 'payitems.edit', branchId)`
 
-All other cases (mixed scope, multiple SpecificBranch rows) return `false`
-conservatively. The backend enforces the real boundary.
+A company-scoped `payitems.edit` grant applies to every concrete branch. A
+branch-scoped grant applies only to that exact branch. Multiple
+`SpecificBranch` assignments are represented and evaluated independently, so
+each branch is authorized without permission-provenance ambiguity. The backend
+remains the final enforcement boundary.
 
 ### Company-wide review / direct create
 
-`canReviewCdpiCompanyWide` / `canDirectCreateCdpiCompanyItem` require that
-every branch row is `AllCompanyBranches` AND `active_permissions` includes
-`payitems.edit`. Returns `false` when any `SpecificBranch` assignment exists.
+`canReviewCdpiCompanyWide` / `canDirectCreateCdpiCompanyItem` require
+company-scoped `payitems.edit` authority, equivalent to:
 
-### Auth model gap
+`hasAuthorityPermission(user.authority, 'payitems.edit', null)`
 
-`BranchAccess` (from `/auth/me`) exposes `scope`, `role_code`, `role_name` but
-no per-assignment permission code list. Until the auth model is extended,
-multi-branch `SpecificBranch` users with `payitems.edit` will see the helpers
-return `false`. This is documented in `permissions.ts`.
+This company-scoped authority gates review actions (approve, return, reject)
+and direct company item creation. A branch-scoped grant does not satisfy this
+company-wide requirement. The backend remains the final enforcement boundary.
 
 ### Settings admin
 
 `canManageSettingsAdmin` alone does not grant CDPI request
-creation or review. CDPI actions require `payitems.edit` with a provably safe
-scope, regardless of setup-manage status.
+creation or review. CDPI actions require `payitems.edit` through canonical
+authority at the required scope, regardless of setup-manage status.
 
 ---
 
