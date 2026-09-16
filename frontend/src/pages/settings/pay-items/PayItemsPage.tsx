@@ -1015,7 +1015,7 @@ export function PayItemsPage() {
   // ─── Derived ───────────────────────────────────────────────────────────────
 
   // ── CDPI permission derivation ────────────────────────────────────────────
-  // Company-wide direct create: AllCompanyBranches + payitems.edit (all assignments same scope).
+  // Company-wide direct create requires company-scoped payitems.edit authority.
   const userCanDirectCreate = canDirectCreateCdpiCompanyItem(user);
   // Branch-scoped request flow: mutually exclusive with direct create; requires a concrete branch.
   // selectedBranchId may be null while branches are loading — conservative: hide button until known.

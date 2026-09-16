@@ -61,8 +61,8 @@ so they can retry the submission later.
 
 ### 3.2 Company review
 
-A company-wide manager (all assignments `AllCompanyBranches` + `payitems.edit`)
-sees the **Custom Item Requests** section on the same page. Requests are
+A manager with company-scoped `payitems.edit` authority sees the **Custom Item
+Requests** section on the same page. Requests are
 filterable by status (Pending / Draft / Approved / Rejected / All). For each
 `PendingCompanyApproval` request the reviewer can:
 
@@ -124,7 +124,7 @@ Save flow:
 |------|-------------|
 | `frontend/src/types/settings.ts` | Added all CDPI types: `CdpiRequestSummary`, `CdpiRequestCreatePayload`, `CdpiSubmitPayload`, `CdpiDecidePayload`, `CdpiDirectCreatePayload`, `CdpiDirectCreateSummary`, `CdpiBranchItem`, `CdpiBranchItemUpdatePayload`, `CdpiRequestListParams`, `CdpiDecideAction`, `CdpiStatus` |
 | `frontend/src/lib/cdpiApi.ts` | New module — typed wrappers for all six CDPI endpoint groups; no legacy endpoints mixed in |
-| `frontend/src/lib/permissions.ts` | Added `hasPayItemsEdit`, `canManageCdpiForBranch`, `canReviewCdpiCompanyWide`, `canDirectCreateCdpiCompanyItem`, `canViewDailyPayItems`; auth-model-gap documented in comments |
+| `frontend/src/lib/permissions.ts` | Added `hasPayItemsEdit`, `canManageCdpiForBranch`, `canReviewCdpiCompanyWide`, `canDirectCreateCdpiCompanyItem`, `canViewDailyPayItems`; helpers use canonical branch-aware authority |
 | `frontend/src/App.tsx` | Outer `/settings` gate expanded to include `canViewDailyPayItems`; inner `/settings/pay-items` gate changed from `canManageSettingsAdmin` to `canViewDailyPayItems`; `SettingsDefaultRedirect` updated |
 | `frontend/src/components/AppShell.tsx` | `payitems.edit`-only users get a settings nav group containing only Daily Pay Items |
 | `frontend/src/pages/settings/pay-items/PayItemsPage.tsx` | FE-3 wizard converted; FE-4 CDPI request review section added; FE-5 branch controls section added; all CDPI state follows `useReducer` pattern |
