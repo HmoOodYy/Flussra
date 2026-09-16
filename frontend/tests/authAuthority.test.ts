@@ -126,15 +126,6 @@ test('toUserProfile: passes authority through onto UserProfile', () => {
   assert.deepEqual(profile.authority, authority);
 });
 
-test('toUserProfile: preserves active_permissions unchanged alongside authority', () => {
-  const info = makeUserInfoResponse({
-    active_permissions: ['payroll.view', 'drivers.view'],
-    authority: makeAuthority({ company_permissions: ['payroll.view', 'drivers.view'] }),
-  });
-  const profile = toUserProfile(info);
-  assert.deepEqual(profile.active_permissions, ['payroll.view', 'drivers.view']);
-});
-
 // ── permissions.ts action helpers: branch-aware authority, not active_permissions union ─────
 
 test('canEntryPayroll: a grant scoped to branch A does not authorize branch B', () => {
@@ -310,7 +301,6 @@ test('canManageSettingsAdmin: an unrelated AllCompanyBranches row plus branch-10
     }),
   });
   assert.equal(user.scope_type, 'AllCompanyBranches');
-  assert.deepEqual(user.active_permissions, ['setup.manage']);
   assert.equal(canManageSettingsAdmin(user), false);
 });
 

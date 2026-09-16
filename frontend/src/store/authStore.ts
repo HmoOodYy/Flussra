@@ -89,8 +89,6 @@ export interface UserProfile {
    */
   scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
   branch_ids: number[];
-  /** All distinct permission codes from the user's active role assignments. */
-  active_permissions: string[];
   /** Display name of the primary role (first AllCompanyBranches branch, or first branch). */
   primary_role_name: string | null;
   /**
@@ -113,8 +111,6 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
     info.branches.length > 0 &&
     info.branches.every((b) => b.scope === 'OwnDriverDataOnly');
 
-  const perms: string[] = info.active_permissions ?? [];
-
   return {
     user_id:            info.user_id,
     username:           info.username,
@@ -129,7 +125,6 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
     branch_ids:         info.branches
       .filter((b) => b.branch_id !== null)
       .map((b) => b.branch_id as number),
-    active_permissions: perms,
     primary_role_name:  (
       info.branches.find((b) => b.scope === 'AllCompanyBranches')?.role_name ??
       info.branches[0]?.role_name ??

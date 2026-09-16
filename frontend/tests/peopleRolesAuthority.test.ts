@@ -243,7 +243,6 @@ test('role helpers are independently gated: a roles.create-only grant cannot edi
 
 test('canViewSettings: branch-only settings.manage in active_permissions is denied', () => {
   const user = branchOnlyUser('settings.manage');
-  assert.deepEqual(user.active_permissions, ['settings.manage']);
   assert.equal(canViewSettings(user), false);
 });
 
