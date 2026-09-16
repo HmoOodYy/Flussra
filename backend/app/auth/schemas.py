@@ -4,7 +4,7 @@ Pydantic schemas for the auth domain.
 These define the exact shape of every auth request body and response.
 FastAPI validates inputs against these schemas before any service code runs.
 """
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -74,7 +74,7 @@ class UserInfo(BaseModel):
     company_id: int
     company_name: str
     branches: list[BranchAccess]
-    active_permissions: list[str] = []
+    active_permissions: list[str] = Field(default=[], deprecated=True)
     """
     Distinct permission codes granted to this user across all active role
     assignments.  Derived from sec.CompanyRolePermissions (new path) and
