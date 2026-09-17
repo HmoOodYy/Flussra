@@ -131,24 +131,6 @@ export interface StatusKeyCreate {
   limit_uses_per_day?: number | null;
 }
 
-export interface StatusKeyUpdate {
-  key_name?: string | null;
-  hours_value?: number | null;
-  is_off_reason?: boolean | null;
-  deducts_from_yearly_allowance?: boolean | null;
-  allowance_category?: string | null;
-  is_active?: boolean | null;
-  // Usage limits
-  limit_uses_per_period_enabled?: boolean | null;
-  limit_uses_per_period?: number | null;
-  limit_uses_per_driver_enabled?: boolean | null;
-  limit_uses_per_driver?: number | null;
-  limit_uses_across_drivers_enabled?: boolean | null;
-  limit_uses_across_drivers?: number | null;
-  limit_uses_per_day_enabled?: boolean | null;
-  limit_uses_per_day?: number | null;
-}
-
 // ─── Pay Items ────────────────────────────────────────────────────────────────
 
 export interface BranchPayItemConfigVersion {
@@ -220,54 +202,8 @@ export interface BulkPayItemConfigResult {
   results: BulkPayItemBranchResult[];
 }
 
-// Custom pay items (company-created, not system standard)
-export interface CustomPayItem {
-  pay_item_id: number;
-  company_id: number;
-  pay_item_code: string;               // immutable after creation, auto-generated
-  display_label: string | null;
-  pay_item_name: string;
-  category: string;
-  data_type: string;                   // 'Time' | 'Decimal' | 'Integer' | 'Currency'
-  unit: string | null;
-  item_scope: 'Daily' | 'Period';      // immutable after creation
-  rate_behavior: string;               // immutable after creation
-  status: 'Active' | 'Inactive' | 'Retired';
-  sort_order: number;
-  appears_in_payroll_entry: boolean;
-  appears_in_ledger: boolean;
-  appears_in_reports: boolean;
-  requires_rate: boolean;
-  is_system_standard: boolean;         // always false for custom items
-  requesting_branch_id: number | null;
-  notes: string | null;
-  created_at_utc: string;
-  updated_at_utc: string | null;
-  /** Rate column names configured at creation. Stored in payitemsettings. */
-  rate_names: string[];
-}
-
 export type WizardValueType = 'Time' | 'Number' | 'Money';
 export type WizardRateMethod = 'PerUnit';
-
-export interface CustomPayItemCreate {
-  /** Optional — backend auto-generates a CPI_ prefixed code when omitted. Not shown in the UI. */
-  pay_item_code?: string;
-  display_label: string | null;
-  pay_item_name: string;
-  /** Optional — backend defaults to "Custom". Not shown in the UI. */
-  category?: string;
-  unit?: string | null;
-  item_scope: 'Daily' | 'Period';
-  rate_behavior: string;
-  /** Optional — backend auto-assigns MAX(sort_order)+10 when omitted. */
-  sort_order?: number | null;
-  notes: string | null;
-  /** Wizard field: value type determines datatype+unit in backend. */
-  value_type?: WizardValueType | null;
-  /** Pay rate column names — persisted to payitemsettings. */
-  rate_names?: string[];
-}
 
 // Pay item ordering
 export interface PayItemOrderEntry {
@@ -277,15 +213,6 @@ export interface PayItemOrderEntry {
 
 export interface PayItemOrderUpdate {
   items: PayItemOrderEntry[];
-}
-
-export interface CustomPayItemUpdate {
-  display_label?: string | null;
-  pay_item_name?: string | null;
-  category?: string | null;
-  unit?: string | null;
-  sort_order?: number | null;
-  notes?: string | null;
 }
 
 export interface CustomPayItemUsage {

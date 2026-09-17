@@ -32,18 +32,6 @@ export interface PeriodSummary {
   final_driver_count: number;
 }
 
-export interface PeriodCreate {
-  branch_id: number;
-  period_type: string;
-  start_date: string;
-  end_date: string;
-  pay_date?: string;
-  period_name?: string;
-  notes?: string;
-}
-
-export const PERIOD_TYPES = ['Week', 'Biweek', 'Month', 'Custom'] as const;
-
 // ── Current workflow and candidate-based period creation ───────────────────
 
 export type PeriodCandidateMode = 'OPEN_CREATION' | 'PREPARED_CREATION';
@@ -192,24 +180,6 @@ export interface CurrentPayrollHub {
   requested_branch_id: number | null;
   generated_at_utc: string;
   branches: CurrentPayrollHubBranch[];
-}
-
-// ── Draft lines ──────────────────────────────────────────────────────────────
-
-export interface DraftLineCreate {
-  driver_id: number;
-  work_date: string | null;
-  line_type: string;
-  quantity: number;
-  rate_amount?: number;
-  notes?: string;
-  source_type: 'Manual';
-}
-
-export interface DraftLineUpdate {
-  quantity?: number;
-  rate_amount?: number | null;
-  notes?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,15 +346,6 @@ export interface BonusSummary {
   bonus_data_revision: number;
   drivers: BonusSummaryDriver[];
 }
-
-export interface StatusTransitionRequest {
-  status: string;
-  notes?: string;
-}
-
-// ---------------------------------------------------------------------------
-// CP-2 — Status colors
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // CP-2.5 — Period-level Drivers Off
@@ -897,14 +858,3 @@ export interface CalculationPreviewResponse {
   drivers: CalculationPreviewDriver[];
   total_expected_pay: string;
 }
-
-export const STATUS_COLORS: Record<PeriodStatus, { bg: string; color: string; border: string }> = {
-  Draft:     { bg: '#f9fafb', color: '#374151', border: '#e5e7eb' },
-  Open:      { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
-  InReview:  { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
-  Returned:  { bg: '#fff7ed', color: '#9a3412', border: '#fed7aa' },
-  Approved:  { bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
-  Locked:    { bg: '#f0fdfa', color: '#0f766e', border: '#99f6e4' },
-  Cancelled: { bg: '#fef2f2', color: '#991b1b', border: '#fecaca' },
-  Archived:  { bg: '#f5f3ff', color: '#5b21b6', border: '#ddd6fe' },
-};

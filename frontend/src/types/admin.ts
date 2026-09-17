@@ -109,18 +109,8 @@ export interface CompanyRoleCreate {
   // role_code is generated server-side (CR_XXXXXXXX) — do not send from UI
 }
 
-export interface CompanyRoleUpdate {
-  role_name?: string | null;
-  is_active?: boolean | null;
-  notes?: string | null;
-}
-
 export interface CompanyRolePermissions {
   company_role_id: number;
-  permission_codes: string[];
-}
-
-export interface CompanyRolePermissionsUpdate {
   permission_codes: string[];
 }
 
@@ -131,22 +121,6 @@ export interface CompanyRoleAssignmentCreate {
   scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
   branch_id?: number | null;
   notes?: string | null;
-}
-
-export interface CompanyRoleAssignmentDetail {
-  assignment_id: number;
-  user_id: number;
-  company_role_id: number;
-  company_role_code: string;
-  company_role_name: string;
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
-  branch_id: number | null;
-  branch_name: string | null;
-  is_active: boolean;
-  granted_by_user_id: number | null;
-  granted_at_utc: string;
-  revoked_at_utc: string | null;
-  notes: string | null;
 }
 
 // ─── User Permission Overrides ────────────────────────────────────────────────
