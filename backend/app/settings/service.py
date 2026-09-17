@@ -1551,7 +1551,6 @@ async def update_status_key(
     new_lpday   = data.limit_uses_per_day               if data.limit_uses_per_day               is not None else row.get("limitusesperday")
 
     # StatusCode is immutable — always keep the existing generated code.
-    existing_code       = row["statuscode"]
     existing_normalized = row["normalizedstatuscode"]
 
     _validate_deduction_rules(new_deducts, new_off, new_cat)

@@ -5293,7 +5293,6 @@ async def _build_live_calculation_packet(
     refreshed_calcs = await _compute_draft_line_preview_amounts(
         period_id, company_id, period.start_date, db
     )
-    refreshed_line_ids: set[int] = set(refreshed_calcs.keys())
 
     lines_result = await db.execute(
         text(f"""
@@ -8057,7 +8056,7 @@ async def approve_rate(
     # Step 2 — supersede prior Approved rate(s) FIRST via shared helper.
     # The helper only touches rates with EffectiveFrom < effective_from.
     # Writes RATE_SUPERSEDED audit inside the same transaction.
-    superseded_ids: list[int] = await _supersede_current_approved_rates(
+    await _supersede_current_approved_rates(
         company_id, rate.driver_id, rate.rate_type_id, rate.effective_from,
         user_id, rate.branch_id, db,
         exclude_rate_id=rate_id,
@@ -8101,7 +8100,6 @@ async def approve_rate(
         )
 
     # Step 4 — supersede audit already written by _supersede_current_approved_rates.
-    # (superseded_ids preserved for reference / future use.)
 
     # Step 5 — audit this approval (failure here rolls back steps 2+3+4)
     await _write_rate_audit(
@@ -13882,7 +13880,7 @@ async def save_day_grid(
     # P1 #3: status key validation (invalid/inactive → 422 before writes)
     # This preserves all-or-nothing atomicity.
 
-    ParsedRow = tuple  # (save_row, driver_id, parsed_values, validated_status_key, key_row)
+    # Each row: (save_row, driver_id, parsed_values, validated_status_key, key_row)
     parsed_rows: list[tuple] = []
 
     for save_row in data.rows:
