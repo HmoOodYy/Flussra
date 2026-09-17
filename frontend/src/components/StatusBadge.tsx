@@ -54,11 +54,3 @@ export function PeriodStatusBadge({ status }: { status: string }) {
   const color = PERIOD_STATUS_COLOR[status] ?? 'gray';
   return <StatusBadge label={PERIOD_STATUS_LABEL[status] ?? status} color={color} />;
 }
-
-export function LineStatusBadge({ status, needsReview }: { status: string; needsReview: boolean }) {
-  if (status === 'Void')     return <StatusBadge label="Void"         color="gray"  />;
-  if (needsReview)           return <StatusBadge label="Needs Review" color="amber" />;
-  if (status === 'Active')   return <StatusBadge label="Active"       color="green" />;
-  if (status === 'Rejected') return <StatusBadge label="Rejected"     color="red"   />;
-  return <StatusBadge label={status} color="gray" />;
-}

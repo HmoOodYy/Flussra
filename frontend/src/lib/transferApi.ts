@@ -24,11 +24,6 @@ export async function listTransfers(params?: {
   return r.data;
 }
 
-export async function getTransfer(id: number): Promise<DriverTransferRequest> {
-  const r = await apiClient.get<DriverTransferRequest>(`/driver-transfers/${id}`);
-  return r.data;
-}
-
 export async function createTransfer(data: DriverTransferCreate): Promise<DriverTransferRequest> {
   const r = await apiClient.post<DriverTransferRequest>('/driver-transfers', data);
   return r.data;
