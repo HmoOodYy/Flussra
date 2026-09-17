@@ -70,7 +70,7 @@ from app.payroll.schemas import (
     DayGridColumn, DayGridStatusKey, DayGridLineValue,
     DayGridRow, DayGridSummary, DayGridPeriod, DayGridResponse,
     DayGridSaveRequest,
-    DriversOffEntry, DriversOffResponse,
+    DriversOffEntry,
     CandidateSelectedInfo, CandidateNavigationInfo, CandidatePreviewResponse,
     PeriodCreationRequest, PeriodCreationResponse,
     WorkflowCapability, WorkflowSlotItem, WorkflowBranchSlots,

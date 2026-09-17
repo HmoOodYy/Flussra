@@ -18,7 +18,6 @@ Race safety:
 All database access is raw parameterised SQL via sqlalchemy.text().
 """
 import json
-import re
 import secrets
 import string as _string
 
@@ -4670,8 +4669,6 @@ async def update_pay_item_order(
 
     Requires AllCompanyBranches scope + setup.manage.
     """
-    from app.settings.schemas import PayItemOrderUpdate  # local import avoids circular
-
     await _ensure_company_admin(company_id, user_id, db)
 
     ids = [entry.pay_item_id for entry in data.items]

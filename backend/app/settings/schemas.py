@@ -265,7 +265,6 @@ class PayrollSetupUpsert(BaseModel):
 
     @model_validator(mode="after")
     def validate_custom_cadence(self) -> "PayrollSetupUpsert":
-        from datetime import timedelta
         if self.payroll_frequency != "Custom":
             return self
 
