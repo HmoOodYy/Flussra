@@ -13092,21 +13092,110 @@ async def _enforce_status_key_limits(
             )
 
 
+async def _finalized_drivers_off_entries(
+    period: PeriodSummary,
+    company_id: int,
+    db: AsyncConnection,
+) -> tuple[list[dict], dict[str, str | None]]:
+    """
+    Stage B3 Unit 8C-7: Locked/Archived Status evidence for CP-2.5 Drivers Off.
+
+    Reuses the same Approved-PeriodApproval-review-item snapshot authority
+    and shared read primitives as Day Grid (Unit 8C-3) and CP-5B Off Drivers
+    (Unit 8C-5) via status_evidence.py -- never the EntryState freeze columns
+    (StatusCodeSnapshot/StatusLabelSnapshot/StatusIsOffReasonSnapshot/
+    FinalizedAtUtc), never live PayrollStatusKeys, never legacy DailyStatus
+    DraftLines. Returns (entries, {state, reason_code}); entries is always
+    [] unless state is AVAILABLE with at least one captured off-reason row.
+    """
+    snapshot, availability = await status_evidence.resolve_finalized_snapshot(
+        db, period_id=period.payroll_period_id, company_id=company_id, branch_id=period.branch_id,
+    )
+    if snapshot is None:
+        # No usable snapshot provenance -- never fall back to another
+        # snapshot or to mutable current state; evidence is unavailable.
+        return [], availability
+
+    status_rows = await status_evidence.read_status_entries(
+        db,
+        snapshot_id=snapshot["payrollcalculationsnapshotid"],
+        company_id=company_id,
+        branch_id=period.branch_id,
+        period_id=period.payroll_period_id,
+    )
+    evidence_state = status_evidence.status_evidence_availability(snapshot, status_rows)
+    off_rows = [row for row in status_rows if row["is_off_reason"]]
+    if not off_rows:
+        return [], evidence_state
+
+    driver_ids = sorted({row["driver_id"] for row in off_rows})
+    identity_rows = (await db.execute(
+        text("""
+            SELECT d.driverid, e.fullname AS drivername, d.drivercode
+            FROM core.drivers d
+            JOIN core.employees e ON e.employeeid = d.employeeid
+            WHERE d.companyid = :company_id
+              AND d.driverid  = ANY(:driver_ids)
+        """),
+        {"company_id": company_id, "driver_ids": driver_ids},
+    )).mappings().all()
+    identities = {int(r["driverid"]): r for r in identity_rows}
+
+    # NoteText is not part of the immutable Status-evidence table's contract
+    # (see status_evidence.read_status_entries) -- read it separately from
+    # canonical EntryState, which no write path can change once a period is
+    # Locked (Locked/Archived are in _WRITE_BLOCKED_STATUSES).
+    note_rows = (await db.execute(
+        text("""
+            SELECT driverid, workdate, notetext
+            FROM payroll.payrollperioddriverdayentrystate
+            WHERE payrollperiodid = :period_id
+              AND companyid = :company_id
+              AND isvoided = FALSE
+        """),
+        {"period_id": period.payroll_period_id, "company_id": company_id},
+    )).mappings().all()
+    notes_by_day = {
+        (int(row["driverid"]), row["workdate"]): row["notetext"] for row in note_rows
+    }
+
+    entries: list[dict] = []
+    for row in sorted(off_rows, key=lambda r: (r["work_date"], r["driver_id"])):
+        identity = identities.get(row["driver_id"])
+        if identity is None:
+            continue
+        entries.append({
+            "driver_id":       row["driver_id"],
+            "driver_name":     identity["drivername"],
+            "driver_code":     identity["drivercode"],
+            "work_date":       row["work_date"],
+            "status_key_code": row["status_code"],
+            "status_label":    row["status_label"],
+            "notes":           notes_by_day.get((row["driver_id"], row["work_date"])),
+        })
+    return entries, evidence_state
+
+
 async def get_drivers_off(
     period_id: int,
     company_id: int,
     user_id: int,
     db: AsyncConnection,
-) -> list[dict]:
+) -> tuple[list[dict], dict[str, str | None] | None]:
     """
     Return all off-driver records for the entire period (all work dates).
 
-    An off-driver record is a DailyStatus line whose status code maps to a
-    PayrollStatusKeys row with IsOffReason = TRUE.
+    Draft/Open/InReview/Returned/Approved (unchanged): an off-driver record
+    is a legacy DailyStatus line whose status code maps to a live
+    PayrollStatusKeys row with IsOffReason = TRUE. The status key code is
+    stored in the Notes column of DailyStatus lines. An optional DailyNote
+    line for the same driver/date is joined to supply the driver-level notes
+    text.
 
-    The status key code is stored in the Notes column of DailyStatus lines.
-    An optional DailyNote line for the same driver/date is joined to supply
-    the driver-level notes text.
+    Locked/Archived (Stage B3 Unit 8C-7): Status meaning comes only from
+    immutable calculation-snapshot evidence via _finalized_drivers_off_entries
+    -- never live PayrollStatusKeys, never legacy DailyStatus DraftLines.
+    Returns (entries, {state, reason_code}) instead of (entries, None).
 
     ODA/Driver users are blocked unconditionally.
     payroll.view OR payroll.entry permission is required.
@@ -13119,6 +13208,10 @@ async def get_drivers_off(
     await _check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
+
+    if period.status in ("Locked", "Archived"):
+        entries, evidence_state = await _finalized_drivers_off_entries(period, company_id, db)
+        return entries, evidence_state
 
     result = await db.execute(
         text("""
@@ -13166,7 +13259,7 @@ async def get_drivers_off(
             "notes":            r["driver_notes"],
         }
         for r in rows
-    ]
+    ], None
 
 
 async def get_day_grid(

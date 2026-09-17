@@ -1160,6 +1160,12 @@ class DriversOffResponse(BaseModel):
     period_id: int
     entries: list[DriversOffEntry]
     total_count: int
+    # Stage B3 Unit 8C-7: set only for Locked/Archived periods, where entries
+    # come from immutable calculation-snapshot evidence rather than live
+    # PayrollStatusKeys. Reuses the same {state, reason_code} shape already
+    # established for Day Grid (Unit 8C-3) and CP-5B Off Drivers (Unit 8C-5).
+    # None for Draft/Open/InReview/Returned/Approved.
+    status_evidence: FinalizedSectionAvailability | None = None
 
 
 # ---------------------------------------------------------------------------

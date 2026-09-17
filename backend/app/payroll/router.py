@@ -1611,7 +1611,7 @@ async def get_period_drivers_off(
     token: TokenDep,
     db: DbDep,
 ) -> DriversOffResponse:
-    entries_raw = await service.get_drivers_off(
+    entries_raw, status_evidence_state = await service.get_drivers_off(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1623,6 +1623,7 @@ async def get_period_drivers_off(
         period_id=period_id,
         entries=entries,
         total_count=len(entries),
+        status_evidence=status_evidence_state,
     )
 
 
