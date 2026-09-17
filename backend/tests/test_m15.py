@@ -2412,7 +2412,7 @@ class TestAuditRollback:
         monkeypatch,
     ):
         """If _write_pay_rule_audit raises during create, the rule must not persist."""
-        import app.payroll.service as svc
+        import app.payroll.driver_pay_rules as svc
         import pytest
 
         async def _failing_audit(*args, **kwargs):
@@ -2454,7 +2454,7 @@ class TestAuditRollback:
         monkeypatch,
     ):
         """If audit write fails during end, rule status must remain Active."""
-        import app.payroll.service as svc
+        import app.payroll.driver_pay_rules as svc
         import pytest
 
         # Create rule
@@ -2511,7 +2511,7 @@ class TestAuditRollback:
         monkeypatch,
     ):
         """If audit write fails during void, rule status must remain Active."""
-        import app.payroll.service as svc
+        import app.payroll.driver_pay_rules as svc
         import pytest
 
         r = await session_client.post(
@@ -2566,7 +2566,7 @@ class TestAuditRollback:
         monkeypatch,
     ):
         """If audit write fails during notes update, notes must remain unchanged."""
-        import app.payroll.service as svc
+        import app.payroll.driver_pay_rules as svc
         import pytest
 
         r = await session_client.post(
