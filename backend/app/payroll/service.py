@@ -5867,6 +5867,74 @@ async def _load_report_evidence(
     return status_entries, bonus_events
 
 
+async def _validate_legacy_status_canonicalized(
+    period: PeriodSummary,
+    company_id: int,
+    db: AsyncConnection,
+) -> list[str]:
+    """
+    CP-4D completeness guard: reject Submit/Resubmit if a legacy DailyStatus
+    DraftLine exists for a driver/day with no corresponding live-selected
+    canonical PayrollPeriodDriverDayEntryState row.
+
+    `_load_report_evidence` (the CP-4D immutable Status-evidence reader) reads
+    only canonical entry-state rows with a non-voided StatusKeyID -- it never
+    falls back to DraftLines. Without this guard, such a day would silently
+    capture zero Status evidence while the snapshot still reports a versioned,
+    "complete" ReportEvidenceVersion.
+
+    A canonical row that exists but only carries NoteText (StatusKeyID NULL --
+    e.g. a note-only save on an old period whose legacy Status code was never
+    re-entered) does not satisfy this check; the legacy Status is still
+    unrepresented. DailyNote-only legacy lines are out of scope: NoteText is
+    never part of the immutable Status evidence contract (`_load_report_evidence`
+    requires `StatusKeyID IS NOT NULL`), so a missing canonical row can never
+    cause a note to disappear from that evidence.
+
+    Read-only. Returns a blocker list (empty = no gap found).
+    """
+    rows = (await db.execute(
+        text("""
+            SELECT DISTINCT ds.driverid, ds.workdate
+            FROM   payroll.payrolldraftlines ds
+            WHERE  ds.payrollperiodid = :pid
+              AND  ds.companyid       = :cid
+              AND  ds.linetype        = 'DailyStatus'
+              AND  ds.status         != 'Void'
+              AND  ds.workdate BETWEEN :period_start AND :period_end
+              AND  NOT EXISTS (
+                       SELECT 1
+                       FROM   payroll.payrollperioddriverdayentrystate e
+                       WHERE  e.payrollperiodid = ds.payrollperiodid
+                         AND  e.companyid       = ds.companyid
+                         AND  e.driverid        = ds.driverid
+                         AND  e.workdate        = ds.workdate
+                         AND  e.statuskeyid    IS NOT NULL
+                         AND  e.isvoided        = FALSE
+                   )
+            ORDER BY ds.driverid, ds.workdate
+            LIMIT 5
+        """),
+        {
+            "pid": period.payroll_period_id,
+            "cid": company_id,
+            "period_start": period.start_date,
+            "period_end": period.end_date,
+        },
+    )).mappings().all()
+    if not rows:
+        return []
+
+    examples = "; ".join(f"driver {r['driverid']} on {r['workdate']}" for r in rows)
+    return [
+        "LEGACY_STATUS_NOT_CANONICAL: one or more days have a Status set only "
+        "through the legacy Daily Status representation, with no matching "
+        f"entry in the current Day Grid entry state ({examples}). Open the "
+        "Day Grid for the affected day(s), re-select the Status, and save "
+        "before this period can be submitted."
+    ]
+
+
 async def _build_live_calculation_packet(
     period: PeriodSummary,
     company_id: int,
@@ -5927,6 +5995,17 @@ async def _build_live_calculation_packet(
         branch_id=period.branch_id,
         period_start=period.start_date,
         period_end=period.end_date,
+        db=db,
+    ))
+
+    # ── CP-4D completeness guard: a legacy DailyStatus DraftLine with no
+    # canonical entry-state row would silently vanish from the immutable
+    # Status evidence captured at Submit/Resubmit (_load_report_evidence
+    # reads canonical rows only). Block until the day is re-saved through
+    # the Day Grid so the Status is canonically represented.
+    blockers.extend(await _validate_legacy_status_canonicalized(
+        period=period,
+        company_id=company_id,
         db=db,
     ))
 

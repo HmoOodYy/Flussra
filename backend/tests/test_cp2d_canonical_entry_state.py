@@ -18,8 +18,13 @@ Product contracts verified:
   - Locked period display: get_day_grid uses snapshot values (not live lookup) for
     Locked periods.
   - Legacy fallback: periods with no canonical rows read status/note from DraftLines.
-  - Legacy canonicalization: finalize_period creates canonical rows for periods that
-    had only DraftLines (legacy).
+  - Solution B legacy-Status guard: a legacy DailyStatus DraftLine with no canonical
+    entry-state row blocks calculation preview/Submit/Resubmit with
+    LEGACY_STATUS_NOT_CANONICAL (immutable Status evidence is captured only from
+    canonical entry-state at Submit; finalize_period no longer canonicalizes
+    legacy DraftLines at Lock time). Re-saving the day through the Day Grid
+    clears the blocker. DailyNote-only legacy data and Voided legacy DailyStatus
+    lines do not trigger the guard.
   - Dual-write: save_day_grid writes both DraftLine AND canonical row.
   - Tenant isolation: canonical rows are scoped by CompanyID; cross-company
     rows are not visible.
@@ -66,45 +71,154 @@ def _sk_code(prefix: str, date: datetime.date) -> str:
 
 async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
     """
-    Remove all periods and related rows for the branch, including locked/finalized ones.
-    Disables immutability triggers so locked period records can be deleted.
-    Must be called BEFORE deleting any status keys that may be referenced by canonical rows.
+    Physically remove every PayrollPeriods row this module created for the
+    branch, and everything that references it -- zero footprint. The PAYTEST
+    branch is shared by ~65 other test files, so leaving rows behind (even as
+    a terminal Cancelled status) would accumulate unbounded cross-suite data.
+
+    CP-4C/CP-4D/CP-5C/Phase6/P6D (migrations 0061-0065) added several
+    ON DELETE RESTRICT children of PayrollPeriods and PayrollCalculationSnapshots
+    that this fixture predates: PayrollCalculationSnapshots and its own
+    children (StatusEntries, BonusEvents, Lines, DriverTotals,
+    UsedRateDefinitions), PayrollPeriodWorkflowActionEvidence, and the three
+    P6D PayrollPeriodAuditEvidence* tables -- each protected by its own
+    immutable BEFORE UPDATE OR DELETE trigger, plus a BEFORE DELETE guard
+    directly on PayrollPeriods (trg_PayrollPeriods_AuditEvidenceDelete).
+    Deleting a snapshot-backed or audit-evidenced period now requires
+    clearing that whole chain first, in FK-verified leaf-to-root order.
+    review.ManagerReviewItems.PayrollCalculationSnapshotID (CP-4D, migration
+    0062) also RESTRICTs deletion of PayrollCalculationSnapshots, and
+    review.ManagerReviewDecisions / payroll.PayrollPeriods.CurrentReturnReviewItemID
+    (0001/0048) both RESTRICT deletion of the review item itself -- so the
+    review-domain rows this module's own PeriodApproval Submit/Decide/Resubmit
+    calls create are deleted outright (leaf-to-root: Decisions, then Items),
+    not left behind. Neither review table has an immutable trigger of its own.
+
+    Each table's own specifically-named immutable trigger is disabled only
+    for the duration of this cleanup -- never DISABLE TRIGGER ALL, which was
+    tried and rejected: it also silently suspends
+    PayrollPeriodDriverDayEntryState's normal ON DELETE CASCADE from
+    PayrollPeriods, leaving those rows behind unexpectedly.
     """
-    # Disable immutability guard triggers so locked periods can be cleaned up.
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    # Cancel locked/archived periods before deleting them.
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollfinallines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrolldraftlines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
-        {"bid": branch_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    # (table, trigger) pairs, in the exact order each table's DELETE below
+    # needs its own guard disabled. All names verified against migrations
+    # 0035 (final_line_immutable) and 0061/0063/0064/0065 (everything else).
+    guards = [
+        ("payroll.payrollfinallines", "trg_final_line_immutable"),
+        ("payroll.payrollcalculationsnapshotlines", "trg_PayrollCalculationSnapshotLines_Immutable"),
+        ("payroll.payrollperiodauditevidencesnapshotevents", "trg_PayrollPeriodAuditEvidenceSnapshotEvents_Immutable"),
+        ("payroll.payrollperiodauditevidenceevents", "trg_PayrollPeriodAuditEvidenceEvents_Immutable"),
+        ("payroll.payrollperiodauditevidencecoverage", "trg_PayrollPeriodAuditEvidenceCoverage_Immutable"),
+        ("payroll.payrollcalculationsnapshotusedratedefinitions", "trg_PayrollCalculationSnapshotUsedRateDefinitions_Immutable"),
+        ("payroll.payrollcalculationdrivertotals", "trg_PayrollCalculationDriverTotals_Immutable"),
+        ("payroll.payrollcalculationsnapshotstatusentries", "trg_PayrollCalculationSnapshotStatusEntries_Immutable"),
+        ("payroll.payrollcalculationsnapshotbonusevents", "trg_PayrollCalculationSnapshotBonusEvents_Immutable"),
+        ("payroll.payrollperiodworkflowactionevidence", "trg_PayrollPeriodWorkflowActionEvidence_Immutable"),
+        ("payroll.payrollcalculationsnapshots", "trg_PayrollCalculationSnapshots_Immutable"),
+        ("payroll.payrollperiods", "trg_PayrollPeriods_AuditEvidenceDelete"),
+    ]
+    for table, trigger in guards:
+        await db.execute(_text(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+    try:
+        period_subq = "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"
+        snapshot_subq = (
+            "(SELECT payrollcalculationsnapshotid FROM payroll.payrollcalculationsnapshots "
+            f"WHERE payrollperiodid IN {period_subq})"
+        )
+        drivertotal_subq = (
+            "(SELECT payrollcalculationdrivertotalid FROM payroll.payrollcalculationdrivertotals "
+            f"WHERE payrollcalculationsnapshotid IN {snapshot_subq})"
+        )
+        # ManagerReviewItems has no real FK to PayrollPeriods -- the link is
+        # the polymorphic (EntitySchema, EntityName, EntityID) convention this
+        # module's own Submit/Resubmit calls create (entityschema='payroll',
+        # entityname='PayrollPeriods', entityid=str(period_id)), confirmed
+        # against app/payroll/service.py's review-item creation sites.
+        review_items_subq = (
+            "(SELECT reviewitemid FROM review.managerreviewitems "
+            "WHERE entityschema = 'payroll' AND entityname = 'PayrollPeriods' "
+            f"AND entityid IN (SELECT payrollperiodid::text FROM payroll.payrollperiods WHERE branchid = :bid))"
+        )
+
+        # Leaf-to-root, verified against each table's actual FK targets:
+        # SnapshotLines -> DriverTotals/UsedRateDefinitions -> Snapshots;
+        # AuditEvidenceSnapshotEvents -> AuditEvidenceEvents AND Snapshots;
+        # StatusEntries/BonusEvents/UsedRateDefinitions/WorkflowActionEvidence
+        # -> Snapshots (and/or Periods directly, all have PayrollPeriodID);
+        # Snapshots/FinalLines/DraftLines/EntryState/AuditEvidenceCoverage
+        # -> Periods; Periods last.
+        for stmt in (
+            f"DELETE FROM payroll.payrollcalculationsnapshotlines "
+            f"WHERE payrollcalculationdrivertotalid IN {drivertotal_subq}",
+
+            f"DELETE FROM payroll.payrollperiodauditevidencesnapshotevents "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            f"DELETE FROM payroll.payrollperiodauditevidenceevents "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            f"DELETE FROM payroll.payrollperiodauditevidencecoverage "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            f"DELETE FROM payroll.payrollcalculationsnapshotusedratedefinitions "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            f"DELETE FROM payroll.payrollcalculationdrivertotals "
+            f"WHERE payrollcalculationsnapshotid IN {snapshot_subq}",
+
+            f"DELETE FROM payroll.payrollcalculationsnapshotstatusentries "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            f"DELETE FROM payroll.payrollcalculationsnapshotbonusevents "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            f"DELETE FROM payroll.payrollperiodworkflowactionevidence "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            # PayrollPeriods.CurrentReturnReviewItemID (0048) RESTRICTs
+            # deleting the review item it points to -- clear it first (the
+            # period row is being deleted below anyway, so this is a pure
+            # unblock, not a behavior change).
+            f"UPDATE payroll.payrollperiods SET currentreturnreviewitemid = NULL "
+            f"WHERE branchid = :bid",
+
+            # ManagerReviewDecisions (0001) RESTRICTs deleting the
+            # ManagerReviewItems row it belongs to -- delete children first.
+            f"DELETE FROM review.managerreviewdecisions "
+            f"WHERE reviewitemid IN {review_items_subq}",
+
+            # Deleting the review item outright (rather than only nulling its
+            # PayrollCalculationSnapshotID) also removes the leftover
+            # Pending/Approved/EditRequested/Rejected rows this module's own
+            # PeriodApproval Submit/Decide/Resubmit calls create -- otherwise
+            # they orphan-reference the PayrollPeriods rows deleted below and
+            # accumulate indefinitely on the shared PAYTEST branch.
+            f"DELETE FROM review.managerreviewitems "
+            f"WHERE reviewitemid IN {review_items_subq}",
+
+            f"DELETE FROM payroll.payrollcalculationsnapshots "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            "DELETE FROM payroll.payrollfinallines "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            "DELETE FROM payroll.payrolldraftlines "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            # PayrollPeriodDriverDayEntryState is normally ON DELETE CASCADE
+            # from PayrollPeriods; deleted explicitly here since its own
+            # trigger isn't in the disabled set (it has no guard of its own)
+            # and callers need its StatusKeyID references gone before they
+            # can delete the PayrollStatusKeys rows they created.
+            f"DELETE FROM payroll.payrollperioddriverdayentrystate "
+            f"WHERE payrollperiodid IN {period_subq}",
+
+            "DELETE FROM payroll.payrollperiods WHERE branchid = :bid",
+        ):
+            await db.execute(_text(stmt), {"bid": branch_id})
+    finally:
+        for table, trigger in reversed(guards):
+            await db.execute(_text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
     await db.commit()
 
 
@@ -893,11 +1007,22 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E11 — Legacy canonicalization at finalization
+    # E11 — Solution B: legacy Status blocks Submit until re-saved canonically
     # ------------------------------------------------------------------ #
+    #
+    # Superseded contract (pre-CP-4F): finalize_period used to canonicalize
+    # leftover legacy DailyStatus DraftLines at Lock time
+    # (_finalize_canonicalize_entry_state). CP-4F's finalize_period consumes
+    # the immutable calculation snapshot captured at Submit and never touches
+    # PayrollPeriodDriverDayEntryState — so that finalize-time canonicalization
+    # can no longer run. Solution B instead rejects Submit/Resubmit up front
+    # (LEGACY_STATUS_NOT_CANONICAL) so an incomplete immutable Status snapshot
+    # is never created in the first place; the user re-saves the affected day
+    # through the Day Grid, which dual-writes the canonical row, and Submit
+    # then captures the correct Status evidence.
 
     @pytest.mark.asyncio
-    async def test_e11_finalization_canonicalizes_legacy_draftlines(
+    async def test_e11_legacy_status_blocks_submit_until_resaved_canonically(
         self,
         session_client,
         auth_token: str,
@@ -905,7 +1030,9 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E11: finalize_period creates canonical rows for legacy periods (DraftLine-only)."""
+        """E11: legacy DailyStatus-only day blocks preview/Submit; re-saving it
+        through the Day Grid clears the blocker and Submit captures the
+        correct immutable Status evidence."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e11")
         code = _sk_code("E11LEG", start)
@@ -913,9 +1040,11 @@ class TestCp2dCanonicalEntryState:
         headers = _auth(auth_token)
         sk_id = None
         try:
-            sk_id = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code)
+            sk_id = await _insert_status_key(
+                direct_db, _COMPANY_ID, ces_branch_id, code, is_off_reason=True
+            )
 
-            # Insert DraftLine directly — bypasses canonical write
+            # Insert DraftLine directly — bypasses canonical write (legacy-only state).
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
@@ -927,7 +1056,7 @@ class TestCp2dCanonicalEntryState:
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
             )
-            # Also add a DailyNote so finalization won't reject for empty period
+            # Also add a DailyNote so the empty-period guard doesn't mask this blocker.
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
@@ -941,19 +1070,77 @@ class TestCp2dCanonicalEntryState:
             )
             await direct_db.commit()
 
-            # No canonical row should exist yet
+            # No canonical row exists yet — the legacy Status is unrepresented.
             assert not await _canonical_rows(direct_db, pid)
 
-            await _advance_to_approved(session_client, auth_token, pid, ces_driver_id, wdate)
-            fin = await session_client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
-            assert fin.status_code == 200
+            # Calculation preview must surface the blocker.
+            preview = await session_client.get(
+                f"/payroll/periods/{pid}/calculation-preview", headers=headers,
+            )
+            assert preview.status_code == 200, preview.text
+            preview_body = preview.json()
+            assert preview_body["has_blockers"] is True
+            assert any(
+                "LEGACY_STATUS_NOT_CANONICAL" in b for b in preview_body["blockers"]
+            ), preview_body["blockers"]
 
-            # finalize_period must have created a canonical row from the DraftLine
+            # Submit must be blocked — no incomplete immutable snapshot may be created.
+            submit = await session_client.patch(
+                f"/payroll/periods/{pid}/status", headers=headers,
+                json={"status": "InReview"},
+            )
+            assert submit.status_code == 422, submit.text
+            assert "LEGACY_STATUS_NOT_CANONICAL" in submit.text
+            snapshot_count = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM payroll.payrollcalculationsnapshots "
+                      "WHERE payrollperiodid = :pid"),
+                {"pid": pid},
+            )).scalar_one()
+            assert snapshot_count == 0, "Submit must not create a snapshot while blocked"
+
+            # User re-saves the day through the supported canonical entry path.
+            resave = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid", headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                                 "status_key": code, "notes": "resaved"}]},
+            )
+            assert resave.status_code == 200, resave.text
+
+            # Blocker is gone; canonical row now exists with the Status set.
+            preview2 = await session_client.get(
+                f"/payroll/periods/{pid}/calculation-preview", headers=headers,
+            )
+            assert preview2.status_code == 200, preview2.text
+            assert not any(
+                "LEGACY_STATUS_NOT_CANONICAL" in b for b in preview2.json()["blockers"]
+            ), preview2.json()["blockers"]
             rows = await _canonical_rows(direct_db, pid)
-            ces = [r for r in rows if r["driverid"] == ces_driver_id]
-            assert ces, "Finalization must create canonical row from legacy DraftLine"
-            assert ces[0]["statuscodesnapshot"] == code, "Snapshot must use DraftLine status code"
-            assert ces[0]["finalizedatutc"] is not None
+            ces = next(r for r in rows if r["driverid"] == ces_driver_id)
+            assert ces["statuskeyid"] == sk_id
+
+            # Submit now succeeds and captures the correct immutable Status evidence.
+            submit2 = await session_client.patch(
+                f"/payroll/periods/{pid}/status", headers=headers,
+                json={"status": "InReview"},
+            )
+            assert submit2.status_code == 200, submit2.text
+
+            evidence = (await direct_db.execute(
+                _text("""
+                    SELECT se.statuscodesnapshot, se.statuslabelsnapshot,
+                           se.statusisoffreasonsnapshot
+                    FROM   payroll.payrollcalculationsnapshotstatusentries se
+                    JOIN   payroll.payrollcalculationsnapshots s
+                           ON s.payrollcalculationsnapshotid = se.payrollcalculationsnapshotid
+                    WHERE  s.payrollperiodid = :pid AND se.driverid = :did
+                """),
+                {"pid": pid, "did": ces_driver_id},
+            )).mappings().first()
+            assert evidence is not None, "Immutable Status evidence must be captured"
+            assert evidence["statuscodesnapshot"] == code
+            assert "E11" in (evidence["statuslabelsnapshot"] or "")
+            assert evidence["statusisoffreasonsnapshot"] is True
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id:
@@ -1483,3 +1670,250 @@ class TestCp2dCanonicalEntryState:
             assert rows3["isvoided"] is True, "Row must be soft-voided when both fields NULL"
         finally:
             await _clean_branch(direct_db, ces_branch_id)
+
+    # ------------------------------------------------------------------ #
+    # E22 — Solution B: DailyNote-only legacy data must NOT block Submit
+    # ------------------------------------------------------------------ #
+    #
+    # NoteText is never part of the immutable Status evidence contract:
+    # PayrollCalculationSnapshotStatusEntries.StatusKeyID is NOT NULL and
+    # _load_report_evidence requires StatusKeyID IS NOT NULL, so a note-only
+    # canonical row (StatusKeyID NULL, as E21 proves) is already excluded from
+    # capture regardless of whether it exists. A legacy DailyNote DraftLine
+    # with no canonical row therefore cannot cause a Status to disappear from
+    # evidence, and must not trigger LEGACY_STATUS_NOT_CANONICAL.
+
+    @pytest.mark.asyncio
+    async def test_e22_legacy_note_only_does_not_block_submit(
+        self,
+        session_client,
+        auth_token: str,
+        direct_db,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E22: a legacy DailyNote DraftLine with no canonical row (and no
+        DailyStatus at all) must not trigger LEGACY_STATUS_NOT_CANONICAL."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e22")
+        wdate = str(start)
+        headers = _auth(auth_token)
+        try:
+            # Insert DailyNote directly — bypasses canonical write. No DailyStatus exists.
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrolldraftlines
+                        (companyid, branchid, payrollperiodid, driverid,
+                         workdate, linetype, linescope, quantity,
+                         sourcetype, status, needsmanagerreview, notes, addedbyuserid)
+                    VALUES (1, :bid, :pid, :did, :dt,
+                            'DailyNote', 'Daily', 1, 'Manual', 'Active', FALSE,
+                            'legacy note only', 1)
+                """),
+                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start},
+            )
+            await direct_db.commit()
+
+            assert not await _canonical_rows(direct_db, pid)
+
+            preview = await session_client.get(
+                f"/payroll/periods/{pid}/calculation-preview", headers=headers,
+            )
+            assert preview.status_code == 200, preview.text
+            assert not any(
+                "LEGACY_STATUS_NOT_CANONICAL" in b for b in preview.json()["blockers"]
+            ), preview.json()["blockers"]
+
+            submit = await session_client.patch(
+                f"/payroll/periods/{pid}/status", headers=headers,
+                json={"status": "InReview"},
+            )
+            assert submit.status_code == 200, submit.text
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+
+    # ------------------------------------------------------------------ #
+    # E23 — Solution B: a Voided legacy DailyStatus line must NOT block Submit
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_e23_voided_legacy_status_does_not_block_submit(
+        self,
+        session_client,
+        auth_token: str,
+        direct_db,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E23: a Voided legacy DailyStatus DraftLine with no canonical row
+        must not trigger LEGACY_STATUS_NOT_CANONICAL — it is not live source
+        data, so nothing needs to be captured for it."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e23")
+        code = _sk_code("E23VOID", start)
+        wdate = str(start)
+        headers = _auth(auth_token)
+        sk_id = None
+        try:
+            sk_id = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code)
+
+            # Insert an already-Void legacy DailyStatus line, plus an active DailyNote
+            # so the period isn't rejected as empty.
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrolldraftlines
+                        (companyid, branchid, payrollperiodid, driverid,
+                         workdate, linetype, linescope, quantity,
+                         sourcetype, status, needsmanagerreview, notes, addedbyuserid)
+                    VALUES (1, :bid, :pid, :did, :dt,
+                            'DailyStatus', 'Daily', 0, 'Manual', 'Void', FALSE, :code, 1)
+                """),
+                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
+            )
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrolldraftlines
+                        (companyid, branchid, payrollperiodid, driverid,
+                         workdate, linetype, linescope, quantity,
+                         sourcetype, status, needsmanagerreview, addedbyuserid)
+                    VALUES (1, :bid, :pid, :did, :dt,
+                            'DailyNote', 'Daily', 1, 'Manual', 'Active', FALSE, 1)
+                """),
+                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start},
+            )
+            await direct_db.commit()
+
+            assert not await _canonical_rows(direct_db, pid)
+
+            preview = await session_client.get(
+                f"/payroll/periods/{pid}/calculation-preview", headers=headers,
+            )
+            assert preview.status_code == 200, preview.text
+            assert not any(
+                "LEGACY_STATUS_NOT_CANONICAL" in b for b in preview.json()["blockers"]
+            ), preview.json()["blockers"]
+
+            submit = await session_client.patch(
+                f"/payroll/periods/{pid}/status", headers=headers,
+                json={"status": "InReview"},
+            )
+            assert submit.status_code == 200, submit.text
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+            if sk_id:
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+                    {"sid": sk_id},
+                )
+                await direct_db.commit()
+
+    # ------------------------------------------------------------------ #
+    # E24 — Solution B: Returned -> correction -> Resubmit captures the
+    # corrected Status, unaffected by the legacy-canonicalization guard
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_e24_returned_correction_resubmit_captures_corrected_status(
+        self,
+        session_client,
+        auth_token: str,
+        direct_db,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E24: with canonical entry-state kept valid throughout, Return ->
+        correct the Status through the Day Grid -> Resubmit must succeed
+        (the new guard never fires for a normal canonical flow), and the
+        latest immutable snapshot must reflect the corrected Status, not the
+        one captured at first Submit."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e24")
+        code_a = _sk_code("E24A", start)
+        code_b = _sk_code("E24B", start)
+        wdate = str(start)
+        headers = _auth(auth_token)
+        sk_a = sk_b = None
+        try:
+            sk_a = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code_a)
+            sk_b = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code_b)
+
+            # Save the original Status through the canonical entry path.
+            save1 = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid", headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                                 "status_key": code_a, "notes": "first pass"}]},
+            )
+            assert save1.status_code == 200, save1.text
+
+            submit1 = await session_client.patch(
+                f"/payroll/periods/{pid}/status", headers=headers,
+                json={"status": "InReview"},
+            )
+            assert submit1.status_code == 200, submit1.text
+
+            review_resp = await session_client.get("/review/items", headers=headers)
+            assert review_resp.status_code == 200
+            item = next(
+                (i for i in review_resp.json()
+                 if i.get("entity_name") == "PayrollPeriods"
+                 and i.get("entity_id") == str(pid)
+                 and i.get("status") == "Pending"),
+                None,
+            )
+            assert item is not None, f"No pending review item for period {pid}"
+
+            decide = await session_client.post(
+                f"/review/items/{item['review_item_id']}/decide", headers=headers,
+                json={"decision": "EditRequested", "decision_reason": "correct the status"},
+            )
+            assert decide.status_code == 200, decide.text
+
+            period_after_return = await session_client.get(
+                f"/payroll/periods/{pid}", headers=headers,
+            )
+            assert period_after_return.status_code == 200
+            assert period_after_return.json()["status"] == "Returned"
+
+            # Correct the Status through the same canonical entry path.
+            save2 = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid", headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                                 "status_key": code_b, "notes": "corrected"}]},
+            )
+            assert save2.status_code == 200, save2.text
+
+            # Canonical state is still valid (a live row with StatusKeyID set) —
+            # the legacy-canonicalization guard must not fire for Resubmit either.
+            resubmit = await session_client.post(
+                f"/payroll/periods/{pid}/resubmissions", headers=headers,
+            )
+            assert resubmit.status_code == 200, resubmit.text
+
+            # The latest snapshot's evidence must reflect the corrected Status.
+            evidence = (await direct_db.execute(
+                _text("""
+                    SELECT se.statuscodesnapshot
+                    FROM   payroll.payrollcalculationsnapshotstatusentries se
+                    JOIN   payroll.payrollcalculationsnapshots s
+                           ON s.payrollcalculationsnapshotid = se.payrollcalculationsnapshotid
+                    WHERE  s.payrollperiodid = :pid AND se.driverid = :did
+                    ORDER BY s.revisionnumber DESC
+                    LIMIT 1
+                """),
+                {"pid": pid, "did": ces_driver_id},
+            )).mappings().first()
+            assert evidence is not None, "Latest snapshot must capture Status evidence"
+            assert evidence["statuscodesnapshot"] == code_b, (
+                "Latest snapshot must reflect the corrected Status, not the original"
+            )
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+            for sid in (sk_a, sk_b):
+                if sid:
+                    await direct_db.execute(
+                        _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+                        {"sid": sid},
+                    )
+            await direct_db.commit()
