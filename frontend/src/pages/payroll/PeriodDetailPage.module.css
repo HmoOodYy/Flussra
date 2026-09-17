@@ -192,6 +192,11 @@
 }
 .statusSelect:disabled { background: #f3f4f6; color: #9ca3af; }
 
+/* Stage B3 Unit 8C-4: Locked/Archived historical Status (read-only, from
+   immutable evidence -- not an editable control). */
+.statusHistorical { font-size: 0.78rem; color: #111827; }
+.statusUnavailable { font-size: 0.78rem; color: #9ca3af; font-style: italic; }
+
 .notesBtn {
   padding: 0.15rem 0.4rem;
   border: 1px solid #d1d5db;

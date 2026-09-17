@@ -248,6 +248,13 @@ export interface DayGridResponse {
   status_keys: DayGridStatusKey[];
   rows: DayGridRow[];
   summary: DayGridSummary;
+  // Stage B3 Unit 8C-3: set only for Locked/Archived periods, where row
+  // status_key/status_label/is_off come from immutable calculation-snapshot
+  // evidence rather than live PayrollStatusKeys. Reuses the same
+  // {state, reason_code} shape already established by the P6A Finalized
+  // Payroll Information Library below. Absent/null for Draft/Open/
+  // InReview/Returned/Approved.
+  status_evidence?: FinalizedSectionAvailability | null;
 }
 
 export interface DayGridSaveRow {

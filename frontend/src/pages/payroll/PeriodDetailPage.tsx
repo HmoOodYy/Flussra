@@ -20,6 +20,12 @@ import styles from './PeriodDetailPage.module.css';
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
 
+// Stage B3 Unit 8C-4: Locked/Archived read Status from immutable
+// calculation-snapshot evidence (DayGridResponse.status_evidence), never
+// from the live StatusKey list -- a key may have been renamed, deactivated,
+// or had its off-reason flag changed since the period was finalized.
+const FINALIZED_STATUSES = new Set(['Locked', 'Archived']);
+
 // ---------------------------------------------------------------------------
 // Date helpers
 // ---------------------------------------------------------------------------
@@ -272,7 +278,13 @@ export function PeriodDetailPage() {
   if (error && !grid) return <div className={styles.error}>{error}</div>;
   if (!grid) return null;
 
-  const { period, columns, status_keys, rows, summary } = grid;
+  const { period, columns, status_keys, rows, summary, status_evidence } = grid;
+  const isFinalized = FINALIZED_STATUSES.has(period.status);
+  // AVAILABLE and EMPTY are both trustworthy historical reads (EMPTY is a
+  // positively-captured "nobody had a Status" snapshot, not a gap) -- only
+  // UNAVAILABLE means the historical Status genuinely cannot be shown.
+  const isHistoricalStatusReadable =
+    !!status_evidence && (status_evidence.state === 'AVAILABLE' || status_evidence.state === 'EMPTY');
 
   const readOnlyBanner = (() => {
     if (period.status === 'Draft')
@@ -410,17 +422,36 @@ export function PeriodDetailPage() {
                       {isDirty && <span style={{ color: '#f59e0b', marginLeft: 4 }}>●</span>}
                     </td>
                     <td>
-                      <select
-                        className={styles.statusSelect}
-                        value={getStatusValue(row)}
-                        disabled={!canEdit}
-                        onChange={(e) => handleStatusChange(row.driver_id, e.target.value || null)}
-                      >
-                        <option value="">—</option>
-                        {status_keys.map((sk) => (
-                          <option key={sk.key_code} value={sk.key_code}>{sk.label}</option>
-                        ))}
-                      </select>
+                      {isFinalized ? (
+                        isHistoricalStatusReadable ? (
+                          <span className={styles.statusHistorical}>
+                            {row.status_label ?? '—'}
+                          </span>
+                        ) : (
+                          <span
+                            className={styles.statusUnavailable}
+                            title={
+                              status_evidence?.reason_code
+                                ? `Historical Status unavailable (${status_evidence.reason_code})`
+                                : 'Historical Status unavailable'
+                            }
+                          >
+                            Unavailable
+                          </span>
+                        )
+                      ) : (
+                        <select
+                          className={styles.statusSelect}
+                          value={getStatusValue(row)}
+                          disabled={!canEdit}
+                          onChange={(e) => handleStatusChange(row.driver_id, e.target.value || null)}
+                        >
+                          <option value="">—</option>
+                          {status_keys.map((sk) => (
+                            <option key={sk.key_code} value={sk.key_code}>{sk.label}</option>
+                          ))}
+                        </select>
+                      )}
                     </td>
                     {columns.map((col) => {
                       const val = row.values[col.pay_item_code];
