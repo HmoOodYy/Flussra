@@ -375,14 +375,6 @@ class StatusKey(BaseModel):
     updated_at_utc: datetime | None = None
 
 
-def _validate_usage_limit(enabled: bool, value: int | None, field: str) -> None:
-    """Raise ValueError if limit is enabled but value is missing or non-positive."""
-    if enabled and (value is None or value <= 0):
-        raise ValueError(
-            f"{field}: when enabled the value must be a positive integer."
-        )
-
-
 class StatusKeyCreate(BaseModel):
     """
     Payload to create a new status key for a branch.

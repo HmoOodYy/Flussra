@@ -88,9 +88,3 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserInfo
-
-
-class TokenPayload(BaseModel):
-    """Decoded JWT payload — minimal claims only."""
-    sub: int    # user_id
-    cid: int    # company_id
