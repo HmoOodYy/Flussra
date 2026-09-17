@@ -1771,9 +1771,13 @@ class TestPreviewFinalizationDivergence:
 
 class TestMinMaxRealParticipation:
     """
-    `_MINMAX_BASE_EXCLUDED_LINETYPES = ("BONUS", "SYS_MIN_TOPUP", "SYS_MAX_CAP")`
-    (service.py) does not include the real STATUS_PAY linetype, so
-    STATUS_PAY amounts ARE included in the normal min/max comparison base.
+    The min/max base exclusion set is BONUS, SYS_MIN_TOPUP, and SYS_MAX_CAP;
+    it does not include the real STATUS_PAY linetype, so STATUS_PAY amounts
+    ARE included in the normal min/max comparison base. (The
+    `_MINMAX_BASE_EXCLUDED_LINETYPES` constant that formerly documented this
+    set lived only inside `_legacy_finalize_period`, which Unit 8C-6 removed
+    as dead code; the live `get_finalization_preview` enforces the same rule
+    via its own `driver_bonus` accumulator, per the CP-3C comment history.)
     The existing regression in test_cp3c_minmax_bonus.py
     (`test_status_payment_remains_in_minmax_base`) already asserts this
     conclusion, but does so using a SYNTHETIC injected DraftLine literally

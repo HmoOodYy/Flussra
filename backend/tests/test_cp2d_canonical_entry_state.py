@@ -42,6 +42,7 @@ import itertools
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 # ---------------------------------------------------------------------------
@@ -1707,11 +1708,26 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E13 — ON DELETE CASCADE: deleting period removes canonical rows
+    # E13 — P6D immutable-history contract: physical delete of a period
+    # that has acquired audit evidence is rejected, not cascaded.
+    #
+    # Originally (pre-P6D) this contract asserted the opposite: a raw
+    # DELETE of PayrollPeriods cascaded away its canonical entry-state
+    # rows via the FK's ON DELETE CASCADE. Migration 0065 (P6D) added
+    # trg_PayrollPeriods_AuditEvidenceDelete, a BEFORE DELETE guard that
+    # raises whenever the period has rows in
+    # PayrollPeriodAuditEvidenceCoverage/Events or PayrollCalculationSnapshots
+    # -- and the Day Grid save below (the supported workflow for writing a
+    # canonical Status row) always leaves a STATUS_NOTE coverage row behind
+    # via capture_period_audit_evidence's _ensure_partial_coverage. So the
+    # old cascade is no longer reachable for a period with real data; this
+    # test now proves the guard rejects the delete and that both the
+    # canonical row and the audit-evidence coverage it produced survive the
+    # rejected attempt untouched.
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_e13_cascade_delete(
+    async def test_e13_delete_rejected_for_evidence_bearing_period(
         self,
         session_client,
         auth_token: str,
@@ -1719,7 +1735,10 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E13: Deleting a payroll period removes its canonical entry-state rows."""
+        """E13: A period that has acquired P6D audit evidence through the
+        supported Day Grid workflow rejects physical DELETE, and the
+        canonical entry-state row plus the audit-evidence coverage row it
+        produced remain intact after the rejected attempt."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e13")
         code = _sk_code("E13KEY", start)
@@ -1733,27 +1752,63 @@ class TestCp2dCanonicalEntryState:
                 json={"work_date": wdate,
                       "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
             )
-            assert await _canonical_rows(direct_db, pid), "Row must exist before delete"
+            assert await _canonical_rows(direct_db, pid), "Canonical row must exist before delete"
 
+            coverage_before = (await direct_db.execute(
+                _text("""
+                    SELECT evidencedomain, coveragestate
+                    FROM   payroll.payrollperiodauditevidencecoverage
+                    WHERE  payrollperiodid = :pid
+                """),
+                {"pid": pid},
+            )).mappings().all()
+            assert coverage_before, (
+                "Day Grid save must produce P6D audit-evidence coverage for "
+                "the period -- that is the evidence this test proves is protected."
+            )
+
+            # payrolldraftlines has no delete guard of its own; only the
+            # PayrollPeriods row itself is protected once evidence exists.
             await direct_db.execute(
                 _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
                 {"pid": pid},
             )
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-            rows_after = await _canonical_rows(direct_db, pid)
-            assert not rows_after, "Canonical rows must be removed via CASCADE"
+            with pytest.raises(IntegrityError, match="payroll_period_delete"):
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                    {"pid": pid},
+                )
         finally:
-            await _clean_branch(direct_db, ces_branch_id)
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
-                {"sid": sk_id},
-            )
-            await direct_db.commit()
+            await direct_db.rollback()
+
+        period_row = (await direct_db.execute(
+            _text("SELECT payrollperiodid FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+            {"pid": pid},
+        )).mappings().first()
+        assert period_row is not None, "Rejected DELETE must leave the period row in place"
+
+        rows_after = await _canonical_rows(direct_db, pid)
+        assert rows_after, "Canonical row must survive the rejected DELETE"
+
+        coverage_after = (await direct_db.execute(
+            _text("""
+                SELECT evidencedomain, coveragestate
+                FROM   payroll.payrollperiodauditevidencecoverage
+                WHERE  payrollperiodid = :pid
+            """),
+            {"pid": pid},
+        )).mappings().all()
+        as_pairs = lambda rows: sorted((r["evidencedomain"], r["coveragestate"]) for r in rows)
+        assert as_pairs(coverage_after) == as_pairs(coverage_before), (
+            "Protected audit-evidence coverage must be unchanged by the rejected DELETE"
+        )
+
+        await _clean_branch(direct_db, ces_branch_id)
+        await direct_db.execute(
+            _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+            {"sid": sk_id},
+        )
+        await direct_db.commit()
 
     # ------------------------------------------------------------------ #
     # E14 — Tenant isolation: CompanyID scoping
