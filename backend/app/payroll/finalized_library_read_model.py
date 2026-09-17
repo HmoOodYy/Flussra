@@ -17,7 +17,7 @@ from app.core.service import (
     _check_permission,
     _require_not_driver_role,
 )
-from app.payroll import report_read_model, service
+from app.payroll import report_read_model, service, status_evidence
 
 _REPORT_TYPES = {"drivers", "period-work", "period-pay", "mixed"}
 _FINALIZED_STATUSES = {"Locked", "Archived"}
@@ -737,28 +737,16 @@ async def _finalized_eligible_driver_days(
 async def _finalized_status_entries(
     snapshot: dict[str, Any] | None, period: dict[str, Any], db: AsyncConnection,
 ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
-    if snapshot is None:
-        return [], _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    if snapshot["reportevidenceversion"] is None:
-        return [], _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
-    rows = (await db.execute(text("""
-        SELECT driverid, workdate, statuskeyid, statuscodesnapshot, statuslabelsnapshot,
-               statusisoffreasonsnapshot
-        FROM payroll.payrollcalculationsnapshotstatusentries
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id
-          AND payrollperiodid = :period_id
-        ORDER BY driverid, workdate
-    """), {
-        "snapshot_id": snapshot["payrollcalculationsnapshotid"],
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().all()
-    return [{
-        "driver_id": int(row["driverid"]), "work_date": row["workdate"],
-        "status_key_id": int(row["statuskeyid"]), "status_code": row["statuscodesnapshot"],
-        "status_label": row["statuslabelsnapshot"], "is_off_reason": bool(row["statusisoffreasonsnapshot"]),
-    } for row in rows], _availability("EMPTY" if not rows else "AVAILABLE")
+    entries: list[dict[str, Any]] = []
+    if snapshot is not None and snapshot["reportevidenceversion"] is not None:
+        entries = await status_evidence.read_status_entries(
+            db,
+            snapshot_id=snapshot["payrollcalculationsnapshotid"],
+            company_id=period["companyid"],
+            branch_id=period["branchid"],
+            period_id=period["payrollperiodid"],
+        )
+    return entries, status_evidence.status_evidence_availability(snapshot, entries)
 
 
 async def _finalized_normal_work_pairs(

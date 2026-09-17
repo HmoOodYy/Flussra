@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
-from app.payroll import service
+from app.payroll import service, status_evidence
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 
 
@@ -142,13 +142,18 @@ async def _snapshot_evidence(snapshot_id: int, period: dict[str, Any], db: Async
     version = header["reportevidenceversion"]
     if version is None:
         return False, None, None, [], []
-    statuses = (await db.execute(text("""
-        SELECT driverid, workdate, statuskeyid, statuscodesnapshot, statuslabelsnapshot,
-               statusisoffreasonsnapshot
-        FROM payroll.payrollcalculationsnapshotstatusentries
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-        ORDER BY driverid, workdate
-    """), {"snapshot_id": snapshot_id})).mappings().all()
+    status_rows = await status_evidence.read_status_entries(
+        db,
+        snapshot_id=snapshot_id,
+        company_id=int(header["companyid"]),
+        branch_id=int(header["branchid"]),
+        period_id=int(header["payrollperiodid"]),
+    )
+    statuses = [{
+        "driver_id": row["driver_id"], "work_date": row["work_date"],
+        "status_key_id": row["status_key_id"], "code": row["status_code"],
+        "label": row["status_label"], "is_off": row["is_off_reason"],
+    } for row in status_rows]
     bonuses = (await db.execute(text("""
         SELECT payrollbonuseventid, driverid, amount, reason, notes, datarevision,
                createdbyuserid, creatordisplaynamesnapshot, createdatutc
@@ -156,11 +161,7 @@ async def _snapshot_evidence(snapshot_id: int, period: dict[str, Any], db: Async
         WHERE payrollcalculationsnapshotid = :snapshot_id
         ORDER BY driverid, payrollbonuseventid
     """), {"snapshot_id": snapshot_id})).mappings().all()
-    return True, int(version), str(header["reportevidencehash"]), [
-        {"driver_id": int(r["driverid"]), "work_date": r["workdate"],
-         "status_key_id": int(r["statuskeyid"]), "code": r["statuscodesnapshot"],
-         "label": r["statuslabelsnapshot"], "is_off": bool(r["statusisoffreasonsnapshot"])} for r in statuses
-    ], [
+    return True, int(version), str(header["reportevidencehash"]), statuses, [
         {"bonus_event_id": int(r["payrollbonuseventid"]), "driver_id": int(r["driverid"]),
          "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
          "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
