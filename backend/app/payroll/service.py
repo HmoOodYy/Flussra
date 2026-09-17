@@ -49,6 +49,7 @@ from app.payroll.snapshot_hash import (
     calculate_snapshot_hash,
     calculate_source_config_hash,
 )
+from app.payroll import status_evidence
 from app.payroll.schemas import (
     PeriodSummary, PeriodCreate, PeriodStatusChange, NextPeriodDates, PeriodEntryCount,
     _VALID_TRANSITIONS,
@@ -14352,6 +14353,48 @@ async def get_day_grid(
         for row in dk_result.mappings().all():
             deactivated_key_map[row["statuskeyid"]] = dict(row)
 
+    # ── Stage B3 Unit 8C-3: immutable Status evidence for Locked/Archived ──── #
+    # After Submit, immutable calculation-snapshot Status evidence is the
+    # historical authority for finalized periods. Locked/Archived rows below
+    # must not use the EntryState freeze columns (StatusCodeSnapshot/
+    # StatusLabelSnapshot/StatusIsOffReasonSnapshot/FinalizedAtUtc), current
+    # mutable PayrollStatusKeys, or legacy DraftLine Status codes to determine
+    # historical Status meaning. Draft/Open/InReview/Returned/Approved periods
+    # are unaffected -- this block only runs for Locked/Archived.
+    _is_finalized_period = period.status in ("Locked", "Archived")
+    _status_evidence_by_driver: dict[int, dict[str, Any]] = {}
+    _status_evidence_state: dict[str, str | None] | None = None
+    # Set once evidence resolution below concludes UNAVAILABLE -- guards the
+    # worked/off tally further down so an unreadable historical Status never
+    # gets silently counted as "worked" (see the tally comment for why EMPTY
+    # does not need the same guard).
+    _status_evidence_unavailable = False
+    if _is_finalized_period:
+        _fin_snapshot, _fin_snapshot_avail = await status_evidence.resolve_finalized_snapshot(
+            db, period_id=period.payroll_period_id, company_id=company_id, branch_id=branch_id,
+        )
+        if _fin_snapshot is None:
+            # No usable snapshot provenance -- never fall back to another
+            # snapshot or to mutable current state; evidence is unavailable.
+            _status_evidence_state = _fin_snapshot_avail
+        else:
+            _fin_status_entries = await status_evidence.read_status_entries(
+                db,
+                snapshot_id=_fin_snapshot["payrollcalculationsnapshotid"],
+                company_id=company_id,
+                branch_id=branch_id,
+                period_id=period.payroll_period_id,
+            )
+            _status_evidence_state = status_evidence.status_evidence_availability(
+                _fin_snapshot, _fin_status_entries,
+            )
+            _status_evidence_by_driver = {
+                entry["driver_id"]: entry
+                for entry in _fin_status_entries
+                if entry["work_date"] == work_date
+            }
+        _status_evidence_unavailable = _status_evidence_state["state"] == "UNAVAILABLE"
+
     # ── Build rows ────────────────────────────────────────────────────────── #
     col_codes = {c.pay_item_code for c in columns}
     rows: list[DayGridRow] = []
@@ -14378,35 +14421,42 @@ async def get_day_grid(
         ces_row = canonical_by_driver.get(did)
         if ces_row is not None:
             notes_text = ces_row.get("notetext")
-            if ces_row["finalizedatutc"] is not None:
-                # Locked period: use frozen snapshot values.
-                status_key_code = ces_row["statuscodesnapshot"]
-                sk_label = ces_row["statuslabelsnapshot"]
-                snap_off = ces_row["statusisoffreasonsnapshot"]
-                is_off = bool(snap_off) if snap_off is not None else False
-            else:
-                # Editable period: live label/flags via StatusKeyID.
-                sk_id = ces_row.get("statuskeyid")
-                if sk_id is not None:
-                    live_sk = status_key_id_map.get(sk_id)
-                    if live_sk is not None:
-                        status_key_code = live_sk.key_code
-                        sk_label = live_sk.label
-                        is_off = bool(live_sk.is_off_reason)
-                    else:
-                        dk = deactivated_key_map.get(sk_id)
-                        if dk:
-                            status_key_code = dk["statuscode"]
-                            sk_label = dk["keyname"]
-                            is_off = bool(dk["isoffreason"])
+            # Stage B3 Unit 8C-3: for Locked/Archived, Status meaning comes
+            # only from immutable snapshot evidence (applied further below) --
+            # never from these EntryState freeze columns or the live StatusKey.
+            if not _is_finalized_period:
+                if ces_row["finalizedatutc"] is not None:
+                    # Locked period (pre-Solution-B path): use frozen snapshot values.
+                    status_key_code = ces_row["statuscodesnapshot"]
+                    sk_label = ces_row["statuslabelsnapshot"]
+                    snap_off = ces_row["statusisoffreasonsnapshot"]
+                    is_off = bool(snap_off) if snap_off is not None else False
+                else:
+                    # Editable period: live label/flags via StatusKeyID.
+                    sk_id = ces_row.get("statuskeyid")
+                    if sk_id is not None:
+                        live_sk = status_key_id_map.get(sk_id)
+                        if live_sk is not None:
+                            status_key_code = live_sk.key_code
+                            sk_label = live_sk.label
+                            is_off = bool(live_sk.is_off_reason)
+                        else:
+                            dk = deactivated_key_map.get(sk_id)
+                            if dk:
+                                status_key_code = dk["statuscode"]
+                                sk_label = dk["keyname"]
+                                is_off = bool(dk["isoffreason"])
 
         for line in drv_lines:
             lt = line["linetype"]
             canonical = _LEGACY_TO_CANONICAL.get(lt, lt)
 
             if lt == "DailyStatus":
-                if ces_row is None:
+                if ces_row is None and not _is_finalized_period:
                     # Legacy fallback: status code stored in DraftLine notes.
+                    # Not used for Locked/Archived -- see Stage B3 Unit 8C-3
+                    # note above: legacy DraftLine Status must not be used to
+                    # fabricate historical meaning.
                     status_key_code = line["notes"]
                 continue
             if lt == "DailyNote":
@@ -14435,13 +14485,44 @@ async def get_day_grid(
                     gross_total += Decimal(str(calc))
 
         # Legacy path: resolve label/is_off from status_key_map when no canonical row.
-        if ces_row is None and status_key_code:
+        if not _is_finalized_period and ces_row is None and status_key_code:
             sk_obj = status_key_map.get(status_key_code)
             if sk_obj is not None:
                 sk_label = sk_obj.label
                 is_off = bool(sk_obj.is_off_reason)
 
-        if is_off:
+        # Stage B3 Unit 8C-3: for Locked/Archived, override whatever the
+        # blocks above computed (they are guarded off above, but this stays
+        # authoritative even if that guarding is ever loosened) -- Status
+        # meaning comes only from immutable snapshot evidence for this
+        # specific work_date, or is left unknown (None/False) when no
+        # evidence entry exists for this driver/day, regardless of whether
+        # the overall evidence state is AVAILABLE, EMPTY, or UNAVAILABLE.
+        if _is_finalized_period:
+            evidence_row = _status_evidence_by_driver.get(did)
+            if evidence_row is not None:
+                status_key_code = evidence_row["status_code"]
+                sk_label = evidence_row["status_label"]
+                is_off = bool(evidence_row["is_off_reason"])
+            else:
+                status_key_code = None
+                sk_label = None
+                is_off = False
+
+        # Stage B3 Unit 8C-3 follow-up: when the overall Status evidence for
+        # this Locked/Archived period is UNAVAILABLE, every row's is_off
+        # above is a default (False), not a historical fact -- tallying it
+        # into worked/off would silently present an unknown historical
+        # Status as a confirmed "worked" day. Skip the tally entirely in
+        # that case (leaves worked=off=0, distinguishable from a real
+        # all-worked day via the top-level status_evidence field). EMPTY
+        # does not need this guard: a captured snapshot with zero Status
+        # rows is a positive historical fact that nobody had an off/PTO
+        # Status that period, matching the same "no Status recorded means
+        # worked" rule already applied to every other period status here.
+        if _status_evidence_unavailable:
+            pass
+        elif is_off:
             off_count += 1
         else:
             worked_count += 1
@@ -14489,6 +14570,7 @@ async def get_day_grid(
         status_keys=status_keys,
         rows=rows,
         summary=summary,
+        status_evidence=_status_evidence_state,
     )
 
 

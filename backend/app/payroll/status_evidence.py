@@ -107,3 +107,106 @@ def status_evidence_availability(
     if snapshot.get("reportevidenceversion") is None:
         return {"state": "UNAVAILABLE", "reason_code": "LEGACY_NOT_CAPTURED"}
     return {"state": "EMPTY" if not entries else "AVAILABLE", "reason_code": None}
+
+
+async def resolve_finalized_snapshot(
+    db: AsyncConnection,
+    *,
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+) -> tuple[dict[str, Any] | None, dict[str, str | None]]:
+    """
+    Resolve the one authoritative calculation snapshot for a Locked/Archived
+    period -- never MAX(revision), never latest snapshot by timestamp, never
+    an arbitrary snapshot lookup by period.
+
+    Primary selector: the snapshot bound to the period's Approved
+    PeriodApproval review item (review.ManagerReviewItems.
+    PayrollCalculationSnapshotID). This is deliberately NOT FinalLines
+    provenance (contrast with
+    app.payroll.finalized_library_read_model._originating_snapshot, which
+    resolves Financial/report authority from FinalLines and is left
+    untouched by this Stage B3 Unit 8C-3 change): a period whose only
+    entries were Status (no billable pay-item line) finalizes with zero
+    FinalLines (see app.payroll.service.finalize_period /
+    _project_approved_snapshot_final_lines, which project exactly the
+    approved snapshot's lines -- zero lines in, zero FinalLines out). A
+    FinalLines-based selector would then wrongly report Status evidence as
+    unavailable even though the snapshot and its captured Status entries are
+    completely real and correctly bound. The review-item binding has no such
+    blind spot, because app.payroll.service._load_approved_snapshot_packet
+    (the exact function finalize_period itself calls) resolves it the same
+    way, before any FinalLines projection happens or fails to happen -- and
+    it guarantees uniqueness the same way finalize_period does (refusing to
+    finalize when more than one Approved PeriodApproval review item exists
+    for a period).
+
+    When FinalLines do exist, their recorded provenance is cross-checked
+    against the review-item-resolved snapshot (id + revision + hash) as a
+    defensive integrity check; a mismatch is treated as unavailable rather
+    than silently trusted. FinalLines being empty is not itself a reason to
+    call evidence unavailable.
+
+    Returns (None, UNAVAILABLE/PROVENANCE_UNAVAILABLE) when no exactly-one
+    Approved PeriodApproval review item exists for the period, that item has
+    no bound snapshot, the bound snapshot cannot be matched to this exact
+    period/company/branch, or (when FinalLines exist) their provenance
+    disagrees with it. Returns (snapshot, AVAILABLE) otherwise. Never falls
+    back to a different snapshot when provenance is unusable.
+    """
+    reviews = (await db.execute(text("""
+        SELECT ri.reviewitemid, ri.payrollcalculationsnapshotid
+        FROM review.managerreviewitems ri
+        WHERE ri.companyid = :company_id AND ri.branchid = :branch_id
+          AND ri.requesttype = 'PeriodApproval'
+          AND ri.entityschema = 'payroll' AND ri.entityname = 'PayrollPeriods'
+          AND ri.entityid = :period_id AND ri.status = 'Approved'
+    """), {
+        "company_id": company_id, "branch_id": branch_id, "period_id": str(period_id),
+    })).mappings().all()
+    if len(reviews) != 1:
+        return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
+    snapshot_id = reviews[0]["payrollcalculationsnapshotid"]
+    if snapshot_id is None:
+        return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
+    snapshot = (await db.execute(text("""
+        SELECT payrollcalculationsnapshotid, revisionnumber, snapshothash, sourceconfighash,
+               reportevidenceversion, reportevidencehash
+        FROM payroll.payrollcalculationsnapshots
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
+    """), {
+        "snapshot_id": snapshot_id, "period_id": period_id,
+        "company_id": company_id, "branch_id": branch_id,
+    })).mappings().first()
+    if snapshot is None:
+        return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
+
+    fl_rows = (await db.execute(text("""
+        SELECT DISTINCT
+               sourcesnapshot ->> 'payroll_calculation_snapshot_id' AS snapshot_id,
+               sourcesnapshot ->> 'revision_number' AS revision_number,
+               sourcesnapshot ->> 'snapshot_hash' AS snapshot_hash
+        FROM payroll.payrollfinallines
+        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
+    """), {
+        "period_id": period_id, "company_id": company_id, "branch_id": branch_id,
+    })).mappings().all()
+    if fl_rows:
+        if len(fl_rows) != 1 or any(value is None for value in fl_rows[0].values()):
+            return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
+        fl_source = fl_rows[0]
+        try:
+            fl_snapshot_id = int(fl_source["snapshot_id"])
+            fl_revision_number = int(fl_source["revision_number"])
+        except (TypeError, ValueError):
+            return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
+        if (
+            fl_snapshot_id != int(snapshot["payrollcalculationsnapshotid"])
+            or fl_revision_number != int(snapshot["revisionnumber"])
+            or str(fl_source["snapshot_hash"]) != str(snapshot["snapshothash"])
+        ):
+            return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
+
+    return dict(snapshot), {"state": "AVAILABLE", "reason_code": None}

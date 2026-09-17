@@ -1075,6 +1075,13 @@ class DayGridLineValue(BaseModel):
     needs_manager_review: bool = False
 
 
+# Shared {state, reason_code} availability shape -- also used by the P6A
+# Finalized Payroll Information Library contracts further below.
+class FinalizedSectionAvailability(BaseModel):
+    state: str
+    reason_code: str | None = None
+
+
 class DayGridRow(BaseModel):
     driver_id: int
     driver_name: str
@@ -1116,6 +1123,11 @@ class DayGridResponse(BaseModel):
     status_keys: list[DayGridStatusKey]
     rows: list[DayGridRow]
     summary: DayGridSummary
+    # Stage B3 Unit 8C-3: set only for Locked/Archived periods, where row
+    # status_key/status_label/is_off come from immutable calculation-snapshot
+    # evidence rather than live PayrollStatusKeys. None for Draft/Open/
+    # InReview/Returned/Approved, which are unaffected by this field.
+    status_evidence: FinalizedSectionAvailability | None = None
 
 
 class DayGridSaveRow(BaseModel):
@@ -1633,11 +1645,6 @@ class MixedReportResponse(CalculationReportResponse):
 # P6A: Finalized Payroll Information Library. These contracts are read-only
 # projections over FinalLines plus the exact originating immutable snapshot.
 # ---------------------------------------------------------------------------
-
-class FinalizedSectionAvailability(BaseModel):
-    state: str
-    reason_code: str | None = None
-
 
 class FinalizedFinancialSummary(BaseModel):
     total_pay: Decimal

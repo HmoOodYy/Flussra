@@ -278,6 +278,31 @@ async def _insert_status_key(
     return r["statuskeyid"]
 
 
+async def _insert_approved_review_item(
+    db: AsyncConnection, company_id: int, branch_id: int, period_id: int, snapshot_id: int,
+) -> int:
+    """Bind a snapshot to a period the way an Approved PeriodApproval review
+    item does -- the exact selector app.payroll.service._load_approved_snapshot_packet
+    (and therefore finalize_period) trusts, and the one
+    status_evidence.resolve_finalized_snapshot mirrors for Locked/Archived
+    Day Grid reads (Stage B3 Unit 8C-3)."""
+    r = (await db.execute(
+        _text("""
+            INSERT INTO review.managerreviewitems
+                (companyid, branchid, requesttype, entityschema, entityname, entityid,
+                 title, status, payrollcalculationsnapshotid)
+            VALUES (:cid, :bid, 'PeriodApproval', 'payroll', 'PayrollPeriods', :pid_text,
+                    'Test review item', 'Approved', :sid)
+            RETURNING reviewitemid
+        """),
+        {
+            "cid": company_id, "bid": branch_id, "pid_text": str(period_id), "sid": snapshot_id,
+        },
+    )).mappings().first()
+    await db.commit()
+    return r["reviewitemid"]
+
+
 async def _canonical_rows(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
@@ -888,11 +913,26 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E09 — Finalization snapshot
+    # E09 — Solution B: Submit captures immutable Status evidence; the old
+    # finalize-time EntryState freeze is NOT the historical authority.
     # ------------------------------------------------------------------ #
+    #
+    # Superseded contract (this test used to encode): finalize_period filled
+    # EntryState's own FinalizedAtUtc/StatusCodeSnapshot/StatusLabelSnapshot/
+    # StatusIsOffReasonSnapshot columns via _finalize_canonicalize_entry_state.
+    # That is no longer true of the live finalize path: finalize_period (the
+    # function POST /periods/{id}/finalize actually calls) projects
+    # PayrollFinalLines from _load_approved_snapshot_packet and never calls
+    # _finalize_canonicalize_entry_state at all. That helper is called only
+    # from _legacy_finalize_period, which has zero callers anywhere in
+    # app/ or tests/ -- it is dead code, not a second live path. So under
+    # Solution B, EntryState's freeze columns are never written by any
+    # reachable flow; immutable PayrollCalculationSnapshotStatusEntries
+    # (captured at Submit/Resubmit) is the historical Status authority, and
+    # Locked/Archived get_day_grid (Stage B3 Unit 8C-3) reads it directly.
 
     @pytest.mark.asyncio
-    async def test_e09_finalization_snapshot(
+    async def test_e09_submit_captures_immutable_status_evidence(
         self,
         session_client,
         auth_token: str,
@@ -900,7 +940,11 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E09: finalize_period fills snapshot columns on canonical rows."""
+        """E09: canonical EntryState exists (unfrozen) before Submit; Submit
+        captures immutable Status evidence; Approve + Finalize succeed
+        without ever freezing EntryState's own snapshot columns; and the
+        Locked Day Grid's historical Status/label/is_off come from that
+        immutable evidence, not from EntryState."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e09")
         code = _sk_code("E09SNAP", start)
@@ -912,36 +956,81 @@ class TestCp2dCanonicalEntryState:
                 direct_db, _COMPANY_ID, ces_branch_id, code, is_off_reason=True
             )
 
-            # Save status + note
-            await session_client.post(
+            save = await session_client.post(
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
                       "rows": [{"driver_id": ces_driver_id, "values": {},
                                  "status_key": code, "notes": "snap note"}]},
             )
+            assert save.status_code == 200, save.text
 
-            # Verify snapshot fields are NULL before finalization
+            # Canonical EntryState exists before Submit, and is unfrozen.
             rows_pre = await _canonical_rows(direct_db, pid)
             ces_pre = next(r for r in rows_pre if r["driverid"] == ces_driver_id)
+            assert ces_pre["statuskeyid"] == sk_id
             assert ces_pre["finalizedatutc"] is None
             assert ces_pre["statuscodesnapshot"] is None
 
-            # Advance to Approved then finalize
+            # _advance_to_approved submits (Open -> InReview, capturing
+            # immutable Status evidence) then approves the review item.
             await _advance_to_approved(session_client, auth_token, pid, ces_driver_id, wdate)
-            fin = await session_client.post(
-                f"/payroll/periods/{pid}/finalize",
-                headers=headers,
+
+            evidence_query = _text("""
+                SELECT se.statuscodesnapshot, se.statuslabelsnapshot,
+                       se.statusisoffreasonsnapshot
+                FROM   payroll.payrollcalculationsnapshotstatusentries se
+                JOIN   payroll.payrollcalculationsnapshots s
+                       ON s.payrollcalculationsnapshotid = se.payrollcalculationsnapshotid
+                WHERE  s.payrollperiodid = :pid AND se.driverid = :did
+            """)
+            evidence_after_submit = (await direct_db.execute(
+                evidence_query, {"pid": pid, "did": ces_driver_id},
+            )).mappings().first()
+            assert evidence_after_submit is not None, (
+                "Submit must capture immutable Status evidence"
             )
+            assert evidence_after_submit["statuscodesnapshot"] == code
+            assert "E09SNAP" in (evidence_after_submit["statuslabelsnapshot"] or "")
+            assert evidence_after_submit["statusisoffreasonsnapshot"] is True
+
+            fin = await session_client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
             assert fin.status_code == 200, f"finalize failed: {fin.text}"
 
-            # Snapshot fields must now be filled
+            # Solution B: the live finalize path does not freeze EntryState --
+            # these columns are not required to become the historical
+            # authority, and the live path in fact never writes them.
             rows_post = await _canonical_rows(direct_db, pid)
             ces_post = next(r for r in rows_post if r["driverid"] == ces_driver_id)
-            assert ces_post["finalizedatutc"] is not None, "FinalizedAtUtc must be set"
-            assert ces_post["statuscodesnapshot"] == code
-            assert "E09" in (ces_post["statuslabelsnapshot"] or "")
-            assert ces_post["statusisoffreasonsnapshot"] is True
+            assert ces_post["finalizedatutc"] is None, (
+                "Live finalize_period must not freeze EntryState under Solution B"
+            )
+            assert ces_post["statuscodesnapshot"] is None
+
+            # The immutable snapshot evidence is unchanged by Finalize and
+            # remains the historical authority after Lock.
+            evidence_after_finalize = (await direct_db.execute(
+                evidence_query, {"pid": pid, "did": ces_driver_id},
+            )).mappings().first()
+            assert dict(evidence_after_finalize) == dict(evidence_after_submit)
+
+            # Locked Day Grid returns the historical Status from the
+            # immutable evidence (Stage B3 Unit 8C-3), not from EntryState.
+            r = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": wdate},
+                headers=headers,
+            )
+            assert r.status_code == 200
+            body = r.json()
+            drv_row = next(
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+            )
+            assert drv_row is not None
+            assert drv_row["status_key"] == code
+            assert "E09SNAP" in (drv_row["status_label"] or "")
+            assert drv_row["is_off"] is True
+            assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id:
@@ -952,11 +1041,24 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E10 — Locked period: get_day_grid uses snapshot values
+    # E10 — Solution B: Locked period Day Grid reads immutable Status
+    # evidence, not the EntryState freeze columns and not mutable
+    # PayrollStatusKeys.
     # ------------------------------------------------------------------ #
+    #
+    # Superseded contract (pre-Stage-B3): get_day_grid used to read Locked
+    # periods' Status straight off PayrollPeriodDriverDayEntryState's own
+    # freeze columns (StatusCodeSnapshot/StatusLabelSnapshot/
+    # StatusIsOffReasonSnapshot, filled by _finalize_canonicalize_entry_state
+    # at finalize time). Stage B3 Unit 8C-3 moves Locked/Archived Day Grid
+    # reads onto the immutable calculation-snapshot Status evidence captured
+    # at Submit instead -- the same historical authority CP-5C/P6A already
+    # use for reports and the finalized library. This test proves that by
+    # drifting the CURRENT StatusKey's label/off-reason AFTER Locking: the
+    # Locked Day Grid must keep showing the ORIGINAL captured values.
 
     @pytest.mark.asyncio
-    async def test_e10_locked_period_uses_snapshot(
+    async def test_e10_locked_period_uses_immutable_status_evidence(
         self,
         session_client,
         auth_token: str,
@@ -964,7 +1066,8 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E10: get_day_grid returns snapshot label/code for Locked periods."""
+        """E10: get_day_grid for a Locked period shows the captured immutable
+        Status evidence, unaffected by later mutable StatusKey drift."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e10")
         code = _sk_code("E10LOCK", start)
@@ -972,31 +1075,435 @@ class TestCp2dCanonicalEntryState:
         headers = _auth(auth_token)
         sk_id = None
         try:
-            sk_id = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code)
+            sk_id = await _insert_status_key(
+                direct_db, _COMPANY_ID, ces_branch_id, code, is_off_reason=True
+            )
 
-            await session_client.post(
+            save = await session_client.post(
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
                       "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
             )
+            assert save.status_code == 200, save.text
 
             await _advance_to_approved(session_client, auth_token, pid, ces_driver_id, wdate)
             fin = await session_client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
-            assert fin.status_code == 200
+            assert fin.status_code == 200, fin.text
 
-            # get_day_grid on Locked period must return the status code from snapshot
+            # Drift the CURRENT StatusKey after Locking. Immutable Status
+            # evidence must not follow this drift.
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.payrollstatuskeys
+                    SET keyname = 'DRIFTED LABEL', isoffreason = FALSE
+                    WHERE statuskeyid = :sid
+                """),
+                {"sid": sk_id},
+            )
+            await direct_db.commit()
+
             r = await session_client.get(
                 f"/payroll/periods/{pid}/day-grid",
                 params={"work_date": wdate},
                 headers=headers,
             )
             assert r.status_code == 200
+            body = r.json()
             drv_row = next(
-                (d for d in r.json()["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
             )
             assert drv_row is not None
-            assert drv_row["status_key"] == code, "Locked period must show snapshot status code"
+            assert drv_row["status_key"] == code, (
+                "Locked period must show the captured immutable status code"
+            )
+            assert "E10LOCK" in (drv_row["status_label"] or ""), (
+                "Locked period must show the ORIGINAL captured label, not the drifted one"
+            )
+            assert drv_row["status_label"] != "DRIFTED LABEL"
+            assert drv_row["is_off"] is True, (
+                "Locked period must show the ORIGINAL captured is_off, not the drifted one"
+            )
+            assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
+            # AVAILABLE evidence must be tallied into the summary (not
+            # skipped the way UNAVAILABLE is -- see E26/E28).
+            assert body["summary"]["off"] >= 1
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+            if sk_id:
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+                    {"sid": sk_id},
+                )
+                await direct_db.commit()
+
+    @pytest.mark.asyncio
+    async def test_e25_archived_period_uses_immutable_status_evidence(
+        self,
+        session_client,
+        auth_token: str,
+        direct_db,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E25: same immutable-evidence authority holds after Locked ->
+        Archived, proving Archived is not treated as a live/editable status."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e25")
+        code = _sk_code("E25ARCH", start)
+        wdate = str(start)
+        headers = _auth(auth_token)
+        sk_id = None
+        try:
+            sk_id = await _insert_status_key(
+                direct_db, _COMPANY_ID, ces_branch_id, code, is_off_reason=True
+            )
+
+            save = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
+            )
+            assert save.status_code == 200, save.text
+
+            await _advance_to_approved(session_client, auth_token, pid, ces_driver_id, wdate)
+            fin = await session_client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
+            assert fin.status_code == 200, fin.text
+
+            archive = await session_client.patch(
+                f"/payroll/periods/{pid}/status", headers=headers,
+                json={"status": "Archived"},
+            )
+            assert archive.status_code == 200, archive.text
+
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.payrollstatuskeys
+                    SET keyname = 'DRIFTED LABEL', isoffreason = FALSE
+                    WHERE statuskeyid = :sid
+                """),
+                {"sid": sk_id},
+            )
+            await direct_db.commit()
+
+            r = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": wdate},
+                headers=headers,
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert body["period"]["status"] == "Archived"
+            drv_row = next(
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+            )
+            assert drv_row is not None
+            assert drv_row["status_key"] == code
+            assert "E25ARCH" in (drv_row["status_label"] or "")
+            assert drv_row["status_label"] != "DRIFTED LABEL"
+            assert drv_row["is_off"] is True
+            assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+            if sk_id:
+                await direct_db.execute(
+                    _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+                    {"sid": sk_id},
+                )
+                await direct_db.commit()
+
+    @pytest.mark.asyncio
+    async def test_e26_locked_period_legacy_snapshot_status_evidence_unavailable(
+        self,
+        direct_db,
+        session_client,
+        auth_token: str,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E26: a Locked period whose authoritative snapshot predates CP-5C
+        (ReportEvidenceVersion IS NULL) must report status_evidence as
+        UNAVAILABLE/LEGACY_NOT_CAPTURED, with no row falling back to mutable
+        PayrollStatusKeys or legacy DraftLine Status codes."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e26")
+        headers = _auth(auth_token)
+        try:
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Locked' WHERE payrollperiodid = :pid"),
+                {"pid": pid},
+            )
+            snapshot_id = int((await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollcalculationsnapshots
+                        (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
+                         sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
+                    VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0)
+                    RETURNING payrollcalculationsnapshotid
+                """),
+                {
+                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid,
+                    "source_hash": "0" * 64, "snapshot_hash": "1" * 64,
+                },
+            )).scalar_one())
+            await _insert_approved_review_item(
+                direct_db, _COMPANY_ID, ces_branch_id, pid, snapshot_id,
+            )
+            await direct_db.execute(
+                _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
+            )
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                         approvedatutc, lockedatutc, sourcesnapshot)
+                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB))
+                """),
+                {
+                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                    "wdate": start,
+                    "snap": (
+                        '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
+                        '"snapshot_hash": "%s"}' % (snapshot_id, "1" * 64)
+                    ),
+                },
+            )
+            await direct_db.commit()
+
+            r = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": str(start)},
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("status_evidence") == {
+                "state": "UNAVAILABLE", "reason_code": "LEGACY_NOT_CAPTURED",
+            }
+            drv_row = next(
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+            )
+            assert drv_row is not None
+            assert drv_row["status_key"] is None
+            assert drv_row["status_label"] is None
+            assert drv_row["is_off"] is False
+            # Unknowable historical Status must not be tallied as "worked".
+            assert body["summary"]["worked"] == 0
+            assert body["summary"]["off"] == 0
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+
+    @pytest.mark.asyncio
+    async def test_e27_locked_period_captured_snapshot_zero_status_rows_is_empty(
+        self,
+        direct_db,
+        session_client,
+        auth_token: str,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E27: a Locked period whose authoritative snapshot IS versioned
+        (captured) but has zero PayrollCalculationSnapshotStatusEntries rows
+        must report status_evidence as EMPTY, with no mutable fallback."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e27")
+        headers = _auth(auth_token)
+        try:
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Locked' WHERE payrollperiodid = :pid"),
+                {"pid": pid},
+            )
+            snapshot_id = int((await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollcalculationsnapshots
+                        (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
+                         sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
+                         reportevidenceversion, reportevidencehash)
+                    VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0,
+                            1, :evidence_hash)
+                    RETURNING payrollcalculationsnapshotid
+                """),
+                {
+                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid,
+                    "source_hash": "0" * 64, "snapshot_hash": "2" * 64,
+                    "evidence_hash": "3" * 64,
+                },
+            )).scalar_one())
+            await _insert_approved_review_item(
+                direct_db, _COMPANY_ID, ces_branch_id, pid, snapshot_id,
+            )
+            await direct_db.execute(
+                _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
+            )
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                         approvedatutc, lockedatutc, sourcesnapshot)
+                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB))
+                """),
+                {
+                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                    "wdate": start,
+                    "snap": (
+                        '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
+                        '"snapshot_hash": "%s"}' % (snapshot_id, "2" * 64)
+                    ),
+                },
+            )
+            await direct_db.commit()
+
+            r = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": str(start)},
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("status_evidence") == {"state": "EMPTY", "reason_code": None}
+            drv_row = next(
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+            )
+            assert drv_row is not None
+            assert drv_row["status_key"] is None
+            assert drv_row["status_label"] is None
+            assert drv_row["is_off"] is False
+            # A captured snapshot with zero Status rows is a positive
+            # historical fact (nobody had an off/PTO Status) -- this is NOT
+            # the same as unknowable, so it keeps the normal "no Status
+            # means worked" tally (unlike UNAVAILABLE, see E26/E28).
+            assert body["summary"]["off"] == 0
+            assert body["summary"]["worked"] == body["summary"]["total_drivers"]
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+
+    @pytest.mark.asyncio
+    async def test_e28_locked_period_missing_snapshot_provenance_is_unavailable(
+        self,
+        direct_db,
+        session_client,
+        auth_token: str,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E28: a Locked period whose FinalLines carry no snapshot provenance
+        at all must report status_evidence as UNAVAILABLE/PROVENANCE_UNAVAILABLE
+        -- never silently falling back to another snapshot or to mutable
+        current state."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e28")
+        headers = _auth(auth_token)
+        try:
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Locked' WHERE payrollperiodid = :pid"),
+                {"pid": pid},
+            )
+            await direct_db.execute(
+                _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
+            )
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                         approvedatutc, lockedatutc)
+                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                            'DraftLine', 1, NOW(), NOW())
+                """),
+                {
+                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                    "wdate": start,
+                },
+            )
+            await direct_db.commit()
+
+            r = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": str(start)},
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("status_evidence") == {
+                "state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE",
+            }
+            drv_row = next(
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+            )
+            assert drv_row is not None
+            assert drv_row["status_key"] is None
+            assert drv_row["status_label"] is None
+            assert drv_row["is_off"] is False
+            # Unknowable historical Status must not be tallied as "worked".
+            assert body["summary"]["worked"] == 0
+            assert body["summary"]["off"] == 0
+        finally:
+            await _clean_branch(direct_db, ces_branch_id)
+
+    @pytest.mark.asyncio
+    async def test_e29_open_period_day_grid_unaffected_by_status_evidence(
+        self,
+        session_client,
+        auth_token: str,
+        direct_db,
+        ces_branch_id: int,
+        ces_driver_id: int,
+    ):
+        """E29: Open periods are untouched by Stage B3 Unit 8C-3 -- Day Grid
+        keeps reading live StatusKey label/off-reason (mutable-state drift
+        DOES show immediately, unlike Locked/Archived), and status_evidence
+        stays absent (None)."""
+        start, end = _week_2096()
+        pid = await _open_period(direct_db, ces_branch_id, start, end, "-e29")
+        code = _sk_code("E29OPEN", start)
+        wdate = str(start)
+        headers = _auth(auth_token)
+        sk_id = None
+        try:
+            sk_id = await _insert_status_key(
+                direct_db, _COMPANY_ID, ces_branch_id, code, is_off_reason=True
+            )
+
+            save = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
+            )
+            assert save.status_code == 200, save.text
+
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.payrollstatuskeys
+                    SET keyname = 'DRIFTED LIVE LABEL', isoffreason = FALSE
+                    WHERE statuskeyid = :sid
+                """),
+                {"sid": sk_id},
+            )
+            await direct_db.commit()
+
+            r = await session_client.get(
+                f"/payroll/periods/{pid}/day-grid",
+                params={"work_date": wdate},
+                headers=headers,
+            )
+            assert r.status_code == 200
+            body = r.json()
+            drv_row = next(
+                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+            )
+            assert drv_row is not None
+            assert drv_row["status_key"] == code
+            assert drv_row["status_label"] == "DRIFTED LIVE LABEL", (
+                "Open period must reflect the CURRENT live StatusKey, not a frozen value"
+            )
+            assert drv_row["is_off"] is False, "Open period must reflect the CURRENT is_off"
+            assert body.get("status_evidence") is None
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id:
