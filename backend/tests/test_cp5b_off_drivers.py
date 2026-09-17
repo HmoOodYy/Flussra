@@ -26,30 +26,109 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
         {"branch_id": branch_id},
     )).scalars().all()
     if period_ids:
-        await db.execute(
-            _text("DELETE FROM payroll.payrollbonusevents WHERE payrollperiodid = ANY(:ids)"),
-            {"ids": period_ids},
-        )
-        await db.execute(
-            _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = ANY(:ids)"),
-            {"ids": period_ids},
-        )
-        await db.execute(
-            _text("DELETE FROM payroll.payrollperioddriverdayentrystate WHERE payrollperiodid = ANY(:ids)"),
-            {"ids": period_ids},
-        )
-        await db.execute(
-            _text("DELETE FROM payroll.payrollperioddrivereligibility WHERE payrollperiodid = ANY(:ids)"),
-            {"ids": period_ids},
-        )
-        await db.execute(
-            _text("DELETE FROM payroll.payrollperiodeligibilitysnapshots WHERE payrollperiodid = ANY(:ids)"),
-            {"ids": period_ids},
-        )
-        await db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = ANY(:ids)"),
-            {"ids": period_ids},
-        )
+        # Stage B3 Unit 8C-5: some CP5B tests now drive a real
+        # Submit/Approve/Finalize flow, or directly construct a calculation
+        # snapshot, to exercise the immutable-evidence Off Drivers path.
+        # CP-4C/CP-4D/CP-5C/Phase6/P6D (migrations 0061-0065) added several
+        # ON DELETE RESTRICT children of PayrollPeriods and
+        # PayrollCalculationSnapshots -- each protected by its own immutable
+        # BEFORE UPDATE OR DELETE trigger, plus a BEFORE DELETE guard
+        # directly on PayrollPeriods. Trigger names verified against actual
+        # migration source (0035/0061/0063/0064/0065). Never DISABLE TRIGGER
+        # ALL (it also suspends unrelated ON DELETE CASCADE elsewhere) --
+        # disable each by exact name, delete leaf-to-root, always re-enable.
+        # Mirrors the proven approach in
+        # test_cp2d_canonical_entry_state.py's _clean_branch.
+        guards = [
+            ("payroll.payrollfinallines", "trg_final_line_immutable"),
+            ("payroll.payrollcalculationsnapshotlines", "trg_PayrollCalculationSnapshotLines_Immutable"),
+            ("payroll.payrollperiodauditevidencesnapshotevents", "trg_PayrollPeriodAuditEvidenceSnapshotEvents_Immutable"),
+            ("payroll.payrollperiodauditevidenceevents", "trg_PayrollPeriodAuditEvidenceEvents_Immutable"),
+            ("payroll.payrollperiodauditevidencecoverage", "trg_PayrollPeriodAuditEvidenceCoverage_Immutable"),
+            ("payroll.payrollcalculationsnapshotusedratedefinitions", "trg_PayrollCalculationSnapshotUsedRateDefinitions_Immutable"),
+            ("payroll.payrollcalculationdrivertotals", "trg_PayrollCalculationDriverTotals_Immutable"),
+            ("payroll.payrollcalculationsnapshotstatusentries", "trg_PayrollCalculationSnapshotStatusEntries_Immutable"),
+            ("payroll.payrollcalculationsnapshotbonusevents", "trg_PayrollCalculationSnapshotBonusEvents_Immutable"),
+            ("payroll.payrollperiodworkflowactionevidence", "trg_PayrollPeriodWorkflowActionEvidence_Immutable"),
+            ("payroll.payrollcalculationsnapshots", "trg_PayrollCalculationSnapshots_Immutable"),
+            ("payroll.payrollperiods", "trg_PayrollPeriods_AuditEvidenceDelete"),
+        ]
+        for table, trigger in guards:
+            await db.execute(_text(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+        try:
+            snapshot_subq = (
+                "(SELECT payrollcalculationsnapshotid FROM payroll.payrollcalculationsnapshots "
+                "WHERE payrollperiodid = ANY(:ids))"
+            )
+            drivertotal_subq = (
+                "(SELECT payrollcalculationdrivertotalid FROM payroll.payrollcalculationdrivertotals "
+                f"WHERE payrollcalculationsnapshotid IN {snapshot_subq})"
+            )
+            # ManagerReviewItems has no real FK to PayrollPeriods -- the link
+            # is the polymorphic (EntitySchema, EntityName, EntityID)
+            # convention this module's own Submit/Approve calls (and the
+            # legacy/unavailable tests' direct inserts) create.
+            review_items_subq = (
+                "(SELECT reviewitemid FROM review.managerreviewitems "
+                "WHERE entityschema = 'payroll' AND entityname = 'PayrollPeriods' "
+                "AND entityid IN (SELECT payrollperiodid::text FROM payroll.payrollperiods "
+                "WHERE payrollperiodid = ANY(:ids)))"
+            )
+            for stmt in (
+                f"DELETE FROM payroll.payrollcalculationsnapshotlines "
+                f"WHERE payrollcalculationdrivertotalid IN {drivertotal_subq}",
+
+                "DELETE FROM payroll.payrollperiodauditevidencesnapshotevents "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperiodauditevidenceevents "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperiodauditevidencecoverage "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollcalculationsnapshotusedratedefinitions "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                f"DELETE FROM payroll.payrollcalculationdrivertotals "
+                f"WHERE payrollcalculationsnapshotid IN {snapshot_subq}",
+
+                "DELETE FROM payroll.payrollcalculationsnapshotstatusentries "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollcalculationsnapshotbonusevents "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperiodworkflowactionevidence "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                "UPDATE payroll.payrollperiods SET currentreturnreviewitemid = NULL "
+                "WHERE payrollperiodid = ANY(:ids)",
+
+                f"DELETE FROM review.managerreviewdecisions WHERE reviewitemid IN {review_items_subq}",
+
+                f"DELETE FROM review.managerreviewitems WHERE reviewitemid IN {review_items_subq}",
+
+                "DELETE FROM payroll.payrollcalculationsnapshots WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollbonusevents WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperioddrivereligibility WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperiodeligibilitysnapshots WHERE payrollperiodid = ANY(:ids)",
+
+                "DELETE FROM payroll.payrollperiods WHERE payrollperiodid = ANY(:ids)",
+            ):
+                await db.execute(_text(stmt), {"ids": period_ids})
+        finally:
+            for table, trigger in reversed(guards):
+                await db.execute(_text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
     await db.execute(
         _text("DELETE FROM payroll.payrollstatuskeys WHERE branchid = :branch_id AND statuscode LIKE 'CP5B_%'"),
         {"branch_id": branch_id},
@@ -324,6 +403,96 @@ async def _selected(
     )
 
 
+# ---------------------------------------------------------------------------
+# Stage B3 Unit 8C-5: real Submit -> Approve -> Finalize flow, and direct
+# construction of legacy/unavailable snapshot scenarios (same techniques
+# proven in test_cp2d_canonical_entry_state.py's E10/E25-E28).
+# ---------------------------------------------------------------------------
+
+async def _save_day_grid_status(
+    client: httpx.AsyncClient,
+    token: str,
+    period_id: int,
+    driver_id: int,
+    work_date: datetime.date,
+    status_key_code: str,
+) -> None:
+    resp = await client.post(
+        f"/payroll/periods/{period_id}/day-grid",
+        headers=_auth(token),
+        json={"work_date": work_date.isoformat(),
+              "rows": [{"driver_id": driver_id, "values": {}, "status_key": status_key_code}]},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+async def _submit_approve_finalize(
+    client: httpx.AsyncClient,
+    token: str,
+    period_id: int,
+    driver_id: int,
+    work_date: datetime.date,
+) -> None:
+    """Drive a period Open -> InReview -> Approved -> Locked through the
+    real HTTP workflow, capturing immutable Status evidence at Submit."""
+    headers = _auth(token)
+    lines_resp = await client.get(
+        f"/payroll/periods/{period_id}/lines", headers=headers, params={"status": "Active"},
+    )
+    if lines_resp.status_code == 200 and len(lines_resp.json()) == 0:
+        await client.post(
+            f"/payroll/periods/{period_id}/lines",
+            headers=headers,
+            json={"driver_id": driver_id, "work_date": work_date.isoformat(),
+                  "line_type": "DailyNote", "notes": "filler"},
+        )
+    submit = await client.patch(
+        f"/payroll/periods/{period_id}/status", headers=headers, json={"status": "InReview"},
+    )
+    assert submit.status_code == 200, f"InReview failed: {submit.text}"
+    review_resp = await client.get("/review/items", headers=headers)
+    assert review_resp.status_code == 200
+    item = next(
+        (i for i in review_resp.json()
+         if i.get("entity_name") == "PayrollPeriods"
+         and i.get("entity_id") == str(period_id)
+         and i.get("status") == "Pending"),
+        None,
+    )
+    assert item is not None, f"No pending review item for period {period_id}"
+    decide = await client.post(
+        f"/review/items/{item['review_item_id']}/decide",
+        headers=headers,
+        json={"decision": "Approved"},
+    )
+    assert decide.status_code == 200, f"Approval failed: {decide.text}"
+    finalize = await client.post(f"/payroll/periods/{period_id}/finalize", headers=headers)
+    assert finalize.status_code == 200, f"Finalize failed: {finalize.text}"
+
+
+async def _insert_approved_review_item(
+    db: AsyncConnection, company_id: int, branch_id: int, period_id: int, snapshot_id: int,
+) -> int:
+    """Bind a snapshot to a period the way an Approved PeriodApproval review
+    item does -- the exact selector app.payroll.service._load_approved_snapshot_packet
+    (and therefore finalize_period) trusts, and the one
+    status_evidence.resolve_finalized_snapshot mirrors for Locked/Archived
+    Off Drivers reads (Stage B3 Unit 8C-5, same rule as Day Grid Unit 8C-3)."""
+    row = (await db.execute(
+        _text("""
+            INSERT INTO review.managerreviewitems
+                (companyid, branchid, requesttype, entityschema, entityname, entityid,
+                 title, status, payrollcalculationsnapshotid)
+            VALUES (:cid, :bid, 'PeriodApproval', 'payroll', 'PayrollPeriods', :pid_text,
+                    'Test review item', 'Approved', :sid)
+            RETURNING reviewitemid
+        """),
+        {"cid": company_id, "bid": branch_id, "pid_text": str(period_id), "sid": snapshot_id},
+    )).mappings().first()
+    await db.commit()
+    return row["reviewitemid"]
+
+
 def _hub_branch(payload: dict, branch_id: int) -> dict:
     return next(branch for branch in payload["branches"] if branch["branch_id"] == branch_id)
 
@@ -499,35 +668,90 @@ class TestOffDrivers:
         assert selected.json()["total_count"] == 1
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
-    async def test_selected_day_uses_frozen_status_snapshot_when_available(
+    async def test_selected_day_uses_immutable_status_evidence_ignoring_statuskey_drift(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
     ):
+        """Stage B3 Unit 8C-5 drift regression (real flow, not manually-set
+        FinalizedAtUtc): Submit -> Approve -> Finalize captures immutable
+        Status evidence; mutating the CURRENT StatusKey afterward (label AND
+        IsOffReason) must not change the historical selected-day Off Drivers
+        result for the Locked period."""
         await _clean(direct_db, paytest_branch_id)
-        period_id = await _insert_period(direct_db, paytest_branch_id, "FROZEN", status="Locked")
+        period_id = await _insert_period(direct_db, paytest_branch_id, "IMMUT")
         days = await _period_dates(direct_db, period_id)
         await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        status_key_id = await _status_key(direct_db, paytest_branch_id, "CP5B_FROZEN", True)
-        await _set_status(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[0], status_key_id)
+        off_code = f"CP5B_IMMUT_{next(_COUNTER)}"
+        status_key_id = await _status_key(direct_db, paytest_branch_id, off_code, True)
+
+        await _save_day_grid_status(
+            session_client, auth_token, period_id, paytest_driver_id, days[0], off_code,
+        )
+        await _submit_approve_finalize(
+            session_client, auth_token, period_id, paytest_driver_id, days[0],
+        )
+
+        # Drift the CURRENT StatusKey after Locking -- label AND IsOffReason.
         await direct_db.execute(
             _text("""
-                UPDATE payroll.payrollperioddriverdayentrystate
-                SET finalizedatutc = NOW(), statuscodesnapshot = 'FROZEN_OFF',
-                    statuslabelsnapshot = 'Frozen Off', statusisoffreasonsnapshot = TRUE
-                WHERE payrollperiodid = :period_id AND driverid = :driver_id AND workdate = :work_date
+                UPDATE payroll.payrollstatuskeys
+                SET keyname = 'Mutated', isoffreason = FALSE
+                WHERE statuskeyid = :status_key_id
             """),
-            {"period_id": period_id, "driver_id": paytest_driver_id, "work_date": days[0]},
-        )
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollstatuskeys SET keyname = 'Mutated' WHERE statuskeyid = :status_key_id"),
             {"status_key_id": status_key_id},
         )
         await direct_db.commit()
 
         selected = await _selected(session_client, auth_token, period_id, days[0])
         assert selected.status_code == 200, selected.text
-        row = selected.json()["drivers"][0]
-        assert row["status_code"] == "FROZEN_OFF"
-        assert row["status_label"] == "Frozen Off"
+        body = selected.json()
+        assert body["total_count"] == 1
+        row = body["drivers"][0]
+        assert row["driver_id"] == paytest_driver_id
+        assert row["status_code"] == off_code
+        assert row["status_label"] == f"{off_code} label", (
+            "Must show the ORIGINAL captured label, not the drifted 'Mutated'"
+        )
+        assert row["is_off_reason"] is True, (
+            "Must show the ORIGINAL captured is_off_reason, not the drifted False"
+        )
+        assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
+
+    async def test_summary_fully_off_uses_immutable_status_evidence_ignoring_statuskey_drift(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    ):
+        """Same drift regression for the Fully-Off KPI resolver shared with
+        the Current Payroll hub (resolve_fully_off_drivers)."""
+        await _clean(direct_db, paytest_branch_id)
+        period_id = await _insert_period(direct_db, paytest_branch_id, "IMMUTFULL")
+        days = await _period_dates(direct_db, period_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        off_code = f"CP5B_IMMUTFULL_{next(_COUNTER)}"
+        status_key_id = await _status_key(direct_db, paytest_branch_id, off_code, True)
+
+        for work_date in days:
+            await _save_day_grid_status(
+                session_client, auth_token, period_id, paytest_driver_id, work_date, off_code,
+            )
+        await _submit_approve_finalize(
+            session_client, auth_token, period_id, paytest_driver_id, days[0],
+        )
+
+        await direct_db.execute(
+            _text("""
+                UPDATE payroll.payrollstatuskeys
+                SET keyname = 'Mutated', isoffreason = FALSE
+                WHERE statuskeyid = :status_key_id
+            """),
+            {"status_key_id": status_key_id},
+        )
+        await direct_db.commit()
+
+        summary = await _summary(session_client, auth_token, period_id)
+        assert summary.status_code == 200, summary.text
+        body = summary.json()
+        assert body["total_fully_off_drivers"] == 1
+        assert body["fully_off_drivers"][0]["driver_id"] == paytest_driver_id
+        assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
 
     async def test_legacy_drivers_off_endpoint_retains_driver_day_row_semantics(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
@@ -580,3 +804,223 @@ class TestOffDrivers:
         assert summary.status_code == 200, summary.text
         assert hub.status_code == 200, hub.text
         assert _hub_branch(hub.json(), paytest_branch_id)["slots"]["open"]["metrics"]["fully_off_drivers"] == summary.json()["total_fully_off_drivers"]
+
+    # ------------------------------------------------------------------ #
+    # Stage B3 Unit 8C-5: legacy / unavailable / empty coverage, mirroring
+    # test_cp2d_canonical_entry_state.py's E26/E27/E28 for Day Grid.
+    # ------------------------------------------------------------------ #
+
+    async def test_locked_period_legacy_snapshot_status_evidence_unavailable(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    ):
+        """A Locked period whose authoritative snapshot predates CP-5C
+        (ReportEvidenceVersion IS NULL) must report status_evidence as
+        UNAVAILABLE/LEGACY_NOT_CAPTURED for both Off Drivers reads, with no
+        row fabricated from mutable PayrollStatusKeys or legacy DraftLines."""
+        await _clean(direct_db, paytest_branch_id)
+        period_id = await _insert_period(direct_db, paytest_branch_id, "LEGACYSNAP", status="Locked")
+        days = await _period_dates(direct_db, period_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        snapshot_id = int((await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollcalculationsnapshots
+                    (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
+                     sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
+                VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0)
+                RETURNING payrollcalculationsnapshotid
+            """),
+            {
+                "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id,
+                "source_hash": "0" * 64, "snapshot_hash": "1" * 64,
+            },
+        )).scalar_one())
+        await _insert_approved_review_item(
+            direct_db, _COMPANY_ID, paytest_branch_id, period_id, snapshot_id,
+        )
+        await direct_db.execute(
+            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
+        )
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollfinallines
+                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                     linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                     approvedatutc, lockedatutc, sourcesnapshot)
+                VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                        'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB))
+            """),
+            {
+                "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                "wdate": days[0],
+                "snap": (
+                    '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
+                    '"snapshot_hash": "%s"}' % (snapshot_id, "1" * 64)
+                ),
+            },
+        )
+        await direct_db.commit()
+
+        selected = await _selected(session_client, auth_token, period_id, days[0])
+        assert selected.status_code == 200, selected.text
+        sel_body = selected.json()
+        assert sel_body["total_count"] == 0
+        assert sel_body.get("status_evidence") == {
+            "state": "UNAVAILABLE", "reason_code": "LEGACY_NOT_CAPTURED",
+        }
+
+        summary = await _summary(session_client, auth_token, period_id)
+        assert summary.status_code == 200, summary.text
+        sum_body = summary.json()
+        assert sum_body["total_fully_off_drivers"] == 0
+        assert sum_body.get("status_evidence") == {
+            "state": "UNAVAILABLE", "reason_code": "LEGACY_NOT_CAPTURED",
+        }
+
+    async def test_locked_period_captured_snapshot_zero_status_rows_is_empty(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    ):
+        """A Locked period whose authoritative snapshot IS versioned
+        (captured) but has zero PayrollCalculationSnapshotStatusEntries rows
+        must report status_evidence as EMPTY -- a positive historical fact
+        (nobody had an off/PTO Status), not UNAVAILABLE, and with no
+        fabricated off-driver rows."""
+        await _clean(direct_db, paytest_branch_id)
+        period_id = await _insert_period(direct_db, paytest_branch_id, "EMPTYSNAP", status="Locked")
+        days = await _period_dates(direct_db, period_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        snapshot_id = int((await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollcalculationsnapshots
+                    (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
+                     sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
+                     reportevidenceversion, reportevidencehash)
+                VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0,
+                        1, :evidence_hash)
+                RETURNING payrollcalculationsnapshotid
+            """),
+            {
+                "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id,
+                "source_hash": "0" * 64, "snapshot_hash": "2" * 64,
+                "evidence_hash": "3" * 64,
+            },
+        )).scalar_one())
+        await _insert_approved_review_item(
+            direct_db, _COMPANY_ID, paytest_branch_id, period_id, snapshot_id,
+        )
+        await direct_db.execute(
+            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
+        )
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollfinallines
+                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                     linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                     approvedatutc, lockedatutc, sourcesnapshot)
+                VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                        'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB))
+            """),
+            {
+                "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                "wdate": days[0],
+                "snap": (
+                    '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
+                    '"snapshot_hash": "%s"}' % (snapshot_id, "2" * 64)
+                ),
+            },
+        )
+        await direct_db.commit()
+
+        selected = await _selected(session_client, auth_token, period_id, days[0])
+        assert selected.status_code == 200, selected.text
+        sel_body = selected.json()
+        assert sel_body["total_count"] == 0
+        assert sel_body.get("status_evidence") == {"state": "EMPTY", "reason_code": None}
+
+        summary = await _summary(session_client, auth_token, period_id)
+        assert summary.status_code == 200, summary.text
+        sum_body = summary.json()
+        assert sum_body["total_fully_off_drivers"] == 0
+        assert sum_body.get("status_evidence") == {"state": "EMPTY", "reason_code": None}
+
+    async def test_locked_period_missing_snapshot_provenance_is_unavailable(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    ):
+        """A Locked period with no Approved PeriodApproval review item bound
+        to a snapshot must report status_evidence as UNAVAILABLE/
+        PROVENANCE_UNAVAILABLE -- never silently falling back to another
+        snapshot or to mutable current state."""
+        await _clean(direct_db, paytest_branch_id)
+        period_id = await _insert_period(direct_db, paytest_branch_id, "NOPROV", status="Locked")
+        days = await _period_dates(direct_db, period_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await direct_db.execute(
+            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
+        )
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollfinallines
+                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                     linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                     approvedatutc, lockedatutc)
+                VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                        'DraftLine', 1, NOW(), NOW())
+            """),
+            {
+                "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                "wdate": days[0],
+            },
+        )
+        await direct_db.commit()
+
+        selected = await _selected(session_client, auth_token, period_id, days[0])
+        assert selected.status_code == 200, selected.text
+        sel_body = selected.json()
+        assert sel_body["total_count"] == 0
+        assert sel_body.get("status_evidence") == {
+            "state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE",
+        }
+
+        summary = await _summary(session_client, auth_token, period_id)
+        assert summary.status_code == 200, summary.text
+        sum_body = summary.json()
+        assert sum_body["total_fully_off_drivers"] == 0
+        assert sum_body.get("status_evidence") == {
+            "state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE",
+        }
+
+    async def test_locked_period_zero_final_lines_still_resolves_via_review_item_binding(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    ):
+        """A period whose only entries are Status (no billable pay-item
+        line) finalizes with zero FinalLines -- Off Drivers must still
+        resolve the immutable Status evidence correctly through the
+        Approved review-item binding, not treat empty FinalLines as
+        unavailable provenance."""
+        await _clean(direct_db, paytest_branch_id)
+        period_id = await _insert_period(direct_db, paytest_branch_id, "ZEROFL")
+        days = await _period_dates(direct_db, period_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        off_code = f"CP5B_ZEROFL_{next(_COUNTER)}"
+        await _status_key(direct_db, paytest_branch_id, off_code, True)
+
+        await _save_day_grid_status(
+            session_client, auth_token, period_id, paytest_driver_id, days[0], off_code,
+        )
+        await _submit_approve_finalize(
+            session_client, auth_token, period_id, paytest_driver_id, days[0],
+        )
+
+        final_lines = (await direct_db.execute(
+            _text("SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )).scalar_one()
+        assert final_lines == 0, (
+            "A Status-only day must finalize with zero FinalLines for this test to be meaningful"
+        )
+
+        selected = await _selected(session_client, auth_token, period_id, days[0])
+        assert selected.status_code == 200, selected.text
+        sel_body = selected.json()
+        assert sel_body["total_count"] == 1
+        assert sel_body["drivers"][0]["status_code"] == off_code
+        assert sel_body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}

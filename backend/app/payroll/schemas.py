@@ -1180,6 +1180,13 @@ class OffDriversSummaryResponse(BaseModel):
     end_date: date
     total_fully_off_drivers: int
     fully_off_drivers: list[FullyOffDriverSummary] = []
+    # Stage B3 Unit 8C-5: set only for Locked/Archived periods, where the
+    # Fully-Off result comes from immutable calculation-snapshot evidence
+    # rather than live PayrollStatusKeys. Reuses the same {state,
+    # reason_code} shape already established for Day Grid (Unit 8C-3) and
+    # the P6A Finalized Payroll Information Library. None for Draft/Open/
+    # InReview/Returned/Approved.
+    status_evidence: FinalizedSectionAvailability | None = None
 
 
 class SelectedDayOffDriver(BaseModel):
@@ -1202,6 +1209,8 @@ class SelectedDayOffDriversResponse(BaseModel):
     day_name: str
     total_count: int
     drivers: list[SelectedDayOffDriver] = []
+    # Stage B3 Unit 8C-5: see OffDriversSummaryResponse.status_evidence.
+    status_evidence: FinalizedSectionAvailability | None = None
 
 
 # ---------------------------------------------------------------------------

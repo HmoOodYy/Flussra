@@ -8,13 +8,15 @@ from types import SimpleNamespace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.payroll import service
+from app.payroll import service, status_evidence
 from app.payroll.schemas import (
     FullyOffDriverSummary,
     OffDriversSummaryResponse,
     SelectedDayOffDriver,
     SelectedDayOffDriversResponse,
 )
+
+_FINALIZED_STATUSES = ("Locked", "Archived")
 
 _NON_WORK_DAILY_LINE_TYPES = (
     "DailyStatus",
@@ -208,8 +210,82 @@ async def _eligible_driver_days(
     return output
 
 
-async def _status_entries(period, company_id: int, db: AsyncConnection) -> dict[tuple[int, date], _StatusEntry]:
-    """Canonical entry state wins; DailyStatus/DailyNote is legacy compatibility only."""
+async def _finalized_status_entries(
+    period, company_id: int, db: AsyncConnection,
+) -> tuple[dict[tuple[int, date], _StatusEntry], dict[str, str | None]]:
+    """
+    Stage B3 Unit 8C-5: Locked/Archived Status evidence.
+
+    Reuses the same Approved-PeriodApproval-review-item snapshot authority
+    and shared read primitives as Day Grid (Unit 8C-3) via
+    status_evidence.py -- never the EntryState freeze columns
+    (StatusCodeSnapshot/StatusLabelSnapshot/StatusIsOffReasonSnapshot/
+    FinalizedAtUtc), never live PayrollStatusKeys, never legacy DraftLines.
+    """
+    period_id = _period_id(period)
+    branch_id = period.branch_id
+    snapshot, availability = await status_evidence.resolve_finalized_snapshot(
+        db, period_id=period_id, company_id=company_id, branch_id=branch_id,
+    )
+    # NoteText is not part of the immutable Status-evidence table's contract
+    # (see status_evidence.read_status_entries) -- read it separately from
+    # canonical EntryState, which no write path can change once a period is
+    # Locked (Locked/Archived are in service._WRITE_BLOCKED_STATUSES).
+    note_rows = (await db.execute(
+        text("""
+            SELECT driverid, workdate, notetext
+            FROM payroll.payrollperioddriverdayentrystate
+            WHERE payrollperiodid = :period_id
+              AND companyid = :company_id
+              AND isvoided = FALSE
+        """),
+        {"period_id": period_id, "company_id": company_id},
+    )).mappings().all()
+    notes_by_day = {
+        (int(row["driverid"]), row["workdate"]): row["notetext"] for row in note_rows
+    }
+
+    if snapshot is None:
+        # No usable snapshot provenance -- never fall back to another
+        # snapshot or to mutable current state; evidence is unavailable.
+        return {}, availability
+
+    evidence_rows = await status_evidence.read_status_entries(
+        db,
+        snapshot_id=snapshot["payrollcalculationsnapshotid"],
+        company_id=company_id,
+        branch_id=branch_id,
+        period_id=period_id,
+    )
+    evidence_state = status_evidence.status_evidence_availability(snapshot, evidence_rows)
+    entries: dict[tuple[int, date], _StatusEntry] = {}
+    for row in evidence_rows:
+        key = (row["driver_id"], row["work_date"])
+        entries[key] = _StatusEntry(
+            status_key_id=row["status_key_id"],
+            status_code=row["status_code"],
+            status_label=row["status_label"],
+            is_off_reason=row["is_off_reason"],
+            note=notes_by_day.get(key),
+        )
+    return entries, evidence_state
+
+
+async def _status_entries(
+    period, company_id: int, db: AsyncConnection,
+) -> tuple[dict[tuple[int, date], _StatusEntry], dict[str, str | None] | None]:
+    """
+    Canonical entry state wins; DailyStatus/DailyNote is legacy compatibility
+    only. Unchanged for Draft/Open/InReview/Returned/Approved.
+
+    Stage B3 Unit 8C-5: for Locked/Archived, delegates to
+    _finalized_status_entries -- Status meaning comes only from immutable
+    calculation-snapshot evidence. The second return value is None for
+    non-finalized periods and {state, reason_code} for Locked/Archived.
+    """
+    if period.status in _FINALIZED_STATUSES:
+        return await _finalized_status_entries(period, company_id, db)
+
     canonical_rows = (await db.execute(
         text("""
             SELECT es.driverid, es.workdate, es.statuskeyid, es.notetext,
@@ -269,7 +345,7 @@ async def _status_entries(period, company_id: int, db: AsyncConnection) -> dict[
             is_off_reason=bool(row["isoffreason"]),
             note=row["note"],
         ))
-    return entries
+    return entries, None
 
 
 async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> set[tuple[int, date]]:
@@ -310,14 +386,28 @@ async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> se
     return {(int(row["driverid"]), row["workdate"]) for row in rows}
 
 
-async def resolve_fully_off_drivers(period, company_id: int, db: AsyncConnection) -> list[FullyOffDriverSummary]:
-    """Resolve the official distinct-driver Fully-Off KPI for one payroll period."""
+async def resolve_fully_off_drivers(
+    period,
+    company_id: int,
+    db: AsyncConnection,
+    *,
+    precomputed_statuses: dict[tuple[int, date], _StatusEntry] | None = None,
+) -> list[FullyOffDriverSummary]:
+    """Resolve the official distinct-driver Fully-Off KPI for one payroll period.
+
+    precomputed_statuses lets a caller that already resolved _status_entries
+    (to also read its evidence-availability state, e.g. get_off_drivers_summary)
+    avoid a second read; unset by existing callers (e.g. current_hub.py),
+    which keep computing it here exactly as before.
+    """
     eligible = await _eligible_driver_days(period, company_id, db)
     if not eligible:
         return []
-    statuses, normal_work = await _status_entries(period, company_id, db), await _normal_work_pairs(
-        period, company_id, db,
-    )
+    if precomputed_statuses is not None:
+        statuses = precomputed_statuses
+    else:
+        statuses, _unused_state = await _status_entries(period, company_id, db)
+    normal_work = await _normal_work_pairs(period, company_id, db)
     fully_off: list[FullyOffDriverSummary] = []
     for driver_id, (driver, days) in eligible.items():
         if all(
@@ -339,13 +429,17 @@ async def get_off_drivers_summary(
     period_id: int, company_id: int, user_id: int, db: AsyncConnection,
 ) -> OffDriversSummaryResponse:
     period = await _readable_period(period_id, company_id, user_id, db)
-    drivers = await resolve_fully_off_drivers(period, company_id, db)
+    statuses, finalized_state = await _status_entries(period, company_id, db)
+    drivers = await resolve_fully_off_drivers(
+        period, company_id, db, precomputed_statuses=statuses,
+    )
     return OffDriversSummaryResponse(
         period_id=_period_id(period),
         start_date=period.start_date,
         end_date=period.end_date,
         total_fully_off_drivers=len(drivers),
         fully_off_drivers=drivers,
+        status_evidence=finalized_state,
     )
 
 
@@ -363,7 +457,7 @@ async def get_selected_day_off_drivers(
     eligible = await _eligible_driver_days(
         period, company_id, db, candidate_days={work_date},
     )
-    statuses = await _status_entries(period, company_id, db)
+    statuses, finalized_state = await _status_entries(period, company_id, db)
     drivers: list[SelectedDayOffDriver] = []
     for driver_id, (driver, eligible_days) in eligible.items():
         if work_date not in eligible_days:
@@ -391,4 +485,5 @@ async def get_selected_day_off_drivers(
         day_name=work_date.strftime("%A"),
         total_count=len(drivers),
         drivers=drivers,
+        status_evidence=finalized_state,
     )
