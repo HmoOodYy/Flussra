@@ -16,6 +16,7 @@ from app.payroll import (
     bonus,
     current_hub,
     finalized_library_read_model,
+    ledger_read,
     off_drivers,
     period_creation,
     period_read,
@@ -691,7 +692,7 @@ async def list_final_lines(
     db: DbDep,
     driver_id: int | None = Query(None, description="Filter to a specific driver"),
 ) -> list[FinalLineSummary]:
-    return await service.get_final_lines(
+    return await ledger_read.get_final_lines(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
