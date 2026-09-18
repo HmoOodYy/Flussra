@@ -17,6 +17,7 @@ from app.payroll import (
     finalized_library_read_model,
     off_drivers,
     period_creation,
+    period_read,
     rates,
     report_read_model,
     service,
@@ -135,7 +136,7 @@ async def list_periods(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[PeriodSummary]:
-    return await service.get_periods(
+    return await period_read.get_periods(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -214,7 +215,7 @@ async def get_period(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodSummary:
-    return await service.get_period_by_id(
+    return await period_read.get_period_by_id(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         period_id=period_id,
