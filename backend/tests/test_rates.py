@@ -24,7 +24,7 @@ import pytest_asyncio
 import httpx
 from decimal import Decimal
 from unittest.mock import patch, AsyncMock
-from app.payroll import service as payroll_service
+from app.payroll import rates as payroll_rates
 
 
 # ---------------------------------------------------------------------------
@@ -1096,7 +1096,7 @@ class TestRateSafety:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on create — rollback expected")
 
-        with patch.object(payroll_service, "_write_rate_audit", _raise):
+        with patch.object(payroll_rates, "_write_rate_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on create"):
                 await client.post(
                     "/payroll/rates",
@@ -1141,7 +1141,7 @@ class TestRateSafety:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on approval — rollback expected")
 
-        with patch.object(payroll_service, "_write_rate_audit", _raise):
+        with patch.object(payroll_rates, "_write_rate_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on approval"):
                 await client.post(f"/payroll/rates/{rid}/approve", headers=headers)
 
@@ -1187,7 +1187,7 @@ class TestRateSafety:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure — supersession rollback expected")
 
-        with patch.object(payroll_service, "_write_rate_audit", _raise):
+        with patch.object(payroll_rates, "_write_rate_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure"):
                 await client.post(f"/payroll/rates/{rid2}/approve", headers=headers)
 
