@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
 from app.payroll import (
+    bonus,
     current_hub,
     finalized_library_read_model,
     off_drivers,
@@ -1267,7 +1268,7 @@ async def list_bonus_events(
     db: DbDep,
     driver_id: int | None = Query(None, description="Filter to a specific driver"),
 ) -> list[BonusEventResponse]:
-    return await service.list_bonus_events(
+    return await bonus.list_bonus_events(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1291,7 +1292,7 @@ async def get_bonus_summary(
     token: TokenDep,
     db: DbDep,
 ) -> BonusSummaryResponse:
-    return await service.get_bonus_summary(
+    return await bonus.get_bonus_summary(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1319,7 +1320,7 @@ async def apply_bonus_batch(
     db: DbDep,
     response: Response,
 ) -> BonusBatchResponse:
-    result, is_new = await service.apply_bonus_batch(
+    result, is_new = await bonus.apply_bonus_batch(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1346,7 +1347,7 @@ async def create_bonus_event(
     token: TokenDep,
     db: DbDep,
 ) -> BonusEventResponse:
-    return await service.create_bonus_event(
+    return await bonus.create_bonus_event(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1371,7 +1372,7 @@ async def update_bonus_event(
     token: TokenDep,
     db: DbDep,
 ) -> BonusEventResponse:
-    return await service.update_bonus_event(
+    return await bonus.update_bonus_event(
         period_id=period_id,
         bonus_event_id=bonus_event_id,
         company_id=int(token["cid"]),
@@ -1395,7 +1396,7 @@ async def void_bonus_event(
     token: TokenDep,
     db: DbDep,
 ) -> BonusEventResponse:
-    return await service.void_bonus_event(
+    return await bonus.void_bonus_event(
         period_id=period_id,
         bonus_event_id=bonus_event_id,
         company_id=int(token["cid"]),

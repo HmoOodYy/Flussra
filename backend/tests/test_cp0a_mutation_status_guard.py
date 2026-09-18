@@ -686,21 +686,33 @@ class TestTrueRace:
         Return (monkeypatched_fn, restore_fn).
         The monkeypatched fn sets boundary_reached, waits for release_boundary,
         then calls the real _lock_period_for_mutation.
+
+        This fixture is shared by draft-line, day-grid, and bonus race tests.
+        Draft-line and day-grid mutations still live in app.payroll.service,
+        but Bonus (Stage B4-8) moved to app.payroll.bonus, which imports its
+        own _lock_period_for_mutation binding directly from
+        app.payroll.mutation_lock — a separate namespace entry from
+        app.payroll.service's. Both must be patched so the boundary fires
+        regardless of which module's bare-name lookup resolves the call.
         """
+        import app.payroll.bonus as bonus_mod
         import app.payroll.service as svc
-        real_lock = svc._lock_period_for_mutation
+        real_lock_svc = svc._lock_period_for_mutation
+        real_lock_bonus = bonus_mod._lock_period_for_mutation
 
         async def mock_lock(period_id, company_id, db):
             boundary_reached.set()
             loop = asyncio.get_running_loop()
             ok = await loop.run_in_executor(None, release_boundary.wait, 15.0)
             assert ok, "release_boundary never fired inside mock_lock"
-            await real_lock(period_id, company_id, db)
+            await real_lock_svc(period_id, company_id, db)
 
         svc._lock_period_for_mutation = mock_lock
+        bonus_mod._lock_period_for_mutation = mock_lock
 
         def restore():
-            svc._lock_period_for_mutation = real_lock
+            svc._lock_period_for_mutation = real_lock_svc
+            bonus_mod._lock_period_for_mutation = real_lock_bonus
 
         return restore
 

@@ -805,7 +805,7 @@ async def test_audit_failure_rolls_back_event_and_revision(
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated audit failure")
 
-    monkeypatch.setattr("app.payroll.service._write_line_audit", _boom)
+    monkeypatch.setattr("app.payroll.bonus._write_line_audit", _boom)
 
     with pytest.raises(RuntimeError):
         await client.post(
