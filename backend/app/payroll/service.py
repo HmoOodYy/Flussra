@@ -21,11 +21,12 @@ from app.core.service import (
     _check_branch_access, _build_in_clause, _check_permission, _check_any_permission,
     _require_not_driver_role,
 )
-from app.payroll.calculation.per_unit import (
-    PER_UNIT_CALCULATION_VERSION,
-    PerUnitInput as _PerUnitInput,
-    calculate_per_unit as _calculate_per_unit,
-)
+# Stage B4-13C: PerUnitInput/calculate_per_unit are no longer imported here —
+# their only caller (_compute_calculated_amount) moved to
+# app.payroll.draft_line_calculation, which imports them directly.
+# PER_UNIT_CALCULATION_VERSION stays: _build_live_calculation_packet still
+# reads it.
+from app.payroll.calculation.per_unit import PER_UNIT_CALCULATION_VERSION
 from app.payroll.immutable_evidence import (
     capture_snapshot_used_rate_definitions,
     capture_workflow_action_evidence,
@@ -117,20 +118,13 @@ from app.payroll.period_creation import (
 # which owns it more than the others. Extracted into its own small neutral
 # module rather than left under period_creation.py's ownership.
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
-# Stage B4-4B: Rates moved to app.payroll.rates in full. Re-exported here
-# because _compute_calculated_amount (Draft-line/Calculation, stays in this
-# module) dispatches to the four advanced-rate-method computation helpers and
-# needs _TIERED_BEHAVIORS to decide when to. _RANGE_BEHAVIORS is NOT
-# re-exported: it has no caller in this module, only inside app.payroll.rates
-# (create_rate/update_rate). No Rates public function or other private helper
-# has a remaining caller in this module.
-from app.payroll.rates import (
-    _TIERED_BEHAVIORS,
-    _compute_ordinal_tier,
-    _compute_range_bracket,
-    _compute_range_progressive,
-    _compute_block,
-)
+# Stage B4-4B: Rates moved to app.payroll.rates in full. No Rates public
+# function or private helper has a remaining caller in this module. Stage
+# B4-13C moved _compute_calculated_amount (the last remaining caller of
+# _TIERED_BEHAVIORS and the four advanced-rate-method computation helpers)
+# to app.payroll.draft_line_calculation, which now imports all four rate
+# helpers directly from app.payroll.rates; this module no longer needs any
+# binding from that module.
 # Stage B4-5A: _lock_period_for_mutation and _write_line_audit are genuinely
 # shared by domains that all still live in this module — Draft-line CRUD,
 # Bonus, and Day Grid — none of which is more entitled to
@@ -257,6 +251,18 @@ from app.payroll.day_entry_state import (
 # module's facade — it now imports it directly from
 # app.payroll.period_day_calendar.
 from app.payroll.period_day_calendar import _validate_period_work_date
+# Stage B4-13C: the Draft-line calculation kernel (_CalcResult,
+# _compute_calculated_amount) moved to app.payroll.draft_line_calculation in
+# full. Only _compute_calculated_amount keeps a plain imported binding here:
+# add_draft_line, update_draft_line, _refresh_draft_calculations, and
+# _compute_draft_line_preview_amounts all still live in this module and
+# still call it by its bare name — this binding is load-bearing for those
+# four runtime callers, not incidental, and stays until they themselves
+# move. _CalcResult is NOT re-exported: every caller only accesses the
+# returned instance's attributes (e.g. .calculated_amount), never the class
+# name itself — confirmed by a fresh whole-module search at this stage —
+# so no binding is load-bearing for it.
+from app.payroll.draft_line_calculation import _compute_calculated_amount
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has internal call
@@ -1998,27 +2004,6 @@ async def get_period_draft_summary(
 # ─────────────────────────────────────────────
 
 
-class _CalcResult(NamedTuple):
-    """
-    Return value of _compute_calculated_amount.
-
-    Phase 3B adds source fields so callers can store them in PayrollFinalLines:
-      driver_rate_id       -- DriverRates.DriverRateID used (PerUnit / Tiered / Block)
-      rate_type_id         -- RateTypes.RateTypeID of the matched rate
-      resolved_rate_amount -- dr.Amount (PerUnit only; NULL for tiered/block)
-
-    Fields default to None so existing callers that only unpack (calc, nmr) are
-    unaffected as long as they use positional unpacking of the first two fields
-    or attribute access.
-    """
-    calculated_amount:    Decimal | None
-    needs_manager_review: bool
-    driver_rate_id:       int | None = None
-    rate_type_id:         int | None = None
-    resolved_rate_amount: Decimal | None = None
-    rate_behavior:        str | None = None
-
-
 # Maps legacy system line-type strings to their calculation metadata.
 # Any string NOT in this dict goes through the custom-item DB slow path.
 _SYSTEM_LINE_TYPE_INFO: dict[str, _LineTypeInfo] = {
@@ -2453,131 +2438,6 @@ async def _refresh_draft_calculations(
             refresh_count += 1
 
     return refresh_count
-
-
-async def _compute_calculated_amount(
-    rate_behavior: str,
-    rate_code: str | None,
-    quantity: Decimal,
-    rate_amount_override: Decimal | None,
-    driver_id: int,
-    company_id: int,
-    as_of_date: date,
-    db: AsyncConnection,
-) -> "_CalcResult":
-    """
-    Compute the calculated amount for a draft line.
-
-    Returns a _CalcResult NamedTuple:
-      (calculated_amount, needs_manager_review,
-       driver_rate_id, rate_type_id, resolved_rate_amount)
-
-    Phase 3B: the last three fields are populated for rate-based lookups so
-    callers (finalization, preview) can snapshot the source into FinalLines.
-    Existing callers that only unpack the first two positional fields are
-    unaffected — NamedTuple positional access still works.
-
-    rate_behavior dispatch:
-      PerUnit:       qty × approved DriverRate for rate_code (looked up by date).
-                     No approved rate → (None, True) — flagged for review.
-                     No rate_code mapping → (None, True).
-      EnteredAmount: (rate_amount_override, False) — user-supplied dollar amount.
-      Fixed:         (None, False) — fixed amounts from PayItemSettings (M13c+).
-      None / other:  (None, False) — informational or unimplemented behavior.
-    Tiered/Block:    delegates to dedicated helpers which return (amount, nmr,
-                     driver_rate_id, rate_type_id).
-    """
-    if rate_behavior == "EnteredAmount":
-        return _CalcResult(rate_amount_override, False, rate_behavior="EnteredAmount")
-
-    # M13c tiered / block behaviors — dispatch to dedicated helpers.
-    if rate_behavior in _TIERED_BEHAVIORS or rate_behavior == "Block":
-        if not rate_code:
-            # No RateType mapping → calculation unresolvable → flag for review.
-            return _CalcResult(None, True, rate_behavior=rate_behavior)
-        if rate_behavior == "OrdinalTier":
-            amt, nmr, rid, rtid = await _compute_ordinal_tier(
-                quantity, driver_id, company_id, as_of_date, rate_code, db
-            )
-            return _CalcResult(amt, nmr, driver_rate_id=rid, rate_type_id=rtid, rate_behavior="OrdinalTier")
-        if rate_behavior == "RangeBracket":
-            amt, nmr, rid, rtid = await _compute_range_bracket(
-                quantity, driver_id, company_id, as_of_date, rate_code, db
-            )
-            return _CalcResult(amt, nmr, driver_rate_id=rid, rate_type_id=rtid, rate_behavior="RangeBracket")
-        if rate_behavior == "RangeProgressive":
-            amt, nmr, rid, rtid = await _compute_range_progressive(
-                quantity, driver_id, company_id, as_of_date, rate_code, db
-            )
-            return _CalcResult(amt, nmr, driver_rate_id=rid, rate_type_id=rtid, rate_behavior="RangeProgressive")
-        # Block
-        amt, nmr, rid, rtid = await _compute_block(
-            quantity, driver_id, company_id, as_of_date, rate_code, db
-        )
-        return _CalcResult(amt, nmr, driver_rate_id=rid, rate_type_id=rtid, rate_behavior="Block")
-
-    if rate_behavior != "PerUnit":
-        # Fixed, None — not computed yet.
-        return _CalcResult(None, False, rate_behavior=rate_behavior)
-
-    # PerUnit: look up the driver's approved rate for rate_code as-of as_of_date.
-    if not rate_code:
-        # PerUnit item but no rate type mapping in PayItemRateTypeMap.
-        # If the caller supplied a manual rate_amount, the finalization COALESCE
-        # will produce a non-zero result (qty * rate_amount) — no review needed.
-        # If no rate_amount either, the line would finalize as zero — flag for review.
-        if rate_amount_override is not None:
-            return _CalcResult(None, False, rate_behavior="PerUnit")
-        return _CalcResult(None, True, rate_behavior="PerUnit")
-
-    # Include Superseded rows — a superseded rate is still the correct rate
-    # for work dates that fall within its original effective range.
-    # (Mirrors the lookup logic in get_driver_rate_on_date.)
-    rate_result = await db.execute(
-        text("""
-            SELECT dr.driverrateid, dr.ratetypeid, dr.amount
-            FROM   payroll.driverrates dr
-            JOIN   payroll.ratetypes   rt ON rt.ratetypeid = dr.ratetypeid
-            WHERE  dr.driverid       = :did
-              AND  dr.companyid      = :cid
-              AND  rt.ratecode       = :rcode
-              AND  dr.status         IN ('Approved', 'Superseded')
-              AND  dr.effectivefrom <= :dt
-              AND  (dr.effectiveto IS NULL OR dr.effectiveto >= :dt)
-            ORDER BY dr.effectivefrom DESC
-            LIMIT 1
-        """),
-        {
-            "did":   driver_id,
-            "cid":   company_id,
-            "rcode": rate_code,
-            "dt":    as_of_date,
-        },
-    )
-    rate_row = rate_result.mappings().first()
-
-    if rate_row is None:
-        # No approved rate for this driver / type / date.
-        # If the caller supplied a manual rate_amount, the finalization COALESCE
-        # will produce a non-zero result — no review needed.
-        # If no rate_amount either, the line would finalize as zero — flag for review.
-        if rate_amount_override is not None:
-            return _CalcResult(None, False, rate_behavior="PerUnit")
-        return _CalcResult(None, True, rate_behavior="PerUnit")
-
-    resolved_amt = Decimal(str(rate_row["amount"]))
-    # CP-4A: authoritative PerUnit multiply/quantize now lives in the pure core.
-    calculated = _calculate_per_unit(
-        _PerUnitInput(quantity=quantity, rate_amount=resolved_amt)
-    ).calculated_amount
-    return _CalcResult(
-        calculated,
-        False,
-        driver_rate_id=int(rate_row["driverrateid"]),
-        rate_type_id=int(rate_row["ratetypeid"]),
-        resolved_rate_amount=resolved_amt,
-        rate_behavior="PerUnit",
-    )
 
 
 # ---------------------------------------------------------------------------
