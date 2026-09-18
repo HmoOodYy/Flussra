@@ -19,6 +19,7 @@ from app.payroll import (
     ledger_read,
     off_drivers,
     period_creation,
+    period_pay,
     period_read,
     rates,
     report_read_model,
@@ -1175,7 +1176,7 @@ async def add_period_pay_line(
     token: TokenDep,
     db: DbDep,
 ) -> DraftLineSummary:
-    return await service.add_period_pay_line(
+    return await period_pay.add_period_pay_line(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1195,7 +1196,7 @@ async def list_period_pay_lines(
     db: DbDep,
     driver_id: int | None = Query(None, description="Filter to a specific driver"),
 ) -> list[DraftLineSummary]:
-    return await service.get_period_pay_lines(
+    return await period_pay.get_period_pay_lines(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1220,7 +1221,7 @@ async def update_period_pay_line(
     token: TokenDep,
     db: DbDep,
 ) -> DraftLineSummary:
-    return await service.update_period_pay_line(
+    return await period_pay.update_period_pay_line(
         period_id=period_id,
         line_id=line_id,
         company_id=int(token["cid"]),
@@ -1245,7 +1246,7 @@ async def void_period_pay_line(
     token: TokenDep,
     db: DbDep,
 ) -> DraftLineSummary:
-    return await service.void_period_pay_line(
+    return await period_pay.void_period_pay_line(
         period_id=period_id,
         line_id=line_id,
         company_id=int(token["cid"]),
