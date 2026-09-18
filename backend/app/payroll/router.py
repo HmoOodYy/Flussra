@@ -15,6 +15,7 @@ from app.dependencies import get_current_user, get_db
 from app.payroll import (
     bonus,
     current_hub,
+    draft_line_mutation,
     finalized_library_read_model,
     ledger_read,
     off_drivers,
@@ -401,7 +402,7 @@ async def add_period_line(
     token: TokenDep,
     db: DbDep,
 ) -> DraftLineSummary:
-    return await service.add_draft_line(
+    return await draft_line_mutation.add_draft_line(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -427,7 +428,7 @@ async def update_period_line(
     token: TokenDep,
     db: DbDep,
 ) -> DraftLineSummary:
-    return await service.update_draft_line(
+    return await draft_line_mutation.update_draft_line(
         period_id=period_id,
         draft_line_id=line_id,
         company_id=int(token["cid"]),
@@ -453,7 +454,7 @@ async def void_period_line(
     token: TokenDep,
     db: DbDep,
 ) -> Response:
-    await service.void_draft_line(
+    await draft_line_mutation.void_draft_line(
         period_id=period_id,
         draft_line_id=line_id,
         company_id=int(token["cid"]),

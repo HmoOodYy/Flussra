@@ -295,9 +295,15 @@ class TestSourceMutationVsCancellation:
         """
         Monkeypatch _lock_period_for_mutation: set boundary_reached, wait for
         release_boundary, then call the real helper.  Returns a restore fn.
+
+        The exercised mutation is a draft-line source add (POST .../lines),
+        whose implementation is app.payroll.draft_line_mutation.add_draft_line
+        (Stage B4-14) — it resolves _lock_period_for_mutation from that
+        module's own globals, not app.payroll.service's, so the patch targets
+        app.payroll.draft_line_mutation directly.
         """
-        import app.payroll.service as svc
-        real_lock = svc._lock_period_for_mutation
+        import app.payroll.draft_line_mutation as dlm
+        real_lock = dlm._lock_period_for_mutation
 
         async def _mock(period_id: int, company_id: int, db) -> None:
             boundary_reached.set()
@@ -306,8 +312,8 @@ class TestSourceMutationVsCancellation:
             assert ok, "release_boundary never fired inside monkeypatched lock"
             await real_lock(period_id, company_id, db)
 
-        svc._lock_period_for_mutation = _mock
-        return lambda: setattr(svc, "_lock_period_for_mutation", real_lock)
+        dlm._lock_period_for_mutation = _mock
+        return lambda: setattr(dlm, "_lock_period_for_mutation", real_lock)
 
     async def test_open_to_cancelled_wins_source_write_fails(
         self,
@@ -685,8 +691,14 @@ class TestSourceMutationFirstSerialization:
         Source mutation acquires the real period row FOR UPDATE lock; submit
         blocks until the source releases it; both complete; period is InReview
         with the source row coherently included.
+
+        The exercised source mutation is a draft-line add (POST .../lines),
+        whose implementation is app.payroll.draft_line_mutation.add_draft_line
+        (Stage B4-14) — it resolves _lock_period_for_mutation from that
+        module's own globals, not app.payroll.service's, so the patch targets
+        app.payroll.draft_line_mutation directly.
         """
-        import app.payroll.service as svc_payroll
+        import app.payroll.draft_line_mutation as svc_payroll
 
         pid, period_start = await _create_open_period(
             session_client, auth_token, paytest_branch_id, direct_db

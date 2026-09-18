@@ -688,17 +688,21 @@ class TestTrueRace:
         then calls the real _lock_period_for_mutation.
 
         This fixture is shared by draft-line, day-grid, and bonus race tests.
-        Draft-line and day-grid mutations still live in app.payroll.service,
-        but Bonus (Stage B4-8) moved to app.payroll.bonus, which imports its
-        own _lock_period_for_mutation binding directly from
-        app.payroll.mutation_lock — a separate namespace entry from
-        app.payroll.service's. Both must be patched so the boundary fires
-        regardless of which module's bare-name lookup resolves the call.
+        Day-grid mutations still live in app.payroll.service. Stage B4-14 moved
+        Draft-line CRUD (add_draft_line/update_draft_line/void_draft_line) to
+        app.payroll.draft_line_mutation, which imports its own
+        _lock_period_for_mutation binding directly from app.payroll.mutation_lock
+        — a separate namespace entry from app.payroll.service's. Bonus (Stage
+        B4-8) moved to app.payroll.bonus earlier, which does the same. All three
+        must be patched so the boundary fires regardless of which module's
+        bare-name lookup resolves the call.
         """
         import app.payroll.bonus as bonus_mod
+        import app.payroll.draft_line_mutation as dlm
         import app.payroll.service as svc
         real_lock_svc = svc._lock_period_for_mutation
         real_lock_bonus = bonus_mod._lock_period_for_mutation
+        real_lock_dlm = dlm._lock_period_for_mutation
 
         async def mock_lock(period_id, company_id, db):
             boundary_reached.set()
@@ -709,10 +713,12 @@ class TestTrueRace:
 
         svc._lock_period_for_mutation = mock_lock
         bonus_mod._lock_period_for_mutation = mock_lock
+        dlm._lock_period_for_mutation = mock_lock
 
         def restore():
             svc._lock_period_for_mutation = real_lock_svc
             bonus_mod._lock_period_for_mutation = real_lock_bonus
+            dlm._lock_period_for_mutation = real_lock_dlm
 
         return restore
 
@@ -1632,7 +1638,7 @@ class TestFirstReferenceRace:
         the real helper attempts FOR UPDATE on a now-deleted row → finds neither
         custom nor system row → raises 422.  No DraftLine is created.
         """
-        import app.payroll.service as svc_payroll
+        import app.payroll.draft_line_mutation as dlm_mod
 
         loop = asyncio.get_running_loop()
 
@@ -1695,7 +1701,7 @@ class TestFirstReferenceRace:
                     conn.close()
                     thread_done.set()
 
-            real_lock_fn = svc_payroll._lock_pay_item_for_source_write
+            real_lock_fn = dlm_mod._lock_pay_item_for_source_write
             boundary_reached = threading.Event()
             release_boundary = threading.Event()
 
@@ -1706,7 +1712,7 @@ class TestFirstReferenceRace:
                     assert ok, "release_boundary never fired"
                 await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
 
-            svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
+            dlm_mod._lock_pay_item_for_source_write = mock_lock_fn
 
             t = threading.Thread(target=delete_thread, daemon=True)
             try:
@@ -1758,7 +1764,7 @@ class TestFirstReferenceRace:
                 iid = None  # thread deleted it
 
             finally:
-                svc_payroll._lock_pay_item_for_source_write = real_lock_fn
+                dlm_mod._lock_pay_item_for_source_write = real_lock_fn
                 t.join(timeout=5)
 
         finally:
@@ -1787,7 +1793,7 @@ class TestFirstReferenceRace:
         FOR UPDATE.  After the source add commits, the thread unblocks and the
         deletion API call follows with the now-committed DraftLine visible.
         """
-        import app.payroll.service as svc_payroll
+        import app.payroll.draft_line_mutation as dlm_mod
 
         loop = asyncio.get_running_loop()
 
@@ -1818,7 +1824,7 @@ class TestFirstReferenceRace:
             thread_done           = threading.Event()
             thread_exc: list[BaseException] = []
 
-            real_lock_fn = svc_payroll._lock_pay_item_for_source_write
+            real_lock_fn = dlm_mod._lock_pay_item_for_source_write
 
             async def mock_lock_fn(line_type, company_id_arg, db, *, period_id=None):
                 await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
@@ -1827,7 +1833,7 @@ class TestFirstReferenceRace:
                     ok = await loop.run_in_executor(None, release_after_lock.wait, 15.0)
                     assert ok, "release_after_lock never fired"
 
-            svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
+            dlm_mod._lock_pay_item_for_source_write = mock_lock_fn
 
             def concurrent_lock_thread():
                 """
@@ -1924,7 +1930,7 @@ class TestFirstReferenceRace:
                 iid = None
 
             finally:
-                svc_payroll._lock_pay_item_for_source_write = real_lock_fn
+                dlm_mod._lock_pay_item_for_source_write = real_lock_fn
                 t.join(timeout=5)
 
         finally:
@@ -1964,7 +1970,7 @@ class TestStaleRetirementRace:
         direct_db,
         pg_instance,
     ):
-        import app.payroll.service as svc_payroll
+        import app.payroll.draft_line_mutation as dlm_mod
 
         loop = asyncio.get_running_loop()
 
@@ -2028,7 +2034,7 @@ class TestStaleRetirementRace:
             # Monkeypatch: pause _lock_pay_item_for_source_write BEFORE the real
             # FOR UPDATE so the retire thread can commit between Phase 1 validation
             # and the actual lock attempt.  This simulates the race window.
-            real_lock_fn = svc_payroll._lock_pay_item_for_source_write
+            real_lock_fn = dlm_mod._lock_pay_item_for_source_write
             boundary_reached = threading.Event()
             release_boundary = threading.Event()
 
@@ -2039,7 +2045,7 @@ class TestStaleRetirementRace:
                     assert ok, "release_boundary never fired"
                 await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
 
-            svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
+            dlm_mod._lock_pay_item_for_source_write = mock_lock_fn
 
             t = threading.Thread(target=retire_thread, daemon=True)
             try:
@@ -2103,7 +2109,7 @@ class TestStaleRetirementRace:
                 )
 
             finally:
-                svc_payroll._lock_pay_item_for_source_write = real_lock_fn
+                dlm_mod._lock_pay_item_for_source_write = real_lock_fn
                 t.join(timeout=5)
 
         finally:
@@ -2160,7 +2166,7 @@ class TestZeroToMeaningfulRace:
         deletion cleans the zero DraftLine and physically deletes the catalog;
         update unblocks, finds item gone → 422; no meaningful DraftLine orphaned.
         """
-        import app.payroll.service as svc_payroll
+        import app.payroll.draft_line_mutation as dlm_mod
 
         loop = asyncio.get_running_loop()
 
@@ -2251,7 +2257,7 @@ class TestZeroToMeaningfulRace:
 
             # Monkeypatch _lock_pay_item_for_source_write to pause update before
             # the actual FOR UPDATE, so the deletion thread can commit first.
-            real_lock_fn = svc_payroll._lock_pay_item_for_source_write
+            real_lock_fn = dlm_mod._lock_pay_item_for_source_write
             boundary_reached = threading.Event()
             release_boundary = threading.Event()
 
@@ -2262,7 +2268,7 @@ class TestZeroToMeaningfulRace:
                     assert ok, "release_boundary never fired"
                 await real_lock_fn(line_type, company_id_arg, db, period_id=period_id)
 
-            svc_payroll._lock_pay_item_for_source_write = mock_lock_fn
+            dlm_mod._lock_pay_item_for_source_write = mock_lock_fn
 
             t = threading.Thread(target=deletion_thread, daemon=True)
             try:
@@ -2316,7 +2322,7 @@ class TestZeroToMeaningfulRace:
                 iid = None  # deletion thread cleaned up the catalog
 
             finally:
-                svc_payroll._lock_pay_item_for_source_write = real_lock_fn
+                dlm_mod._lock_pay_item_for_source_write = real_lock_fn
                 t.join(timeout=5)
 
         finally:

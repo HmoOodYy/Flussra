@@ -876,7 +876,7 @@ class TestDraftLineAuditLogging:
         async def _fail(*args, **kwargs):
             raise RuntimeError("Simulated audit failure")
 
-        monkeypatch.setattr("app.payroll.service._write_line_audit", _fail)
+        monkeypatch.setattr("app.payroll.draft_line_mutation._write_line_audit", _fail)
 
         import pytest as _pytest
         with _pytest.raises(RuntimeError):
