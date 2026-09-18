@@ -185,6 +185,19 @@ from app.payroll.source_line_read import (
     _get_line_by_id,
     _line_row_to_summary,
 )
+# Stage B4-11D: the SOURCE-domain audit-evidence adapter
+# (_capture_source_evidence) moved to app.payroll.source_evidence in full.
+# It keeps a plain imported binding here: Draft CRUD (add_draft_line,
+# update_draft_line, void_draft_line) and Period Pay (add_period_pay_line,
+# update_period_pay_line, void_period_pay_line) still live in this module
+# and still call _capture_source_evidence by its bare name — this binding
+# is load-bearing for those six runtime callers, not incidental, and stays
+# until the consuming domains themselves move. Not folded into
+# app.payroll.audit_evidence: that module is deliberately generic
+# infrastructure, and this is the SOURCE domain's own adapter over it
+# (dependency direction: source_evidence.py -> audit_evidence.py, never the
+# reverse, and never -> app.payroll.service).
+from app.payroll.source_evidence import _capture_source_evidence
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has ~31 internal call
@@ -342,33 +355,6 @@ async def _write_period_status_audit(
             "new_val": json.dumps(new_val_dict),
             "reason":  _PERIOD_AUDIT_REASONS["PERIOD_STATUS_CHANGED"],
         },
-    )
-
-
-async def _capture_source_evidence(
-    *, company_id: int, branch_id: int, period_id: int, user_id: int,
-    line_id: int, action_code: str, db: AsyncConnection,
-    before_state: dict[str, Any] | None, after_state: dict[str, Any] | None,
-    driver_id: int | None, work_date: date | None, line_type: str,
-) -> None:
-    """Capture one non-compatibility DraftLine mutation for P6D."""
-    pay_item_id = (await db.execute(text("""
-        SELECT payitemid
-        FROM payroll.payrollperiodpayitems
-        WHERE companyid = :company_id AND branchid = :branch_id
-          AND payrollperiodid = :period_id AND payitemcode = :line_type
-        LIMIT 1
-    """), {
-        "company_id": company_id, "branch_id": branch_id,
-        "period_id": period_id, "line_type": line_type,
-    })).scalar_one_or_none()
-    await capture_period_audit_evidence(
-        company_id=company_id, branch_id=branch_id, period_id=period_id,
-        domain="SOURCE", action_code=action_code,
-        source_entity_type="PayrollDraftLines", source_entity_id=line_id,
-        user_id=user_id, required_permission_code="payroll.entry", db=db,
-        before_state=before_state, after_state=after_state, driver_id=driver_id,
-        work_date=work_date, pay_item_id=pay_item_id,
     )
 
 
