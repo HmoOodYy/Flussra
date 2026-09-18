@@ -16,6 +16,7 @@ from app.payroll import (
     current_hub,
     finalized_library_read_model,
     off_drivers,
+    period_creation,
     report_read_model,
     service,
 )
@@ -1767,7 +1768,7 @@ async def get_period_candidates(
     mode: str = Query(..., description="OPEN_CREATION or PREPARED_CREATION"),
     cursor: str | None = Query(None, description="Signed cursor from a previous candidate_key for navigation"),
 ) -> CandidatePreviewResponse:
-    return await service.get_period_candidates(
+    return await period_creation.get_period_candidates(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         branch_id=branch_id,
@@ -1809,7 +1810,7 @@ async def create_period_from_candidate(
     db: DbDep,
     response: Response,
 ) -> PeriodCreationResponse:
-    result = await service.create_period_from_candidate(
+    result = await period_creation.create_period_from_candidate(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         branch_id=branch_id,
