@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll import service, status_evidence
+from app.payroll.period_day_calendar import _validate_period_work_date
 from app.payroll.schemas import (
     FullyOffDriverSummary,
     OffDriversSummaryResponse,
@@ -451,7 +452,7 @@ async def get_selected_day_off_drivers(
     db: AsyncConnection,
 ) -> SelectedDayOffDriversResponse:
     period = await _readable_period(period_id, company_id, user_id, db)
-    await service._validate_period_work_date(
+    await _validate_period_work_date(
         _period_id(period), work_date, period.start_date, period.end_date, db,
     )
     eligible = await _eligible_driver_days(

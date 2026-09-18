@@ -245,6 +245,18 @@ from app.payroll.day_entry_state import (
     _validate_status_key,
     _void_entry_state_field,
 )
+# Stage B4-13B: the shared period-day calendar validator
+# (_validate_period_work_date) moved to app.payroll.period_day_calendar in
+# full. It keeps a plain imported binding here: Draft CRUD (add_draft_line)
+# and Day Grid (get_day_grid, save_day_grid) still live in this module and
+# still call it by its bare name — this binding is load-bearing for those
+# three runtime callers, not incidental, and stays until both consuming
+# domains themselves move. Not placed under app.payroll.period_creation:
+# see the historical B4-4A note carried into the new module's own docstring.
+# app.payroll.off_drivers no longer resolves this helper through this
+# module's facade — it now imports it directly from
+# app.payroll.period_day_calendar.
+from app.payroll.period_day_calendar import _validate_period_work_date
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has internal call
@@ -1807,72 +1819,6 @@ async def resubmit_period(
 # ===========================================================================
 # Draft lines — entry service
 # ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# Work-date accessor
-#
-# B4-4A ownership correction: this was briefly moved into
-# app.payroll.period_creation, but has no caller inside that module's own
-# logic — Period Creation only ever *writes* PayrollPeriodDays once (see
-# _create_period_day_rows there). It is a read/validate accessor consumed
-# by Draft-line CRUD (below), Day Grid, and app.payroll.off_drivers — none
-# of which is extracted yet — so it is returned here rather than left under
-# the wrong domain's ownership.
-#
-# Stage B4-11E: the two pay-item snapshot accessors that previously sat here
-# (_period_has_pay_item_snapshot, _get_period_pay_item_snapshot) moved to
-# app.payroll.period_pay_item_snapshot in full; see the import block above.
-# ---------------------------------------------------------------------------
-
-async def _validate_period_work_date(
-    period_id: int,
-    work_date: date,
-    start_date: date,
-    end_date: date,
-    db: AsyncConnection,
-) -> None:
-    """
-    Validate that work_date is valid for a period.
-
-    1. Existing StartDate/EndDate bounds check (always applied).
-    2. If PayrollPeriodDays rows exist for the period, work_date must appear
-       in the snapshot. Missing dates are rejected (400).
-    3. Configured-off days (IsConfiguredOffDay=TRUE) are NOT rejected in CP-2B
-       — IsScheduledWorkDay is metadata-only in this version.
-
-    Legacy periods (created before 0052, no day rows) fall back to step 1 only.
-    """
-    if not (start_date <= work_date <= end_date):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"work_date {work_date} is outside the period range "
-                f"({start_date} to {end_date})."
-            ),
-        )
-
-    has_snapshot = (await db.execute(
-        text("SELECT 1 FROM payroll.PayrollPeriodDays WHERE payrollperiodid = :pid LIMIT 1"),
-        {"pid": period_id},
-    )).first()
-
-    if has_snapshot is not None:
-        day_row = (await db.execute(
-            text("""
-                SELECT 1 FROM payroll.PayrollPeriodDays
-                WHERE payrollperiodid = :pid AND workdate = :dt
-            """),
-            {"pid": period_id, "dt": work_date},
-        )).first()
-        if day_row is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"work_date {work_date} is not in the period day snapshot. "
-                    "The requested date was not part of this period's calendar."
-                ),
-            )
 
 
 # ---------------------------------------------------------------------------
