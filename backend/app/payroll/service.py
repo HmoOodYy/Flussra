@@ -198,6 +198,19 @@ from app.payroll.source_line_read import (
 # (dependency direction: source_evidence.py -> audit_evidence.py, never the
 # reverse, and never -> app.payroll.service).
 from app.payroll.source_evidence import _capture_source_evidence
+# Stage B4-11E: the period pay-item snapshot read accessors
+# (_period_has_pay_item_snapshot, _get_period_pay_item_snapshot) moved to
+# app.payroll.period_pay_item_snapshot in full. Both keep a plain imported
+# binding here: Period Pay (update_period_pay_line) and Day Grid
+# (get_day_grid, save_day_grid) still live in this module and still call
+# both helpers by their bare names — these bindings are load-bearing for
+# those runtime callers, not incidental, and stay until the consuming
+# domains themselves move. Not placed under app.payroll.period_creation:
+# see the historical B4-4A note at the "Work-date accessor" banner below.
+from app.payroll.period_pay_item_snapshot import (
+    _get_period_pay_item_snapshot,
+    _period_has_pay_item_snapshot,
+)
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has ~31 internal call
@@ -243,6 +256,11 @@ from app.payroll.schemas import (
     _VALID_TRANSITIONS,
     DraftLineSummary, DraftLineCreate, DraftLineUpdate,
     DriverPeriodSummary, ENTRY_ALLOWED_STATUSES, SOURCE_ENTRY_STATUSES,
+    # Stage B4-11E: _WRITE_BLOCKED_STATUSES relocated here from this module in
+    # full. Four callers remain in this module (update_draft_line,
+    # void_draft_line, update_period_pay_line, void_period_pay_line); this
+    # binding is load-bearing for those runtime callers, not incidental.
+    _WRITE_BLOCKED_STATUSES,
     PeriodPayLineCreate, PeriodPayLineUpdate,
     DayGridColumn, DayGridStatusKey, DayGridLineValue,
     DayGridRow, DayGridSummary, DayGridPeriod, DayGridResponse,
@@ -1754,23 +1772,21 @@ async def resubmit_period(
 # Draft lines — entry service
 # ===========================================================================
 
-# CP-0A: Periods frozen to all source mutations.
-# InReview is now included: once a period enters review it must not be
-# mutated.  Open is the only editable status.
-_WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"}
-
 
 # ---------------------------------------------------------------------------
-# Work-date / pay-item snapshot accessors
+# Work-date accessor
 #
-# B4-4A ownership correction: these three were briefly moved into
-# app.payroll.period_creation, but none has a caller inside that module's own
-# logic — Period Creation only ever *writes* PayrollPeriodDays/
-# PayrollPeriodPayItems once (see _create_period_day_rows/
-# _create_period_pay_item_rows there). They are read/validate accessors
-# consumed exclusively by Draft-line CRUD (below), Period Pay Lines, Day
-# Grid, and app.payroll.off_drivers — none of which is extracted yet — so
-# they are returned here rather than left under the wrong domain's ownership.
+# B4-4A ownership correction: this was briefly moved into
+# app.payroll.period_creation, but has no caller inside that module's own
+# logic — Period Creation only ever *writes* PayrollPeriodDays once (see
+# _create_period_day_rows there). It is a read/validate accessor consumed
+# by Draft-line CRUD (below), Day Grid, and app.payroll.off_drivers — none
+# of which is extracted yet — so it is returned here rather than left under
+# the wrong domain's ownership.
+#
+# Stage B4-11E: the two pay-item snapshot accessors that previously sat here
+# (_period_has_pay_item_snapshot, _get_period_pay_item_snapshot) moved to
+# app.payroll.period_pay_item_snapshot in full; see the import block above.
 # ---------------------------------------------------------------------------
 
 async def _validate_period_work_date(
@@ -1821,55 +1837,6 @@ async def _validate_period_work_date(
                     "The requested date was not part of this period's calendar."
                 ),
             )
-
-
-async def _period_has_pay_item_snapshot(
-    period_id: int,
-    db: AsyncConnection,
-) -> bool:
-    """Return True if the period has any PayrollPeriodPayItems rows (post-0053 period)."""
-    result = await db.execute(
-        text("SELECT 1 FROM payroll.payrollperiodpayitems WHERE payrollperiodid = :pid LIMIT 1"),
-        {"pid": period_id},
-    )
-    return result.first() is not None
-
-
-async def _get_period_pay_item_snapshot(
-    period_id: int,
-    company_id: int,
-    db: AsyncConnection,
-    scope: str | None = None,
-    active_only: bool = False,
-) -> list:
-    """
-    Return PayrollPeriodPayItems rows for a period.
-
-    scope: 'Daily' | 'Period' | None (all)
-    active_only: if True, only rows with IsActiveInPeriod = TRUE
-
-    Returns list of mapping rows. Empty list if no snapshot exists (legacy period).
-    """
-    filters = ["payrollperiodid = :pid", "companyid = :cid"]
-    params: dict = {"pid": period_id, "cid": company_id}
-    if scope:
-        filters.append("itemscope = :scope")
-        params["scope"] = scope
-    if active_only:
-        filters.append("isactiveinperiod = TRUE")
-    where = " AND ".join(filters)
-    result = await db.execute(
-        text(f"""
-            SELECT payitemcode, payitemname, displaylabel, category, datatype, unit,
-                   itemscope, ratebehavior, appearsinpayrollentry, isactiveinperiod,
-                   payitemid, payitemstatusatsnapshot, sortorder
-            FROM payroll.payrollperiodpayitems
-            WHERE {where}
-            ORDER BY sortorder NULLS LAST, payitemcode
-        """),
-        params,
-    )
-    return result.mappings().all()
 
 
 # ---------------------------------------------------------------------------

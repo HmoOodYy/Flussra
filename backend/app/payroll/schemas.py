@@ -184,6 +184,13 @@ ENTRY_ALLOWED_STATUSES = {"Open", "Returned"}
 # Do NOT use this constant for Period Pay, Bonus, or any financial line creation.
 SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}
 
+# CP-0A: Periods frozen to all source mutations.
+# InReview is now included: once a period enters review it must not be
+# mutated.  Open is the only editable status.
+# Relocated from app.payroll.service (Stage B4-11E) — no behavior change.
+# Invariant on current code: _WRITE_BLOCKED_STATUSES == _ALL_STATUSES - ENTRY_ALLOWED_STATUSES.
+_WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"}
+
 
 class DraftLineSummary(BaseModel):
     draft_line_id: int
