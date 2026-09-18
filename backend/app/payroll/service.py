@@ -86,6 +86,16 @@ from app.payroll.driver_pay_rules import (
     update_driver_pay_rule_notes as update_driver_pay_rule_notes,
     void_driver_pay_rule as void_driver_pay_rule,
 )
+# Stage B4-3A: CP-1C slot-matrix policy/core moved to app.payroll.period_creation.
+# Re-exported here because _decode_candidate_key, get_period_candidates, and
+# create_period_from_candidate (CP-1C) and _build_branch_entry (Current
+# Payroll Hub) all still call these directly from this module.
+# _ACTIVE_SLOT_STATUSES is not re-exported: it has no caller in this module,
+# only inside _check_slot_matrix itself, which now lives in period_creation.
+from app.payroll.period_creation import (
+    _cp1c_error,
+    _check_slot_matrix,
+)
 # Stage B4-1: driver eligibility helpers moved to app.payroll.eligibility.
 # Re-exported here (same names) so this module stays a compatibility facade —
 # every existing internal call site and external consumer (current_hub.py,
@@ -13096,9 +13106,6 @@ _CP1C_VERSION = "cp1c-v1"
 _CP1C_PURPOSE = "period_creation"
 _CP1C_MAX_FUTURE = 12
 
-# Active slot statuses that govern mode-eligibility checks:
-_ACTIVE_SLOT_STATUSES = frozenset({"Draft", "Open", "InReview", "Returned"})
-
 
 # ---------------------------------------------------------------------------
 # Helpers: HMAC signing / verification
@@ -13151,13 +13158,6 @@ def _decode_candidate_key(key: str) -> tuple[dict, str]:
         _cp1c_error("INVALID_CANDIDATE_KEY", "Wrong version or purpose in candidate key.")
 
     return payload, sig
-
-
-def _cp1c_error(code: str, message: str, http_status: int = 409) -> None:
-    raise HTTPException(
-        status_code=http_status,
-        detail={"code": code, "message": message},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -13326,53 +13326,6 @@ async def _acquire_branch_workflow_lock(
         text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
         {"cid": company_id, "bid": branch_id},
     )
-
-
-# ---------------------------------------------------------------------------
-# Helper: slot matrix
-# ---------------------------------------------------------------------------
-
-def _check_slot_matrix(
-    mode: str,
-    periods: list[dict],
-) -> tuple[bool, str | None]:
-    """
-    Apply the mode/slot matrix.
-    Returns (creatable, error_code | None).
-    """
-    counts: dict[str, int] = {}
-    for p in periods:
-        s = p["status"]
-        if s in _ACTIVE_SLOT_STATUSES:
-            counts[s] = counts.get(s, 0) + 1
-
-    for s, cnt in counts.items():
-        if cnt > 1:
-            return False, "SLOT_INVARIANT_VIOLATION"
-
-    has_open = "Open" in counts
-    has_draft = "Draft" in counts
-
-    if mode == "OPEN_CREATION":
-        if has_open and has_draft:
-            return False, "ACTIVE_PERIOD_SLOTS_FULL"
-        if has_open:
-            return False, "OPEN_FILLED"
-        if has_draft:
-            return False, "DRAFT_WITHOUT_OPEN"
-        return True, None
-
-    if mode == "PREPARED_CREATION":
-        if has_open and has_draft:
-            return False, "ACTIVE_PERIOD_SLOTS_FULL"
-        if has_draft and not has_open:
-            return False, "DRAFT_WITHOUT_OPEN"
-        if not has_open:
-            return False, "OPEN_REQUIRED"
-        return True, None
-
-    _cp1c_error("INVALID_CANDIDATE_KEY", f"Unknown mode: {mode!r}.")
-    return False, None  # unreachable
 
 
 # ---------------------------------------------------------------------------
