@@ -138,6 +138,23 @@ from app.payroll.rates import (
 # because every current caller of both stays in this module in this unit.
 from app.payroll.mutation_lock import _lock_period_for_mutation
 from app.payroll.line_audit import _write_line_audit
+# Stage B4-11A: the live shared line-type vocabulary (_LineTypeInfo,
+# _LEGACY_TO_CANONICAL, _INFORMATIONAL_ONLY) moved to
+# app.payroll.line_type_vocabulary. _SYSTEM_ITEM_DB_CODES is NOT re-exported:
+# its only purpose is constructing _LEGACY_TO_CANONICAL, which now happens
+# inside the new module — it has no remaining caller here. The two dead
+# legacy constants that construct _LineTypeInfo instances,
+# _SYSTEM_LINE_TYPE_INFO and _SYSTEM_LINE_TYPES, deliberately stay in this
+# module unchanged (B4-10 Decision Review): _SYSTEM_LINE_TYPES has zero real
+# callers anywhere and _SYSTEM_LINE_TYPE_INFO is referenced only by that dead
+# set, so neither is genuinely shared vocabulary — they are legacy residue
+# left for a future dedicated dead-code cleanup stage, not this one. They
+# continue to resolve _LineTypeInfo via this import at module-import time.
+from app.payroll.line_type_vocabulary import (
+    _INFORMATIONAL_ONLY,
+    _LEGACY_TO_CANONICAL,
+    _LineTypeInfo,
+)
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has ~31 internal call
@@ -2169,13 +2186,6 @@ async def get_period_draft_summary(
 # ─────────────────────────────────────────────
 
 
-class _LineTypeInfo(NamedTuple):
-    """Validation result for a draft line's line_type value."""
-    rate_behavior: str         # 'PerUnit', 'EnteredAmount', 'Fixed', 'None', etc.
-    rate_code: str | None      # RateTypes.RateCode for PerUnit; None for other behaviors
-    item_scope: str = "Daily"  # 'Daily' | 'Period' — Period items are blocked from daily entry
-
-
 class _CalcResult(NamedTuple):
     """
     Return value of _compute_calculated_amount.
@@ -2212,39 +2222,6 @@ _SYSTEM_LINE_TYPE_INFO: dict[str, _LineTypeInfo] = {
     "Bonus":       _LineTypeInfo("Fixed",         None,  "Period"),  # Period item; blocked from daily entry
     "Adjustment":  _LineTypeInfo("Fixed",         None,  "Period"),  # Period item; blocked from daily entry
 }
-
-# Maps each legacy line-type string to its PayItemCode in payroll.PayItems
-# (where CompanyID IS NULL).  None means no DB counterpart exists for that
-# legacy string (informational items only — no branch-activation check needed).
-_SYSTEM_ITEM_DB_CODES: dict[str, str | None] = {
-    "Hours":       "HOURS",
-    "Miles":       "MILES",
-    "Loads":       "LOADS",
-    "Overnight":   "OVERNIGHT",
-    "Wait":        "WAIT_TIME",
-    "Pallets":     "PALLETS",
-    "Silos":       "SILOS",
-    "DailyStatus": None,      # no DB counterpart; informational only
-    "DailyNote":   None,      # no DB counterpart; informational only
-    "Bonus":       "BONUS",
-    "Adjustment":  "ADJUSTMENT",
-}
-
-# CP-0: Maps legacy display-name line-type strings to their canonical PayItemCode.
-# Callers may send either form; the service normalises to canonical before validation
-# and stores the canonical code in PayrollDraftLines.LineType for new rows.
-# Historical rows created before CP-0 still contain legacy strings — reads return
-# them verbatim.  Validation re-normalises on update so old rows validate correctly.
-_LEGACY_TO_CANONICAL: dict[str, str] = {
-    legacy: code
-    for legacy, code in _SYSTEM_ITEM_DB_CODES.items()
-    if code is not None   # DailyStatus / DailyNote have no canonical PayItemCode
-}
-# e.g. {"Hours": "HOURS", "Miles": "MILES", ..., "Silos": "SILOS", "Bonus": "BONUS", ...}
-
-# Pure-informational items that have no PayItems catalog counterpart.
-# Accepted unconditionally (no scope, branch, or rate checks).
-_INFORMATIONAL_ONLY: frozenset[str] = frozenset({"DailyStatus", "DailyNote"})
 
 _SYSTEM_LINE_TYPES: frozenset[str] = frozenset(_SYSTEM_LINE_TYPE_INFO)
 
