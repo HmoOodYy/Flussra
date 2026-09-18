@@ -155,6 +155,21 @@ from app.payroll.line_type_vocabulary import (
     _LEGACY_TO_CANONICAL,
     _LineTypeInfo,
 )
+# Stage B4-11B: the pay-item source-write lock (_lock_pay_item_for_source_write)
+# moved to app.payroll.pay_item_write_lock in full. This is a deliberate
+# compatibility facade, not incidental: four concurrency tests in
+# test_cp0a_mutation_status_guard.py patch
+# service._lock_pay_item_for_source_write directly
+# (svc_payroll._lock_pay_item_for_source_write = mock_lock_fn), and their
+# exercised callers (add_draft_line, update_draft_line) remain in this
+# module in this unit, so this plain imported binding must stay for those
+# patches to keep intercepting. Every current caller (add_draft_line,
+# update_draft_line, add_period_pay_line, update_period_pay_line,
+# save_day_grid) still resolves the name via this module's globals, in the
+# same call order as before (pay-item lock, then _lock_period_for_mutation)
+# — unchanged by this move, since ordering is enforced by each caller, not
+# by the function itself.
+from app.payroll.pay_item_write_lock import _lock_pay_item_for_source_write
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has ~31 internal call
@@ -1742,112 +1757,6 @@ async def resubmit_period(
 # InReview is now included: once a period enters review it must not be
 # mutated.  Open is the only editable status.
 _WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"}
-
-async def _lock_pay_item_for_source_write(
-    line_type: str,
-    company_id: int,
-    db: AsyncConnection,
-    *,
-    period_id: int | None = None,
-) -> None:
-    """
-    CP-0A: Acquire a FOR UPDATE row lock on the company-owned PayItems catalog
-    row before inserting a DraftLine reference.
-
-    Serializes with the physical-delete path's own FOR UPDATE on the same row,
-    preventing the first-reference race:
-      1. Deletion reads zero usage (no DraftLines yet).
-      2. Source creation validates the item via a plain read (no lock).
-      3. Source creation inserts the first DraftLine reference.
-      4. Deletion physically removes the catalog row → DraftLine orphaned.
-
-    Call order: acquire this lock BEFORE _lock_period_for_mutation so both
-    paths lock PayItem then Period (same order as the deletion path), avoiding
-    deadlock.
-
-    System items (companyid IS NULL) cannot be physically deleted; no lock
-    needed.  Informational-only items (DailyStatus, DailyNote) have no catalog
-    row and are skipped.
-
-    CP-2C: if period_id is provided and the item appears in that period's
-    PayrollPeriodPayItems snapshot with IsActiveInPeriod=TRUE, the live
-    status check is bypassed.  The FK lock is still acquired so a concurrent
-    physical-delete (which the snapshot FK blocks anyway) is serialised.
-    Physical deletion of an item with snapshot rows is already prevented by
-    the FK constraint on PayrollPeriodPayItems; this code path is reached only
-    when a concurrent retirement races with the write.
-
-    Raises HTTP 422 if the custom row is absent when the lock is attempted,
-    meaning a concurrent deletion committed between validation and this call.
-    """
-    if line_type in _INFORMATIONAL_ONLY:
-        return  # no PayItems catalog row
-
-    # CP-2C: snapshot authorisation — item active in period snapshot remains
-    # usable even if live PayItems.Status was later changed to Retired.
-    snapshot_authorised = False
-    if period_id is not None:
-        snap_auth = await db.execute(
-            text("""
-                SELECT 1 FROM payroll.payrollperiodpayitems
-                WHERE payrollperiodid = :pid
-                  AND payitemcode     = :code
-                  AND isactiveinperiod = TRUE
-                LIMIT 1
-            """),
-            {"pid": period_id, "code": line_type},
-        )
-        if snap_auth.first() is not None:
-            snapshot_authorised = True
-
-    # Try to lock the custom (company-specific) row and read its status.
-    # Selecting status here means the retirement race is caught: if a concurrent
-    # deletion/retirement committed while this call was waiting for the lock, we
-    # see the committed 'Retired' status and reject rather than inserting a
-    # DraftLine for a no-longer-Active item.
-    result = await db.execute(
-        text("""
-            SELECT payitemid, status FROM payroll.payitems
-            WHERE  payitemcode = :code AND companyid = :cid
-            FOR UPDATE
-        """),
-        {"code": line_type, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is not None:
-        if row["status"] != "Active" and not snapshot_authorised:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Pay item '{line_type}' is no longer active "
-                    f"(status: '{row['status']}'). "
-                    "Refresh and try again."
-                ),
-            )
-        # Custom row locked — held until this transaction commits.
-        return
-
-    # No custom row.  Check whether a system row exists (system items can't
-    # be deleted, so no lock is needed for them).
-    sys_result = await db.execute(
-        text("""
-            SELECT payitemid FROM payroll.payitems
-            WHERE  payitemcode = :code AND companyid IS NULL
-        """),
-        {"code": line_type},
-    )
-    if sys_result.mappings().first() is not None:
-        return  # system item — safe without a lock
-
-    # Neither custom nor system — item was concurrently deleted between the
-    # initial _validate_line_type read and this lock attempt.
-    raise HTTPException(
-        status_code=422,
-        detail=(
-            f"Pay item '{line_type}' is no longer available. "
-            "It may have been deleted concurrently. Refresh and try again."
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
