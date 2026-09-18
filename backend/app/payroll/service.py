@@ -170,6 +170,21 @@ from app.payroll.line_type_vocabulary import (
 # — unchanged by this move, since ordering is enforced by each caller, not
 # by the function itself.
 from app.payroll.pay_item_write_lock import _lock_pay_item_for_source_write
+# Stage B4-11C: the shared source-line read model (_LINE_SELECT,
+# _line_row_to_summary, _get_line_by_id) moved to
+# app.payroll.source_line_read in full. All three keep a plain imported
+# binding here: Draft CRUD (get_period_lines, add_draft_line,
+# update_draft_line, void_draft_line) and Period Pay (get_period_pay_lines,
+# add_period_pay_line, update_period_pay_line, void_period_pay_line) still
+# live in this module and still call _get_line_by_id, _LINE_SELECT, and
+# _line_row_to_summary by their bare names — these bindings are load-bearing
+# for those runtime callers, not incidental, and stay until the consuming
+# domains themselves move.
+from app.payroll.source_line_read import (
+    _LINE_SELECT,
+    _get_line_by_id,
+    _line_row_to_summary,
+)
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
 # Only get_period_by_id is re-exported here: it still has ~31 internal call
@@ -1871,53 +1886,6 @@ async def _get_period_pay_item_snapshot(
     return result.mappings().all()
 
 
-_LINE_SELECT = """
-    SELECT
-        dl.draftlineid,
-        dl.payrollperiodid,
-        dl.branchid,
-        dl.driverid,
-        e.fullname         AS drivername,
-        dl.workdate,
-        dl.linetype,
-        dl.linescope,
-        dl.quantity,
-        dl.rateamount,
-        dl.calculatedamount,
-        dl.sourcetype,
-        dl.status,
-        dl.needsmanagerreview,
-        dl.notes,
-        dl.addedbyuserid,
-        dl.addedatutc
-    FROM   payroll.payrolldraftlines dl
-    JOIN   core.drivers              d  ON d.driverid   = dl.driverid
-    JOIN   core.employees            e  ON e.employeeid = d.employeeid
-"""
-
-
-def _line_row_to_summary(r: Any) -> DraftLineSummary:
-    return DraftLineSummary(
-        draft_line_id=r["draftlineid"],
-        period_id=r["payrollperiodid"],
-        branch_id=r["branchid"],
-        driver_id=r["driverid"],
-        driver_name=r["drivername"],
-        work_date=r["workdate"],
-        line_type=r["linetype"],
-        line_scope=r["linescope"],
-        quantity=r["quantity"],
-        rate_amount=r["rateamount"],
-        calculated_amount=r["calculatedamount"],
-        source_type=r["sourcetype"],
-        status=r["status"],
-        needs_manager_review=r["needsmanagerreview"],
-        notes=r["notes"],
-        added_by_user_id=r["addedbyuserid"],
-        added_at_utc=r["addedatutc"],
-    )
-
-
 # ---------------------------------------------------------------------------
 # List lines
 # ---------------------------------------------------------------------------
@@ -3422,25 +3390,6 @@ async def void_draft_line(
             clear_status=(line.line_type == "DailyStatus"),
             clear_note=(line.line_type == "DailyNote"),
         )
-
-
-# ---------------------------------------------------------------------------
-# Internal: fetch a single line by its primary key
-# ---------------------------------------------------------------------------
-
-async def _get_line_by_id(
-    draft_line_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> DraftLineSummary:
-    result = await db.execute(
-        text(f"{_LINE_SELECT} WHERE dl.draftlineid = :lid AND dl.companyid = :cid"),
-        {"lid": draft_line_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Draft line not found.")
-    return _line_row_to_summary(row)
 
 
 # ===========================================================================
