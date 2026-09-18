@@ -9,9 +9,10 @@ and create_period_from_candidate remain in app.payroll.service for now (a
 future unit may extract the rest of CP-1C).
 
 _check_slot_matrix is genuinely shared: it is called both by Period Creation
-(get_period_candidates, create_period_from_candidate) and by Current Payroll
-Hub (_build_branch_entry) — both of which remain in app.payroll.service and
-import these symbols back from here.
+(get_period_candidates, create_period_from_candidate, still in
+app.payroll.service) and by Current Payroll Hub (_build_branch_entry, moved
+to app.payroll.current_hub in Stage B4-3B) — each imports these symbols
+directly from here.
 """
 from fastapi import HTTPException
 

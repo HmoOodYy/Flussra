@@ -1871,7 +1871,7 @@ async def get_current_workflow(
     db: DbDep,
     branch_id: int | None = Query(None, description="Scope to a specific branch (optional)"),
 ) -> CurrentWorkflowResponse:
-    return await service.get_current_workflow(
+    return await current_hub.get_current_workflow(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         branch_id=branch_id,
