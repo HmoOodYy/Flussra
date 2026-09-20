@@ -13,7 +13,7 @@ from app.core.service import (
     _has_any_permission,
     _require_not_driver_role,
 )
-from app.payroll import off_drivers, service
+from app.payroll import off_drivers, period_calculation, service
 from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.period_creation import _check_slot_matrix
 from app.payroll.schemas import (
@@ -265,7 +265,7 @@ async def _hub_slot(
             status=slot.status,
         )
         financial_summary = _financial_summary(
-            await service._build_live_calculation_packet(period, company_id, db)
+            await period_calculation._build_live_calculation_packet(period, company_id, db)
         )
 
     return CurrentPayrollHubPeriodSlot(

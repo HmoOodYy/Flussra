@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
-from app.payroll import service, status_evidence
+from app.payroll import period_calculation, service, status_evidence
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 
 
@@ -182,7 +182,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
             branch_name=period["branchname"], period_code=period["periodcode"], period_name=period["periodname"],
             period_type=period["periodtype"], start_date=period["startdate"], end_date=period["enddate"], status=period["status"],
         )
-        packet = await service._build_live_calculation_packet(summary, int(period["companyid"]), db)
+        packet = await period_calculation._build_live_calculation_packet(summary, int(period["companyid"]), db)
         lines = [dict(line.__dict__) for driver in packet.drivers for line in driver.lines]
         totals = {d.driver_id: {"daily_pay": d.daily_pay, "status_pay": d.status_pay,
                   "period_pay": d.period_pay, "minimum_adjustment": d.minimum_adjustment,
@@ -328,7 +328,7 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
                     "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
                     "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
                     "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]}
-                   for r in await service._load_active_bonus_events(int(period["payrollperiodid"]), company_id, db)]
+                   for r in await period_calculation._load_active_bonus_events(int(period["payrollperiodid"]), company_id, db)]
         evidence_available = True
     summaries = _status_summaries(statuses)
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)

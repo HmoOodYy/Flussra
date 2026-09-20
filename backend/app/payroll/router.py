@@ -20,6 +20,7 @@ from app.payroll import (
     finalized_library_read_model,
     ledger_read,
     off_drivers,
+    period_calculation,
     period_creation,
     period_pay,
     period_read,
@@ -550,7 +551,7 @@ async def get_calculation_preview(
     token: TokenDep,
     db: DbDep,
 ) -> CalculationPreviewResponse:
-    return await service.get_calculation_preview(
+    return await period_calculation.get_calculation_preview(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

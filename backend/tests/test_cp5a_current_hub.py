@@ -407,7 +407,11 @@ class TestCurrentPayrollHub:
         async def live_packet_must_not_run(*args, **kwargs):
             raise AssertionError("Prepared must not invoke CP-4B live calculation")
 
-        monkeypatch.setattr(current_hub.service, "_build_live_calculation_packet", live_packet_must_not_run)
+        # Stage B4-17: current_hub's Calculation edge now calls
+        # app.payroll.period_calculation._build_live_calculation_packet
+        # directly — the old current_hub.service binding is no longer on
+        # the production call path.
+        monkeypatch.setattr(current_hub.period_calculation, "_build_live_calculation_packet", live_packet_must_not_run)
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text
         prepared = _branch(response.json(), paytest_branch_id)["slots"]["prepared"]
@@ -509,7 +513,11 @@ class TestCurrentPayrollHub:
         async def live_packet_must_not_run(*args, **kwargs):
             raise AssertionError("InReview must not invoke CP-4B live calculation")
 
-        monkeypatch.setattr(current_hub.service, "_build_live_calculation_packet", live_packet_must_not_run)
+        # Stage B4-17: current_hub's Calculation edge now calls
+        # app.payroll.period_calculation._build_live_calculation_packet
+        # directly — the old current_hub.service binding is no longer on
+        # the production call path.
+        monkeypatch.setattr(current_hub.period_calculation, "_build_live_calculation_packet", live_packet_must_not_run)
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text
         in_review = _branch(response.json(), paytest_branch_id)["slots"]["in_review"]

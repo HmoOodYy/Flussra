@@ -456,7 +456,11 @@ async def test_prepared_route_matrix_is_operational_only(
     async def live_packet_must_not_run(*_args, **_kwargs):
         raise AssertionError("Prepared reports must not invoke CP-4B live calculation")
 
-    monkeypatch.setattr(report_read_model.service, "_build_live_calculation_packet", live_packet_must_not_run)
+    # Stage B4-17: report_read_model's Calculation edge now calls
+    # app.payroll.period_calculation._build_live_calculation_packet
+    # directly — the old report_read_model.service binding is no longer on
+    # the production call path.
+    monkeypatch.setattr(report_read_model.period_calculation, "_build_live_calculation_packet", live_packet_must_not_run)
     drivers = await _report(session_client, auth_token, period_id, "drivers")
     work = await _report(session_client, auth_token, period_id, "period-work")
     pay = await _report(session_client, auth_token, period_id, "period-pay")

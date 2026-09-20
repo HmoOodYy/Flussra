@@ -2521,7 +2521,7 @@ class TestStructuralBlockers:
         endpoint surfaces it with HTTP 200 and has_blockers=True. This
         proves propagation without ever touching shared schema.
         """
-        from app.payroll import service as payroll_service
+        from app.payroll import period_calculation
 
         real_duplicate_text = (
             "Cannot finalize: duplicate active Daily draft lines detected "
@@ -2531,7 +2531,12 @@ class TestStructuralBlockers:
         async def _stub_validator(*, period_id, company_id, branch_id, period_start, period_end, db):
             return [real_duplicate_text]
 
-        monkeypatch.setattr(payroll_service, "_validate_period_can_finalize", _stub_validator)
+        # Stage B4-17: _validate_period_can_finalize now lives in
+        # app.payroll.period_calculation, and _build_live_calculation_packet
+        # (also in period_calculation) resolves it as a bare name through
+        # that module's own globals — patching app.payroll.service's
+        # compatibility re-export no longer intercepts it.
+        monkeypatch.setattr(period_calculation, "_validate_period_can_finalize", _stub_validator)
 
         async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open") as pid:
             r = await session_client.get(f"/payroll/periods/{pid}/calculation-preview", headers=auth(auth_token))

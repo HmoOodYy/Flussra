@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+import app.payroll.period_calculation as period_calculation
 import app.payroll.service as payroll_service
 from app.payroll.schemas import PeriodStatusChange
 from app.payroll.service import (
@@ -877,7 +878,13 @@ async def test_submit_structural_blocker_leaves_no_snapshot_or_transition(cp4d_d
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_validate_period_can_finalize", _blocker)
+    # Stage B4-17: _validate_period_can_finalize now lives in
+    # app.payroll.period_calculation, and _build_live_calculation_packet
+    # (also in period_calculation) resolves it as a bare name through that
+    # module's own globals — patching app.payroll.service's compatibility
+    # re-export no longer intercepts it. _set_submit_transaction_isolation
+    # is unaffected: it is Lifecycle-owned and stays in app.payroll.service.
+    monkeypatch.setattr(period_calculation, "_validate_period_can_finalize", _blocker)
     monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(HTTPException, match="incomplete calculation packet"):
         await change_period_status(

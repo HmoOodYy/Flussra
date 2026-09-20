@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import app.payroll.period_calculation as period_calculation
 import app.payroll.service as payroll_service
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
@@ -207,7 +208,16 @@ async def test_snapshot_read_and_approval_ignore_live_draft_line_drift(cp4e_db, 
     async def _unexpected_live_calculation(*_args, **_kwargs):
         raise AssertionError("approval must not rebuild live payroll calculations")
 
+    # Stage B4-17: _build_live_calculation_packet's real implementation now
+    # lives in app.payroll.period_calculation. app.payroll.service still
+    # carries a load-bearing compatibility binding to the same function
+    # (Lifecycle resolves it there). decide_review_item's call graph does
+    # not reference either namespace today, so this guard patches BOTH to
+    # remain a genuine "never invoke by any route" assertion rather than a
+    # single-namespace guard that a future accidental call through the
+    # other namespace could silently escape.
     monkeypatch.setattr(payroll_service, "_build_live_calculation_packet", _unexpected_live_calculation)
+    monkeypatch.setattr(period_calculation, "_build_live_calculation_packet", _unexpected_live_calculation)
     await decide_review_item(review_id, cp4e_db.company_id, cp4e_db.user_id, ReviewDecide(decision="Approved"), cp4e_db.conn)
     assert (await cp4e_db.conn.execute(text("SELECT payrollcalculationsnapshotid FROM review.managerreviewitems WHERE reviewitemid = :review_id"), {"review_id": review_id})).scalar_one() == snapshot_id
 
