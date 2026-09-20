@@ -13,7 +13,11 @@ from app.core.service import (
     _has_any_permission,
     _require_not_driver_role,
 )
-from app.payroll import off_drivers, period_calculation, service
+from app.payroll import off_drivers, period_calculation
+from app.payroll.eligibility import (
+    _is_snapshot_row_eligible_for_workdate,
+    _period_has_driver_eligibility_snapshot,
+)
 from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.period_creation import _check_slot_matrix
 from app.payroll.schemas import (
@@ -27,6 +31,7 @@ from app.payroll.schemas import (
     CurrentPayrollHubResponse,
     CurrentPayrollHubSlots,
     CurrentWorkflowResponse,
+    PeriodSummary,
     PeriodWorkflowCapabilities,
     WorkflowAlert,
     WorkflowBranchSlots,
@@ -58,7 +63,7 @@ async def _eligible_driver_ids(
     db: AsyncConnection,
 ) -> tuple[set[int], dict[int, SimpleNamespace] | None]:
     """Return period eligibility plus CP-2E date windows when snapshotted."""
-    has_snapshot = await service._period_has_driver_eligibility_snapshot(period_id, db)
+    has_snapshot = await _period_has_driver_eligibility_snapshot(period_id, db)
 
     if has_snapshot:
         rows = (await db.execute(
@@ -136,7 +141,7 @@ async def _period_metrics(
     # a financial total. Every source must be inside the period bounds. CP-2E
     # periods are additionally filtered through the canonical snapshotted
     # driver-date helper below; the SQL conditions are the legacy day-grid path.
-    in_clause, in_params = service._build_in_clause(sorted(eligible_ids), "driver")
+    in_clause, in_params = _build_in_clause(sorted(eligible_ids), "driver")
     legacy_date_eligibility = ""
     if snapshot_rows is None:
         legacy_date_eligibility = """
@@ -194,7 +199,7 @@ async def _period_metrics(
         working_ids = {
             int(row["driverid"])
             for row in rows
-            if service._is_snapshot_row_eligible_for_workdate(
+            if _is_snapshot_row_eligible_for_workdate(
                 snapshot_rows[int(row["driverid"])], row["workdate"],
             )
         }
@@ -253,7 +258,7 @@ async def _hub_slot(
     metrics = await _period_metrics(slot, company_id, db)
     financial_summary = None
     if slot.status in {"Open", "Returned"}:
-        period = service.PeriodSummary.model_construct(
+        period = PeriodSummary.model_construct(
             payroll_period_id=slot.period_id,
             branch_id=slot.branch_id,
             branch_name=slot.branch_name,

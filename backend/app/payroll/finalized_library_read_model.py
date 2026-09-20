@@ -17,7 +17,8 @@ from app.core.service import (
     _check_permission,
     _require_not_driver_role,
 )
-from app.payroll import report_read_model, service, status_evidence
+from app.payroll import report_read_model, status_evidence
+from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 
 _REPORT_TYPES = {"drivers", "period-work", "period-pay", "mixed"}
 _FINALIZED_STATUSES = {"Locked", "Archived"}
@@ -721,7 +722,7 @@ async def _finalized_eligible_driver_days(
         eligibility = SimpleNamespace(**dict(row))
         days = {
             work_date for work_date in scheduled_days
-            if service._is_snapshot_row_eligible_for_workdate(eligibility, work_date)
+            if _is_snapshot_row_eligible_for_workdate(eligibility, work_date)
         }
         if days:
             driver_id = int(row["driverid"])

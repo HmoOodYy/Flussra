@@ -17,6 +17,7 @@ from app.payroll import (
     current_hub,
     day_grid,
     draft_line_mutation,
+    driver_pay_rules,
     eligibility,
     finalization,
     finalized_library_read_model,
@@ -29,7 +30,6 @@ from app.payroll import (
     period_read,
     rates,
     report_read_model,
-    service,
     source_line_read,
 )
 from app.payroll.schemas import (
@@ -1471,7 +1471,7 @@ async def list_driver_pay_rules(
     rule_type: str | None = Query(None, description="MinimumPay | MaximumPay"),
     rule_status: str | None = Query(None, alias="status", description="Active | Ended | Voided"),
 ) -> list[DriverPayRuleSummary]:
-    return await service.get_driver_pay_rules(
+    return await driver_pay_rules.get_driver_pay_rules(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         driver_id=driver_id,
@@ -1497,7 +1497,7 @@ async def create_driver_pay_rule(
     token: TokenDep,
     db: DbDep,
 ) -> DriverPayRuleSummary:
-    return await service.create_driver_pay_rule(
+    return await driver_pay_rules.create_driver_pay_rule(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -1519,7 +1519,7 @@ async def get_driver_pay_rule(
     token: TokenDep,
     db: DbDep,
 ) -> DriverPayRuleSummary:
-    return await service.get_driver_pay_rule_by_id(
+    return await driver_pay_rules.get_driver_pay_rule_by_id(
         rule_id=rule_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1543,7 +1543,7 @@ async def end_driver_pay_rule(
     token: TokenDep,
     db: DbDep,
 ) -> DriverPayRuleSummary:
-    return await service.end_driver_pay_rule(
+    return await driver_pay_rules.end_driver_pay_rule(
         rule_id=rule_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1568,7 +1568,7 @@ async def update_driver_pay_rule(
     token: TokenDep,
     db: DbDep,
 ) -> DriverPayRuleSummary:
-    return await service.update_driver_pay_rule_notes(
+    return await driver_pay_rules.update_driver_pay_rule_notes(
         rule_id=rule_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1592,7 +1592,7 @@ async def void_driver_pay_rule(
     token: TokenDep,
     db: DbDep,
 ) -> DriverPayRuleSummary:
-    return await service.void_driver_pay_rule(
+    return await driver_pay_rules.void_driver_pay_rule(
         rule_id=rule_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1624,7 +1624,7 @@ async def get_period_drivers_off(
     token: TokenDep,
     db: DbDep,
 ) -> DriversOffResponse:
-    entries_raw, status_evidence_state = await service.get_drivers_off(
+    entries_raw, status_evidence_state = await off_drivers.get_drivers_off(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

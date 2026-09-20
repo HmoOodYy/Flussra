@@ -6,19 +6,13 @@ Branch-access enforcement is performed at the top of every mutating function;
 read functions filter by the user's allowed branches directly in the query.
 """
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
-
-# B4-21 correction: _build_in_clause was briefly (and incorrectly) removed
-# from this import as an orphan — it is production-load-bearing until B4-22
-# retargets current_hub.py, which resolves it via qualified module-attribute
-# access (service._build_in_clause), not a direct symbol import from this
-# module's namespace. _check_any_permission and _require_not_driver_role
-# remain load-bearing for get_drivers_off, the last real implementation here.
-from app.core.service import (
-    _build_in_clause,  # noqa: F401
-    _check_any_permission, _require_not_driver_role,
-)
+# Stage B4-22 removed the app.core.service import entirely: _build_in_clause
+# was production-load-bearing only for current_hub.py's qualified
+# service._build_in_clause access, which now imports it directly from
+# app.core.service; _check_any_permission and _require_not_driver_role were
+# load-bearing only for get_drivers_off, which moved to app.payroll.off_drivers
+# in this stage. A fresh whole-tree search confirmed no test imports any of
+# the three directly from this module.
 # Stage B4-13C: PerUnitInput/calculate_per_unit are no longer imported here —
 # their only caller (_compute_calculated_amount) moved to
 # app.payroll.draft_line_calculation, which imports them directly.
@@ -46,7 +40,6 @@ from app.core.service import (
 # and calculate_source_config_hash had exactly one caller each
 # (_capture_calculation_snapshot), which moved to
 # app.payroll.period_calculation and imports all six directly.
-from app.payroll import status_evidence
 # Stage B4-2A: shared payroll access/guard helpers moved to app.payroll.guards.
 # _check_own_driver_only, _check_not_in_finalized_period, and
 # _check_driver_read_access are NOT re-exported (as of B4-4B): their only
@@ -59,28 +52,12 @@ from app.payroll import status_evidence
 # test_cp4f_finalization_snapshot_projection.py's no_access_checks fixture,
 # previously documented here, is retargeted to app.payroll.finalization as
 # part of this stage.
-# Stage B4-2B: Driver Pay Rules implementation moved to
-# app.payroll.driver_pay_rules. The public functions are re-exported so
-# router.py can still call them as service.<name>. Most private helpers were
-# intentionally NOT re-exported: their only test coupling (test_m15.py's
-# audit-rollback monkeypatches) was repointed to patch
-# app.payroll.driver_pay_rules directly, where the moved functions actually
-# resolve that name now.
-#
-# Stage B4-2C correction: _write_pay_rule_audit was re-exported here from
-# B4-2C through B4-4A because copy_driver_rates (a Rates function that stayed
-# in this file until B4-4B) called it directly. Stage B4-4B moved
-# copy_driver_rates into app.payroll.rates, which now imports
-# _write_pay_rule_audit directly from app.payroll.driver_pay_rules — this
-# module no longer has any caller of it, so it is NOT re-exported here.
-from app.payroll.driver_pay_rules import (
-    create_driver_pay_rule as create_driver_pay_rule,
-    get_driver_pay_rules as get_driver_pay_rules,
-    get_driver_pay_rule_by_id as get_driver_pay_rule_by_id,
-    end_driver_pay_rule as end_driver_pay_rule,
-    update_driver_pay_rule_notes as update_driver_pay_rule_notes,
-    void_driver_pay_rule as void_driver_pay_rule,
-)
+# Stage B4-2B moved Driver Pay Rules to app.payroll.driver_pay_rules; the six
+# public functions were re-exported here so router.py could call them as
+# service.<name>. Stage B4-22 redirected router.py to call
+# app.payroll.driver_pay_rules directly (the last production caller through
+# this facade), and a fresh whole-tree search confirmed no test imports any
+# of the six directly from this module either — the facade is removed.
 # Stage B4-3A/B4-4A: CP-1C (Period Creation) moved to app.payroll.period_creation
 # in full. _cp1c_error, _check_slot_matrix, get_period_candidates, and
 # create_period_from_candidate were never re-exported here (router.py and
@@ -315,20 +292,17 @@ from app.payroll.draft_line_calculation import _compute_calculated_amount  # noq
 # module.
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
-# Only get_period_by_id is re-exported here: get_drivers_off (Drivers Off,
-# deferred to B4-22) is this module's last remaining internal caller. Stage
-# B4-21 moved Period Create's own call site to app.payroll.period_creation
-# directly, alongside get_period_entry_count/get_period_lines/
-# get_period_draft_summary/get_period_eligible_drivers's call sites, which
-# each now import get_period_by_id directly from their own new owner
-# modules. app.payroll.off_drivers also resolves it via this facade
-# (qualified service.get_period_by_id access) — left unchanged, not
-# redirected, since the facade is load-bearing anyway pending B4-22.
-# get_periods has no remaining caller here (router.py now calls
+# Stage B4-22 moved get_drivers_off (this module's last remaining internal
+# caller of get_period_by_id) to app.payroll.off_drivers, which now imports
+# its own copy directly from period_read — off_drivers.py no longer
+# resolves it via this facade. get_period_by_id is retained below purely as
+# test-only compatibility: test_cp4d_submit_snapshot_capture.py and
+# test_cp5c_frozen_report_evidence.py both import it directly from this
+# module. get_periods has no remaining caller here (router.py calls
 # period_read.get_periods directly); _BASE_SELECT and _row_to_summary are
 # private implementation details of period_read.py with no caller anywhere
-# else. Do not remove this binding until Drivers Off itself moves in B4-22.
-from app.payroll.period_read import get_period_by_id
+# else.
+from app.payroll.period_read import get_period_by_id  # noqa: F401
 # Stage B4-1: driver eligibility helpers moved to app.payroll.eligibility.
 # Re-exported here (same names) so this module stays a compatibility facade —
 # every existing internal call site and external consumer (current_hub.py,
@@ -338,22 +312,20 @@ from app.payroll.eligibility import (
     # imports this directly from app.payroll.service.
     _get_driver_eligibility_row,  # noqa: F401
     # Stage B4-21 moved get_period_eligible_drivers (this symbol's last
-    # INTERNAL caller here) to app.payroll.eligibility directly, but this
-    # binding stays production-load-bearing, not test-only: current_hub.py
-    # and off_drivers.py both resolve it via qualified module-attribute
-    # access (service._period_has_driver_eligibility_snapshot), not a direct
-    # symbol import, so no static import-graph search finds them. Also
-    # re-exported for test_cp2e_eligibility_snapshot.py, which imports it
+    # internal caller here) to app.payroll.eligibility directly. Stage B4-22
+    # retargeted current_hub.py and off_drivers.py — the two remaining
+    # qualified-access production consumers — to import their own copy
+    # directly from app.payroll.eligibility too, so this binding is now
+    # genuinely test-only: test_cp2e_eligibility_snapshot.py imports it
     # directly from app.payroll.service.
     _period_has_driver_eligibility_snapshot,  # noqa: F401
-    # B4-21 correction: this binding is production-load-bearing, not
-    # test-only — current_hub.py and off_drivers.py both resolve it via
-    # qualified module-attribute access (service._is_snapshot_row_eligible_for_workdate),
-    # not a direct symbol import, so no static import-graph search finds
-    # them. Day Grid (get_day_grid) stopped being an INTERNAL caller here at
-    # B4-16 and imports its own copy directly from app.payroll.eligibility;
-    # that is unrelated to the two qualified-access consumers above. Also
-    # re-exported for test_cp2e_eligibility_snapshot.py, which imports it
+    # Stage B4-16: Day Grid (get_day_grid) was this symbol's last internal
+    # caller here; it now imports its own copy directly from
+    # app.payroll.eligibility. Stage B4-22 retargeted current_hub.py,
+    # off_drivers.py, and finalized_library_read_model.py — the three
+    # remaining qualified-access production consumers — to import their own
+    # copy directly from app.payroll.eligibility too, so this binding is now
+    # genuinely test-only: test_cp2e_eligibility_snapshot.py imports it
     # directly from app.payroll.service.
     _is_snapshot_row_eligible_for_workdate,  # noqa: F401
     # Stage B4-15: Status Payment Sync (_refresh_status_payment_lines) was
@@ -423,10 +395,13 @@ from app.payroll.eligibility import (
 # get_period_eligible_drivers — the last remaining callers here of
 # PeriodCreate, NextPeriodDates, PeriodEntryCount, DraftLineSummary, and
 # DriverPeriodSummary — to their new owner modules, which each import their
-# own copy directly; none of those five is re-exported anymore. Only
-# PeriodSummary remains: get_drivers_off (Drivers Off, deferred to B4-22)
-# still uses it as a parameter type in this module.
-from app.payroll.schemas import PeriodSummary
+# own copy directly; none of those five is re-exported anymore. Stage B4-22
+# moved get_drivers_off (PeriodSummary's last remaining consumer here, as a
+# parameter type) to app.payroll.off_drivers, and retargeted current_hub.py
+# and report_read_model.py — the two remaining qualified-access production
+# consumers — to import PeriodSummary directly from app.payroll.schemas. A
+# fresh whole-tree search confirmed no test imports it from this module
+# either, so it is no longer re-exported.
 # Stage B4-17: the Period Calculation + Snapshot domain
 # (_RATE_DEPENDENT_BEHAVIORS, _refresh_draft_calculations,
 # _validate_period_can_finalize, _compute_draft_line_preview_amounts,
@@ -541,178 +516,7 @@ from app.payroll.finalization import (
 # Stage B4-9.5: the Ledger read domain (_FINAL_SELECT, get_final_lines) moved
 # to app.payroll.ledger_read in full. No facade is kept here: router.py now
 # calls app.payroll.ledger_read directly, and no internal service.py caller
-# or test imports either symbol from this module. get_drivers_off /
-# _finalized_drivers_off_entries stay in this module — B4-9 deferred both
-# pending targeted architectural discovery (B4-20 resolved the underlying
-# structural cause; the move itself is reserved for B4-22), not a Ledger
-# ownership question.
-
-
-async def _finalized_drivers_off_entries(
-    period: PeriodSummary,
-    company_id: int,
-    db: AsyncConnection,
-) -> tuple[list[dict], dict[str, str | None]]:
-    """
-    Stage B3 Unit 8C-7: Locked/Archived Status evidence for CP-2.5 Drivers Off.
-
-    Reuses the same Approved-PeriodApproval-review-item snapshot authority
-    and shared read primitives as Day Grid (Unit 8C-3) and CP-5B Off Drivers
-    (Unit 8C-5) via status_evidence.py -- never the EntryState freeze columns
-    (StatusCodeSnapshot/StatusLabelSnapshot/StatusIsOffReasonSnapshot/
-    FinalizedAtUtc), never live PayrollStatusKeys, never legacy DailyStatus
-    DraftLines. Returns (entries, {state, reason_code}); entries is always
-    [] unless state is AVAILABLE with at least one captured off-reason row.
-    """
-    snapshot, availability = await status_evidence.resolve_finalized_snapshot(
-        db, period_id=period.payroll_period_id, company_id=company_id, branch_id=period.branch_id,
-    )
-    if snapshot is None:
-        # No usable snapshot provenance -- never fall back to another
-        # snapshot or to mutable current state; evidence is unavailable.
-        return [], availability
-
-    status_rows = await status_evidence.read_status_entries(
-        db,
-        snapshot_id=snapshot["payrollcalculationsnapshotid"],
-        company_id=company_id,
-        branch_id=period.branch_id,
-        period_id=period.payroll_period_id,
-    )
-    evidence_state = status_evidence.status_evidence_availability(snapshot, status_rows)
-    off_rows = [row for row in status_rows if row["is_off_reason"]]
-    if not off_rows:
-        return [], evidence_state
-
-    driver_ids = sorted({row["driver_id"] for row in off_rows})
-    identity_rows = (await db.execute(
-        text("""
-            SELECT d.driverid, e.fullname AS drivername, d.drivercode
-            FROM core.drivers d
-            JOIN core.employees e ON e.employeeid = d.employeeid
-            WHERE d.companyid = :company_id
-              AND d.driverid  = ANY(:driver_ids)
-        """),
-        {"company_id": company_id, "driver_ids": driver_ids},
-    )).mappings().all()
-    identities = {int(r["driverid"]): r for r in identity_rows}
-
-    # NoteText is not part of the immutable Status-evidence table's contract
-    # (see status_evidence.read_status_entries) -- read it separately from
-    # canonical EntryState, which no write path can change once a period is
-    # Locked (Locked/Archived are in _WRITE_BLOCKED_STATUSES).
-    note_rows = (await db.execute(
-        text("""
-            SELECT driverid, workdate, notetext
-            FROM payroll.payrollperioddriverdayentrystate
-            WHERE payrollperiodid = :period_id
-              AND companyid = :company_id
-              AND isvoided = FALSE
-        """),
-        {"period_id": period.payroll_period_id, "company_id": company_id},
-    )).mappings().all()
-    notes_by_day = {
-        (int(row["driverid"]), row["workdate"]): row["notetext"] for row in note_rows
-    }
-
-    entries: list[dict] = []
-    for row in sorted(off_rows, key=lambda r: (r["work_date"], r["driver_id"])):
-        identity = identities.get(row["driver_id"])
-        if identity is None:
-            continue
-        entries.append({
-            "driver_id":       row["driver_id"],
-            "driver_name":     identity["drivername"],
-            "driver_code":     identity["drivercode"],
-            "work_date":       row["work_date"],
-            "status_key_code": row["status_code"],
-            "status_label":    row["status_label"],
-            "notes":           notes_by_day.get((row["driver_id"], row["work_date"])),
-        })
-    return entries, evidence_state
-
-
-async def get_drivers_off(
-    period_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> tuple[list[dict], dict[str, str | None] | None]:
-    """
-    Return all off-driver records for the entire period (all work dates).
-
-    Draft/Open/InReview/Returned/Approved (unchanged): an off-driver record
-    is a legacy DailyStatus line whose status code maps to a live
-    PayrollStatusKeys row with IsOffReason = TRUE. The status key code is
-    stored in the Notes column of DailyStatus lines. An optional DailyNote
-    line for the same driver/date is joined to supply the driver-level notes
-    text.
-
-    Locked/Archived (Stage B3 Unit 8C-7): Status meaning comes only from
-    immutable calculation-snapshot evidence via _finalized_drivers_off_entries
-    -- never live PayrollStatusKeys, never legacy DailyStatus DraftLines.
-    Returns (entries, {state, reason_code}) instead of (entries, None).
-
-    ODA/Driver users are blocked unconditionally.
-    payroll.view OR payroll.entry permission is required.
-    """
-    # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
-
-    period = await get_period_by_id(company_id, user_id, period_id, db)
-
-    await _check_any_permission(
-        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
-    )
-
-    if period.status in ("Locked", "Archived"):
-        entries, evidence_state = await _finalized_drivers_off_entries(period, company_id, db)
-        return entries, evidence_state
-
-    result = await db.execute(
-        text("""
-            SELECT
-                d.driverid,
-                e.fullname       AS drivername,
-                d.drivercode,
-                dl.workdate,
-                dl.notes         AS status_key_code,
-                sk.keyname       AS status_label,
-                dn.notes         AS driver_notes
-            FROM payroll.payrolldraftlines dl
-            JOIN core.drivers   d  ON d.driverid  = dl.driverid
-            JOIN core.employees e  ON e.employeeid = d.employeeid
-            JOIN payroll.payrollstatuskeys sk
-                ON  sk.companyid  = dl.companyid
-                AND sk.branchid   = dl.branchid
-                AND sk.statuscode = dl.notes
-                AND sk.isoffreason = TRUE
-                AND sk.isactive    = TRUE
-            LEFT JOIN payroll.payrolldraftlines dn
-                ON  dn.payrollperiodid = dl.payrollperiodid
-                AND dn.driverid        = dl.driverid
-                AND dn.workdate        = dl.workdate
-                AND dn.linetype        = 'DailyNote'
-                AND dn.status         != 'Void'
-            WHERE dl.payrollperiodid = :period_id
-              AND dl.companyid       = :company_id
-              AND dl.linetype        = 'DailyStatus'
-              AND dl.status         != 'Void'
-            ORDER BY dl.workdate, e.fullname
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-
-    rows = result.mappings().all()
-    return [
-        {
-            "driver_id":        int(r["driverid"]),
-            "driver_name":      r["drivername"],
-            "driver_code":      r["drivercode"],
-            "work_date":        r["workdate"],
-            "status_key_code":  r["status_key_code"],
-            "status_label":     r["status_label"],
-            "notes":            r["driver_notes"],
-        }
-        for r in rows
-    ], None
+# or test imports either symbol from this module. Stage B4-22 moved
+# get_drivers_off and _finalized_drivers_off_entries — B4-9's deferred
+# Drivers Off residue — to app.payroll.off_drivers, resolving the last
+# remaining real business implementation in this module.

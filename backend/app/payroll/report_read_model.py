@@ -16,8 +16,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
-from app.payroll import period_calculation, service, status_evidence
+from app.payroll import period_calculation, status_evidence
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
+from app.payroll.schemas import PeriodSummary
 
 
 def _unavailable(code: str, message: str) -> HTTPException:
@@ -177,7 +178,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
     if kind is ReportAuthorityKind.UNAVAILABLE:
         raise _unavailable("REPORT_UNAVAILABLE", "Cancelled payroll periods have no calculation reports.")
     if kind is ReportAuthorityKind.LIVE:
-        summary = service.PeriodSummary.model_construct(
+        summary = PeriodSummary.model_construct(
             payroll_period_id=int(period["payrollperiodid"]), branch_id=int(period["branchid"]),
             branch_name=period["branchname"], period_code=period["periodcode"], period_name=period["periodname"],
             period_type=period["periodtype"], start_date=period["startdate"], end_date=period["enddate"], status=period["status"],
