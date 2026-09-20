@@ -22,6 +22,7 @@ from app.payroll import (
     off_drivers,
     period_calculation,
     period_creation,
+    period_lifecycle,
     period_pay,
     period_read,
     rates,
@@ -286,7 +287,7 @@ async def change_period_status(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodSummary:
-    return await service.change_period_status(
+    return await period_lifecycle.change_period_status(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         period_id=period_id,
@@ -321,7 +322,7 @@ async def resubmit_period(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodSummary:
-    return await service.resubmit_period(
+    return await period_lifecycle.resubmit_period(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         period_id=period_id,

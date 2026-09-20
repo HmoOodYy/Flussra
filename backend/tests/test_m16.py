@@ -781,7 +781,7 @@ class TestAuditRollback:
         ASGITransport re-raises unhandled exceptions, so we use pytest.raises.
         """
         import pytest
-        import app.payroll.service as payroll_svc
+        import app.payroll.period_lifecycle as payroll_lifecycle
 
         pid = m16_open_period["payroll_period_id"]
         await _add_miles_line(client, auth_token, pid, m16_driver_id)
@@ -789,8 +789,13 @@ class TestAuditRollback:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure")
 
+        # Stage B4-18: _write_period_status_audit's real implementation now
+        # lives in app.payroll.period_lifecycle, and change_period_status
+        # (also in period_lifecycle) resolves it as a bare name through that
+        # module's own globals — patching app.payroll.service no longer
+        # intercepts it.
         with monkeypatch.context() as m:
-            m.setattr(payroll_svc, "_write_period_status_audit", _raise)
+            m.setattr(payroll_lifecycle, "_write_period_status_audit", _raise)
             with pytest.raises(RuntimeError, match="Simulated audit failure"):
                 await _submit_for_review(client, auth_token, pid)
 

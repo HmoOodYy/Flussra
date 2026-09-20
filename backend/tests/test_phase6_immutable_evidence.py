@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import app.payroll.period_lifecycle as period_lifecycle
 import app.payroll.service as payroll_service
 from app.payroll.schemas import PeriodStatusChange
 from app.payroll.service import (
@@ -275,7 +276,12 @@ async def test_workflow_actions_capture_frozen_participants_at_authoritative_tra
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and resubmit_period (also
+    # in period_lifecycle) resolves it as a bare name through that module's
+    # own globals — patching app.payroll.service's compatibility re-export
+    # no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     await payroll_service.resubmit_period(
         foundation_db.company_id, foundation_db.user_id, foundation_db.period_id,
         foundation_db.conn,

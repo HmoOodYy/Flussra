@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 import app.payroll.period_calculation as period_calculation
+import app.payroll.period_lifecycle as period_lifecycle
 import app.payroll.service as payroll_service
 from app.payroll.schemas import PeriodStatusChange
 from app.payroll.service import (
@@ -697,7 +698,12 @@ async def test_returned_resubmit_creates_next_snapshot_and_preserves_old_review_
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     result = await resubmit_period(
         cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id, cp4d_db.conn,
     )
@@ -750,7 +756,12 @@ async def test_legacy_returned_period_captures_its_first_snapshot_without_backfi
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     result = await resubmit_period(
         cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id, cp4d_db.conn,
     )
@@ -850,8 +861,18 @@ async def test_submit_rolls_back_snapshot_review_and_status_when_status_audit_fa
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_write_period_status_audit", _raise_after_status_update)
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _write_period_status_audit's real implementation now
+    # lives in app.payroll.period_lifecycle, and change_period_status (also
+    # in period_lifecycle) resolves it as a bare name through that module's
+    # own globals — patching app.payroll.service's compatibility re-export
+    # no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_write_period_status_audit", _raise_after_status_update)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(RuntimeError, match="injected period-status audit failure"):
         async with cp4d_db.conn.begin_nested():
             await change_period_status(
@@ -882,10 +903,15 @@ async def test_submit_structural_blocker_leaves_no_snapshot_or_transition(cp4d_d
     # app.payroll.period_calculation, and _build_live_calculation_packet
     # (also in period_calculation) resolves it as a bare name through that
     # module's own globals — patching app.payroll.service's compatibility
-    # re-export no longer intercepts it. _set_submit_transaction_isolation
-    # is unaffected: it is Lifecycle-owned and stays in app.payroll.service.
+    # re-export no longer intercepts it. Stage B4-18: _set_submit_transaction_isolation
+    # is likewise Lifecycle-owned and now lives in app.payroll.period_lifecycle.
     monkeypatch.setattr(period_calculation, "_validate_period_can_finalize", _blocker)
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(HTTPException, match="incomplete calculation packet"):
         await change_period_status(
             cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id,
@@ -908,7 +934,12 @@ async def test_submit_needs_manager_review_guard_leaves_no_snapshot(cp4d_db, mon
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(HTTPException, match="require manager review"):
         await change_period_status(
             cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id,
@@ -929,7 +960,12 @@ async def test_submit_unresolved_period_amount_guard_leaves_no_snapshot(cp4d_db,
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(HTTPException, match="no resolved calculation amount"):
         await change_period_status(
             cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id,
@@ -958,7 +994,12 @@ async def test_submit_duplicate_pending_review_guard_leaves_no_snapshot(cp4d_db,
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and change_period_status /
+    # resubmit_period (also in period_lifecycle) resolve it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(HTTPException, match="Pending review item already exists"):
         await change_period_status(
             cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id,

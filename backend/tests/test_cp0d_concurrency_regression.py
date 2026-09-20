@@ -468,7 +468,12 @@ class TestDoubleSubmitPrevention:
         period UPDATE in change_period_status would allow this second submit to
         succeed silently, breaking the "one Open→InReview at a time" invariant.
         """
-        import app.payroll.service as svc_payroll
+        # Stage B4-18: get_period_by_id is called by change_period_status,
+        # which now lives in app.payroll.period_lifecycle and resolves it as
+        # a bare name through that module's own globals — patching
+        # app.payroll.service's compatibility re-export no longer
+        # intercepts it.
+        import app.payroll.period_lifecycle as svc_payroll
 
         pid, period_start = await _create_open_period(session_client, auth_token, paytest_branch_id, direct_db)
         work_date = (

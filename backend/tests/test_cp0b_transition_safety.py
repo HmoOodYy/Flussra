@@ -408,7 +408,12 @@ class TestStaleTransitionRejection:
         Pre-flight reads Open; psycopg2 commits Open→InReview before the
         UPDATE; UPDATE WHERE status='Open' → 0 rows → 409.
         """
-        import app.payroll.service as svc_payroll
+        # Stage B4-18: get_period_by_id is called by change_period_status,
+        # which now lives in app.payroll.period_lifecycle and resolves it as
+        # a bare name through that module's own globals — patching
+        # app.payroll.service's compatibility re-export no longer
+        # intercepts it.
+        import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "Open")
@@ -467,7 +472,12 @@ class TestStaleTransitionRejection:
         Prevents a duplicate-archive scenario where two concurrent PATCH requests
         both observe Locked and the second silently overwrites the Archived status.
         """
-        import app.payroll.service as svc_payroll
+        # Stage B4-18: get_period_by_id is called by change_period_status,
+        # which now lives in app.payroll.period_lifecycle and resolves it as
+        # a bare name through that module's own globals — patching
+        # app.payroll.service's compatibility re-export no longer
+        # intercepts it.
+        import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "Locked")
@@ -559,7 +569,12 @@ class TestOpenToInReviewAlreadySafe:
         Pre-flight reads Open; psycopg2 commits Open→Cancelled before the
         UPDATE; UPDATE WHERE status='Open' → 0 rows → 422 (existing behaviour).
         """
-        import app.payroll.service as svc_payroll
+        # Stage B4-18: get_period_by_id is called by change_period_status,
+        # which now lives in app.payroll.period_lifecycle and resolves it as
+        # a bare name through that module's own globals — patching
+        # app.payroll.service's compatibility re-export no longer
+        # intercepts it.
+        import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "Open")

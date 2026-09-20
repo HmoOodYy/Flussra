@@ -2267,7 +2267,11 @@ class TestRollbackProof:
             )).scalar_one()
 
             # Force the Draft promotion audit to fail → simulates post-UPDATE failure.
-            from app.payroll import service as _svc
+            # Stage B4-18: _write_period_status_audit's real implementation
+            # now lives in app.payroll.period_lifecycle, and
+            # change_period_status (also in period_lifecycle) resolves it as
+            # a bare name through that module's own globals.
+            from app.payroll import period_lifecycle as _svc
             original_write_audit = _svc._write_period_status_audit
             from fastapi import HTTPException as _HTTPException
 
@@ -2592,7 +2596,11 @@ class TestRollbackProof:
 
             # Inject failure at the Open→InReview status audit (fires after review item INSERT
             # and status UPDATE — everything runs, then the audit write fails → full rollback).
-            from app.payroll import service as _svc
+            # Stage B4-18: _write_period_status_audit's real implementation
+            # now lives in app.payroll.period_lifecycle, and
+            # change_period_status (also in period_lifecycle) resolves it as
+            # a bare name through that module's own globals.
+            from app.payroll import period_lifecycle as _svc
             original = _svc._write_period_status_audit
             from fastapi import HTTPException as _HTTPException
 

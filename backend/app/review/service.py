@@ -65,7 +65,7 @@ from app.payroll.audit_evidence import (
     capture_period_audit_evidence,
     link_audit_evidence_to_snapshot,
 )
-from app.payroll.service import _write_period_status_audit  # M16, CP-1D
+from app.payroll.period_lifecycle import _write_period_status_audit  # M16, CP-1D
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.review.schemas import (
     _DECIDABLE_STATUSES,

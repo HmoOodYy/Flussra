@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.payroll.period_calculation as period_calculation
+import app.payroll.period_lifecycle as period_lifecycle
 import app.payroll.service as payroll_service
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
@@ -290,7 +291,12 @@ async def test_legacy_return_then_cp4d_resubmit_creates_revision_one_that_can_ap
     async def _no_op_isolation(_db):
         return None
 
-    monkeypatch.setattr(payroll_service, "_set_submit_transaction_isolation", _no_op_isolation)
+    # Stage B4-18: _set_submit_transaction_isolation's real implementation
+    # now lives in app.payroll.period_lifecycle, and resubmit_period (also
+    # in period_lifecycle) resolves it as a bare name through that module's
+    # own globals — patching app.payroll.service's compatibility re-export
+    # no longer intercepts it.
+    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     result = await resubmit_period(cp4e_db.company_id, cp4e_db.user_id, cp4e_db.period_id, cp4e_db.conn)
     assert result.status == "InReview"
     new_review = (await cp4e_db.conn.execute(text("""
