@@ -688,21 +688,33 @@ class TestTrueRace:
         then calls the real _lock_period_for_mutation.
 
         This fixture is shared by draft-line, day-grid, and bonus race tests.
-        Day-grid mutations still live in app.payroll.service. Stage B4-14 moved
-        Draft-line CRUD (add_draft_line/update_draft_line/void_draft_line) to
-        app.payroll.draft_line_mutation, which imports its own
+        Each of those domains now lives in its own module and imports its own
         _lock_period_for_mutation binding directly from app.payroll.mutation_lock
-        — a separate namespace entry from app.payroll.service's. Bonus (Stage
-        B4-8) moved to app.payroll.bonus earlier, which does the same. All three
-        must be patched so the boundary fires regardless of which module's
-        bare-name lookup resolves the call.
+        — separate namespace entries from app.payroll.service's, and from each
+        other's. Bonus (Stage B4-8) moved to app.payroll.bonus, Draft-line CRUD
+        (add_draft_line/update_draft_line/void_draft_line) moved to
+        app.payroll.draft_line_mutation in Stage B4-14, and Day Grid
+        (get_day_grid/save_day_grid) moved to app.payroll.day_grid in Stage
+        B4-16. app.payroll.service is still patched because other callers that
+        resolve the name through its globals remain there. All four must be
+        patched so the boundary fires regardless of which module's bare-name
+        lookup resolves the call.
+
+        The day_grid entry is load-bearing, not defensive: a day-grid save whose
+        payload carries ordinary pay-item values reaches add_draft_line first and
+        would fire the boundary through the draft_line_mutation binding anyway,
+        but a status/notes-only payload skips Draft-line mutation entirely and
+        reaches save_day_grid's own lock call as the first lock of the request.
+        Without this entry that path is not intercepted at all.
         """
         import app.payroll.bonus as bonus_mod
+        import app.payroll.day_grid as day_grid_mod
         import app.payroll.draft_line_mutation as dlm
         import app.payroll.service as svc
         real_lock_svc = svc._lock_period_for_mutation
         real_lock_bonus = bonus_mod._lock_period_for_mutation
         real_lock_dlm = dlm._lock_period_for_mutation
+        real_lock_day_grid = day_grid_mod._lock_period_for_mutation
 
         async def mock_lock(period_id, company_id, db):
             boundary_reached.set()
@@ -714,11 +726,13 @@ class TestTrueRace:
         svc._lock_period_for_mutation = mock_lock
         bonus_mod._lock_period_for_mutation = mock_lock
         dlm._lock_period_for_mutation = mock_lock
+        day_grid_mod._lock_period_for_mutation = mock_lock
 
         def restore():
             svc._lock_period_for_mutation = real_lock_svc
             bonus_mod._lock_period_for_mutation = real_lock_bonus
             dlm._lock_period_for_mutation = real_lock_dlm
+            day_grid_mod._lock_period_for_mutation = real_lock_day_grid
 
         return restore
 

@@ -15,6 +15,7 @@ from app.dependencies import get_current_user, get_db
 from app.payroll import (
     bonus,
     current_hub,
+    day_grid,
     draft_line_mutation,
     finalized_library_read_model,
     ledger_read,
@@ -1712,7 +1713,7 @@ async def get_day_grid(
         ),
     ),
 ) -> DayGridResponse:
-    return await service.get_day_grid(
+    return await day_grid.get_day_grid(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1738,7 +1739,7 @@ async def save_day_grid(
     token: TokenDep,
     db: DbDep,
 ) -> DayGridResponse:
-    return await service.save_day_grid(
+    return await day_grid.save_day_grid(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
