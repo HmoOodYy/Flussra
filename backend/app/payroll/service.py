@@ -5,16 +5,19 @@ All SQL is raw parameterised via sqlalchemy.text().
 Branch-access enforcement is performed at the top of every mutating function;
 read functions filter by the user's allowed branches directly in the query.
 """
-from datetime import date, timedelta
-from typing import Any
 
-from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+# B4-21 correction: _build_in_clause was briefly (and incorrectly) removed
+# from this import as an orphan — it is production-load-bearing until B4-22
+# retargets current_hub.py, which resolves it via qualified module-attribute
+# access (service._build_in_clause), not a direct symbol import from this
+# module's namespace. _check_any_permission and _require_not_driver_role
+# remain load-bearing for get_drivers_off, the last real implementation here.
 from app.core.service import (
-    _check_branch_access, _build_in_clause, _check_permission, _check_any_permission,
-    _require_not_driver_role,
+    _build_in_clause,  # noqa: F401
+    _check_any_permission, _require_not_driver_role,
 )
 # Stage B4-13C: PerUnitInput/calculate_per_unit are no longer imported here —
 # their only caller (_compute_calculated_amount) moved to
@@ -37,9 +40,6 @@ from app.core.service import (
 # of this module — that was the last remaining caller here of
 # link_unmapped_audit_evidence_to_snapshot, so it is no longer re-exported;
 # period_lifecycle imports its own copy directly.
-from app.payroll.audit_evidence import (
-    initialize_period_audit_evidence_coverage,
-)
 # Stage B4-17: app.payroll.snapshot_hash is no longer imported here —
 # CURRENT_PAYROLL_CALCULATION_VERSION, CURRENT_REPORT_EVIDENCE_VERSION,
 # canonical_json, calculate_report_evidence_hash, calculate_snapshot_hash,
@@ -82,47 +82,36 @@ from app.payroll.driver_pay_rules import (
     void_driver_pay_rule as void_driver_pay_rule,
 )
 # Stage B4-3A/B4-4A: CP-1C (Period Creation) moved to app.payroll.period_creation
-# in full. Re-exported here because these symbols still have real callers that
-# remain in this module: legacy create_period (_auto_period_name, _month_end,
-# _unique_period_code, ensure_current_schedule_version,
-# _create_period_day_rows, _create_period_pay_item_rows). _cp1c_error and
-# _check_slot_matrix are NOT re-exported (as of B4-4A): their last remaining
-# callers in this module — get_current_workflow/_build_branch_entry (moved to
-# current_hub.py in B4-3B) and get_period_candidates/create_period_from_candidate
-# (moved to period_creation.py in B4-4A) — are both gone. get_period_candidates
-# and create_period_from_candidate themselves are NOT re-exported either:
-# router.py now calls period_creation directly (their only consumer).
-# _validate_period_work_date, _period_has_pay_item_snapshot, and
-# _get_period_pay_item_snapshot were returned to this module in a B4-4A
-# ownership correction (see the "Work-date / pay-item snapshot accessors"
-# section below) rather than staying under period_creation.py's ownership.
-# _acquire_branch_workflow_lock was also returned and then extracted into its
-# own small neutral module, app.payroll.workflow_lock (see below) — it is not
-# period-creation-specific logic. _ACTIVE_SLOT_STATUSES, _decode_candidate_key,
-# _make_candidate_key, _setup_fingerprint, _slot_fingerprint,
-# _candidate_dates_at_offset, _generate_period_day_rows, _period_end, and
-# _write_period_created_audit have no remaining caller in this module either.
+# in full. _cp1c_error, _check_slot_matrix, get_period_candidates, and
+# create_period_from_candidate were never re-exported here (router.py and
+# current_hub.py call period_creation directly). _validate_period_work_date,
+# _period_has_pay_item_snapshot, and _get_period_pay_item_snapshot were
+# returned to this module in a B4-4A ownership correction (see the
+# "Work-date / pay-item snapshot accessors" section below) rather than
+# staying under period_creation.py's ownership.
+# Stage B4-21 moved legacy create_period (and with it _auto_period_name,
+# _month_end, _unique_period_code, and _create_period_day_rows — its only
+# remaining callers here) to app.payroll.period_creation directly; none of
+# those four is re-exported anymore, as a fresh whole-tree search confirmed
+# no test imports any of them from this module. ensure_current_schedule_version
+# and _create_period_pay_item_rows are retained below as test-only
+# compatibility, not real internal consumers: test_cp2a_schedule_versioning.py
+# imports ensure_current_schedule_version directly from this module, and
+# test_cp5c_reports.py, test_p6a/b/c_finalized_*.py, test_p6d_finalized_audit.py,
+# and test_lg1_cdpi_ledger.py import _create_period_pay_item_rows directly.
 from app.payroll.period_creation import (
-    _auto_period_name,
-    _month_end,
-    _unique_period_code,
-    ensure_current_schedule_version,
-    _create_period_day_rows,
-    _create_period_pay_item_rows,
+    ensure_current_schedule_version,  # noqa: F401
+    _create_period_pay_item_rows,  # noqa: F401
 )
 # Stage B4-4A ownership correction: _acquire_branch_workflow_lock is a
 # generic branch-level advisory-lock primitive genuinely shared by Period
-# Creation, Lifecycle, Finalization (finalize_period), legacy create_period,
-# and app.review.service — none of which owns it more than the others.
-# Extracted into its own small neutral module rather than left under
-# period_creation.py's ownership. Stage B4-18 moved Lifecycle
-# (change_period_status, resubmit_period) out of this module; it now
-# imports its own copy directly from app.payroll.workflow_lock. This plain
-# imported binding still stays here: legacy create_period and
-# finalize_period still live in this module and still call it by its bare
-# name — this binding is load-bearing for those two runtime callers, not
-# incidental.
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+# Creation, Lifecycle, Finalization, and app.review.service — none of which
+# owns it more than the others; it lives in its own small neutral module,
+# app.payroll.workflow_lock. Stage B4-19 moved Finalization (finalize_period)
+# out of this module, and Stage B4-21 moved legacy create_period out too —
+# those were this module's last two runtime callers, so this binding is no
+# longer re-exported here; a fresh whole-tree search confirmed no test
+# imports it from this module either.
 # Stage B4-4B: Rates moved to app.payroll.rates in full. No Rates public
 # function or private helper has a remaining caller in this module. Stage
 # B4-13C moved _compute_calculated_amount (the last remaining caller of
@@ -155,24 +144,19 @@ from app.payroll.line_audit import _write_line_audit  # noqa: F401
 # _LEGACY_TO_CANONICAL, _INFORMATIONAL_ONLY) moved to
 # app.payroll.line_type_vocabulary. _SYSTEM_ITEM_DB_CODES is NOT re-exported:
 # its only purpose is constructing _LEGACY_TO_CANONICAL, which now happens
-# inside the new module — it has no remaining caller here. The two dead
-# legacy constants that construct _LineTypeInfo instances,
-# _SYSTEM_LINE_TYPE_INFO and _SYSTEM_LINE_TYPES, deliberately stay in this
-# module unchanged (B4-10 Decision Review): _SYSTEM_LINE_TYPES has zero real
-# callers anywhere and _SYSTEM_LINE_TYPE_INFO is referenced only by that dead
-# set, so neither is genuinely shared vocabulary — they are legacy residue
-# left for a future dedicated dead-code cleanup stage, not this one. They
-# continue to resolve _LineTypeInfo via this import at module-import time.
-# Stage B4-16 moved Day Grid out of this module — get_day_grid was the only
-# remaining caller of _INFORMATIONAL_ONLY here, so it is no longer
-# re-exported; Day Grid imports its own copy directly.
-# Stage B4-17: _LEGACY_TO_CANONICAL is no longer imported here — its only
-# two callers (_refresh_draft_calculations, _compute_draft_line_preview_amounts)
-# moved to app.payroll.period_calculation, which imports its own copy
-# directly.
-from app.payroll.line_type_vocabulary import (
-    _LineTypeInfo,
-)
+# inside the new module — it has no remaining caller here. Stage B4-16 moved
+# Day Grid out of this module — get_day_grid was the only remaining caller
+# of _INFORMATIONAL_ONLY here, so it is no longer re-exported; Day Grid
+# imports its own copy directly. Stage B4-17: _LEGACY_TO_CANONICAL is no
+# longer imported here either — its only two callers
+# (_refresh_draft_calculations, _compute_draft_line_preview_amounts) moved to
+# app.payroll.period_calculation, which imports its own copy directly.
+# Stage B4-21 deleted the two dead legacy constants that used to construct
+# _LineTypeInfo instances here, _SYSTEM_LINE_TYPE_INFO and _SYSTEM_LINE_TYPES
+# (B4-10 Decision Review had left both as residue pending a dedicated
+# dead-code cleanup stage; a fresh whole-repository search confirmed both
+# remained dead) — _LineTypeInfo has no remaining caller here either and is
+# no longer imported.
 # Stage B4-11B: the pay-item source-write lock (_lock_pay_item_for_source_write)
 # moved to app.payroll.pay_item_write_lock in full. Stage B4-12 moved Period
 # Pay Lines (add_period_pay_line, update_period_pay_line) out of this module;
@@ -197,15 +181,11 @@ from app.payroll.line_type_vocabulary import (
 # out of this module; it now imports all three directly from
 # app.payroll.source_line_read. Stage B4-14 moved Draft-line CRUD (which
 # called _get_line_by_id) out of this module too, and it now imports its own
-# copy directly from the same owner module — _get_line_by_id has no
-# remaining caller here and is NOT re-exported. _LINE_SELECT and
-# _line_row_to_summary keep a plain imported binding here: get_period_lines
-# still lives in this module and still calls both by their bare names — this
-# binding is load-bearing for that runtime caller, not incidental.
-from app.payroll.source_line_read import (
-    _LINE_SELECT,
-    _line_row_to_summary,
-)
+# copy directly from the same owner module. Stage B4-21 moved get_period_lines
+# (the last remaining caller here of _LINE_SELECT and _line_row_to_summary)
+# to app.payroll.source_line_read directly — neither binding is re-exported
+# here anymore, and a fresh whole-tree search confirmed no test imports
+# either from this module.
 # Stage B4-11D: the SOURCE-domain audit-evidence adapter
 # (_capture_source_evidence) moved to app.payroll.source_evidence in full.
 # Stage B4-12 moved Period Pay Lines out of this module; it now imports this
@@ -232,10 +212,11 @@ from app.payroll.source_line_read import (
 # Stage B4-13A: the canonical Day Entry State domain (_validate_status_key,
 # _resolve_status_key_id, _upsert_entry_state, _void_entry_state_field,
 # _enforce_status_key_limits) moved to app.payroll.day_entry_state in full.
-# _KEEP is NOT re-exported: it has zero real executable consumers anywhere
-# in the repo (confirmed by a fresh whole-repo search at this stage) and was
-# left behind in this module as legacy/dead residue rather than promoted
-# into the new module without a live consumer. _canonical_aliases and
+# _KEEP was never re-exported: it had zero real executable consumers
+# anywhere in the repo (confirmed by a fresh whole-repo search at B4-13A,
+# and reconfirmed at B4-21) and was left behind here as legacy/dead residue
+# rather than promoted into the new module without a live consumer — Stage
+# B4-21 deleted it. _canonical_aliases and
 # _parse_quantity were evaluated and deliberately NOT moved: both are
 # save_day_grid-only input-normalization helpers with zero coupling to the
 # entry-state table, no StatusKey involvement, and no audit evidence of
@@ -334,20 +315,19 @@ from app.payroll.draft_line_calculation import _compute_calculated_amount  # noq
 # module.
 # Stage B4-7: the Period read model (_BASE_SELECT, _row_to_summary,
 # get_periods, get_period_by_id) moved to app.payroll.period_read in full.
-# Only get_period_by_id is re-exported here: it still has internal call
-# sites across Period Create, Lifecycle, Resubmission, Finalization,
-# Calculation, Bonus, Drivers Off, and Day Grid, none of which move in this
-# unit. Stage B4-12 moved Period Pay Lines out of this module; it now
-# imports get_period_by_id directly from app.payroll.period_read. Stage
-# B4-14 moved Draft-line CRUD out of this module too; it now imports its own
-# copy directly from app.payroll.period_read. app.payroll.off_drivers also
-# resolves it via this facade (qualified service.get_period_by_id access) —
-# left unchanged, not redirected, since the facade is load-bearing anyway.
+# Only get_period_by_id is re-exported here: get_drivers_off (Drivers Off,
+# deferred to B4-22) is this module's last remaining internal caller. Stage
+# B4-21 moved Period Create's own call site to app.payroll.period_creation
+# directly, alongside get_period_entry_count/get_period_lines/
+# get_period_draft_summary/get_period_eligible_drivers's call sites, which
+# each now import get_period_by_id directly from their own new owner
+# modules. app.payroll.off_drivers also resolves it via this facade
+# (qualified service.get_period_by_id access) — left unchanged, not
+# redirected, since the facade is load-bearing anyway pending B4-22.
 # get_periods has no remaining caller here (router.py now calls
 # period_read.get_periods directly); _BASE_SELECT and _row_to_summary are
 # private implementation details of period_read.py with no caller anywhere
-# else. Do not remove this binding until the remaining internal callers
-# themselves move to their true domains in later stages.
+# else. Do not remove this binding until Drivers Off itself moves in B4-22.
 from app.payroll.period_read import get_period_by_id
 # Stage B4-1: driver eligibility helpers moved to app.payroll.eligibility.
 # Re-exported here (same names) so this module stays a compatibility facade —
@@ -357,13 +337,24 @@ from app.payroll.eligibility import (
     # Temporary compatibility re-export: test_cp2e_eligibility_snapshot.py
     # imports this directly from app.payroll.service.
     _get_driver_eligibility_row,  # noqa: F401
-    _period_has_driver_eligibility_snapshot,
-    # Stage B4-16: Day Grid (get_day_grid) was this symbol's last internal
-    # caller here; it now imports its own copy directly from
-    # app.payroll.eligibility. Re-exported here only because
-    # test_cp2e_eligibility_snapshot.py imports it directly from
-    # app.payroll.service — test-only compatibility, not a real internal
-    # consumer of this module.
+    # Stage B4-21 moved get_period_eligible_drivers (this symbol's last
+    # INTERNAL caller here) to app.payroll.eligibility directly, but this
+    # binding stays production-load-bearing, not test-only: current_hub.py
+    # and off_drivers.py both resolve it via qualified module-attribute
+    # access (service._period_has_driver_eligibility_snapshot), not a direct
+    # symbol import, so no static import-graph search finds them. Also
+    # re-exported for test_cp2e_eligibility_snapshot.py, which imports it
+    # directly from app.payroll.service.
+    _period_has_driver_eligibility_snapshot,  # noqa: F401
+    # B4-21 correction: this binding is production-load-bearing, not
+    # test-only — current_hub.py and off_drivers.py both resolve it via
+    # qualified module-attribute access (service._is_snapshot_row_eligible_for_workdate),
+    # not a direct symbol import, so no static import-graph search finds
+    # them. Day Grid (get_day_grid) stopped being an INTERNAL caller here at
+    # B4-16 and imports its own copy directly from app.payroll.eligibility;
+    # that is unrelated to the two qualified-access consumers above. Also
+    # re-exported for test_cp2e_eligibility_snapshot.py, which imports it
+    # directly from app.payroll.service.
     _is_snapshot_row_eligible_for_workdate,  # noqa: F401
     # Stage B4-15: Status Payment Sync (_refresh_status_payment_lines) was
     # this symbol's last internal caller here; it now imports its own copy
@@ -386,7 +377,12 @@ from app.payroll.eligibility import (
     # app.payroll.service — test-only compatibility, not a real internal
     # consumer of this module.
     _assert_driver_eligible_for_workdate_via_snapshot,  # noqa: F401
-    _create_period_driver_eligibility_rows,
+    # Stage B4-21 moved create_period (this symbol's last internal caller
+    # here) to app.payroll.period_creation directly. Re-exported here only
+    # because test_cp2e_eligibility_snapshot.py imports it directly from
+    # app.payroll.service — test-only compatibility, not a real internal
+    # consumer of this module.
+    _create_period_driver_eligibility_rows,  # noqa: F401
     # Stage B4-18 moved change_period_status (Lifecycle) out of this module
     # — that was the only remaining production caller here of
     # _regenerate_period_driver_eligibility_rows; period_lifecycle imports
@@ -422,11 +418,15 @@ from app.payroll.eligibility import (
 # app.payroll.period_lifecycle — that was the only remaining caller here of
 # PeriodStatusChange and _VALID_TRANSITIONS, so neither is re-exported
 # anymore; period_lifecycle imports its own copy of both directly.
-from app.payroll.schemas import (
-    PeriodSummary, PeriodCreate, NextPeriodDates, PeriodEntryCount,
-    DraftLineSummary,
-    DriverPeriodSummary,
-)
+# Stage B4-21 moved create_period, get_next_period_dates,
+# get_period_entry_count, get_period_lines, get_period_draft_summary, and
+# get_period_eligible_drivers — the last remaining callers here of
+# PeriodCreate, NextPeriodDates, PeriodEntryCount, DraftLineSummary, and
+# DriverPeriodSummary — to their new owner modules, which each import their
+# own copy directly; none of those five is re-exported anymore. Only
+# PeriodSummary remains: get_drivers_off (Drivers Off, deferred to B4-22)
+# still uses it as a parameter type in this module.
+from app.payroll.schemas import PeriodSummary
 # Stage B4-17: the Period Calculation + Snapshot domain
 # (_RATE_DEPENDENT_BEHAVIORS, _refresh_draft_calculations,
 # _validate_period_can_finalize, _compute_draft_line_preview_amounts,
@@ -534,805 +534,18 @@ from app.payroll.finalization import (
 # imports any Bonus symbol from this module. Stage B4-17 moved
 # _load_active_bonus_events to app.payroll.period_calculation (it was never
 # Bonus CRUD ownership — see period_calculation.py's own docstring for why).
-# get_period_eligible_drivers stays in this module — it is not Bonus CRUD
-# ownership either (see its own definition below for why).
+# get_period_eligible_drivers was never Bonus CRUD ownership either — B4-21
+# moved it to app.payroll.eligibility (see that module's own docstring for
+# why).
 #
 # Stage B4-9.5: the Ledger read domain (_FINAL_SELECT, get_final_lines) moved
 # to app.payroll.ledger_read in full. No facade is kept here: router.py now
 # calls app.payroll.ledger_read directly, and no internal service.py caller
-# or test imports either symbol from this module. get_period_eligible_drivers
-# and get_drivers_off / _finalized_drivers_off_entries stay in this module —
-# B4-9 deferred both pending targeted architectural discovery, not a Ledger
+# or test imports either symbol from this module. get_drivers_off /
+# _finalized_drivers_off_entries stay in this module — B4-9 deferred both
+# pending targeted architectural discovery (B4-20 resolved the underlying
+# structural cause; the move itself is reserved for B4-22), not a Ledger
 # ownership question.
-
-
-
-
-# ---------------------------------------------------------------------------
-# Create period
-# ---------------------------------------------------------------------------
-
-async def create_period(
-    company_id: int,
-    user_id: int,
-    data: PeriodCreate,
-    db: AsyncConnection,
-) -> PeriodSummary:
-    # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
-
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-
-    if not can_see_all and data.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to the target branch.",
-        )
-
-    # Permission gate: creating a period requires payroll.period.create.
-    # This is intentionally separate from payroll.entry (data entry/editing).
-    # Migration 0030 seeds this permission and assigns it to appropriate roles.
-    await _check_permission(company_id, user_id, data.branch_id, "payroll.period.create", db)
-
-    # CP-1C: Acquire branch advisory lock before overlap check and insert.
-    # Serializes all period creation (both legacy and candidate-based) for this branch.
-    await _acquire_branch_workflow_lock(company_id, data.branch_id, db)
-
-    # CP-1D: Draft creation guard — legacy POST /payroll/periods creates a Draft;
-    # this is only valid when exactly one Open exists and no Draft already exists.
-    _slot_result = await db.execute(
-        text("""
-            SELECT status FROM payroll.payrollperiods
-            WHERE  companyid = :cid AND branchid = :bid
-              AND  status IN ('Draft', 'Open', 'InReview', 'Returned')
-        """),
-        {"cid": company_id, "bid": data.branch_id},
-    )
-    _slot_statuses = [r["status"] for r in _slot_result.mappings().all()]
-    if "Draft" in _slot_statuses:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "DRAFT_SLOT_OCCUPIED",
-                "message": (
-                    "A Draft period already exists for this branch. "
-                    "Only one Draft period is permitted per branch at a time."
-                ),
-            },
-        )
-    _open_count = _slot_statuses.count("Open")
-    if _open_count == 0:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "DRAFT_CREATION_REQUIRES_OPEN",
-                "message": (
-                    "No Open period exists for this branch. "
-                    "Legacy Draft creation requires exactly one Open period. "
-                    "Use the candidate-based period creation endpoint instead."
-                ),
-            },
-        )
-    if _open_count > 1:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "WORKFLOW_SLOT_CONFLICT",
-                "message": (
-                    "More than one Open period exists for this branch — "
-                    "the workflow is in an inconsistent state."
-                ),
-            },
-        )
-    # Exactly one Open, no Draft → allow (InReview/Returned co-existence is valid)
-
-    # Verify branch belongs to this company and get its BranchCode for period_code
-    br_result = await db.execute(
-        text(
-            "SELECT branchcode FROM core.branches "
-            "WHERE branchid = :bid AND companyid = :cid"
-        ),
-        {"bid": data.branch_id, "cid": company_id},
-    )
-    br_row = br_result.mappings().first()
-    if br_row is None:
-        raise HTTPException(
-            status_code=422,
-            detail="branch_id does not exist in this company.",
-        )
-    branch_code: str = br_row["branchcode"]
-
-    # Guard: reject dates that overlap any existing non-cancelled period for this branch.
-    # Every status except Cancelled reserves the date range — Locked and Archived
-    # represent official historical records that must not be overlapped.
-    overlap_row = await db.execute(
-        text("""
-            SELECT payrollperiodid, status, startdate, enddate
-            FROM   payroll.payrollperiods
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  status    != 'Cancelled'
-              AND  startdate <= :end_date
-              AND  enddate   >= :start_date
-            LIMIT  1
-        """),
-        {
-            "bid":        data.branch_id,
-            "cid":        company_id,
-            "start_date": data.start_date,
-            "end_date":   data.end_date,
-        },
-    )
-    existing = overlap_row.mappings().first()
-    if existing is not None:
-        ex_id     = existing["payrollperiodid"]
-        ex_status = existing["status"]
-        ex_start  = existing["startdate"]
-        ex_end    = existing["enddate"]
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"A payroll period already exists for this date range. "
-                f"Existing period (ID {ex_id}) status: {ex_status}, "
-                f"dates: {ex_start} – {ex_end}. "
-                f"Open the existing period instead of creating a new one. "
-                f"Locked and Archived periods are official historical records and cannot be overlapped."
-            ),
-        )
-
-    # Auto-generate period_name if not provided
-    period_name = data.period_name or _auto_period_name(
-        data.period_type, data.start_date, data.end_date
-    )
-
-    # Auto-generate a unique period_code
-    base_code = f"{branch_code}-{data.start_date.strftime('%Y%m%d')}"
-    period_code = await _unique_period_code(base_code, company_id, data.branch_id, db)
-
-    # CP-2A: ensure schedule version and set on new period. Still under advisory lock.
-    # None means no active setup — reject before inserting a period with NULL version.
-    legacy_sv_id = await ensure_current_schedule_version(company_id, data.branch_id, user_id, db)
-    if legacy_sv_id is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "PAYROLL_SETUP_REQUIRED",
-                "message": (
-                    "No active payroll setup or schedule version exists for this branch. "
-                    "Configure payroll setup before creating periods."
-                ),
-            },
-        )
-
-    # Insert
-    insert_result = await db.execute(
-        text("""
-            INSERT INTO payroll.payrollperiods
-                (companyid, branchid, periodcode, periodname, periodtype,
-                 startdate, enddate, paydate, status, notes, createdbyuserid,
-                 scheduleversionid)
-            VALUES
-                (:company_id, :branch_id, :period_code, :period_name, :period_type,
-                 :start_date, :end_date, :pay_date, 'Draft', :notes, :created_by,
-                 :sv_id)
-            RETURNING payrollperiodid
-        """),
-        {
-            "company_id":  company_id,
-            "branch_id":   data.branch_id,
-            "period_code": period_code,
-            "period_name": period_name,
-            "period_type": data.period_type,
-            "start_date":  data.start_date,
-            "end_date":    data.end_date,
-            "pay_date":    data.pay_date,
-            "notes":       data.notes,
-            "created_by":  user_id,
-            "sv_id":       legacy_sv_id,
-        },
-    )
-    period_id: int = insert_result.scalar_one()
-    await initialize_period_audit_evidence_coverage(
-        company_id=company_id, branch_id=data.branch_id, period_id=period_id, db=db,
-    )
-
-    # CP-2B: create period-day snapshot from the schedule version's mask.
-    # Read from PayrollScheduleVersions (immutable) — not from mutable BranchPayrollSettings.
-    sv_mask_row = (await db.execute(
-        text(
-            "SELECT normaldaysoffmask FROM payroll.PayrollScheduleVersions "
-            "WHERE scheduleversionid = :sv_id"
-        ),
-        {"sv_id": legacy_sv_id},
-    )).mappings().first()
-    period_mask = sv_mask_row["normaldaysoffmask"] if sv_mask_row else None
-    await _create_period_day_rows(
-        period_id, company_id, data.branch_id,
-        legacy_sv_id, data.start_date, data.end_date, period_mask, db,
-    )
-
-    # CP-2C: create period pay-item layout snapshot.
-    await _create_period_pay_item_rows(
-        period_id, company_id, data.branch_id, data.start_date, db,
-    )
-
-    # CP-2E: create driver eligibility snapshot for legacy Draft periods.
-    # Draft stays provisional (freeze=False); freeze happens when promoted to Open.
-    await _create_period_driver_eligibility_rows(
-        period_id, company_id, data.branch_id, db,
-        snapshot_source="Generated",
-        freeze=False,
-        created_by_user_id=user_id,
-    )
-
-    return await get_period_by_id(company_id, user_id, period_id, db)
-
-
-# ---------------------------------------------------------------------------
-# Period-date calculation from payroll setup
-# ---------------------------------------------------------------------------
-
-def compute_period_dates(
-    frequency: str,
-    anchor_start_date: date,
-    last_end_date: date | None = None,
-    custom_interval_days: int | None = None,
-) -> tuple[date, date]:
-    """
-    Compute the next period's (start, end) dates from a branch's payroll setup.
-
-    Rules
-    -----
-    - If *last_end_date* is None the first period starts on *anchor_start_date*.
-    - Otherwise the next period starts the day after *last_end_date*.
-    - Period length depends on *frequency*:
-
-      ======= =============================================
-      Week    7 days  (start + 6 days)
-      Biweek  14 days (start + 13 days)
-      Month   One calendar month (start to same day next month minus 1 day)
-      Custom  Requires custom_interval_days > 0 (inclusive period length)
-      ======= =============================================
-
-    Both start and end are inclusive.
-
-    Raises
-    ------
-    ValueError if *frequency* is unrecognised, or if 'Custom' and
-    *custom_interval_days* is None or ≤ 0.
-    """
-    start = anchor_start_date if last_end_date is None else last_end_date + timedelta(days=1)
-
-    if frequency == "Week":
-        end = start + timedelta(days=6)
-    elif frequency == "Biweek":
-        end = start + timedelta(days=13)
-    elif frequency == "Month":
-        end = _month_end(start)
-    elif frequency == "Custom":
-        if not custom_interval_days or custom_interval_days <= 0:
-            raise ValueError(
-                "Custom frequency requires custom_interval_days > 0. "
-                "Configure the custom cadence in Payroll Setup first."
-            )
-        end = start + timedelta(days=custom_interval_days - 1)
-    else:
-        raise ValueError(f"Unknown payroll frequency: {frequency!r}")
-
-    return start, end
-
-
-async def get_next_period_dates(
-    company_id: int,
-    user_id: int,
-    branch_id: int,
-    db: AsyncConnection,
-) -> NextPeriodDates:
-    """
-    Return suggested start/end dates for the next payroll period of *branch_id*,
-    derived from its BranchPayrollSettings and the latest existing period.
-
-    - If no prior non-cancelled periods exist the first period starts on the
-      setup's anchor_start_date.
-    - Returns ``is_custom=True`` and ``start_date=None`` for Custom frequency.
-
-    Raises 403 if the caller lacks access; 404 if no payroll setup is configured.
-    """
-    await _require_not_driver_role(company_id, user_id, db)
-
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    if not can_see_all and branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to the requested branch.",
-        )
-    await _check_any_permission(
-        company_id, user_id, branch_id,
-        ["payroll.view", "payroll.entry", "payroll.finalize"],
-        db,
-    )
-
-    # Fetch branch payroll setup
-    setup_row = await db.execute(
-        text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays
-            FROM   payroll.branchpayrollsettings
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  isactive  = TRUE
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )
-    setup = setup_row.mappings().first()
-    if setup is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"No active payroll setup found for branch {branch_id}. "
-                "Configure it in Settings → Payroll Setup first."
-            ),
-        )
-
-    frequency: str         = setup["payrollfrequency"]
-    anchor: date           = setup["anchorstartdate"]
-    interval_days: int | None = setup.get("customintervaldays")
-
-    # MAX end_date of non-cancelled periods for this branch
-    last_row = await db.execute(
-        text("""
-            SELECT MAX(enddate) AS last_end
-            FROM   payroll.payrollperiods
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  status    != 'Cancelled'
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )
-    last_end: date | None = last_row.scalar_one_or_none()
-
-    is_custom = (frequency == "Custom")
-    start_date_out: date | None = None
-    end_date_out:   date | None = None
-
-    if frequency == "Custom":
-        if interval_days and interval_days > 0:
-            # Custom with a valid saved interval — compute automatically
-            start_date_out, end_date_out = compute_period_dates(
-                frequency, anchor, last_end, custom_interval_days=interval_days
-            )
-        # else: interval missing → leave start/end as None (setup incomplete)
-    else:
-        start_date_out, end_date_out = compute_period_dates(frequency, anchor, last_end)
-
-    return NextPeriodDates(
-        branch_id=branch_id,
-        period_type=frequency,
-        anchor_start_date=anchor,
-        last_period_end_date=last_end,
-        start_date=start_date_out,
-        end_date=end_date_out,
-        is_custom=is_custom,
-        custom_interval_days=interval_days,
-    )
-
-
-async def get_period_entry_count(
-    company_id: int,
-    user_id: int,
-    period_id: int,
-    db: AsyncConnection,
-) -> PeriodEntryCount:
-    """
-    Return a count of non-voided draft entries in *period_id* for the caller.
-
-    Counts all rows in payroll.PayrollDraftLines (both 'Day' and 'Period'
-    linescope) that are not Void.  Used by the UI to show a data-loss warning
-    before cancelling a period.
-
-    Raises 403 / 404 via ``get_period_by_id`` if the caller lacks access.
-    """
-    # Access check reuses the existing get_period_by_id guard
-    await get_period_by_id(company_id, user_id, period_id, db)
-
-    row = await db.execute(
-        text("""
-            SELECT
-                COUNT(DISTINCT driverid) AS driver_count,
-                COUNT(*)                 AS entry_count
-            FROM   payroll.payrolldraftlines
-            WHERE  payrollperiodid = :pid
-              AND  companyid       = :cid
-              AND  status          != 'Void'
-        """),
-        {"pid": period_id, "cid": company_id},
-    )
-    r = row.mappings().first()
-    driver_count = int(r["driver_count"] or 0)
-    entry_count  = int(r["entry_count"]  or 0)
-
-    return PeriodEntryCount(
-        period_id=period_id,
-        driver_count=driver_count,
-        entry_count=entry_count,
-        has_data=(entry_count > 0),
-    )
-
-
-
-
-# ===========================================================================
-# Draft lines — entry service
-# ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# List lines
-# ---------------------------------------------------------------------------
-
-async def get_period_lines(
-    period_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-    *,
-    driver_id: int | None = None,
-    work_date: date | None = None,
-    line_status: str | None = None,
-) -> list[DraftLineSummary]:
-    """Return draft lines for a period (access-checked via the period lookup)."""
-    period = await get_period_by_id(company_id, user_id, period_id, db)
-
-    conditions = [
-        "dl.payrollperiodid  = :period_id",
-        "dl.companyid        = :company_id",
-        # M14: exclude Period Pay lines from the daily lines list.
-        # Period Pay lines have linescope='Period' and are returned by
-        # get_period_pay_lines() instead.  Using the explicit LineScope column
-        # (not WorkDate IS NOT NULL) because daily lines can also have NULL WorkDate.
-        "dl.linescope        = 'Daily'",
-    ]
-    params: dict[str, Any] = {
-        "period_id": period_id,
-        "company_id": company_id,
-    }
-
-    # CP-2F: for Draft periods, exclude System-sourced lines, STATUS_PAYMENT, and
-    # ADJUSTMENT / MINIMUM / MAXIMUM pay items — these are financial and must not be
-    # visible until the period is promoted to Open.
-    if period.status == "Draft":
-        conditions.append("dl.sourcetype != 'System'")
-        conditions.append(
-            "dl.linetype NOT IN ('STATUS_PAYMENT', 'ADJUSTMENT', 'MINIMUM', 'MAXIMUM',"
-            " 'SYS_MIN_TOPUP', 'SYS_MAX_CAP')"
-        )
-
-    if driver_id is not None:
-        conditions.append("dl.driverid = :driver_id")
-        params["driver_id"] = driver_id
-
-    if work_date is not None:
-        conditions.append("dl.workdate = :work_date")
-        params["work_date"] = work_date
-
-    if line_status is not None:
-        conditions.append("dl.status = :line_status")
-        params["line_status"] = line_status
-
-    where = " AND ".join(conditions)
-    result = await db.execute(
-        text(f"{_LINE_SELECT} WHERE {where} ORDER BY dl.workdate, dl.driverid, dl.linetype"),
-        params,
-    )
-    rows = [_line_row_to_summary(r) for r in result.mappings().all()]
-
-    # CP-2F: sanitize money fields for Draft so callers never see stale rates/amounts.
-    if period.status == "Draft":
-        sanitized = []
-        for ln in rows:
-            ln = ln.model_copy(update={
-                "rate_amount": None,
-                "calculated_amount": None,
-                "needs_manager_review": False,
-            })
-            sanitized.append(ln)
-        return sanitized
-
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Summary (aggregated per driver × line_type)
-# ---------------------------------------------------------------------------
-
-async def get_period_draft_summary(
-    period_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> list[DriverPeriodSummary]:
-    """
-    Aggregated totals per driver × line_type for one period.
-
-    Uses a direct query (not vw_PayrollDraftSummary) so that Void lines
-    are explicitly excluded from the aggregation.
-    """
-    period = await get_period_by_id(company_id, user_id, period_id, db)
-
-    # CP-2F: Draft periods have no financial summary — block to avoid returning
-    # zero totals that could mislead callers into thinking the period is empty.
-    if period.status == "Draft":
-        raise HTTPException(
-            status_code=422,
-            detail="Lines summary is not available for Prepared (Draft) periods.",
-        )
-
-    result = await db.execute(
-        text("""
-            SELECT
-                dl.driverid,
-                e.fullname                                                              AS drivername,
-                dl.payrollperiodid,
-                :period_name                                                            AS periodname,
-                dl.linetype,
-                SUM(dl.quantity)                                                        AS totalquantity,
-                SUM(COALESCE(dl.calculatedamount, 0))                                  AS totalcalculatedamount,
-                COUNT(*)                                                                AS linecount,
-                SUM(CASE WHEN dl.status IN ('NeedsReview', 'Rejected')
-                          OR dl.needsmanagerreview THEN 1 ELSE 0 END)                  AS linesneedingattention
-            FROM   payroll.payrolldraftlines dl
-            JOIN   core.drivers              d  ON d.driverid   = dl.driverid
-            JOIN   core.employees            e  ON e.employeeid = d.employeeid
-            WHERE  dl.payrollperiodid = :period_id
-              AND  dl.companyid       = :company_id
-              AND  dl.status         != 'Void'
-              AND  dl.linescope       = 'Daily'
-            GROUP  BY dl.driverid, e.fullname, dl.payrollperiodid, dl.linetype
-            ORDER  BY e.fullname, dl.linetype
-        """),
-        {
-            "period_id":   period_id,
-            "company_id":  company_id,
-            "period_name": period.period_name,
-        },
-    )
-    return [
-        DriverPeriodSummary(
-            driver_id=r["driverid"],
-            driver_name=r["drivername"],
-            period_id=r["payrollperiodid"],
-            period_name=r["periodname"],
-            line_type=r["linetype"],
-            total_quantity=r["totalquantity"],
-            total_calculated_amount=r["totalcalculatedamount"],
-            line_count=r["linecount"],
-            lines_needing_attention=r["linesneedingattention"],
-        )
-        for r in result.mappings().all()
-    ]
-
-
-# ===========================================================================
-# M13a: PayItem-driven line-type validation
-# M13b: PerUnit / EnteredAmount calculated-amount engine
-# ===========================================================================
-#
-# TRANSITIONAL DESIGN NOTE (target cleanup: M14)
-# ─────────────────────────────────────────────
-# System pay items were established before the PayItems catalog.
-# Their line-type strings (e.g. "Hours", "Miles") are stored verbatim in
-# PayrollDraftLines.LineType and differ from their PayItemCodes ("HOURS", "MILES").
-#
-# _SYSTEM_LINE_TYPES    — fast-path set; these bypass the full DB lookup.
-# _SYSTEM_LINE_TYPE_INFO — rate_behavior, rate_code, and item_scope for each
-#                          system string.
-#
-# Custom pay items (CompanyID IS NOT NULL) use their PayItemCode directly as
-# LineType — no alias.  They are validated via the DB slow path.
-#
-# BranchPayItemConfig IS checked for system items (Fix 2, M13b): the fast path
-# now validates branch activation via a DB query for items that have a DB counterpart
-# (DailyStatus and DailyNote have no DB counterpart and are accepted unconditionally).
-#
-# PayItemRateTypeMap rows for system PerUnit items are seeded by migration 0008.
-# The fast path queries PayItemRateTypeMap for rate_code (Fix 4, M13b) and falls
-# back to the hardcoded _SYSTEM_LINE_TYPE_INFO value ONLY as a backward-compat
-# measure during zero-downtime deploys.  On a properly migrated DB (head >= 0008)
-# the fallback should never trigger.
-#
-# ─────────────────────────────────────────────
-
-
-# Maps legacy system line-type strings to their calculation metadata.
-# Any string NOT in this dict goes through the custom-item DB slow path.
-_SYSTEM_LINE_TYPE_INFO: dict[str, _LineTypeInfo] = {
-    "Hours":       _LineTypeInfo("PerUnit",       "HOURLY"),
-    "Miles":       _LineTypeInfo("PerUnit",       "MILEAGE"),
-    "Loads":       _LineTypeInfo("PerUnit",       "LOAD"),
-    "Overnight":   _LineTypeInfo("Fixed",         None),   # fixed per-night; PayItemSettings (M13c+)
-    "Wait":        _LineTypeInfo("PerUnit",       "WAIT"),
-    "Pallets":     _LineTypeInfo("PerUnit",       "PALLET"),
-    "Silos":       _LineTypeInfo("PerUnit",       "SILO"),
-    "DailyStatus": _LineTypeInfo("None",          None),   # informational
-    "DailyNote":   _LineTypeInfo("None",          None),   # informational
-    "Bonus":       _LineTypeInfo("Fixed",         None,  "Period"),  # Period item; blocked from daily entry
-    "Adjustment":  _LineTypeInfo("Fixed",         None,  "Period"),  # Period item; blocked from daily entry
-}
-
-_SYSTEM_LINE_TYPES: frozenset[str] = frozenset(_SYSTEM_LINE_TYPE_INFO)
-
-# All behaviors that need a DriverRate (including Block which doesn't use tiers).
-_RATE_USING_BEHAVIORS: frozenset[str] = frozenset(
-    {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-)
-
-# System period items that can be entered via the Period Pay endpoint (M14).
-# Both legacy display names ("Bonus") and canonical PayItemCodes ("BONUS") are
-# accepted — both map to the same canonical code for DB lookup and storage.
-_SYSTEM_PERIOD_ALLOWED: dict[str, str] = {
-    "Bonus":       "BONUS",
-    "Adjustment":  "ADJUSTMENT",
-    "BONUS":       "BONUS",       # canonical alias
-    "ADJUSTMENT":  "ADJUSTMENT",  # canonical alias
-}
-_SYSTEM_PERIOD_ALLOWED_TYPES: frozenset[str] = frozenset(_SYSTEM_PERIOD_ALLOWED)
-
-# System period items blocked in M14 (need automated pay-rule engine, M15+).
-# Both display-name and DB-code forms accepted so callers get a clear message
-# regardless of which form they use.
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Period-eligible drivers (P1 #1)
-# ---------------------------------------------------------------------------
-
-async def get_period_eligible_drivers(
-    period_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> list[dict]:
-    """
-    Return drivers eligible for a Bonus (or other period-pay line) for the
-    given period.
-
-    Eligibility = period-scoped, NOT day-scoped:
-      1. Active drivers (employmentstatus='Active' AND driverstatus='Active')
-         whose hire/termination window overlaps the period dates.
-      2. OR any driver who already has period-pay lines in this period —
-         so existing bonuses stay voidable even if the driver was later
-         terminated.
-
-    ODA/Driver users are blocked unconditionally (same boundary as day-grid).
-    payroll.view OR payroll.entry permission is required.
-    """
-    # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
-
-    period = await get_period_by_id(company_id, user_id, period_id, db)
-
-    # CP-2F: Period Pay / Bonus eligible driver list is a financial path — block for Draft.
-    if period.status == "Draft":
-        raise HTTPException(
-            status_code=422,
-            detail="Period eligible drivers are not available for Prepared (Draft) periods.",
-        )
-
-    await _check_any_permission(
-        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
-    )
-
-    # CP-2E: For snapshotted periods use the snapshot roster instead of live tables.
-    _has_snap = await _period_has_driver_eligibility_snapshot(period_id, db)
-    if _has_snap:
-        # Active / TerminatedHistorical / Transferred → prospective choices
-        # IncludedByExistingData → only if they already have a period-pay line
-        snap_result = await db.execute(
-            text("""
-                SELECT ppde.driverid,
-                       COALESCE(ppde.drivernamesnapshot, '') AS drivername,
-                       COALESCE(ppde.drivercodesnapshot, '') AS drivercode,
-                       ppde.eligibilityreasoncode
-                FROM   payroll.payrollperioddrivereligibility ppde
-                WHERE  ppde.payrollperiodid = :period_id
-                  AND  ppde.companyid       = :cid
-                  AND  ppde.branchid        = :bid
-                  AND  ppde.iseligibleforperiod = TRUE
-                ORDER BY ppde.drivernamesnapshot
-            """),
-            {"period_id": period_id, "cid": company_id, "bid": period.branch_id},
-        )
-        snap_rows = list(snap_result.mappings().all())
-
-        # For IBED: check which have existing period-pay lines
-        ibed_ids = [r["driverid"] for r in snap_rows if r["eligibilityreasoncode"] == "IncludedByExistingData"]
-        ibed_with_period_pay: set[int] = set()
-        if ibed_ids:
-            in_cl, in_pr = _build_in_clause(ibed_ids, "ibed")
-            ibed_res = await db.execute(
-                text(f"""
-                    SELECT DISTINCT driverid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :period_id AND linescope = 'Period'
-                      AND status != 'Void'
-                      AND driverid IN ({in_cl})
-                """),
-                {"period_id": period_id, **in_pr},
-            )
-            ibed_with_period_pay = {r["driverid"] for r in ibed_res.mappings().all()}
-
-        out = []
-        for r in snap_rows:
-            if r["eligibilityreasoncode"] == "IncludedByExistingData":
-                if r["driverid"] not in ibed_with_period_pay:
-                    continue
-            out.append({
-                "driver_id":   int(r["driverid"]),
-                "driver_name": r["drivername"],
-                "driver_code": r["drivercode"],
-            })
-        return out
-
-    result = await db.execute(
-        text("""
-            SELECT DISTINCT d.driverid, e.fullname AS drivername, d.drivercode
-            FROM   core.drivers   d
-            JOIN   core.employees e ON e.employeeid = d.employeeid
-            WHERE  d.companyid = :cid
-              AND  d.branchid  = :bid
-              AND  (
-                    -- Active driver whose hire/termination window overlaps the period
-                    (    e.employmentstatus = 'Active'
-                     AND d.driverstatus     = 'Active'
-                     AND (e.hiredate IS NULL OR e.hiredate <= :period_end)
-                     AND (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
-                    )
-                    OR
-                    -- Driver who already has period-pay lines in this period
-                    -- (keeps existing bonuses voidable even if driver was terminated)
-                    EXISTS (
-                        SELECT 1
-                        FROM   payroll.payrolldraftlines pdl
-                        WHERE  pdl.driverid        = d.driverid
-                          AND  pdl.payrollperiodid = :period_id
-                          AND  pdl.linescope        = 'Period'
-                    )
-              )
-            ORDER BY e.fullname
-        """),
-        {
-            "cid":          company_id,
-            "bid":          period.branch_id,
-            "period_start": period.start_date,
-            "period_end":   period.end_date,
-            "period_id":    period_id,
-        },
-    )
-    rows = result.mappings().all()
-    return [
-        {
-            "driver_id":   int(r["driverid"]),
-            "driver_name": r["drivername"],
-            "driver_code": r["drivercode"],
-        }
-        for r in rows
-    ]
-
-
-# ---------------------------------------------------------------------------
-# CP-2D1: canonical daily driver/day entry-state helpers
-# ---------------------------------------------------------------------------
-
-_KEEP = object()  # sentinel: do not modify this field in ON CONFLICT UPDATE
 
 
 async def _finalized_drivers_off_entries(

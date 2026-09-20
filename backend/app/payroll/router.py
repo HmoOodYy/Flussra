@@ -17,6 +17,7 @@ from app.payroll import (
     current_hub,
     day_grid,
     draft_line_mutation,
+    eligibility,
     finalization,
     finalized_library_read_model,
     ledger_read,
@@ -29,6 +30,7 @@ from app.payroll import (
     rates,
     report_read_model,
     service,
+    source_line_read,
 )
 from app.payroll.schemas import (
     BatchRateRequest,
@@ -179,7 +181,7 @@ async def get_next_period_dates(
     db: DbDep,
     branch_id: int = Query(..., description="Branch to compute the next period for"),
 ) -> NextPeriodDates:
-    return await service.get_next_period_dates(
+    return await period_creation.get_next_period_dates(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         branch_id=branch_id,
@@ -201,7 +203,7 @@ async def get_period_entry_count(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodEntryCount:
-    return await service.get_period_entry_count(
+    return await period_read.get_period_entry_count(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         period_id=period_id,
@@ -253,7 +255,7 @@ async def create_period(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodSummary:
-    return await service.create_period(
+    return await period_creation.create_period(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -356,7 +358,7 @@ async def list_period_lines(
         description="Active | NeedsReview | Rejected | Void",
     ),
 ) -> list[DraftLineSummary]:
-    return await service.get_period_lines(
+    return await source_line_read.get_period_lines(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -381,7 +383,7 @@ async def get_period_lines_summary(
     token: TokenDep,
     db: DbDep,
 ) -> list[DriverPeriodSummary]:
-    return await service.get_period_draft_summary(
+    return await source_line_read.get_period_draft_summary(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1437,7 +1439,7 @@ async def get_period_eligible_drivers(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodEligibleDriversResponse:
-    drivers = await service.get_period_eligible_drivers(
+    drivers = await eligibility.get_period_eligible_drivers(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

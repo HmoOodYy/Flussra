@@ -8,10 +8,11 @@ _BASE_SELECT and _row_to_summary are private implementation details of this
 module: both have exactly two consumers, get_periods and get_period_by_id,
 and neither is referenced anywhere else in the backend or tests.
 
-get_period_by_id is a genuine cross-domain dependency gate: ~31 call sites
-remain in app.payroll.service (Period Create, Lifecycle, Resubmission,
+get_period_by_id is a genuine cross-domain dependency gate: call sites
+remain across many payroll domain modules (Lifecycle, Resubmission,
 Draft-line CRUD, Finalization, Calculation, Period Pay Lines, Bonus,
-Drivers Off, Day Grid) and app.payroll.off_drivers accesses it via qualified
+Drivers Off, Day Grid — Period Create's own call site moved here directly
+with it in B4-21) and app.payroll.off_drivers accesses it via qualified
 module attribute (service.get_period_by_id). app.payroll.service re-exports
 it via facade for its own internal callers; app.payroll.off_drivers is left
 unchanged (its qualified access continues to resolve through that facade,
@@ -20,6 +21,12 @@ module-attribute-patch visibility).
 
 get_periods has no remaining caller in app.payroll.service after this move —
 router.py is its only consumer and now imports it directly.
+
+get_period_entry_count (Stage B4-21) is a period-level data-presence read —
+"does this period hold non-void draft data?", used by the UI to warn before
+cancellation — not a source-line read, so it belongs here rather than in
+app.payroll.source_line_read despite querying PayrollDraftLines. Pure
+relocation from app.payroll.service, no behavior change.
 """
 from decimal import Decimal
 from typing import Any
@@ -35,7 +42,7 @@ from app.core.service import (
     _has_any_permission,
     _require_not_driver_role,
 )
-from app.payroll.schemas import PeriodSummary
+from app.payroll.schemas import PeriodEntryCount, PeriodSummary
 
 
 def _row_to_summary(r: Any) -> PeriodSummary:
@@ -228,3 +235,49 @@ async def get_period_by_id(
     )
 
     return _row_to_summary(row)
+
+
+# ---------------------------------------------------------------------------
+# Period entry count (Stage B4-21)
+# ---------------------------------------------------------------------------
+
+async def get_period_entry_count(
+    company_id: int,
+    user_id: int,
+    period_id: int,
+    db: AsyncConnection,
+) -> PeriodEntryCount:
+    """
+    Return a count of non-voided draft entries in *period_id* for the caller.
+
+    Counts all rows in payroll.PayrollDraftLines (both 'Day' and 'Period'
+    linescope) that are not Void.  Used by the UI to show a data-loss warning
+    before cancelling a period.
+
+    Raises 403 / 404 via ``get_period_by_id`` if the caller lacks access.
+    """
+    # Access check reuses the existing get_period_by_id guard
+    await get_period_by_id(company_id, user_id, period_id, db)
+
+    row = await db.execute(
+        text("""
+            SELECT
+                COUNT(DISTINCT driverid) AS driver_count,
+                COUNT(*)                 AS entry_count
+            FROM   payroll.payrolldraftlines
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  status          != 'Void'
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    r = row.mappings().first()
+    driver_count = int(r["driver_count"] or 0)
+    entry_count  = int(r["entry_count"]  or 0)
+
+    return PeriodEntryCount(
+        period_id=period_id,
+        driver_count=driver_count,
+        entry_count=entry_count,
+        has_data=(entry_count > 0),
+    )
