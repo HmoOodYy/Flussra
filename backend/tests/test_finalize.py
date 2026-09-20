@@ -22,7 +22,11 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from sqlalchemy import text as _sqla_text
 
-from app.payroll import service as payroll_service
+# Stage B4-19: _write_finalization_audit's real implementation now lives in
+# app.payroll.finalization, and finalize_period (also in finalization)
+# resolves it as a bare name through that module's own globals — patching
+# app.payroll.service no longer intercepts it.
+from app.payroll import finalization as payroll_service
 
 
 # ---------------------------------------------------------------------------

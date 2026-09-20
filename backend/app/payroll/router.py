@@ -17,6 +17,7 @@ from app.payroll import (
     current_hub,
     day_grid,
     draft_line_mutation,
+    finalization,
     finalized_library_read_model,
     ledger_read,
     off_drivers,
@@ -493,7 +494,7 @@ async def finalize_period(
     token: TokenDep,
     db: DbDep,
 ) -> PeriodSummary:
-    return await service.finalize_period(
+    return await finalization.finalize_period(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -523,7 +524,7 @@ async def get_finalization_preview(
     token: TokenDep,
     db: DbDep,
 ) -> FinalizationPreviewResponse:
-    return await service.get_finalization_preview(
+    return await finalization.get_finalization_preview(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

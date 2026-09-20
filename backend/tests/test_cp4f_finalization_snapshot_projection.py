@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import app.payroll.finalization as payroll_finalization
 import app.payroll.service as payroll_service
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
@@ -186,8 +187,13 @@ async def _approved_snapshot(db, packet: _LiveCalculationPacket | None = None) -
 def no_access_checks(monkeypatch):
     async def allowed(*_args, **_kwargs):
         return None
-    monkeypatch.setattr(payroll_service, "_check_permission", allowed)
-    monkeypatch.setattr(payroll_service, "_get_oda_own_driver_id", allowed)
+    # Stage B4-19: _check_permission and _get_oda_own_driver_id are called
+    # by finalize_period / get_finalization_preview, which now live in
+    # app.payroll.finalization and resolve both as bare names through that
+    # module's own globals — patching app.payroll.service no longer
+    # intercepts them.
+    monkeypatch.setattr(payroll_finalization, "_check_permission", allowed)
+    monkeypatch.setattr(payroll_finalization, "_get_oda_own_driver_id", allowed)
 
 
 @pytest.mark.asyncio
@@ -250,7 +256,12 @@ async def test_projection_failure_rolls_back_locked_transition(cp4f_db, no_acces
     await _approved_snapshot(cp4f_db)
     async def fail_projection(**_kwargs):
         raise RuntimeError("projection failed")
-    monkeypatch.setattr(payroll_service, "_project_approved_snapshot_final_lines", fail_projection)
+    # Stage B4-19: _project_approved_snapshot_final_lines's real
+    # implementation now lives in app.payroll.finalization, and
+    # finalize_period (also in finalization) resolves it as a bare name
+    # through that module's own globals — patching app.payroll.service's
+    # compatibility re-export no longer intercepts it.
+    monkeypatch.setattr(payroll_finalization, "_project_approved_snapshot_final_lines", fail_projection)
     with pytest.raises(RuntimeError, match="projection failed"):
         async with cp4f_db.conn.begin_nested():
             await finalize_period(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
