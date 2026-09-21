@@ -44,6 +44,11 @@ migrations/__pycache__/
 # Logs
 *.log
 
+# Local DB/data artifacts (not migration/schema SQL under migrations/)
+*.sqlite
+*.sqlite3
+*.dump
+
 # Dev tunnel scratch dir (temp scripts + cloudflared logs)
 .dev-tunnel/
 
