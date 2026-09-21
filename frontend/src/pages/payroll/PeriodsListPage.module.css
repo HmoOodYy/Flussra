@@ -352,6 +352,14 @@
   max-width: 220px;
 }
 
+/* ── Returned correction reason (why this period was returned) ── */
+.returnReasonNote {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+  color: #92400e;
+  line-height: 1.4;
+}
+
 /* ── States ── */
 .stateMsg {
   color: #6b7280;

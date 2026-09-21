@@ -17,6 +17,7 @@ import type {
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
 import { canEntryPayroll } from '../../lib/permissions';
+import { formatGrossTotal } from './grossDisplay';
 import styles from './PayrollEntryDialog.module.css';
 
 // ---------------------------------------------------------------------------
@@ -314,7 +315,7 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
               </span>
               <span className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>Gross:</span>
-                <span className={styles.summaryValue}>${grid.summary.gross_total}</span>
+                <span className={styles.summaryValue}>{formatGrossTotal(grid.summary.gross_total)}</span>
               </span>
               {grid.summary.needs_attention > 0 && (
                 <span className={styles.summaryItem}>

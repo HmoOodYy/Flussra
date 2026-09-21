@@ -348,9 +348,26 @@
   cursor: pointer;
   font-weight: 600;
   font-size: 0.88rem;
-  margin-top: 1rem;
 }
 .doneBtn:hover { background: #1d4ed8; }
+
+.successActions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.viewFinalizedBtn {
+  padding: 0.45rem 1.5rem;
+  background: #059669;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+.viewFinalizedBtn:hover { background: #047857; }
 
 /* ── Confirm overlay ── */
 .confirmOverlay {

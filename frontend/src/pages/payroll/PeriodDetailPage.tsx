@@ -12,6 +12,7 @@ import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/pa
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
 import { canEntryPayroll } from '../../lib/permissions';
+import { formatGrossTotal } from './grossDisplay';
 import styles from './PeriodDetailPage.module.css';
 
 // ---------------------------------------------------------------------------
@@ -384,7 +385,7 @@ export function PeriodDetailPage() {
         </div>
         <div className={styles.summaryItem}>
           <span className={styles.summaryLabel}>Gross:</span>
-          <span className={styles.summaryValue}>${summary.gross_total}</span>
+          <span className={styles.summaryValue}>{formatGrossTotal(summary.gross_total)}</span>
         </div>
         {summary.needs_attention > 0 && (
           <div className={styles.summaryItem}>

@@ -211,3 +211,77 @@ test('resolveCapabilityGate: a present, allowed capability always wins over isAc
   const result = resolveCapabilityGate(makeCapability({ allowed: true }), false);
   assert.deepEqual(result, { disabled: false, reasonMessage: null });
 });
+
+// ── resolveCapabilityGate — Cancel ──────────────────────────────────────────
+// can_cancel is authority-driven the same way as Submit/Resubmit/Day Grid, and
+// there is no separate frontend-derived "which statuses can be cancelled"
+// rule: the Cancel action is rendered for every Hub-active status
+// (isHubActiveWorkflowStatus — the same set Submit/Resubmit/Day Grid already
+// use), and the backend's can_cancel capability alone decides enabled vs.
+// disabled + reason, including on InReview/Returned where the backend always
+// denies it with its own PERIOD_NOT_OPEN reason rather than the frontend
+// hiding the action via a hard-coded Draft/Open-only rule.
+
+test('Cancel: Draft + can_cancel allowed -> enabled', () => {
+  const result = resolveCapabilityGate(makeCapability({ allowed: true }), isHubActiveWorkflowStatus('Draft'));
+  assert.deepEqual(result, { disabled: false, reasonMessage: null });
+});
+
+test('Cancel: Draft + can_cancel denied -> disabled with backend reason', () => {
+  const result = resolveCapabilityGate(
+    makeCapability({
+      allowed: false,
+      reason_code: 'PERMISSION_DENIED',
+      reason_message: 'payroll.finalize required to cancel a Draft period.',
+    }),
+    isHubActiveWorkflowStatus('Draft'),
+  );
+  assert.deepEqual(result, {
+    disabled: true,
+    reasonMessage: 'payroll.finalize required to cancel a Draft period.',
+  });
+});
+
+test('Cancel: Open + can_cancel allowed -> enabled', () => {
+  const result = resolveCapabilityGate(makeCapability({ allowed: true }), isHubActiveWorkflowStatus('Open'));
+  assert.deepEqual(result, { disabled: false, reasonMessage: null });
+});
+
+test('Cancel: Open + can_cancel denied -> disabled with backend reason', () => {
+  const result = resolveCapabilityGate(
+    makeCapability({
+      allowed: false,
+      reason_code: 'PERMISSION_DENIED',
+      reason_message: 'payroll.finalize required to cancel an Open period.',
+    }),
+    isHubActiveWorkflowStatus('Open'),
+  );
+  assert.deepEqual(result, {
+    disabled: true,
+    reasonMessage: 'payroll.finalize required to cancel an Open period.',
+  });
+});
+
+test('Cancel: Draft/Open + missing capability -> disabled as context unavailable (fail closed)', () => {
+  for (const status of ['Draft', 'Open'] as const) {
+    const result = resolveCapabilityGate(null, isHubActiveWorkflowStatus(status));
+    assert.deepEqual(result, { disabled: true, reasonMessage: WORKFLOW_CONTEXT_UNAVAILABLE_MESSAGE }, status);
+  }
+});
+
+test('Cancel: InReview/Returned + backend always denies with its own reason -> disabled, backend reason shown (not hidden by a frontend status rule)', () => {
+  for (const status of ['InReview', 'Returned'] as const) {
+    const result = resolveCapabilityGate(
+      makeCapability({
+        allowed: false,
+        reason_code: 'PERIOD_NOT_OPEN',
+        reason_message: 'Only Draft and Open periods can be cancelled via this workflow.',
+      }),
+      isHubActiveWorkflowStatus(status),
+    );
+    assert.deepEqual(result, {
+      disabled: true,
+      reasonMessage: 'Only Draft and Open periods can be cancelled via this workflow.',
+    }, status);
+  }
+});
