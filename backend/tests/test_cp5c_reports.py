@@ -86,6 +86,13 @@ async def _insert_http_period(
             UPDATE review.managerreviewitems SET entityid = :period_id
             WHERE reviewitemid = :review_id
         """), {"period_id": str(row), "review_id": return_review_id})
+    # Current-architecture periods always carry a frozen Pay Item layout
+    # snapshot (CP-2C); give every HTTP-shaped test period one too, so Daily
+    # financial lines resolve to a PayItemID that belongs to the period's
+    # reportable Daily layout.
+    await _create_period_pay_item_rows(
+        period_id=int(row), company_id=1, branch_id=branch_id, start_date=start_date, db=direct_db,
+    )
     await direct_db.commit()
     return int(row)
 
@@ -111,10 +118,20 @@ async def _seed_submitted_snapshot(
     direct_db, branch_id: int, driver_id: int, *, include_evidence: bool = True,
     include_multiple_statuses: bool = False,
     system_adjustments: tuple[tuple[str, Decimal], ...] = (),
+    daily_pay_item_id: int | None = None,
 ) -> tuple[int, int, int, int | None, int | None]:
     """Capture a real CP-4D snapshot/evidence packet for route-level reads."""
     period_id = await _insert_http_period(direct_db, branch_id, "Open")
-    await _insert_http_work(direct_db, period_id, branch_id, driver_id)
+    # A real Daily Pay Item code (not a pseudo line type), so the raw
+    # DraftLine row remains valid once the period returns to LIVE authority
+    # (Returned) and PayItemID must resolve to the frozen Daily layout.
+    await _insert_http_work(direct_db, period_id, branch_id, driver_id, line_type="HOURS")
+    hours_pay_item_id = int((await direct_db.execute(text("""
+        SELECT payitemid FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND payitemcode = 'HOURS'
+    """), {"period_id": period_id})).scalar_one())
+    if daily_pay_item_id is None:
+        daily_pay_item_id = hours_pay_item_id
     marker = uuid4().hex[:12]
     status_key_id = None
     bonus_id = None
@@ -162,7 +179,7 @@ async def _seed_submitted_snapshot(
         source_type="DraftLine", source_id=f"CP5C:{marker}", line_type="DailyNote", line_scope="Daily",
         work_date=date(2099, 1, 1), driver_id=driver_id, quantity=Decimal("1"),
         resolved_rate_amount=None, calculated_amount=Decimal("16"), needs_manager_review=False,
-        blocker_reason=None, source_evidence={"CP5C": marker},
+        blocker_reason=None, pay_item_id=daily_pay_item_id, source_evidence={"CP5C": marker},
     )
     lines = [daily]
     bonus_total = Decimal("0")
@@ -224,6 +241,10 @@ async def _seed_legacy_snapshot(direct_db, branch_id: int, driver_id: int) -> tu
     """Create a pre-evidence immutable packet with live evidence deliberately present."""
     period_id = await _insert_http_period(direct_db, branch_id, "Open")
     await _insert_http_work(direct_db, period_id, branch_id, driver_id)
+    hours_pay_item_id = int((await direct_db.execute(text("""
+        SELECT payitemid FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND payitemcode = 'HOURS'
+    """), {"period_id": period_id})).scalar_one())
     marker = uuid4().hex[:12]
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollstatuskeys
@@ -258,10 +279,10 @@ async def _seed_legacy_snapshot(direct_db, branch_id: int, driver_id: int) -> tu
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollcalculationsnapshotlines
             (payrollcalculationdrivertotalid, sourcetype, sourceid, linetype, linescope,
-             workdate, quantity, calculatedamount, sourceevidencejsonb)
+             workdate, payitemid, quantity, calculatedamount, sourceevidencejsonb)
         VALUES (:total_id, 'DraftLine', 'legacy-cp5c', 'DailyNote', 'Daily', '2099-01-01',
-                1.0000, 16.0000, '{}'::jsonb)
-    """), {"total_id": total_id})
+                :pay_item_id, 1.0000, 16.0000, '{}'::jsonb)
+    """), {"total_id": total_id, "pay_item_id": hours_pay_item_id})
     await direct_db.execute(text("""
         INSERT INTO review.managerreviewitems
             (companyid, branchid, requestedbyuserid, requesttype, entityschema, entityname,
@@ -370,6 +391,7 @@ async def test_prepared_reports_are_operational_only_without_live_financial_buil
     monkeypatch.setattr(report_read_model, "_period_context", lambda **_: _async(_period("Draft")))
     monkeypatch.setattr(report_read_model, "resolve_report_financial_authority", lambda **_: _async(authority))
     monkeypatch.setattr(report_read_model, "_columns", _columns)
+    monkeypatch.setattr(report_read_model, "_pay_item_columns", _columns)
     monkeypatch.setattr(report_read_model, "_operational_rows", _operational)
     monkeypatch.setattr(report_read_model, "_financial_packet", financial)
 
@@ -399,7 +421,8 @@ async def test_frozen_report_uses_the_rp1_selected_snapshot_and_immutable_eviden
 
     async def financial(*_args):
         return ([{"driver_id": 7, "source_type": "DraftLine", "line_type": "HOURS",
-                  "line_scope": "Daily", "work_date": None, "calculated_amount": Decimal("16")}],
+                  "line_scope": "Daily", "work_date": None, "pay_item_id": 1,
+                  "calculated_amount": Decimal("16"), "snapshot_source_type": "DraftLine"}],
                 totals, [], [], True, 88, "a" * 64)
 
     async def evidence(*_args):
@@ -413,6 +436,8 @@ async def test_frozen_report_uses_the_rp1_selected_snapshot_and_immutable_eviden
     monkeypatch.setattr(report_read_model, "_period_context", lambda **_: _async(_period("Approved")))
     monkeypatch.setattr(report_read_model, "resolve_report_financial_authority", lambda **_: _async(authority))
     monkeypatch.setattr(report_read_model, "_columns", _columns)
+    monkeypatch.setattr(report_read_model, "_pay_item_columns", _columns)
+    monkeypatch.setattr(report_read_model, "_period_has_pay_item_snapshot", lambda *_: _async(True))
     monkeypatch.setattr(report_read_model, "_operational_rows", _operational)
     monkeypatch.setattr(report_read_model, "_financial_packet", financial)
     monkeypatch.setattr(report_read_model, "_snapshot_evidence", evidence)
@@ -473,6 +498,10 @@ async def test_prepared_route_matrix_is_operational_only(
         assert response.json()["metadata"]["financials_available"] is False
         assert response.json()["metadata"]["unavailable_reason"] == "SOURCE_ONLY_PERIOD"
         assert response.json()["pay_totals"] is None
+        # Pay Item column metadata is not financial and remains available
+        # even when Prepared has no financial authority; only the amounts do not.
+        assert any(c["code"] == "HOURS" for c in response.json()["pay_item_columns"])
+        assert response.json()["pay_item_totals"] is None
     assert mixed.json()["drivers"][0]["work"]["daily_rows"]
     assert mixed.json()["drivers"][0]["pay"] is None
 
@@ -575,13 +604,6 @@ async def test_report_columns_use_frozen_period_pay_item_metadata(
     session_client, auth_token, paytest_branch_id, direct_db,
 ):
     period_id = await _insert_http_period(direct_db, paytest_branch_id, "Draft")
-    await _create_period_pay_item_rows(
-        period_id=period_id,
-        company_id=1,
-        branch_id=paytest_branch_id,
-        start_date=date(2099, 1, 1),
-        db=direct_db,
-    )
     snapshot = (await direct_db.execute(text("""
         SELECT payitemid, payitemcode, COALESCE(displaylabel, payitemname) AS label,
                unit, sortorder, appearsinreports
@@ -706,6 +728,17 @@ async def test_resubmit_creates_the_next_report_snapshot_revision(
     period_id, first_snapshot_id, review_id, _, _ = await _seed_submitted_snapshot(
         direct_db, paytest_branch_id, paytest_driver_id,
     )
+    # An approved rate is required so the corrected HOURS line resolves
+    # cleanly and does not block resubmission with a manager-review flag.
+    hourly_rate_type_id = (await direct_db.execute(text("""
+        SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'HOURLY'
+    """))).scalar_one()
+    await direct_db.execute(text("""
+        INSERT INTO payroll.driverrates
+            (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status, createdbyuserid)
+        VALUES (1, :branch_id, :driver_id, :rate_type_id, 5.0000, '2099-01-01', 'Approved', 1)
+    """), {"branch_id": paytest_branch_id, "driver_id": paytest_driver_id, "rate_type_id": hourly_rate_type_id})
+    await direct_db.commit()
     returned = await session_client.post(
         f"/review/items/{review_id}/decide",
         json={"decision": "EditRequested", "decision_reason": "Correct source"},
@@ -729,7 +762,7 @@ async def test_resubmit_creates_the_next_report_snapshot_revision(
         payload_before_resubmit = report_before_resubmit.json()
         assert payload_before_resubmit["metadata"]["authority_kind"] == "LIVE"
         if name != "period-pay":
-            assert Decimal(payload_before_resubmit["work_totals"]["DailyNote"]) == Decimal("2")
+            assert Decimal(payload_before_resubmit["work_totals"]["HOURS"]) == Decimal("2")
         if payload_before_resubmit["pay_totals"] is not None:
             assert Decimal(payload_before_resubmit["pay_totals"]["total_pay"]) == Decimal(live_preview.json()["total_expected_pay"])
     resubmitted = await session_client.post(
@@ -967,3 +1000,440 @@ async def test_locked_route_uses_final_lines_and_originating_snapshot_evidence(
 
 async def _async(value):
     return value
+
+
+# ---------------------------------------------------------------------------
+# C1-3A — Period Pay per-Daily-Pay-Item money.
+# ---------------------------------------------------------------------------
+
+async def _approve_rate(
+    session_client: httpx.AsyncClient, auth_token: str, driver_id: int,
+    rate_code: str, amount: str, effective_from: str = "2098-01-01",
+) -> None:
+    # Deliberately before the shared 2099-01-01..2099-01-07 default period
+    # window: other tests in this module leave Locked/Archived residue there
+    # (never cancelled, unlike Draft/Open/InReview/Returned/Approved), and
+    # rate approval rejects any effective_from inside a finalized period for
+    # the same branch. An open-ended earlier effective date still applies.
+    rate_types = await session_client.get("/payroll/rate-types", headers=_auth(auth_token))
+    assert rate_types.status_code == 200, rate_types.text
+    rate_type_id = next(row["rate_type_id"] for row in rate_types.json() if row["rate_code"] == rate_code)
+    created = await session_client.post(
+        "/payroll/rates",
+        json={"driver_id": driver_id, "rate_type_id": rate_type_id,
+              "amount": amount, "effective_from": effective_from},
+        headers=_auth(auth_token),
+    )
+    assert created.status_code == 201, created.text
+    approved = await session_client.post(
+        f"/payroll/rates/{created.json()['driver_rate_id']}/approve", headers=_auth(auth_token),
+    )
+    assert approved.status_code == 200, approved.text
+
+
+async def _pay_item_id(direct_db, period_id: int, code: str) -> int:
+    return int((await direct_db.execute(text("""
+        SELECT payitemid FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND payitemcode = :code
+    """), {"period_id": period_id, "code": code})).scalar_one())
+
+
+def _pay_gross_reconciles(pay: dict) -> None:
+    gross = Decimal(pay["daily_pay"]) + Decimal(pay["status_pay"]) + Decimal(pay["period_pay"])
+    assert Decimal(pay["gross_pay"]) == gross
+    assert (
+        gross + Decimal(pay["minimum_adjustment"]) + Decimal(pay["maximum_adjustment"]) + Decimal(pay["bonus_total"])
+        == Decimal(pay["total_pay"])
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_period_pay_item_amounts_dense_and_reconcile(
+    session_client, auth_token, paytest_branch_id, direct_db,
+):
+    driver_ids = []
+    for _ in range(2):
+        created = await session_client.post(
+            "/core/drivers",
+            json={"branch_id": paytest_branch_id, "full_name": f"CP5C item {uuid4().hex[:8]}"},
+            headers=_auth(auth_token),
+        )
+        assert created.status_code == 201, created.text
+        driver_ids.append(created.json()["driver_id"])
+    driver_a, driver_b = driver_ids
+    await _approve_rate(session_client, auth_token, driver_a, "HOURLY", "10.00")
+    await _approve_rate(session_client, auth_token, driver_b, "HOURLY", "10.00")
+    await _approve_rate(session_client, auth_token, driver_b, "MILEAGE", "1.00")
+    period_id = await _insert_http_period(direct_db, paytest_branch_id, "Open")
+    hours_id = await _pay_item_id(direct_db, period_id, "HOURS")
+    miles_id = await _pay_item_id(direct_db, period_id, "MILES")
+    for driver_id, work_date, line_type, qty in (
+        (driver_a, "2099-01-01", "HOURS", "2.0000"),
+        (driver_b, "2099-01-01", "HOURS", "3.0000"),
+        (driver_b, "2099-01-02", "MILES", "10.0000"),
+    ):
+        line = await session_client.post(
+            f"/payroll/periods/{period_id}/lines",
+            json={"driver_id": driver_id, "work_date": work_date, "line_type": line_type, "quantity": qty},
+            headers=_auth(auth_token),
+        )
+        assert line.status_code == 201, line.text
+    report = await _report(session_client, auth_token, period_id, "period-pay")
+    assert report.status_code == 200, report.text
+    payload = report.json()
+    column_ids = [c["pay_item_id"] for c in payload["pay_item_columns"]]
+    assert hours_id in column_ids
+    assert miles_id in column_ids
+    by_driver = {d["driver_id"]: d for d in payload["drivers"]}
+    a_amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in by_driver[driver_a]["pay"]["pay_item_amounts"]}
+    b_amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in by_driver[driver_b]["pay"]["pay_item_amounts"]}
+    # Dense: every active reportable Daily column is present per driver.
+    assert set(a_amounts) == set(column_ids)
+    assert set(b_amounts) == set(column_ids)
+    # Driver A never touched MILES: present as an explicit zero, not absent.
+    assert a_amounts[miles_id] == Decimal("0")
+    assert a_amounts[hours_id] == Decimal("20")
+    assert b_amounts[hours_id] == Decimal("30")
+    assert b_amounts[miles_id] == Decimal("10")
+    for driver_id in (driver_a, driver_b):
+        amounts = a_amounts if driver_id == driver_a else b_amounts
+        pay = by_driver[driver_id]["pay"]
+        # Only Daily items exist in this period, so per-item sum == daily_pay.
+        assert Decimal(pay["daily_pay"]) == sum(amounts.values(), Decimal("0"))
+        _pay_gross_reconciles(pay)
+    totals = {t["pay_item_id"]: Decimal(t["amount"]) for t in payload["pay_item_totals"]}
+    assert totals[hours_id] == a_amounts[hours_id] + b_amounts[hours_id]
+    assert totals[miles_id] == a_amounts[miles_id] + b_amounts[miles_id]
+    # Unused active columns (LOADS etc.) still total zero, not absent.
+    unused = [c for c in column_ids if c not in (hours_id, miles_id)]
+    assert unused, "expected at least one other active Daily column with zero usage"
+    for cid in unused:
+        assert totals[cid] == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_returned_period_pay_reflects_corrected_live_money(
+    session_client, auth_token, paytest_branch_id, direct_db,
+):
+    # A fresh driver (not the shared paytest_driver_id) — other tests in this
+    # module may have already given paytest_driver_id an Approved HOURLY rate.
+    created = await session_client.post(
+        "/core/drivers",
+        json={"branch_id": paytest_branch_id, "full_name": f"CP5C returned {uuid4().hex[:8]}"},
+        headers=_auth(auth_token),
+    )
+    assert created.status_code == 201, created.text
+    driver_id = created.json()["driver_id"]
+    period_id, _, review_id, _, _ = await _seed_submitted_snapshot(
+        direct_db, paytest_branch_id, driver_id,
+    )
+    await _approve_rate(session_client, auth_token, driver_id, "HOURLY", "7.00")
+    returned = await session_client.post(
+        f"/review/items/{review_id}/decide",
+        json={"decision": "EditRequested", "decision_reason": "Correct source"},
+        headers=_auth(auth_token),
+    )
+    assert returned.status_code == 200, returned.text
+    lines = await session_client.get(f"/payroll/periods/{period_id}/lines", headers=_auth(auth_token))
+    assert lines.status_code == 200, lines.text
+    corrected = await session_client.patch(
+        f"/payroll/periods/{period_id}/lines/{lines.json()[0]['draft_line_id']}",
+        json={"quantity": "4.0000"}, headers=_auth(auth_token),
+    )
+    assert corrected.status_code == 200, corrected.text
+    hours_id = await _pay_item_id(direct_db, period_id, "HOURS")
+    report = await _report(session_client, auth_token, period_id, "period-pay")
+    assert report.status_code == 200, report.text
+    payload = report.json()
+    assert payload["metadata"]["authority_kind"] == "LIVE"
+    driver = next(d for d in payload["drivers"] if d["driver_id"] == driver_id)
+    amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in driver["pay"]["pay_item_amounts"]}
+    # Corrected LIVE money (4 x 7 = 28), never the stale $16 submitted snapshot.
+    assert amounts[hours_id] == Decimal("28")
+    assert amounts[hours_id] != Decimal("16")
+    _pay_gross_reconciles(driver["pay"])
+
+
+@pytest.mark.asyncio
+async def test_live_fallback_amount_reconciles_pay_item_total(
+    session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+):
+    period_id = await _insert_http_period(direct_db, paytest_branch_id, "Open")
+    hours_id = await _pay_item_id(direct_db, period_id, "HOURS")
+    # A manager-flagged line with a manual rate override and NULL
+    # calculatedamount is excluded from live re-resolution (the manager-NMR
+    # guard) — the packet must still use its fallback qty*rate amount for
+    # per-item aggregation, not the raw (None) calculated_amount.
+    await direct_db.execute(text("""
+        INSERT INTO payroll.payrolldraftlines
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
+             quantity, rateamount, calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2099-01-01', 'HOURS', 'Daily',
+                2.0000, 15.0000, NULL, 'Manual', 'Active', TRUE, 1)
+    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id})
+    await direct_db.commit()
+    report = await _report(session_client, auth_token, period_id, "drivers")
+    assert report.status_code == 200, report.text
+    payload = report.json()
+    driver = next(d for d in payload["drivers"] if d["driver_id"] == paytest_driver_id)
+    pay = driver["pay"]
+    assert Decimal(pay["daily_pay"]) == Decimal("30")
+    amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in pay["pay_item_amounts"]}
+    assert amounts[hours_id] == Decimal("30")
+    line = next(row for row in pay["financial_lines"] if row["line_type"] == "HOURS")
+    assert Decimal(line["calculated_amount"]) == Decimal("30")
+
+
+def test_pay_item_amounts_excludes_status_bonus_and_system_lines():
+    lines = [
+        # Public source_type is the raw LIVE provenance value ("Manual"), not
+        # the category — classification must use snapshot_source_type, never
+        # source_type, so this line is still correctly aggregated.
+        {"driver_id": 1, "line_scope": "Daily", "source_type": "Manual", "snapshot_source_type": "DraftLine",
+         "pay_item_id": 10, "calculated_amount": Decimal("50")},
+        {"driver_id": 1, "line_scope": "Daily", "source_type": "StatusEntryState", "snapshot_source_type": "StatusEntryState",
+         "pay_item_id": None, "calculated_amount": Decimal("99")},
+        {"driver_id": 1, "line_scope": "Period", "source_type": "BonusEvent", "snapshot_source_type": "BonusEvent",
+         "pay_item_id": None, "calculated_amount": Decimal("5")},
+        {"driver_id": 1, "line_scope": "Period", "source_type": "System", "snapshot_source_type": "System",
+         "pay_item_id": None, "calculated_amount": Decimal("7")},
+    ]
+    per_driver, totals = report_read_model._pay_item_amounts(lines, [10])
+    assert per_driver[1] == {10: Decimal("50")}
+    assert totals == {10: Decimal("50")}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_authority_pay_item_amounts_frozen_against_later_mutation(
+    session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+):
+    period_id, snapshot_id, review_id, _, _ = await _seed_submitted_snapshot(
+        direct_db, paytest_branch_id, paytest_driver_id,
+    )
+    hours_id = await _pay_item_id(direct_db, period_id, "HOURS")
+    # Mutate the underlying (now dormant) DraftLine after the snapshot was
+    # captured; InReview/Approved must keep reading the frozen $16, not it.
+    await direct_db.execute(text("""
+        UPDATE payroll.payrolldraftlines SET calculatedamount = 9999.0000
+        WHERE payrollperiodid = :period_id
+    """), {"period_id": period_id})
+    await direct_db.commit()
+    for name in ("drivers", "period-pay", "mixed"):
+        response = await _report(session_client, auth_token, period_id, name)
+        assert response.status_code == 200, response.text
+        driver = next(d for d in response.json()["drivers"] if d["driver_id"] == paytest_driver_id)
+        amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in driver["pay"]["pay_item_amounts"]}
+        assert amounts[hours_id] == Decimal("16")
+        _pay_gross_reconciles(driver["pay"])
+    decision = await session_client.post(
+        f"/review/items/{review_id}/decide", json={"decision": "Approved"}, headers=_auth(auth_token),
+    )
+    assert decision.status_code == 200, decision.text
+    approved_report = await _report(session_client, auth_token, period_id, "period-pay")
+    assert approved_report.status_code == 200, approved_report.text
+    approved_payload = approved_report.json()
+    assert approved_payload["metadata"]["authority_kind"] == "APPROVED_SNAPSHOT"
+    assert approved_payload["metadata"]["snapshot_id"] == snapshot_id
+    approved_driver = next(d for d in approved_payload["drivers"] if d["driver_id"] == paytest_driver_id)
+    approved_amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in approved_driver["pay"]["pay_item_amounts"]}
+    assert approved_amounts[hours_id] == Decimal("16")
+    _pay_gross_reconciles(approved_driver["pay"])
+
+
+@pytest.mark.asyncio
+async def test_locked_and_archived_status_lines_classified_separately_from_pay_items(
+    session_client, auth_token, paytest_branch_id, direct_db,
+):
+    marker = uuid4().hex[:12]
+    employee_id = int((await direct_db.execute(text("""
+        INSERT INTO core.employees
+            (companyid, branchid, fullname, employeetype, employmentstatus, createdbyuserid)
+        VALUES (1, :branch_id, :name, 'Driver', 'Active', 1)
+        RETURNING employeeid
+    """), {"branch_id": paytest_branch_id, "name": f"CP5C status split {marker}"})).scalar_one())
+    driver_id = int((await direct_db.execute(text("""
+        INSERT INTO core.drivers (companyid, branchid, employeeid, drivercode, driverstatus)
+        VALUES (1, :branch_id, :employee_id, :code, 'Active')
+        RETURNING driverid
+    """), {"branch_id": paytest_branch_id, "employee_id": employee_id, "code": f"CP5C-{marker[:20]}"})).scalar_one())
+    period_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.payrollperiods
+            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+        VALUES (1, :branch_id, 'Locked', :code, 'CP5C status classification', 'Week', '2097-01-01', '2097-01-07')
+        RETURNING payrollperiodid
+    """), {"branch_id": paytest_branch_id, "code": f"CP5C-{marker}"})).scalar_one())
+    await _create_period_pay_item_rows(
+        period_id=period_id, company_id=1, branch_id=paytest_branch_id, start_date=date(2097, 1, 1), db=direct_db,
+    )
+    hours_id = await _pay_item_id(direct_db, period_id, "HOURS")
+    await direct_db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)"))
+    await direct_db.execute(text("""
+        INSERT INTO payroll.payrollfinallines
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
+             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc)
+        VALUES
+            (1, :branch_id, :period_id, :driver_id, '2097-01-01', 'HOURS', 'Daily',
+             :hours_id, 2, 20.0000, 'DraftLine', 1, NOW(), NOW()),
+            (1, :branch_id, :period_id, :driver_id, '2097-01-02', 'STATUS_PAY', 'Daily',
+             NULL, 1, 5.0000, 'StatusEntryState', 1, NOW(), NOW())
+    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": driver_id, "hours_id": hours_id})
+    await direct_db.commit()
+    for name in ("drivers", "period-pay", "mixed"):
+        response = await _report(session_client, auth_token, period_id, name)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        driver = next(d for d in payload["drivers"] if d["driver_id"] == driver_id)
+        pay = driver["pay"]
+        assert Decimal(pay["daily_pay"]) == Decimal("20")
+        assert Decimal(pay["status_pay"]) == Decimal("5")
+        amounts = {a["pay_item_id"]: Decimal(a["amount"]) for a in pay["pay_item_amounts"]}
+        assert amounts[hours_id] == Decimal("20")
+        assert Decimal("5") not in amounts.values()
+        _pay_gross_reconciles(pay)
+    archived = await session_client.patch(
+        f"/payroll/periods/{period_id}/status", json={"status": "Archived"}, headers=_auth(auth_token),
+    )
+    assert archived.status_code == 200, archived.text
+    archived_report = await _report(session_client, auth_token, period_id, "mixed")
+    assert archived_report.status_code == 200, archived_report.text
+    archived_driver = next(d for d in archived_report.json()["drivers"] if d["driver_id"] == driver_id)
+    assert Decimal(archived_driver["pay"]["status_pay"]) == Decimal("5")
+    assert Decimal(archived_driver["pay"]["daily_pay"]) == Decimal("20")
+
+
+@pytest.mark.asyncio
+async def test_current_and_finalized_period_pay_reconcile_for_locked_period(
+    session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db, test_database_url,
+):
+    period_id, _, review_id, _, _ = await _seed_submitted_snapshot(
+        direct_db, paytest_branch_id, paytest_driver_id,
+    )
+    await direct_db.execute(text("UPDATE review.managerreviewitems SET status = 'Approved' WHERE reviewitemid = :id"), {"id": review_id})
+    await direct_db.execute(text("UPDATE payroll.payrollperiods SET status = 'Approved' WHERE payrollperiodid = :id"), {"id": period_id})
+    await direct_db.commit()
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as finalize_db:
+            result = await finalize_period(period_id, 1, 1, finalize_db)
+            assert result.status == "Locked"
+    finally:
+        await engine.dispose()
+    for view in ("drivers", "period-work", "period-pay", "mixed"):
+        current = await _report(session_client, auth_token, period_id, view)
+        finalized = await session_client.get(
+            f"/payroll/finalized/{period_id}/reports/{view}", headers=_auth(auth_token),
+        )
+        assert current.status_code == 200, current.text
+        assert finalized.status_code == 200, finalized.text
+        current_body, finalized_body = current.json(), finalized.json()
+        assert (
+            sorted(c["pay_item_id"] for c in current_body["pay_item_columns"])
+            == sorted(c["pay_item_id"] for c in finalized_body["pay_item_columns"])
+        )
+        assert current_body["pay_item_totals"] == finalized_body["pay_item_totals"]
+        assert current_body["pay_totals"] == finalized_body["pay_totals"]
+        current_driver = next(d for d in current_body["drivers"] if d["driver_id"] == paytest_driver_id)
+        finalized_driver = next(d for d in finalized_body["drivers"] if d["driver_id"] == paytest_driver_id)
+        assert current_driver["pay"]["pay_item_amounts"] == finalized_driver["pay"]["pay_item_amounts"]
+        assert current_driver["pay"]["gross_pay"] == finalized_driver["pay"]["gross_pay"]
+
+
+@pytest.mark.asyncio
+async def test_pay_item_columns_frozen_and_scoped_to_active_reportable_daily(
+    session_client, auth_token, paytest_branch_id, direct_db,
+):
+    marker = uuid4().hex[:12]
+    custom_pay_item_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.payitems
+            (companyid, branchid, payitemcode, payitemname, category, datatype, unit, status, sortorder,
+             appearsinpayrollentry, appearsinledger, appearsinreports, requiresrate, issystemstandard,
+             itemscope, ratebehavior, isdefaultbranchactive)
+        VALUES (1, NULL, :code, 'C1-3A Custom Item', 'Custom', 'Decimal', 'Unit', 'Active', 50,
+                TRUE, TRUE, TRUE, TRUE, FALSE, 'Daily', 'PerUnit', FALSE)
+        RETURNING payitemid
+    """), {"code": f"C13A{marker}".upper()})).scalar_one())
+    await direct_db.execute(text("""
+        INSERT INTO payroll.branchpayitemconfig (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
+        VALUES (1, :branch_id, :pay_item_id, TRUE, '2099-01-01', 1)
+    """), {"branch_id": paytest_branch_id, "pay_item_id": custom_pay_item_id})
+    await direct_db.commit()
+    period_id = await _insert_http_period(direct_db, paytest_branch_id, "Draft")
+    report = await _report(session_client, auth_token, period_id, "drivers")
+    assert report.status_code == 200, report.text
+    columns = report.json()["pay_item_columns"]
+    codes = {c["code"] for c in columns}
+    assert "HOURS" in codes
+    assert f"C13A{marker}".upper() in codes
+    assert "BONUS" not in codes
+    assert "ADJUSTMENT" not in codes
+    assert "SYS_MIN_TOPUP" not in codes
+    assert "SYS_MAX_CAP" not in codes
+    assert "GUARANTEED_MINIMUM" not in codes
+    assert all(c["scope"] == "Daily" for c in columns)
+    assert [c["sort_order"] for c in columns] == sorted(c["sort_order"] for c in columns)
+    # Mutating the live catalog after the fact must not change the frozen columns.
+    await direct_db.execute(text("""
+        UPDATE payroll.payitems SET payitemname = 'Mutated after freeze', status = 'Retired'
+        WHERE payitemid = :pay_item_id
+    """), {"pay_item_id": custom_pay_item_id})
+    await direct_db.commit()
+    report_after = await _report(session_client, auth_token, period_id, "drivers")
+    assert report_after.status_code == 200, report_after.text
+    frozen_custom = next(c for c in report_after.json()["pay_item_columns"] if c["pay_item_id"] == custom_pay_item_id)
+    assert frozen_custom["label"] == "C1-3A Custom Item"
+
+
+@pytest.mark.asyncio
+async def test_daily_line_outside_frozen_layout_fails_closed_but_period_work_still_available(
+    session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+):
+    period_id, _, _, _, _ = await _seed_submitted_snapshot(
+        direct_db, paytest_branch_id, paytest_driver_id, daily_pay_item_id=999999999,
+    )
+    for name in ("drivers", "period-pay", "mixed"):
+        response = await _report(session_client, auth_token, period_id, name)
+        assert response.status_code == 422, response.text
+        assert "REPORT_PAY_ITEM_INTEGRITY_ERROR" in response.text
+    # Period Work is operational, not financial, and must stay available even
+    # though the per-item financial projection for this same period fails.
+    work = await _report(session_client, auth_token, period_id, "period-work")
+    assert work.status_code == 200, work.text
+    assert work.json()["metadata"]["authority_kind"] == "SUBMITTED_SNAPSHOT"
+    assert work.json()["pay_item_totals"] is None
+    driver = next(d for d in work.json()["drivers"] if d["driver_id"] == paytest_driver_id)
+    assert driver["pay"]["pay_item_amounts"] == []
+
+
+@pytest.mark.asyncio
+async def test_missing_frozen_layout_fails_closed_but_period_work_still_available(
+    session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+):
+    # A period built without going through real period creation (or
+    # _insert_http_period) never gets a PayrollPeriodPayItems layout row at
+    # all -- the pre-CP-2C shape. This must fail closed for the financial
+    # per-item path, not silently report zero columns.
+    marker = uuid4().hex[:12]
+    period_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.payrollperiods
+            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+        VALUES (1, :branch_id, 'Open', :code, 'CP5C missing layout', 'Week', '2096-01-01', '2096-01-07')
+        RETURNING payrollperiodid
+    """), {"branch_id": paytest_branch_id, "code": f"CP5C-{marker}"})).scalar_one())
+    await direct_db.execute(text("""
+        INSERT INTO payroll.payrolldraftlines
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
+             quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2096-01-01', 'HOURS', 'Daily',
+                2.0000, 'Manual', 'Active', FALSE, 1)
+    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id})
+    await direct_db.commit()
+    assert not await report_read_model._period_has_pay_item_snapshot(period_id, direct_db)
+    for name in ("drivers", "period-pay", "mixed"):
+        response = await _report(session_client, auth_token, period_id, name)
+        assert response.status_code == 422, response.text
+        assert "REPORT_PAY_ITEM_LAYOUT_UNAVAILABLE" in response.text
+    # Period Work must not be coupled to the missing financial layout either.
+    work = await _report(session_client, auth_token, period_id, "period-work")
+    assert work.status_code == 200, work.text
+    assert Decimal(work.json()["work_totals"]["HOURS"]) == Decimal("2")
+    assert work.json()["pay_item_totals"] is None
