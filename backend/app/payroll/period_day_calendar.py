@@ -17,10 +17,11 @@ app.payroll.period_creation and returned, because that module only ever
 has no caller of this accessor inside its own logic. It is NOT owned by
 period_creation.py — that module owns creation/writing of period structures,
 not shared validation against an existing period/day calendar. It remains
-consumed by Draft-line CRUD (add_draft_line) and Day Grid (get_day_grid,
-save_day_grid), both of which stay in app.payroll.service in this unit, and
-by app.payroll.off_drivers (get_selected_day_off_drivers), which now imports
-it directly rather than through the service.py facade.
+consumed by Draft-line CRUD (add_draft_line, in
+app.payroll.draft_line_mutation) and Day Grid (get_day_grid, save_day_grid,
+in app.payroll.day_grid), and by app.payroll.off_drivers
+(get_selected_day_off_drivers), which now imports it directly rather than
+through the service.py facade.
 """
 from datetime import date
 

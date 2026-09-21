@@ -12,12 +12,11 @@ get_period_by_id is a genuine cross-domain dependency gate: call sites
 remain across many payroll domain modules (Lifecycle, Resubmission,
 Draft-line CRUD, Finalization, Calculation, Period Pay Lines, Bonus,
 Drivers Off, Day Grid — Period Create's own call site moved here directly
-with it in B4-21) and app.payroll.off_drivers accesses it via qualified
-module attribute (service.get_period_by_id). app.payroll.service re-exports
-it via facade for its own internal callers; app.payroll.off_drivers is left
-unchanged (its qualified access continues to resolve through that facade,
-and redirecting it adds no architectural leverage while changing
-module-attribute-patch visibility).
+with it in B4-21). Stage B4-22 retargeted app.payroll.off_drivers to import
+this function directly from this module — it no longer resolves it via
+qualified access through app.payroll.service. app.payroll.service retains a
+plain imported binding purely for legacy test compatibility (it has no
+internal callers of its own).
 
 get_periods has no remaining caller in app.payroll.service after this move —
 router.py is its only consumer and now imports it directly.

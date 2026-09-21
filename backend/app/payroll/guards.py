@@ -4,9 +4,9 @@ Shared payroll access/guard helpers.
 Extracted from app.payroll.service (Stage B4-2A) as a dependency-closed leaf
 module — no behavior change, pure relocation. These four functions were
 proven, by caller audit, to be genuinely shared by at least the Rates and
-Driver Pay Rules domains (several are also called directly from lifecycle,
-finalization, calculation, Day Grid, and Current Payroll Hub code in
-service.py) rather than owned by any single domain. This module exists to
+Driver Pay Rules domains (several are also called directly from Lifecycle,
+Finalization, Calculation, Day Grid, and Current Payroll Hub code) rather
+than owned by any single domain. This module exists to
 remove that incorrect ownership from service.py so both Rates and a future
 Driver Pay Rules module can depend on a neutral leaf instead of importing
 app.payroll.service.

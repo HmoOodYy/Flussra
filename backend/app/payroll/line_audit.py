@@ -16,11 +16,13 @@ It already writes audit rows for three different entity types (DraftLines,
 PeriodPay lines, BonusEvents — see its own action-code docstring below), so
 it was never owned by a single domain the way _write_rate_audit belongs to
 Rates or _write_pay_rule_audit belongs to Driver Pay Rules. It is genuinely
-shared by four domains that all still live in app.payroll.service —
-Draft-line CRUD, Period Pay Lines, Bonus, and Day Grid — none of which is
-more entitled to own it than the others. app.payroll.service imports it back
-via facade for all of its current callers, which are not being extracted in
-this unit.
+shared by four domains, each now in its own module — Draft-line CRUD
+(app.payroll.draft_line_mutation), Period Pay Lines (app.payroll.period_pay),
+Bonus (app.payroll.bonus), and Day Grid (app.payroll.day_grid) — none of
+which is more entitled to own it than the others. app.payroll.service
+retains a plain imported binding purely for legacy test compatibility
+(test_cp3b2a_bonus_batch_safety.py); it has no production callers of its
+own.
 
 Do not add unrelated helpers here. This is not a general utilities module.
 """

@@ -25,17 +25,18 @@ same rate-resolution rule and the same arithmetic
 Plus _STATUS_PAYMENT_PROJECTION_SQL: the exact identity predicate for the
 persisted STATUS_PAYMENT compatibility-projection DraftLine written by
 _sync_status_payment_for_entry_state, used by Calculation
-(_build_live_calculation_packet, still in app.payroll.service) to exclude
-those rows from its own live-line scan since the canonical live status pay is
-sourced from _resolve_live_status_payment_lines instead.
+(_build_live_calculation_packet, in app.payroll.period_calculation) to
+exclude those rows from its own live-line scan since the canonical live
+status pay is sourced from _resolve_live_status_payment_lines instead.
 
-Current consumers, all remaining in app.payroll.service in this unit:
-  - Day Grid (save_day_grid) calls _sync_status_payment_for_entry_state.
-  - Lifecycle (change_period_status, resubmit_period) calls
-    _refresh_status_payment_lines.
-  - Calculation (_build_live_calculation_packet) calls
-    _resolve_live_status_payment_lines and references
-    _STATUS_PAYMENT_PROJECTION_SQL.
+Current consumers, each in its own module:
+  - Day Grid (save_day_grid, in app.payroll.day_grid) calls
+    _sync_status_payment_for_entry_state.
+  - Lifecycle (change_period_status, resubmit_period, in
+    app.payroll.period_lifecycle) calls _refresh_status_payment_lines.
+  - Calculation (_build_live_calculation_packet, in
+    app.payroll.period_calculation) calls _resolve_live_status_payment_lines
+    and references _STATUS_PAYMENT_PROJECTION_SQL.
 """
 from datetime import date
 from decimal import Decimal, ROUND_HALF_EVEN

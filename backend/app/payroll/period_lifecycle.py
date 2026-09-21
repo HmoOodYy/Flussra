@@ -43,7 +43,7 @@ directly from app.payroll.status_payment_sync
 Payment logic.
 
 Finalization (finalize_period, get_finalization_preview, and their approved-
-snapshot helpers) remains in app.payroll.service — proven dependency-
+snapshot helpers) lives in app.payroll.finalization — proven dependency-
 disjoint from this module by the B4-17 discovery, reconfirmed unchanged by
 this stage. Review approval behavior remains owned by app.review.service,
 which imports _write_period_status_audit directly from this module as of

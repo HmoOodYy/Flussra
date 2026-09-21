@@ -9,9 +9,10 @@ These four symbols are genuine shared vocabulary/type metadata, not
 validation policy: _LineTypeInfo is a result/type shape, _SYSTEM_ITEM_DB_CODES
 and _LEGACY_TO_CANONICAL are legacy-to-canonical naming facts, and
 _INFORMATIONAL_ONLY is a catalog-shape fact (which line types have no
-PayItems catalog row). Live consumers span Draft CRUD, Period Pay, Day Grid,
-and Calculation in app.payroll.service, none of which is more entitled to own
-this vocabulary than the others.
+PayItems catalog row). Live consumers span Draft CRUD
+(app.payroll.draft_line_mutation), Period Pay (app.payroll.period_pay), Day
+Grid (app.payroll.day_grid), and Calculation (app.payroll.period_calculation),
+none of which is more entitled to own this vocabulary than the others.
 
 _SYSTEM_ITEM_DB_CODES is NOT re-exported from app.payroll.service: its only
 purpose is constructing _LEGACY_TO_CANONICAL (below), which now happens
@@ -19,11 +20,9 @@ inside this module. It is private to this module.
 
 B4-10 Decision Review deliberately did NOT move _SYSTEM_LINE_TYPE_INFO or
 _SYSTEM_LINE_TYPES here, even though the former constructs _LineTypeInfo
-instances: both are dead legacy constants (_SYSTEM_LINE_TYPES has zero real
-callers anywhere in the backend; _SYSTEM_LINE_TYPE_INFO is referenced only by
-that dead set) and are not genuinely shared. They remain in
-app.payroll.service unchanged, importing _LineTypeInfo from this module at
-module-import time, pending a future dedicated dead-code cleanup stage.
+instances: both were dead legacy constants (_SYSTEM_LINE_TYPES had zero real
+callers anywhere in the backend; _SYSTEM_LINE_TYPE_INFO was referenced only
+by that dead set) and were not genuinely shared. Stage B4-21 deleted both.
 """
 from typing import NamedTuple
 

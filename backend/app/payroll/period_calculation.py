@@ -33,7 +33,7 @@ _LiveCalculationPacket is the direct input contract to snapshot capture, the
 three packet types are shared by live construction, hash projection and
 capture, _refresh_draft_calculations/_compute_draft_line_preview_amounts are
 an intentional write/read policy pair that must not drift apart, and
-Lifecycle (still in app.payroll.service) invokes build-then-capture as one
+Lifecycle (app.payroll.period_lifecycle) invokes build-then-capture as one
 transactionally-coherent operation.
 
 Distinct from app.payroll.calculation (the CP-4A pure PerUnit calculation
@@ -63,13 +63,12 @@ no INSERT/UPDATE/DELETE. Only _refresh_draft_calculations (Lifecycle-invoked,
 never Calculation-preview-invoked) mutates payroll.payrolldraftlines.
 
 Finalization (finalize_period, get_finalization_preview, and their approved-
-snapshot helpers) and Lifecycle (change_period_status, resubmit_period, and
-their transaction/audit helpers) remain in app.payroll.service — both are
-proven dependency-disjoint from this module. Lifecycle still resolves
-_refresh_draft_calculations, _build_live_calculation_packet, and
-_capture_calculation_snapshot as plain imported bindings in service.py's
-namespace; those three bindings are load-bearing there, not merely test
-compatibility.
+snapshot helpers, in app.payroll.finalization) and Lifecycle
+(change_period_status, resubmit_period, and their transaction/audit helpers,
+in app.payroll.period_lifecycle) are dependency-disjoint from this module.
+Lifecycle imports _refresh_draft_calculations, _build_live_calculation_packet,
+and _capture_calculation_snapshot directly from this module; those three
+bindings are load-bearing there, not merely test compatibility.
 """
 from __future__ import annotations
 

@@ -12,7 +12,8 @@ Owns exactly:
     constants consumed only by _validate_line_type / update_draft_line)
 
 Does NOT own the read surfaces (get_period_lines, get_period_draft_summary),
-which stay in app.payroll.service — "CRUD" here is mutation-only by design.
+which live in app.payroll.source_line_read — "CRUD" here is mutation-only by
+design.
 
 Consumes, rather than owns, every adjacent domain:
   - app.payroll.period_read.get_period_by_id
@@ -32,9 +33,9 @@ Consumes, rather than owns, every adjacent domain:
     ENTRY_ALLOWED_STATUSES, _WRITE_BLOCKED_STATUSES)
   - app.core.service._check_permission
 
-Day Grid (save_day_grid, still in app.payroll.service) calls
-add_draft_line/update_draft_line/void_draft_line in-process; service.py keeps
-plain imported bindings for those three public names for that reason alone.
+Day Grid (save_day_grid, in app.payroll.day_grid) calls
+add_draft_line/update_draft_line/void_draft_line in-process, importing them
+directly from this module.
 """
 from datetime import date
 from decimal import Decimal

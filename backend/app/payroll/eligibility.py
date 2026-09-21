@@ -4,9 +4,9 @@ Payroll driver eligibility helpers.
 Extracted from app.payroll.service (Stage B4-1) as a dependency-closed leaf
 module — no behavior change, pure relocation. Two of these symbols
 (_period_has_driver_eligibility_snapshot, _is_snapshot_row_eligible_for_workdate)
-are consumed externally via the app.payroll.service compatibility facade by
-app.payroll.current_hub, app.payroll.off_drivers, and
-app.payroll.finalized_library_read_model.
+are consumed directly by app.payroll.current_hub, app.payroll.off_drivers,
+and app.payroll.finalized_library_read_model (retargeted off the
+app.payroll.service compatibility facade in Stage B4-22).
 
 Stage B4-21 moved get_period_eligible_drivers here from app.payroll.service —
 pure relocation, no behavior change. This module already owned the table its

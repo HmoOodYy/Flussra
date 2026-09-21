@@ -16,9 +16,9 @@ quantity/driver/date tuple. _CalcResult is its return-value NamedTuple,
 co-located here because it exists only to describe this function's output
 shape.
 
-Reused (not owned) by Draft CRUD (add_draft_line, update_draft_line),
-_refresh_draft_calculations, and _compute_draft_line_preview_amounts, all of
-which stay in app.payroll.service in this unit.
+Reused (not owned) by Draft CRUD (add_draft_line, update_draft_line, in
+app.payroll.draft_line_mutation), _refresh_draft_calculations, and
+_compute_draft_line_preview_amounts (both in app.payroll.period_calculation).
 """
 from datetime import date
 from decimal import Decimal

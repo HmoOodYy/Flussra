@@ -24,18 +24,19 @@ Call order: every caller acquires this lock BEFORE
 _lock_period_for_mutation, so all source-write paths lock PayItem then
 Period — the same order as the delete/retirement path — avoiding deadlock.
 This module does not call _lock_period_for_mutation itself; ordering is
-enforced entirely by the caller (still app.payroll.service in this stage),
-so this extraction does not and cannot change it.
+enforced entirely by the caller, so this extraction does not and cannot
+change it.
 
-Genuinely shared by five call sites that all still live in
-app.payroll.service — Draft-line CRUD (add_draft_line, update_draft_line),
-Period Pay Lines (add_period_pay_line, update_period_pay_line), and Day Grid
-(save_day_grid) — none of which is more entitled to own it than the others.
-app.payroll.service imports it back via a compatibility facade: four
-concurrency tests in test_cp0a_mutation_status_guard.py patch
-service._lock_pay_item_for_source_write directly, and their exercised
-callers (add_draft_line, update_draft_line) remain in app.payroll.service in
-this unit, so the plain imported binding is load-bearing, not incidental.
+Genuinely shared by five call sites, each now in its own module —
+Draft-line CRUD (add_draft_line, update_draft_line, in
+app.payroll.draft_line_mutation), Period Pay Lines (add_period_pay_line,
+update_period_pay_line, in app.payroll.period_pay), and Day Grid
+(save_day_grid, in app.payroll.day_grid) — none of which is more entitled to
+own it than the others. app.payroll.service does not re-export this symbol:
+the concurrency tests in test_cp0a_mutation_status_guard.py patch
+draft_line_mutation._lock_pay_item_for_source_write directly, and their
+exercised callers (add_draft_line, update_draft_line) live in
+app.payroll.draft_line_mutation.
 
 Do not add unrelated helpers here. This is not a general utilities module.
 """

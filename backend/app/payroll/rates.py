@@ -69,8 +69,9 @@ from app.payroll.schemas import (
 # M13c: rate behaviors that use DriverRateTiers for calculation.
 # Physically defined near the M13a line-type-validation code in
 # app.payroll.service until Stage B4-4B; genuinely Rates-owned (classifies
-# rate *methods*), not calculation-owned. app.payroll.service imports it back
-# via facade for _compute_calculated_amount's dispatch.
+# rate *methods*), not calculation-owned. app.payroll.draft_line_calculation
+# imports it directly from this module for _compute_calculated_amount's
+# dispatch.
 _TIERED_BEHAVIORS: frozenset[str] = frozenset({"OrdinalTier", "RangeBracket", "RangeProgressive"})
 # Range behaviors (RangeBracket + RangeProgressive) share the same tier input/storage.
 _RANGE_BEHAVIORS: frozenset[str] = frozenset({"RangeBracket", "RangeProgressive"})

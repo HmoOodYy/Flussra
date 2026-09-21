@@ -38,8 +38,10 @@ values go through add_draft_line/update_draft_line/void_draft_line.
 This module owns no domain it consumes. Draft-line mutation, Day Entry State,
 Status Payment Sync, Period-Day Calendar, pay-item snapshot storage, the two
 lock primitives and line audit all remain owned by their own modules and are
-imported here. Drivers Off, Calculation, Lifecycle and Finalization remain in
-app.payroll.service and are not referenced here at all.
+imported here. Drivers Off (app.payroll.off_drivers), Calculation
+(app.payroll.period_calculation), Lifecycle (app.payroll.period_lifecycle)
+and Finalization (app.payroll.finalization) are owned by their own modules
+and are not referenced here at all.
 
 Transaction ownership is above this module: app.dependencies.get_db opens
 `async with engine.begin()`, so every write here — this module's own SQL, the

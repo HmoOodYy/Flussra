@@ -166,8 +166,10 @@ class PeriodStatusChange(BaseModel):
 
 # ---------------------------------------------------------------------------
 # M13a note: _VALID_LINE_TYPES (the old hardcoded set) has been removed.
-# Line-type validation is now done in the service layer using PayItems-driven
-# logic.  See payroll/service.py — _validate_line_type() and _SYSTEM_LINE_TYPES.
+# Line-type validation is now done using PayItems-driven logic. See
+# payroll/draft_line_mutation.py — _validate_line_type(). The legacy
+# _SYSTEM_LINE_TYPES constant this note used to reference was deleted in
+# Stage B4-21.
 # ---------------------------------------------------------------------------
 
 _VALID_SOURCE_TYPES   = {"Manual", "Import", "System"}

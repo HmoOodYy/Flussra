@@ -14,7 +14,9 @@ that has since become Locked/Archived, which _lock_period_for_mutation's
 editability check would reject.
 
 _load_active_bonus_events and get_period_eligible_drivers are NOT part of
-this module — both remain in app.payroll.service. _load_active_bonus_events
+this module — _load_active_bonus_events is owned by
+app.payroll.period_calculation and get_period_eligible_drivers by
+app.payroll.eligibility. _load_active_bonus_events
 is consumed by Calculation, Reporting, and report_read_model.py, not by
 Bonus CRUD/domain ownership. get_period_eligible_drivers is shared with
 other period-pay behavior, not Bonus-exclusive.

@@ -10,9 +10,10 @@ period-workflow-mutating operations. It was briefly kept in
 app.payroll.period_creation only because create_period_from_candidate had a
 structural (not architectural) need for it and that module must not import
 app.payroll.service. It is genuinely shared across Period Creation
-(app.payroll.period_creation), Lifecycle and Finalization (app.payroll.service:
-create_period, change_period_status, resubmit_period, finalize_period), and
-Review (app.review.service) — none of those domains is more entitled to own
+(app.payroll.period_creation: create_period), Lifecycle
+(app.payroll.period_lifecycle: change_period_status, resubmit_period),
+Finalization (app.payroll.finalization: finalize_period), and Review
+(app.review.service) — none of those domains is more entitled to own
 it than the others, so it now lives in this small neutral module instead.
 
 Do not add unrelated helpers here. This is not a general utilities module.

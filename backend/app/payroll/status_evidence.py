@@ -135,7 +135,7 @@ async def resolve_finalized_snapshot(
     FinalLines-based selector would then wrongly report Status evidence as
     unavailable even though the snapshot and its captured Status entries are
     completely real and correctly bound. The review-item binding has no such
-    blind spot, because app.payroll.service._load_approved_snapshot_packet
+    blind spot, because app.payroll.finalization._load_approved_snapshot_packet
     (the exact function finalize_period itself calls) resolves it the same
     way, before any FinalLines projection happens or fails to happen -- and
     it guarantees uniqueness the same way finalize_period does (refusing to

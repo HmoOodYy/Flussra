@@ -7,8 +7,9 @@ module — no behavior change, pure relocation.
 
 Owns:
   - _validate_period_line_type: the Period Pay line-type validator (mirrors
-    Draft CRUD's own _validate_line_type, which stays private to
-    app.payroll.service — the two validators are deliberately not unified).
+    Draft CRUD's own _validate_line_type, which is private to
+    app.payroll.draft_line_mutation — the two validators are deliberately
+    not unified).
   - _PERIOD_PAY_ALLOWED_BEHAVIORS / _SYSTEM_PERIOD_BLOCKED: Period-Pay-private
     policy constants consumed only by _validate_period_line_type.
   - add_period_pay_line / get_period_pay_lines / update_period_pay_line /
