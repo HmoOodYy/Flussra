@@ -1,15 +1,19 @@
 import { useEffect, useReducer, useState, useCallback } from 'react';
 import apiClient from '../../lib/apiClient';
-import { getCurrentPayrollHub, resubmitPeriod, submitPeriod } from '../../lib/payrollApi';
+import { getCurrentPayrollHub, resubmitPeriod, submitPeriod, cancelPeriod } from '../../lib/payrollApi';
+import { getReviewItem } from '../../lib/reviewApi';
 import { useAuth } from '../../store/authStore';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports, canPreviewCalculation } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
 import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary, PeriodWorkflowCapabilities, WorkflowAlert } from '../../types/payroll';
+import type { ReviewItemDetail } from '../../types/review';
 import { getPeriodWorkflowCapabilities, isHubActiveWorkflowStatus, resolveCapabilityGate } from './workflowCapabilityGate';
+import { RETURN_REASON_UNAVAILABLE_MESSAGE, resolveReturnReasonDisplay, shouldFetchReturnReason } from './returnedReason';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { SectionCard } from '../../components/ui/SectionCard';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { ErrorState } from '../../components/ui/ErrorState';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { CreatePeriodModal } from '../../components/CreatePeriodModal';
 import { PayrollEntryDialog } from './PayrollEntryDialog';
 import { DriversOffDialog } from './DriversOffDialog';
@@ -88,6 +92,61 @@ function workflowReducer(state: WorkflowState, action: WorkflowAction): Workflow
   }
 }
 
+// ── Returned correction reason ──────────────────────────────────────────────
+// Surfaces WHY a Returned period was returned, from the review item the
+// backend already links via current_return_review_item_id (set on the
+// InReview -> Returned decision, cleared on resubmit — see
+// app.review.service). This fetches once per Returned card; it never
+// reconstructs the reason itself, only relays the backend's own
+// final_decision_reason via the existing GET /review/items/{id} contract.
+
+function ReturnedReasonNote({
+  isReturned,
+  reviewItemId,
+}: {
+  isReturned: boolean;
+  reviewItemId: number | null;
+}) {
+  const [detail, setDetail] = useState<ReviewItemDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [errored, setErrored] = useState(false);
+
+  // Only fetches when there's actually something to fetch — resolveReturnReasonDisplay
+  // short-circuits on !isReturned / missing reviewItemId before ever looking at
+  // detail/loading/errored, so there is nothing to reset for those cases and no
+  // synchronous setState in the effect body outside the async fetch continuation.
+  useEffect(() => {
+    if (!shouldFetchReturnReason(isReturned, reviewItemId)) return;
+    const id = reviewItemId as number;
+    let active = true;
+    async function load() {
+      setLoading(true);
+      setErrored(false);
+      setDetail(null);
+      try {
+        const d = await getReviewItem(id);
+        if (active) setDetail(d);
+      } catch {
+        if (active) setErrored(true);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    void load();
+    return () => { active = false; };
+  }, [isReturned, reviewItemId]);
+
+  const display = resolveReturnReasonDisplay(isReturned, reviewItemId, loading, errored, detail);
+  if (display.kind === 'none') return null;
+  if (display.kind === 'loading') {
+    return <p className={styles.returnReasonNote}>Loading return reason…</p>;
+  }
+  if (display.kind === 'unavailable') {
+    return <p className={styles.returnReasonNote}>{RETURN_REASON_UNAVAILABLE_MESSAGE}</p>;
+  }
+  return <p className={styles.returnReasonNote}><strong>Returned:</strong> {display.message}</p>;
+}
+
 // ── Period card ───────────────────────────────────────────────────────────────
 
 interface PeriodCardProps {
@@ -119,8 +178,11 @@ function PeriodCard({
 }: PeriodCardProps) {
   const [transitioning,  setTransitioning]  = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
-  // Backend-authoritative gates for Submit / Resubmit / Day Grid access —
+  // Backend-authoritative gates for Submit / Resubmit / Day Grid / Cancel —
   // from GET /payroll/current, capabilities.periods[period_id].
   //
   // isActiveWorkflowStatus is true for Draft/Open/InReview/Returned — the
@@ -135,6 +197,7 @@ function PeriodCard({
   const submitGate = resolveCapabilityGate(workflowCapabilities?.can_submit_for_review ?? null, isActiveWorkflowStatus);
   const resubmitGate = resolveCapabilityGate(workflowCapabilities?.can_resubmit_returned ?? null, isActiveWorkflowStatus);
   const dayGridGate = resolveCapabilityGate(workflowCapabilities?.can_open_day_grid ?? null, isActiveWorkflowStatus);
+  const cancelGate = resolveCapabilityGate(workflowCapabilities?.can_cancel ?? null, isActiveWorkflowStatus);
 
   async function handleSubmit() {
     if (submitGate.disabled) return;
@@ -161,6 +224,22 @@ function PeriodCard({
       setTransitionError(getWorkflowErrorDetail(e, 'Failed to resubmit this period for review.'));
     } finally {
       setTransitioning(false);
+    }
+  }
+
+  async function handleCancelConfirmed() {
+    if (cancelGate.disabled) return;
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await cancelPeriod(p.payroll_period_id);
+      setShowCancelConfirm(false);
+      onReload();
+    } catch (e: unknown) {
+      setShowCancelConfirm(false);
+      setCancelError(getWorkflowErrorDetail(e, 'Failed to cancel this period.'));
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -217,6 +296,9 @@ function PeriodCard({
           )}
         </div>
         {nextAction && <div className={nextAction.style}>{nextAction.text}</div>}
+        {isReturned && (
+          <ReturnedReasonNote isReturned={isReturned} reviewItemId={p.current_return_review_item_id} />
+        )}
       </div>
 
       {/* Right: action buttons */}
@@ -291,10 +373,48 @@ function PeriodCard({
           </button>
         )}
 
+        {/* Cancel — rendered for every Hub-active status (the same
+            isActiveWorkflowStatus set Submit/Resubmit/Day Grid already use),
+            never a Cancel-specific frontend status rule. The backend's own
+            can_cancel capability is the sole authority for enabled/disabled
+            and reason: it always allows Draft/Open (permission-gated) and
+            always denies InReview/Returned with its own PERIOD_NOT_OPEN
+            reason — the button surfaces that denial rather than the
+            frontend hiding it via a hard-coded lifecycle rule. */}
+        {isActiveWorkflowStatus && (
+          <>
+            <button
+              className={styles.actionBtn}
+              disabled={cancelling || cancelGate.disabled}
+              title={cancelGate.reasonMessage ?? undefined}
+              onClick={() => { if (!cancelGate.disabled) setShowCancelConfirm(true); }}
+            >
+              Cancel Period
+            </button>
+            {cancelGate.disabled && cancelGate.reasonMessage && (
+              <span className={styles.capabilityHint}>{cancelGate.reasonMessage}</span>
+            )}
+          </>
+        )}
+
         {transitionError && (
           <span className={styles.transitionError}>{transitionError}</span>
         )}
+        {cancelError && (
+          <span className={styles.transitionError}>{cancelError}</span>
+        )}
       </div>
+
+      <ConfirmDialog
+        open={showCancelConfirm}
+        title="Cancel Payroll Period"
+        message={`Cancel ${p.period_name || p.period_code}? This cannot be undone and the period will no longer be available for entry or review.`}
+        confirmLabel="Cancel Period"
+        variant="danger"
+        loading={cancelling}
+        onConfirm={() => void handleCancelConfirmed()}
+        onCancel={() => setShowCancelConfirm(false)}
+      />
     </div>
   );
 }

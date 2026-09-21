@@ -116,6 +116,17 @@ export async function resubmitPeriod(periodId: number): Promise<PeriodSummary> {
   return resp.data;
 }
 
+export async function cancelPeriod(periodId: number): Promise<PeriodSummary> {
+  // Backend's canonical cancel route: PATCH /status with status='Cancelled'.
+  // Allowed only from Draft or Open (app.payroll.schemas._VALID_TRANSITIONS) —
+  // the backend rejects any other source status with a 422.
+  const resp = await apiClient.patch<PeriodSummary>(
+    `/payroll/periods/${periodId}/status`,
+    { status: 'Cancelled' },
+  );
+  return resp.data;
+}
+
 // ---------------------------------------------------------------------------
 // CP-3A — Canonical BonusEvents
 // ---------------------------------------------------------------------------

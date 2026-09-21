@@ -9,6 +9,7 @@
  * retain their distinct permission contracts; frontend gating is UI-only.
  */
 import { useEffect, useReducer, useState, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import apiClient from '../../lib/apiClient';
 import { getFinalizedPeriods } from '../../lib/payrollApi';
 import type { Branch } from '../../types/core';
@@ -20,6 +21,7 @@ import {
   type FinalizedPayrollLibraryPeriodContext,
 } from './FinalizedPayrollLibraryDialog';
 import { discoverLedgerPeriods, type LedgerDiscoveryDeps, type LedgerDiscoveryPeriod } from './ledgerDiscovery';
+import { resolvePreselectedPeriodId } from './finalizedNavigation';
 import styles from './LedgerPage.module.css';
 
 // ---------------------------------------------------------------------------
@@ -182,6 +184,8 @@ export function LedgerPage() {
   const [summaryPeriod,  setSummaryPeriod]  = useState<PeriodSummary | null>(null);
   const [libraryPeriod,  setLibraryPeriod]  = useState<FinalizedPayrollLibraryPeriodContext | null>(null);
   const periodRequestId = useRef(0);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const preselectConsumed = useRef(false);
 
   // /core/branches already scopes results to what this user can access.
   useEffect(() => {
@@ -209,6 +213,37 @@ export function LedgerPage() {
   }, [filterStatus, filterBranchId]);
 
   useEffect(() => { void fetchPeriods(); }, [fetchPeriods]);
+
+  // Deep-link preselection (e.g. from "View Finalized Payroll" right after
+  // finalizing a period): open the matching card's dialog once the default
+  // Locked list has loaded, then drop the query param so it doesn't re-fire
+  // on a later refetch (filter change, dialog close, etc.). A period that
+  // isn't found (wrong filter, not yet visible, or a bad id) is a silent
+  // no-op — the page still shows the full ledger list to pick from manually.
+  // This is a genuine one-time reaction to external navigation state (the
+  // URL), guarded by preselectConsumed so it never re-fires on a later
+  // refetch — not per-render derived state, so the direct setState calls
+  // below are intentional and explicitly acknowledged rather than hidden.
+  useEffect(() => {
+    if (preselectConsumed.current) return;
+    if (periodsSt.loading || periodsSt.error) return;
+    const preselectedId = resolvePreselectedPeriodId(searchParams);
+    if (preselectedId == null) return;
+
+    preselectConsumed.current = true;
+    const match = periodsSt.periods.find((p) => p.identity === preselectedId);
+    if (match?.finalized) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time deep-link consumption, guarded by preselectConsumed above
+      setLibraryPeriod(libraryContextForPeriod(match.finalized));
+    } else if (match?.operational) {
+      setSummaryPeriod(match.operational);
+    }
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('period_id');
+      return next;
+    }, { replace: true });
+  }, [periodsSt, searchParams, setSearchParams]);
 
   const hasMultipleBranches = branchesSt.branches.length > 1;
   const fixedBranch = branchesSt.branches.length === 1 ? branchesSt.branches[0] : null;

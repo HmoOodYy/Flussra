@@ -12,6 +12,7 @@
  *  - No manual Min/Max/Adjustment controls — those are backend-only.
  */
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { getFinalizationPreview, finalizePeriod } from '../../lib/payrollApi';
 import type {
   FinalizationPreviewResponse,
@@ -19,6 +20,7 @@ import type {
   FinalizationPreviewSysAdjustment,
   FinalizationPreviewLine,
 } from '../../types/payroll';
+import { finalizedLedgerPath } from './finalizedNavigation';
 import styles from './FinalizationPreviewDialog.module.css';
 
 // ---------------------------------------------------------------------------
@@ -303,6 +305,7 @@ export function FinalizationPreviewDialog({
   onFinalized,
   onStateConflict,
 }: FinalizationPreviewDialogProps) {
+  const navigate = useNavigate();
   const [preview, setPreview] = useState<FinalizationPreviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -372,6 +375,11 @@ export function FinalizationPreviewDialog({
     }
   }
 
+  function handleViewFinalized() {
+    onClose();
+    navigate(finalizedLedgerPath(periodId));
+  }
+
   return (
     <div
       className={styles.backdrop}
@@ -420,7 +428,12 @@ export function FinalizationPreviewDialog({
                 <strong>{preview.period_name}</strong> has been locked.{' '}
                 {preview.final_line_count_estimate} approved financial lines were written to locked history.
               </p>
-              <button className={styles.doneBtn} onClick={onClose}>Close</button>
+              <div className={styles.successActions}>
+                <button className={styles.doneBtn} onClick={onClose}>Close</button>
+                <button className={styles.viewFinalizedBtn} onClick={handleViewFinalized}>
+                  View Finalized Payroll
+                </button>
+              </div>
             </div>
           ) : (
             <>

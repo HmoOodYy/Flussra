@@ -23,6 +23,8 @@ export interface PeriodSummary {
   notes: string | null;
   created_by_user_id: number | null;
   created_at_utc: string;
+  // CP-1A: set when status='Returned'; cleared on resubmission.
+  current_return_review_item_id: number | null;
   draft_drivers: number;
   draft_lines: number;
   draft_lines_needing_attention: number;
@@ -240,8 +242,11 @@ export interface DayGridSummary {
   off: number;
   total_hours: string;
   total_miles: string;
-  gross_total: string;
+  // CP-2F: null and financials_available=false for Draft (Prepared) periods —
+  // financial truth is not authoritative until the period leaves Draft.
+  gross_total: string | null;
   needs_attention: number;
+  financials_available: boolean;
 }
 
 export interface DayGridPeriod {
