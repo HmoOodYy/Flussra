@@ -168,6 +168,34 @@
   color: #92400e;
 }
 
+/* ── Branch-level workflow alerts (severity-differentiated) ── */
+.branchAlert {
+  margin: 0.5rem 0 0;
+  padding: 0.35rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  border: 1px solid transparent;
+}
+
+.branchAlertBlocker {
+  color: #991b1b;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.branchAlertWarning {
+  color: #92400e;
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.branchAlertInfo {
+  color: #1e40af;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
 @media (max-width: 640px) {
   .workflowSlots {
     grid-template-columns: 1fr;
@@ -269,7 +297,8 @@
   font-size: 0.83rem;
   white-space: nowrap;
 }
-.primaryActionBtn:hover { background: #1d4ed8; }
+.primaryActionBtn:not(:disabled):hover { background: #1d4ed8; }
+.primaryActionBtn:disabled { opacity: 0.5; cursor: default; }
 
 .actionBtn {
   padding: 0.35rem 0.8rem;
@@ -314,6 +343,13 @@
   font-size: 0.78rem;
   color: #dc2626;
   max-width: 200px;
+}
+
+/* ── Backend-blocked workflow action reason (Submit/Resubmit) ── */
+.capabilityHint {
+  font-size: 0.78rem;
+  color: #92400e;
+  max-width: 220px;
 }
 
 /* ── States ── */

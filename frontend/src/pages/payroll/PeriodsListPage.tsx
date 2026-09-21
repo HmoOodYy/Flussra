@@ -4,7 +4,8 @@ import { getCurrentPayrollHub, resubmitPeriod, submitPeriod } from '../../lib/pa
 import { useAuth } from '../../store/authStore';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports, canPreviewCalculation } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
-import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary } from '../../types/payroll';
+import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary, PeriodWorkflowCapabilities, WorkflowAlert } from '../../types/payroll';
+import { getPeriodWorkflowCapabilities, isHubActiveWorkflowStatus, resolveCapabilityGate } from './workflowCapabilityGate';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { SectionCard } from '../../components/ui/SectionCard';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -102,15 +103,41 @@ interface PeriodCardProps {
   canPreview: boolean;
   canFinalize: boolean;
   canViewReports: boolean;
+  // Backend-authoritative workflow capabilities for this period (from
+  // GET /payroll/current, capabilities.periods[period_id]). Null either
+  // because the period is outside the Hub's active workflow slot set (e.g.
+  // Approved — expected, gating below preserves prior behavior) or because
+  // the Hub had no opinion for an active-workflow status (Draft/Open/
+  // InReview/Returned — unexpected: gating below fails closed instead of
+  // falling back to independent frontend lifecycle inference). See
+  // isHubActiveWorkflowStatus / resolveCapabilityGate for the distinction.
+  workflowCapabilities: PeriodWorkflowCapabilities | null;
 }
 
 function PeriodCard({
-  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReports, onReload, canEntry, canPreview, canFinalize, canViewReports,
+  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReports, onReload, canEntry, canPreview, canFinalize, canViewReports, workflowCapabilities,
 }: PeriodCardProps) {
   const [transitioning,  setTransitioning]  = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
 
+  // Backend-authoritative gates for Submit / Resubmit / Day Grid access —
+  // from GET /payroll/current, capabilities.periods[period_id].
+  //
+  // isActiveWorkflowStatus is true for Draft/Open/InReview/Returned — the
+  // statuses the Hub is expected to cover. For those, a missing capability
+  // (workflowCapabilities null, or the Hub still loading/failed/missing
+  // this branch) FAILS CLOSED via resolveCapabilityGate rather than
+  // silently falling back to independent frontend lifecycle inference.
+  // For Approved (and any other status outside that set), a missing
+  // capability is the expected case and resolves to "not disabled" —
+  // preserving prior behavior for those cards unchanged.
+  const isActiveWorkflowStatus = isHubActiveWorkflowStatus(p.status);
+  const submitGate = resolveCapabilityGate(workflowCapabilities?.can_submit_for_review ?? null, isActiveWorkflowStatus);
+  const resubmitGate = resolveCapabilityGate(workflowCapabilities?.can_resubmit_returned ?? null, isActiveWorkflowStatus);
+  const dayGridGate = resolveCapabilityGate(workflowCapabilities?.can_open_day_grid ?? null, isActiveWorkflowStatus);
+
   async function handleSubmit() {
+    if (submitGate.disabled) return;
     setTransitioning(true);
     setTransitionError(null);
     try {
@@ -124,6 +151,7 @@ function PeriodCard({
   }
 
   async function handleResubmit() {
+    if (resubmitGate.disabled) return;
     setTransitioning(true);
     setTransitionError(null);
     try {
@@ -193,10 +221,22 @@ function PeriodCard({
 
       {/* Right: action buttons */}
       <div className={styles.cardActions}>
-        {/* View/Enter Payroll — always visible for non-finalized periods */}
-        <button className={styles.primaryActionBtn} onClick={onViewPayroll}>
+        {/* View/Enter Payroll — always visible for non-finalized periods.
+            Gated on can_open_day_grid for Draft/Open/Returned (the Hub's
+            active workflow statuses); Approved has no Hub entry for this
+            capability, so dayGridGate resolves to "not disabled" for it —
+            preserving its existing unconditional behavior unchanged. */}
+        <button
+          className={styles.primaryActionBtn}
+          disabled={dayGridGate.disabled}
+          title={dayGridGate.reasonMessage ?? undefined}
+          onClick={() => { if (!dayGridGate.disabled) onViewPayroll(); }}
+        >
           {isDraft ? 'Prepare Payroll' : isGridEnterable ? 'Enter Payroll' : 'View Payroll'}
         </button>
+        {dayGridGate.disabled && dayGridGate.reasonMessage && (
+          <span className={styles.capabilityHint}>{dayGridGate.reasonMessage}</span>
+        )}
 
         {canPreview && isEnterable && (
           <button className={styles.actionBtn} onClick={onPreview}>View Expected Payroll</button>
@@ -214,22 +254,34 @@ function PeriodCard({
           <button className={styles.actionBtn} onClick={onBonus}>Bonus</button>
         )}
         {canEntry && isOpen && (
-          <button
-            className={styles.workflowBtn}
-            disabled={transitioning}
-            onClick={() => void handleSubmit()}
-          >
-            {transitioning ? 'Submitting…' : 'Submit for Review'}
-          </button>
+          <>
+            <button
+              className={styles.workflowBtn}
+              disabled={transitioning || submitGate.disabled}
+              title={submitGate.reasonMessage ?? undefined}
+              onClick={() => void handleSubmit()}
+            >
+              {transitioning ? 'Submitting…' : 'Submit for Review'}
+            </button>
+            {submitGate.disabled && submitGate.reasonMessage && (
+              <span className={styles.capabilityHint}>{submitGate.reasonMessage}</span>
+            )}
+          </>
         )}
         {canEntry && isReturned && (
-          <button
-            className={styles.workflowBtn}
-            disabled={transitioning}
-            onClick={() => void handleResubmit()}
-          >
-            {transitioning ? 'Resubmitting…' : 'Resubmit for Review'}
-          </button>
+          <>
+            <button
+              className={styles.workflowBtn}
+              disabled={transitioning || resubmitGate.disabled}
+              title={resubmitGate.reasonMessage ?? undefined}
+              onClick={() => void handleResubmit()}
+            >
+              {transitioning ? 'Resubmitting…' : 'Resubmit for Review'}
+            </button>
+            {resubmitGate.disabled && resubmitGate.reasonMessage && (
+              <span className={styles.capabilityHint}>{resubmitGate.reasonMessage}</span>
+            )}
+          </>
         )}
 
         {/* Finalize — requires payroll.finalize, only on Approved periods */}
@@ -296,6 +348,16 @@ function formatMoney(value: string): string {
     : value;
 }
 
+// Maps a backend alert severity to its visual treatment. Severity values
+// come from the Hub response (WorkflowAlert.severity: blocker | warning |
+// info) — this only selects an existing CSS class, it does not invent new
+// severity semantics.
+function alertSeverityClass(severity: WorkflowAlert['severity']): string {
+  if (severity === 'blocker') return styles.branchAlertBlocker;
+  if (severity === 'info') return styles.branchAlertInfo;
+  return styles.branchAlertWarning;
+}
+
 function WorkflowBranch({ branch }: { branch: CurrentPayrollHubBranch }) {
   const { open, prepared, in_review: inReview, returned } = branch.slots;
   const creationCapability = branch.capabilities.can_create_open_candidate.allowed
@@ -330,8 +392,14 @@ function WorkflowBranch({ branch }: { branch: CurrentPayrollHubBranch }) {
         ))}
       </div>
       <p className={styles.workflowHint}>{workflowHint}</p>
-      {branch.alerts.map((alert) => (
-        <p key={alert.code} className={styles.workflowAlert}>{alert.message}</p>
+      {branch.alerts.map((alert, index) => (
+        <p
+          key={`${alert.code}-${alert.related_period_id ?? 'none'}-${index}`}
+          className={`${styles.branchAlert} ${alertSeverityClass(alert.severity)}`}
+          title={alert.title}
+        >
+          {alert.message}
+        </p>
       ))}
     </div>
   );
@@ -514,6 +582,7 @@ export function PeriodsListPage() {
         canPreview={user ? canPreviewCalculation(user, p.branch_id) : false}
         canFinalize={user ? canFinalizePayroll(user, p.branch_id) : false}
         canViewReports={user ? canViewPayrollReports(user, p.branch_id) : false}
+        workflowCapabilities={getPeriodWorkflowCapabilities(workflowBranches, p.branch_id, p.payroll_period_id)}
       />
     );
   }

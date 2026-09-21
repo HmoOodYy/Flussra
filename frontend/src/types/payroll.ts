@@ -103,6 +103,19 @@ export interface WorkflowAlert {
   affected_action_codes: string[];
 }
 
+// Backend PeriodWorkflowCapabilities (per-period entry inside
+// BranchWorkflowCapabilities.periods, keyed by str(period_id)). Present only
+// for periods in the Hub's active workflow slot set (Draft/Open/InReview/
+// Returned) — Approved (and later) periods have no entry here.
+export interface PeriodWorkflowCapabilities {
+  can_enter_source: WorkflowCapability;
+  can_submit_for_review: WorkflowCapability;
+  can_resubmit_returned: WorkflowCapability;
+  can_view_review: WorkflowCapability;
+  can_cancel: WorkflowCapability;
+  can_open_day_grid: WorkflowCapability;
+}
+
 export interface BranchCurrentWorkflow {
   branch_id: number;
   branch_name: string;
@@ -118,6 +131,7 @@ export interface BranchCurrentWorkflow {
     can_create_open_candidate: WorkflowCapability;
     can_create_prepared_candidate: WorkflowCapability;
     can_view_candidates: WorkflowCapability;
+    periods: Record<string, PeriodWorkflowCapabilities>;
   };
   alerts: WorkflowAlert[];
 }
