@@ -47,6 +47,11 @@ migrations/__pycache__/
 # Dev tunnel scratch dir (temp scripts + cloudflared logs)
 .dev-tunnel/
 
+# Local tool/session caches (not project-relevant)
+.omo/
+.playwright-mcp/
+.codegraph
+
 # Claude Code editor settings — ignore runtime/session/cache files everywhere
 **/.claude/*
 **/.claude/**
