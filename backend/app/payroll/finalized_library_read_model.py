@@ -276,7 +276,7 @@ async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[lis
             "line_scope": row["linescope"], "work_date": row["workdate"],
             "pay_item_id": row["payitemid"], "quantity": row["quantity"],
             "resolved_rate_amount": row["resolvedrateamount"], "calculated_amount": amount,
-            "bonus_event_id": row["bonuseventid"],
+            "bonus_event_id": row["bonuseventid"], "snapshot_source_type": row["sourcetype"],
         })
     return lines, dict(totals)
 
@@ -520,10 +520,12 @@ def _pay_totals(totals: dict[int, dict[str, Any]]) -> dict[str, Decimal]:
         "daily_pay", "status_pay", "period_pay", "minimum_adjustment",
         "maximum_adjustment", "bonus_total", "total_pay",
     )
-    return {
+    pay_totals = {
         name: sum((Decimal(str(total[name])) for total in totals.values()), Decimal("0"))
         for name in names
     }
+    pay_totals["gross_pay"] = pay_totals["daily_pay"] + pay_totals["status_pay"] + pay_totals["period_pay"]
+    return pay_totals
 
 
 async def build_overview(
@@ -587,7 +589,23 @@ async def build_finalized_report(
         raise _unavailable("FINALIZED_REPORT_VIEW_UNAVAILABLE", "Unknown finalized report view.")
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
     columns, columns_availability = await _columns(period, db)
+    pay_item_columns = await report_read_model._pay_item_columns(period, db)
+    pay_item_column_ids = [c["pay_item_id"] for c in pay_item_columns]
     final_lines, financial_totals = await _final_lines(period, db)
+    per_driver_pay_items: dict[int, dict[int, Decimal]] = {}
+    pay_item_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in pay_item_column_ids}
+    # Period Work is operational (quantities/Status), not financial, and must
+    # stay independent of the per-Pay-Item financial integrity invariant.
+    if report_type != "period-work":
+        # A missing frozen Daily Pay Item layout (pre-CP-2C period) must fail
+        # explicitly rather than silently reporting zero columns as if this
+        # were a legitimate modern period with no active Daily items.
+        if not await report_read_model._period_has_pay_item_snapshot(int(period["payrollperiodid"]), db):
+            raise _unavailable(
+                "REPORT_PAY_ITEM_LAYOUT_UNAVAILABLE",
+                "this period has no frozen Daily Pay Item layout; per-item financial reporting is unavailable.",
+            )
+        per_driver_pay_items, pay_item_total_map = report_read_model._pay_item_amounts(final_lines, pay_item_column_ids)
     snapshot, provenance = await _originating_snapshot(period, db)
     frozen_drivers: dict[int, dict[str, Any]] = {}
     work_rows: list[dict[str, Any]] = []
@@ -626,7 +644,22 @@ async def build_finalized_report(
     result_drivers = []
     for driver_id in sorted(drivers):
         total = financial_totals.get(driver_id)
-        pay = None if total is None else {**total, "financial_lines": by_driver_lines[driver_id]}
+        pay = None
+        if total is not None:
+            item_amounts = per_driver_pay_items.get(driver_id, {})
+            gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"])) + Decimal(str(total["period_pay"]))
+            pay = {
+                **total,
+                "gross_pay": gross_pay,
+                # Period Work never carries per-item money: an empty list
+                # here means "not computed for this view", never a verified
+                # zero for every column.
+                "pay_item_amounts": [] if report_type == "period-work" else [
+                    {"pay_item_id": cid, "amount": item_amounts.get(cid, Decimal("0"))}
+                    for cid in pay_item_column_ids
+                ],
+                "financial_lines": by_driver_lines[driver_id],
+            }
         result_drivers.append({
             **drivers[driver_id],
             "work": {
@@ -656,8 +689,12 @@ async def build_finalized_report(
             },
             "generated_at_utc": datetime.now(UTC),
         },
-        "columns": columns, "drivers": result_drivers,
+        "columns": columns, "pay_item_columns": pay_item_columns, "drivers": result_drivers,
         "work_totals": _work_totals(work_rows), "pay_totals": _pay_totals(financial_totals),
+        "pay_item_totals": None if report_type == "period-work" else [
+            {"pay_item_id": cid, "amount": pay_item_total_map.get(cid, Decimal("0"))}
+            for cid in pay_item_column_ids
+        ],
     }
 
 

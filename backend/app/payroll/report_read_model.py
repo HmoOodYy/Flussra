@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
 from app.payroll import period_calculation, status_evidence
+from app.payroll.period_pay_item_snapshot import _period_has_pay_item_snapshot
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 from app.payroll.schemas import PeriodSummary
 
@@ -75,6 +76,69 @@ async def _columns(period: dict[str, Any], db: AsyncConnection) -> list[dict[str
         "data_type": row["datatype"], "unit": row["unit"], "scope": row["itemscope"],
         "sort_order": row["sortorder"],
     } for row in rows]
+
+
+async def _pay_item_columns(period: dict[str, Any], db: AsyncConnection) -> list[dict[str, Any]]:
+    """Authoritative Period Pay financial columns: frozen, active, reportable Daily items only.
+
+    Distinct from `_columns` (which is broader and shared with Period Work).
+    Never falls back to the mutable PayItems catalog — a legacy period with
+    no frozen layout simply has no financial columns.
+    """
+    rows = (await db.execute(text("""
+        SELECT payitemid, payitemcode, payitemname, displaylabel, category,
+               datatype, unit, itemscope, sortorder
+        FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND companyid = :company_id
+          AND branchid = :branch_id AND itemscope = 'Daily'
+          AND isactiveinperiod = TRUE AND appearsinreports = TRUE
+        ORDER BY sortorder, payitemcode, payitemid
+    """), {"period_id": period["payrollperiodid"], "company_id": period["companyid"],
+          "branch_id": period["branchid"]})).mappings().all()
+    return [{
+        "pay_item_id": int(row["payitemid"]), "code": row["payitemcode"],
+        "label": row["displaylabel"] or row["payitemname"], "category": row["category"],
+        "data_type": row["datatype"], "unit": row["unit"], "scope": row["itemscope"],
+        "sort_order": row["sortorder"],
+    } for row in rows]
+
+
+def _pay_item_amounts(
+    lines: list[dict[str, Any]],
+    column_ids: list[int],
+) -> tuple[dict[int, dict[int, Decimal]], dict[int, Decimal]]:
+    """Aggregate authoritative Daily source money by frozen Pay Item column.
+
+    Never recalculates an amount; only sums already-authoritative
+    DraftLine-sourced Daily money. Classification uses `snapshot_source_type`
+    (DraftLine/StatusEntryState/BonusEvent/System), never the public
+    `source_type` field — that field's meaning is authority-specific (a raw
+    DB provenance value for LIVE, e.g. "Manual"; a category for frozen
+    authorities) and must not be repurposed as a classification key. A Daily
+    financial line whose PayItemID is not part of the period's frozen
+    reportable Daily layout is a data-integrity failure, not something to
+    silently drop or fold into an "unattributed" bucket.
+    """
+    column_id_set = set(column_ids)
+    per_driver: dict[int, dict[int, Decimal]] = defaultdict(dict)
+    totals: dict[int, Decimal] = {cid: Decimal("0") for cid in column_ids}
+    for line in lines:
+        if line["line_scope"] != "Daily" or line["snapshot_source_type"] != "DraftLine":
+            continue
+        driver_id = int(line["driver_id"])
+        pay_item_id = line.get("pay_item_id")
+        if pay_item_id is None or int(pay_item_id) not in column_id_set:
+            raise _unavailable(
+                "REPORT_PAY_ITEM_INTEGRITY_ERROR",
+                "a Daily financial line does not carry a PayItemID within the "
+                "period's frozen reportable Daily Pay Item layout.",
+            )
+        pay_item_id = int(pay_item_id)
+        amount = Decimal(str(line["calculated_amount"])) if line["calculated_amount"] is not None else Decimal("0")
+        bucket = per_driver[driver_id]
+        bucket[pay_item_id] = bucket.get(pay_item_id, Decimal("0")) + amount
+        totals[pay_item_id] += amount
+    return dict(per_driver), totals
 
 
 async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
@@ -184,7 +248,34 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
             period_type=period["periodtype"], start_date=period["startdate"], end_date=period["enddate"], status=period["status"],
         )
         packet = await period_calculation._build_live_calculation_packet(summary, int(period["companyid"]), db)
-        lines = [dict(line.__dict__) for driver in packet.drivers for line in driver.lines]
+        # Preserve the existing public `source_type`/`source_id` provenance
+        # values exactly as before (e.g. "Manual" for a manual DraftLine) —
+        # only the effective money amount needs the same fallback the
+        # packet's own totals already use. `snapshot_source_type` is added
+        # as a separate, additive classification field (DraftLine /
+        # StatusEntryState / BonusEvent / System) for internal aggregation
+        # (see _pay_item_amounts); it does not replace source_type.
+        lines = [
+            {
+                "driver_id": line.driver_id,
+                "source_type": line.source_type,
+                "source_id": line.source_id,
+                "line_type": line.line_type,
+                "line_scope": line.line_scope,
+                "work_date": line.work_date,
+                "pay_item_id": line.pay_item_id,
+                "quantity": line.quantity,
+                "resolved_rate_amount": line.resolved_rate_amount,
+                "calculated_amount": (
+                    line.snapshot_calculated_amount
+                    if line.snapshot_calculated_amount is not None
+                    else line.calculated_amount
+                ),
+                "bonus_event_id": line.bonus_event_id,
+                "snapshot_source_type": line.snapshot_source_type or line.source_type,
+            }
+            for driver in packet.drivers for line in driver.lines
+        ]
         totals = {d.driver_id: {"daily_pay": d.daily_pay, "status_pay": d.status_pay,
                   "period_pay": d.period_pay, "minimum_adjustment": d.minimum_adjustment,
                   "maximum_adjustment": d.maximum_adjustment, "bonus_total": d.bonus_total,
@@ -217,7 +308,8 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
                 lines.append({"driver_id": did, "source_type": r["sourcetype"], "source_id": r["sourceid"],
                               "line_type": r["linetype"], "line_scope": r["linescope"], "work_date": r["workdate"],
                               "pay_item_id": r["payitemid"], "quantity": r["quantity"], "resolved_rate_amount": r["resolvedrateamount"],
-                              "calculated_amount": r["calculatedamount"], "bonus_event_id": r["bonuseventid"]})
+                              "calculated_amount": r["calculatedamount"], "bonus_event_id": r["bonuseventid"],
+                              "snapshot_source_type": r["sourcetype"]})
         return lines, totals, [], [], True, snapshot_id, authority.snapshot_hash
     # Locked/Archived: FinalLines are the financial authority.  Snapshot identity, when
     # present, is read only for evidence below, never to replace the money source.
@@ -241,11 +333,13 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
             total["maximum_adjustment"] += amount
         elif r["sourcetype"] == "BonusEvent":
             total["bonus_total"] += amount
+        elif r["sourcetype"] in {"StatusEntryState", "Status"}:
+            total["status_pay"] += amount
         elif r["linescope"] == "Daily":
             total["daily_pay"] += amount
         else:
             total["period_pay"] += amount
-        lines.append({"driver_id": did, "source_type": r["sourcetype"], "source_id": r["sourceid"], "line_type": r["linetype"], "line_scope": r["linescope"], "work_date": r["workdate"], "pay_item_id": r["payitemid"], "quantity": r["quantity"], "resolved_rate_amount": r["resolvedrateamount"], "calculated_amount": amount, "bonus_event_id": r["bonuseventid"]})
+        lines.append({"driver_id": did, "source_type": r["sourcetype"], "source_id": r["sourceid"], "line_type": r["linetype"], "line_scope": r["linescope"], "work_date": r["workdate"], "pay_item_id": r["payitemid"], "quantity": r["quantity"], "resolved_rate_amount": r["resolvedrateamount"], "calculated_amount": amount, "bonus_event_id": r["bonuseventid"], "snapshot_source_type": r["sourcetype"]})
     provenance = (await db.execute(text("""
         SELECT DISTINCT sourcesnapshot ->> 'payroll_calculation_snapshot_id' AS snapshot_id
         FROM payroll.payrollfinallines
@@ -285,10 +379,12 @@ def _report_totals(
         "daily_pay", "status_pay", "period_pay", "minimum_adjustment",
         "maximum_adjustment", "bonus_total", "total_pay",
     )
-    return dict(work_totals), {
+    pay_totals = {
         name: sum((Decimal(str(total[name])) for total in financial_totals.values()), Decimal("0"))
         for name in names
     }
+    pay_totals["gross_pay"] = pay_totals["daily_pay"] + pay_totals["status_pay"] + pay_totals["period_pay"]
+    return dict(work_totals), pay_totals
 
 
 async def build_report(*, report_type: str, period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> dict[str, Any]:
@@ -297,7 +393,25 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     if authority.authority_kind is ReportAuthorityKind.UNAVAILABLE:
         raise _unavailable("REPORT_UNAVAILABLE", "Cancelled payroll periods have no calculation reports.")
     columns = await _columns(period, db)
+    pay_item_columns = await _pay_item_columns(period, db)
+    pay_item_column_ids = [c["pay_item_id"] for c in pay_item_columns]
     lines, financial_totals, blockers, warnings, financials_available, snapshot_id, snapshot_hash = await _financial_packet(authority, period, db)
+    per_driver_pay_items: dict[int, dict[int, Decimal]] = {}
+    pay_item_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in pay_item_column_ids}
+    # Period Work is operational (quantities/Status), not financial, and must
+    # stay independent of the per-Pay-Item financial integrity invariant: a
+    # PayItemID that doesn't belong to the frozen Daily layout must not make
+    # an otherwise-valid Period Work report unavailable.
+    if financials_available and report_type != "period-work":
+        # A missing frozen Daily Pay Item layout (pre-CP-2C period) must fail
+        # explicitly rather than silently reporting zero columns as if this
+        # were a legitimate modern period with no active Daily items.
+        if not await _period_has_pay_item_snapshot(int(period["payrollperiodid"]), db):
+            raise _unavailable(
+                "REPORT_PAY_ITEM_LAYOUT_UNAVAILABLE",
+                "this period has no frozen Daily Pay Item layout; per-item financial reporting is unavailable.",
+            )
+        per_driver_pay_items, pay_item_total_map = _pay_item_amounts(lines, pay_item_column_ids)
     if authority.authority_kind in {ReportAuthorityKind.SOURCE_ONLY, ReportAuthorityKind.LIVE}:
         operational_drivers, work_rows = await _operational_rows(period, db)
     else:
@@ -347,13 +461,32 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     result_drivers = []
     for driver_id in sorted(drivers):
         total = financial_totals.get(driver_id)
-        pay = None if total is None else {**total, "financial_lines": by_driver_lines[driver_id]}
+        pay = None
+        if total is not None:
+            item_amounts = per_driver_pay_items.get(driver_id, {})
+            gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"])) + Decimal(str(total["period_pay"]))
+            pay = {
+                **total,
+                "gross_pay": gross_pay,
+                # Period Work never carries per-item money: an empty list
+                # here means "not computed for this view", never a verified
+                # zero for every column.
+                "pay_item_amounts": [] if report_type == "period-work" else [
+                    {"pay_item_id": cid, "amount": item_amounts.get(cid, Decimal("0"))}
+                    for cid in pay_item_column_ids
+                ],
+                "financial_lines": by_driver_lines[driver_id],
+            }
         work = {"daily_rows": by_driver_work[driver_id], "status_entries": by_driver_status[driver_id],
                 "status_summaries": summaries.get(driver_id, [])}
         result_drivers.append({**drivers[driver_id], "work": work, "pay": pay, "bonus_events": by_driver_bonus[driver_id]})
     if report_type == "period-pay" and not financials_available:
         raise _unavailable("REPORT_FINANCIALS_UNAVAILABLE", "Prepared payroll periods have no financial report authority.")
     work_totals, pay_totals = _report_totals(work_rows, financial_totals, financials_available)
+    pay_item_totals = None if not financials_available or report_type == "period-work" else [
+        {"pay_item_id": cid, "amount": pay_item_total_map.get(cid, Decimal("0"))}
+        for cid in pay_item_column_ids
+    ]
     metadata = {"period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"], "period_name": period["periodname"],
                 "period_status": period["status"], "branch_id": int(period["branchid"]), "report_type": report_type,
                 "authority_kind": authority.authority_kind, "financials_available": financials_available,
@@ -365,7 +498,9 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     return {
         "metadata": metadata,
         "columns": columns,
+        "pay_item_columns": pay_item_columns,
         "drivers": result_drivers,
         "work_totals": work_totals,
         "pay_totals": pay_totals,
+        "pay_item_totals": pay_item_totals,
     }

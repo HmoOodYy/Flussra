@@ -1613,6 +1613,11 @@ class ReportColumn(BaseModel):
     sort_order: int
 
 
+class PayItemAmount(BaseModel):
+    pay_item_id: int
+    amount: Decimal
+
+
 class ReportWorkSection(BaseModel):
     daily_rows: list[dict] = []
     status_entries: list[dict] = []
@@ -1627,6 +1632,8 @@ class ReportPaySection(BaseModel):
     maximum_adjustment: Decimal
     bonus_total: Decimal
     total_pay: Decimal
+    gross_pay: Decimal
+    pay_item_amounts: list[PayItemAmount] = []
     driver_code: str | None = None
     driver_name: str | None = None
     financial_lines: list[dict] = []
@@ -1644,9 +1651,11 @@ class ReportDriver(BaseModel):
 class CalculationReportResponse(BaseModel):
     metadata: ReportMetadata
     columns: list[ReportColumn] = []
+    pay_item_columns: list[ReportColumn] = []
     drivers: list[ReportDriver] = []
     work_totals: dict[str, Decimal] = {}
     pay_totals: dict[str, Decimal] | None = None
+    pay_item_totals: list[PayItemAmount] | None = None
 
 
 class DriversReportResponse(CalculationReportResponse):
@@ -1737,9 +1746,11 @@ class FinalizedReportMetadata(BaseModel):
 class FinalizedCalculationReportResponse(BaseModel):
     metadata: FinalizedReportMetadata
     columns: list[ReportColumn] = []
+    pay_item_columns: list[ReportColumn] = []
     drivers: list[ReportDriver] = []
     work_totals: dict[str, Decimal] = {}
     pay_totals: dict[str, Decimal] | None = None
+    pay_item_totals: list[PayItemAmount] | None = None
 
 
 class FinalizedOffStatusEntry(BaseModel):

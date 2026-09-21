@@ -55,6 +55,10 @@ async def _seed_finalized_period(
     await _create_period_pay_item_rows(
         period_id, 1, branch_id, date(2098, 1, 1), direct_db,
     )
+    hours_pay_item_id = int((await direct_db.execute(text("""
+        SELECT payitemid FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND payitemcode = 'HOURS'
+    """), {"period_id": period_id})).scalar_one())
     await direct_db.execute(text("""
         INSERT INTO payroll.payrolldraftlines
             (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
@@ -82,7 +86,8 @@ async def _seed_finalized_period(
         line_scope="Daily", work_date=date(2098, 1, 1), driver_id=driver_id,
         quantity=Decimal("2"), resolved_rate_amount=Decimal("10"),
         calculated_amount=Decimal("20"), needs_manager_review=False, blocker_reason=None,
-        driver_rate_id=rate_id, source_evidence={"RateBehavior": "PerUnit"},
+        pay_item_id=hours_pay_item_id, driver_rate_id=rate_id,
+        source_evidence={"RateBehavior": "PerUnit"},
     )
     packet = _LiveCalculationPacket(
         payroll_period_id=period_id, company_id=1, branch_id=branch_id, status="Open",
@@ -483,14 +488,26 @@ async def test_legacy_final_lines_keep_money_but_report_evidence_is_unavailable(
         VALUES (1, :branch_id, 'Locked', :code, 'P6A legacy', 'Week', '2077-01-01', '2077-01-07')
         RETURNING payrollperiodid
     """), {"branch_id": paytest_branch_id, "code": f"P6A-LEGACY-{marker}"})).scalar_one())
+    # This period deliberately has no originating calculation-snapshot
+    # provenance (pre-CP-4D FinalLines). It still gets a current-architecture
+    # Daily Pay Item layout, distinct from snapshot provenance, so its
+    # FinalLine can carry a valid PayItemID.
+    await _create_period_pay_item_rows(
+        period_id, 1, paytest_branch_id, date(2077, 1, 1), direct_db,
+    )
+    hours_pay_item_id = int((await direct_db.execute(text("""
+        SELECT payitemid FROM payroll.payrollperiodpayitems
+        WHERE payrollperiodid = :period_id AND payitemcode = 'HOURS'
+    """), {"period_id": period_id})).scalar_one())
     await direct_db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)"))
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollfinallines
             (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc)
-        VALUES (1, :branch_id, :period_id, :driver_id, '2077-01-01', 'HOURS', 'Daily', 1,
-                12.0000, 'DraftLine', 1, NOW(), NOW())
-    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id})
+             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2077-01-01', 'HOURS', 'Daily',
+                :pay_item_id, 1, 12.0000, 'DraftLine', 1, NOW(), NOW())
+    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id,
+           "pay_item_id": hours_pay_item_id})
     overview = await session_client.get(f"/payroll/finalized/{period_id}/overview", headers=_auth(auth_token))
     assert overview.status_code == 200, overview.text
     body = overview.json()
