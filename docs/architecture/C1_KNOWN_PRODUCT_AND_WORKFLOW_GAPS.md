@@ -106,7 +106,46 @@ The final application should make the dependency/order between these concepts ob
 
 ---
 
-## 5. C1 Status
+## 5. Legacy Generic Period Pay Write Path Remains Reachable
+
+### Problem
+
+Current backend still exposes the legacy generic Period Pay write surface:
+
+- `POST /payroll/periods/{id}/period-pay`
+- `GET /payroll/periods/{id}/period-pay`
+- `PATCH /payroll/periods/{id}/period-pay/{line_id}`
+- `DELETE /payroll/periods/{id}/period-pay/{line_id}`
+
+BONUS is correctly rejected from this path and uses the canonical Bonus Events domain instead.
+
+However, the generic Period Pay path can still create/update eligible Period-scope items such as ADJUSTMENT or eligible custom Period items when permitted by the frozen period Pay Item snapshot.
+
+Those values participate in authoritative payroll calculation as generic `period_pay`, including Gross Pay / Total Pay.
+
+But the current C1 Period Pay Matrix is intentionally centered on:
+
+- frozen Daily Pay Item money columns
+- Status Pay
+- Gross Pay
+- Minimum Adjustment
+- Maximum Adjustment
+- Bonus
+- Total Pay
+
+It does not expose a dedicated generic legacy Period Pay / ADJUSTMENT / custom Period-item breakdown.
+
+The current frontend does not use this legacy generic write API in the normal C1 workflow, so this is not currently considered a C1 pilot blocker. But the backend surface remains reachable and therefore represents an unresolved legacy/current-product boundary.
+
+### Required follow-up
+
+Clearly define the future disposition of this legacy generic Period Pay write surface so that later features — especially Import — cannot accidentally treat it as part of the canonical current payroll-entry model.
+
+The final product must make it unambiguous whether such Period-scope manual money belongs in the supported product and, if so, how it is represented transparently in authoritative reporting.
+
+---
+
+## 6. C1 Status
 
 These items are known gaps to revisit after the current C1 foundation work.
 
