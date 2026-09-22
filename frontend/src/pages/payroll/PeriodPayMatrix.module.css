@@ -1,0 +1,34 @@
+/* Period Pay matrix (C1-3B) — a payroll-spreadsheet-style table with one
+   sticky Driver column and one column per backend-supplied Daily Pay Item.
+   Shared by CurrentPayrollReportsDialog and FinalizedPayrollLibraryDialog. */
+.periodPayWrap { overflow-x: auto; margin-top: 0.35rem; border: 1px solid #e5e7eb; border-radius: 6px; }
+.periodPayTable { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.periodPayTable th,
+.periodPayTable td { border: 1px solid #e5e7eb; padding: 0.4rem 0.6rem; text-align: left; vertical-align: middle; white-space: nowrap; }
+.periodPayTable thead th { background: #f8fafc; color: #374151; font-size: 0.72rem; font-weight: 600; vertical-align: bottom; }
+.periodPayTable thead th small { display: block; margin-top: 0.15rem; color: #94a3b8; font-size: 0.66rem; font-weight: 500; }
+.periodPayDriverCol {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: #fff;
+  border-right: 2px solid #dbeafe;
+  min-width: 150px;
+  white-space: normal;
+}
+.periodPayTable thead .periodPayDriverCol { background: #f8fafc; }
+.periodPayDriverCol strong { display: block; color: #111827; font-size: 0.8rem; }
+.periodPayDriverCol span { display: block; margin-top: 0.1rem; color: #64748b; font-size: 0.7rem; }
+.periodPayTotalCol { background: #f8fbff; }
+.periodPayFooterRow { font-weight: 700; }
+.periodPayFooterRow td { background: #eff6ff; border-top: 2px solid #93c5fd; }
+.periodPayFooterRow .periodPayDriverCol,
+.periodPayFooterRow .periodPayTotalCol { background: #dbeafe; border-top: 2px solid #93c5fd; }
+
+.numeric { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+@media (max-width: 620px) {
+  .periodPayTable th,
+  .periodPayTable td { padding: 0.3rem 0.45rem; }
+  .periodPayDriverCol { min-width: 120px; }
+}

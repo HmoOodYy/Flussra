@@ -536,6 +536,11 @@ export interface ReportWorkSection {
   status_summaries: Record<string, unknown>[];
 }
 
+export interface PayItemAmount {
+  pay_item_id: number;
+  amount: string;
+}
+
 export interface ReportPaySection {
   daily_pay: string;
   status_pay: string;
@@ -544,6 +549,8 @@ export interface ReportPaySection {
   maximum_adjustment: string;
   bonus_total: string;
   total_pay: string;
+  gross_pay: string;
+  pay_item_amounts: PayItemAmount[];
   driver_code: string | null;
   driver_name: string | null;
   financial_lines: Record<string, unknown>[];
@@ -561,9 +568,11 @@ export interface ReportDriver {
 export interface CalculationReportResponse {
   metadata: ReportMetadata;
   columns: ReportColumn[];
+  pay_item_columns: ReportColumn[];
   drivers: ReportDriver[];
   work_totals: Record<string, string>;
   pay_totals: Record<string, string> | null;
+  pay_item_totals: PayItemAmount[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +651,11 @@ export interface FinalizedReportMetadata {
 export interface FinalizedCalculationReportResponse {
   metadata: FinalizedReportMetadata;
   columns: ReportColumn[];
+  pay_item_columns: ReportColumn[];
   drivers: ReportDriver[];
   work_totals: Record<string, string>;
   pay_totals: Record<string, string> | null;
+  pay_item_totals: PayItemAmount[] | null;
 }
 
 export type FinalizedReportView = CalculationReportView;

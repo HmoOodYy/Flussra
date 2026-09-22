@@ -12,6 +12,8 @@ import type {
   FinalizedSectionAvailability,
   ReportDriver,
 } from '../../types/payroll';
+import { buildPeriodPayTable } from './periodPayTable';
+import { PeriodPayMatrix } from './PeriodPayMatrix';
 import styles from './FinalizedPayrollLibraryDialog.module.css';
 
 const REPORT_TABS: readonly { view: FinalizedReportView; label: string }[] = [
@@ -248,6 +250,10 @@ function DriverReport({
   );
 }
 
+function periodPayCell(value: string | null): string {
+  return value == null ? '—' : formatMoney(value);
+}
+
 function ReportBody({ report, view }: { report: FinalizedCalculationReportResponse; view: FinalizedReportView }) {
   const showWork = view === 'drivers' || view === 'period-work' || view === 'mixed';
   const showPay = view === 'drivers' || view === 'period-pay' || view === 'mixed';
@@ -269,24 +275,37 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
           <span key={key}><span className={styles.availabilityLabel}>{key.replaceAll('_', ' ')}</span><AvailabilityBadge availability={availability} /></span>
         ))}
       </div>
-      <section className={styles.totals}>
-        {showWork && <Dictionary title="Work totals" values={report.work_totals} />}
-        {showPay && <Dictionary title="Pay totals" values={report.pay_totals} money />}
-      </section>
-      {report.columns.length > 0 && (
-        <section className={styles.columns}>
-          <h3>Report columns</h3>
-          <div>{report.columns.map((column) => <span key={column.pay_item_id}>{column.label} <small>({column.code})</small></span>)}</div>
+      {view === 'period-pay' ? (
+        <section className={styles.section}>
+          <h3>Period Pay</h3>
+          <PeriodPayMatrix
+            table={buildPeriodPayTable(report.pay_item_columns, report.drivers, report.pay_item_totals, report.pay_totals)}
+            formatCell={periodPayCell}
+            emptyState={<StateMessage>No driver records are available.</StateMessage>}
+          />
         </section>
+      ) : (
+        <>
+          <section className={styles.totals}>
+            {showWork && <Dictionary title="Work totals" values={report.work_totals} />}
+            {showPay && <Dictionary title="Pay totals" values={report.pay_totals} money />}
+          </section>
+          {report.columns.length > 0 && (
+            <section className={styles.columns}>
+              <h3>Report columns</h3>
+              <div>{report.columns.map((column) => <span key={column.pay_item_id}>{column.label} <small>({column.code})</small></span>)}</div>
+            </section>
+          )}
+          <section className={styles.section}>
+            <h3>Drivers</h3>
+            {report.drivers.length === 0 ? <StateMessage>No driver records are available.</StateMessage> : (
+              <div className={styles.driverList}>
+                {report.drivers.map((driver) => <DriverReport key={driver.driver_id} driver={driver} showWork={showWork} showPay={showPay} evidenceMessage={evidenceMessage} />)}
+              </div>
+            )}
+          </section>
+        </>
       )}
-      <section className={styles.section}>
-        <h3>Drivers</h3>
-        {report.drivers.length === 0 ? <StateMessage>No driver records are available.</StateMessage> : (
-          <div className={styles.driverList}>
-            {report.drivers.map((driver) => <DriverReport key={driver.driver_id} driver={driver} showWork={showWork} showPay={showPay} evidenceMessage={evidenceMessage} />)}
-          </div>
-        )}
-      </section>
     </>
   );
 }
