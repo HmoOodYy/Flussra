@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -23,6 +24,20 @@ from app.payroll.service import (
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"P6C_{uuid4().hex[:10]}", "name": "P6C isolated"},
+    )).mappings().one()
+    await session_db_conn.commit()
+    return int(row["branchid"])
 
 
 async def _seed_finalized_rates_period(

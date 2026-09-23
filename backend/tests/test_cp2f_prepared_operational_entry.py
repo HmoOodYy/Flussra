@@ -18,6 +18,7 @@ Run from backend/:
 """
 import datetime
 import itertools
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -43,62 +44,6 @@ def _week(offset: int = 0) -> tuple[datetime.date, datetime.date]:
     n = next(_CTR) + offset
     start = _BASE_MONDAY_2097_LATE + datetime.timedelta(weeks=n)
     return start, start + datetime.timedelta(days=6)
-
-
-async def _clean_branch_periods(db: AsyncConnection, branch_id: int) -> None:
-    """Remove all periods and related rows for the branch."""
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollfinallines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrolldraftlines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperioddriverdayentrystate "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperioddrivereligibility "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiodeligibilitysnapshots "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
-        {"bid": branch_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.commit()
 
 
 async def _insert_period_db(
@@ -315,14 +260,68 @@ async def _ensure_status_key(
 # Module-scoped fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def branch_id(hq_branch_id: int) -> int:
-    return hq_branch_id
+@pytest_asyncio.fixture(scope="module")
+async def branch_id(
+    session_db_conn: AsyncConnection,
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+) -> int:
+    """Create a branch-local CP2F fixture so workflow slots are not shared."""
+    code = f"CP2F_{uuid4().hex[:10]}".upper()
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": code, "name": f"CP2F isolated {code}"},
+    )).mappings().one()
+    branch = int(row["branchid"])
+
+    setup = await session_client.put(
+        f"/settings/branches/{branch}/payroll-setup",
+        json={"payroll_frequency": "Week", "anchor_start_date": "2097-07-07"},
+        headers=_auth(auth_token),
+    )
+    assert setup.status_code in (200, 201), setup.text
+
+    # Force an explicit HOURS config. The default catalog flag alone is not
+    # enough for every rate-matrix/day-grid query on a new branch.
+    items = await session_client.get(
+        f"/settings/branches/{branch}/pay-items",
+        headers=_auth(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours = next(item for item in items.json() if item["pay_item_code"] == "HOURS")
+    activate = await session_client.patch(
+        f"/settings/branches/{branch}/pay-items/{hours['pay_item_id']}",
+        json={"is_active": True},
+        headers=_auth(auth_token),
+    )
+    assert activate.status_code == 200, activate.text
+    return branch
 
 
-@pytest.fixture(scope="module")
-def driver_id(hq_driver_id: int) -> int:
-    return hq_driver_id
+@pytest_asyncio.fixture(scope="module")
+async def driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    branch_id: int,
+) -> int:
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": branch_id,
+            "full_name": "CP2F Isolated Driver",
+            "preferred_name": "CP2F",
+            "driver_code": f"CP2F-{uuid4().hex[:8]}",
+            "cdl_number": f"CDL-CP2F-{uuid4().hex[:8]}",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
 
 
 # ---------------------------------------------------------------------------

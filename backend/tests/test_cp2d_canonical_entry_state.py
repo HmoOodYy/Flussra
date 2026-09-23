@@ -38,6 +38,7 @@ Run from backend/:
 """
 import datetime
 import itertools
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -360,13 +361,19 @@ async def _advance_to_approved(
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture(scope="class")
-async def ces_branch_id(session_client, auth_token: str) -> int:
-    resp = await session_client.get("/core/branches", headers=_auth(auth_token))
-    assert resp.status_code == 200
-    for b in resp.json():
-        if b["branch_code"] == "PAYTEST":
-            return b["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+async def ces_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP2D_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
 
 
 @pytest_asyncio.fixture(scope="class")

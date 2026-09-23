@@ -16,6 +16,8 @@ import pytest
 import pytest_asyncio
 import httpx
 from datetime import date
+from sqlalchemy import text as _sqla_text
+from uuid import uuid4
 
 
 # ---------------------------------------------------------------------------
@@ -4309,6 +4311,7 @@ class TestCustomPayItemRateStructure:
         paytest_driver_id: int,
         paytest_branch_id: int,
         session_db_conn,
+        direct_db,
     ):
         """
         A RangeBracket item should appear as exactly ONE column in the day-grid
@@ -4346,31 +4349,41 @@ class TestCustomPayItemRateStructure:
             )
             assert act_resp.status_code == 200, act_resp.text
 
-            # ------------------------------------------------------------------ #
-            # 3. Create a payroll period for PAYTEST branch at far-future dates
-            # ------------------------------------------------------------------ #
-            period_resp = await session_client.post(
-                "/payroll/periods",
-                json={
-                    "branch_id":   paytest_branch_id,
-                    "period_type": "Week",
-                    "start_date":  "2082-07-01",
-                    "end_date":    "2082-07-07",
-                },
-                headers=h,
+            # Seed a minimal Open period directly for this lower-level
+            # day-grid assertion; period creation has its own current-contract
+            # coverage and requires Payroll Setup/candidate prerequisites.
+            await direct_db.execute(
+                _sqla_text(
+                    "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                    "WHERE branchid = :bid AND status = 'Open'"
+                ),
+                {"bid": paytest_branch_id},
             )
-            assert period_resp.status_code == 201, f"period create failed: {period_resp.text}"
-            period_id = period_resp.json()["payroll_period_id"]
+            await direct_db.execute(
+                _sqla_text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, status, periodcode, periodname,
+                         periodtype, startdate, enddate)
+                    VALUES (1, :bid, 'Open', :code, 'RangeBracket Open',
+                            'Week', '2082-07-01', '2082-07-07')
+                """),
+                {"bid": paytest_branch_id,
+                 "code": f"RB-OPEN-{uuid4().hex[:10]}"},
+            )
 
             # ------------------------------------------------------------------ #
-            # 4. Open the period
+            # 3. Use the seeded Open period
             # ------------------------------------------------------------------ #
-            open_resp = await session_client.patch(
-                f"/payroll/periods/{period_id}/status",
-                json={"status": "Open"},
-                headers=h,
-            )
-            assert open_resp.status_code == 200, f"open failed: {open_resp.text}"
+            period_id = (await direct_db.execute(
+                _sqla_text("""
+                    SELECT payrollperiodid
+                    FROM payroll.payrollperiods
+                    WHERE branchid = :bid AND status = 'Open'
+                    ORDER BY payrollperiodid DESC
+                    LIMIT 1
+                """),
+                {"bid": paytest_branch_id},
+            )).scalar_one()
 
             # ------------------------------------------------------------------ #
             # 5. GET day-grid — filter to the first day of the period
@@ -4420,6 +4433,13 @@ class TestCustomPayItemRateStructure:
                     json={"status": "Cancelled"},
                     headers=h,
                 )
+            await direct_db.execute(
+                _sqla_text(
+                    "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                    "WHERE branchid = :bid AND status = 'Open'"
+                ),
+                {"bid": paytest_branch_id},
+            )
             await session_client.delete(f"/settings/pay-items/{pay_item_id}", headers=h)
 
     # ------------------------------------------------------------------

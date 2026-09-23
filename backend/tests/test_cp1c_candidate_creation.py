@@ -23,6 +23,7 @@ import datetime
 import hmac as _hmac_mod
 import itertools
 import json
+import uuid
 
 import psycopg2
 import pytest
@@ -80,26 +81,13 @@ def _d(s: str) -> datetime.date:
 
 
 async def _cancel_all(direct_db, branch_id: int, company_id: int | None = None) -> None:
-    """Delete all periods in the branch so tests start clean.
-
-    We DELETE rather than CANCEL to avoid the CANDIDATE_ALREADY_CANCELLED guard:
-    because candidate keys are deterministic, a cancelled period's hash would
-    prevent a later test from reusing the same logical candidate key.
-    Child records (draft lines, review items) are deleted first to satisfy FK
-    constraints — cross-file test contamination (e.g. cp1d tests creating draft
-    lines on the same branch) can leave FK children behind.
-    """
+    """Release mutable workflow slots without deleting payroll history."""
     await direct_db.execute(
         _text("""
-            DELETE FROM payroll.payrolldraftlines
-            WHERE payrollperiodid IN (
-                SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid
-            )
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled', currentreturnreviewitemid = NULL
+            WHERE branchid = :bid AND status IN ('Draft', 'Open', 'InReview', 'Returned')
         """),
-        {"bid": branch_id},
-    )
-    await direct_db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
         {"bid": branch_id},
     )
     await direct_db.commit()
@@ -161,15 +149,30 @@ def _tamper_key(key: str) -> str:
 # Session-scoped setup: configure PAYTEST branch for CP-1C tests
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture
 async def cp1c_setup(session_client, auth_token, paytest_branch_id, session_db_conn):
     """
-    Module-scoped: configure PAYTEST branch with Weekly payroll, anchor 2096-01-07.
-    Cancels any existing active periods so tests start clean.
+    Create a function-local branch with Weekly payroll, anchor 2096-01-07.
+    Candidate cancellation is intentionally terminal, so each test gets a
+    fresh branch rather than attempting to recycle candidate state.
     """
-    await _cancel_all(session_db_conn, paytest_branch_id)
-    await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id, "2096-01-07")
-    return {"branch_id": paytest_branch_id, "anchor": "2096-01-07", "freq": "Week"}
+    # Candidate creation mutates branch setup and reserves period slots.  A
+    # module-local branch keeps those stateful invariants isolated from the
+    # shared PAYTEST branch and from other test modules' historical periods.
+    branch_code = f"CP1C_{uuid.uuid4().hex[:10]}"
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": branch_code, "name": f"CP1C {branch_code}"},
+    )).mappings().first()
+    await session_db_conn.commit()
+    branch_id = row["branchid"]
+    await _setup_payroll_weekly(session_client, auth_token, branch_id, "2096-01-07")
+    return {"branch_id": branch_id, "anchor": "2096-01-07", "freq": "Week"}
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +385,7 @@ class TestOpenCreation:
         key = r.json()["selected"]["candidate_key"]
 
         cr1 = await _create(session_client, auth_token, bid, key)
-        assert cr1.status_code == 201
+        assert cr1.status_code == 201, cr1.text
         pid1 = cr1.json()["payroll_period_id"]
 
         cr2 = await _create(session_client, auth_token, bid, key)

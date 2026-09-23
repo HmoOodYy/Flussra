@@ -1462,7 +1462,7 @@ class TestFinalizationSnapshotAware:
     ):
         """Driver absent from snapshot → period assert raises 422."""
         from fastapi import HTTPException
-        from app.payroll.service import _assert_driver_eligible_for_period_via_snapshot
+        from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
         await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid)

@@ -36,17 +36,25 @@ async def cp4e_db(test_database_url):
     try:
         async with engine.begin() as seed:
             tenant = (await seed.execute(text("""
-                SELECT c.companyid, b.branchid, u.userid
+                SELECT c.companyid, u.userid
                 FROM core.companies c
-                JOIN core.branches b ON b.companyid = c.companyid
                 JOIN sec.users u ON u.companyid = c.companyid
-                WHERE c.companycode = 'DEMO' AND b.branchcode = 'HQ' AND u.username = 'admin'
+                WHERE c.companycode = 'DEMO' AND u.username = 'admin'
             """))).mappings().one()
             ids.update({
                 "company_id": int(tenant["companyid"]),
-                "branch_id": int(tenant["branchid"]),
                 "user_id": int(tenant["userid"]),
             })
+            branch_id = (await seed.execute(text("""
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                VALUES (:company_id, :branch_code, :branch_name, 'Active', FALSE)
+                RETURNING branchid
+            """), {
+                **ids, "branch_code": f"CP4E_{marker}",
+                "branch_name": f"CP4E isolated {marker}",
+            })).scalar_one()
+            ids["branch_id"] = int(branch_id)
             employee_id = (await seed.execute(text("""
                 INSERT INTO core.employees
                     (companyid, branchid, fullname, employeetype, employmentstatus, createdbyuserid)
@@ -95,6 +103,7 @@ async def cp4e_db(test_database_url):
             await cleanup.execute(text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :id"), {"id": ids["period_id"]})
             await cleanup.execute(text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": ids["driver_id"]})
             await cleanup.execute(text("DELETE FROM core.employees WHERE employeeid = :id"), {"id": ids["employee_id"]})
+            await cleanup.execute(text("DELETE FROM core.branches WHERE branchid = :id"), {"id": ids["branch_id"]})
     finally:
         await engine.dispose()
 

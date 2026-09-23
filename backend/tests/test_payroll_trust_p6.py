@@ -21,6 +21,7 @@ import httpx
 import sqlalchemy.exc
 from datetime import date as _date
 from sqlalchemy import text as _text
+from uuid import uuid4
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +32,40 @@ B_START, B_END, B_WORK = "2059-04-07", "2059-04-13", "2059-04-08"
 C_START, C_END, C_WORK = "2060-05-05", "2060-05-11", "2060-05-06"
 D_START, D_END, D_WORK = "2061-06-02", "2061-06-08", "2061-06-03"
 E_START, E_END, E_WORK = "2062-07-07", "2062-07-13", "2062-07-08"
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use an isolated branch so finalized periods cannot contaminate setup."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches
+            (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {
+        "code": f"P6_{uuid4().hex}",
+        "name": f"P6 isolated {uuid4().hex[:8]}",
+    })).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "P6 Isolated Driver",
+            "driver_code": f"P6-D-{uuid4().hex[:10]}",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ import pytest_asyncio
 import httpx
 from decimal import Decimal
 from sqlalchemy import text as _text
+from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -37,6 +38,39 @@ DATE_JUN21 = "2089-06-21"
 DATE_JUN23 = "2089-06-23"
 DATE_JUN25 = "2089-06-25"
 DATE_JUN27 = "2089-06-27"
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches
+            (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {
+        "code": f"CP5_{uuid4().hex}",
+        "name": f"CP5 isolated {uuid4().hex[:8]}",
+    })).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "CP5 Isolated Driver",
+            "driver_code": f"CP5-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -861,15 +895,16 @@ class TestFinalizeAutoRefresh:
         )
 
         try:
-            # Finalize — auto-refresh must update the stored calculatedamount
-            # from $160 ($20 rate, now voided) to $280 ($35 rate, now active)
+            # Finalization projects the approved immutable snapshot; a later
+            # live-rate change must not rewrite the submitted $160 authority.
             fin = await session_client.post(
                 f"/payroll/periods/{pid}/finalize",
                 headers=headers,
             )
             assert fin.status_code == 200, f"Finalize failed: {fin.text}"
 
-            # Check FinalLines: HOURS finalamount must reflect $35 × 8 = $280
+            # Check FinalLines: HOURS finalamount remains the approved snapshot
+            # amount ($20 × 8 = $160), not the later live rate.
             fl = await session_client.get(
                 f"/payroll/periods/{pid}/final-lines",
                 headers=headers,
@@ -878,8 +913,8 @@ class TestFinalizeAutoRefresh:
             hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found"
             final_amount = Decimal(str(hours_finals[0]["final_amount"]))
-            assert final_amount == Decimal("280.00"), (
-                f"Expected $280 (8h × $35 refreshed rate), got {final_amount}"
+            assert final_amount == Decimal("160.0000"), (
+                f"Expected approved snapshot $160 (8h × $20), got {final_amount}"
             )
         finally:
             await session_client.delete(f"/payroll/rates/{new_rate_id}", headers=headers)

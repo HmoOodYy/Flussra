@@ -24,6 +24,8 @@ import pytest_asyncio
 import httpx
 from decimal import Decimal
 from unittest.mock import patch, AsyncMock
+from sqlalchemy import text as _text
+from uuid import uuid4
 from app.payroll import rates as payroll_rates
 
 
@@ -1312,6 +1314,7 @@ class TestRateSafety:
         paytest_rate_type_id: int,
         paytest_branch_id: int,
         rates_clean,
+        direct_db,
     ):
         """
         PayrollFinalLines snapshot the rate amount at finalization time.
@@ -1342,27 +1345,28 @@ class TestRateSafety:
         assert drv_resp.status_code == 201, f"Create isolated driver failed: {drv_resp.text}"
         isolated_driver_id = drv_resp.json()["driver_id"]
 
-        # Create a payroll period on the PAYTEST branch (unique future dates)
-        period_resp = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_branch_id,
-                "period_type": "Week",
-                "start_date":  "2038-06-07",
-                "end_date":    "2038-06-13",
-            },
-            headers=headers,
-        )
-        assert period_resp.status_code == 201
-        pid = period_resp.json()["payroll_period_id"]
+        # This test exercises finalization, not the legacy period factory.
+        # Seed an Open prerequisite directly because the current POST factory
+        # intentionally rejects branches without one.
+        # Seed the Open period directly; period creation has separate current
+        # Payroll Setup/candidate coverage.
+        await direct_db.execute(_text(
+            "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+            "WHERE branchid = :bid AND status = 'Open'"
+        ), {"bid": paytest_branch_id})
+        pid = int((await direct_db.execute(_text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname,
+                 periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, 'Rate Safety Period',
+                    'Week', '2038-06-07', '2038-06-13')
+            RETURNING payrollperiodid
+        """), {
+            "bid": paytest_branch_id, "code": f"RS-PERIOD-{uuid4().hex[:10]}"
+        })).scalar_one())
 
-        # Open → create and approve an HOURLY rate ($15), then add the line
+        # Create and approve an HOURLY rate ($15), then add the line
         # Phase 4C: rate_amount is no longer accepted for PerUnit lines.
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=headers,
-        )
         rate15 = await _create_rate(
             session_client, auth_token, isolated_driver_id, paytest_rate_type_id,
             amount="15.00", effective_from="2038-01-01",

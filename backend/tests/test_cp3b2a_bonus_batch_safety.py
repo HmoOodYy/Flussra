@@ -173,17 +173,24 @@ async def _get_bonus_data_revision(db: AsyncConnection, period_id: int) -> int:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture
-async def cp3b2a_branch_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
-    resp = await session_client.get("/core/branches", headers=_auth(auth_token))
-    assert resp.status_code == 200, resp.text
-    for branch in resp.json():
-        if branch["branch_code"] == "PAYTEST":
-            return branch["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+@pytest_asyncio.fixture(scope="module")
+async def cp3b2a_branch_id(
+    session_client: httpx.AsyncClient, auth_token: str, session_db_conn,
+) -> int:
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP3B2A_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    return row["branchid"]
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="module")
 async def cp3b2a_driver_id(
     session_client: httpx.AsyncClient, auth_token: str, cp3b2a_branch_id: int,
 ) -> int:

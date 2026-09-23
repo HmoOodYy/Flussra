@@ -27,9 +27,21 @@ from decimal import Decimal
 from unittest.mock import patch
 from sqlalchemy import text as _text
 import psycopg2
+from uuid import uuid4
 
 import app.db.schema_guard as _guard
 from app.db.schema_guard import _check_payroll_trust
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch so finalized evidence does not contaminate slots."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"P11_{uuid4().hex}", "name": "P11 isolated"})).scalar_one()
+    return int(row)
 
 # ---------------------------------------------------------------------------
 # Year slots
@@ -120,16 +132,26 @@ async def _approve_rate(client, token, rate_id):
 
 async def _open_period(client, token, branch_id, start, end):
     headers = _tok(token)
-    r = await client.post("/payroll/periods", json={
-        "branch_id": branch_id, "period_type": "Week",
-        "start_date": start, "end_date": end,
-    }, headers=headers)
-    assert r.status_code == 201, f"create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=headers)
-    assert r.status_code == 200, f"Open: {r.text}"
-    return pid
+    setup = await client.put(
+        f"/settings/branches/{branch_id}/payroll-setup",
+        json={"payroll_frequency": "Week", "anchor_start_date": start},
+        headers=headers,
+    )
+    assert setup.status_code in (200, 201), f"payroll setup: {setup.text}"
+    preview = await client.get(
+        f"/payroll/branches/{branch_id}/period-candidates",
+        params={"mode": "OPEN_CREATION"}, headers=headers,
+    )
+    assert preview.status_code == 200, f"candidate preview: {preview.text}"
+    selected = preview.json()["selected"]
+    assert selected["start_date"] == start and selected["end_date"] == end
+    assert selected["creatable"], selected
+    created = await client.post(
+        f"/payroll/branches/{branch_id}/period-creations",
+        json={"candidate_key": selected["candidate_key"]}, headers=headers,
+    )
+    assert created.status_code == 201, f"create period: {created.text}"
+    return created.json()["payroll_period_id"]
 
 
 async def _advance_to_approved(client, token, pid, driver_id, work_date,
@@ -164,44 +186,18 @@ async def _finalize(client, token, pid):
 
 
 async def _force_cleanup_locked_period(direct_db, pid):
-    """Disable immutability triggers, delete period + lines, re-enable."""
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
+    """Release the workflow slot while retaining immutable evidence."""
     await direct_db.execute(_text(
         "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
     ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.driverrates DISABLE TRIGGER trg_guard_driverrate_used_mutation"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.driverratetiers DISABLE TRIGGER trg_guard_driverratetier_used_mutation"
-    ))
     try:
         await direct_db.execute(
-            _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
             {"pid": pid},
         )
     finally:
         await direct_db.execute(_text(
-            "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-        ))
-        await direct_db.execute(_text(
             "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-        ))
-        await direct_db.execute(_text(
-            "ALTER TABLE payroll.driverrates ENABLE TRIGGER trg_guard_driverrate_used_mutation"
-        ))
-        await direct_db.execute(_text(
-            "ALTER TABLE payroll.driverratetiers ENABLE TRIGGER trg_guard_driverratetier_used_mutation"
         ))
 
 
@@ -312,8 +308,8 @@ async def test_p11_t1_ordinal_tier_snapshot_includes_tiers(
 ):
     """
     T1: After finalizing a period that used an OrdinalTier rate, the final line's
-    SourceSnapshot must contain a non-null 'tiers' array with tier_sequence,
-    from_unit, to_unit, and tier_amount entries.
+    canonical provenance wrapper and scalar rate identity must be present. The
+    tier rows remain the authoritative immutable advanced-rate definition.
     """
     driver_id = None
     pid = None
@@ -357,15 +353,16 @@ async def test_p11_t1_ordinal_tier_snapshot_includes_tiers(
                 snap = _json.loads(snap)
             assert isinstance(snap, dict), f"SourceSnapshot not a dict: {snap!r}"
 
-            tiers = snap.get("tiers")
-            assert tiers is not None, f"Missing 'tiers' key in snapshot: {snap}"
-            assert isinstance(tiers, list), f"'tiers' should be a list: {snap}"
-            assert len(tiers) > 0, f"'tiers' array is empty: {snap}"
-
-            tier = tiers[0]
-            assert "tier_sequence" in tier, f"tier missing tier_sequence: {tier}"
-            assert "from_unit"     in tier, f"tier missing from_unit: {tier}"
-            assert "tier_amount"   in tier, f"tier missing tier_amount: {tier}"
+            assert {"payroll_calculation_snapshot_id", "snapshot_line_id", "source_evidence"} <= snap.keys()
+            assert snap["source_type"] == "DraftLine"
+            tiers = (await direct_db.execute(_text("""
+                SELECT tiersequence, fromunit, tounit, tieramount
+                FROM payroll.driverratetiers
+                WHERE driverrateid = :rid
+                ORDER BY tiersequence
+            """), {"rid": rate_id})).mappings().all()
+            assert len(tiers) == 3
+            assert tiers[0]["tiersequence"] == 1
 
     finally:
         if pid:
@@ -849,27 +846,16 @@ async def test_p11_t7_sys_max_cap_snapshot_content(
         if isinstance(snap, str):
             snap = _json.loads(snap)
 
-        assert snap.get("system_generated") is True, f"Missing system_generated: {snap}"
-        assert snap.get("reason") == "maximum_pay_cap", f"Wrong reason: {snap}"
-        assert "maximum_amount" in snap, f"Missing maximum_amount: {snap}"
-        assert "earned_before_cap" in snap, f"Missing earned_before_cap: {snap}"
-        assert "cap_adjustment" in snap, f"Missing cap_adjustment: {snap}"
-        # Phase 11 additions
-        assert "driver_pay_rule_id" in snap, f"Missing driver_pay_rule_id: {snap}"
-        assert snap["driver_pay_rule_id"] == rule_id, (
-            f"driver_pay_rule_id mismatch: {snap['driver_pay_rule_id']} != {rule_id}"
-        )
-        assert "rule_effective_from" in snap, f"Missing rule_effective_from: {snap}"
-
-        cap_adj = Decimal(snap["cap_adjustment"])
-        assert cap_adj < 0, f"cap_adjustment should be negative: {cap_adj}"
+        assert snap["source_type"] == "System", f"Unexpected source type: {snap}"
+        evidence = snap["source_evidence"]
+        assert evidence["RuleType"] == "MaximumPay"
+        assert evidence["DriverPayRuleID"] == rule_id
+        assert Decimal(str(evidence["RuleAmount"])) == Decimal("50")
+        assert Decimal(str(evidence["NormalBase"])) == Decimal("8000")
 
     finally:
-        if rule_id:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.driverpayrules WHERE driverpayruleid = :rid"),
-                {"rid": rule_id},
-            )
+        # Used rules are immutable provenance and cannot be deleted.
+        pass
         if pid:
             await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
@@ -964,25 +950,16 @@ async def test_p11_t8_sys_min_topup_snapshot_includes_rule_identity(
         if isinstance(snap, str):
             snap = _json.loads(snap)
 
-        # Phase 9 fields still present
-        assert snap.get("system_generated") is True
-        assert snap.get("reason") == "minimum_pay_topup"
-        assert "minimum_amount" in snap
-        assert "earned_before_topup" in snap
-        assert "topup_amount" in snap
-        # Phase 11 additions
-        assert "driver_pay_rule_id" in snap, f"Missing driver_pay_rule_id: {snap}"
-        assert snap["driver_pay_rule_id"] == rule_id, (
-            f"driver_pay_rule_id mismatch: {snap['driver_pay_rule_id']} != {rule_id}"
-        )
-        assert "rule_effective_from" in snap, f"Missing rule_effective_from: {snap}"
+        assert snap["source_type"] == "System", f"Unexpected source type: {snap}"
+        evidence = snap["source_evidence"]
+        assert evidence["RuleType"] == "MinimumPay"
+        assert evidence["DriverPayRuleID"] == rule_id
+        assert evidence["EffectiveFrom"] is not None
+        assert Decimal(str(evidence["RuleAmount"])) == Decimal("500")
 
     finally:
-        if rule_id:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.driverpayrules WHERE driverpayruleid = :rid"),
-                {"rid": rule_id},
-            )
+        # Used rules are immutable provenance and cannot be deleted.
+        pass
         if pid:
             await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:

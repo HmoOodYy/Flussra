@@ -17,6 +17,7 @@ Run from backend/:
 """
 import datetime
 import itertools
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -72,18 +73,33 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
         """),
         {"bid": branch_id},
     )
-    # Delete review decisions and items
+    # Delete only review rows not retained by immutable P6D evidence.
     await db.execute(
         _text("""
-            DELETE FROM review.managerreviewdecisions
-            WHERE reviewitemid IN (
-                SELECT reviewitemid FROM review.managerreviewitems WHERE branchid = :bid
+            DELETE FROM review.managerreviewdecisions decision
+            WHERE decision.reviewitemid IN (
+                SELECT item.reviewitemid FROM review.managerreviewitems item WHERE item.branchid = :bid
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM payroll.payrollperiodworkflowactionevidence evidence
+                WHERE evidence.reviewdecisionid = decision.reviewdecisionid
             )
         """),
         {"bid": branch_id},
     )
     await db.execute(
-        _text("DELETE FROM review.managerreviewitems WHERE branchid = :bid"),
+        _text("""
+            DELETE FROM review.managerreviewitems item
+            WHERE item.branchid = :bid
+              AND NOT EXISTS (
+                  SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                  WHERE evidence.reviewitemid = item.reviewitemid
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM review.managerreviewdecisions decision
+                  WHERE decision.reviewitemid = item.reviewitemid
+              )
+        """),
         {"bid": branch_id},
     )
     await db.execute(
@@ -184,6 +200,25 @@ async def _setup_payroll_weekly(client, token, branch_id: int) -> None:
         headers=_auth(token),
     )
     assert r.status_code in (200, 201), f"payroll-setup: {r.text}"
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client, auth_token, session_db_conn):
+    """Use a fresh branch so slot/capability tests do not share period history."""
+    branch_code = f"CP1E_{uuid.uuid4().hex[:10]}"
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": branch_code, "name": f"CP1E {branch_code}"},
+    )).mappings().first()
+    await session_db_conn.commit()
+    branch_id = row["branchid"]
+    await _setup_payroll_weekly(session_client, auth_token, branch_id)
+    return branch_id
 
 
 # ---------------------------------------------------------------------------

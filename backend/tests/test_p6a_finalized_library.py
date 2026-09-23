@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -24,6 +25,40 @@ from app.payroll.service import (
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"P6A_{uuid4().hex[:10]}", "name": "P6A isolated"},
+    )).mappings().one()
+    await session_db_conn.commit()
+    return int(row["branchid"])
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create a driver whose company/branch key matches P6A legacy lines."""
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "P6A Isolated Driver",
+            "driver_code": f"P6A-D-{uuid4().hex[:10]}",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
 
 
 async def _seed_finalized_period(

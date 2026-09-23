@@ -28,6 +28,7 @@ Run from backend/:
 """
 import datetime
 import itertools
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -39,6 +40,23 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 # ---------------------------------------------------------------------------
 
 _COMPANY_ID = 1
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a suite-owned branch so retained P6D periods cannot move PAYTEST's anchor."""
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP2B_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -57,27 +75,42 @@ def _week_2095(offset: int = 0) -> tuple[datetime.date, datetime.date]:
 
 
 async def _clean(db: AsyncConnection, branch_id: int) -> None:
-    """Delete all PayrollPeriodDays and PayrollPeriods for this branch."""
+    """Release slots and delete only periods with no immutable P6D evidence."""
+    eligible = """
+        SELECT period.payrollperiodid
+        FROM payroll.payrollperiods period
+        WHERE period.branchid = :bid
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.payrollcalculationsnapshots snapshot
+              WHERE snapshot.payrollperiodid = period.payrollperiodid
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.payrollperiodauditevidencecoverage coverage
+              WHERE coverage.payrollperiodid = period.payrollperiodid
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+              WHERE evidence.payrollperiodid = period.payrollperiodid
+          )
+    """
     await db.execute(
         _text("""
-            DELETE FROM payroll.PayrollPeriodDays
-            WHERE payrollperiodid IN (
-                SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid
-            )
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled', currentreturnreviewitemid = NULL
+            WHERE branchid = :bid AND status IN ('Draft', 'Open', 'InReview', 'Returned')
         """),
         {"bid": branch_id},
     )
     await db.execute(
-        _text("""
-            DELETE FROM payroll.payrolldraftlines
-            WHERE payrollperiodid IN (
-                SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid
-            )
-        """),
+        _text(f"DELETE FROM payroll.PayrollPeriodDays WHERE payrollperiodid IN ({eligible})"),
         {"bid": branch_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
+        _text(f"DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid IN ({eligible})"),
+        {"bid": branch_id},
+    )
+    await db.execute(
+        _text(f"DELETE FROM payroll.payrollperiods WHERE payrollperiodid IN ({eligible})"),
         {"bid": branch_id},
     )
     await db.commit()
@@ -227,11 +260,11 @@ class TestCp2bPeriodDays:
             assert idx_r.first() is not None, f"Index {idx_name!r} missing"
 
     # ------------------------------------------------------------------ #
-    # D02 — Alembic head is exactly 0054
+    # D02 — Alembic head is the current migration
     # ------------------------------------------------------------------ #
 
-    def test_d02_alembic_head_0053(self):
-        """D02: Migration chain is linear and head is 0054."""
+    def test_d02_alembic_head_current(self):
+        """D02: Migration chain is linear and head is 0065."""
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
@@ -242,7 +275,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0054" in lines[0], f"Expected head 0054, got: {lines[0]}"
+        assert "0065" in lines[0], f"Expected head 0065, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows
@@ -976,7 +1009,18 @@ class TestCp2bPeriodDays:
             )
         finally:
             await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                _text("""
+                    DELETE FROM payroll.payrollperiods period
+                    WHERE period.payrollperiodid = :pid
+                      AND NOT EXISTS (
+                          SELECT 1 FROM payroll.payrollperiodauditevidencecoverage coverage
+                          WHERE coverage.payrollperiodid = period.payrollperiodid
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                          WHERE evidence.payrollperiodid = period.payrollperiodid
+                      )
+                """),
                 {"pid": period_id},
             )
             await direct_db.commit()

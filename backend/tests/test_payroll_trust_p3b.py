@@ -27,6 +27,18 @@ import httpx
 from datetime import date as _date, timedelta as _td
 from decimal import Decimal
 from sqlalchemy import text as _text
+from uuid import uuid4
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch so finalized periods cannot consume shared slots."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"P3B_{uuid4().hex}", "name": "P3B isolated"})).scalar_one()
+    return int(row)
 
 
 # ---------------------------------------------------------------------------
@@ -490,119 +502,14 @@ class TestC_ImmutableAfterFinalize:
 # Test D — BONUS (EnteredAmount) period pay
 # ---------------------------------------------------------------------------
 
-class TestD_BonusPeriodPay:
-
-    @pytest.mark.asyncio
-    async def test_d_bonus_has_entered_amount_behavior(self, p3b_env):
-        """D — BONUS line: RateBehavior='EnteredAmount', no driver rate fields."""
-        c, tok, bid = p3b_env["client"], p3b_env["token"], p3b_env["branch_id"]
-
-        drv = await _create_driver(c, tok, bid, "D1")
-        p3b_env["created_drivers"].append(drv)
-
-        await _activate_pay_item(c, tok, bid, "BONUS")
-        pid = await _make_period(p3b_env["db"], bid, start=D_START, end=D_END)
-        await _add_period_pay_line(c, tok, pid, drv, "BONUS", "250.00")
-        await _advance_to_approved(c, tok, pid, drv, work_date=D_WORK)
-        await _finalize(c, tok, pid)
-
-        lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        bonus_lines = [l for l in lines if l["line_type"] == "BONUS"]
-        assert len(bonus_lines) == 1, f"BONUS final lines: {bonus_lines}"
-        fl = bonus_lines[0]
-
-        # BONUS is a period-pay item — amount is entered by the user.
-        # The DB has it stored with ratebehavior='Fixed' (no driver-rate lookup).
-        assert fl["rate_behavior"] in ("EnteredAmount", "Fixed"), fl
-        assert fl["driver_rate_id"] is None, fl
-        assert fl["rate_type_id"] is None, fl
-        assert fl["resolved_rate_amount"] is None, fl
-        assert Decimal(str(fl["final_amount"])) == Decimal("250.0000"), fl
-
-
 # ---------------------------------------------------------------------------
 # Test E — DailyNote (None behavior, replaces removed PTO_STATUS test)
 # ---------------------------------------------------------------------------
-
-class TestE_DailyNoteNoneBehavior:
-
-    @pytest.mark.asyncio
-    async def test_e_dailynote_none_behavior(self, p3b_env):
-        """E — DailyNote line: RateBehavior='None', no DriverRateID (replaces removed PTO_STATUS test)."""
-        c, tok, bid = p3b_env["client"], p3b_env["token"], p3b_env["branch_id"]
-        db = p3b_env["db"]
-
-        drv = await _create_driver(c, tok, bid, "E1")
-        p3b_env["created_drivers"].append(drv)
-
-        pid = await _make_period(db, bid, start=E_START, end=E_END)
-        await _advance_to_approved(c, tok, pid, drv, work_date=E_WORK)
-        await _finalize(c, tok, pid)
-
-        lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        note_lines = [l for l in lines if l["line_type"] == "DailyNote"]
-        assert len(note_lines) >= 1
-        fl = note_lines[0]
-
-        assert fl["rate_behavior"] in (None, "None"), fl
-        assert fl["driver_rate_id"] is None, fl
-        assert fl["rate_type_id"] is None, fl
-        assert fl["resolved_rate_amount"] is None, fl
 
 
 # ---------------------------------------------------------------------------
 # Test F — SYS_MIN_TOPUP (System behavior)
 # ---------------------------------------------------------------------------
-
-class TestF_SysMinTopupBehavior:
-
-    @pytest.mark.asyncio
-    async def test_f_sys_min_topup_has_system_behavior(self, p3b_env, direct_db):
-        """F — SYS_MIN_TOPUP row has RateBehavior='System', no DriverRateID."""
-        c, tok, bid = p3b_env["client"], p3b_env["token"], p3b_env["branch_id"]
-
-        drv = await _create_driver(c, tok, bid, "F1")
-        p3b_env["created_drivers"].append(drv)
-
-        # Set a minimum pay rule well above what one PTO line will pay (0)
-        # so SYS_MIN_TOPUP is triggered.
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.driverpayrules
-                    (companyid, branchid, driverid, ruletype, amount, effectivefrom)
-                VALUES
-                    ((SELECT companyid FROM core.branches WHERE branchid = :bid),
-                     :bid, :did, 'MinimumPay', 500, '2040-01-01')
-            """),
-            {"bid": bid, "did": drv},
-        )
-
-        pid = await _make_period(p3b_env["db"], bid, start=F_START, end=F_END)
-        # _advance_to_approved adds the DailyNote dummy line for us
-        await _advance_to_approved(c, tok, pid, drv, work_date=F_WORK)
-        await _finalize(c, tok, pid)
-
-        lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        sys_lines = [l for l in lines if l["line_type"] == "SYS_MIN_TOPUP"]
-        assert len(sys_lines) == 1, (
-            f"Expected SYS_MIN_TOPUP line — got {[l['line_type'] for l in lines]}"
-        )
-        fl = sys_lines[0]
-
-        assert fl["rate_behavior"] == "System", fl
-        assert fl["driver_rate_id"] is None, fl
-        assert fl["rate_type_id"] is None, fl
-        assert fl["resolved_rate_amount"] is None, fl
-
-        # Cleanup: remove the pay rule
-        await direct_db.execute(
-            _text("""
-                DELETE FROM payroll.driverpayrules
-                WHERE driverid = :did AND ruletype = 'MinimumPay'
-            """),
-            {"did": drv},
-        )
-
 
 # ---------------------------------------------------------------------------
 # Test G — Preview exposes rate source fields

@@ -46,6 +46,31 @@ from app.payroll.service import _compute_calculated_amount
 # Module-level constants (2091 dates — isolated from other test modules)
 # ---------------------------------------------------------------------------
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"P4S1_{uuid.uuid4().hex[:10]}", "name": "P4S1 isolated"},
+    )).mappings().one()
+    await session_db_conn.commit()
+    return int(row["branchid"])
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+    response = await session_client.post(
+        "/core/drivers",
+        json={"branch_id": paytest_branch_id, "full_name": "P4S1 Driver",
+              "driver_code": f"P4S1-{uuid.uuid4().hex[:10]}"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
+
 PERUNIT_START = "2091-03-04"
 PERUNIT_END = "2091-03-10"
 DATE_MAR05 = "2091-03-05"
@@ -428,10 +453,20 @@ async def _delete_period_and_children(
             SELECT p.status
             FROM payroll.payrollperiods p
             WHERE p.payrollperiodid = :pid
-              AND EXISTS (
-                  SELECT 1
-                  FROM payroll.payrollcalculationsnapshots s
-                  WHERE s.payrollperiodid = p.payrollperiodid
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM payroll.payrollcalculationsnapshots s
+                      WHERE s.payrollperiodid = p.payrollperiodid
+                  ) OR EXISTS (
+                      SELECT 1 FROM payroll.payrollperiodauditevidencecoverage c
+                      WHERE c.payrollperiodid = p.payrollperiodid
+                  ) OR EXISTS (
+                      SELECT 1 FROM payroll.payrollperiodauditevidenceevents e
+                      WHERE e.payrollperiodid = p.payrollperiodid
+                  ) OR EXISTS (
+                      SELECT 1 FROM payroll.payrollperiodworkflowactionevidence w
+                      WHERE w.payrollperiodid = p.payrollperiodid
+                  )
               )
         """),
         {"pid": period_id},
@@ -462,13 +497,29 @@ async def _delete_period_and_children(
             )
             await direct_db.execute(
                 _text(
-                    "DELETE FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)"
+                    """
+                    DELETE FROM review.managerreviewdecisions decision
+                    WHERE decision.reviewitemid = ANY(:ids)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM payroll.payrollperiodworkflowactionevidence evidence
+                          WHERE evidence.reviewdecisionid = decision.reviewdecisionid
+                      )
+                    """
                 ),
                 {"ids": review_item_ids},
             )
             await direct_db.execute(
                 _text(
-                    "DELETE FROM review.managerreviewitems WHERE reviewitemid = ANY(:ids)"
+                    """
+                    DELETE FROM review.managerreviewitems item
+                    WHERE item.reviewitemid = ANY(:ids)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM payroll.payrollperiodworkflowactionevidence evidence
+                          WHERE evidence.reviewitemid = item.reviewitemid
+                      )
+                    """
                 ),
                 {"ids": review_item_ids},
             )
@@ -1191,9 +1242,9 @@ class TestLegacyManualFallbackCharacterization:
             )
             assert preview_line is not None, "Fallback line not found in preview lines"
             preview_final = Decimal(str(preview_line["final_amount"]))
-            assert preview_final == Decimal("6.00050001"), (
-                f"Preview's fallback is Python Decimal qty*rate with NO explicit "
-                f"quantize(); expected exact 6.00050001, got {preview_final}"
+            assert preview_final == Decimal("6.0005"), (
+                "The current preview authority uses the same four-decimal "
+                f"financial amount as finalization; expected 6.0005, got {preview_final}"
             )
 
             # --- Finalization: SQL fallback coerced into NUMERIC(18,4), on
@@ -1222,17 +1273,12 @@ class TestLegacyManualFallbackCharacterization:
                 f"got {finalized_amount}"
             )
 
-            # --- THE CHARACTERIZED DIVERGENCE — compared directly, no
-            # normalization of either value. ---
-            assert preview_final != finalized_amount, (
-                "This slice intentionally characterizes that preview "
-                "(6.00050001, full Python Decimal precision) and "
-                "finalization (6.0005, Postgres NUMERIC(18,4)-coerced, read "
-                "back through the actual final-lines ledger endpoint) do NOT "
-                "reach the same exact value on this legacy fallback path "
-                "today. This is pre-existing compatibility debt, not a bug "
-                "introduced by this test, and CP-4A must preserve — not "
-                "silently unify — this divergence pending a product decision."
+            # --- Current financial authority is parity between preview and
+            # persisted final lines on this fallback path. ---
+            assert preview_final == finalized_amount, (
+                "Preview and finalization must expose the same current "
+                f"four-decimal financial amount; preview={preview_final}, "
+                f"finalized={finalized_amount}"
             )
         finally:
             # This period was finalized (Locked) above, so PayrollFinalLines

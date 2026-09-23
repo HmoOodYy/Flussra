@@ -17,12 +17,44 @@ import httpx
 import psycopg2
 from datetime import date, datetime, timezone, timedelta
 from sqlalchemy import text
+from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 BASE = "/dashboard"
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch for dashboard period-count fixtures."""
+    row = (await session_db_conn.execute(text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"M17_{uuid4().hex}", "name": "M17 isolated"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the dashboard test driver on this module's isolated branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "Dashboard Isolated Driver",
+            "driver_code": f"M17-D-{uuid4().hex[:10]}",
+        },
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert resp.status_code == 201, f"Dashboard driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
 
 
 async def _get_dashboard(client: httpx.AsyncClient, token: str) -> dict:

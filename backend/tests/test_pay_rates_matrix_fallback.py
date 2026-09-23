@@ -313,9 +313,10 @@ class TestMatrixDefaultFallback:
         # Build batch payload from every matrix row
         changes = [
             {
-                "pay_item_id":  g["pay_item_id"],
+                "pay_item_id": g.get("pay_item_id"),
+                "status_rate_column_id": g.get("status_rate_column_id"),
                 "rate_type_id": g["rate_type_id"],
-                "amount":       "10.00",
+                "amount": "10.00",
             }
             for g in groups
         ]

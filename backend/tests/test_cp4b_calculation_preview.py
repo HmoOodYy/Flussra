@@ -68,6 +68,23 @@ def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a suite-owned branch so CP4B evidence never contaminates PAYTEST."""
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP4B_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
+
+
 # ---------------------------------------------------------------------------
 # Independent cleanup runner (Codex P1 fix).
 #
@@ -202,7 +219,12 @@ async def _cancel_active_periods(client: httpx.AsyncClient, token: str, branch_i
 
 async def _delete_period_and_children(db, period_id: int) -> None:
     """
-    Hard-deletes exactly this test-owned period and everything under it.
+    Deletes an un-evidenced test period, or cancels it when P6D evidence exists.
+
+    The current product deliberately retains periods after source mutations have
+    created immutable audit evidence.  Cancellation releases the branch's
+    mutable workflow slot without weakening that retention boundary.
+
     `add_draft_line`/`add_period_pay_line`/bonus-event creation each write a
     real AuditLog row (`_write_line_audit`, entity_name='PayrollDraftLines'
     or 'PayrollBonusEvents') immediately after insert -- this captures the
@@ -212,6 +234,28 @@ async def _delete_period_and_children(db, period_id: int) -> None:
     asserts zero residue for every row and audit type this period could
     have produced.
     """
+    has_p6d_evidence = (await db.execute(
+        _text("""
+            SELECT EXISTS (
+                SELECT 1 FROM payroll.payrollperiodauditevidencecoverage
+                WHERE payrollperiodid = :pid
+            ) OR EXISTS (
+                SELECT 1 FROM payroll.payrollcalculationsnapshots
+                WHERE payrollperiodid = :pid
+            ) OR EXISTS (
+                SELECT 1 FROM payroll.payrollperiodworkflowactionevidence
+                WHERE payrollperiodid = :pid
+            ) AS present
+        """), {"pid": period_id},
+    )).scalar_one()
+    if has_p6d_evidence:
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )
+        await db.commit()
+        return
+
     draft_line_ids = [
         r["draftlineid"] for r in (await db.execute(
             _text("SELECT draftlineid FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),

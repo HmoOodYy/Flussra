@@ -32,17 +32,25 @@ async def report_authority_db(test_database_url):
     try:
         async with engine.begin() as seed:
             tenant = (await seed.execute(text("""
-                SELECT c.companyid, hq.branchid AS branch_id,
-                       paytest.branchid AS other_branch_id, u.userid
+                SELECT c.companyid, paytest.branchid AS other_branch_id, u.userid
                 FROM core.companies c
-                JOIN core.branches hq ON hq.companyid = c.companyid AND hq.branchcode = 'HQ'
                 JOIN core.branches paytest ON paytest.companyid = c.companyid AND paytest.branchcode = 'PAYTEST'
                 JOIN sec.users u ON u.companyid = c.companyid AND u.username = 'admin'
                 WHERE c.companycode = 'DEMO'
             """))).mappings().one()
+            isolated_branch_id = (await seed.execute(text("""
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                VALUES (:company_id, :branch_code, :branch_name, 'Active', FALSE)
+                RETURNING branchid
+            """), {
+                "company_id": int(tenant["companyid"]),
+                "branch_code": f"RP1_{marker}",
+                "branch_name": f"RP1 isolated {marker}",
+            })).scalar_one()
             ids = {
                 "company_id": int(tenant["companyid"]),
-                "branch_id": int(tenant["branch_id"]),
+                "branch_id": int(isolated_branch_id),
                 "other_branch_id": int(tenant["other_branch_id"]),
                 "user_id": int(tenant["userid"]),
             }
@@ -71,6 +79,7 @@ async def report_authority_db(test_database_url):
         async with engine.begin() as cleanup:
             await cleanup.execute(text("DELETE FROM core.drivers WHERE driverid = :driver_id"), ids)
             await cleanup.execute(text("DELETE FROM core.employees WHERE employeeid = :employee_id"), ids)
+            await cleanup.execute(text("DELETE FROM core.branches WHERE branchid = :branch_id"), ids)
     finally:
         await engine.dispose()
 

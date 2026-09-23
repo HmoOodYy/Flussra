@@ -498,14 +498,16 @@ async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
 
     finally:
         if pid is not None:
-            # Delete draft lines first (FK prevents period deletion while lines exist)
+            # Release the workflow slot while retaining any immutable evidence.
             await direct_db.execute(
-                _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
+                _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
+            )
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
                 {"pid": pid},
             )
             await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
+                _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
             )
         await _delete_driver(session_client, auth_token, drv)
         await direct_db.execute(
