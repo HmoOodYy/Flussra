@@ -36,6 +36,7 @@ import pytest_asyncio
 import httpx
 from unittest.mock import patch, AsyncMock
 from sqlalchemy import text
+from uuid import uuid4
 from app.settings import service as settings_service
 
 
@@ -2105,9 +2106,11 @@ class TestApprovalEffectiveDate:
         db_conn,
     ):
         """LLR-A: approval attempt returns 422 regardless of open period state."""
-        from datetime import date, timedelta
+        from datetime import date
 
-        today = date.today()
+        period_start = date(2300, 1, 2)
+        period_end   = date(2300, 1, 8)
+        pay_date      = date(2300, 1, 10)
 
         # Create a dedicated branch + open period for this test
         branch_resp = await client.post(
@@ -2123,22 +2126,23 @@ class TestApprovalEffectiveDate:
         assert branch_resp.status_code == 201, branch_resp.text
         test_branch_id = branch_resp.json()["branch_id"]
 
-        period_start = today - timedelta(days=2)
-        period_end   = today + timedelta(days=4)
-        pay_date      = period_end + timedelta(days=2)
-
-        period_resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   test_branch_id,
-                "period_type": "Week",
-                "start_date":  str(period_start),
-                "end_date":    str(period_end),
-                "pay_date":    str(pay_date),
-            },
-            headers=auth(auth_token),
-        )
-        assert period_resp.status_code == 201, period_resp.text
+        # The legacy POST period factory currently requires exactly one Open
+        # period.  Seed that prerequisite directly; this test is about the
+        # legacy item-approval guard, not period creation.
+        await db_conn.execute(text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname,
+                 periodtype, startdate, enddate, paydate)
+            VALUES
+                (1, :bid, 'Open', :code, 'Effective Date Open',
+                 'Week', :start, :end, :paydate)
+        """), {
+            "bid": test_branch_id,
+            "code": f"M12-EFF-OPEN-{uuid4().hex[:10]}",
+            "start": period_start,
+            "end": period_end,
+            "paydate": pay_date,
+        })
 
         request_id = await _seed_legacy_request(
             db_conn, branch_id=test_branch_id, code="M12_EFF_DEFER",

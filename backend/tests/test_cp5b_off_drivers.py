@@ -5,12 +5,45 @@ from decimal import Decimal
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
+from uuid import uuid4
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2097, 1, 1)
 _COUNTER = itertools.count(1)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Keep CP5B workflow slots isolated from the shared PAYTEST branch."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, 'CP5B isolated', 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"CP5B_{uuid4().hex}"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the CP5B driver on its isolated branch."""
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "CP5B Isolated Driver",
+            "driver_code": f"CP5B-D-{uuid4().hex[:10]}",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
 
 
 def _auth(token: str) -> dict[str, str]:

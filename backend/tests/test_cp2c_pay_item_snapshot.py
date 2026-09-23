@@ -4,7 +4,7 @@ CP-2C: Payroll period pay-item layout snapshot tests.
 Product contracts verified:
   - Migration 0053: PayrollPeriodPayItems table exists with all required columns,
     constraints (unique, checks, FKs), and indexes.
-  - Alembic head is exactly 0053.
+  - Alembic head is the current migration.
   - Candidate-created Open periods get one snapshot row per non-Retired PayItem.
   - Legacy POST /payroll/periods (manual) also creates snapshot rows.
   - Snapshot rows: CompanyID / BranchID / PayrollPeriodID match the period.
@@ -36,6 +36,7 @@ Run from backend/:
 """
 import itertools
 import datetime
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -75,14 +76,7 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
             UPDATE payroll.payrollperiods period
             SET status = 'Cancelled'
             WHERE period.branchid = :bid
-              AND period.status IN ('Open', 'InReview', 'Approved', 'Returned')
-              AND EXISTS (
-                  SELECT 1
-                  FROM payroll.payrollcalculationsnapshots snapshot
-                  WHERE snapshot.payrollperiodid = period.payrollperiodid
-                    AND snapshot.companyid = period.companyid
-                    AND snapshot.branchid = period.branchid
-              )
+              AND period.status IN ('Draft', 'Open', 'InReview', 'Returned')
         """),
         {"bid": branch_id},
     )
@@ -107,6 +101,14 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
                   WHERE snapshot.payrollperiodid = period.payrollperiodid
                     AND snapshot.companyid = period.companyid
                     AND snapshot.branchid = period.branchid
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM payroll.payrollperiodauditevidencecoverage coverage
+                  WHERE coverage.payrollperiodid = period.payrollperiodid
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                  WHERE evidence.payrollperiodid = period.payrollperiodid
               )
         """),
         {"bid": branch_id},
@@ -184,15 +186,20 @@ async def _active_snap_codes(db: AsyncConnection, period_id: int,
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture(scope="class")
-async def snap_branch_id(session_client, auth_token: str) -> int:
-    """Return the PAYTEST branch_id (shared with CP-2B but isolated by date range)."""
-    resp = await session_client.get("/core/branches",
-                                    headers=_auth(auth_token))
-    assert resp.status_code == 200
-    for b in resp.json():
-        if b["branch_code"] == "PAYTEST":
-            return b["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+async def snap_branch_id(session_db_conn) -> int:
+    """Use a class-owned branch so retained P6D periods cannot move the anchor."""
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP2C_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
 
 
 @pytest_asyncio.fixture(scope="class")
@@ -282,7 +289,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0055."""
+        """S03: Alembic migration chain is linear and head is 0065."""
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
@@ -293,7 +300,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0055" in lines[0], f"Expected head 0055, got: {lines[0]}"
+        assert "0065" in lines[0], f"Expected head 0065, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist
@@ -444,7 +451,7 @@ class TestCp2cPayItemSnapshot:
 
         # cleanup
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems WHERE payitemcode = 'RETIRED_2094' AND companyid = :cid"),
+            _text("UPDATE payroll.payitems SET status = 'Retired' WHERE payitemcode = 'RETIRED_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )
         await _clean(direct_db, snap_branch_id)
@@ -530,14 +537,14 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
 
     # ------------------------------------------------------------------ #
-    # S11 — ON DELETE CASCADE removes snapshot rows with period
+    # S11 — P6D evidence protects snapshot rows from period deletion
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
     async def test_s11_cascade_delete_on_period_delete(
         self, client, auth_token, direct_db, snap_branch_id
     ):
-        """S11: Deleting a period removes its PayrollPeriodPayItems rows via CASCADE."""
+        """S11: P6D-backed periods cannot be hard-deleted, preserving snapshots."""
         await _clean(direct_db, snap_branch_id)
         await _setup(client, auth_token, snap_branch_id)
 
@@ -549,13 +556,14 @@ class TestCp2cPayItemSnapshot:
         rows = await _snap_rows(direct_db, pid)
         assert rows, "No snapshot rows created"
 
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
+        with pytest.raises(Exception, match="P6D|audit evidence"):
+            await direct_db.execute(
+                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                {"pid": pid},
+            )
 
         rows_after = await _snap_rows(direct_db, pid)
-        assert len(rows_after) == 0, "CASCADE did not remove snapshot rows on period delete"
+        assert len(rows_after) == len(rows), "P6D protection must preserve snapshot rows"
 
         await _clean(direct_db, snap_branch_id)
 
@@ -924,14 +932,14 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
 
     # ------------------------------------------------------------------ #
-    # S20 — add_period_pay_line accepts BONUS (system Period item)
+    # S20 — generic Period Pay BONUS is retired in favor of Bonus Events
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
     async def test_s20_add_period_pay_line_accepts_bonus(
         self, client, auth_token, direct_db, snap_branch_id, snap_driver_id
     ):
-        """S20: add_period_pay_line accepts BONUS, which is in the snapshot as Period scope."""
+        """S20: generic period-pay BONUS is rejected; Bonus Events is canonical."""
         await _clean(direct_db, snap_branch_id)
 
         # Ensure BONUS is active for this branch before period creation
@@ -975,8 +983,8 @@ class TestCp2cPayItemSnapshot:
             },
             headers=_auth(auth_token),
         )
-        assert r.status_code in (200, 201), (
-            f"BONUS should be accepted, got {r.status_code}: {r.text}"
+        assert r.status_code == 422, (
+            f"BONUS must use the canonical Bonus Events API, got {r.status_code}: {r.text}"
         )
 
         # Restore — remove the forced BranchPayItemConfig row
@@ -1170,7 +1178,7 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         # Clean up the custom item (now retired; physical delete blocked by snapshot rows)
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems WHERE payitemcode = 'SNAP_CUSTOM_2094' AND companyid = :cid"),
+            _text("UPDATE payroll.payitems SET status = 'Retired' WHERE payitemcode = 'SNAP_CUSTOM_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )
 
@@ -1357,7 +1365,7 @@ class TestCp2cPayItemSnapshot:
 
         await _clean(direct_db, snap_branch_id)
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems "
+            _text("UPDATE payroll.payitems SET status = 'Retired' "
                   "WHERE payitemcode = 'SNAP_DAILY_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )
@@ -1430,7 +1438,7 @@ class TestCp2cPayItemSnapshot:
 
         await _clean(direct_db, snap_branch_id)
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems "
+            _text("UPDATE payroll.payitems SET status = 'Retired' "
                   "WHERE payitemcode = 'SNAP_PERIOD_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )
@@ -1517,7 +1525,7 @@ class TestCp2cPayItemSnapshot:
 
         await _clean(direct_db, snap_branch_id)
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems "
+            _text("UPDATE payroll.payitems SET status = 'Retired' "
                   "WHERE payitemcode = 'SNAP_UPD_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )
@@ -1590,7 +1598,7 @@ class TestCp2cPayItemSnapshot:
 
         await _clean(direct_db, snap_branch_id)
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems "
+            _text("UPDATE payroll.payitems SET status = 'Retired' "
                   "WHERE payitemcode = 'SNAP_PPL_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )
@@ -2004,7 +2012,7 @@ class TestCp2cPayItemSnapshot:
 
         await _clean(direct_db, snap_branch_id)
         await direct_db.execute(
-            _text("DELETE FROM payroll.payitems "
+            _text("UPDATE payroll.payitems SET status = 'Retired' "
                   "WHERE payitemcode = 'SNAP_GRID_2094' AND companyid = :cid"),
             {"cid": _COMPANY_ID},
         )

@@ -40,18 +40,32 @@ async def evidence_db(test_database_url):
     try:
         async with engine.begin() as seed:
             tenant = (await seed.execute(text("""
-                SELECT c.companyid, b.branchid, u.userid
+                SELECT c.companyid, u.userid
                 FROM core.companies c
-                JOIN core.branches b ON b.companyid = c.companyid
                 JOIN sec.users u ON u.companyid = c.companyid
-                WHERE c.companycode = 'DEMO' AND b.branchcode = 'HQ'
+                WHERE c.companycode = 'DEMO'
                   AND u.username = 'admin'
             """))).mappings().one()
             ids.update({
                 "company_id": int(tenant["companyid"]),
-                "branch_id": int(tenant["branchid"]),
                 "user_id": int(tenant["userid"]),
             })
+            branch_id = (await seed.execute(text("""
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                VALUES (:cid, :code, :name, 'Active', FALSE)
+                RETURNING branchid
+            """), {
+                "cid": ids["company_id"],
+                "code": f"CP5C-{marker[:16]}",
+                "name": f"CP5C isolated {marker[:12]}",
+            })).scalar_one()
+            await seed.execute(text("""
+                INSERT INTO payroll.branchpayrollsettings
+                    (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
+                VALUES (:cid, :bid, 'Week', '2089-01-01', TRUE)
+            """), {"cid": ids["company_id"], "bid": branch_id})
+            ids["branch_id"] = int(branch_id)
             employee_id = (await seed.execute(text("""
                 INSERT INTO core.employees
                     (companyid, branchid, fullname, employeetype, employmentstatus,
@@ -165,6 +179,12 @@ async def evidence_db(test_database_url):
             })
             await cleanup.execute(text("DELETE FROM core.employees WHERE employeeid = :id"), {
                 "id": ids["employee_id"],
+            })
+            await cleanup.execute(text(
+                "DELETE FROM payroll.branchpayrollsettings WHERE branchid = :bid"
+            ), {"bid": ids["branch_id"]})
+            await cleanup.execute(text("DELETE FROM core.branches WHERE branchid = :bid"), {
+                "bid": ids["branch_id"],
             })
     finally:
         await engine.dispose()

@@ -481,13 +481,10 @@ async def cp0_period_items_activated(
 # ---------------------------------------------------------------------------
 
 class TestPeriodPayCanonical:
-    """
-    Period Pay endpoint accepts "BONUS"/"ADJUSTMENT" (canonical) in addition
-    to "Bonus"/"Adjustment" (legacy).  Stored line_type is canonical.
-    """
+    """The generic Period Pay surface rejects retired Bonus/Adjustment writes."""
 
     @pytest.mark.asyncio
-    async def test_canonical_bonus_accepted(
+    async def test_canonical_bonus_rejected(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
         cp0_period_items_activated,
     ):
@@ -499,28 +496,11 @@ class TestPeriodPayCanonical:
             json={"driver_id": paytest_driver_id, "line_type": "BONUS", "amount": "250.00"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
-        assert resp.json()["line_type"] == "BONUS"
+        assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
+        assert "bonus events" in resp.text.lower()
 
     @pytest.mark.asyncio
-    async def test_canonical_adjustment_accepted(
-        self, session_client, auth_token, paytest_driver_id, cp0_clean,
-        cp0_period_items_activated,
-    ):
-        branch_id, db = cp0_clean
-        period = await _open_period(db, branch_id, "2080-06-09", "2080-06-15")
-        pid = period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "ADJUSTMENT", "amount": "-30.00"},
-            headers=auth(auth_token),
-        )
-        # Manual ADJUSTMENT is blocked in this version (deferred to a future release)
-        assert resp.status_code == 422, f"Expected 422 (ADJUSTMENT blocked), got {resp.status_code}: {resp.text}"
-        assert "adjustment" in resp.json()["detail"].lower()
-
-    @pytest.mark.asyncio
-    async def test_legacy_bonus_still_accepted_stores_canonical(
+    async def test_legacy_bonus_rejected(
         self, session_client, auth_token, paytest_driver_id, cp0_clean,
         cp0_period_items_activated,
     ):
@@ -532,11 +512,8 @@ class TestPeriodPayCanonical:
             json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "100.00"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 201, f"Legacy 'Bonus' must still work; got {resp.text}"
-        assert resp.json()["line_type"] == "BONUS", (
-            "Legacy 'Bonus' must be stored as canonical 'BONUS'; "
-            f"got '{resp.json()['line_type']}'"
-        )
+        assert resp.status_code == 422, f"Legacy 'Bonus' must be rejected; got {resp.text}"
+        assert "bonus events" in resp.text.lower()
 
     @pytest.mark.asyncio
     async def test_daily_canonical_code_rejected_on_period_pay_endpoint(

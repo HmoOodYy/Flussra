@@ -1,10 +1,12 @@
 """Focused CP-5A coverage for the backend-owned Current Payroll Hub."""
 import datetime
 import itertools
+import uuid
 from decimal import Decimal
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -17,6 +19,38 @@ _SECURITY_COUNTER = itertools.count(1)
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a suite-owned branch so retained evidence cannot affect PAYTEST."""
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP5A_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": f"CP5A Driver {uuid.uuid4().hex[:8]}",
+            "driver_code": f"CP5A-{uuid.uuid4().hex[:10]}",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["driver_id"]
 
 
 async def _clean(db: AsyncConnection, branch_id: int) -> None:

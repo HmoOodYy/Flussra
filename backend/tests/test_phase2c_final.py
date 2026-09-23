@@ -10,6 +10,7 @@ Covers:
 import pytest
 import httpx
 from datetime import date
+from sqlalchemy import text as _text
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +208,310 @@ class TestPayRulesCRUD:
             )
             assert end_resp.status_code == 403
         finally:
+            await session_client.post(
+                f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
+            )
+
+
+class TestPayRulesCurrentContract:
+    """Focused coverage for M15 invariants not covered by the CRUD smoke tests."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_driver_is_rejected(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+    ):
+        response = await session_client.post(
+            "/payroll/driver-pay-rules",
+            json={
+                "driver_id": 999999999,
+                "rule_type": "MinimumPay",
+                "amount": "100.00",
+                "effective_from": "2200-01-01",
+            },
+            headers=auth(auth_token),
+        )
+        assert response.status_code == 404, response.text
+
+    @pytest.mark.asyncio
+    async def test_validation_rejects_nonpositive_amount_and_reverse_range(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_driver_id: int,
+    ):
+        for amount in ("0", "-1.00"):
+            response = await session_client.post(
+                "/payroll/driver-pay-rules",
+                json={
+                    "driver_id": paytest_driver_id,
+                    "rule_type": "MinimumPay",
+                    "amount": amount,
+                    "effective_from": "2200-01-01",
+                },
+                headers=auth(auth_token),
+            )
+            assert response.status_code == 422, response.text
+
+        response = await session_client.post(
+            "/payroll/driver-pay-rules",
+            json={
+                "driver_id": paytest_driver_id,
+                "rule_type": "MinimumPay",
+                "amount": "100.00",
+                "effective_from": "2200-02-01",
+                "effective_to": "2200-01-31",
+            },
+            headers=auth(auth_token),
+        )
+        assert response.status_code == 422, response.text
+
+    @pytest.mark.asyncio
+    async def test_overlap_rejected_and_contiguous_range_allowed(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_driver_id: int,
+    ):
+        first = await _create_pay_rule(
+            session_client, auth_token, paytest_driver_id,
+            "MinimumPay", "500.00", "2201-01-01", "2201-01-31",
+        )
+        try:
+            overlap = await session_client.post(
+                "/payroll/driver-pay-rules",
+                json={
+                    "driver_id": paytest_driver_id,
+                    "rule_type": "MinimumPay",
+                    "amount": "600.00",
+                    "effective_from": "2201-01-15",
+                    "effective_to": "2201-02-15",
+                },
+                headers=auth(auth_token),
+            )
+            assert overlap.status_code == 422, overlap.text
+
+            contiguous = await session_client.post(
+                "/payroll/driver-pay-rules",
+                json={
+                    "driver_id": paytest_driver_id,
+                    "rule_type": "MinimumPay",
+                    "amount": "600.00",
+                    "effective_from": "2201-02-01",
+                    "effective_to": "2201-02-28",
+                },
+                headers=auth(auth_token),
+            )
+            assert contiguous.status_code == 201, contiguous.text
+            second = contiguous.json()["driver_pay_rule_id"]
+
+            ended_create = await session_client.post(
+                "/payroll/driver-pay-rules",
+                json={
+                    "driver_id": paytest_driver_id,
+                    "rule_type": "MinimumPay",
+                    "amount": "700.00",
+                    "effective_from": "2201-03-01",
+                    "effective_to": "2201-03-31",
+                },
+                headers=auth(auth_token),
+            )
+            assert ended_create.status_code == 201, ended_create.text
+            ended = ended_create.json()["driver_pay_rule_id"]
+            ended_response = await session_client.post(
+                f"/payroll/driver-pay-rules/{ended}/end",
+                json={"effective_to": "2201-03-15"}, headers=auth(auth_token),
+            )
+            assert ended_response.status_code == 200, ended_response.text
+            ended_overlap = await session_client.post(
+                "/payroll/driver-pay-rules",
+                json={
+                    "driver_id": paytest_driver_id,
+                    "rule_type": "MinimumPay",
+                    "amount": "800.00",
+                    "effective_from": "2201-03-10",
+                    "effective_to": "2201-04-01",
+                },
+                headers=auth(auth_token),
+            )
+            assert ended_overlap.status_code == 422, ended_overlap.text
+        finally:
+            await session_client.post(
+                f"/payroll/driver-pay-rules/{first}/void", headers=auth(auth_token)
+            )
+            if "second" in locals():
+                await session_client.post(
+                    f"/payroll/driver-pay-rules/{second}/void", headers=auth(auth_token)
+                )
+            if "ended" in locals():
+                await session_client.post(
+                    f"/payroll/driver-pay-rules/{ended}/void", headers=auth(auth_token)
+                )
+
+    @pytest.mark.asyncio
+    async def test_list_filter_get_404_and_notes_only_update(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_driver_id: int,
+    ):
+        rule_id = await _create_pay_rule(
+            session_client, auth_token, paytest_driver_id,
+            "MinimumPay", "450.00", "2202-01-01", "2202-01-31",
+        )
+        try:
+            filtered = await session_client.get(
+                f"/payroll/drivers/{paytest_driver_id}/pay-rules",
+                params={"rule_type": "MinimumPay", "status": "Active"},
+                headers=auth(auth_token),
+            )
+            assert filtered.status_code == 200, filtered.text
+            assert any(r["driver_pay_rule_id"] == rule_id for r in filtered.json())
+
+            detail = await session_client.get(
+                f"/payroll/driver-pay-rules/{rule_id}", headers=auth(auth_token)
+            )
+            assert detail.status_code == 200
+            before = detail.json()
+
+            patched = await session_client.patch(
+                f"/payroll/driver-pay-rules/{rule_id}",
+                json={"notes": "current contract note"},
+                headers=auth(auth_token),
+            )
+            assert patched.status_code == 200, patched.text
+            assert patched.json()["notes"] == "current contract note"
+            assert patched.json()["amount"] == before["amount"]
+            assert patched.json()["effective_from"] == before["effective_from"]
+        finally:
+            await session_client.post(
+                f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
+            )
+
+        missing = await session_client.get(
+            "/payroll/driver-pay-rules/999999", headers=auth(auth_token)
+        )
+        assert missing.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_end_void_and_notes_lifecycle_guards(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_driver_id: int,
+    ):
+        rule_id = await _create_pay_rule(
+            session_client, auth_token, paytest_driver_id,
+            "MaximumPay", "2200.00", "2203-01-01", "2203-01-31",
+        )
+        ended = await session_client.post(
+            f"/payroll/driver-pay-rules/{rule_id}/end",
+            json={"effective_to": "2203-01-15"}, headers=auth(auth_token),
+        )
+        assert ended.status_code == 200, ended.text
+        repeated_end = await session_client.post(
+            f"/payroll/driver-pay-rules/{rule_id}/end",
+            json={"effective_to": "2203-01-20"}, headers=auth(auth_token),
+        )
+        assert repeated_end.status_code == 422
+
+        ended_notes = await session_client.patch(
+            f"/payroll/driver-pay-rules/{rule_id}",
+            json={"notes": "ended rule note"}, headers=auth(auth_token),
+        )
+        assert ended_notes.status_code == 200
+        voided = await session_client.post(
+            f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
+        )
+        assert voided.status_code == 200
+        repeated_void = await session_client.post(
+            f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
+        )
+        assert repeated_void.status_code == 422
+        voided_notes = await session_client.patch(
+            f"/payroll/driver-pay-rules/{rule_id}",
+            json={"notes": "must be rejected"}, headers=auth(auth_token),
+        )
+        assert voided_notes.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_all_pay_rule_writes_roll_back_when_audit_fails(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_driver_id: int,
+        direct_db,
+        monkeypatch,
+    ):
+        """Create/end/void/notes writes never commit without their audit row."""
+        create_marker = "audit-failure-create"
+        create_payload = {
+            "driver_id": paytest_driver_id,
+            "rule_type": "MinimumPay",
+            "amount": "100.00",
+            "effective_from": "2210-01-01",
+            "effective_to": "2210-01-31",
+            "notes": create_marker,
+        }
+        first = await _create_pay_rule(
+            session_client, auth_token, paytest_driver_id,
+            "MinimumPay", "200.00", "2210-02-01", "2210-02-28",
+        )
+        second = await _create_pay_rule(
+            session_client, auth_token, paytest_driver_id,
+            "MaximumPay", "3000.00", "2210-03-01", "2210-03-31",
+        )
+        third = await _create_pay_rule(
+            session_client, auth_token, paytest_driver_id,
+            "MinimumPay", "250.00", "2210-04-01", "2210-04-30",
+        )
+
+        async def fail_audit(*args, **kwargs):
+            raise RuntimeError("simulated pay-rule audit failure")
+
+        monkeypatch.setattr("app.payroll.driver_pay_rules._write_pay_rule_audit", fail_audit)
+
+        with pytest.raises(RuntimeError):
+            await session_client.post(
+                "/payroll/driver-pay-rules", json=create_payload,
+                headers=auth(auth_token),
+            )
+        created_residue = (await direct_db.execute(
+            _text(
+                "SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did AND notes = :notes"
+            ),
+            {"did": paytest_driver_id, "notes": create_marker},
+        )).scalar_one()
+        assert created_residue == 0
+
+        with pytest.raises(RuntimeError):
+            await session_client.post(
+                f"/payroll/driver-pay-rules/{first}/end",
+                json={"effective_to": "2210-02-15"}, headers=auth(auth_token),
+            )
+        with pytest.raises(RuntimeError):
+            await session_client.post(
+                f"/payroll/driver-pay-rules/{second}/void", headers=auth(auth_token)
+            )
+        with pytest.raises(RuntimeError):
+            await session_client.patch(
+                f"/payroll/driver-pay-rules/{third}",
+                json={"notes": "must not commit"}, headers=auth(auth_token),
+            )
+
+        states = (await direct_db.execute(
+            _text(
+                "SELECT driverpayruleid, status, notes FROM payroll.driverpayrules "
+                "WHERE driverpayruleid = ANY(:ids) ORDER BY driverpayruleid"
+            ),
+            {"ids": [first, second, third]},
+        )).mappings().all()
+        assert [row["status"] for row in states] == ["Active", "Active", "Active"]
+        assert states[2]["notes"] is None
+
+        monkeypatch.undo()
+        for rule_id in (first, second, third):
             await session_client.post(
                 f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
             )

@@ -61,6 +61,31 @@ from sqlalchemy import text as _text
 # Module-level constants (2098 dates — isolated from other test modules)
 # ---------------------------------------------------------------------------
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"P4S2_{uuid.uuid4().hex[:10]}", "name": "P4S2 isolated"},
+    )).mappings().one()
+    await session_db_conn.commit()
+    return int(row["branchid"])
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+    response = await session_client.post(
+        "/core/drivers",
+        json={"branch_id": paytest_branch_id, "full_name": "P4S2 Driver",
+              "driver_code": f"P4S2-{uuid.uuid4().hex[:10]}"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
+
 _PERIOD_CODE_PREFIX = "P4S2-"
 
 PERIOD_A_START = "2098-02-02"
@@ -392,6 +417,27 @@ async def _insert_status_pay_rate(
 
 
 async def _delete_driver_rate(direct_db, driver_rate_id: int) -> None:
+    referenced = (await direct_db.execute(
+        _text(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM payroll.payrollcalculationsnapshotusedratedefinitions
+                WHERE driverrateid = :id
+            ) AS referenced
+            """
+        ),
+        {"id": driver_rate_id},
+    )).scalar_one()
+    if referenced:
+        # Phase 6 evidence intentionally retains the exact rate definition.
+        # Status is the supported supersession/cleanup mutation; deleting the
+        # referenced definition would violate the immutable-evidence FK.
+        await direct_db.execute(
+            _text("UPDATE payroll.driverrates SET status = 'Voided' WHERE driverrateid = :id"),
+            {"id": driver_rate_id},
+        )
+        return
     await direct_db.execute(
         _text("DELETE FROM payroll.driverrates WHERE driverrateid = :id"),
         {"id": driver_rate_id},
@@ -422,10 +468,20 @@ async def _owned_driver_rate(
     finally:
         await _delete_driver_rate(direct_db, rate_id)
         residue = (await direct_db.execute(
-            _text("SELECT COUNT(*) AS cnt FROM payroll.driverrates WHERE driverrateid = :id"),
+            _text("""
+                SELECT
+                    (SELECT COUNT(*) FROM payroll.driverrates WHERE driverrateid = :id) AS cnt,
+                    (SELECT EXISTS(
+                        SELECT 1 FROM payroll.payrollcalculationsnapshotusedratedefinitions
+                        WHERE driverrateid = :id
+                    )) AS referenced
+            """),
             {"id": rate_id},
         )).mappings().first()
-        assert residue["cnt"] == 0, f"DriverRate {rate_id} was not removed"
+        assert residue["cnt"] == (1 if residue["referenced"] else 0), (
+            f"DriverRate {rate_id} cleanup did not match its immutable-evidence state: "
+            f"{dict(residue)}"
+        )
 
 
 async def _save_day_grid(
@@ -558,8 +614,16 @@ async def _delete_period_and_children(
     snapshot_exists = (await direct_db.execute(
         _text("""
             SELECT EXISTS(
-                SELECT 1
-                FROM payroll.payrollcalculationsnapshots
+                SELECT 1 FROM payroll.payrollcalculationsnapshots
+                WHERE payrollperiodid = :pid
+            ) OR EXISTS(
+                SELECT 1 FROM payroll.payrollperiodauditevidencecoverage
+                WHERE payrollperiodid = :pid
+            ) OR EXISTS(
+                SELECT 1 FROM payroll.payrollperiodauditevidenceevents
+                WHERE payrollperiodid = :pid
+            ) OR EXISTS(
+                SELECT 1 FROM payroll.payrollperiodworkflowactionevidence
                 WHERE payrollperiodid = :pid
             )
         """),
@@ -592,11 +656,31 @@ async def _delete_period_and_children(
                 {"ids": [str(i) for i in review_item_ids]},
             )
             await direct_db.execute(
-                _text("DELETE FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)"),
+                _text(
+                    """
+                    DELETE FROM review.managerreviewdecisions decision
+                    WHERE decision.reviewitemid = ANY(:ids)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM payroll.payrollperiodworkflowactionevidence evidence
+                          WHERE evidence.reviewdecisionid = decision.reviewdecisionid
+                      )
+                    """
+                ),
                 {"ids": review_item_ids},
             )
             await direct_db.execute(
-                _text("DELETE FROM review.managerreviewitems WHERE reviewitemid = ANY(:ids)"),
+                _text(
+                    """
+                    DELETE FROM review.managerreviewitems item
+                    WHERE item.reviewitemid = ANY(:ids)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM payroll.payrollperiodworkflowactionevidence evidence
+                          WHERE evidence.reviewitemid = item.reviewitemid
+                      )
+                    """
+                ),
                 {"ids": review_item_ids},
             )
         await direct_db.execute(
@@ -617,8 +701,13 @@ async def _delete_period_and_children(
                     (SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid) AS status,
                     (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate
                         WHERE payrollperiodid = :pid) AS ppdes,
-                    (SELECT COUNT(*) FROM review.managerreviewitems
-                        WHERE reviewitemid = ANY(:review_ids)) AS review_items
+                    (SELECT COUNT(*) FROM review.managerreviewitems item
+                        WHERE item.reviewitemid = ANY(:review_ids)
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM payroll.payrollperiodworkflowactionevidence evidence
+                              WHERE evidence.reviewitemid = item.reviewitemid
+                          )) AS review_items
             """),
             {"pid": period_id, "review_ids": review_item_ids or [-1]},
         )).mappings().one()
@@ -847,6 +936,7 @@ async def _owned_driver_pay_rule(
             owned_ids.add(rule_id)
 
         cleanup_errors: list[Exception] = []
+        retained_ids: set[int] = set()
 
         for rid in owned_ids:
             try:
@@ -867,6 +957,21 @@ async def _owned_driver_pay_rule(
             except Exception as e:
                 cleanup_errors.append(e)
             try:
+                referenced = (await direct_db.execute(
+                    _text(
+                        """
+                        SELECT EXISTS(
+                            SELECT 1
+                            FROM payroll.payrollcalculationsnapshotusedratedefinitions
+                            WHERE driverpayruleid = :id
+                        )
+                        """
+                    ),
+                    {"id": rid},
+                )).scalar_one()
+                if referenced:
+                    retained_ids.add(rid)
+                    continue
                 await direct_db.execute(
                     _text("DELETE FROM payroll.driverpayrules WHERE driverpayruleid = :id"),
                     {"id": rid},
@@ -886,10 +991,10 @@ async def _owned_driver_pay_rule(
                 {"did": driver_id, "rtype": rule_type},
             )).mappings().all()
         }
-        assert final_rule_ids == pre_rule_ids, (
+        assert final_rule_ids == pre_rule_ids | retained_ids, (
             f"DriverPayRule scope residue for driver={driver_id} rule_type={rule_type}: "
-            f"expected {pre_rule_ids}, got {final_rule_ids} -- "
-            f"no Active, Voided, or historical test-owned row may remain"
+            f"expected {pre_rule_ids | retained_ids}, got {final_rule_ids} -- "
+            "only immutable-evidence-referenced test rows may remain"
         )
         final_audit_count = (await direct_db.execute(
             _text(
@@ -1614,15 +1719,10 @@ class TestStatusRateResolution:
 
 class TestPreviewFinalizationDivergence:
     """
-    `get_finalization_preview` (service.py) does NOT call
-    `_refresh_status_payment_lines` — only the Open->InReview submit
-    transition and `finalize_period` (Step 1.6a) do. This test proves a
-    genuine, currently-reachable divergence: a driver-rate change made AFTER
-    submit (while the period is Approved, before finalize) is NOT reflected
-    by a subsequent finalization-preview read (stale, submit-time amount),
-    but IS reflected by finalize's own final-lines result (fresh, re-synced
-    amount) — exactly the kind of "preview vs finalization parity" gap this
-    Slice is required to characterize, not fix.
+    The current approved authority remains stable after submit. A later rate
+    change is retained as a separate effective-dated definition and does not
+    rewrite the submitted period evidence used by the preview/finalization
+    path.
     """
 
     @pytest.mark.asyncio
@@ -1716,51 +1816,39 @@ class TestPreviewFinalizationDivergence:
                     )
                 )
 
-                # Preview does NOT re-sync status payment -- must show the STALE
-                # submit-time amount ($160), not the new rate's $240. Selected
-                # by the exact draft_line_id captured above, not by amount.
+                # Preview reads the submitted snapshot. System STATUS_PAY lines
+                # have no DraftLineID in the snapshot, so select by line type.
                 preview_resp = await session_client.get(
                     f"/payroll/periods/{pid}/finalization-preview", headers=headers,
                 )
                 assert preview_resp.status_code == 200, f"Preview failed: {preview_resp.text}"
                 preview_line = next(
-                    (l for l in preview_resp.json()["lines"] if l["draft_line_id"] == draft_line_id),
+                    (l for l in preview_resp.json()["lines"] if l["line_type"] == "STATUS_PAY"),
                     None,
                 )
-                assert preview_line is not None, "STATUS_PAY line not found in preview lines"
+                assert preview_line is not None, "STATUS_PAY snapshot line not found in preview lines"
                 assert Decimal(str(preview_line["calculated_amount"])) == Decimal("160.0000"), (
-                    "Preview must show the STALE submit-time amount ($160) -- it does "
-                    "not call _refresh_status_payment_lines, unlike submit/finalize"
+                    "Preview must use the submitted snapshot amount ($160), "
+                    f"got {preview_line['calculated_amount']}"
                 )
 
-                # Finalize DOES re-sync status payment (Step 1.6a) -- must show
-                # the FRESH amount using rate B ($240).
+                # Finalization projects the same approved snapshot and therefore
+                # remains at the submitted amount despite the later rate.
                 fin_resp = await session_client.post(f"/payroll/periods/{pid}/finalize", headers=headers)
                 assert fin_resp.status_code == 200, f"Finalize failed: {fin_resp.text}"
 
                 fl_resp = await session_client.get(f"/payroll/periods/{pid}/final-lines", headers=headers)
                 assert fl_resp.status_code == 200
-                # Selected by the exact persisted source linkage
-                # (PayrollFinalLines.DraftLineID == the same DraftLineID
-                # captured before finalization) -- not by driver+amount, which
-                # would not distinguish this line from another coincidentally
-                # sharing the same driver and dollar amount.
                 final_line = next(
-                    (l for l in fl_resp.json() if l.get("draft_line_id") == draft_line_id),
+                    (l for l in fl_resp.json() if l["line_type"] == "STATUS_PAY"),
                     None,
                 )
-                assert final_line is not None, (
-                    f"STATUS_PAY final line not found by exact draft_line_id={draft_line_id}"
-                )
+                assert final_line is not None, "STATUS_PAY final line not found"
                 assert final_line["line_type"] == "STATUS_PAY"
-                assert final_line["source_type"] == "System"
-                assert Decimal(str(final_line["final_amount"])) == Decimal("240.0000"), (
-                    "Finalization re-syncs status payment before locking -- must reflect "
-                    "the fresh rate B (8.00 x $30 = $240.0000), diverging from the "
-                    "stale preview value ($160.0000) read just before finalize. The "
-                    "difference is caused by refresh timing (preview never re-syncs, "
-                    "finalize always does), not by selecting a different line -- both "
-                    "reads used the exact same draft_line_id identity."
+                assert final_line["source_type"] == "StatusEntryState"
+                assert Decimal(str(final_line["final_amount"])) == Decimal("160.0000"), (
+                    "Finalization must project the same approved snapshot amount "
+                    f"($160.0000); got {final_line['final_amount']}"
                 )
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
@@ -2255,12 +2343,24 @@ class TestCleanupIsExceptionSafe:
             """),
             {"pid": pid, "skid": status_key_id, "rid": rate_id, "eid": str(pid)},
         )).mappings().first()
-        assert residue["periods"] == 0, f"Period {pid} leaked after a deliberate post-creation failure"
-        assert residue["draftlines"] == 0, f"DraftLines for period {pid} leaked"
+        assert residue["periods"] == 1, (
+            "P6D-backed period evidence is intentionally retained after a "
+            f"deliberate post-creation failure; period {pid} must remain for auditability"
+        )
+        period_state = (await direct_db.execute(
+            _text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+            {"pid": pid},
+        )).scalar_one()
+        assert period_state == "Cancelled", (
+            f"Retained cleanup period {pid} must be Cancelled, got {period_state}"
+        )
+        assert residue["draftlines"] >= 1, (
+            f"P6D-backed source DraftLines for retained period {pid} must remain auditable"
+        )
         assert residue["finallines"] == 0, f"FinalLines for period {pid} leaked"
         assert residue["ppdes"] == 0, f"Canonical entry-state rows for period {pid} leaked"
         assert residue["statuskeys"] == 0, f"StatusKey {status_key_id} leaked"
-        assert residue["driverrates"] == 0, f"DriverRate {rate_id} leaked"
+        assert residue["driverrates"] in (0, 1), f"Unexpected DriverRate residue for {rate_id}"
         assert residue["period_audit"] == 0, f"AuditLog rows for period {pid} leaked"
         assert residue["review_items"] == 0, f"Review items for period {pid} leaked"
 

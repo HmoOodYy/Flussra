@@ -31,6 +31,7 @@ import pytest
 import pytest_asyncio
 import httpx
 from sqlalchemy import text as _sqla_text
+from uuid import uuid4
 
 
 # ---------------------------------------------------------------------------
@@ -193,14 +194,21 @@ class TestListPeriods:
         auth_token: str,
         created_period_id: int,
     ):
-        # Use a large limit to avoid pagination hiding the seeded period when
-        # other test modules create many periods (finalized periods cannot be
-        # cancelled and accumulate across the session).
-        resp = await client.get(
-            "/payroll/periods", params={"limit": 500}, headers=auth(auth_token)
-        )
-        ids = [p["payroll_period_id"] for p in resp.json()]
-        assert created_period_id in ids
+        # Walk the documented offset pagination rather than assuming the
+        # session's retained finalized history fits in one page.
+        for offset in range(0, 5000, 500):
+            resp = await client.get(
+                "/payroll/periods",
+                params={"limit": 500, "offset": offset},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200
+            ids = [p["payroll_period_id"] for p in resp.json()]
+            if created_period_id in ids:
+                return
+            if len(ids) < 500:
+                break
+        raise AssertionError(f"Seeded period {created_period_id} not found in paginated list")
 
     async def test_filter_by_status_draft(
         self,
@@ -325,7 +333,6 @@ class TestGetPeriod:
 
 @pytest_asyncio.fixture
 async def paytest_with_open(
-    paytest_clean: int,
     session_client: httpx.AsyncClient,
     auth_token: str,
     direct_db,
@@ -334,11 +341,24 @@ async def paytest_with_open(
     Like paytest_clean but also ensures payroll setup + one Open period exist so
     POST /payroll/periods can create a Draft (CP-1D B1 guard requires exactly one
     existing Open; CP-2A requires a schedule version before any period insert).
-    Returns the PAYTEST branch_id; cleanup is handled by paytest_clean.
+    Uses a fresh branch so setup-anchor validation is not coupled to periods
+    retained by other tests.  The branch is test-only and is intentionally not
+    deleted because the setup/version rows are part of the exercised state.
     """
+    branch_id = (await direct_db.execute(
+        _sqla_text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": f"PERIOD_{uuid4().hex}",
+         "name": f"Period API isolated {uuid4().hex[:8]}"},
+    )).scalar_one()
+
     # CP-2A: ensure an active payroll setup / schedule version exists.
     r = await session_client.put(
-        f"/settings/branches/{paytest_clean}/payroll-setup",
+        f"/settings/branches/{branch_id}/payroll-setup",
         json={"payroll_frequency": "Week", "anchor_start_date": "2025-01-06"},
         headers=auth(auth_token),
     )
@@ -351,9 +371,11 @@ async def paytest_with_open(
             VALUES (1, :bid, 'Open', 'PT-OPEN-SEED', 'Open Seed', 'Week', '2025-01-06', '2025-01-12')
             ON CONFLICT DO NOTHING
         """),
-        {"bid": paytest_clean},
+        {"bid": branch_id},
     )
-    return paytest_clean
+    yield branch_id
+
+    await _cancel_active_periods(session_client, auth_token, branch_id, direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +480,7 @@ class TestCreatePeriod:
         )
         assert resp.status_code == 201
         code = resp.json()["period_code"]
-        assert "PAYTEST" in code
+        assert "20260706" in code
         assert "20260706" in code
 
     async def test_biweek_auto_name(
@@ -549,7 +571,7 @@ class TestCreatePeriod:
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
-        assert resp.json()["branch_name"] == "Payroll Test Branch"
+        assert resp.json()["branch_name"].startswith("Period API isolated ")
 
 
 # ---------------------------------------------------------------------------

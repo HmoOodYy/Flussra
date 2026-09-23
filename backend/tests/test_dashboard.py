@@ -32,6 +32,7 @@ import itertools
 import pytest
 import pytest_asyncio
 import httpx
+from uuid import uuid4
 
 _counter = itertools.count(500)
 
@@ -272,7 +273,6 @@ class TestSectionGating:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
         direct_db,
     ):
         """
@@ -283,18 +283,41 @@ class TestSectionGating:
         """
         from sqlalchemy import text as _text
 
-        create_r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": paytest_branch_id,
-                "period_type": "Week",
-                "start_date": "2055-02-01",
-                "end_date": "2055-02-07",
-            },
-            headers=_hdr(auth_token),
+        branch_id = int((await direct_db.execute(
+            _text("""
+                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+                VALUES (1, :code, 'Dashboard isolated', 'Active', FALSE)
+                RETURNING branchid
+            """), {"code": f"DASH_{uuid4().hex}"}
+        )).scalar_one())
+
+        # The legacy POST period factory requires one existing Open period.
+        # Seed that prerequisite explicitly; this test exercises dashboard
+        # visibility of an Approved period.
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname,
+                     periodtype, startdate, enddate)
+                VALUES
+                    (1, :bid, 'Open', :code, 'Dashboard Open Seed',
+                     'Week', '2055-01-25', '2055-01-31')
+            """),
+            {"bid": branch_id, "code": f"DASH-OPEN-{_u()}"},
         )
-        assert create_r.status_code == 201, create_r.text
-        pid = create_r.json()["payroll_period_id"]
+
+        pid = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname,
+                     periodtype, startdate, enddate)
+                VALUES
+                    (1, :bid, 'Draft', :code, 'Dashboard Draft Seed',
+                     'Week', '2055-02-01', '2055-02-07')
+                RETURNING payrollperiodid
+            """),
+            {"bid": branch_id, "code": f"DASH-DRAFT-{_u()}"},
+        )).scalar_one()
 
         try:
             # Set status directly to Approved via AUTOCOMMIT direct_db connection.
@@ -321,6 +344,11 @@ class TestSectionGating:
             await direct_db.execute(
                 _text("UPDATE payroll.payrollperiods SET status='Cancelled' WHERE payrollperiodid=:pid"),
                 {"pid": pid},
+            )
+            await direct_db.execute(
+                _text("UPDATE payroll.payrollperiods SET status='Cancelled' "
+                      "WHERE branchid=:bid AND status='Open'"),
+                {"bid": branch_id},
             )
 
     async def test_non_finalize_user_no_approved_periods_section(

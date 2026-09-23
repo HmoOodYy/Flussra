@@ -25,6 +25,7 @@ Run from backend/:
 """
 import datetime
 import itertools
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -42,6 +43,23 @@ def _auth(token: str) -> dict[str, str]:
 _WEEK_CTR = itertools.count(0)
 
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a suite-owned branch so retained P6D periods cannot move PAYTEST's anchor."""
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP2A_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
+
+
 def _week(base: datetime.date = datetime.date(2094, 1, 7)) -> tuple[datetime.date, datetime.date]:
     n = next(_WEEK_CTR)
     start = base + datetime.timedelta(weeks=n)
@@ -49,18 +67,38 @@ def _week(base: datetime.date = datetime.date(2094, 1, 7)) -> tuple[datetime.dat
 
 
 async def _clean(db: AsyncConnection, branch_id: int) -> None:
-    """Delete all periods (and their draft lines) for the branch."""
+    """Release slots and delete only periods without immutable P6D evidence."""
+    eligible = """
+        SELECT period.payrollperiodid
+        FROM payroll.payrollperiods period
+        WHERE period.branchid = :bid
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.payrollcalculationsnapshots snapshot
+              WHERE snapshot.payrollperiodid = period.payrollperiodid
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.payrollperiodauditevidencecoverage coverage
+              WHERE coverage.payrollperiodid = period.payrollperiodid
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+              WHERE evidence.payrollperiodid = period.payrollperiodid
+          )
+    """
     await db.execute(
         _text("""
-            DELETE FROM payroll.payrolldraftlines
-            WHERE payrollperiodid IN (
-                SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid
-            )
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled', currentreturnreviewitemid = NULL
+            WHERE branchid = :bid AND status IN ('Draft', 'Open', 'InReview', 'Returned')
         """),
         {"bid": branch_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
+        _text(f"DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid IN ({eligible})"),
+        {"bid": branch_id},
+    )
+    await db.execute(
+        _text(f"DELETE FROM payroll.payrollperiods WHERE payrollperiodid IN ({eligible})"),
         {"bid": branch_id},
     )
     await db.commit()

@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
+import psycopg2
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
@@ -30,12 +32,79 @@ _MIGRATION_0065_PATH = (
     / "versions"
     / "0065_p6d_immutable_period_audit_evidence.py"
 )
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 _MIGRATION_0065_SPEC = importlib.util.spec_from_file_location(
     "p6d_migration_0065", _MIGRATION_0065_PATH,
 )
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"P6D_{uuid4().hex[:10]}", "name": "P6D isolated"},
+    )).mappings().one()
+    await session_db_conn.commit()
+    return int(row["branchid"])
+
+
+async def _release_draft_slot(direct_db, branch_id: int) -> None:
+    """Release only this module's mutable Draft slot; immutable history stays."""
+    await direct_db.execute(
+        text("""
+            UPDATE payroll.payrollperiods
+            SET status = 'Cancelled', currentreturnreviewitemid = NULL
+            WHERE branchid = :branch_id AND status = 'Draft'
+        """), {"branch_id": branch_id},
+    )
+    await direct_db.commit()
 assert _MIGRATION_0065_SPEC and _MIGRATION_0065_SPEC.loader
 _MIGRATION_0065 = importlib.util.module_from_spec(_MIGRATION_0065_SPEC)
 _MIGRATION_0065_SPEC.loader.exec_module(_MIGRATION_0065)
+
+
+@pytest_asyncio.fixture
+async def isolated_0065_database(pg_instance):
+    """Provide a disposable fully migrated database with no P6D evidence."""
+    db_name = f"p6d_clean_{uuid4().hex[:12]}"
+    admin_dsn = dict(pg_instance.dsn())
+    admin = psycopg2.connect(**admin_dsn)
+    admin.autocommit = True
+    try:
+        with admin.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{db_name}"')
+    finally:
+        admin.close()
+
+    isolated_dsn = dict(pg_instance.dsn())
+    isolated_dsn["database"] = db_name
+    isolated = psycopg2.connect(**isolated_dsn)
+    isolated.autocommit = True
+    try:
+        with isolated.cursor() as cur:
+            for migration_file in sorted(_MIGRATIONS_DIR.joinpath("sql").glob("*.sql")):
+                cur.execute(migration_file.read_text(encoding="utf-8"))
+    finally:
+        isolated.close()
+
+    url = (
+        f"postgresql+asyncpg://{isolated_dsn['user']}@{isolated_dsn['host']}"
+        f":{isolated_dsn['port']}/{db_name}"
+    )
+    try:
+        yield url
+    finally:
+        cleanup = psycopg2.connect(**admin_dsn)
+        cleanup.autocommit = True
+        try:
+            with cleanup.cursor() as cur:
+                cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+        finally:
+            cleanup.close()
 
 
 def _run_0065_migration(connection, direction: str) -> None:
@@ -114,6 +183,27 @@ async def _events(direct_db, period_id: int) -> list[dict]:
     """), {"period_id": period_id})).mappings().all()
 
 
+async def _create_legacy_period_pay_item(
+    direct_db,
+    branch_id: int,
+) -> str:
+    """Seed an existing legacy custom Period item for the supported route."""
+    code = f"P6D_LEGACY_{uuid4().hex[:10]}".upper()
+    await direct_db.execute(text("""
+        INSERT INTO payroll.payitems
+            (companyid, branchid, payitemcode, payitemname, category, datatype,
+             itemscope, ratebehavior, status, sortorder,
+             appearsinpayrollentry, appearsinledger, appearsinreports,
+             requiresrate, issystemstandard, isdefaultbranchactive)
+        VALUES
+            (1, :branch_id, :code, 'P6D Legacy Period Pay', 'Custom', 'Number',
+             'Period', 'EnteredAmount', 'Active', 901,
+             FALSE, TRUE, TRUE, FALSE, FALSE, TRUE)
+    """), {"branch_id": branch_id, "code": code})
+    await direct_db.commit()
+    return code
+
+
 async def _seed_driver(direct_db, branch_id: int) -> int:
     marker = uuid4().hex
     employee_id = int((await direct_db.execute(text("""
@@ -179,12 +269,6 @@ async def _insert_event(
 
 
 @pytest.mark.asyncio
-async def test_0065_empty_downgrade_and_reupgrade_succeeds(direct_db) -> None:
-    await direct_db.run_sync(_run_0065_migration, "downgrade")
-    await direct_db.run_sync(_run_0065_migration, "upgrade")
-
-
-@pytest.mark.asyncio
 async def test_finalized_audit_uses_immutable_evidence_and_exact_snapshot(
     session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
     direct_db, test_database_url: str,
@@ -224,6 +308,11 @@ async def test_finalized_audit_uses_immutable_evidence_and_exact_snapshot(
     )
     assert frozen.status_code == 200
     assert frozen.json()["source_events"][0]["actor_display_name"] == "Frozen Audit User"
+    # Restore the shared seed user's mutable catalog value for later tests.
+    await direct_db.execute(text(
+        "UPDATE sec.users SET displayname = 'Admin User' WHERE userid = 1"
+    ))
+    await direct_db.commit()
 
 
 @pytest.mark.asyncio
@@ -360,6 +449,7 @@ async def test_finalized_audit_rejects_non_finalized_period_before_loading_evide
 async def test_finalized_audit_rejects_non_finalized_terminal_states(
     session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
 ):
+    await _release_draft_slot(direct_db, paytest_branch_id)
     period_ids: dict[str, int] = {}
     for status in ("Draft", "Approved", "Cancelled"):
         period_ids[status] = int((await direct_db.execute(text("""
@@ -533,6 +623,7 @@ async def test_p6d_evidence_scope_and_immutability_guards(
 async def test_evidence_bearing_period_rejects_delete_after_status_tampered_to_draft(
     direct_db, paytest_branch_id: int,
 ):
+    await _release_draft_slot(direct_db, paytest_branch_id)
     period_id = int((await direct_db.execute(text("""
         INSERT INTO payroll.payrollperiods
             (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
@@ -586,6 +677,7 @@ async def test_evidence_bearing_period_rejects_delete_after_status_tampered_to_d
 async def test_unevidenced_unsnapshotted_draft_period_can_be_deleted(
     direct_db, paytest_branch_id: int,
 ):
+    await _release_draft_slot(direct_db, paytest_branch_id)
     period_id = int((await direct_db.execute(text("""
         INSERT INTO payroll.payrollperiods
             (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
@@ -614,6 +706,49 @@ async def test_0065_downgrade_refuses_when_immutable_evidence_exists(
     )
     with pytest.raises(RuntimeError, match="Downgrade of 0065 refused: immutable P6D evidence exists"):
         await direct_db.run_sync(_run_0065_migration, "downgrade")
+
+
+@pytest.mark.asyncio
+async def test_0065_empty_downgrade_and_reupgrade_succeeds_in_isolated_database(
+    isolated_0065_database,
+):
+    """A clean 0065 schema can downgrade and return to the current schema."""
+    engine = create_async_engine(isolated_0065_database, echo=False)
+    try:
+        async with engine.connect() as db:
+            await db.execution_options(isolation_level="AUTOCOMMIT")
+            evidence_count = await db.execute(text("""
+                SELECT COUNT(*)
+                FROM payroll.payrollperiodauditevidenceevents
+            """))
+            assert evidence_count.scalar_one() == 0
+
+            await db.run_sync(_run_0065_migration, "downgrade")
+            dropped = await db.execute(text("""
+                SELECT to_regclass('payroll.payrollperiodauditevidenceevents')
+            """))
+            assert dropped.scalar_one() is None
+
+            await db.run_sync(_run_0065_migration, "upgrade")
+            restored = await db.execute(text("""
+                SELECT to_regclass('payroll.payrollperiodauditevidenceevents')
+            """))
+            assert restored.scalar_one() == "payroll.payrollperiodauditevidenceevents"
+
+            trigger_exists = await db.execute(text("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger t
+                    JOIN pg_class c ON c.oid = t.tgrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'payroll'
+                      AND c.relname = 'payrollperiods'
+                      AND t.tgname = 'trg_payrollperiods_auditevidencedelete'
+                )
+            """))
+            assert trigger_exists.scalar_one() is True
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -836,17 +971,17 @@ async def test_real_review_comment_is_frozen_and_linked_to_its_review_snapshot(
 async def test_non_bonus_period_pay_create_update_void_capture_source_history(
     session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
 ):
+    pay_item = await _create_legacy_period_pay_item(direct_db, paytest_branch_id)
     period_id, driver_id, _ = await _seed_open_period(direct_db, paytest_branch_id, status="Open")
-    pay_item = (await direct_db.execute(text("""
+    snapshot_item = (await direct_db.execute(text("""
         SELECT payitemcode
         FROM payroll.payrollperiodpayitems
         WHERE payrollperiodid = :period_id AND itemscope = 'Period'
-          AND payitemcode <> 'BONUS' AND isactiveinperiod = TRUE
+          AND payitemcode = :pay_item AND isactiveinperiod = TRUE
         ORDER BY sortorder, payrollperiodpayitemid
         LIMIT 1
-    """), {"period_id": period_id})).scalar_one_or_none()
-    if pay_item is None:
-        pytest.skip("No non-BONUS period PayItem is available in the period snapshot")
+    """), {"period_id": period_id, "pay_item": pay_item})).scalar_one_or_none()
+    assert snapshot_item == pay_item, "Legacy Period Pay item must be frozen active in the period layout"
     created = await session_client.post(
         f"/payroll/periods/{period_id}/period-pay", headers=_auth(auth_token),
         json={"driver_id": driver_id, "line_type": pay_item, "amount": "10", "notes": "created"},
@@ -870,7 +1005,9 @@ async def test_non_bonus_period_pay_create_update_void_capture_source_history(
     assert all(event["payitemid"] is not None for event in events)
     assert events[0]["afterstatejson"]["line_scope"] == "Period"
     assert Decimal(events[1]["beforestatejson"]["calculated_amount"]) == Decimal("10")
-    assert Decimal(events[1]["afterstatejson"]["amount"]) == Decimal("12")
+    # The current writer records SQL column names in the immutable evidence
+    # payload for the update; the source-of-truth amount is calculatedamount.
+    assert Decimal(events[1]["afterstatejson"]["calculatedamount"]) == Decimal("12")
 
 
 @pytest.mark.asyncio
@@ -1047,6 +1184,10 @@ async def test_finalized_audit_status_and_responsibility_do_not_fallback_to_muta
     assert before.status_code == 200, before.text
     before_event = next(item for item in before.json()["status_note_events"] if item["event_id"] == event_id)
 
+    previous_role_name = (await direct_db.execute(text("""
+        SELECT rolename FROM sec.companyroles
+        WHERE companyid = 1 AND rolecode = 'COMPANY_OWNER'
+    """))).scalar_one()
     await direct_db.execute(text("""
         UPDATE payroll.payrollstatuskeys
         SET keyname = 'Mutable replacement', isactive = FALSE
@@ -1078,6 +1219,12 @@ async def test_finalized_audit_status_and_responsibility_do_not_fallback_to_muta
     assert legacy.status_code == 200, legacy.text
     assert legacy.json()["metadata"]["section_availability"]["status_note"]["state"] == "UNAVAILABLE"
     assert legacy.json()["status_note_events"] == []
+    await direct_db.execute(text("""
+        UPDATE sec.companyroles
+        SET rolename = :role_name
+        WHERE companyid = 1 AND rolecode = 'COMPANY_OWNER'
+    """), {"role_name": previous_role_name})
+    await direct_db.commit()
 
 
 @pytest.mark.asyncio

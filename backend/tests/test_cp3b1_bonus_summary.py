@@ -283,17 +283,23 @@ async def _create_user_with_role(
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="module")
 async def cp3b1_branch_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
+    session_db_conn,
 ) -> int:
-    resp = await session_client.get("/core/branches", headers=_auth(auth_token))
-    assert resp.status_code == 200, resp.text
-    for branch in resp.json():
-        if branch["branch_code"] == "PAYTEST":
-            return branch["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP3B1_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    return row["branchid"]
 
 
 async def _get_or_create_driver(
@@ -321,7 +327,7 @@ async def _get_or_create_driver(
     return resp.json()["driver_id"]
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="module")
 async def cp3b1_drivers(
     session_client: httpx.AsyncClient,
     auth_token: str,

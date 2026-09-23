@@ -30,6 +30,7 @@ import pytest_asyncio
 import httpx
 from datetime import date, timedelta
 from unittest.mock import patch
+from uuid import uuid4
 from app.settings import service as settings_service
 
 
@@ -165,7 +166,19 @@ class TestListPayItems:
         auth_token: str,
         hq_branch_id: int,
     ):
-        item = await _item_by_code(client, auth_token, hq_branch_id, "OVERNIGHT")
+        branch = await client.post(
+            "/settings/branches",
+            json={
+                "branch_name": f"Pay Items Isolated {uuid4().hex[:8]}",
+                "branch_code": f"PI-{uuid4().hex[:8]}",
+                "status": "Active",
+                "is_default": False,
+            },
+            headers=auth(auth_token),
+        )
+        assert branch.status_code == 201, branch.text
+        isolated_branch_id = branch.json()["branch_id"]
+        item = await _item_by_code(client, auth_token, isolated_branch_id, "OVERNIGHT")
         assert item["is_active"]        is False
         assert item["is_using_default"] is True
 

@@ -282,24 +282,41 @@ async def _finalized_driver_total(final_lines: list[dict], driver_id: int) -> De
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
-async def cp3c_branch_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
-    resp = await session_client.get("/core/branches", headers=_auth(auth_token))
-    assert resp.status_code == 200, resp.text
-    for branch in resp.json():
-        if branch["branch_code"] == "PAYTEST":
-            return branch["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+async def cp3c_branch_id(direct_db: AsyncConnection) -> int:
+    """Use a fresh branch per test so retained P6D history cannot reserve slots."""
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {
+            "code": f"CP3C-{uuid.uuid4().hex[:10]}",
+            "name": f"CP3C isolated {uuid.uuid4().hex[:10]}",
+        },
+    )).mappings().first()
+    branch_id = row["branchid"]
+    await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.branchpayrollsettings
+                (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
+            VALUES (1, :bid, 'Week', '2092-01-06', TRUE)
+        """),
+        {"bid": branch_id},
+    )
+    await direct_db.commit()
+    return branch_id
 
 
 async def _get_or_create_driver(
     session_client: httpx.AsyncClient, auth_token: str, branch_id: int,
     driver_code: str, full_name: str,
 ) -> int:
-    r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
-    if r_list.status_code == 200:
-        for d in r_list.json():
-            if d.get("driver_code") == driver_code:
-                return d["driver_id"]
+    # The branch fixture is intentionally fresh per test. Do not search the
+    # company-wide driver list and accidentally reuse a same-code driver from
+    # another branch/test.
+    driver_code = f"{driver_code}-{uuid.uuid4().hex[:8]}"
     resp = await session_client.post(
         "/core/drivers",
         json={"branch_id": branch_id, "full_name": full_name, "driver_code": driver_code},
@@ -750,9 +767,97 @@ async def test_preview_finalization_parity_minimum(
     assert len(topup_lines) == 1
     assert Decimal(str(topup_lines[0]["final_amount"])) == Decimal("150.00")
 
-    await _void_pay_rule(client, auth_token, rule_id)
-    await _cancel_period_db(db_conn, period_id)
 
+@pytest.mark.asyncio
+async def test_minimum_greater_than_maximum_blocks_finalization(
+    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
+) -> None:
+    """Finalization must reject an applicable minimum above the maximum."""
+    start, end = _week()
+    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
+    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "600.00")
+    minimum_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id,
+        "MinimumPay", "800.00", start, end,
+    )
+    maximum_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id,
+        "MaximumPay", "500.00", start, end,
+    )
+    try:
+        submitted = await client.patch(
+            f"/payroll/periods/{period_id}/status",
+            json={"status": "InReview"}, headers=_auth(auth_token),
+        )
+        assert submitted.status_code == 422, submitted.text
+        assert "minimum" in submitted.text.lower() or "maximum" in submitted.text.lower()
+
+        # The current workflow rejects the invalid packet before approval; a
+        # direct finalize attempt remains unavailable as a second boundary.
+        finalized = await _finalize(client, auth_token, period_id)
+        assert finalized.status_code == 422, finalized.text
+    finally:
+        await _void_pay_rule(client, auth_token, minimum_id)
+        await _void_pay_rule(client, auth_token, maximum_id)
+        await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_ended_and_voided_rules_resolve_by_period_start(
+    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
+) -> None:
+    """Ended rules apply only inside their range and voided rules never apply."""
+    first_start, first_end = _week()
+    ended_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id,
+        "MinimumPay", "200.00", first_start - datetime.timedelta(days=7), first_end,
+    )
+    ended = await client.post(
+        f"/payroll/driver-pay-rules/{ended_id}/end",
+        json={"effective_to": (first_start + datetime.timedelta(days=2)).isoformat()},
+        headers=_auth(auth_token),
+    )
+    assert ended.status_code == 200, ended.text
+    assert ended.json()["status"] == "Ended"
+
+    first_period = await _insert_period_db(db_conn, cp3c_branch_id, first_start, first_end)
+    await _inject_adjustment_line(db_conn, cp3c_branch_id, first_period, cp3c_driver_id, "50.00")
+    await _advance_to_approved(client, auth_token, first_period)
+    first_preview = await _get_preview(client, auth_token, first_period)
+    assert first_preview.status_code == 200, first_preview.text
+    first_row = _driver_row(first_preview.json(), cp3c_driver_id)
+    assert Decimal(first_row["sys_adjustment"]) == Decimal("150.00")
+
+    after_end_start, after_end = _week(1)
+    second_period = await _insert_period_db(db_conn, cp3c_branch_id, after_end_start, after_end)
+    await _inject_adjustment_line(db_conn, cp3c_branch_id, second_period, cp3c_driver_id, "50.00")
+    await _advance_to_approved(client, auth_token, second_period)
+    second_preview = await _get_preview(client, auth_token, second_period)
+    assert second_preview.status_code == 200, second_preview.text
+    second_row = _driver_row(second_preview.json(), cp3c_driver_id)
+    assert Decimal(second_row["sys_adjustment"]) == Decimal("0")
+
+    voided_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id,
+        "MinimumPay", "9999.00", after_end_start, after_end,
+    )
+    voided = await client.post(
+        f"/payroll/driver-pay-rules/{voided_id}/void",
+        headers=_auth(auth_token),
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["status"] == "Voided"
+
+    third_start, third_end = _week(2)
+    third_period = await _insert_period_db(db_conn, cp3c_branch_id, third_start, third_end)
+    await _inject_adjustment_line(db_conn, cp3c_branch_id, third_period, cp3c_driver_id, "50.00")
+    await _advance_to_approved(client, auth_token, third_period)
+    third_preview = await _get_preview(client, auth_token, third_period)
+    assert third_preview.status_code == 200, third_preview.text
+    third_row = _driver_row(third_preview.json(), cp3c_driver_id)
+    assert Decimal(third_row["sys_adjustment"]) == Decimal("0")
+
+    await _void_pay_rule(client, auth_token, ended_id)
 
 @pytest.mark.asyncio
 async def test_preview_finalization_parity_maximum(

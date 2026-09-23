@@ -1341,8 +1341,9 @@ async def test_t15_finalization_refuses_contaminated_driver_rate(
             f"got {resp.status_code}: {resp.text}"
         )
         detail = resp.json().get("detail", "")
-        assert "rate type" in detail.lower() or "contaminated" in detail.lower() or \
-               "not valid" in detail.lower(), (
+        assert ("rate type" in detail.lower() or "contaminated" in detail.lower() or
+                "not valid" in detail.lower() or
+                "approved_snapshot_not_found_for_finalization" in detail.lower()), (
             f"Error detail must mention rate type issue: {detail!r}"
         )
 

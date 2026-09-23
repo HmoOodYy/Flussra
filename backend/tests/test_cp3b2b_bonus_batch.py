@@ -193,14 +193,20 @@ async def _count_batch_rows(db: AsyncConnection, period_id: int) -> int:
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture
-async def cp3b2b_branch_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
-    resp = await session_client.get("/core/branches", headers=_auth(auth_token))
-    assert resp.status_code == 200, resp.text
-    for branch in resp.json():
-        if branch["branch_code"] == "PAYTEST":
-            return branch["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+@pytest_asyncio.fixture(scope="module")
+async def cp3b2b_branch_id(session_db_conn) -> int:
+    row = (await session_db_conn.execute(
+        _text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """),
+        {"code": (code := f"CP3B2B_{uuid.uuid4().hex[:10]}"), "name": code},
+    )).mappings().first()
+    await session_db_conn.commit()
+    assert row is not None
+    return row["branchid"]
 
 
 async def _get_or_create_driver(

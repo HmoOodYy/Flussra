@@ -31,6 +31,18 @@ import pytest_asyncio
 import httpx
 from datetime import date as _date, timedelta as _td
 from sqlalchemy import text as _text, text as _sqla_text
+from uuid import uuid4
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch for eligibility workflow-slot tests."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"P2_{uuid4().hex}", "name": "P2 isolated"})).scalar_one()
+    return int(row)
 
 
 # ---------------------------------------------------------------------------
@@ -498,40 +510,15 @@ class TestFinalizationEligibility:
             {"td": _date(2034, 5, 10), "did": driver_id},
         )
 
-        # Advance to Approved via review workflow (works without finalize)
-        # Then attempt finalize — should be blocked
-        # First go to InReview
+        # Current submission validation rejects stale ineligible daily evidence
+        # before an InReview snapshot can be created.
         r = await c.patch(
             f"/payroll/periods/{pid}/status",
             headers=auth(tok),
             json={"status": "InReview"},
         )
-        assert r.status_code == 200, r.text
-
-        review_resp = await c.get("/review/items", headers=auth(tok))
-        review_item = next(
-            (i for i in review_resp.json()
-             if i.get("entity_name") == "PayrollPeriods"
-             and i.get("entity_id") == str(pid)
-             and i.get("status") == "Pending"),
-            None,
-        )
-        assert review_item is not None
-
-        decide = await c.post(
-            f"/review/items/{review_item['review_item_id']}/decide",
-            headers=auth(tok),
-            json={"decision": "Approved"},
-        )
-        assert decide.status_code == 200, decide.text
-
-        # Try to finalize — the stale ineligible line must block it
-        resp = await c.post(
-            f"/payroll/periods/{pid}/finalize",
-            headers=auth(tok),
-        )
-        assert resp.status_code == 422, resp.text
-        assert "eligible" in resp.text.lower() or "ineligible" in resp.text.lower()
+        assert r.status_code == 422, r.text
+        assert "eligible" in r.text.lower() or "ineligible" in r.text.lower()
 
         # Restore
         await direct_db.execute(
@@ -550,21 +537,22 @@ class TestPeriodPayEligibility:
 
     @staticmethod
     async def _ensure_bonus_active(c, tok, bid) -> None:
-        """Activate BONUS pay item on the branch (idempotent)."""
+        """Activate the legacy Period-scope ADJUSTMENT item for eligibility coverage."""
         items_resp = await c.get(
             f"/settings/branches/{bid}/pay-items",
             headers=auth(tok),
         )
         assert items_resp.status_code == 200
         for item in items_resp.json():
-            if item["pay_item_code"] == "BONUS":
-                await c.patch(
+            if item["pay_item_code"] == "ADJUSTMENT":
+                activated = await c.patch(
                     f"/settings/branches/{bid}/pay-items/{item['pay_item_id']}",
                     headers=auth(tok),
                     json={"is_active": True},
                 )
+                assert activated.status_code == 200, activated.text
                 return
-        pytest.skip("BONUS pay item not found on PAYTEST branch")
+        raise AssertionError("ADJUSTMENT pay item missing from the current catalog")
 
     @pytest.mark.asyncio
     async def test_t10_period_pay_rejects_driver_not_eligible_in_period(self, p2_env):
@@ -587,7 +575,7 @@ class TestPeriodPayEligibility:
             headers=auth(tok),
             json={
                 "driver_id": driver_id,
-                "line_type": "BONUS",
+                "line_type": "ADJUSTMENT",
                 "amount":    "50.00",
             },
         )
@@ -615,7 +603,7 @@ class TestPeriodPayEligibility:
             headers=auth(tok),
             json={
                 "driver_id": driver_id,
-                "line_type": "BONUS",
+                "line_type": "ADJUSTMENT",
                 "amount":    "50.00",
             },
         )
@@ -779,7 +767,6 @@ class TestNormalPathStillWorks:
             "test_core.py",
             "test_entry.py",
             "test_finalize.py",
-            "test_cp2_workflow.py",
             "test_cp5_calc_consistency.py",
             "test_cp6_review.py",
             "test_payroll_trust_p1.py",

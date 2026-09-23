@@ -71,40 +71,59 @@ async def fresh_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_clean: int,
+    direct_db,
 ) -> dict:
     """Create a Draft period on PAYTEST; return its response dict."""
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   paytest_clean,
-            "period_type": "Week",
-            "start_date":  "2031-01-06",
-            "end_date":    "2031-01-12",
-        },
-        headers=auth(auth_token),
-    )
-    assert resp.status_code == 201, f"fresh_period setup failed: {resp.text}"
-    return resp.json()
+    from sqlalchemy import text as _text
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype,
+                 startdate, enddate)
+            VALUES (1, :bid, 'Draft', 'ENTRY-2031-0106', 'Entry Test Week', 'Week',
+                    '2031-01-06', '2031-01-12')
+            RETURNING payrollperiodid, status, startdate, enddate
+        """),
+        {"bid": paytest_clean},
+    )).mappings().first()
+    return {
+        "payroll_period_id": row["payrollperiodid"],
+        "status": row["status"],
+        "start_date": str(row["startdate"]),
+        "end_date": str(row["enddate"]),
+    }
 
 
 @pytest_asyncio.fixture
 async def open_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    fresh_period: dict,
+    paytest_clean: int,
+    direct_db,
 ) -> dict:
     """
-    Transition the fresh Draft period to Open so entry is allowed.
+    Seed an Open period directly; Draft→Open is no longer a supported
+    transition in the current lifecycle.
     Returns the updated period dict.
     """
-    pid = fresh_period["payroll_period_id"]
-    resp = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(auth_token),
-    )
-    assert resp.status_code == 200, f"open_period setup failed: {resp.text}"
-    return resp.json()
+    from sqlalchemy import text as _text
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype,
+                 startdate, enddate)
+            VALUES (1, :bid, 'Open', 'ENTRY-2031-0106-OPEN', 'Entry Test Open Week', 'Week',
+                    '2031-01-06', '2031-01-12')
+            RETURNING payrollperiodid, status, startdate, enddate
+        """),
+        {"bid": paytest_clean},
+    )).mappings().first()
+    return {
+        "payroll_period_id": row["payrollperiodid"],
+        "status": row["status"],
+        "start_date": str(row["startdate"]),
+        "end_date": str(row["enddate"]),
+    }
 
 
 def _line_payload(driver_id: int, **overrides) -> dict:
@@ -383,21 +402,21 @@ class TestAddLine:
         assert body["needs_manager_review"] is True
         assert body["notes"] == "Stayed over"
 
-    async def test_rejects_draft_period(
+    async def test_accepts_draft_period(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_period: dict,
         paytest_driver_id: int,
     ):
-        """POST to a period still in Draft status must return 422."""
+        """Draft periods accept source lines in the current entry workflow."""
         pid = fresh_period["payroll_period_id"]
         resp = await client.post(
             f"/payroll/periods/{pid}/lines",
             json=_line_payload(paytest_driver_id),
             headers=auth(auth_token),
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 201
 
     async def test_rejects_invalid_line_type(
         self,
@@ -816,7 +835,7 @@ class TestVoidLine:
         pid = open_period["payroll_period_id"]
         post_resp = await client.post(
             f"/payroll/periods/{pid}/lines",
-            json=_line_payload(paytest_driver_id, line_type="PTO", quantity="8.00"),
+            json=_line_payload(paytest_driver_id, line_type="Hours", quantity="8.00"),
             headers=auth(auth_token),
         )
         lid = post_resp.json()["draft_line_id"]
@@ -835,4 +854,4 @@ class TestVoidLine:
         assert resp.status_code == 200
         # The voided line should not appear in the aggregated view
         rows = resp.json()
-        assert all(r["line_type"] != "PTO" or r["line_count"] == 0 for r in rows)
+        assert all(r["line_type"] != "Hours" or r["line_count"] == 0 for r in rows)

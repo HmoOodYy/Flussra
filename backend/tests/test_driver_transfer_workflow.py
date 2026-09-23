@@ -28,6 +28,8 @@ Note: the tests share a session-scoped DB + app (via conftest fixtures) but
 each test creates its OWN distinct driver/request so they are fully isolated.
 """
 import random
+import datetime
+import uuid
 import pytest
 import pytest_asyncio
 import httpx
@@ -485,23 +487,13 @@ async def test_old_history_stays_on_old_driver(
         session_client, auth_token, paytest_branch_id, suffix=sfx
     )
 
-    # Create a payroll period on PAYTEST branch via the API.
-    # Fixed date well into the future (2092-06): no conflict with other test
-    # files (which use 2026–2089 ranges) and no unique-date constraint to worry
-    # about because PayrollPeriods has no UNIQUE on (branch_id, start_date).
-    period_resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   paytest_branch_id,
-            "period_type": "Week",
-            "start_date":  "2092-06-01",
-            "end_date":    "2092-06-07",
-            "pay_date":    "2092-06-14",
-        },
-        headers=auth(auth_token),
+    # Seed the lower-level transfer fixture directly as an Open period; this
+    # test does not exercise period creation and the legacy POST is no longer
+    # a generic Draft factory.
+    period_id = await _create_open_period(
+        session_client, auth_token, paytest_branch_id,
+        "2092-06-01", "2092-06-07", direct_db,
     )
-    assert period_resp.status_code == 201, period_resp.text
-    period_id: int = period_resp.json()["payroll_period_id"]
 
     # Get company_id for the direct INSERT (needed by the draft-line FK).
     cid_row = await direct_db.execute(
@@ -1422,17 +1414,10 @@ async def test_completion_preserves_final_lines_on_old_driver(
     )
     company_id = cid_r.scalar_one()
 
-    # Reuse an existing period for PAYTEST branch (ux_payrollperiods_onedraftperbranch
-    # allows only one Draft period per branch at a time, so we don't create a new one).
-    p_r = await direct_db.execute(
-        _text("""
-            SELECT payrollperiodid FROM payroll.payrollperiods
-            WHERE  branchid = :bid AND companyid = :cid
-            ORDER BY payrollperiodid DESC LIMIT 1
-        """),
-        {"bid": paytest_branch_id, "cid": company_id},
+    period_id = await _create_open_period(
+        session_client, auth_token, paytest_branch_id,
+        "2092-07-01", "2092-07-07", direct_db,
     )
-    period_id = p_r.scalar_one()
 
     # Insert a FinalLine for the old driver
     # Phase 6: authorise via session-level GUC for test setup.
@@ -1805,6 +1790,7 @@ async def _create_open_period(
     branch_id: int,
     start_date: str,
     end_date: str,
+    direct_db,
     period_type: str = "Week",
 ) -> int:
     """
@@ -1818,26 +1804,24 @@ async def _create_open_period(
     """
     await _cancel_all_branch_periods(client, token, branch_id)
 
-    r = await client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   branch_id,
-            "period_type": period_type,
-            "start_date":  start_date,
-            "end_date":    end_date,
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (1, :bid, 'Open', :code, :name, :ptype, :start, :end)
+            RETURNING payrollperiodid
+        """),
+        {
+            "bid": branch_id,
+            "code": f"DTW-{uuid.uuid4().hex[:12]}",
+            "name": f"Driver transfer {uuid.uuid4().hex[:8]}",
+            "ptype": period_type,
+            "start": datetime.date.fromisoformat(start_date),
+            "end": datetime.date.fromisoformat(end_date),
         },
-        headers=auth(token),
-    )
-    assert r.status_code == 201, f"period create failed: {r.text}"
-    pid = r.json()["payroll_period_id"]
-
-    r2 = await client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(token),
-    )
-    assert r2.status_code == 200, f"period open failed: {r2.text}"
-    return pid
+    )).mappings().first()
+    await direct_db.commit()
+    return row["payrollperiodid"]
 
 
 @pytest.mark.asyncio
@@ -1846,6 +1830,7 @@ async def test_post_transfer_source_branch_driver_absent_from_grid(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 8 — Post-transfer source branch.
@@ -1865,6 +1850,7 @@ async def test_post_transfer_source_branch_driver_absent_from_grid(
     source_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2093-01-06", "2093-01-12",
+        direct_db,
     )
 
     # Complete the transfer to HQ
@@ -1900,6 +1886,7 @@ async def test_post_transfer_target_branch_driver_present_in_grid(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 9 — Post-transfer target branch.
@@ -1920,6 +1907,7 @@ async def test_post_transfer_target_branch_driver_present_in_grid(
     target_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2093-02-03", "2093-02-09",
+        direct_db,
     )
 
     # Transfer from HQ → PAYTEST
@@ -1957,6 +1945,7 @@ async def test_effective_date_defers_target_activation(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 10 — EffectiveDate controls day-grid eligibility (Phase 2C behavior).
@@ -1980,6 +1969,7 @@ async def test_effective_date_defers_target_activation(
     period_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2094-07-11", "2094-07-18",
+        direct_db,
     )
 
     # Transfer PAYTEST → HQ with effective_date = 2094-07-15
@@ -2031,6 +2021,7 @@ async def test_future_transfer_source_visible_before_effective(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 11a — Source branch still shows old profile before effective_date.
@@ -2046,6 +2037,7 @@ async def test_future_transfer_source_visible_before_effective(
     source_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2095-07-28", "2095-07-31",
+        direct_db,
     )
 
     r = await _create_transfer(
@@ -2077,6 +2069,7 @@ async def test_future_transfer_target_hidden_before_effective(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 11b — Target branch does NOT show new profile before effective_date.
@@ -2093,6 +2086,7 @@ async def test_future_transfer_target_hidden_before_effective(
     target_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2095-09-10", "2095-09-20",
+        direct_db,
     )
 
     r = await _create_transfer(
@@ -2135,6 +2129,7 @@ async def test_source_hidden_on_effective_date(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 11c — Old profile disappears from source grid exactly on effective_date.
@@ -2151,6 +2146,7 @@ async def test_source_hidden_on_effective_date(
     source_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2096-02-27", "2096-03-05",
+        direct_db,
     )
 
     r = await _create_transfer(
@@ -2182,6 +2178,7 @@ async def test_target_visible_on_effective_date(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 11d — New profile appears in target grid exactly on effective_date.
@@ -2197,6 +2194,7 @@ async def test_target_visible_on_effective_date(
     target_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2096-04-28", "2096-05-05",
+        direct_db,
     )
 
     r = await _create_transfer(
@@ -2230,6 +2228,7 @@ async def test_mid_period_transfer_split_visibility(
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
+    direct_db,
 ):
     """
     Test 11e — Within a single PAYTEST period spanning the effective_date, source visibility
@@ -2256,6 +2255,7 @@ async def test_mid_period_transfer_split_visibility(
     source_pid = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2097-01-24", "2097-01-30",
+        direct_db,
     )
 
     r = await _create_transfer(

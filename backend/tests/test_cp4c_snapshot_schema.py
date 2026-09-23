@@ -36,21 +36,29 @@ async def snapshot_db(test_database_url) -> AsyncIterator[SimpleNamespace]:
         outer = await conn.begin()
         try:
             tenant = (await conn.execute(text("""
-                SELECT c.companyid, b.branchid, u.userid
+                SELECT c.companyid, u.userid
                 FROM core.companies c
-                JOIN core.branches b ON b.companyid = c.companyid
                 JOIN sec.users u ON u.companyid = c.companyid
-                WHERE c.companycode = 'DEMO' AND b.branchcode = 'HQ'
-                  AND u.username = 'admin'
+                WHERE c.companycode = 'DEMO' AND u.username = 'admin'
             """))).mappings().one()
-            period_id = await _insert_period(conn, tenant["companyid"], tenant["branchid"])
+            branch_id = (await conn.execute(text("""
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                VALUES (:company_id, :code, :name, 'Active', FALSE)
+                RETURNING branchid
+            """), {
+                "company_id": tenant["companyid"],
+                "code": f"CP4C_{uuid4().hex}",
+                "name": f"CP4C isolated {uuid4().hex[:8]}",
+            })).scalar_one()
+            period_id = await _insert_period(conn, tenant["companyid"], branch_id)
             driver_id = await _insert_driver(
-                conn, tenant["companyid"], tenant["branchid"], tenant["userid"]
+                conn, tenant["companyid"], branch_id, tenant["userid"]
             )
             yield SimpleNamespace(
                 conn=conn,
                 company_id=tenant["companyid"],
-                branch_id=tenant["branchid"],
+                branch_id=branch_id,
                 user_id=tenant["userid"],
                 period_id=period_id,
                 driver_id=driver_id,

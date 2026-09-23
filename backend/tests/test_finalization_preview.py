@@ -23,6 +23,38 @@ import pytest_asyncio
 import httpx
 from decimal import Decimal
 from sqlalchemy import text as _text
+from uuid import uuid4
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch for finalization-preview workflow tests."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"FP_{uuid4().hex}", "name": "Preview isolated"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the preview test driver on this module's isolated branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "Preview Isolated Driver",
+            "driver_code": f"FP-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"Preview driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
 
 _preview_driver_counter = itertools.count(1)
 

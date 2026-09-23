@@ -27,6 +27,37 @@ _SECURITY_COUNTER = itertools.count(1)
 _REPORT_PATHS = ("drivers", "period-work", "period-pay", "mixed")
 
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Keep CP5C period/report fixtures isolated from shared workflow slots."""
+    row = (await session_db_conn.execute(text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, 'CP5C isolated', 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"CP5C_{uuid4().hex}"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the CP5C driver on its isolated branch."""
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "CP5C Isolated Driver",
+            "driver_code": f"CP5C-D-{uuid4().hex[:10]}",
+        },
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _cleanup_cp5c_workflow_slots(direct_db):
     """Keep this route suite from reserving a workflow slot for later modules."""

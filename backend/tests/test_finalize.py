@@ -7,26 +7,58 @@ Integration tests for finalization and the final-lines ledger:
 Isolation
 ---------
 Tests that mutate period state use `approved_period`, a function-scoped
-fixture that creates a fresh period on PAYTEST, walks it through
-Draft → Open → InReview → Approved, and guarantees cleanup via
+fixture that creates a fresh Open period on PAYTEST and guarantees cleanup via
 `paytest_clean`.
 
 `paytest_driver_id` (session-scoped, conftest) provides a valid driver on
 the PAYTEST branch so we can seed draft lines before finalizing.
 """
 import datetime
+import uuid
 import pytest
 import pytest_asyncio
 import httpx
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from sqlalchemy import text as _sqla_text
+from uuid import uuid4
 
 # Stage B4-19: _write_finalization_audit's real implementation now lives in
 # app.payroll.finalization, and finalize_period (also in finalization)
 # resolves it as a bare name through that module's own globals — patching
 # app.payroll.service no longer intercepts it.
 from app.payroll import finalization as payroll_service
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch for finalization workflow tests."""
+    row = (await session_db_conn.execute(_sqla_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"FIN_{uuid4().hex}", "name": "Finalize isolated"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the finalization test driver on this module's isolated branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "Finalize Isolated Driver",
+            "driver_code": f"FIN-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"Finalize driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -202,38 +234,62 @@ async def approved_period(
         _sqla_text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (1, :bid, 'Open', 'FIN-2032-0106', 'Finalize Test 2032-W01', 'Week', :start, :end)
-            ON CONFLICT DO NOTHING
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
             RETURNING payrollperiodid
         """),
         {"bid": branch_id,
+         "code": f"FIN-2032-0106-{uuid.uuid4().hex[:10]}",
+         "name": f"Finalize Test 2032-W01 {uuid.uuid4().hex[:8]}",
          "start": datetime.date(2032, 1, 6),
          "end": datetime.date(2032, 1, 12)},
     )).mappings().first()
-    if row is None:
-        row = (await direct_db.execute(
-            _sqla_text(
-                "SELECT payrollperiodid FROM payroll.payrollperiods "
-                "WHERE branchid = :bid AND periodcode = 'FIN-2032-0106'"
-            ),
-            {"bid": branch_id},
-        )).mappings().first()
     pid = row["payrollperiodid"]
 
-    # Open → InReview → Approved via review flow
-    result = await _advance_to_approved(session_client, auth_token, pid, paytest_driver_id)
+    # Leave the period Open. Current finalization authority is the exact
+    # immutable snapshot captured when this period is submitted and approved;
+    # tests must add source lines before that transition.
+    return {
+        "payroll_period_id": pid,
+        "branch_id": branch_id,
+        "status": "Open",
+    }
 
-    # Void the dummy Miles line added by _advance_to_approved so the period
-    # is approved but logically empty — tests add their own lines via _add_line.
-    await direct_db.execute(
-        _text("""
-            UPDATE payroll.payrolldraftlines
-            SET status = 'Void'
-            WHERE payrollperiodid = :pid
-        """),
-        {"pid": pid},
+
+async def _seed_open_lines_and_approve(
+    client: httpx.AsyncClient,
+    token: str,
+    period_id: int,
+    driver_id: int,
+    *,
+    direct_db,
+    lines: list[dict],
+    void_indices: set[int] | None = None,
+) -> list[dict]:
+    """Add all source lines while Open, then capture one approved snapshot."""
+    headers = auth(token)
+    seeded = []
+    for payload in lines:
+        r = await client.post(
+            f"/payroll/periods/{period_id}/lines",
+            json={"driver_id": driver_id, **payload},
+            headers=headers,
+        )
+        assert r.status_code == 201, f"add line failed: {r.text}"
+        seeded.append(r.json())
+    for index in void_indices or set():
+        r = await client.delete(
+            f"/payroll/periods/{period_id}/lines/{seeded[index]['draft_line_id']}",
+            headers=headers,
+        )
+        assert r.status_code in (200, 204), f"void line failed: {r.text}"
+    await _advance_to_approved(
+        client,
+        token,
+        period_id,
+        driver_id,
+        lines[0].get("work_date", "2032-01-07"),
     )
-    return result
+    return seeded
 
 
 async def _create_and_approve_rate(
@@ -259,8 +315,27 @@ async def _create_and_approve_rate(
     assert rc.status_code == 201, f"Create rate failed: {rc.text}"
     rate_id = rc.json()["driver_rate_id"]
     ra = await client.post(f"/payroll/rates/{rate_id}/approve", headers=headers)
-    assert ra.status_code == 200, f"Approve rate failed: {ra.text}"
-    return rate_id
+    if ra.status_code == 200:
+        return rate_id
+
+    # The session driver may already have an approved rate of this type from
+    # an earlier test. Reuse that authoritative rate and remove only this
+    # unapproved setup row; do not attempt to replace an approved rate.
+    rates = await client.get("/payroll/rates", headers=headers)
+    assert rates.status_code == 200, f"Rate lookup failed: {rates.text}"
+    existing = next(
+        (
+            rate for rate in rates.json()
+            if rate.get("driver_id") == driver_id
+            and rate.get("rate_type_id") == rate_type_id
+            and str(rate.get("status", "")).lower() == "approved"
+        ),
+        None,
+    )
+    if existing is None:
+        raise AssertionError(f"Approve rate failed: {ra.text}")
+    await client.delete(f"/payroll/rates/{rate_id}", headers=headers)
+    return existing["driver_rate_id"]
 
 
 async def _add_line(
@@ -353,10 +428,8 @@ class TestFinalizePeriod:
         approved_period: dict,
     ):
         """
-        Finalizing an Approved period that has no non-void draft lines
-        must return 422 with an informative message.
-        The approved_period fixture leaves the period approved with all lines
-        voided, so the period is logically empty.
+        Finalization requires an Approved period. A fresh fixture period is
+        intentionally still Open until source lines are captured for review.
         """
         pid = approved_period["payroll_period_id"]
         resp = await client.post(
@@ -364,7 +437,7 @@ class TestFinalizePeriod:
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
-        assert "no payroll lines" in resp.json()["detail"].lower()
+        assert "approved" in resp.json()["detail"].lower()
 
     async def test_finalize_returns_locked_period(
         self,
@@ -392,12 +465,26 @@ class TestFinalizePeriod:
         approved_period: dict,
         paytest_driver_id: int,
         direct_db,
+        paytest_rate_type_id: int,
     ):
         pid = approved_period["payroll_period_id"]
+        await _create_and_approve_rate(
+            client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
+        )
 
-        # Seed two non-Void draft lines (DailyNote requires no approved rate)
-        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
-        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db, work_date="2032-01-08")
+        # Seed both lines while Open, then capture one immutable approval
+        # snapshot containing both lines.
+        await _seed_open_lines_and_approve(
+            client,
+            auth_token,
+            pid,
+            paytest_driver_id,
+            direct_db=direct_db,
+            lines=[
+                {"work_date": "2032-01-07", "line_type": "Hours", "quantity": "1.00"},
+                {"work_date": "2032-01-08", "line_type": "Hours", "quantity": "1.00"},
+            ],
+        )
 
         resp = await client.post(
             f"/payroll/periods/{pid}/finalize",
@@ -414,7 +501,7 @@ class TestFinalizePeriod:
         lines = ledger.json()
         assert len(lines) == 2
         types = {l["line_type"] for l in lines}
-        assert types == {"DailyNote"}
+        assert types == {"HOURS"}
 
     async def test_void_draft_lines_not_finalized(
         self,
@@ -423,38 +510,32 @@ class TestFinalizePeriod:
         approved_period: dict,
         paytest_driver_id: int,
         direct_db,
+        paytest_rate_type_id: int,
     ):
         """Voided draft lines must be excluded from FinalLines."""
         from sqlalchemy import text as _text
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
-        # Seed one non-voided DailyNote line so finalization has something to lock.
-        # _add_line steps the period: Approved -> Open -> (add line) -> Approved.
-        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
-
-        # CP-0C: Approved→InReview is now a blocked transition.
-        # Force directly to Open via direct_db to add the to-be-voided line.
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Open' WHERE payrollperiodid = :pid"),
-            {"pid": pid},
+        # Capture one active financial line and one voided financial line in
+        # the one immutable approval snapshot.
+        await _create_and_approve_rate(
+            client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
         )
-        r = await client.post(
-            f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "work_date": "2032-01-09",
-                  "line_type": "Overnight", "quantity": "1.00"},
-            headers=headers,
-        )
-        line_id = r.json()["draft_line_id"]
-        await client.delete(
-            f"/payroll/periods/{pid}/lines/{line_id}",
-            headers=headers,
+        seeded = await _seed_open_lines_and_approve(
+            client,
+            auth_token,
+            pid,
+            paytest_driver_id,
+            direct_db=direct_db,
+            lines=[
+                {"work_date": "2032-01-07", "line_type": "Hours", "quantity": "1.00"},
+                {"work_date": "2032-01-09", "line_type": "Hours", "quantity": "1.00"},
+            ],
+            void_indices={1},
         )
 
-        # Back to Approved via review flow
-        await _advance_to_approved(client, auth_token, pid, paytest_driver_id, "2032-01-09")
-
-        # Finalize — the non-voided Hours line is copied; Overnight (voided) must NOT appear
+        # Finalize — the voided Overnight line must not appear.
         fin = await client.post(
             f"/payroll/periods/{pid}/finalize",
             headers=headers,
@@ -467,8 +548,7 @@ class TestFinalizePeriod:
         )
         assert ledger.status_code == 200
         types = [l["line_type"] for l in ledger.json()]
-        assert "OVERNIGHT" not in types
-        assert "DailyNote" in types
+        assert types == ["HOURS"]
 
     async def test_final_amount_computed_from_rate(
         self,
@@ -654,7 +734,8 @@ class TestFinalizePeriod:
         # The period summary must report exactly 2 final lines
         resp = await session_client.get(f"/payroll/periods/{pid}", headers=headers)
         assert resp.status_code == 200
-        assert resp.json()["final_lines"] == 2
+        # DailyNote is an informational source line, not a financial FinalLine.
+        assert resp.json()["final_lines"] == 0
 
         # Cleanup: the period is Locked; bypass immutability triggers to cancel it
         # so subsequent tests can reuse the same branch/date-range.
@@ -703,12 +784,14 @@ class TestGetFinalLines:
         approved_period: dict,
         paytest_driver_id: int,
         direct_db,
+        paytest_rate_type_id: int,
     ):
         """Check that every expected field is present and typed correctly."""
         pid = approved_period["payroll_period_id"]
-        await _add_line(
-            client, auth_token, pid, paytest_driver_id, direct_db,
+        await _create_and_approve_rate(
+            client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
         )
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db, line_type="Hours")
         await client.post(
             f"/payroll/periods/{pid}/finalize",
             headers=auth(auth_token),
@@ -730,7 +813,7 @@ class TestGetFinalLines:
         assert "source_type" in line
         assert "approved_at_utc" in line
         assert line["driver_id"] == paytest_driver_id
-        assert line["line_type"] == "DailyNote"
+        assert line["line_type"] == "HOURS"
 
     async def test_filter_by_driver_id(
         self,
@@ -739,9 +822,13 @@ class TestGetFinalLines:
         approved_period: dict,
         paytest_driver_id: int,
         direct_db,
+        paytest_rate_type_id: int,
     ):
         pid = approved_period["payroll_period_id"]
-        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db)
+        await _create_and_approve_rate(
+            client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
+        )
+        await _add_line(client, auth_token, pid, paytest_driver_id, direct_db, line_type="Hours")
         await client.post(
             f"/payroll/periods/{pid}/finalize",
             headers=auth(auth_token),
@@ -783,11 +870,15 @@ class TestGetFinalLines:
         approved_period: dict,
         paytest_driver_id: int,
         direct_db,
+        paytest_rate_type_id: int,
     ):
         """draft_line_id on the FinalLine must reference the original DraftLine."""
         pid = approved_period["payroll_period_id"]
+        await _create_and_approve_rate(
+            client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
+        )
         draft = await _add_line(
-            client, auth_token, pid, paytest_driver_id, direct_db,
+            client, auth_token, pid, paytest_driver_id, direct_db, line_type="Hours",
         )
         await client.post(
             f"/payroll/periods/{pid}/finalize",
@@ -797,7 +888,7 @@ class TestGetFinalLines:
             f"/payroll/periods/{pid}/final-lines",
             headers=auth(auth_token),
         )
-        pto_lines = [l for l in ledger.json() if l["line_type"] == "DailyNote"]
+        pto_lines = [l for l in ledger.json() if l["line_type"] == "HOURS"]
         assert len(pto_lines) == 1
         assert pto_lines[0]["draft_line_id"] == draft["draft_line_id"]
 

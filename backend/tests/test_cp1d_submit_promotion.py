@@ -80,20 +80,35 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
         """),
         p,
     )
-    # 3. Delete review decisions for 2095 review items on this branch
+    # 3. Delete only review decisions not retained by immutable workflow evidence.
     await direct_db.execute(
         _text("""
-            DELETE FROM review.managerreviewdecisions
-            WHERE reviewitemid IN (
-                SELECT reviewitemid FROM review.managerreviewitems
-                WHERE  branchid = :bid
+            DELETE FROM review.managerreviewdecisions decision
+            WHERE decision.reviewitemid IN (
+                SELECT item.reviewitemid FROM review.managerreviewitems item
+                WHERE item.branchid = :bid
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM payroll.payrollperiodworkflowactionevidence evidence
+                WHERE evidence.reviewdecisionid = decision.reviewdecisionid
             )
         """),
         p,
     )
-    # 4. Delete review items for this branch (all types, to avoid FK issues)
+    # 4. Delete only review items with no immutable evidence references.
     await direct_db.execute(
-        _text("DELETE FROM review.managerreviewitems WHERE branchid = :bid"),
+        _text("""
+            DELETE FROM review.managerreviewitems item
+            WHERE item.branchid = :bid
+              AND NOT EXISTS (
+                  SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                  WHERE evidence.reviewitemid = item.reviewitemid
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM review.managerreviewdecisions decision
+                  WHERE decision.reviewitemid = item.reviewitemid
+              )
+        """),
         p,
     )
     # 5. Delete draft lines referencing 2095 periods on this branch
@@ -103,6 +118,11 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
             WHERE payrollperiodid IN (
                 SELECT payrollperiodid FROM payroll.payrollperiods
                 WHERE  branchid = :bid AND startdate >= '2095-01-01' AND startdate < '2096-01-01'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                WHERE evidence.sourceentityid = payroll.payrolldraftlines.draftlineid::VARCHAR
+                  AND evidence.sourceentitytype = 'PayrollDraftLines'
             )
         """),
         p,
@@ -121,6 +141,14 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
                   WHERE snapshot.payrollperiodid = period.payrollperiodid
                     AND snapshot.companyid = period.companyid
                     AND snapshot.branchid = period.branchid
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM payroll.payrollperiodauditevidencecoverage coverage
+                  WHERE coverage.payrollperiodid = period.payrollperiodid
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                  WHERE evidence.payrollperiodid = period.payrollperiodid
               )
         """),
         p,
@@ -1366,14 +1394,33 @@ class TestSerializationConcurrency:
         )
         await direct_db.execute(
             _text("""
-                DELETE FROM review.managerreviewdecisions
-                WHERE reviewitemid IN (
-                    SELECT reviewitemid FROM review.managerreviewitems WHERE branchid = :bid
+                DELETE FROM review.managerreviewdecisions decision
+                WHERE decision.reviewitemid IN (
+                    SELECT item.reviewitemid FROM review.managerreviewitems item
+                    WHERE item.branchid = :bid
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM payroll.payrollperiodworkflowactionevidence evidence
+                    WHERE evidence.reviewdecisionid = decision.reviewdecisionid
                 )
             """),
             {"bid": branch_id},
         )
-        await direct_db.execute(_text("DELETE FROM review.managerreviewitems WHERE branchid = :bid"), {"bid": branch_id})
+        await direct_db.execute(
+            _text("""
+                DELETE FROM review.managerreviewitems item
+                WHERE item.branchid = :bid
+                  AND NOT EXISTS (
+                      SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
+                      WHERE evidence.reviewitemid = item.reviewitemid
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM review.managerreviewdecisions decision
+                      WHERE decision.reviewitemid = item.reviewitemid
+                  )
+            """),
+            {"bid": branch_id},
+        )
         await direct_db.execute(
             _text("""
                 DELETE FROM payroll.payrolldraftlines

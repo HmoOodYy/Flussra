@@ -222,7 +222,7 @@ class TestMigration:
         assert m.down_revision == "0048"
 
     def test_0049_in_alembic_heads(self):
-        """Migration chain must be linear (single head) and currently at 0053."""
+        """Migration chain must be linear (single current head)."""
         import subprocess, sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
@@ -234,8 +234,8 @@ class TestMigration:
             f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
             f"{result.stdout}\n{result.stderr}"
         )
-        assert "0055" in lines[0], (
-            f"Expected head 0055, got: {lines[0]}\n{result.stderr}"
+        assert "0065" in lines[0], (
+            f"Expected head 0065, got: {lines[0]}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio

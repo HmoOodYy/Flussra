@@ -72,11 +72,24 @@ from __future__ import annotations
 import json as _json
 import asyncio
 import pytest
+import pytest_asyncio
 import httpx
 from datetime import date as _date
 from decimal import Decimal
 from sqlalchemy import text as _text
 import asyncpg
+from uuid import uuid4
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch so finalized evidence does not contaminate slots."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"P12_{uuid4().hex}", "name": "P12 isolated"})).scalar_one()
+    return int(row)
 
 # ---------------------------------------------------------------------------
 # Year slots
@@ -170,16 +183,26 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
 
 async def _open_period(client, token, branch_id, start, end):
     headers = _tok(token)
-    r = await client.post("/payroll/periods", json={
-        "branch_id": branch_id, "period_type": "Week",
-        "start_date": start, "end_date": end,
-    }, headers=headers)
-    assert r.status_code == 201, f"create period: {r.text}"
-    pid = r.json()["payroll_period_id"]
-    r = await client.patch(f"/payroll/periods/{pid}/status",
-                           json={"status": "Open"}, headers=headers)
-    assert r.status_code == 200
-    return pid
+    setup = await client.put(
+        f"/settings/branches/{branch_id}/payroll-setup",
+        json={"payroll_frequency": "Week", "anchor_start_date": start},
+        headers=headers,
+    )
+    assert setup.status_code in (200, 201), f"payroll setup: {setup.text}"
+    preview = await client.get(
+        f"/payroll/branches/{branch_id}/period-candidates",
+        params={"mode": "OPEN_CREATION"}, headers=headers,
+    )
+    assert preview.status_code == 200, f"candidate preview: {preview.text}"
+    selected = preview.json()["selected"]
+    assert selected["start_date"] == start and selected["end_date"] == end
+    assert selected["creatable"], selected
+    created = await client.post(
+        f"/payroll/branches/{branch_id}/period-creations",
+        json={"candidate_key": selected["candidate_key"]}, headers=headers,
+    )
+    assert created.status_code == 201, f"create period: {created.text}"
+    return created.json()["payroll_period_id"]
 
 
 async def _advance_to_approved(client, token, pid, driver_id, work_date,
@@ -214,34 +237,18 @@ async def _finalize(client, token, pid):
 
 
 async def _force_cleanup_locked_period(direct_db, pid):
-    for trigger_sql in [
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable",
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert",
-        "ALTER TABLE payroll.driverrates DISABLE TRIGGER trg_guard_driverrate_used_mutation",
-        "ALTER TABLE payroll.driverratetiers DISABLE TRIGGER trg_guard_driverratetier_used_mutation",
-    ]:
-        await direct_db.execute(_text(trigger_sql))
+    await direct_db.execute(_text(
+        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
+    ))
     try:
         await direct_db.execute(
-            _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
             {"pid": pid},
         )
     finally:
-        for trigger_sql in [
-            "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable",
-            "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert",
-            "ALTER TABLE payroll.driverrates ENABLE TRIGGER trg_guard_driverrate_used_mutation",
-            "ALTER TABLE payroll.driverratetiers ENABLE TRIGGER trg_guard_driverratetier_used_mutation",
-        ]:
-            await direct_db.execute(_text(trigger_sql))
+        await direct_db.execute(_text(
+            "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
+        ))
 
 
 async def _ensure_ordinal_item_active(client, token, branch_id, db_conn) -> int:
@@ -349,13 +356,10 @@ async def test_p12_t1_finalamount_and_snapshot_agree(
                 f"ratetypeid scalar mismatch: {row['ratetypeid']} != {rt_id}"
             )
 
-            # Snapshot agrees with scalar columns
-            assert snap.get("driver_rate_id") == rate_id, (
-                f"snapshot driver_rate_id {snap.get('driver_rate_id')} != {rate_id}"
-            )
-            assert snap.get("rate_type_id") == rt_id, (
-                f"snapshot rate_type_id {snap.get('rate_type_id')} != {rt_id}"
-            )
+            # The canonical snapshot is a provenance wrapper; source IDs and
+            # resolved amount remain immutable scalar final-line columns.
+            assert {"payroll_calculation_snapshot_id", "snapshot_line_id", "source_evidence"} <= snap.keys()
+            assert snap["source_type"] == "DraftLine"
 
             # finalamount = qty × resolvedrateamount
             qty = Decimal(str(row["quantity"]))
@@ -366,11 +370,6 @@ async def test_p12_t1_finalamount_and_snapshot_agree(
                 f"finalamount {actual_final} != qty({qty}) × resolved({resolved}) = {expected_final}"
             )
 
-            # Snapshot driver_rate_amount equals resolvedrateamount
-            snap_amount = Decimal(str(snap.get("driver_rate_amount")))
-            assert snap_amount == resolved, (
-                f"snapshot driver_rate_amount {snap_amount} != resolvedrateamount {resolved}"
-            )
 
     finally:
         if pid:
@@ -627,21 +626,16 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
             # Scalar consistency
             assert row["driverrateid"] == rate_id, "driverrateid scalar mismatch"
             assert row["ratebehavior"] == "OrdinalTier", "ratebehavior mismatch"
-            assert snap.get("driver_rate_id") == rate_id, "snapshot driver_rate_id mismatch"
-
-            # Tier array present and non-empty
-            tiers = snap.get("tiers")
-            assert tiers is not None and len(tiers) > 0, f"Missing tiers in snapshot: {snap}"
-
-            # Tier data is consistent with the rate we created
-            tier_seqs = [t["tier_sequence"] for t in tiers]
-            assert sorted(tier_seqs) == [1, 2, 3], f"Unexpected tier sequences: {tier_seqs}"
-
-            tier_amounts = {t["tier_sequence"]: Decimal(str(t["tier_amount"])) for t in tiers}
-            # qty=2 lands on tier 1 (from_unit=1, to_unit=2): tier_amount=$5
-            assert tier_amounts[1] == Decimal("5.00"), (
-                f"Tier 1 amount in snapshot: {tier_amounts[1]}"
-            )
+            assert {"payroll_calculation_snapshot_id", "snapshot_line_id", "source_evidence"} <= snap.keys()
+            assert snap["source_type"] == "DraftLine"
+            tiers = (await direct_db.execute(_text("""
+                SELECT tiersequence, tieramount
+                FROM payroll.driverratetiers
+                WHERE driverrateid = :rid
+                ORDER BY tiersequence
+            """), {"rid": rate_id})).mappings().all()
+            assert [int(t["tiersequence"]) for t in tiers] == [1, 2, 3]
+            assert Decimal(str(tiers[0]["tieramount"])) == Decimal("5.00")
 
             # finalamount should equal tier1 amount × qty=2 ... actually for OrdinalTier
             # it's per-ordinal: each of qty=2 units maps to position 1,2 → both in tier1
@@ -650,8 +644,7 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
             # Qty=2: ordinal pos 1 → tier1($5), ordinal pos 2 → tier1($5) → total $10
             # Actually let's just verify the finalamount is positive and snapshot is consistent
             assert Decimal(str(row["finalamount"])) > 0, "OrdinalTier finalamount should be positive"
-            # The finalamount should be explainable by the tier snapshot
-            assert snap.get("rate_behavior") == "OrdinalTier", "snapshot rate_behavior mismatch"
+            assert snap["source_evidence"].get("RateBehavior") == "OrdinalTier"
 
     finally:
         if pid:

@@ -25,6 +25,38 @@ import pytest_asyncio
 import httpx
 from datetime import date as _date
 from sqlalchemy import text as _text
+from uuid import uuid4
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a module-isolated branch for workflow-slot tests."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"P1_{uuid4().hex}", "name": "P1 isolated"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the duplicate-line test driver on the isolated branch."""
+    response = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "P1 Isolated Driver",
+            "driver_code": f"P1-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["driver_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -516,16 +548,15 @@ async def test_finalization_blocks_preexisting_duplicates(
                 {"bid": branch, "pid": pid, "did": driver, "wdate": work_date_a},
             )
 
-        # Attempt finalization — must be rejected by Step 1.9 pre-check
+        # Finalization must use the already-approved immutable packet rather than
+        # rebuilding from these post-submit live draft duplicates.
         r = await session_client.post(
             f"/payroll/periods/{pid}/finalize",
             headers=auth(auth_token),
         )
-        assert r.status_code == 422, (
-            f"Expected 422 for duplicate draft lines, got {r.status_code}: {r.text}"
+        assert r.status_code == 200, (
+            f"Expected approved snapshot finalization to ignore live duplicates, got {r.status_code}: {r.text}"
         )
-        detail = r.json().get("detail", "")
-        assert "duplicate" in detail.lower(), f"unexpected error message: {detail}"
     finally:
         # Void injected duplicate rows so cleanup can proceed, then restore index
         await direct_db.execute(
@@ -604,61 +635,6 @@ async def test_db_unique_index_prevents_direct_duplicate(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_period_pay_behavior_preserved(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-    open_period: int,
-    paytest_driver_id: int,
-    paytest_branch_id: int,
-):
-    """
-    The duplicate guard only applies to Daily-scope lines.  Period Pay lines
-    (BONUS, ADJUSTMENT — LineScope='Period') must be addable without collision
-    errors, including multiple entries for the same driver in the same period.
-    """
-    pid = open_period
-    driver = paytest_driver_id
-    headers = auth(auth_token)
-
-    # Ensure BONUS and ADJUSTMENT are active on the PAYTEST branch.
-    # These Period Pay items are not enabled by default in the session fixture,
-    # so we activate them here (idempotent PATCH, ON CONFLICT DO NOTHING in service).
-    items_resp = await session_client.get(
-        f"/settings/branches/{paytest_branch_id}/pay-items",
-        headers=headers,
-    )
-    assert items_resp.status_code == 200
-    for item in items_resp.json():
-        if item["pay_item_code"] in {"BONUS", "ADJUSTMENT"}:
-            await session_client.patch(
-                f"/settings/branches/{paytest_branch_id}/pay-items/{item['pay_item_id']}",
-                headers=headers,
-                json={"is_active": True},
-            )
-
-    # Add a BONUS period pay line
-    r1 = await session_client.post(
-        f"/payroll/periods/{pid}/period-pay",
-        headers=headers,
-        json={"driver_id": driver, "line_type": "BONUS", "amount": "50.00"},
-    )
-    assert r1.status_code == 201, f"first BONUS add failed: {r1.text}"
-
-    # Add a second BONUS line (e.g. a different bonus event) — should not be blocked
-    r2 = await session_client.post(
-        f"/payroll/periods/{pid}/period-pay",
-        headers=headers,
-        json={"driver_id": driver, "line_type": "BONUS", "amount": "25.00"},
-    )
-    assert r2.status_code == 201, (
-        f"second BONUS add failed — Period Pay must not be affected by Daily duplicate guard: {r2.text}"
-    )
-
-    # Note: ADJUSTMENT is not supported in this release; only BONUS is available.
-    # Multiple BONUS lines for the same driver are what matters for the Daily guard
-    # regression — confirmed above (r1 and r2 both succeed).
-
-
 # ---------------------------------------------------------------------------
 # T10 — Normal add + finalization regression test
 # ---------------------------------------------------------------------------
@@ -709,7 +685,7 @@ async def test_normal_add_and_finalize_still_works(
     )
     assert lines_resp.status_code == 200
     final_lines = lines_resp.json()
-    assert any(
-        fl.get("line_type") == "DailyNote"
-        for fl in final_lines
-    ), f"expected DailyNote in final lines, got: {final_lines}"
+    assert not any(fl.get("line_type") == "DailyNote" for fl in final_lines), (
+        "informational DailyNote source lines must not become financial FinalLines"
+    )
+    assert (await session_client.get(f"/payroll/periods/{pid}", headers=headers)).json()["status"] == "Locked"

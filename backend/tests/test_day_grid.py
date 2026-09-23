@@ -12,6 +12,8 @@ import pytest
 import pytest_asyncio
 import httpx
 from datetime import date
+import itertools
+from sqlalchemy import text as _text
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +33,8 @@ OUT_OF_RANGE = "2081-01-20"       # outside the period
 # P1 test period — wider range so new tests have plenty of unique dates
 P1_PERIOD_START = "2081-02-01"
 P1_PERIOD_END   = "2081-02-28"
+
+_DIRECT_PERIOD_COUNTER = itertools.count()
 
 
 async def _cancel_active_periods(
@@ -81,6 +85,43 @@ async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
     ))
 
 
+async def _insert_open_period(
+    direct_db,
+    branch_id: int,
+    start_date: str,
+    end_date: str,
+    period_type: str,
+    label: str,
+) -> dict:
+    """Seed an Open period for endpoint tests that do not test period creation."""
+    sequence = next(_DIRECT_PERIOD_COUNTER)
+    row = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype,
+                 startdate, enddate)
+            VALUES
+                ((SELECT companyid FROM core.branches WHERE branchid = :bid),
+                 :bid, 'Open', :code, :name, :period_type, :start_date, :end_date)
+            RETURNING payrollperiodid, status, startdate, enddate
+        """),
+        {
+            "bid": branch_id,
+            "code": f"{label}-{sequence}",
+            "name": f"{label} {sequence}",
+            "period_type": period_type,
+            "start_date": date.fromisoformat(start_date),
+            "end_date": date.fromisoformat(end_date),
+        },
+    )).mappings().first()
+    return {
+        "payroll_period_id": row["payrollperiodid"],
+        "status": row["status"],
+        "start_date": str(row["startdate"]),
+        "end_date": str(row["enddate"]),
+    }
+
+
 @pytest_asyncio.fixture
 async def dg_clean(
     session_client: httpx.AsyncClient,
@@ -101,29 +142,12 @@ async def dg_open_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     dg_clean: int,
+    direct_db,
 ) -> dict:
     """Create an Open payroll period on PAYTEST for 2081-01-05 to 2081-01-18."""
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   dg_clean,
-            "period_type": "Biweek",
-            "start_date":  PERIOD_START,
-            "end_date":    PERIOD_END,
-        },
-        headers=auth(auth_token),
+    return await _insert_open_period(
+        direct_db, dg_clean, PERIOD_START, PERIOD_END, "Biweek", "DG-OPEN"
     )
-    assert resp.status_code == 201, f"period create failed: {resp.text}"
-    pid = resp.json()["payroll_period_id"]
-
-    # Transition to Open
-    resp2 = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(auth_token),
-    )
-    assert resp2.status_code == 200, f"open failed: {resp2.text}"
-    return resp2.json()
 
 
 @pytest_asyncio.fixture
@@ -147,25 +171,28 @@ async def dg_seed_status_key(
     )
     company_id = cid_result.scalar_one()
 
+    key_code = f"DG_SICK_2081_{next(_DIRECT_PERIOD_COUNTER)}"
     result = await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrollstatuskeys
                 (companyid, branchid, statuscode, normalizedstatuscode, keyname,
                  hoursvalue, isoffreason, isactive, displayorder)
             VALUES
-                (:cid, :bid, 'DG_SICK_2081', 'DG_SICK_2081', 'Sick Day',
+                (:cid, :bid, :code, :code, 'Sick Day',
                  0, TRUE, TRUE, 99)
             RETURNING statuskeyid
         """),
-        {"cid": company_id, "bid": paytest_branch_id},
+        {"cid": company_id, "bid": paytest_branch_id, "code": key_code},
     )
     sk_id = result.scalar_one()
 
-    yield {"status_key_id": sk_id, "key_code": "DG_SICK_2081", "company_id": company_id}
+    yield {"status_key_id": sk_id, "key_code": key_code, "company_id": company_id}
 
-    # Cleanup
+    # Preserve the status key because period-day entry state references it.
+    # Deactivation gives the next fixture invocation the same logical code
+    # without violating the immutable-state FK or active-code uniqueness rule.
     await direct_db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+        _text("UPDATE payroll.payrollstatuskeys SET isactive = FALSE WHERE statuskeyid = :sid"),
         {"sid": sk_id},
     )
 
@@ -175,31 +202,15 @@ async def p1_open_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     dg_clean: int,
+    direct_db,
 ) -> dict:
     """
     A wider Open payroll period (2081-02-01 to 2081-02-28) used by P1 tests
     so they have plenty of unique dates without colliding with the main test period.
     """
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   dg_clean,
-            "period_type": "Custom",
-            "start_date":  P1_PERIOD_START,
-            "end_date":    P1_PERIOD_END,
-        },
-        headers=auth(auth_token),
+    return await _insert_open_period(
+        direct_db, dg_clean, P1_PERIOD_START, P1_PERIOD_END, "Custom", "DG-P1"
     )
-    assert resp.status_code == 201, f"p1 period create failed: {resp.text}"
-    pid = resp.json()["payroll_period_id"]
-
-    resp2 = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(auth_token),
-    )
-    assert resp2.status_code == 200, f"p1 period open failed: {resp2.text}"
-    return resp2.json()
 
 
 @pytest_asyncio.fixture
@@ -222,24 +233,25 @@ async def p1_seed_status_key(
     )
     company_id = cid_result.scalar_one()
 
+    key_code = f"P1_SICK_2081_{next(_DIRECT_PERIOD_COUNTER)}"
     result = await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrollstatuskeys
                 (companyid, branchid, statuscode, normalizedstatuscode, keyname,
                  hoursvalue, isoffreason, isactive, displayorder)
             VALUES
-                (:cid, :bid, 'P1_SICK_2081', 'P1_SICK_2081', 'P1 Sick Day',
+                (:cid, :bid, :code, :code, 'P1 Sick Day',
                  0, TRUE, TRUE, 99)
             RETURNING statuskeyid
         """),
-        {"cid": company_id, "bid": paytest_branch_id},
+        {"cid": company_id, "bid": paytest_branch_id, "code": key_code},
     )
     sk_id = result.scalar_one()
 
-    yield {"status_key_id": sk_id, "key_code": "P1_SICK_2081", "company_id": company_id}
+    yield {"status_key_id": sk_id, "key_code": key_code, "company_id": company_id}
 
     await direct_db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+        _text("UPDATE payroll.payrollstatuskeys SET isactive = FALSE WHERE statuskeyid = :sid"),
         {"sid": sk_id},
     )
 
@@ -660,18 +672,10 @@ class TestDayGridSave:
         from sqlalchemy import text as _text
 
         # Create a separate period and manually set it to Locked via DB
-        create_resp = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_branch_id,
-                "period_type": "Week",
-                "start_date":  "2081-02-01",
-                "end_date":    "2081-02-07",
-            },
-            headers=auth(auth_token),
+        period = await _insert_open_period(
+            direct_db, paytest_branch_id, "2081-02-01", "2081-02-07", "Week", "DG-LOCKED"
         )
-        assert create_resp.status_code == 201
-        pid = create_resp.json()["payroll_period_id"]
+        pid = period["payroll_period_id"]
 
         # Force to Locked
         await direct_db.execute(
@@ -1217,26 +1221,10 @@ class TestDayGridDateLoading:
         end = (today + timedelta(days=5)).isoformat()
 
         # Create period around today
-        create_resp = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": paytest_branch_id,
-                "period_type": "Week",
-                "start_date": start,
-                "end_date": end,
-            },
-            headers=auth(auth_token),
+        period = await _insert_open_period(
+            direct_db, paytest_branch_id, start, end, "Week", "DG-TODAY"
         )
-        assert create_resp.status_code == 201, create_resp.text
-        pid = create_resp.json()["payroll_period_id"]
-
-        # Open it
-        open_resp = await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=auth(auth_token),
-        )
-        assert open_resp.status_code == 200, open_resp.text
+        pid = period["payroll_period_id"]
 
         try:
             resp = await session_client.get(
@@ -1549,7 +1537,7 @@ class TestDayGridStatusKeyValidation:
             assert resp.status_code == 422, resp.text
         finally:
             await direct_db.execute(
-                _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+                _text("UPDATE payroll.payrollstatuskeys SET isactive = FALSE WHERE statuskeyid = :sid"),
                 {"sid": sk_id},
             )
 
@@ -1983,28 +1971,12 @@ async def lim_open_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     dg_clean: int,
+    direct_db,
 ) -> dict:
     """Open payroll period on PAYTEST for 2081-03 limit tests."""
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   dg_clean,
-            "period_type": "Custom",
-            "start_date":  LIM_PERIOD_START,
-            "end_date":    LIM_PERIOD_END,
-        },
-        headers=auth(auth_token),
+    return await _insert_open_period(
+        direct_db, dg_clean, LIM_PERIOD_START, LIM_PERIOD_END, "Custom", "DG-LIM"
     )
-    assert resp.status_code == 201, f"lim period create failed: {resp.text}"
-    pid = resp.json()["payroll_period_id"]
-
-    resp2 = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(auth_token),
-    )
-    assert resp2.status_code == 200, f"lim period open failed: {resp2.text}"
-    return resp2.json()
 
 
 async def _insert_status_key_with_limits(
@@ -2079,7 +2051,7 @@ async def _void_status_lines(direct_db, period_id: int, status_code: str) -> Non
 async def _delete_status_key(direct_db, sk_id: int) -> None:
     from sqlalchemy import text as _text
     await direct_db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE statuskeyid = :sid"),
+        _text("UPDATE payroll.payrollstatuskeys SET isactive = FALSE WHERE statuskeyid = :sid"),
         {"sid": sk_id},
     )
 
@@ -2677,6 +2649,7 @@ async def elig_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
+    direct_db,
 ) -> dict:
     """
     Open payroll period on PAYTEST for 2082-06-21 to 2082-06-27.
@@ -2684,26 +2657,9 @@ async def elig_period(
     Cancelled in teardown.
     """
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   paytest_branch_id,
-            "period_type": "Week",
-            "start_date":  ELIG_PERIOD_START,
-            "end_date":    ELIG_PERIOD_END,
-        },
-        headers=auth(auth_token),
+    data = await _insert_open_period(
+        direct_db, paytest_branch_id, ELIG_PERIOD_START, ELIG_PERIOD_END, "Week", "DG-ELIG"
     )
-    assert resp.status_code == 201, f"elig period create failed: {resp.text}"
-    pid = resp.json()["payroll_period_id"]
-
-    resp2 = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(auth_token),
-    )
-    assert resp2.status_code == 200, f"elig period open failed: {resp2.text}"
-    data = resp2.json()
     yield data
 
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
@@ -3886,27 +3842,12 @@ async def dg1_period(
     session_client: httpx.AsyncClient,
     auth_token: str,
     dg_clean: int,
+    direct_db,
 ) -> dict:
     """Open payroll period on PAYTEST for 2081-03-01 to 2081-03-28."""
-    resp = await session_client.post(
-        "/payroll/periods",
-        json={
-            "branch_id":   dg_clean,
-            "period_type": "Custom",
-            "start_date":  DG1_PERIOD_START,
-            "end_date":    DG1_PERIOD_END,
-        },
-        headers=auth(auth_token),
+    return await _insert_open_period(
+        direct_db, dg_clean, DG1_PERIOD_START, DG1_PERIOD_END, "Custom", "DG1"
     )
-    assert resp.status_code == 201, f"dg1 period create failed: {resp.text}"
-    pid = resp.json()["payroll_period_id"]
-    resp2 = await session_client.patch(
-        f"/payroll/periods/{pid}/status",
-        json={"status": "Open"},
-        headers=auth(auth_token),
-    )
-    assert resp2.status_code == 200, f"dg1 period open failed: {resp2.text}"
-    return resp2.json()
 
 
 class TestDayGridCDPI:

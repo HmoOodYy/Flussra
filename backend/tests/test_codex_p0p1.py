@@ -937,7 +937,7 @@ async def _cleanup_period_scope_item(
 
 
 class TestPeriodPayAuditLogging:
-    async def test_add_period_pay_writes_audit(
+    async def test_bonus_period_pay_is_rejected(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -945,7 +945,7 @@ class TestPeriodPayAuditLogging:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Adding a period-pay line must write a PERIOD_PAY_ADDED audit entry."""
+        """Retired generic Bonus writes are rejected in favor of Bonus Events."""
         result = await direct_db.execute(
             text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
             {"bid": paytest_branch_id},
@@ -971,7 +971,9 @@ class TestPeriodPayAuditLogging:
                 },
                 headers=_auth(auth_token),
             )
-            assert r.status_code == 201, r.text
+            assert r.status_code == 422, r.text
+            assert "bonus events" in r.text.lower()
+            return
             line_id = r.json()["draft_line_id"]
 
             result = await direct_db.execute(
@@ -993,7 +995,7 @@ class TestPeriodPayAuditLogging:
                 )
             await _cleanup_period_scope_item(client, auth_token, item_id)
 
-    async def test_void_period_pay_writes_audit(
+    async def test_bonus_period_pay_cannot_be_voided(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -1001,7 +1003,7 @@ class TestPeriodPayAuditLogging:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Voiding a period-pay line must write a PERIOD_PAY_VOIDED audit entry."""
+        """A rejected generic Bonus write has no period-pay line to void."""
         result = await direct_db.execute(
             text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
             {"bid": paytest_branch_id},
@@ -1026,7 +1028,9 @@ class TestPeriodPayAuditLogging:
                 },
                 headers=_auth(auth_token),
             )
-            assert r.status_code == 201, r.text
+            assert r.status_code == 422, r.text
+            assert "bonus events" in r.text.lower()
+            return
             line_id = r.json()["draft_line_id"]
 
             v = await client.delete(

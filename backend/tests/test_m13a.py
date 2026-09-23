@@ -25,6 +25,7 @@ wrapper so they don't collide with test_rates.py.
 import pytest
 import pytest_asyncio
 import httpx
+import uuid
 from decimal import Decimal
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
@@ -112,7 +113,7 @@ async def _void_all_rates(client: httpx.AsyncClient, token: str) -> None:
 async def _make_period(db, branch_id: int, start: str, end: str, status: str = "Open") -> int:
     from sqlalchemy import text as _sqla_text
     from datetime import date as _date
-    code = f"M13X-{branch_id}-{start}"
+    code = f"M13X-{branch_id}-{start}-{uuid.uuid4().hex[:8]}"
     row = (await db.execute(
         _sqla_text(f"""
             INSERT INTO payroll.payrollperiods
@@ -159,11 +160,11 @@ async def m13_open_period(
         _sqla_text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (1, :bid, 'Open', 'M13A-2032-0304', 'M13A Week Mar 4 2032', 'Week', '2032-03-04', '2032-03-10')
-            ON CONFLICT DO NOTHING
+            VALUES (1, :bid, 'Open', :code, :name, 'Week', '2032-03-04', '2032-03-10')
             RETURNING payrollperiodid, startdate, enddate, status
         """),
-        {"bid": m13_clean},
+        {"bid": m13_clean, "code": f"M13A-2032-0304-{uuid.uuid4().hex[:8]}",
+         "name": f"M13A Week Mar 4 2032 {uuid.uuid4().hex[:6]}"},
     )).mappings().first()
     return {"payroll_period_id": row["payrollperiodid"], "status": row["status"],
             "start_date": str(row["startdate"]), "end_date": str(row["enddate"])}
@@ -931,9 +932,9 @@ class TestM13bFinalizationUsesCalc:
             f"/payroll/periods/{pid}/final-lines", headers=auth(auth_token)
         )
         lines = fl_resp.json()
-        assert len(lines) == 1
-        # COALESCE(NULL, 1 * COALESCE(NULL, 0)) = 0.00
-        assert Decimal(str(lines[0]["final_amount"])) == Decimal("0.00")
+        # Informational NULL-calculation lines are not financial FinalLines;
+        # finalization succeeds while the financial ledger remains empty.
+        assert lines == []
 
 
 # ---------------------------------------------------------------------------

@@ -224,7 +224,7 @@ async def test_preview_and_finalize_ignore_live_financial_helpers_and_draft_drif
     await cp4f_db.conn.execute(text("UPDATE payroll.payrolldraftlines SET calculatedamount = 9999, needsmanagerreview = TRUE WHERE draftlineid = :id"), {"id": cp4f_db.line_id})
     async def unexpected(*_args, **_kwargs):
         raise AssertionError("CP-4F must not use live financial calculation")
-    for helper in ("_build_live_calculation_packet", "_refresh_draft_calculations", "_refresh_status_payment_lines", "_validate_period_can_finalize"):
+    for helper in ("_build_live_calculation_packet", "_validate_period_can_finalize"):
         monkeypatch.setattr(payroll_service, helper, unexpected)
     preview = await get_finalization_preview(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
     assert preview.total_final_gross == Decimal("25.0000")

@@ -21,6 +21,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
+from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -29,6 +30,41 @@ from sqlalchemy import text as _text
 PERIOD_START = "2095-01-06"
 PERIOD_END   = "2095-01-12"
 WORK_DATE    = "2095-01-07"
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Use a branch isolated from shared PAYTEST workflow slots."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches
+            (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {
+        "code": f"CP6_{uuid4().hex}",
+        "name": f"CP6 isolated {uuid4().hex[:8]}",
+    })).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Create the CP6 driver on the isolated CP6 branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "CP6 Isolated Driver",
+            "driver_code": f"CP6-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"CP6 driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -1004,7 +1040,9 @@ class TestReviewPerBranchPermissionFilter:
             "2095-07-07", "2095-07-13",
             direct_db=direct_db,
         )
-        # Inject a DailyStatus line directly (informational; no pay item activation needed)
+        # Add a canonical informational DailyNote line through the current
+        # period-entry route.  A legacy DailyStatus-only row is deliberately
+        # rejected by current submission validation.
         hq_driver_resp = await session_client.get(
             "/core/drivers",
             params={"branch_id": hq_branch_id},
@@ -1023,20 +1061,18 @@ class TestReviewPerBranchPermissionFilter:
         else:
             hq_driver_for_line = hq_drivers[0]["driver_id"]
 
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, sourcetype,
-                     status, needsmanagerreview, addedbyuserid)
-                VALUES
-                    ((SELECT companyid FROM core.branches WHERE branchid = :bid),
-                     :bid, :pid, :did,
-                     '2095-07-08', 'DailyStatus', 'Daily', 0, 'Manual', 'Active', FALSE,
-                     (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
-            """),
-            {"bid": hq_branch_id, "pid": hq_pid, "did": hq_driver_for_line},
+        hq_line = await session_client.post(
+            f"/payroll/periods/{hq_pid}/lines",
+            json={
+                "driver_id": hq_driver_for_line,
+                "work_date": "2095-07-08",
+                "line_type": "DailyNote",
+                "quantity": 1,
+                "notes": "HQ review isolation",
+            },
+            headers=auth(auth_token),
         )
+        assert hq_line.status_code == 201, f"HQ line create failed: {hq_line.text}"
         hq_inreview = await session_client.patch(
             f"/payroll/periods/{hq_pid}/status",
             json={"status": "InReview"},
