@@ -58,17 +58,40 @@ def actor(cursor):
     return cursor.fetchone()[0]
 
 
-def version(cursor, company_id, setup_id, number=1, effective="2026-01-05", replaces=None):
+def version(cursor, company_id, setup_id, number=1, effective="2026-01-05", replaces=None,
+            frequency="Week", custom_interval=None):
     cursor.execute(
         "INSERT INTO payroll.PayrollSetupVersions "
         "(CompanyID, PayrollSetupID, LifecycleState, VersionNumber, EffectiveFromDate, "
         "PayrollFrequency, AnchorStartDate, CustomIntervalDays, NormalDaysOffMask, "
         "ConfigHash, ReplacesVersionID, PublishedByUserID, PublishedAtUtc) "
-        "VALUES (%s, %s, 'Published', %s, %s, 'Week', '2026-01-05', NULL, 0, "
+        "VALUES (%s, %s, 'Published', %s, %s, %s, '2026-01-05', %s, 0, "
         "%s, %s, %s, NOW()) RETURNING PayrollSetupVersionID",
-        (company_id, setup_id, number, effective, "a" * 64, replaces, actor(cursor)),
+        (company_id, setup_id, number, effective, frequency, custom_interval,
+         "a" * 64, replaces, actor(cursor)),
     )
     return cursor.fetchone()[0]
+
+
+def draft_version(cursor, company_id, setup_id, frequency, custom_interval):
+    cursor.execute(
+        "INSERT INTO payroll.PayrollSetupVersions "
+        "(CompanyID, PayrollSetupID, LifecycleState, PayrollFrequency, CustomIntervalDays) "
+        "VALUES (%s, %s, 'Draft', %s, %s) RETURNING PayrollSetupVersionID",
+        (company_id, setup_id, frequency, custom_interval),
+    )
+    return cursor.fetchone()[0]
+
+
+def publish_draft(cursor, version_id):
+    cursor.execute(
+        "UPDATE payroll.PayrollSetupVersions SET LifecycleState = 'Published', "
+        "VersionNumber = 1, EffectiveFromDate = '2026-01-05', "
+        "AnchorStartDate = '2026-01-05', NormalDaysOffMask = 0, ConfigHash = %s, "
+        "PublishedByUserID = %s, PublishedAtUtc = NOW() "
+        "WHERE PayrollSetupVersionID = %s",
+        ("a" * 64, actor(cursor), version_id),
+    )
 
 
 def assignment(cursor, company_id, branch_id, setup_id, start="2026-01-05", end=None):
@@ -171,6 +194,46 @@ def test_published_version_requires_complete_effective_configuration(cursor):
             "'2026-01-05', 0, %s, %s, NOW())",
             (company_id, setup_id, "a" * 64, actor(cursor)),
         )
+
+
+@pytest.mark.parametrize("frequency", ["Week", "Biweek", "Month"])
+def test_published_non_custom_version_rejects_custom_interval(cursor, frequency):
+    company_id, _ = company(cursor)
+    setup_id, _ = setup(cursor, company_id)
+    version_id = draft_version(cursor, company_id, setup_id, frequency, 7)
+    with rejected(cursor):
+        publish_draft(cursor, version_id)
+
+
+def test_published_custom_version_requires_positive_interval(cursor):
+    company_id, _ = company(cursor)
+    setup_id, _ = setup(cursor, company_id)
+    version_id = draft_version(cursor, company_id, setup_id, "Custom", None)
+    with rejected(cursor):
+        publish_draft(cursor, version_id)
+    cursor.execute(
+        "UPDATE payroll.PayrollSetupVersions SET CustomIntervalDays = 7 "
+        "WHERE PayrollSetupVersionID = %s", (version_id,),
+    )
+    publish_draft(cursor, version_id)
+    cursor.execute(
+        "SELECT LifecycleState, PayrollFrequency, CustomIntervalDays "
+        "FROM payroll.PayrollSetupVersions WHERE PayrollSetupVersionID = %s",
+        (version_id,),
+    )
+    assert cursor.fetchone() == ("Published", "Custom", 7)
+
+
+def test_draft_version_custom_interval_remains_editable(cursor):
+    company_id, _ = company(cursor)
+    setup_id, _ = setup(cursor, company_id)
+    cursor.execute(
+        "INSERT INTO payroll.PayrollSetupVersions "
+        "(CompanyID, PayrollSetupID, LifecycleState, PayrollFrequency, CustomIntervalDays) "
+        "VALUES (%s, %s, 'Draft', 'Week', 7) RETURNING PayrollSetupVersionID",
+        (company_id, setup_id),
+    )
+    assert cursor.fetchone()[0]
 
 
 def test_published_version_cannot_change_or_be_deleted(cursor):

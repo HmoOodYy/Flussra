@@ -75,7 +75,10 @@ CREATE TABLE payroll.PayrollSetupVersions (
             OR (
                 VersionNumber > 0 AND EffectiveFromDate IS NOT NULL
                 AND PayrollFrequency IS NOT NULL AND AnchorStartDate IS NOT NULL
-                AND (PayrollFrequency <> 'Custom' OR CustomIntervalDays IS NOT NULL)
+                AND (
+                    (PayrollFrequency = 'Custom' AND CustomIntervalDays IS NOT NULL)
+                    OR (PayrollFrequency <> 'Custom' AND CustomIntervalDays IS NULL)
+                )
                 AND NormalDaysOffMask IS NOT NULL
                 AND ConfigHash ~ '^[0-9a-f]{64}$'
                 AND PublishedByUserID IS NOT NULL AND PublishedAtUtc IS NOT NULL
