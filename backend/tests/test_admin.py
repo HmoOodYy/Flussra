@@ -1019,7 +1019,7 @@ class TestListPermissions:
     ):
         # Default (ui_only=true) returns permissions whose modulecode is in the
         # UI-visible set: company, roles, users, payroll, payitems, payrates,
-        # drivers, dispatch, reports, settings, review.
+        # drivers, dispatch, reports, settings, payroll_setup, review.
         # payroll.entry (modulecode='payroll') is visible.
         # review.decide (modulecode='review') is visible — 'review' was added
         # to the ui_only filter so the Roles UI can assign it to custom roles.
@@ -1032,6 +1032,10 @@ class TestListPermissions:
         assert "payroll.view"          in ui_codes
         assert "payroll.finalize"      in ui_codes
         assert "settings.manage"       in ui_codes
+        assert {
+            "payroll_setup.view", "payroll_setup.manage",
+            "payroll_setup.publish", "payroll_setup.assign",
+        } <= ui_codes
         # Enforced codes now catalogued and visible to the Roles UI
         assert "payroll.entry"         in ui_codes, (
             "payroll.entry must be visible (migration 0041, modulecode='payroll')"
