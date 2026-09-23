@@ -1447,6 +1447,7 @@ class TestM13bCodexFixes:
         """
         from tests.seed_helpers import seed_legacy_item
         await _void_all_rates(session_client, auth_token)
+        item_id = None
         try:
             # 1. Seed custom item
             item_id = await seed_legacy_item(
@@ -1505,6 +1506,11 @@ class TestM13bCodexFixes:
 
         finally:
             await _void_all_rates(session_client, auth_token)
+            if item_id is not None:
+                cleanup = await session_client.delete(
+                    f"/settings/pay-items/{item_id}", headers=auth(auth_token)
+                )
+                assert cleanup.status_code == 200, cleanup.text
 
     # ── Issue 3: prevent silent zero finalization ─────────────────────────── #
 
@@ -1647,16 +1653,21 @@ class TestM13bCodexFixes:
             category="Count",
         )
 
-        # branch_user attempts to assign a rate type -> must be denied.
-        deny_resp = await session_client.post(
-            f"/settings/pay-items/{item_id}/rate-type-map",
-            json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
-            headers=auth(branch_user_token),
-        )
-        assert deny_resp.status_code == 403, (
-            f"branch_user should be denied (403) but got {deny_resp.status_code}: "
-            f"{deny_resp.text}"
-        )
+        try:
+            deny_resp = await session_client.post(
+                f"/settings/pay-items/{item_id}/rate-type-map",
+                json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
+                headers=auth(branch_user_token),
+            )
+            assert deny_resp.status_code == 403, (
+                f"branch_user should be denied (403) but got {deny_resp.status_code}: "
+                f"{deny_resp.text}"
+            )
+        finally:
+            cleanup = await session_client.delete(
+                f"/settings/pay-items/{item_id}", headers=auth(auth_token)
+            )
+            assert cleanup.status_code == 200, cleanup.text
 
     async def test_rate_type_map_admin_can_assign(
         self, session_client: httpx.AsyncClient, auth_token: str,
@@ -1669,35 +1680,29 @@ class TestM13bCodexFixes:
         Positive counterpart to the denial test above.
         """
         from tests.seed_helpers import seed_legacy_item
-        # Reuse M13A_PERM_TEST created by the denial test (or seed if not yet).
-        items_resp = await session_client.get(
-            "/settings/pay-items", headers=auth(auth_token),
+        item_id = await seed_legacy_item(
+            db_conn,
+            code="M13A_PERM_TEST",
+            name="Permission Test Item (M13)",
+            unit="Unit",
+            category="Count",
         )
-        assert items_resp.status_code == 200
-        item_id = next(
-            (i["pay_item_id"] for i in items_resp.json()
-             if i["pay_item_code"] == "M13A_PERM_TEST"),
-            None,
-        )
-        if item_id is None:
-            item_id = await seed_legacy_item(
-                db_conn,
-                code="M13A_PERM_TEST",
-                name="Permission Test Item (M13)",
-                unit="Unit",
-                category="Count",
+        try:
+            ok_resp = await session_client.post(
+                f"/settings/pay-items/{item_id}/rate-type-map",
+                json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
+                headers=auth(auth_token),
             )
-
-        ok_resp = await session_client.post(
-            f"/settings/pay-items/{item_id}/rate-type-map",
-            json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
-            headers=auth(auth_token),
-        )
-        assert ok_resp.status_code == 201, (
-            f"Admin should be allowed (201) but got {ok_resp.status_code}: "
-            f"{ok_resp.text}"
-        )
-        assert ok_resp.json()["rate_code"] == "HOURLY"
+            assert ok_resp.status_code == 201, (
+                f"Admin should be allowed (201) but got {ok_resp.status_code}: "
+                f"{ok_resp.text}"
+            )
+            assert ok_resp.json()["rate_code"] == "HOURLY"
+        finally:
+            cleanup = await session_client.delete(
+                f"/settings/pay-items/{item_id}", headers=auth(auth_token)
+            )
+            assert cleanup.status_code == 200, cleanup.text
 
     # ── System line update uses DB-driven path (not hardcoded dict) ───────── #
 

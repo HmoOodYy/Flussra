@@ -1133,7 +1133,7 @@ async def list_roles(
 # permission codes whose modulecode uses old capitalisation or naming.
 _UI_MODULE_CODES = (
     'company', 'roles', 'users', 'payroll', 'payitems',
-    'payrates', 'drivers', 'dispatch', 'reports', 'settings',
+    'payrates', 'drivers', 'dispatch', 'reports', 'settings', 'payroll_setup',
 )
 
 # Dependency map: child permission → required parent permission.
@@ -1178,7 +1178,7 @@ async def list_permissions(
                 FROM   sec.permissions
                 WHERE  modulecode IN ('company','roles','users','payroll','payitems',
                                       'payrates','drivers','dispatch','reports','settings',
-                                      'review')
+                                      'payroll_setup','review')
                 ORDER  BY modulecode, permissioncode
             """),
         )

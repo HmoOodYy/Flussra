@@ -1064,14 +1064,18 @@ async def create_rate(
             FROM payroll.payitems pi
             JOIN payroll.payitemratetypemap pirm ON pirm.payitemid = pi.payitemid
               AND pirm.ratetypeid = :rtid AND pirm.status = 'Active'
-            LEFT JOIN payroll.branchpayitemconfig bpic ON bpic.payitemid = pi.payitemid
-              AND bpic.companyid = :cid AND bpic.branchid = :bid
-              AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :effective_from)
+            LEFT JOIN LATERAL (
+                SELECT cfg.isactive
+                FROM payroll.branchpayitemconfig cfg
+                WHERE cfg.payitemid = pi.payitemid
+                  AND cfg.companyid = :cid AND cfg.branchid = :bid
+                  AND (cfg.effectiveto IS NULL OR cfg.effectiveto >= :effective_from)
+                ORDER BY cfg.effectivefrom DESC, cfg.configid DESC
+                LIMIT 1
+            ) bpic ON TRUE
             WHERE pi.status != 'Retired'
               AND pi.requiresrate = TRUE
               AND (pi.companyid IS NULL OR pi.companyid = :cid)
-            ORDER BY bpic.effectivefrom DESC NULLS LAST
-            LIMIT 1
         """),
         {
             "rtid": data.rate_type_id,
@@ -1080,21 +1084,20 @@ async def create_rate(
             "effective_from": data.effective_from,
         },
     )
-    branch_rt_row = branch_rt_result.mappings().first()
-    if branch_rt_row is not None:
-        # Rate type IS mapped to a pay item â€” check branch activation
-        if branch_rt_row["cfg_isactive"] is not None:
-            rt_is_active = bool(branch_rt_row["cfg_isactive"])
-        else:
-            rt_is_active = bool(branch_rt_row["isdefaultbranchactive"])
-        if not rt_is_active:
+    branch_rt_rows = branch_rt_result.mappings().all()
+    if branch_rt_rows:
+        # A RateType may map to multiple PayItems; any eligible active mapping permits it.
+        if not any(
+            bool(row["cfg_isactive"])
+            if row["cfg_isactive"] is not None
+            else bool(row["isdefaultbranchactive"])
+            for row in branch_rt_rows
+        ):
             raise HTTPException(
                 status_code=422,
                 detail="This rate type is not active for this driver's branch.",
             )
-    # branch_rt_row is None: rate type has no PayItemRateTypeMap entry (e.g. Fixed/OVERNIGHT);
-    # it is not restricted to branch pay item config â€” allow through (company scope already
-    # validated above by _assert_rate_type_allowed_for_company).
+    # No eligible mapped PayItems (e.g. Fixed/OVERNIGHT): company validation above suffices.
 
     # M13c: resolve rate behavior and validate tier / block inputs BEFORE inserting.
     rate_behavior = await _resolve_rate_behavior(data.rate_type_id, company_id, db)
