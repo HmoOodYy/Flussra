@@ -15,7 +15,7 @@ Covers:
 import pytest
 import pytest_asyncio
 import httpx
-from datetime import date
+from datetime import date, timedelta
 from sqlalchemy import text as _sqla_text
 from uuid import uuid4
 
@@ -36,6 +36,39 @@ def _today_iso() -> str:
     constant would be yesterday and rate validators would reject it as 'in the past').
     """
     return date.today().isoformat()
+
+
+@pytest_asyncio.fixture
+async def additional_hourly_item(direct_db, paytest_rate_type_id: int):
+    """A second HOURLY-mapped item, removed after each activation test."""
+    from tests.seed_helpers import seed_legacy_item
+
+    item_id = await seed_legacy_item(
+        direct_db, code=f"RATE_GUARD_{uuid4().hex[:12]}", name="Rate Guard Item"
+    )
+    await direct_db.execute(
+        _sqla_text("""
+            INSERT INTO payroll.payitemratetypemap
+                (payitemid, ratetypeid, isprimary, status)
+            VALUES (:item_id, :rate_type_id, FALSE, 'Active')
+        """),
+        {"item_id": item_id, "rate_type_id": paytest_rate_type_id},
+    )
+    try:
+        yield item_id
+    finally:
+        await direct_db.execute(
+            _sqla_text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :item_id"),
+            {"item_id": item_id},
+        )
+        await direct_db.execute(
+            _sqla_text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :item_id"),
+            {"item_id": item_id},
+        )
+        await direct_db.execute(
+            _sqla_text("DELETE FROM payroll.payitems WHERE payitemid = :item_id"),
+            {"item_id": item_id},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3567,6 +3600,160 @@ class TestRateCreationGuard:
     """
 
     @pytest.mark.asyncio
+    async def test_active_hourly_item_overrides_inactive_mapped_item(
+        self, session_client, auth_token, paytest_driver_id, paytest_branch_id,
+        paytest_rate_type_id, additional_hourly_item, direct_db,
+    ):
+        hours = (await direct_db.execute(
+            _sqla_text("""
+                SELECT cfg.isactive FROM payroll.branchpayitemconfig cfg
+                JOIN payroll.payitems pi ON pi.payitemid = cfg.payitemid
+                WHERE cfg.companyid = 1 AND cfg.branchid = :branch_id
+                  AND pi.payitemcode = 'HOURS' AND cfg.effectiveto IS NULL
+            """),
+            {"branch_id": paytest_branch_id},
+        )).scalar_one()
+        assert hours is True
+
+        await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, payitemid, isactive, effectivefrom)
+                VALUES (1, :branch_id, :item_id, FALSE, :effective_from)
+            """),
+            {"branch_id": paytest_branch_id, "item_id": additional_hourly_item,
+             "effective_from": date.today() + timedelta(days=30)},
+        )
+        resp = await session_client.post(
+            "/payroll/rates",
+            json={"driver_id": paytest_driver_id, "rate_type_id": paytest_rate_type_id,
+                  "amount": "25.00", "effective_from": _today_iso()},
+            headers=auth(auth_token),
+        )
+        try:
+            assert resp.status_code == 201, resp.text
+        finally:
+            if resp.status_code == 201:
+                await session_client.delete(
+                    f"/payroll/rates/{resp.json()['driver_rate_id']}",
+                    headers=auth(auth_token),
+                )
+
+    @pytest.mark.asyncio
+    async def test_disabling_one_hourly_item_keeps_other_mapping_eligible(
+        self, session_client, auth_token, paytest_driver_id, paytest_branch_id,
+        paytest_rate_type_id, additional_hourly_item, direct_db,
+    ):
+        await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, payitemid, isactive, effectivefrom)
+                VALUES (1, :branch_id, :item_id, TRUE, :effective_from)
+            """),
+            {"branch_id": paytest_branch_id, "item_id": additional_hourly_item,
+             "effective_from": date.today() + timedelta(days=30)},
+        )
+        hours = (await direct_db.execute(
+            _sqla_text("""
+                SELECT cfg.configid, cfg.isactive
+                FROM payroll.branchpayitemconfig cfg
+                JOIN payroll.payitems pi ON pi.payitemid = cfg.payitemid
+                WHERE cfg.companyid = 1 AND cfg.branchid = :branch_id
+                  AND pi.payitemcode = 'HOURS' AND cfg.effectiveto IS NULL
+            """),
+            {"branch_id": paytest_branch_id},
+        )).mappings().one()
+        assert hours["isactive"] is True
+        await direct_db.execute(
+            _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = FALSE WHERE configid = :id"),
+            {"id": hours["configid"]},
+        )
+        try:
+            resp = await session_client.post(
+                "/payroll/rates",
+                json={"driver_id": paytest_driver_id, "rate_type_id": paytest_rate_type_id,
+                      "amount": "25.00", "effective_from": _today_iso()},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 201, resp.text
+            await session_client.delete(
+                f"/payroll/rates/{resp.json()['driver_rate_id']}",
+                headers=auth(auth_token),
+            )
+        finally:
+            await direct_db.execute(
+                _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = :active WHERE configid = :id"),
+                {"active": hours["isactive"], "id": hours["configid"]},
+            )
+
+    @pytest.mark.asyncio
+    async def test_latest_eligible_config_governs_each_mapped_item(
+        self, session_client, auth_token, paytest_driver_id, paytest_branch_id,
+        paytest_rate_type_id, additional_hourly_item, direct_db,
+    ):
+        future = date.today() + timedelta(days=30)
+        await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, payitemid, isactive, effectivefrom, effectiveto)
+                VALUES (1, :branch_id, :item_id, TRUE, :today, :last_day)
+            """),
+            {"branch_id": paytest_branch_id, "item_id": additional_hourly_item,
+             "today": date.today(), "last_day": future - timedelta(days=1)},
+        )
+        future_config = (await direct_db.execute(
+            _sqla_text("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, payitemid, isactive, effectivefrom)
+                VALUES (1, :branch_id, :item_id, FALSE, :future)
+                RETURNING configid
+            """),
+            {"branch_id": paytest_branch_id, "item_id": additional_hourly_item,
+             "future": future},
+        )).scalar_one()
+        hours = (await direct_db.execute(
+            _sqla_text("""
+                SELECT cfg.configid, cfg.isactive
+                FROM payroll.branchpayitemconfig cfg
+                JOIN payroll.payitems pi ON pi.payitemid = cfg.payitemid
+                WHERE cfg.companyid = 1 AND cfg.branchid = :branch_id
+                  AND pi.payitemcode = 'HOURS' AND cfg.effectiveto IS NULL
+            """),
+            {"branch_id": paytest_branch_id},
+        )).mappings().one()
+        assert hours["isactive"] is True
+        await direct_db.execute(
+            _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = FALSE WHERE configid = :id"),
+            {"id": hours["configid"]},
+        )
+        try:
+            payload = {"driver_id": paytest_driver_id, "rate_type_id": paytest_rate_type_id,
+                       "amount": "25.00", "effective_from": _today_iso()}
+            rejected = await session_client.post(
+                "/payroll/rates", json=payload, headers=auth(auth_token)
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["detail"] == "This rate type is not active for this driver's branch."
+
+            await direct_db.execute(
+                _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = TRUE WHERE configid = :id"),
+                {"id": future_config},
+            )
+            allowed = await session_client.post(
+                "/payroll/rates", json=payload, headers=auth(auth_token)
+            )
+            assert allowed.status_code == 201, allowed.text
+            await session_client.delete(
+                f"/payroll/rates/{allowed.json()['driver_rate_id']}",
+                headers=auth(auth_token),
+            )
+        finally:
+            await direct_db.execute(
+                _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = :active WHERE configid = :id"),
+                {"active": hours["isactive"], "id": hours["configid"]},
+            )
+
+    @pytest.mark.asyncio
     async def test_create_rate_accepts_rate_when_effective_from_matches(
         self,
         session_client: httpx.AsyncClient,
@@ -3674,61 +3861,86 @@ class TestRateCreationGuard:
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        paytest_rate_type_id: int,
         direct_db,
     ):
-        """
-        Temporarily set HOURS BranchPayItemConfig.isactive=FALSE.
-        Creating a rate -> 422 (item not active for branch).
-        """
-        from sqlalchemy import text as _text
+        """Reject HOURLY only after every eligible mapped item is inactive."""
+        mapped_sql = _sqla_text("""
+            SELECT pi.payitemid, pi.isdefaultbranchactive,
+                   cfg.configid, cfg.isactive AS config_active
+            FROM payroll.payitems pi
+            JOIN payroll.payitemratetypemap m ON m.payitemid = pi.payitemid
+                AND m.ratetypeid = :rate_type_id AND m.status = 'Active'
+            LEFT JOIN LATERAL (
+                SELECT configid, isactive FROM payroll.branchpayitemconfig
+                WHERE companyid = 1 AND branchid = :branch_id
+                  AND payitemid = pi.payitemid
+                  AND (effectiveto IS NULL OR effectiveto >= :effective_from)
+                ORDER BY effectivefrom DESC, configid DESC LIMIT 1
+            ) cfg ON TRUE
+            WHERE pi.status != 'Retired' AND pi.requiresrate = TRUE
+              AND (pi.companyid IS NULL OR pi.companyid = 1)
+        """)
+        params = {"rate_type_id": paytest_rate_type_id,
+                  "branch_id": paytest_branch_id, "effective_from": date.today()}
+        mapped = (await direct_db.execute(mapped_sql, params)).mappings().all()
+        assert mapped, "HOURLY must have at least one eligible Pay Item"
 
-        matrix_resp = await session_client.get(
-            f"/payroll/drivers/{paytest_driver_id}/rate-matrix",
-            params={"as_of": _today_iso()},
-            headers=auth(auth_token),
-        )
-        assert matrix_resp.status_code == 200
-        hourly_grp = next(
-            (g for g in matrix_resp.json()["groups"] if g["rate_code"] == "HOURLY"), None
-        )
-        if hourly_grp is None:
-            pytest.skip("HOURLY not in rate matrix for paytest_driver_id")
-
-        pay_item_id = hourly_grp["pay_item_id"]
-        rt_id = hourly_grp["rate_type_id"]
-
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.branchpayitemconfig
-                SET isactive = FALSE
-                WHERE payitemid = :piid AND branchid = :bid AND companyid = 1
-            """),
-            {"piid": pay_item_id, "bid": paytest_branch_id},
-        )
+        previous: list[tuple[int, bool]] = []
+        inserted: list[int] = []
         try:
+            for row in mapped:
+                if row["configid"] is not None:
+                    previous.append((row["configid"], row["config_active"]))
+                    await direct_db.execute(
+                        _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = FALSE WHERE configid = :id"),
+                        {"id": row["configid"]},
+                    )
+                elif row["isdefaultbranchactive"]:
+                    config_id = (await direct_db.execute(
+                        _sqla_text("""
+                            INSERT INTO payroll.branchpayitemconfig
+                                (companyid, branchid, payitemid, isactive, effectivefrom)
+                            VALUES (1, :branch_id, :item_id, FALSE, :effective_from)
+                            RETURNING configid
+                        """),
+                        {"branch_id": paytest_branch_id, "item_id": row["payitemid"],
+                         "effective_from": date.today()},
+                    )).scalar_one()
+                    inserted.append(config_id)
+
+            after = (await direct_db.execute(mapped_sql, params)).mappings().all()
+            assert not any(
+                row["config_active"] if row["configid"] is not None
+                else row["isdefaultbranchactive"]
+                for row in after
+            ), "Test setup must deactivate every eligible HOURLY mapping"
             resp = await session_client.post(
                 "/payroll/rates",
                 json={
                     "driver_id":      paytest_driver_id,
-                    "rate_type_id":   rt_id,
+                    "rate_type_id":   paytest_rate_type_id,
                     "amount":         "25.00",
                     "effective_from": _today_iso(),
                 },
                 headers=auth(auth_token),
             )
             assert resp.status_code == 422, (
-                f"create_rate must reject rate when BranchPayItemConfig.isactive=FALSE. "
+                f"create_rate must reject when every mapped item is inactive. "
                 f"Got {resp.status_code}: {resp.text}"
             )
+            assert resp.json()["detail"] == "This rate type is not active for this driver's branch."
         finally:
-            await direct_db.execute(
-                _text("""
-                    UPDATE payroll.branchpayitemconfig
-                    SET isactive = TRUE
-                    WHERE payitemid = :piid AND branchid = :bid AND companyid = 1
-                """),
-                {"piid": pay_item_id, "bid": paytest_branch_id},
-            )
+            for config_id, active in previous:
+                await direct_db.execute(
+                    _sqla_text("UPDATE payroll.branchpayitemconfig SET isactive = :active WHERE configid = :id"),
+                    {"active": active, "id": config_id},
+                )
+            for config_id in inserted:
+                await direct_db.execute(
+                    _sqla_text("DELETE FROM payroll.branchpayitemconfig WHERE configid = :id"),
+                    {"id": config_id},
+                )
 
     @pytest.mark.asyncio
     async def test_create_rate_accepts_default_active_system_item(
