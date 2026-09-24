@@ -1,34 +1,7 @@
-"""
-Integration tests for M9 — branch payroll setup and status keys.
-
-Endpoints tested
-----------------
-GET  /settings/branches/{id}/payroll-setup
-PUT  /settings/branches/{id}/payroll-setup
-GET  /settings/branches/{id}/status-keys
-POST /settings/branches/{id}/status-keys
-PATCH /settings/branches/{id}/status-keys/{key_id}
-DELETE /settings/branches/{id}/status-keys/{key_id}
-
-Users tested
-------------
-admin        AllCompanyBranches scope, PAYROLL_ADMIN role (all permissions)
-branch_user  SpecificBranch=HQ scope, PAYROLL_VIEWER role (no write permissions)
-
-Test classes
-------------
-TestGetPayrollSetup    — 404 when not configured, 200 after upsert, 403 scope
-TestUpsertPayrollSetup — create, update, validation, scope guard, audit rollback
-TestGetStatusKeys      — empty list, listing after creates, include_inactive flag
-TestCreateStatusKey    — full + minimal payload, validation, duplicates, scope
-TestUpdateStatusKey    — partial patch, hours, code rename, conflict, scope
-TestDeleteStatusKey    — soft delete, idempotent, exclude from default list, scope
-"""
+"""Integration tests for payroll status keys and legacy setup authentication."""
 import pytest
 import pytest_asyncio
 import httpx
-from unittest.mock import patch
-from app.settings import service as settings_service
 
 
 def auth(token: str) -> dict[str, str]:
@@ -36,7 +9,7 @@ def auth(token: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped fixture: an Active branch dedicated to M9 tests
+# Session-scoped branch used by status-key tests.
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture(scope="session")
@@ -44,11 +17,7 @@ async def setup_branch_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
 ) -> int:
-    """
-    Create an Active branch for payroll-setup and status-key tests.
-    Using a dedicated branch keeps M9 mutations isolated from the HQ / PAYTEST
-    branches used by payroll-entry and rate tests.
-    """
+    """Create an Active branch isolated from payroll-entry test branches."""
     resp = await session_client.post(
         "/settings/branches",
         json={
@@ -63,250 +32,20 @@ async def setup_branch_id(
     return resp.json()["branch_id"]
 
 
-# ---------------------------------------------------------------------------
-# TestGetPayrollSetup
-# ---------------------------------------------------------------------------
-
 class TestGetPayrollSetup:
-
-    async def test_404_when_not_configured(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        """A freshly created branch has no payroll setup — must return 404."""
-        resp = await client.get(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 404
-
-    async def test_branch_user_denied_other_branch(
-        self,
-        client: httpx.AsyncClient,
-        branch_user_token: str,
-        setup_branch_id: int,
-    ):
-        """branch_user is scoped to HQ — PSTB must return 403."""
-        resp = await client.get(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            headers=auth(branch_user_token),
-        )
-        assert resp.status_code == 403
 
     async def test_unauthenticated_rejected(
         self,
         client: httpx.AsyncClient,
         setup_branch_id: int,
     ):
-        resp = await client.get(f"/settings/branches/{setup_branch_id}/payroll-setup")
-        assert resp.status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# TestUpsertPayrollSetup
-# ---------------------------------------------------------------------------
-
-class TestUpsertPayrollSetup:
-
-    async def test_create_setup(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        """First PUT creates the configuration."""
-        resp = await client.put(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2026-01-05",
-                "pay_day_of_week":   2,
-                "normal_days_off_mask": 65,
-                "notes": "Weekly Mon–Fri setup",
-            },
-            headers=auth(auth_token),
+        response = await client.get(
+            f"/settings/branches/{setup_branch_id}/payroll-setup"
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["payroll_frequency"] == "Week"
-        assert body["anchor_start_date"] == "2026-01-05"
-        assert body["pay_day_of_week"]   == 2
-        assert body["normal_days_off_mask"] == 65
-        assert body["notes"] == "Weekly Mon–Fri setup"
-        assert body["branch_id"] == setup_branch_id
-        assert body["is_active"] is True
-
-    async def test_get_after_create(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        """GET should now return the upserted configuration."""
-        resp = await client.get(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["payroll_frequency"] == "Week"
-
-    async def test_update_setup(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        """Second PUT replaces (not merges) the configuration."""
-        resp = await client.put(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Biweek",
-                "anchor_start_date": "2026-01-05",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["payroll_frequency"] == "Biweek"
-        # Optional fields revert to defaults when not supplied.
-        assert body["pay_day_of_week"]      is None
-        assert body["normal_days_off_mask"] is None
-        assert body["notes"]                is None
-
-    async def test_invalid_frequency_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        resp = await client.put(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Daily",
-                "anchor_start_date": "2026-01-05",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
-    async def test_invalid_day_of_week_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        resp = await client.put(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2026-01-05",
-                "pay_day_of_week":   8,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
-    async def test_invalid_mask_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        resp = await client.put(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2026-01-05",
-                "normal_days_off_mask": 200,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
-    async def test_branch_user_denied(
-        self,
-        client: httpx.AsyncClient,
-        branch_user_token: str,
-        setup_branch_id: int,
-    ):
-        resp = await client.put(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2026-01-05",
-            },
-            headers=auth(branch_user_token),
-        )
-        assert resp.status_code == 403
-
-    async def test_branch_user_can_read_hq_setup(
-        self,
-        client: httpx.AsyncClient,
-        branch_user_token: str,
-        hq_branch_id: int,
-    ):
-        """
-        branch_user is scoped to HQ.  HQ may or may not have a payroll setup
-        in the test DB, but the request must not be 403.  We accept 200 or 404.
-        """
-        resp = await client.get(
-            f"/settings/branches/{hq_branch_id}/payroll-setup",
-            headers=auth(branch_user_token),
-        )
-        assert resp.status_code in (200, 404)
-
-    async def test_upsert_rolls_back_when_audit_fails(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        """
-        If _write_settings_audit raises, the INSERT/UPDATE must be rolled back.
-        The setup configuration must be unchanged (still Biweek from the
-        previous test, or 404 if the test order shifts the state).
-        """
-        before_resp = await client.get(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            headers=auth(auth_token),
-        )
-        before_freq = (
-            before_resp.json().get("payroll_frequency")
-            if before_resp.status_code == 200
-            else None
-        )
-
-        async def _raise(*args, **kwargs):
-            raise RuntimeError("Simulated audit failure on payroll setup upsert")
-
-        with patch.object(settings_service, "_write_settings_audit", _raise):
-            with pytest.raises(RuntimeError, match="Simulated audit failure"):
-                await client.put(
-                    f"/settings/branches/{setup_branch_id}/payroll-setup",
-                    json={
-                        "payroll_frequency": "Month",
-                        "anchor_start_date": "2026-01-01",
-                    },
-                    headers=auth(auth_token),
-                )
-
-        after_resp = await client.get(
-            f"/settings/branches/{setup_branch_id}/payroll-setup",
-            headers=auth(auth_token),
-        )
-        # Frequency must not have changed to "Month".
-        if after_resp.status_code == 200:
-            assert after_resp.json()["payroll_frequency"] != "Month"
-        else:
-            # 404 means the original state was also 404 — rollback is fine.
-            assert before_freq is None
+        assert response.status_code == 401
 
 
-# ---------------------------------------------------------------------------
-# Session-scoped fixture: one status key created for read/update/delete tests
-# ---------------------------------------------------------------------------
+# Session-scoped fixture: one status key created for read/update/delete tests.
 
 @pytest_asyncio.fixture(scope="session")
 async def setup_branch_key_id(

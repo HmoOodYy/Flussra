@@ -1,8 +1,9 @@
 """
-Integration tests for /payroll/periods:
+Integration tests for payroll periods:
   GET   /payroll/periods
   GET   /payroll/periods/{period_id}
-  POST  /payroll/periods
+  GET   /payroll/branches/{branch_id}/period-candidates
+  POST  /payroll/branches/{branch_id}/period-creations
   PATCH /payroll/periods/{period_id}/status
 
 Schema constraints that shape these tests
@@ -15,23 +16,19 @@ Test isolation strategy
 -----------------------
 - HQ branch (branch_id queried at runtime): holds the `created_period_id`
   session fixture period (Draft, read-only for list/get tests).
-- PAYTEST branch (`paytest_branch_id` from conftest): used for all create and
-  status-transition tests. Two fixtures manage state on this branch:
-
-    paytest_clean  — function-scoped; cancels any active PAYTEST periods before
-                     AND after each test so every test starts with a clean slate.
-                     Yields the PAYTEST branch_id.
-
-    fresh_period   — function-scoped; creates one Draft on PAYTEST (via
-                     paytest_clean so cleanup is guaranteed), then yields the
-                     response dict.  Used by status-transition tests.
+- Creation and status-transition tests each use a fresh branch with a company
+  Setup, published Version, and Branch Assignment. Finalized history is retained.
+- fresh_period inserts one Draft for status-transition tests that exercise the
+  existing lifecycle endpoint rather than candidate creation.
 """
 import datetime as _dt
 import pytest
 import pytest_asyncio
 import httpx
 from sqlalchemy import text as _sqla_text
+from sqlalchemy.ext.asyncio import create_async_engine
 from uuid import uuid4
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 
 # ---------------------------------------------------------------------------
@@ -42,84 +39,92 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _cancel_active_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-    direct_db=None,
-) -> None:
-    """
-    Cancel every Draft / Open period via PATCH (production path).
-    InReview, Returned, and Approved cannot be cancelled via PATCH in CP-1A;
-    cancel those directly in the database when direct_db is provided.
-    """
-    headers = auth(token)
-    for s in ("Draft", "Open"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
+async def _new_authorized_branch(test_database_url: str, frequency: str,
+                                 anchor: _dt.date) -> tuple[int, str]:
+    """Create isolated current setup authority without touching retained periods."""
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            code = f"PERIOD_{uuid4().hex[:16]}"
+            branch_id = (await db.execute(_sqla_text("""
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                VALUES (1, :code, :name, 'Active', FALSE)
+                RETURNING branchid
+            """), {"code": code, "name": f"Period API isolated {code}"})).scalar_one()
+            user_id = (await db.execute(_sqla_text("""
+                SELECT userid FROM sec.users WHERE companyid = 1 AND username = 'admin'
+            """))).scalar_one()
+            setup_id = await create_setup(1, user_id, code, "Period API setup", db)
+            draft_id = await create_draft(
+                1, user_id, setup_id, db,
+                payroll_frequency=frequency, anchor_start_date=anchor,
+                normal_days_off_mask=0,
             )
-    if direct_db is not None:
-        from sqlalchemy import text as _text
-        # Returned: must clear CurrentReturnReviewItemID first (pointer-consistency CHECK).
-        await direct_db.execute(
-            _text(
-                "UPDATE payroll.payrollperiods "
-                "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
-                "WHERE branchid = :bid AND status = 'Returned'"
-            ),
-            {"bid": branch_id},
-        )
-        # InReview and Approved: no pointer to clear.
-        await direct_db.execute(
-            _text(
-                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
-            ),
-            {"bid": branch_id},
-        )
+            await publish_version(1, user_id, setup_id, draft_id, anchor, db)
+            await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
+            return branch_id, code
+    finally:
+        await engine.dispose()
+
+
+async def _create_candidate(client: httpx.AsyncClient, token: str,
+                            branch_id: int, mode: str = "OPEN_CREATION") -> dict:
+    preview = await client.get(
+        f"/payroll/branches/{branch_id}/period-candidates",
+        params={"mode": mode}, headers=auth(token),
+    )
+    assert preview.status_code == 200, preview.text
+    selected = preview.json()["selected"]
+    assert selected["creatable"] is True, selected
+    created = await client.post(
+        f"/payroll/branches/{branch_id}/period-creations",
+        json={"candidate_key": selected["candidate_key"]}, headers=auth(token),
+    )
+    assert created.status_code == 201, created.text
+    return created.json()
 
 
 # ---------------------------------------------------------------------------
-# Function-scoped fixtures for PAYTEST branch isolation
+# Function-scoped fixtures for isolated lifecycle branches
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
 async def paytest_clean(
+    test_database_url: str,
+):
+    """A fresh branch per lifecycle test; no immutable-history cleanup."""
+    branch_id, _ = await _new_authorized_branch(
+        test_database_url, "Week", _dt.date(2030, 1, 6),
+    )
+    return branch_id
+
+
+@pytest_asyncio.fixture
+async def period_test_driver_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
-    direct_db,
-):
-    """
-    Cancels any active periods on PAYTEST before the test (safety net),
-    yields the PAYTEST branch_id, then cancels again after the test.
-    CP-1A: InReview/Returned/Approved cancellation via PATCH is blocked;
-    use direct_db for those statuses.
-    """
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, direct_db)
-    yield paytest_branch_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, direct_db)
+    paytest_clean: int,
+) -> int:
+    code = f"PTD_{uuid4().hex[:12]}"
+    response = await session_client.post(
+        "/core/drivers",
+        json={"branch_id": paytest_clean, "full_name": "Period test driver",
+              "driver_code": code, "cdl_number": f"CDL-{code}"},
+        headers=auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["driver_id"]
 
 
 @pytest_asyncio.fixture
 async def fresh_period(
-    paytest_clean: int,          # int = PAYTEST branch_id; also handles cleanup
+    paytest_clean: int,
     direct_db,
 ) -> dict:
     """
-    Inserts one Draft period on PAYTEST directly via SQL and returns a minimal dict.
-    CP-1D: POST requires an existing Open (B1 guard); insert directly instead.
-    Cleanup is handled by paytest_clean (which runs after this fixture tears down).
+    Inserts one Draft directly to exercise legacy status transitions.
+    CP-1D: the current candidate route requires an Open before Draft creation.
     """
     row = (await direct_db.execute(
         _sqla_text("""
@@ -145,7 +150,7 @@ async def fresh_open_period(
     direct_db,
 ) -> dict:
     """
-    Inserts one Open period on PAYTEST directly via SQL.
+    Inserts one Open period on the fresh branch directly via SQL.
     CP-1D: Draft→Open via PATCH is blocked; use Open directly for tests that need
     an Open period without going through Draft.
     """
@@ -332,68 +337,23 @@ class TestGetPeriod:
 
 
 @pytest_asyncio.fixture
-async def paytest_with_open(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-    direct_db,
-) -> int:
-    """
-    Like paytest_clean but also ensures payroll setup + one Open period exist so
-    POST /payroll/periods can create a Draft (CP-1D B1 guard requires exactly one
-    existing Open; CP-2A requires a schedule version before any period insert).
-    Uses a fresh branch so setup-anchor validation is not coupled to periods
-    retained by other tests.  The branch is test-only and is intentionally not
-    deleted because the setup/version rows are part of the exercised state.
-    """
-    branch_id = (await direct_db.execute(
-        _sqla_text("""
-            INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
-            RETURNING branchid
-        """),
-        {"code": f"PERIOD_{uuid4().hex}",
-         "name": f"Period API isolated {uuid4().hex[:8]}"},
-    )).scalar_one()
-
-    # CP-2A: ensure an active payroll setup / schedule version exists.
-    r = await session_client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": "2025-01-06"},
-        headers=auth(auth_token),
+async def candidate_week_branch(test_database_url: str) -> tuple[int, str]:
+    return await _new_authorized_branch(
+        test_database_url, "Week", _dt.date(2026, 2, 2),
     )
-    assert r.status_code in (200, 201), f"setup PUT failed: {r.text}"
-
-    await direct_db.execute(
-        _sqla_text("""
-            INSERT INTO payroll.payrollperiods
-                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (1, :bid, 'Open', 'PT-OPEN-SEED', 'Open Seed', 'Week', '2025-01-06', '2025-01-12')
-            ON CONFLICT DO NOTHING
-        """),
-        {"bid": branch_id},
-    )
-    yield branch_id
-
-    await _cancel_active_periods(session_client, auth_token, branch_id, direct_db)
 
 
 # ---------------------------------------------------------------------------
-# POST /payroll/periods
+# Candidate-based period creation
 # ---------------------------------------------------------------------------
 
 class TestCreatePeriod:
-    """
-    Tests use `paytest_clean` to borrow the PAYTEST branch.
-    Each test creates at most ONE period; cleanup cancels it after.
-    Validation-only tests (→ 422) skip the fixture since they don't insert.
-    """
+    """Current candidate route; each creation gets its own setup-assigned branch."""
 
     async def test_requires_auth(self, client: httpx.AsyncClient):
         resp = await client.post(
-            "/payroll/periods",
-            json={"branch_id": 1, "period_type": "Week",
-                  "start_date": "2026-03-01", "end_date": "2026-03-07"},
+            "/payroll/branches/1/period-creations",
+            json={"candidate_key": "dummy"},
         )
         assert resp.status_code == 401
 
@@ -401,177 +361,101 @@ class TestCreatePeriod:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_with_open: int,
+        candidate_week_branch: tuple[int, str],
     ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_with_open,
-                "period_type": "Week",
-                "start_date":  "2026-02-02",
-                "end_date":    "2026-02-08",
-            },
-            headers=auth(auth_token),
+        branch_id, _ = candidate_week_branch
+        await _create_candidate(client, auth_token, branch_id)
+        body = await _create_candidate(
+            client, auth_token, branch_id, "PREPARED_CREATION",
         )
-        assert resp.status_code == 201
-        body = resp.json()
         assert body["status"]      == "Draft"
         assert body["period_type"] == "Week"
-        assert body["period_name"] == "Week of Feb 2, 2026"
+        assert body["period_name"] == "Week of Feb 9, 2026"
         assert body["payroll_period_id"] is not None
 
-    async def test_create_with_explicit_name_and_notes(
+    async def test_explicit_name_and_notes_rejected(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_with_open: int,
+        candidate_week_branch: tuple[int, str],
     ):
+        branch_id, _ = candidate_week_branch
         resp = await client.post(
-            "/payroll/periods",
+            f"/payroll/branches/{branch_id}/period-creations",
             json={
-                "branch_id":   paytest_with_open,
-                "period_type": "Custom",
-                "start_date":  "2026-02-10",
-                "end_date":    "2026-02-20",
+                "candidate_key": "dummy",
                 "period_name": "Special Run Feb",
                 "notes":       "Covers overtime reconciliation",
             },
             headers=auth(auth_token),
         )
-        assert resp.status_code == 201
-        body = resp.json()
-        assert body["period_name"] == "Special Run Feb"
-        assert body["notes"]       == "Covers overtime reconciliation"
+        assert resp.status_code == 422
+        errors = {str(item["loc"][-1]) for item in resp.json()["detail"]}
+        assert {"period_name", "notes"} <= errors
 
     async def test_create_month_type_auto_name(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_with_open: int,
+        test_database_url: str,
     ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_with_open,
-                "period_type": "Month",
-                "start_date":  "2026-04-01",
-                "end_date":    "2026-04-30",
-            },
-            headers=auth(auth_token),
+        branch_id, _ = await _new_authorized_branch(
+            test_database_url, "Month", _dt.date(2026, 4, 1),
         )
-        assert resp.status_code == 201
-        assert resp.json()["period_name"] == "April 2026"
+        body = await _create_candidate(client, auth_token, branch_id)
+        assert body["period_type"] == "Month"
+        assert body["period_name"] == "April 2026"
 
     async def test_period_code_includes_branch_and_date(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_with_open: int,
+        candidate_week_branch: tuple[int, str],
     ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_with_open,
-                "period_type": "Week",
-                "start_date":  "2026-07-06",
-                "end_date":    "2026-07-12",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 201
-        code = resp.json()["period_code"]
-        assert "20260706" in code
-        assert "20260706" in code
+        branch_id, branch_code = candidate_week_branch
+        body = await _create_candidate(client, auth_token, branch_id)
+        assert body["period_code"] == f"{branch_code}-20260202"
 
     async def test_biweek_auto_name(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_with_open: int,
+        test_database_url: str,
     ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_with_open,
-                "period_type": "Biweek",
-                "start_date":  "2026-03-16",
-                "end_date":    "2026-03-29",
-            },
-            headers=auth(auth_token),
+        branch_id, _ = await _new_authorized_branch(
+            test_database_url, "Biweek", _dt.date(2026, 3, 16),
         )
-        assert resp.status_code == 201
-        name = resp.json()["period_name"]
-        assert "Mar" in name
-        assert "2026" in name
+        body = await _create_candidate(client, auth_token, branch_id)
+        assert body["period_type"] == "Biweek"
+        assert body["period_name"] == "Mar 16 – Mar 29, 2026"
 
-    async def test_end_before_start_returns_422(
+    async def test_bad_branch_returns_branch_inactive(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
     ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={"branch_id": 1, "period_type": "Week",
-                  "start_date": "2026-03-07", "end_date": "2026-03-01"},
+        resp = await client.get(
+            "/payroll/branches/999999/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "BRANCH_INACTIVE"
 
-    async def test_same_start_end_returns_422(
+    async def test_detail_includes_created_branch_name(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
+        candidate_week_branch: tuple[int, str],
     ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={"branch_id": 1, "period_type": "Week",
-                  "start_date": "2026-03-01", "end_date": "2026-03-01"},
+        branch_id, branch_code = candidate_week_branch
+        created = await _create_candidate(client, auth_token, branch_id)
+        detail = await client.get(
+            f"/payroll/periods/{created['payroll_period_id']}",
             headers=auth(auth_token),
         )
-        assert resp.status_code == 422
-
-    async def test_invalid_period_type_returns_422(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-    ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={"branch_id": 1, "period_type": "Fortnight",
-                  "start_date": "2026-03-01", "end_date": "2026-03-14"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
-    async def test_bad_branch_returns_422(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-    ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={"branch_id": 999999, "period_type": "Week",
-                  "start_date": "2026-03-01", "end_date": "2026-03-07"},
-            headers=auth(auth_token),
-        )
-        # B1 guard fires before branch validation (no Open periods → DRAFT_CREATION_REQUIRES_OPEN)
-        # so the response may be 409 or 422 depending on guard order.
-        assert resp.status_code in (409, 422)
-
-    async def test_response_includes_branch_name(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_with_open: int,
-    ):
-        resp = await client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_with_open, "period_type": "Week",
-                  "start_date": "2026-08-03", "end_date": "2026-08-09"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["branch_name"].startswith("Period API isolated ")
+        assert detail.status_code == 200
+        assert detail.json()["branch_name"] == f"Period API isolated {branch_code}"
 
 
 # ---------------------------------------------------------------------------
@@ -580,8 +464,7 @@ class TestCreatePeriod:
 
 class TestStatusTransitions:
     """
-    Each test gets `fresh_period` — a Draft period on PAYTEST that is
-    cancelled automatically after the test.
+    Each test gets an isolated branch; periods remain as audit history.
     """
 
     async def test_requires_auth(self, client: httpx.AsyncClient):
@@ -612,14 +495,14 @@ class TestStatusTransitions:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         pid = fresh_open_period["payroll_period_id"]
         headers = auth(auth_token)
         # Add a line (required by M16 empty-period guard)
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         resp = await client.patch(f"/payroll/periods/{pid}/status",
@@ -632,7 +515,7 @@ class TestStatusTransitions:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         pid = fresh_open_period["payroll_period_id"]
         headers = auth(auth_token)
@@ -641,7 +524,7 @@ class TestStatusTransitions:
         await client.post(
             f"/payroll/periods/{pid}/lines",
             headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
 
@@ -705,14 +588,14 @@ class TestStatusTransitions:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         """CP-1A: PATCH InReview→Open is blocked; InReview has no PATCH exits."""
         pid = fresh_open_period["payroll_period_id"]
         headers = auth(auth_token)
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
@@ -776,14 +659,14 @@ class TestStatusTransitions:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         """Approved → Locked must go through /finalize, not this endpoint."""
         pid = fresh_open_period["payroll_period_id"]
         headers = auth(auth_token)
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
@@ -836,13 +719,13 @@ class TestStatusTransitions:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         pid = fresh_open_period["payroll_period_id"]
         headers = auth(auth_token)
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
@@ -899,14 +782,14 @@ class TestStatusTransitionReviewGate:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         """PATCH InReview → Approved returns 422 — removed from valid transitions."""
         pid = fresh_open_period["payroll_period_id"]
         headers = auth(auth_token)
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         await client.patch(f"/payroll/periods/{pid}/status",
@@ -924,7 +807,7 @@ class TestStatusTransitionReviewGate:
         client: httpx.AsyncClient,
         auth_token: str,
         fresh_open_period: dict,
-        paytest_driver_id: int,
+        period_test_driver_id: int,
     ):
         """
         CP-1A: Once InReview, no PATCH transition is allowed (not Open, not Cancelled,
@@ -935,7 +818,7 @@ class TestStatusTransitionReviewGate:
         headers = auth(auth_token)
         await client.post(
             f"/payroll/periods/{pid}/lines", headers=headers,
-            json={"driver_id": paytest_driver_id, "work_date": "2030-01-07",
+            json={"driver_id": period_test_driver_id, "work_date": "2030-01-07",
                   "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         )
         r1 = await client.patch(f"/payroll/periods/{pid}/status",

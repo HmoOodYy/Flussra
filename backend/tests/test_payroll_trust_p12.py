@@ -77,19 +77,33 @@ import httpx
 from datetime import date as _date
 from decimal import Decimal
 from sqlalchemy import text as _text
+from sqlalchemy.ext.asyncio import create_async_engine
 import asyncpg
 from uuid import uuid4
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 
-@pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_db_conn) -> int:
-    """Use a module-isolated branch so finalized evidence does not contaminate slots."""
-    row = (await session_db_conn.execute(_text("""
+@pytest_asyncio.fixture
+async def trust_branch_id(db_conn, session_client, auth_token) -> int:
+    """Give each test a branch whose finalized evidence cannot affect another test."""
+    row = (await db_conn.execute(_text("""
         INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
         VALUES (1, :code, :name, 'Active', FALSE)
         RETURNING branchid
-    """), {"code": f"P12_{uuid4().hex}", "name": "P12 isolated"})).scalar_one()
-    return int(row)
+    """), {"code": (code := f"P12_{uuid4().hex}"), "name": code})).scalar_one()
+    branch_id = int(row)
+    items = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items", headers=_tok(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours_id = next(item["pay_item_id"] for item in items.json()
+                    if item["pay_item_code"] == "HOURS")
+    active = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{hours_id}",
+        json={"is_active": True}, headers=_tok(auth_token),
+    )
+    assert active.status_code == 200, active.text
+    return branch_id
 
 # ---------------------------------------------------------------------------
 # Year slots
@@ -125,19 +139,6 @@ FINALIZE_URL = "/payroll/periods/{pid}/finalize"
 
 def _tok(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
-
-
-async def _cancel_periods(client, token, branch_id):
-    headers = _tok(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get("/payroll/periods",
-                                params={"branch_id": branch_id, "status": s},
-                                headers=headers)
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(f"/payroll/periods/{p['payroll_period_id']}/status",
-                               json={"status": "Cancelled"}, headers=headers)
 
 
 async def _create_driver(client, token, branch_id, suffix, hire_date="2131-01-01"):
@@ -181,14 +182,27 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
     return rid
 
 
-async def _open_period(client, token, branch_id, start, end):
+async def _open_period(client, token, branch_id, test_database_url, start, end):
     headers = _tok(token)
-    setup = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": start},
-        headers=headers,
-    )
-    assert setup.status_code in (200, 201), f"payroll setup: {setup.text}"
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            user_id = (await db.execute(_text("""
+                SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin'
+            """))).scalar_one()
+            setup_id = await create_setup(
+                1, user_id, f"P12_{uuid4().hex[:12]}", "P12 trust setup", db,
+            )
+            anchor = _date.fromisoformat(start)
+            draft_id = await create_draft(
+                1, user_id, setup_id, db,
+                payroll_frequency="Week", anchor_start_date=anchor,
+                normal_days_off_mask=0,
+            )
+            await publish_version(1, user_id, setup_id, draft_id, anchor, db)
+            await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
+    finally:
+        await engine.dispose()
     preview = await client.get(
         f"/payroll/branches/{branch_id}/period-candidates",
         params={"mode": "OPEN_CREATION"}, headers=headers,
@@ -234,21 +248,6 @@ async def _finalize(client, token, pid):
     r = await client.post(FINALIZE_URL.format(pid=pid), headers=_tok(token))
     assert r.status_code == 200, f"finalize: {r.text}"
     return r.json()
-
-
-async def _force_cleanup_locked_period(direct_db, pid):
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    try:
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-    finally:
-        await direct_db.execute(_text(
-            "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-        ))
 
 
 async def _ensure_ordinal_item_active(client, token, branch_id, db_conn) -> int:
@@ -298,7 +297,8 @@ _ORDINAL_3_TIERS = [
 async def test_p12_t1_finalamount_and_snapshot_agree(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -314,16 +314,15 @@ async def test_p12_t1_finalamount_and_snapshot_agree(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T1AGREE", hire_date="2131-01-01")
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rt_id, T1_START, amount="25.00",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T1_START, T1_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T1_WORK,
                                    line_type="HOURS", quantity="8")
@@ -372,8 +371,6 @@ async def test_p12_t1_finalamount_and_snapshot_agree(
 
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -385,7 +382,8 @@ async def test_p12_t1_finalamount_and_snapshot_agree(
 @pytest.mark.asyncio
 async def test_p12_t2_advisory_lock_mutual_exclusion(
     apply_schema,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
 ):
     """
     T2: Prove that pg_advisory_xact_lock(company_id, branch_id) is mutually
@@ -425,10 +423,10 @@ async def test_p12_t2_advisory_lock_mutual_exclusion(
         # Look up the company_id for the test branch
         cid = await conn_a.fetchval(
             "SELECT companyid FROM core.branches WHERE branchid = $1",
-            paytest_branch_id,
+            trust_branch_id,
         )
         assert cid is not None, "Could not find company_id for paytest branch"
-        bid = paytest_branch_id
+        bid = trust_branch_id
 
         # Connection A acquires the advisory lock inside a transaction
         await conn_a.execute("BEGIN")
@@ -472,7 +470,8 @@ async def test_p12_t2_advisory_lock_mutual_exclusion(
 async def test_p12_t3_future_rate_approval_after_finalization_works(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -486,16 +485,15 @@ async def test_p12_t3_future_rate_approval_after_finalization_works(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T3FUTURE", hire_date="2133-01-01")
         rate_a_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rt_id, T3A_START, amount="20.00",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T3A_START, T3A_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T3A_WORK)
         await _finalize(session_client, auth_token, pid)
@@ -547,8 +545,6 @@ async def test_p12_t3_future_rate_approval_after_finalization_works(
             )
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -561,7 +557,8 @@ async def test_p12_t3_future_rate_approval_after_finalization_works(
 async def test_p12_t4_advanced_rate_snapshot_consistent(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
     session_db_conn,
 ):
@@ -579,11 +576,10 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
+        await _ensure_ordinal_item_active(session_client, auth_token, trust_branch_id, session_db_conn)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T4ADVSNAP", hire_date="2135-01-01")
 
         # Create OrdinalTier rate: tier1 (qty 1-2) = $5, tier2 (qty 3-4) = $8
@@ -598,7 +594,7 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
                                        headers=_tok(auth_token))
         assert r.status_code == 200, f"approve rate: {r.text}"
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T4_START, T4_END)
         # qty=2 → tier 1 (from_unit=1, to_unit=2, tier_amount=$5) → finalamount=$5
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T4_WORK,
@@ -647,8 +643,6 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
             assert snap["source_evidence"].get("RateBehavior") == "OrdinalTier"
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -661,7 +655,8 @@ async def test_p12_t4_advanced_rate_snapshot_consistent(
 async def test_p12_t5_phase11_tier_immutability_regression(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
     session_db_conn,
 ):
@@ -674,11 +669,10 @@ async def test_p12_t5_phase11_tier_immutability_regression(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
+        await _ensure_ordinal_item_active(session_client, auth_token, trust_branch_id, session_db_conn)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T5PHASE11", hire_date="2136-01-01")
         r = await session_client.post("/payroll/rates", json={
             "driver_id": driver_id, "rate_type_id": rt_id,
@@ -690,7 +684,7 @@ async def test_p12_t5_phase11_tier_immutability_regression(
         await session_client.post(f"/payroll/rates/{rate_id}/approve",
                                    headers=_tok(auth_token))
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T5_START, T5_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T5_WORK,
                                    line_type="P12_ORD", quantity="1")
@@ -724,8 +718,6 @@ async def test_p12_t5_phase11_tier_immutability_regression(
         assert blocked, "Phase 11 tier immutability was weakened by Phase 12"
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -738,7 +730,8 @@ async def test_p12_t5_phase11_tier_immutability_regression(
 async def test_p12_t6_rate_lifecycle_regression(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -753,16 +746,15 @@ async def test_p12_t6_rate_lifecycle_regression(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T6LIFE", hire_date="2137-01-01")
         rate_a_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rt_id, T6A_START, amount="15.00",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T6A_START, T6A_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T6A_WORK)
         await _finalize(session_client, auth_token, pid)
@@ -799,8 +791,6 @@ async def test_p12_t6_rate_lifecycle_regression(
         assert status_b.scalar() == "Voided", "Rate B should be Voided"
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -813,7 +803,8 @@ async def test_p12_t6_rate_lifecycle_regression(
 async def test_p12b_t1_void_rate_acquires_advisory_lock(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
     apply_schema,
 ):
@@ -840,11 +831,10 @@ async def test_p12b_t1_void_rate_acquires_advisory_lock(
     conn_a = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12BT1VD", hire_date="2151-01-01",
         )
         rate_id = await _create_and_approve_rate(
@@ -856,14 +846,14 @@ async def test_p12b_t1_void_rate_acquires_advisory_lock(
         conn_a = await asyncpg.connect(**dsn)
         cid = await conn_a.fetchval(
             "SELECT companyid FROM core.branches WHERE branchid = $1",
-            paytest_branch_id,
+            trust_branch_id,
         )
         assert cid is not None
 
         # External connection holds the advisory lock (simulates concurrent finalization)
         await conn_a.execute("BEGIN")
         await conn_a.execute(
-            "SELECT pg_advisory_xact_lock($1::int4, $2::int4)", cid, paytest_branch_id
+            "SELECT pg_advisory_xact_lock($1::int4, $2::int4)", cid, trust_branch_id
         )
 
         # Launch void_rate HTTP call in the background
@@ -906,8 +896,6 @@ async def test_p12b_t1_void_rate_acquires_advisory_lock(
             except Exception:
                 pass
             await conn_a.close()
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -920,7 +908,8 @@ async def test_p12b_t1_void_rate_acquires_advisory_lock(
 async def test_p12b_t2_approve_rate_backdating_guard_under_lock(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -938,11 +927,10 @@ async def test_p12b_t2_approve_rate_backdating_guard_under_lock(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12BT2AP", hire_date="2152-01-01",
         )
         rate_a_id = await _create_and_approve_rate(
@@ -950,7 +938,7 @@ async def test_p12b_t2_approve_rate_backdating_guard_under_lock(
         )
 
         # Finalize a period — this locks T12B2_START..T12B2_END
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T12B2_START, T12B2_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id,
                                    T12B2_WORK, line_type="HOURS", quantity="8")
@@ -996,8 +984,6 @@ async def test_p12b_t2_approve_rate_backdating_guard_under_lock(
         )
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -1010,7 +996,8 @@ async def test_p12b_t2_approve_rate_backdating_guard_under_lock(
 async def test_p12b_t3_copy_driver_rates_guard_under_lock(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -1031,15 +1018,14 @@ async def test_p12b_t3_copy_driver_rates_guard_under_lock(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
 
         src_driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12BT3SRC", hire_date="2154-01-01",
         )
         tgt_driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12BT3TGT", hire_date="2154-01-01",
         )
 
@@ -1049,7 +1035,7 @@ async def test_p12b_t3_copy_driver_rates_guard_under_lock(
         )
 
         # Finalize a period for source driver — locks T12B3_START..T12B3_END
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T12B3_START, T12B3_END)
         await _advance_to_approved(session_client, auth_token, pid, src_driver_id,
                                    T12B3_WORK, line_type="HOURS", quantity="8")
@@ -1083,8 +1069,6 @@ async def test_p12b_t3_copy_driver_rates_guard_under_lock(
         )
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if src_driver_id:
             await _delete_driver(session_client, auth_token, src_driver_id)
         if tgt_driver_id:
@@ -1117,7 +1101,8 @@ async def test_p12b_t3_copy_driver_rates_guard_under_lock(
 async def test_p12c_t1_stale_pending_update_blocked_after_approval(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -1139,7 +1124,7 @@ async def test_p12c_t1_stale_pending_update_blocked_after_approval(
     try:
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12CT1UD", hire_date="2166-01-01",
         )
 
@@ -1211,7 +1196,8 @@ async def test_p12c_t1_stale_pending_update_blocked_after_approval(
 async def test_p12c_t2_stale_pending_void_blocked_after_approval(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -1235,7 +1221,7 @@ async def test_p12c_t2_stale_pending_void_blocked_after_approval(
     try:
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12CT2VD", hire_date="2167-01-01",
         )
 
@@ -1309,7 +1295,8 @@ async def test_p12c_t2_stale_pending_void_blocked_after_approval(
 async def test_p12c_t3_stale_batch_pending_update_blocked_after_approval(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -1330,7 +1317,7 @@ async def test_p12c_t3_stale_batch_pending_update_blocked_after_approval(
     try:
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12CT3BT", hire_date="2168-01-01",
         )
 
@@ -1398,7 +1385,8 @@ async def test_p12c_t3_stale_batch_pending_update_blocked_after_approval(
 async def test_p12c_t4_tier_replacement_blocked_after_approval(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
     session_db_conn,
 ):
@@ -1423,12 +1411,11 @@ async def test_p12c_t4_tier_replacement_blocked_after_approval(
     rate_id = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-        await _ensure_ordinal_item_active(session_client, auth_token, paytest_branch_id, session_db_conn)
+        await _ensure_ordinal_item_active(session_client, auth_token, trust_branch_id, session_db_conn)
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, trust_branch_id,
             "12CT4TR", hire_date="2169-01-01",
         )
 

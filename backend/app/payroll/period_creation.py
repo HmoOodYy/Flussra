@@ -1,65 +1,15 @@
-"""
-Period Creation (CP-1C) — candidate-key generation/validation, schedule-version
-policy, period-day and pay-item snapshot creation, and the two public
-GET/POST candidate-based period-creation endpoints.
+"""Candidate-based payroll period creation from persisted Payroll Setup authority.
 
-Extracted from app.payroll.service (Stages B4-3A, B4-4A) as a
-dependency-closed leaf module — no behavior change, pure relocation.
+The canonical resolver determines dates and exact Assignment/Version authority.
+Confirmation revalidates its signed candidate under the Branch workflow lock and
+atomically freezes Period, PeriodDay, snapshot, and audit evidence. Legacy direct
+creation and next-date entry points are disabled pending physical retirement.
 
-B4-3A moved the minimal slot-matrix policy/core (_ACTIVE_SLOT_STATUSES,
-_cp1c_error, _check_slot_matrix) first. B4-4A completed the write/generation
-side of the domain: candidate-key/fingerprint/schedule-version helpers,
-period-day-row and pay-item-row creation, the period-created audit, and the
-two public endpoints (get_period_candidates, create_period_from_candidate).
-
-_auto_period_name, _month_end, and _unique_period_code were not physically
-part of the CP-1C block (they were defined near the legacy create_period/
-compute_period_dates functions), but are genuinely shared period-naming/
-date-math primitives used by both the legacy create_period path and this
-module's candidate-based path.
-
-Stage B4-21 moved the legacy compatibility entry point itself here too:
-create_period, compute_period_dates, and get_next_period_dates (see the
-"Legacy period creation (compatibility entry point)" section at the end of
-this module) — pure relocation, no behavior change. create_period is a
-structurally different flow from create_period_from_candidate (caller-
-supplied dates, exactly-one-Open/no-Draft slot rule, provisional
-freeze=False eligibility snapshot) and is deliberately NOT unified with it.
-compute_period_dates and this module's own _period_end/
-_candidate_dates_at_offset frequency ladders independently duplicate the
-Week/Biweek/Month/Custom arithmetic but differ in their start-date rule
-(compute_period_dates: anchor if no prior period, else last_end + 1 day;
-_candidate_dates_at_offset: max(anchor, pred_end + 1 day)) — they remain
-two separate algorithms, not merged.
-
-_check_slot_matrix is genuinely shared with Current Payroll Hub
-(app.payroll.current_hub), which imports it directly from here.
-
-_acquire_branch_workflow_lock was moved here too in the initial B4-4A pass,
-but returned to app.payroll.service and then extracted into its own small
-neutral module, app.payroll.workflow_lock, in a follow-up ownership
-correction: it is a generic branch-level advisory-lock primitive with no
-period-creation-specific logic, genuinely shared across five consumers
-(this module's own create_period_from_candidate and, since B4-21, legacy
-create_period too; change_period_status, resubmit_period, and
-finalize_period in their own respective modules; and app.review.service) —
-none of which is more entitled to own it than the others. This module now
-imports it directly from app.payroll.workflow_lock, the same as its other
-consumers.
-
-_validate_period_work_date, _period_has_pay_item_snapshot, and
-_get_period_pay_item_snapshot were moved here in the initial B4-4A pass but
-returned to app.payroll.service in a follow-up ownership correction: none of
-them has any caller inside this module's own logic (Period Creation only
-ever *writes* PayrollPeriodDays/PayrollPeriodPayItems once, via
-_create_period_day_rows/_create_period_pay_item_rows above). All three are
-read/validate accessors consumed exclusively by Draft-line CRUD, Period Pay
-Lines, Day Grid, and app.payroll.off_drivers — domains not yet extracted —
-so period_creation.py is not their correct owner merely because the tables
-they read were first populated during period creation.
+The slot matrix is shared with Current Payroll Hub.
 """
 import base64
 import calendar as _calendar
+import hashlib
 import hmac as _hmac_mod
 import json
 from datetime import date, datetime, timedelta, timezone
@@ -86,6 +36,9 @@ from app.payroll.schemas import (
     PeriodSummary,
 )
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll_setup.audit import write_policy_audit
+from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.resolver import Authority, resolve_payroll_setup_version
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +261,92 @@ def _slot_fingerprint(periods: list[dict]) -> str:
     return json.dumps(pairs, separators=(",", ":"))
 
 
+async def _next_candidate_start(
+    company_id: int, branch_id: int, db: AsyncConnection,
+) -> tuple[date, date | None]:
+    """Derive the first candidate from non-Cancelled chronology or the first assignment."""
+    result = await db.execute(text("""
+        SELECT MAX(EndDate) FROM payroll.PayrollPeriods
+        WHERE CompanyID = :cid AND BranchID = :bid AND Status <> 'Cancelled'
+    """), {"cid": company_id, "bid": branch_id})
+    last_end = result.scalar_one_or_none()
+    if last_end is not None:
+        return last_end + timedelta(days=1), last_end
+    result = await db.execute(text("""
+        SELECT MIN(EffectiveFromDate) FROM payroll.BranchPayrollSetupAssignments
+        WHERE CompanyID = :cid AND BranchID = :bid AND WithdrawnAtUtc IS NULL
+    """), {"cid": company_id, "bid": branch_id})
+    first_start = result.scalar_one_or_none()
+    if first_start is None:
+        _cp1c_error("PAYROLL_SETUP_REQUIRED", "No persisted Payroll Setup assignment exists for this branch.")
+    return first_start, None
+
+
+async def _resolve_candidate(
+    company_id: int, branch_id: int, start: date, db: AsyncConnection,
+) -> Authority:
+    try:
+        return await resolve_payroll_setup_version(company_id, branch_id, start, db)
+    except PolicyError as exc:
+        _cp1c_error(exc.code, str(exc))
+
+
+async def _candidate_at_offset(
+    company_id: int, branch_id: int, first_start: date, offset: int,
+    db: AsyncConnection,
+) -> Authority:
+    start = first_start
+    for index in range(offset + 1):
+        authority = await _resolve_candidate(company_id, branch_id, start, db)
+        if index < offset:
+            start = authority.end_date + timedelta(days=1)
+    return authority
+
+
+async def _timeline_fingerprints(
+    company_id: int, branch_id: int, setup_id: int, db: AsyncConnection,
+) -> tuple[str, str]:
+    """Fingerprint persisted timelines plus append-only policy-event revisions."""
+    versions = (await db.execute(text("""
+        SELECT PayrollSetupVersionID, EffectiveFromDate, ConfigHash, ReplacesVersionID
+        FROM payroll.PayrollSetupVersions
+        WHERE CompanyID = :cid AND PayrollSetupID = :sid
+          AND LifecycleState = 'Published'
+        ORDER BY PayrollSetupVersionID
+    """), {"cid": company_id, "sid": setup_id})).all()
+    assignments = (await db.execute(text("""
+        SELECT BranchPayrollSetupAssignmentID, PayrollSetupID, EffectiveFromDate,
+               EffectiveToDate, WithdrawnAtUtc
+        FROM payroll.BranchPayrollSetupAssignments
+        WHERE CompanyID = :cid AND BranchID = :bid
+        ORDER BY BranchPayrollSetupAssignmentID
+    """), {"cid": company_id, "bid": branch_id})).all()
+    setup_revision = (await db.execute(text("""
+        SELECT MAX(PayrollSetupPolicyAuditEventID)
+        FROM payroll.PayrollSetupPolicyAuditEvents
+        WHERE CompanyID = :cid AND PayrollSetupID = :sid
+          AND EventType IN ('VersionPublished', 'FutureVersionScheduled', 'VersionReplaced')
+    """), {"cid": company_id, "sid": setup_id})).scalar_one_or_none()
+    branch_revision = (await db.execute(text("""
+        SELECT MAX(PayrollSetupPolicyAuditEventID)
+        FROM payroll.PayrollSetupPolicyAuditEvents
+        WHERE CompanyID = :cid AND BranchID = :bid
+          AND EventType IN ('BranchAssigned', 'BranchReassigned', 'AssignmentWithdrawn')
+    """), {"cid": company_id, "bid": branch_id})).scalar_one_or_none()
+    setup_state = [
+        [row[0], str(row[1]), row[2], row[3]] for row in versions
+    ]
+    branch_state = [
+        [row[0], row[1], str(row[2]), str(row[3]) if row[3] else None,
+         row[4].isoformat() if row[4] else None]
+        for row in assignments
+    ]
+    def fingerprint(rows: list, revision: int | None) -> str:
+        payload = json.dumps([rows, revision], separators=(",", ":"))
+        return hashlib.sha256(payload.encode()).hexdigest()
+    return fingerprint(setup_state, setup_revision), fingerprint(branch_state, branch_revision)
+
+
 # ---------------------------------------------------------------------------
 # CP-2A: ensure current schedule version
 # ---------------------------------------------------------------------------
@@ -499,7 +538,8 @@ async def _create_period_day_rows(
     period_id: int,
     company_id: int,
     branch_id: int,
-    schedule_version_id: int,
+    assignment_id: int,
+    setup_version_id: int,
     start_date: date,
     end_date: date,
     normal_days_off_mask: int | None,
@@ -509,17 +549,18 @@ async def _create_period_day_rows(
     Insert one PayrollPeriodDays row per calendar day for the given period.
     Called inside the period-creation transaction, still under the branch advisory lock.
     ON CONFLICT DO NOTHING ensures idempotency (candidate replay guard).
-    Only called when schedule_version_id is not None.
+    The exact new authority is enforced against the parent Period by composite FKs.
     """
     day_rows = _generate_period_day_rows(start_date, end_date, normal_days_off_mask)
     if not day_rows:
         return
 
     values_sql = ", ".join(
-        f"(:pid, :cid, :bid, :sv_id, :wd_{i}, :dow_{i}, :isd_{i}, :ico_{i})"
+        f"(:pid, :cid, :bid, :aid, :vid, :wd_{i}, :dow_{i}, :isd_{i}, :ico_{i})"
         for i in range(len(day_rows))
     )
-    params: dict = {"pid": period_id, "cid": company_id, "bid": branch_id, "sv_id": schedule_version_id}
+    params: dict = {"pid": period_id, "cid": company_id, "bid": branch_id,
+                    "aid": assignment_id, "vid": setup_version_id}
     for i, row in enumerate(day_rows):
         params[f"wd_{i}"]  = row["work_date"]
         params[f"dow_{i}"] = row["day_of_week"]
@@ -529,7 +570,8 @@ async def _create_period_day_rows(
     await db.execute(
         text(f"""
             INSERT INTO payroll.PayrollPeriodDays
-                (PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID,
+                (PayrollPeriodID, CompanyID, BranchID,
+                 BranchPayrollSetupAssignmentID, PayrollSetupVersionID,
                  WorkDate, DayOfWeek, IsDefaultWorkDay, IsConfiguredOffDay)
             VALUES {values_sql}
             ON CONFLICT (PayrollPeriodID, WorkDate) DO NOTHING
@@ -756,6 +798,8 @@ async def get_period_candidates(
         if cursor_payload.get("mode") != mode:
             _cp1c_error("INVALID_CANDIDATE_KEY", "Wrong mode in cursor.")
         preview_offset = int(cursor_payload.get("offset", 0))
+    if preview_offset < 0 or preview_offset >= _CP1C_MAX_FUTURE:
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Candidate navigation offset is out of range.")
 
     # Read branch status
     branch_row = (await db.execute(
@@ -767,30 +811,6 @@ async def get_period_candidates(
     )).mappings().first()
     if branch_row is None or branch_row["status"] != "Active":
         _cp1c_error("BRANCH_INACTIVE", "Branch is inactive or not found.")
-
-    # Read payroll setup — also fetch currentscheduleversionid for CP-2A binding.
-    setup_row = (await db.execute(
-        text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays,
-                   currentscheduleversionid
-            FROM payroll.branchpayrollsettings
-            WHERE branchid = :bid AND companyid = :cid AND isactive = TRUE
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )).mappings().first()
-    if setup_row is None:
-        _cp1c_error("PAYROLL_SETUP_REQUIRED", "No active payroll setup found for this branch.")
-
-    freq = setup_row["payrollfrequency"]
-    anchor = setup_row["anchorstartdate"]
-    interval_days = setup_row.get("customintervaldays")
-    if freq == "Custom" and (not interval_days or interval_days <= 0):
-        _cp1c_error("PAYROLL_SETUP_INCOMPLETE", "Custom frequency requires custom_interval_days > 0.")
-
-    setup_fp = _setup_fingerprint(freq, anchor, interval_days)
-    # CP-2A: include the current schedule version ID in the signed payload so
-    # any setup change (which creates a new version) invalidates this candidate.
-    current_sv_id = setup_row.get("currentscheduleversionid")
 
     # Read all non-Cancelled periods for slot/date computation
     period_rows = (await db.execute(
@@ -804,7 +824,6 @@ async def get_period_candidates(
     )).mappings().all()
 
     periods = [dict(r) for r in period_rows]
-    pred_end = periods[0]["enddate"] if periods else None
     pred_id = periods[0]["payrollperiodid"] if periods else None
     slot_fp = _slot_fingerprint(periods)
 
@@ -812,11 +831,38 @@ async def get_period_candidates(
     creatable_base, blocked_reason = _check_slot_matrix(mode, periods)
     target_status = "Open" if mode == "OPEN_CREATION" else "Draft"
 
-    # Compute dates at preview_offset
-    try:
-        start_date, end_date = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, preview_offset)
-    except ValueError as e:
-        _cp1c_error("PAYROLL_SETUP_INCOMPLETE", str(e))
+    first_start, _ = await _next_candidate_start(company_id, branch_id, db)
+
+    async def signed_payload(offset: int) -> tuple[dict, Authority]:
+        authority = await _candidate_at_offset(
+            company_id, branch_id, first_start, offset, db,
+        )
+        setup_timeline, branch_timeline = await _timeline_fingerprints(
+            company_id, branch_id, authority.setup_id, db,
+        )
+        return {
+            "ver": _CP1C_VERSION,
+            "purpose": _CP1C_PURPOSE,
+            "cid": company_id,
+            "bid": branch_id,
+            "mode": mode,
+            "target_status": target_status,
+            "assignment_id": authority.assignment_id,
+            "setup_id": authority.setup_id,
+            "setup_version_id": authority.version_id,
+            "config_hash": authority.config_hash,
+            "setup_timeline": setup_timeline,
+            "branch_timeline": branch_timeline,
+            "start": authority.start_date.isoformat(),
+            "end": authority.end_date.isoformat(),
+            "slot_fp": slot_fp,
+            "pred_id": pred_id,
+            "offset": offset,
+        }, authority
+
+    payload, authority = await signed_payload(preview_offset)
+    start_date, end_date = authority.start_date, authority.end_date
+    freq = authority.schedule.frequency
 
     # Offset > 0 candidates are never directly creatable (navigation only)
     creatable = creatable_base and preview_offset == 0
@@ -824,28 +870,6 @@ async def get_period_candidates(
     if preview_offset > 0 and eff_blocked_reason is None:
         eff_blocked_reason = "CANDIDATE_NOT_CURRENT"
 
-    # Build candidate payload and sign it.
-    # CP-2A: sv_id (schedule_version_id) is included so that any setup PUT
-    # (which creates a new version row) invalidates candidates from the prior version.
-    payload = {
-        "ver": _CP1C_VERSION,
-        "purpose": _CP1C_PURPOSE,
-        "cid": company_id,
-        "bid": branch_id,
-        "mode": mode,
-        "target_status": target_status,
-        "freq": freq,
-        "anchor": str(anchor),
-        "interval": interval_days,
-        "period_type": freq,
-        "start": str(start_date),
-        "end": str(end_date),
-        "slot_fp": slot_fp,
-        "setup_fp": setup_fp,
-        "sv_id": current_sv_id,
-        "pred_id": pred_id,
-        "offset": preview_offset,
-    }
     candidate_key, _ = _make_candidate_key(payload)
     label = _auto_period_name(freq, start_date, end_date)
 
@@ -855,18 +879,16 @@ async def get_period_candidates(
 
     if preview_offset > 0:
         try:
-            ps, pe = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, preview_offset - 1)
-            prev_payload = {**payload, "offset": preview_offset - 1, "start": str(ps), "end": str(pe)}
+            prev_payload, _ = await signed_payload(preview_offset - 1)
             prev_cursor, _ = _make_candidate_key(prev_payload)
-        except ValueError:
+        except HTTPException:
             pass
 
     if preview_offset < _CP1C_MAX_FUTURE - 1:
         try:
-            ns, ne = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, preview_offset + 1)
-            next_payload = {**payload, "offset": preview_offset + 1, "start": str(ns), "end": str(ne)}
+            next_payload, _ = await signed_payload(preview_offset + 1)
             next_cursor, _ = _make_candidate_key(next_payload)
-        except ValueError:
+        except HTTPException:
             pass
 
     return CandidatePreviewResponse(
@@ -924,14 +946,12 @@ async def create_period_from_candidate(
     if claimed_offset != 0:
         _cp1c_error("CANDIDATE_NOT_CURRENT", "Only offset-0 candidates may be created.")
 
-    claimed_setup_fp = payload.get("setup_fp", "")
     claimed_slot_fp = payload.get("slot_fp", "")
     claimed_start = date.fromisoformat(payload["start"])
     claimed_end = date.fromisoformat(payload["end"])
     target_status = payload["target_status"]
-    # CP-2A: schedule version ID embedded in the candidate payload.
-    # None means this candidate was generated before CP-2A was deployed.
-    claimed_sv_id = payload.get("sv_id")
+    if target_status != ("Open" if mode == "OPEN_CREATION" else "Draft"):
+        _cp1c_error("INVALID_CANDIDATE_KEY", "Candidate mode and target status disagree.")
 
     # Acquire branch advisory lock (transaction-level)
     await _acquire_branch_workflow_lock(company_id, branch_id, db)
@@ -978,44 +998,6 @@ async def create_period_from_candidate(
     if branch_row is None or branch_row["status"] != "Active":
         _cp1c_error("BRANCH_INACTIVE", "Branch is inactive or not found.")
 
-    # Re-read setup under lock — also fetch currentscheduleversionid for CP-2A validation.
-    setup_row = (await db.execute(
-        text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays,
-                   currentscheduleversionid
-            FROM payroll.branchpayrollsettings
-            WHERE branchid = :bid AND companyid = :cid AND isactive = TRUE
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )).mappings().first()
-    if setup_row is None:
-        _cp1c_error("PAYROLL_SETUP_REQUIRED", "No active payroll setup found.")
-
-    freq = setup_row["payrollfrequency"]
-    anchor = setup_row["anchorstartdate"]
-    interval_days = setup_row.get("customintervaldays")
-    current_setup_fp = _setup_fingerprint(freq, anchor, interval_days)
-
-    if current_setup_fp != claimed_setup_fp:
-        _cp1c_error("CANDIDATE_SETUP_CHANGED", "Payroll setup changed since this candidate was generated.")
-
-    # CP-2A: schedule version validation.
-    # If sv_id is absent the candidate is pre-CP-2A. Replay of an already-created
-    # pre-CP-2A period is allowed (handled by the replay check above). New creation
-    # from a no-sv_id candidate is rejected — clients must regenerate a fresh candidate.
-    current_sv_id_from_settings = setup_row.get("currentscheduleversionid")
-    if claimed_sv_id is None:
-        _cp1c_error(
-            "CANDIDATE_STALE",
-            "Candidate lacks a schedule version ID (pre-CP-2A candidate). "
-            "Regenerate a fresh candidate before creating a new period.",
-        )
-    if current_sv_id_from_settings != claimed_sv_id:
-        _cp1c_error(
-            "CANDIDATE_SETUP_CHANGED",
-            "Payroll schedule version changed since this candidate was generated.",
-        )
-
     # Re-read periods under lock
     period_rows = (await db.execute(
         text("""
@@ -1033,15 +1015,28 @@ async def create_period_from_candidate(
     if current_slot_fp != claimed_slot_fp:
         _cp1c_error("CANDIDATE_STALE", "Branch period slot state changed since this candidate was generated.")
 
-    # Recompute candidate dates and compare to claimed values
-    pred_end = periods[0]["enddate"] if periods else None
     try:
-        computed_start, computed_end = _candidate_dates_at_offset(freq, anchor, interval_days, pred_end, 0)
-    except ValueError as e:
-        _cp1c_error("PAYROLL_SETUP_INCOMPLETE", str(e))
+        first_start, _ = await _next_candidate_start(company_id, branch_id, db)
+        authority = await _resolve_candidate(company_id, branch_id, first_start, db)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            _cp1c_error("CANDIDATE_STALE", "Payroll authority changed since preview.")
+        raise
+    setup_timeline, branch_timeline = await _timeline_fingerprints(
+        company_id, branch_id, authority.setup_id, db,
+    )
+    if (payload.get("assignment_id") != authority.assignment_id
+            or payload.get("setup_id") != authority.setup_id
+            or payload.get("setup_version_id") != authority.version_id
+            or payload.get("config_hash") != authority.config_hash
+            or payload.get("setup_timeline") != setup_timeline
+            or payload.get("branch_timeline") != branch_timeline
+            or claimed_start != authority.start_date
+            or claimed_end != authority.end_date):
+        _cp1c_error("CANDIDATE_STALE", "Payroll authority, timeline, or dates changed since preview.")
 
-    if computed_start != claimed_start or computed_end != claimed_end:
-        _cp1c_error("CANDIDATE_STALE", "Candidate dates no longer match current branch state.")
+    computed_start, computed_end = authority.start_date, authority.end_date
+    freq = authority.schedule.frequency
 
     # Check slot matrix under lock
     creatable, slot_error = _check_slot_matrix(mode, periods)
@@ -1075,21 +1070,27 @@ async def create_period_from_candidate(
     base_code = f"{branch_code}-{computed_start.strftime('%Y%m%d')}"
     period_code = await _unique_period_code(base_code, company_id, branch_id, db)
 
-    # CP-2A: ensure a valid schedule version exists and get its ID for the new period.
-    # Still under the branch advisory lock. Uses repair path if needed (defensive).
-    period_sv_id = await ensure_current_schedule_version(company_id, branch_id, user_id, db)
+    setup_code = (await db.execute(text("""
+        SELECT SetupCode FROM payroll.PayrollSetups
+        WHERE CompanyID = :cid AND PayrollSetupID = :sid
+    """), {"cid": company_id, "sid": authority.setup_id})).scalar_one()
 
-    # Insert period with candidate hash and schedule version
+    # The Phase 1 FKs/trigger bind and validate this exact immutable authority.
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, periodcode, periodname, periodtype,
                  startdate, enddate, status, notes, createdbyuserid,
-                 creationcandidatekeyhash, scheduleversionid)
+                 creationcandidatekeyhash, BranchPayrollSetupAssignmentID,
+                 PayrollSetupVersionID, FrozenPayrollSetupID, FrozenPayrollSetupCode,
+                 FrozenPayrollSetupVersionNumber, FrozenPayrollFrequency,
+                 FrozenAnchorStartDate, FrozenCustomIntervalDays,
+                 FrozenNormalDaysOffMask, ScheduleConfigHash)
             VALUES
                 (:cid, :bid, :code, :name, :ptype,
                  :start, :end, :status, NULL, :uid,
-                 :hash, :sv_id)
+                 :hash, :aid, :vid, :sid, :setup_code, :version_number,
+                 :frequency, :anchor, :interval, :mask, :config_hash)
             RETURNING payrollperiodid
         """),
         {
@@ -1103,7 +1104,16 @@ async def create_period_from_candidate(
             "status": target_status,
             "uid":   user_id,
             "hash":  candidate_hash,
-            "sv_id": period_sv_id,
+            "aid": authority.assignment_id,
+            "vid": authority.version_id,
+            "sid": authority.setup_id,
+            "setup_code": setup_code,
+            "version_number": authority.version_number,
+            "frequency": authority.schedule.frequency,
+            "anchor": authority.schedule.anchor_start_date,
+            "interval": authority.schedule.custom_interval_days,
+            "mask": authority.schedule.normal_days_off_mask,
+            "config_hash": authority.config_hash,
         },
     )
     new_period_id: int = insert_result.scalar_one()
@@ -1123,22 +1133,25 @@ async def create_period_from_candidate(
         initial_status=target_status,
         start_date=computed_start,
         end_date=computed_end,
-        setup_fp=current_setup_fp,
+        setup_fp=authority.config_hash,
+    )
+    await write_policy_audit(
+        db, company_id=company_id, actor_user_id=user_id,
+        event_type="PeriodCreated", payroll_setup_id=authority.setup_id,
+        payroll_setup_version_id=authority.version_id,
+        branch_payroll_setup_assignment_id=authority.assignment_id,
+        branch_id=branch_id, effective_date=computed_start,
+        new_config_hash=authority.config_hash,
+        new_state={"period_id": new_period_id, "candidate_hash": candidate_hash,
+                   "start": computed_start.isoformat(), "end": computed_end.isoformat()},
+        affected_branch_ids=[branch_id],
+        payroll_period_id=new_period_id,
     )
 
-    # CP-2B: create period-day snapshot from the schedule version's mask.
-    # Read from PayrollScheduleVersions (immutable) — not from mutable BranchPayrollSettings.
-    sv_mask_row = (await db.execute(
-        text(
-            "SELECT normaldaysoffmask FROM payroll.PayrollScheduleVersions "
-            "WHERE scheduleversionid = :sv_id"
-        ),
-        {"sv_id": period_sv_id},
-    )).mappings().first()
-    period_mask = sv_mask_row["normaldaysoffmask"] if sv_mask_row else None
     await _create_period_day_rows(
         new_period_id, company_id, branch_id,
-        period_sv_id, computed_start, computed_end, period_mask, db,
+        authority.assignment_id, authority.version_id,
+        computed_start, computed_end, authority.schedule.normal_days_off_mask, db,
     )
 
     # CP-2C: create period pay-item layout snapshot.
@@ -1242,16 +1255,8 @@ async def get_next_period_dates(
     branch_id: int,
     db: AsyncConnection,
 ) -> NextPeriodDates:
-    """
-    Return suggested start/end dates for the next payroll period of *branch_id*,
-    derived from its BranchPayrollSettings and the latest existing period.
-
-    - If no prior non-cancelled periods exist the first period starts on the
-      setup's anchor_start_date.
-    - Returns ``is_custom=True`` and ``start_date=None`` for Custom frequency.
-
-    Raises 403 if the caller lacks access; 404 if no payroll setup is configured.
-    """
+    """Disabled legacy next-date entry point; candidates own date authority."""
+    _cp1c_error("LEGACY_NEXT_DATES_DISABLED", "Use the canonical period-candidates endpoint.", 410)
     await _require_not_driver_role(company_id, user_id, db)
 
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
@@ -1336,6 +1341,8 @@ async def create_period(
     data: PeriodCreate,
     db: AsyncConnection,
 ) -> PeriodSummary:
+    """Disabled legacy direct-create entry point; candidate confirmation owns creation."""
+    _cp1c_error("LEGACY_PERIOD_CREATION_DISABLED", "Use candidate-based period creation.", 410)
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)
 

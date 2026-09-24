@@ -10,11 +10,12 @@ Verifies that a DriverRate referenced by PayrollFinalLines cannot be voided:
   T5  DB trigger allows direct SQL void of an unused rate
   T6  finalization writes DriverRateID into PayrollFinalLines for rate-driven lines
 
-All tests use years 2052-2058 on the PAYTEST branch.
-Per-test ephemeral drivers are created and cleaned up in fixture teardown.
+All tests use years 2052-2058 on fresh per-test branches.
+Finalized period history remains in the disposable test database.
 """
 import pytest
 import pytest_asyncio
+from uuid import uuid4
 import httpx
 import sqlalchemy.exc
 from datetime import date as _date
@@ -37,28 +38,6 @@ T6_START, T6_END, T6_WORK = "2057-05-05", "2057-05-18", "2057-05-08"
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
-
-
-async def _cancel_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    headers = _auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
-            )
 
 
 async def _create_driver(
@@ -240,23 +219,37 @@ async def _lock_period_with_rate(
 async def p5_env(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
+    code = f"P5_{uuid4().hex[:12]}"
+    branch_id = (await direct_db.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": code, "name": code})).scalar_one()
+    items = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items", headers=_auth(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours_id = next(item["pay_item_id"] for item in items.json()
+                    if item["pay_item_code"] == "HOURS")
+    active = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{hours_id}",
+        json={"is_active": True}, headers=_auth(auth_token),
+    )
+    assert active.status_code == 200, active.text
 
     env = {
         "client":          session_client,
         "token":           auth_token,
-        "branch_id":       paytest_branch_id,
+        "branch_id":       branch_id,
         "hourly_rtid":     paytest_rate_type_id,
         "db":              direct_db,
         "created_drivers": [],
     }
     yield env
 
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
     for did in env["created_drivers"]:
         await _delete_driver(session_client, auth_token, did)
 

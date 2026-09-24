@@ -512,6 +512,9 @@ async def _regenerate_period_driver_eligibility_rows(
         created_by_user_id=created_by_user_id,
         frozen_by_user_id=frozen_by_user_id,
     )
+    await _freeze_period_driver_eligibility_snapshot(
+        period_id, db, frozen_by_user_id=frozen_by_user_id,
+    )
 
 
 async def _freeze_period_driver_eligibility_snapshot(

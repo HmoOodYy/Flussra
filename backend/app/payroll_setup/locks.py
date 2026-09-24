@@ -27,10 +27,13 @@ async def lock_setups(
 ) -> None:
     """Lock each distinct Setup row in ascending ID order."""
     for setup_id in sorted(set(setup_ids)):
+        # Period creation holds the Branch lock before inserting Setup-referencing
+        # evidence; NO KEY UPDATE still serializes policy writers without blocking
+        # the FK KEY SHARE lock and reversing the Setup -> Branch lock order.
         await db.execute(
             text(
                 "SELECT payrollsetupid FROM payroll.payrollsetups "
-                "WHERE companyid = :cid AND payrollsetupid = :sid FOR UPDATE"
+                "WHERE companyid = :cid AND payrollsetupid = :sid FOR NO KEY UPDATE"
             ),
             {"cid": company_id, "sid": setup_id},
         )

@@ -15,6 +15,7 @@ Year slots: 2076-2090 (distinct from P6 2058-2064, P7 2066-2075).
 """
 import pytest
 import pytest_asyncio
+from uuid import uuid4
 import httpx
 from datetime import date as _date
 from sqlalchemy import text as _text, text as _sqla_text
@@ -28,12 +29,12 @@ T5_START, T5_END, T5_WORK = "2080-05-05", "2080-05-11", "2080-05-06"
 PREVIEW_URL  = "/payroll/periods/{pid}/finalization-preview"
 FINALIZE_URL = "/payroll/periods/{pid}/finalize"
 
-# Unique identifiers for test-only DB rows (cleaned up in finally blocks)
+# Identifiers for test-only rows; T5 uses a unique per-test item code and
+# retains its referenced item and period on the isolated branch.
 T1_RATE_CODE  = "TST_P8_T1_SYS"   # companyid=NULL, no PayItemRateTypeMap
 T2_RATE_CODE  = "TST_P8_T2_CPI"   # companyid=cid,  no PayItemRateTypeMap
 T4_RATE_CODE  = "TST_P8_T4_RT"    # companyid=cid,  WITH PayItemRateTypeMap
 T4_ITEM_CODE  = "TST_P8_T4_ITEM"  # custom PayItem for T4
-T5_ITEM_CODE  = "TST_P8_T5_ITEM"  # custom PayItem for T5 (no mapping)
 
 
 # ---------------------------------------------------------------------------
@@ -44,18 +45,36 @@ def _tok(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _cancel_periods(client, token, branch_id):
-    headers = _tok(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get("/payroll/periods",
-                                params={"branch_id": branch_id, "status": s},
-                                headers=headers)
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(f"/payroll/periods/{p['payroll_period_id']}/status",
-                               json={"status": "Cancelled"},
-                               headers=headers)
+@pytest_asyncio.fixture
+async def trust_branch_id(direct_db, session_client, auth_token):
+    """Isolate period and rate trust evidence on one fresh branch per test."""
+    code = f"P8_{uuid4().hex[:12]}"
+    branch_id = (await direct_db.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": code, "name": code})).scalar_one()
+    items = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items", headers=_tok(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours_id = next(item["pay_item_id"] for item in items.json()
+                    if item["pay_item_code"] == "HOURS")
+    active = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{hours_id}",
+        json={"is_active": True}, headers=_tok(auth_token),
+    )
+    assert active.status_code == 200, active.text
+    return branch_id
+
+
+@pytest_asyncio.fixture
+async def trust_driver_id(session_client, auth_token, trust_branch_id):
+    driver_id = await _create_driver(
+        session_client, auth_token, trust_branch_id, uuid4().hex[:8],
+    )
+    yield driver_id
+    await _delete_driver(session_client, auth_token, driver_id)
 
 
 async def _create_driver(client, token, branch_id, suffix, hire_date="2076-01-01"):
@@ -135,8 +154,8 @@ async def _advance_to_approved(client, token, pid, driver_id, work_date):
 async def test_p8_t1_unmapped_system_ratetype_fails_closed(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
-    paytest_driver_id: int,
+    trust_branch_id: int,
+    trust_driver_id: int,
     direct_db,
 ):
     """
@@ -163,7 +182,7 @@ async def test_p8_t1_unmapped_system_ratetype_fails_closed(
         r = await session_client.post(
             "/payroll/rates",
             json={
-                "driver_id":     paytest_driver_id,
+                "driver_id":     trust_driver_id,
                 "rate_type_id":  rt_id,
                 "amount":        "10.00",
                 "effective_from": "2076-01-01",
@@ -198,8 +217,8 @@ async def test_p8_t1_unmapped_system_ratetype_fails_closed(
 async def test_p8_t2_unmapped_company_ratetype_fails_closed(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
-    paytest_driver_id: int,
+    trust_branch_id: int,
+    trust_driver_id: int,
     direct_db,
 ):
     """
@@ -209,10 +228,10 @@ async def test_p8_t2_unmapped_company_ratetype_fails_closed(
     """
     headers = _tok(auth_token)
 
-    # Resolve company_id for paytest branch
+    # Resolve company_id for this test's branch.
     cid_row = await direct_db.execute(
         _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-        {"bid": paytest_branch_id},
+        {"bid": trust_branch_id},
     )
     company_id = cid_row.scalar_one()
 
@@ -231,7 +250,7 @@ async def test_p8_t2_unmapped_company_ratetype_fails_closed(
         r = await session_client.post(
             "/payroll/rates",
             json={
-                "driver_id":     paytest_driver_id,
+                "driver_id":     trust_driver_id,
                 "rate_type_id":  rt_id,
                 "amount":        "10.00",
                 "effective_from": "2077-01-01",
@@ -261,7 +280,7 @@ async def test_p8_t2_unmapped_company_ratetype_fails_closed(
 async def test_p8_t3_valid_system_ratetype_still_works(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
@@ -271,9 +290,7 @@ async def test_p8_t3_valid_system_ratetype_still_works(
     period with HOURS lines can be finalized (preview can_finalize=True, status=Locked).
     """
     headers = _tok(auth_token)
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
-
-    drv = await _create_driver(session_client, auth_token, paytest_branch_id,
+    drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T3Sys", hire_date="2078-01-01")
     try:
         # Create and approve HOURLY rate — must NOT raise 422
@@ -281,7 +298,7 @@ async def test_p8_t3_valid_system_ratetype_still_works(
                                        paytest_rate_type_id,
                                        effective_from="2078-01-01")
 
-        pid = await _open_period(direct_db, paytest_branch_id,
+        pid = await _open_period(direct_db, trust_branch_id,
                                  T3_START, T3_END)
 
         # Add HOURS line (rate-dependent)
@@ -318,8 +335,8 @@ async def test_p8_t3_valid_system_ratetype_still_works(
 async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
-    paytest_driver_id: int,
+    trust_branch_id: int,
+    trust_driver_id: int,
     direct_db,
 ):
     """
@@ -332,7 +349,7 @@ async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
     # Resolve company_id
     cid_row = await direct_db.execute(
         _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-        {"bid": paytest_branch_id},
+        {"bid": trust_branch_id},
     )
     company_id = cid_row.scalar_one()
 
@@ -379,7 +396,7 @@ async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
         r = await session_client.post(
             "/payroll/rates",
             json={
-                "driver_id":     paytest_driver_id,
+                "driver_id":     trust_driver_id,
                 "rate_type_id":  rt_id,
                 "amount":        "15.00",
                 "effective_from": "2079-01-01",
@@ -426,7 +443,7 @@ async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
 async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
     direct_db,
 ):
     """
@@ -435,17 +452,16 @@ async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
     Submit must fail before it can capture an immutable snapshot.
     """
     headers = _tok(auth_token)
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
-
     # Resolve company_id
     cid_row = await direct_db.execute(
         _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-        {"bid": paytest_branch_id},
+        {"bid": trust_branch_id},
     )
     company_id = cid_row.scalar_one()
 
     # Insert a custom PayItem with PerUnit behavior but NO PayItemRateTypeMap.
-    # isdefaultbranchactive=TRUE so it is immediately usable in the branch.
+    # Keep it off other branches; activate only this test's branch.
+    item_code = f"TST_P8_T5_{uuid4().hex[:8]}"
     pi_id_row = await direct_db.execute(
         _text("""
             INSERT INTO payroll.payitems
@@ -454,26 +470,30 @@ async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
                  category, datatype, itemscope)
             VALUES
                 (:cid, :code, 'P8 T5 Unmapped Item', 'PerUnit',
-                 TRUE, TRUE, 'Active',
+                 TRUE, FALSE, 'Active',
                  'Custom', 'Decimal', 'Daily')
             RETURNING payitemid
         """),
-        {"cid": company_id, "code": T5_ITEM_CODE},
+        {"cid": company_id, "code": item_code},
     )
     pi_id = pi_id_row.scalar_one()
+    active = await session_client.patch(
+        f"/settings/branches/{trust_branch_id}/pay-items/{pi_id}",
+        json={"is_active": True}, headers=headers,
+    )
+    assert active.status_code == 200, active.text
 
-    drv = await _create_driver(session_client, auth_token, paytest_branch_id,
+    drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T5Map", hire_date="2080-01-01")
-    pid = None
     try:
-        pid = await _open_period(direct_db, paytest_branch_id,
+        pid = await _open_period(direct_db, trust_branch_id,
                                  T5_START, T5_END)
 
         # Add a draft line using the unmapped custom pay item
         r = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": drv, "work_date": T5_WORK,
-                  "line_type": T5_ITEM_CODE, "quantity": "5"},
+                  "line_type": item_code, "quantity": "5"},
             headers=headers,
         )
         assert r.status_code == 201, f"add unmapped line: {r.text}"
@@ -497,20 +517,6 @@ async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
         assert snapshot_count == 0
 
     finally:
-        if pid is not None:
-            # Release the workflow slot while retaining any immutable evidence.
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-            )
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-            )
+        # Fresh branch and unique item code preserve the Open period and source
+        # evidence without rewriting status or removing referenced pay items.
         await _delete_driver(session_client, auth_token, drv)
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payitems WHERE payitemid = :piid"),
-            {"piid": pi_id},
-        )

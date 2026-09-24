@@ -20,6 +20,8 @@ from app.payroll.eligibility import (
 )
 from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.period_creation import _check_slot_matrix
+from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.resolver import resolve_payroll_setup_version
 from app.payroll.schemas import (
     BranchWorkflowCapabilities,
     BranchWorkflowEntry,
@@ -743,24 +745,41 @@ async def get_current_workflow(
     for row in period_rows:
         periods_by_branch[row["branchid"]].append(dict(row))
 
-    # Load payroll setup status for all branches
-    setup_rows = (await db.execute(
+    # Resolve readiness from persisted assignments and published versions only.
+    setup_date_rows = (await db.execute(
         text(f"""
-            SELECT branchid, payrollfrequency, customintervaldays, isactive
-            FROM   payroll.branchpayrollsettings
-            WHERE  companyid = :cid
-              AND  branchid IN ({in_clause2})
+            SELECT b.branchid,
+                   (SELECT MAX(p.enddate) + 1
+                    FROM payroll.payrollperiods p
+                    WHERE p.companyid = b.companyid
+                      AND p.branchid = b.branchid
+                      AND p.status <> 'Cancelled') AS next_after_period,
+                   (SELECT MIN(a.effectivefromdate)
+                    FROM payroll.branchpayrollsetupassignments a
+                    WHERE a.companyid = b.companyid
+                      AND a.branchid = b.branchid
+                      AND a.withdrawnatutc IS NULL) AS first_assignment_start
+            FROM core.branches b
+            WHERE b.companyid = :cid
+              AND b.status = 'Active'
+              AND b.branchid IN ({in_clause2})
         """),
         {"cid": company_id, **in_params2},
     )).mappings().all()
 
     setup_by_branch: dict[int, str] = {}
-    for sr in setup_rows:
-        bid = sr["branchid"]
-        if not sr["isactive"]:
-            setup_by_branch[bid] = "inactive"
-        elif sr["payrollfrequency"] == "Custom" and not sr.get("customintervaldays"):
-            setup_by_branch[bid] = "incomplete"
+    for row in setup_date_rows:
+        bid = int(row["branchid"])
+        resolve_date = row["next_after_period"] or row["first_assignment_start"]
+        if resolve_date is None:
+            setup_by_branch[bid] = "missing"
+            continue
+        try:
+            await resolve_payroll_setup_version(company_id, bid, resolve_date, db)
+        except PolicyError as exc:
+            setup_by_branch[bid] = (
+                "missing" if exc.code == "ASSIGNMENT_NOT_FOUND" else "incomplete"
+            )
         else:
             setup_by_branch[bid] = "complete"
 

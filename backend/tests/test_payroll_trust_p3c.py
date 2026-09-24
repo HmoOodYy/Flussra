@@ -16,11 +16,12 @@ payroll data at the DB layer, and that the service layer still works correctly:
 
 Isolation strategy
 ------------------
-All tests use years 2043–2051 (8 year slots) on the PAYTEST branch.
-Per-test ephemeral drivers are cleaned up in fixture teardown.
+All tests use years 2043–2051 (8 year slots) on fresh per-test branches.
+Finalized period history remains in the disposable test database.
 """
 import pytest
 import pytest_asyncio
+from uuid import uuid4
 import httpx
 from decimal import Decimal
 from datetime import date as _date
@@ -47,28 +48,6 @@ T8B_START, T8B_END, T8B_WORK = "2051-05-05", "2051-05-18", "2051-05-08"
 
 def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
-
-
-async def _cancel_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
-            )
 
 
 async def _make_period(
@@ -274,25 +253,39 @@ async def _lock_period(
 async def p3c_env(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
-    """Cancel conflicting periods; yield env dict; cleanup after test."""
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
+    """Isolate immutable trust evidence on a fresh branch per test."""
+    code = f"P3C_{uuid4().hex[:12]}"
+    branch_id = (await direct_db.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": code, "name": code})).scalar_one()
+    items = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items", headers=auth(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours_id = next(item["pay_item_id"] for item in items.json()
+                    if item["pay_item_code"] == "HOURS")
+    active = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{hours_id}",
+        json={"is_active": True}, headers=auth(auth_token),
+    )
+    assert active.status_code == 200, active.text
 
     env = {
         "client":          session_client,
         "token":           auth_token,
-        "branch_id":       paytest_branch_id,
+        "branch_id":       branch_id,
         "hourly_rtid":     paytest_rate_type_id,
         "db":              direct_db,
         "created_drivers": [],
     }
     yield env
 
-    # Teardown — cancel any open periods, delete ephemeral drivers
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
+    # Retain period history; driver deletion may be denied by finalized FKs.
     for did in env["created_drivers"]:
         await _delete_driver(session_client, auth_token, did)
 

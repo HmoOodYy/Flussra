@@ -24,12 +24,14 @@ import asyncio
 import datetime
 import itertools
 import json
+import uuid
 
 import pytest
 import pytest_asyncio
 import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -167,33 +169,60 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
 
 
 async def _ensure_prepared_creation_setup(
-    client: httpx.AsyncClient,
-    token: str,
-    direct_db: AsyncConnection,
-    branch_id: int,
-) -> None:
-    """Ensure the weekly setup required by candidate tests without rewriting history."""
-    response = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": "2095-01-06"},
+    test_database_url: str,
+    anchor: datetime.date,
+) -> int:
+    """Create an isolated Branch with current company Setup authority."""
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            code = f"CP1D_{uuid.uuid4().hex[:12]}"
+            branch_id = (await db.execute(_text("""
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                VALUES (:cid, :code, :name, 'Active', FALSE)
+                RETURNING branchid
+            """), {
+                "cid": _COMPANY_ID, "code": code, "name": code,
+            })).scalar_one()
+            user_id = (await db.execute(_text("""
+                SELECT userid FROM sec.users
+                WHERE companyid = :cid AND username = 'admin'
+            """), {"cid": _COMPANY_ID})).scalar_one()
+            setup_id = await create_setup(
+                _COMPANY_ID, user_id, code, "CP-1D candidate setup", db,
+            )
+            draft_id = await create_draft(
+                _COMPANY_ID, user_id, setup_id, db,
+                payroll_frequency="Week", anchor_start_date=anchor,
+                normal_days_off_mask=0,
+            )
+            await publish_version(
+                _COMPANY_ID, user_id, setup_id, draft_id, anchor, db,
+            )
+            await assign_setup(
+                _COMPANY_ID, user_id, branch_id, setup_id, anchor, db,
+            )
+            return branch_id
+    finally:
+        await engine.dispose()
+
+
+async def _create_branch_driver(client: httpx.AsyncClient, token: str,
+                                branch_id: int) -> int:
+    code = f"CP1D_{uuid.uuid4().hex[:10]}"
+    response = await client.post(
+        "/core/drivers",
+        json={
+            "branch_id": branch_id,
+            "full_name": "CP-1D candidate driver",
+            "driver_code": code,
+            "cdl_number": f"CDL-{code}",
+        },
         headers=_auth(token),
     )
-    if response.status_code in (200, 201):
-        return
-
-    assert response.status_code == 409, f"payroll setup failed: {response.text}"
-    assert "existing payroll periods" in response.text, response.text
-    settings = (await direct_db.execute(
-        _text("""
-            SELECT payrollfrequency, isactive
-            FROM payroll.branchpayrollsettings
-            WHERE companyid = :cid AND branchid = :bid
-        """),
-        {"cid": _COMPANY_ID, "bid": branch_id},
-    )).mappings().first()
-    assert settings is not None
-    assert settings["payrollfrequency"] == "Week"
-    assert settings["isactive"] is True
+    assert response.status_code == 201, response.text
+    return response.json()["driver_id"]
 
 
 async def _insert_open_period(
@@ -1037,100 +1066,22 @@ class TestSubmittedAtUtc:
 
 
 # ---------------------------------------------------------------------------
-# G: Legacy create guard tests (B1)
+# G: Prepared creation with an InReview backlog
 # ---------------------------------------------------------------------------
 
-class TestLegacyCreateGuard:
+class TestCandidateCreationWithInReview:
 
     @pytest.mark.asyncio
-    async def test_g1_legacy_create_without_open_blocked(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
+    async def test_g4_candidate_create_with_inreview_allowed(
+        self, session_client, auth_token, direct_db, test_database_url,
     ):
-        """G1: Legacy POST /payroll/periods with no active Open → DRAFT_CREATION_REQUIRES_OPEN."""
-        await _clean(direct_db, paytest_branch_id)
-
-        start, end = _dates_2095(60)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": start.isoformat(), "end_date": end.isoformat()},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 409, f"Expected 409 DRAFT_CREATION_REQUIRES_OPEN; got {r.status_code}: {r.text}"
-        detail = r.json().get("detail", {})
-        if isinstance(detail, dict):
-            assert detail.get("code") == "DRAFT_CREATION_REQUIRES_OPEN", detail
-        else:
-            assert "DRAFT_CREATION_REQUIRES_OPEN" in str(detail), detail
-
-    @pytest.mark.asyncio
-    async def test_g2_legacy_create_with_open_succeeds(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
-    ):
-        """G2: Legacy POST /payroll/periods with exactly one Open succeeds → creates Draft."""
-        await _clean(direct_db, paytest_branch_id)
-
-        # Insert an Open period so the guard passes
-        op_start, op_end = _dates_2095(62)
-        await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "G2-OP")
-
-        dr_start = op_end + datetime.timedelta(days=1)
-        dr_end   = dr_start + datetime.timedelta(days=6)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": dr_start.isoformat(), "end_date": dr_end.isoformat()},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 201, f"Expected 201; got {r.status_code}: {r.text}"
-        assert r.json()["status"] == "Draft"
-
-    @pytest.mark.asyncio
-    async def test_g3_legacy_duplicate_draft_blocked(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
-    ):
-        """G3: Second legacy POST /payroll/periods when a Draft already exists → DRAFT_SLOT_OCCUPIED."""
-        await _clean(direct_db, paytest_branch_id)
-
-        op_start, op_end = _dates_2095(64)
-        await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "G3-OP")
-
-        dr_start = op_end + datetime.timedelta(days=1)
-        dr_end   = dr_start + datetime.timedelta(days=6)
-        await _insert_draft_period(direct_db, paytest_branch_id, dr_start, dr_end, "G3-DR")
-
-        dr2_start = dr_end + datetime.timedelta(days=1)
-        dr2_end   = dr2_start + datetime.timedelta(days=6)
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": dr2_start.isoformat(), "end_date": dr2_end.isoformat()},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 409, f"Expected 409 DRAFT_SLOT_OCCUPIED; got {r.status_code}: {r.text}"
-        detail = r.json().get("detail", {})
-        if isinstance(detail, dict):
-            assert detail.get("code") == "DRAFT_SLOT_OCCUPIED", detail
-        else:
-            assert "DRAFT_SLOT_OCCUPIED" in str(detail), detail
-
-    @pytest.mark.asyncio
-    async def test_g4_legacy_create_with_inreview_allowed(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
-    ):
-        """G4: Legacy POST when InReview exists alongside Open → 201 (B1 fix: InReview co-existence is valid).
-
-        Before the B1 fix, the guard incorrectly rejected [Open, InReview] with WORKFLOW_SLOT_CONFLICT.
-        The corrected guard only checks Open count (must be exactly 1) and Draft presence; InReview/Returned
-        co-existence is a normal part of the workflow and must not block Draft creation.
-        """
-        await _clean(direct_db, paytest_branch_id)
-
+        """An InReview period alongside Open does not block Prepared creation."""
         op_start, op_end = _dates_2095(68)
-        await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "G4-OP")
+        branch_id = await _ensure_prepared_creation_setup(test_database_url, op_start)
+        await _insert_open_period(direct_db, branch_id, op_start, op_end, "G4-OP")
 
-        # Insert an InReview period alongside the Open period (valid workflow state)
-        ir_start = op_end + datetime.timedelta(days=1)
+        # The older InReview period does not occupy the Open or Prepared slot.
+        ir_start = op_start - datetime.timedelta(days=7)
         ir_end   = ir_start + datetime.timedelta(days=6)
         await direct_db.execute(
             _text("""
@@ -1138,21 +1089,27 @@ class TestLegacyCreateGuard:
                     (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
                 VALUES (:cid, :bid, 'InReview', :code, :name, 'Week', :start, :end)
             """),
-            {"cid": _COMPANY_ID, "bid": paytest_branch_id,
+            {"cid": _COMPANY_ID, "bid": branch_id,
              "code": f"G4-IR-{ir_start}", "name": f"G4 IR {ir_start}",
              "start": ir_start, "end": ir_end},
         )
 
-        dr_start = ir_end + datetime.timedelta(days=1)
-        dr_end   = dr_start + datetime.timedelta(days=6)
+        preview = await session_client.get(
+            f"/payroll/branches/{branch_id}/period-candidates",
+            params={"mode": "PREPARED_CREATION"},
+            headers=_auth(auth_token),
+        )
+        assert preview.status_code == 200, preview.text
+        selected = preview.json()["selected"]
+        assert selected["creatable"] is True, selected
+        assert selected["start_date"] == (op_end + datetime.timedelta(days=1)).isoformat()
         r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": paytest_branch_id, "period_type": "Week",
-                  "start_date": dr_start.isoformat(), "end_date": dr_end.isoformat()},
+            f"/payroll/branches/{branch_id}/period-creations",
+            json={"candidate_key": selected["candidate_key"]},
             headers=_auth(auth_token),
         )
         assert r.status_code == 201, (
-            f"Expected 201 Draft created with [Open+InReview]; got {r.status_code}: {r.text}"
+            f"Expected Draft creation with [Open+InReview]; got {r.status_code}: {r.text}"
         )
         assert r.json()["status"] == "Draft"
 
@@ -1165,7 +1122,7 @@ class TestCandidateReplayAfterPromotion:
 
     @pytest.mark.asyncio
     async def test_f1_candidate_replay_after_draft_promoted_to_open(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, direct_db, test_database_url,
     ):
         """F1: Replay same CP-1C candidate key after the Draft is promoted to Open.
 
@@ -1178,21 +1135,16 @@ class TestCandidateReplayAfterPromotion:
           - Audit row count for test-owned periods does not grow on replay
           - No second Draft exists after replay
         """
-        await _clean(direct_db, paytest_branch_id)
-
-        # PREPARED_CREATION requires an active weekly setup. Immutable history
-        # may correctly reject rewriting its original test anchor.
-        await _ensure_prepared_creation_setup(
-            session_client, auth_token, direct_db, paytest_branch_id,
-        )
+        op_start, op_end = _dates_2095(72)
+        branch_id = await _ensure_prepared_creation_setup(test_database_url, op_start)
+        driver_id = await _create_branch_driver(session_client, auth_token, branch_id)
 
         # Step 1: Insert Open period.
-        op_start, op_end = _dates_2095(72)
-        open_pid = await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "F1-OP")
+        open_pid = await _insert_open_period(direct_db, branch_id, op_start, op_end, "F1-OP")
 
         # Step 2: Create Draft via CP-1C candidate creation.
         cand_resp = await session_client.get(
-            f"/payroll/branches/{paytest_branch_id}/period-candidates",
+            f"/payroll/branches/{branch_id}/period-candidates",
             params={"mode": "PREPARED_CREATION"},
             headers=_auth(auth_token),
         )
@@ -1208,7 +1160,7 @@ class TestCandidateReplayAfterPromotion:
         )
 
         create_resp = await session_client.post(
-            f"/payroll/branches/{paytest_branch_id}/period-creations",
+            f"/payroll/branches/{branch_id}/period-creations",
             json={"candidate_key": candidate_key},
             headers=_auth(auth_token),
         )
@@ -1232,7 +1184,7 @@ class TestCandidateReplayAfterPromotion:
         )
 
         # Step 3: Submit the Open period → promotes Draft to Open atomically.
-        await _add_pto_line(session_client, auth_token, open_pid, paytest_driver_id, op_start)
+        await _add_pto_line(session_client, auth_token, open_pid, driver_id, op_start)
         submit_r = await _submit(session_client, auth_token, open_pid)
         assert submit_r.status_code == 200, f"submit: {submit_r.text}"
 
@@ -1263,7 +1215,7 @@ class TestCandidateReplayAfterPromotion:
                   AND startdate >= '2095-01-01' AND startdate < '2096-01-01'
                   AND status NOT IN ('Cancelled')
             """),
-            {"bid": paytest_branch_id},
+            {"bid": branch_id},
         )).scalar_one()
 
         pre_audit_count = (await direct_db.execute(
@@ -1278,7 +1230,7 @@ class TestCandidateReplayAfterPromotion:
 
         # Step 4: Replay the same candidate key.
         replay_resp = await session_client.post(
-            f"/payroll/branches/{paytest_branch_id}/period-creations",
+            f"/payroll/branches/{branch_id}/period-creations",
             json={"candidate_key": candidate_key},
             headers=_auth(auth_token),
         )
@@ -1306,7 +1258,7 @@ class TestCandidateReplayAfterPromotion:
                   AND startdate >= '2095-01-01' AND startdate < '2096-01-01'
                   AND status NOT IN ('Cancelled')
             """),
-            {"bid": paytest_branch_id},
+            {"bid": branch_id},
         )).scalar_one()
         assert post_period_count == pre_period_count, (
             f"Replay must not create extra periods; pre={pre_period_count}, post={post_period_count}"
@@ -1347,7 +1299,7 @@ class TestCandidateReplayAfterPromotion:
                   AND startdate >= '2095-01-01' AND startdate < '2096-01-01'
                   AND status = 'Draft'
             """),
-            {"bid": paytest_branch_id},
+            {"bid": branch_id},
         )).scalar_one()
         assert draft_count == 0, (
             f"No Draft must remain after Open promotion + replay; found {draft_count}"
@@ -1755,7 +1707,7 @@ class TestDeterministicLockBoundary:
     @pytest.mark.asyncio
     async def test_d2_candidate_creation_waits_and_revalidates_slot(
         self,
-        session_client, auth_token, paytest_branch_id,
+        session_client, auth_token,
         direct_db, test_database_url,
     ):
         """D2: CP-1C candidate creation waits on branch advisory lock and revalidates slot.
@@ -1769,17 +1721,12 @@ class TestDeterministicLockBoundary:
           6. Release lock.
           7. Assert 409 (slot conflict) — no new period was CREATED.
         """
-        await _clean(direct_db, paytest_branch_id)
-
-        await _ensure_prepared_creation_setup(
-            session_client, auth_token, direct_db, paytest_branch_id,
-        )
-
         op_start, op_end = _dates_2095(140)
-        await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "D2-OP")
+        branch_id = await _ensure_prepared_creation_setup(test_database_url, op_start)
+        await _insert_open_period(direct_db, branch_id, op_start, op_end, "D2-OP")
 
         cand_r = await session_client.get(
-            f"/payroll/branches/{paytest_branch_id}/period-candidates",
+            f"/payroll/branches/{branch_id}/period-candidates",
             params={"mode": "PREPARED_CREATION"},
             headers=_auth(auth_token),
         )
@@ -1794,7 +1741,7 @@ class TestDeterministicLockBoundary:
                   AND startdate >= '2095-01-01' AND startdate < '2096-01-01'
                   AND status NOT IN ('Cancelled')
             """),
-            {"bid": paytest_branch_id},
+            {"bid": branch_id},
         )).scalar_one()
 
         lock_held = asyncio.Event()
@@ -1806,7 +1753,7 @@ class TestDeterministicLockBoundary:
                 async with engine.begin() as conn:
                     await conn.execute(
                         _text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
-                        {"cid": _COMPANY_ID, "bid": paytest_branch_id},
+                        {"cid": _COMPANY_ID, "bid": branch_id},
                     )
                     lock_held.set()
                     await asyncio.wait_for(blocker_done.wait(), timeout=10.0)
@@ -1818,17 +1765,17 @@ class TestDeterministicLockBoundary:
 
         create_task = asyncio.ensure_future(
             session_client.post(
-                f"/payroll/branches/{paytest_branch_id}/period-creations",
+                f"/payroll/branches/{branch_id}/period-creations",
                 json={"candidate_key": candidate_key},
                 headers=_auth(auth_token),
             )
         )
-        await _wait_for_lock_waiter(direct_db, _COMPANY_ID, paytest_branch_id)
+        await _wait_for_lock_waiter(direct_db, _COMPANY_ID, branch_id)
 
         # Fill the Draft slot with a directly-inserted period (different hash → will conflict).
         dr_start = op_end + datetime.timedelta(days=1)
         dr_end   = dr_start + datetime.timedelta(days=6)
-        await _insert_draft_period(direct_db, paytest_branch_id, dr_start, dr_end, "D2-DR")
+        await _insert_draft_period(direct_db, branch_id, dr_start, dr_end, "D2-DR")
 
         blocker_done.set()
         create_resp = await asyncio.wait_for(create_task, timeout=10.0)
@@ -1851,96 +1798,13 @@ class TestDeterministicLockBoundary:
                   AND startdate >= '2095-01-01' AND startdate < '2096-01-01'
                   AND status NOT IN ('Cancelled')
             """),
-            {"bid": paytest_branch_id},
+            {"bid": branch_id},
         )).scalar_one()
         # At most pre_count + 1 (the directly-inserted D2-DR); not pre_count + 2.
         assert post_count <= pre_count + 1, (
             f"At most one new period (the directly-inserted D2-DR); "
             f"pre={pre_count}, post={post_count}"
         )
-
-    @pytest.mark.asyncio
-    async def test_d3_legacy_create_waits_and_revalidates_open_guard(
-        self,
-        session_client, auth_token, paytest_branch_id,
-        direct_db, test_database_url,
-    ):
-        """D3: Legacy POST /payroll/periods waits on branch advisory lock and revalidates B1 guard.
-
-        Protocol:
-          1. Insert Open period so B1 guard would pass initially.
-          2. Hold advisory lock on independent connection.
-          3. Start legacy POST /payroll/periods (must queue for lock).
-          4. Prove waiting in pg_locks.
-          5. Before releasing: cancel the Open period (B1 guard will fire after lock).
-          6. Release lock.
-          7. Assert 409 DRAFT_CREATION_REQUIRES_OPEN.
-        """
-        await _clean(direct_db, paytest_branch_id)
-
-        op_start, op_end = _dates_2095(150)
-        open_pid = await _insert_open_period(direct_db, paytest_branch_id, op_start, op_end, "D3-OP")
-
-        dr_start = op_end + datetime.timedelta(days=1)
-        dr_end   = dr_start + datetime.timedelta(days=6)
-
-        lock_held = asyncio.Event()
-        blocker_done = asyncio.Event()
-
-        async def _hold_lock():
-            engine = create_async_engine(test_database_url, echo=False)
-            try:
-                async with engine.begin() as conn:
-                    await conn.execute(
-                        _text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
-                        {"cid": _COMPANY_ID, "bid": paytest_branch_id},
-                    )
-                    lock_held.set()
-                    await asyncio.wait_for(blocker_done.wait(), timeout=10.0)
-            finally:
-                await engine.dispose()
-
-        lock_task = asyncio.ensure_future(_hold_lock())
-        await asyncio.wait_for(lock_held.wait(), timeout=10.0)
-
-        create_task = asyncio.ensure_future(
-            session_client.post(
-                "/payroll/periods",
-                json={
-                    "branch_id":   paytest_branch_id,
-                    "period_type": "Week",
-                    "start_date":  dr_start.isoformat(),
-                    "end_date":    dr_end.isoformat(),
-                },
-                headers=_auth(auth_token),
-            )
-        )
-        await _wait_for_lock_waiter(direct_db, _COMPANY_ID, paytest_branch_id)
-
-        # Remove the Open period so B1 guard fires after lock acquisition.
-        await direct_db.execute(
-            _text(
-                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-                "WHERE payrollperiodid = :pid"
-            ),
-            {"pid": open_pid},
-        )
-
-        blocker_done.set()
-        create_resp = await asyncio.wait_for(create_task, timeout=10.0)
-        await asyncio.wait_for(lock_task, timeout=10.0)
-
-        assert create_resp.status_code == 409, (
-            f"Expected 409 DRAFT_CREATION_REQUIRES_OPEN after Open cancelled; "
-            f"got {create_resp.status_code}: {create_resp.text}"
-        )
-        detail = create_resp.json().get("detail", {})
-        if isinstance(detail, dict):
-            assert detail.get("code") == "DRAFT_CREATION_REQUIRES_OPEN", (
-                f"Expected DRAFT_CREATION_REQUIRES_OPEN; got {detail}"
-            )
-        else:
-            assert "DRAFT_CREATION_REQUIRES_OPEN" in str(detail), detail
 
     @pytest.mark.asyncio
     async def test_d4_approve_decision_waits_behind_branch_lock(

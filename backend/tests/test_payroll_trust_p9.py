@@ -19,19 +19,33 @@ import httpx
 from datetime import date as _date
 from decimal import Decimal
 from sqlalchemy import text as _text
+from sqlalchemy.ext.asyncio import create_async_engine
 import asyncpg
 from uuid import uuid4
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 
-@pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_db_conn) -> int:
-    """Use a module-isolated branch so retained finalized history cannot move the anchor horizon."""
-    row = (await session_db_conn.execute(_text("""
+@pytest_asyncio.fixture
+async def trust_branch_id(db_conn, session_client, auth_token) -> int:
+    """Give each test a branch whose finalized evidence cannot affect another test."""
+    row = (await db_conn.execute(_text("""
         INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
         VALUES (1, :code, :name, 'Active', FALSE)
         RETURNING branchid
-    """), {"code": f"P9_{uuid4().hex}", "name": "P9 isolated"})).scalar_one()
-    return int(row)
+    """), {"code": (code := f"P9_{uuid4().hex}"), "name": code})).scalar_one()
+    branch_id = int(row)
+    items = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items", headers=_tok(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours_id = next(item["pay_item_id"] for item in items.json()
+                    if item["pay_item_code"] == "HOURS")
+    active = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{hours_id}",
+        json={"is_active": True}, headers=_tok(auth_token),
+    )
+    assert active.status_code == 200, active.text
+    return branch_id
 
 # ---------------------------------------------------------------------------
 # Year slots
@@ -52,20 +66,6 @@ LEDGER_URL   = "/payroll/periods/{pid}/final-lines"
 
 def _tok(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
-
-
-async def _cancel_periods(client, token, branch_id):
-    headers = _tok(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get("/payroll/periods",
-                                params={"branch_id": branch_id, "status": s},
-                                headers=headers)
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(f"/payroll/periods/{p['payroll_period_id']}/status",
-                               json={"status": "Cancelled"},
-                               headers=headers)
 
 
 async def _create_driver(client, token, branch_id, suffix, hire_date="2091-01-01"):
@@ -109,14 +109,27 @@ async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
     return rid
 
 
-async def _open_period(client, token, branch_id, start, end):
+async def _open_period(client, token, branch_id, test_database_url, start, end):
     headers = _tok(token)
-    setup = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": start},
-        headers=headers,
-    )
-    assert setup.status_code in (200, 201), f"payroll setup: {setup.text}"
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            user_id = (await db.execute(_text("""
+                SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin'
+            """))).scalar_one()
+            setup_id = await create_setup(
+                1, user_id, f"P9_{uuid4().hex[:12]}", "P9 trust setup", db,
+            )
+            anchor = _date.fromisoformat(start)
+            draft_id = await create_draft(
+                1, user_id, setup_id, db,
+                payroll_frequency="Week", anchor_start_date=anchor,
+                normal_days_off_mask=0,
+            )
+            await publish_version(1, user_id, setup_id, draft_id, anchor, db)
+            await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
+    finally:
+        await engine.dispose()
     preview = await client.get(
         f"/payroll/branches/{branch_id}/period-candidates",
         params={"mode": "OPEN_CREATION"}, headers=headers,
@@ -161,21 +174,6 @@ async def _finalize(client, token, pid):
     return r.json()
 
 
-async def _force_cleanup_locked_period(direct_db, pid):
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    try:
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-    finally:
-        await direct_db.execute(_text(
-            "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-        ))
-
-
 # ---------------------------------------------------------------------------
 # T1 — SourceSnapshot is populated on regular final lines
 # ---------------------------------------------------------------------------
@@ -184,7 +182,8 @@ async def _force_cleanup_locked_period(direct_db, pid):
 async def test_p9_t1_sourcesnapshot_written_on_finalization(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -196,17 +195,16 @@ async def test_p9_t1_sourcesnapshot_written_on_finalization(
     pid = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T1SNAP", hire_date="2091-01-01")
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
             effective_from=T1_START, amount="20.00",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T1_START, T1_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T1_WORK)
         await _finalize(session_client, auth_token, pid)
@@ -246,8 +244,6 @@ async def test_p9_t1_sourcesnapshot_written_on_finalization(
             assert row["payitemid"] is not None
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -260,7 +256,8 @@ async def test_p9_t1_sourcesnapshot_written_on_finalization(
 async def test_p9_t2_ledger_api_exposes_sourcesnapshot(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -275,17 +272,16 @@ async def test_p9_t2_ledger_api_exposes_sourcesnapshot(
     T2_START, T2_END, T2_WORK = "2091-02-02", "2091-02-08", "2091-02-03"
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T2LEDG", hire_date="2091-01-01")
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
             effective_from=T2_START, amount="22.50",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T2_START, T2_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T2_WORK)
         await _finalize(session_client, auth_token, pid)
@@ -312,8 +308,6 @@ async def test_p9_t2_ledger_api_exposes_sourcesnapshot(
             assert ln["pay_item_id"] is not None
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -326,7 +320,8 @@ async def test_p9_t2_ledger_api_exposes_sourcesnapshot(
 async def test_p9_t3_used_driverrate_amount_update_blocked(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -340,17 +335,16 @@ async def test_p9_t3_used_driverrate_amount_update_blocked(
     T3_START2, T3_END2, T3_WORK2 = "2091-03-02", "2091-03-08", "2091-03-03"
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T3UPDT", hire_date="2091-01-01")
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
             effective_from=T3_START2, amount="15.00",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T3_START2, T3_END2)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T3_WORK2)
         await _finalize(session_client, auth_token, pid)
@@ -381,8 +375,6 @@ async def test_p9_t3_used_driverrate_amount_update_blocked(
         )
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -395,7 +387,8 @@ async def test_p9_t3_used_driverrate_amount_update_blocked(
 async def test_p9_t4_used_driverrate_delete_blocked(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -409,17 +402,16 @@ async def test_p9_t4_used_driverrate_delete_blocked(
     T4_START2, T4_END2, T4_WORK2 = "2091-04-06", "2091-04-12", "2091-04-07"
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T4DELT", hire_date="2091-01-01")
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
             effective_from=T4_START2, amount="17.00",
         )
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T4_START2, T4_END2)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T4_WORK2)
         await _finalize(session_client, auth_token, pid)
@@ -450,8 +442,6 @@ async def test_p9_t4_used_driverrate_delete_blocked(
         )
 
     finally:
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -464,7 +454,8 @@ async def test_p9_t4_used_driverrate_delete_blocked(
 async def test_p9_t5_unused_driverrate_still_mutable(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -475,10 +466,9 @@ async def test_p9_t5_unused_driverrate_still_mutable(
     driver_id = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T5UNSD", hire_date="2092-01-01")
 
         # Create a rate — leave it as PendingApproval (never finalized)
@@ -532,7 +522,8 @@ async def test_p9_t5_unused_driverrate_still_mutable(
 async def test_p9_t6_future_rate_approval_after_historical_finalization(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -546,10 +537,9 @@ async def test_p9_t6_future_rate_approval_after_historical_finalization(
     pid_a = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T6SUPR", hire_date="2093-01-01")
 
         # Create and approve historical rate
@@ -559,7 +549,7 @@ async def test_p9_t6_future_rate_approval_after_historical_finalization(
         )
 
         # Finalize a period that uses the old rate
-        pid_a = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid_a = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                     T6A_START, T6A_END)
         await _advance_to_approved(session_client, auth_token, pid_a, driver_id,
                                     "2093-03-04")
@@ -606,8 +596,6 @@ async def test_p9_t6_future_rate_approval_after_historical_finalization(
         )
 
     finally:
-        if pid_a:
-            await _force_cleanup_locked_period(direct_db, pid_a)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)
 
@@ -620,7 +608,8 @@ async def test_p9_t6_future_rate_approval_after_historical_finalization(
 async def test_p9_t7_sys_min_topup_has_system_snapshot(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
+    test_database_url: str,
     direct_db,
 ):
     """
@@ -633,18 +622,17 @@ async def test_p9_t7_sys_min_topup_has_system_snapshot(
     rule_id = None
 
     try:
-        await _cancel_periods(session_client, auth_token, paytest_branch_id)
         rate_type_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
         # Look up companyid from the branch
         br_row = await direct_db.execute(
             _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-            {"bid": paytest_branch_id},
+            {"bid": trust_branch_id},
         )
         company_id = br_row.scalar()
         assert company_id is not None, "Could not resolve company_id from branch"
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id,
+        driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T7MNTOP", hire_date="2095-01-01")
 
         # Give driver a very small HOURLY rate so earned pay will be below minimum
@@ -666,14 +654,14 @@ async def test_p9_t7_sys_min_topup_has_system_snapshot(
             """),
             {
                 "cid": company_id,
-                "bid": paytest_branch_id,
+                "bid": trust_branch_id,
                 "did": driver_id,
                 "edate": _date.fromisoformat(T7_START),
             },
         )
         rule_id = rule_result.scalar()
 
-        pid = await _open_period(session_client, auth_token, paytest_branch_id,
+        pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
                                   T7_START, T7_END)
         await _advance_to_approved(session_client, auth_token, pid, driver_id, T7_WORK)
         await _finalize(session_client, auth_token, pid)
@@ -710,7 +698,5 @@ async def test_p9_t7_sys_min_topup_has_system_snapshot(
     finally:
         # Used rules are immutable provenance and cannot be deleted.
         pass
-        if pid:
-            await _force_cleanup_locked_period(direct_db, pid)
         if driver_id:
             await _delete_driver(session_client, auth_token, driver_id)

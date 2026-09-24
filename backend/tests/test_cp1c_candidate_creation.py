@@ -32,6 +32,13 @@ import httpx
 import testing.postgresql
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
+from app.payroll_setup.policy import (
+    assign_setup,
+    create_draft,
+    create_setup,
+    publish_version,
+    withdraw_assignment,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,24 +52,19 @@ _WEEK_CTR = itertools.count(0)
 _OPEN_CTR = itertools.count(500)  # offset to avoid collision with _WEEK_CTR
 
 
-async def _insert_open_for_legacy(direct_db, branch_id: int) -> None:
-    """Insert an Open period so the B1 guard allows legacy POST /payroll/periods.
-
-    B1 guard requires exactly one Open period on the branch before Draft creation.
-    Uses 2095-* dates to avoid conflict with 2096-* test periods.
-    """
+async def _insert_open_period(
+    direct_db, company_id: int, branch_id: int, start: str, end: str,
+) -> None:
+    """Insert a period directly to exercise candidate slot-staleness checks."""
     n = next(_OPEN_CTR)
-    start = datetime.date(2095, 1, 7) + datetime.timedelta(weeks=n)
-    end = start + datetime.timedelta(days=6)
     await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
-            ON CONFLICT DO NOTHING
+            VALUES (:cid, :bid, 'Open', :code, :name, 'Week', :start, :end)
         """),
-        {"bid": branch_id, "code": f"CP1C-OPEN-{n}", "name": f"CP1C Open {n}",
-         "start": start, "end": end},
+        {"cid": company_id, "bid": branch_id, "code": f"CP1C-OPEN-{n}", "name": f"CP1C Open {n}",
+         "start": _d(start), "end": _d(end)},
     )
     await direct_db.commit()
 
@@ -93,29 +95,69 @@ async def _cancel_all(direct_db, branch_id: int, company_id: int | None = None) 
     await direct_db.commit()
 
 
-async def _setup_payroll_weekly(client, token, branch_id: int, anchor: str = "2096-01-07") -> None:
-    """Configure PAYTEST branch with Week frequency, given anchor."""
-    r = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": anchor},
-        headers=_auth(token),
-    )
-    assert r.status_code in (200, 201), f"payroll-setup: {r.text}"
-
-
 async def _setup_payroll(
-    client, token, branch_id: int, freq: str, anchor: str,
+    state: dict, freq: str, anchor: str,
     custom_interval_days: int | None = None,
 ) -> None:
-    body: dict = {"payroll_frequency": freq, "anchor_start_date": anchor}
-    if custom_interval_days is not None:
-        body["custom_interval_days"] = custom_interval_days
-    r = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json=body,
-        headers=_auth(token),
+    """Create and assign a published policy schedule for this test branch."""
+    effective_from = _d(anchor)
+    requested = (freq, effective_from, custom_interval_days)
+    if state.get("schedule") == requested:
+        return
+
+    engine = create_async_engine(state["test_database_url"], echo=False)
+    try:
+        async with engine.begin() as db:
+            setup_id = await create_setup(
+                state["company_id"], state["user_id"],
+                f"CP1C_{uuid.uuid4().hex[:12]}", "CP-1C candidate test setup", db,
+            )
+            draft_id = await create_draft(
+                state["company_id"], state["user_id"], setup_id, db,
+                payroll_frequency=freq, anchor_start_date=effective_from,
+                custom_interval_days=custom_interval_days, normal_days_off_mask=0,
+            )
+            version_id = await publish_version(
+                state["company_id"], state["user_id"], setup_id, draft_id,
+                effective_from, db,
+            )
+
+            if state.get("assignment_id") is not None:
+                await withdraw_assignment(
+                    state["company_id"], state["user_id"], state["assignment_id"], db,
+                    reason="Replace setup in isolated candidate test",
+                )
+            assignment_id = await assign_setup(
+                state["company_id"], state["user_id"], state["branch_id"],
+                setup_id, effective_from, db,
+            )
+    finally:
+        await engine.dispose()
+    state.update(
+        setup_id=setup_id,
+        version_id=version_id,
+        assignment_id=assignment_id,
+        schedule=requested,
+        anchor=anchor,
+        freq=freq,
     )
-    assert r.status_code in (200, 201), f"payroll-setup {freq}: {r.text}"
+
+
+async def _setup_payroll_weekly(
+    state: dict, anchor: str = "2096-01-07",
+) -> None:
+    await _setup_payroll(state, "Week", anchor)
+
+
+async def _withdraw_assignment(state: dict) -> None:
+    engine = create_async_engine(state["test_database_url"], echo=False)
+    try:
+        async with engine.begin() as db:
+            await withdraw_assignment(
+                state["company_id"], state["user_id"], state["assignment_id"], db,
+            )
+    finally:
+        await engine.dispose()
 
 
 async def _preview(client, token, branch_id: int, mode: str, cursor: str | None = None) -> dict:
@@ -146,33 +188,41 @@ def _tamper_key(key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped setup: configure PAYTEST branch for CP-1C tests
+# Function-scoped current-policy setup for CP-1C tests
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
-async def cp1c_setup(session_client, auth_token, paytest_branch_id, session_db_conn):
+async def cp1c_setup(session_db_conn, test_database_url):
     """
     Create a function-local branch with Weekly payroll, anchor 2096-01-07.
     Candidate cancellation is intentionally terminal, so each test gets a
     fresh branch rather than attempting to recycle candidate state.
     """
-    # Candidate creation mutates branch setup and reserves period slots.  A
-    # module-local branch keeps those stateful invariants isolated from the
-    # shared PAYTEST branch and from other test modules' historical periods.
+    tenant = (await session_db_conn.execute(_text("""
+        SELECT companyid, userid FROM sec.users
+        WHERE username = 'admin' AND companyid = 1
+    """))).mappings().one()
+    company_id = int(tenant["companyid"])
+    user_id = int(tenant["userid"])
     branch_code = f"CP1C_{uuid.uuid4().hex[:10]}"
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
                 (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+            VALUES (:cid, :code, :name, 'Active', FALSE)
             RETURNING branchid
         """),
-        {"code": branch_code, "name": f"CP1C {branch_code}"},
+        {"cid": company_id, "code": branch_code, "name": f"CP1C {branch_code}"},
     )).mappings().first()
-    await session_db_conn.commit()
     branch_id = row["branchid"]
-    await _setup_payroll_weekly(session_client, auth_token, branch_id, "2096-01-07")
-    return {"branch_id": branch_id, "anchor": "2096-01-07", "freq": "Week"}
+    state = {
+        "branch_id": branch_id,
+        "company_id": company_id,
+        "user_id": user_id,
+        "test_database_url": test_database_url,
+    }
+    await _setup_payroll_weekly(state)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +320,7 @@ class TestCandidateKeyDeterminism:
 
     @pytest.mark.asyncio
     async def test_06_setup_change_invalidates_candidate(self, session_client, auth_token, cp1c_setup, direct_db):
-        """T6: Changing payroll setup invalidates existing candidate key → CANDIDATE_SETUP_CHANGED."""
+        """T6: Reassigning schedule authority invalidates the existing candidate key."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
 
@@ -278,15 +328,12 @@ class TestCandidateKeyDeterminism:
         assert r.status_code == 200
         key = r.json()["selected"]["candidate_key"]
 
-        # Change setup anchor date
-        await _setup_payroll(session_client, auth_token, bid, "Week", "2096-02-04")
+        # Reassign to a different published schedule.
+        await _setup_payroll(cp1c_setup, "Week", "2096-02-04")
 
         cr = await _create(session_client, auth_token, bid, key)
         assert cr.status_code == 409
-        assert cr.json()["detail"]["code"] == "CANDIDATE_SETUP_CHANGED"
-
-        # Restore
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        assert cr.json()["detail"]["code"] == "CANDIDATE_STALE"
 
     @pytest.mark.asyncio
     async def test_07_slot_change_invalidates_candidate(self, session_client, auth_token, cp1c_setup, direct_db):
@@ -298,17 +345,11 @@ class TestCandidateKeyDeterminism:
         assert r.status_code == 200
         key = r.json()["selected"]["candidate_key"]
 
-        # B1 guard: insert an Open period before legacy Draft creation
-        await _insert_open_for_legacy(direct_db, bid)
-
-        # Insert a period via legacy endpoint (changes slot_fp)
-        start, end = _next_week()
-        lr = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": bid, "period_type": "Week", "start_date": start, "end_date": end},
-            headers=_auth(auth_token),
+        sel = r.json()["selected"]
+        await _insert_open_period(
+            direct_db, cp1c_setup["company_id"], bid,
+            sel["start_date"], sel["end_date"],
         )
-        assert lr.status_code == 201
 
         cr = await _create(session_client, auth_token, bid, key)
         assert cr.status_code == 409
@@ -941,7 +982,7 @@ class TestDateAndSetup:
         """T34: Weekly candidate starts at anchor and spans 7 days."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll(session_client, auth_token, bid, "Week", "2096-01-07")
+        await _setup_payroll(cp1c_setup, "Week", "2096-01-07")
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         sel = r.json()["selected"]
@@ -954,7 +995,7 @@ class TestDateAndSetup:
         """T35: Biweekly candidate spans 14 days."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll(session_client, auth_token, bid, "Biweek", "2096-01-07")
+        await _setup_payroll(cp1c_setup, "Biweek", "2096-01-07")
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         sel = r.json()["selected"]
@@ -963,14 +1004,14 @@ class TestDateAndSetup:
         assert (end - start).days == 13
 
         # Restore
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        await _setup_payroll_weekly(cp1c_setup)
 
     @pytest.mark.asyncio
     async def test_36_monthly_dates(self, session_client, auth_token, cp1c_setup, direct_db):
         """T36: Monthly candidate ends on last day of the anchor's month."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll(session_client, auth_token, bid, "Month", "2096-01-01")
+        await _setup_payroll(cp1c_setup, "Month", "2096-01-01")
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         sel = r.json()["selected"]
@@ -978,14 +1019,14 @@ class TestDateAndSetup:
         assert sel["end_date"] == "2096-01-31"  # Jan has 31 days
 
         # Restore
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        await _setup_payroll_weekly(cp1c_setup)
 
     @pytest.mark.asyncio
     async def test_37_custom_interval_dates(self, session_client, auth_token, cp1c_setup, direct_db):
         """T37: Custom 10-day interval → end = start + 9."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll(session_client, auth_token, bid, "Custom", "2096-01-07", custom_interval_days=10)
+        await _setup_payroll(cp1c_setup, "Custom", "2096-01-07", custom_interval_days=10)
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         sel = r.json()["selected"]
@@ -994,56 +1035,52 @@ class TestDateAndSetup:
         assert (end - start).days == 9
 
         # Restore
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        await _setup_payroll_weekly(cp1c_setup)
 
     @pytest.mark.asyncio
     async def test_38_no_setup_returns_payroll_setup_required(self, session_client, auth_token, cp1c_setup, direct_db):
-        """T38: Branch with no active payroll setup → PAYROLL_SETUP_REQUIRED."""
+        """T38: A branch without an effective assignment cannot preview candidates."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-
-        # Deactivate setup directly
-        await direct_db.execute(
-            _text("UPDATE payroll.branchpayrollsettings SET isactive=FALSE WHERE branchid=:bid"),
-            {"bid": bid},
-        )
-        await direct_db.commit()
+        await _withdraw_assignment(cp1c_setup)
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         assert r.status_code == 409
         assert r.json()["detail"]["code"] == "PAYROLL_SETUP_REQUIRED"
 
-        # Restore
-        await direct_db.execute(
-            _text("UPDATE payroll.branchpayrollsettings SET isactive=TRUE WHERE branchid=:bid"),
-            {"bid": bid},
-        )
-        await direct_db.commit()
-        await _setup_payroll_weekly(session_client, auth_token, bid)
-
     @pytest.mark.asyncio
     async def test_39_custom_freq_without_interval_days_incomplete(self, session_client, auth_token, cp1c_setup, direct_db):
-        """T39: Custom frequency with interval_days=NULL → PAYROLL_SETUP_INCOMPLETE."""
+        """T39: An assignment without a published version fails closed."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-
-        # Force Custom with no interval
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.branchpayrollsettings
-                SET payrollfrequency='Custom', customintervaldays=NULL
-                WHERE branchid=:bid AND isactive=TRUE
-            """),
-            {"bid": bid},
-        )
-        await direct_db.commit()
+        await _withdraw_assignment(cp1c_setup)
+        engine = create_async_engine(cp1c_setup["test_database_url"], echo=False)
+        try:
+            async with engine.begin() as db:
+                setup_id = await create_setup(
+                    cp1c_setup["company_id"], cp1c_setup["user_id"],
+                    f"CP1C_UNPUBLISHED_{uuid.uuid4().hex[:10]}",
+                    "Unpublished test setup", db,
+                )
+                await create_draft(
+                    cp1c_setup["company_id"], cp1c_setup["user_id"], setup_id, db,
+                    payroll_frequency="Week", anchor_start_date=_d(cp1c_setup["anchor"]),
+                    normal_days_off_mask=0,
+                )
+        finally:
+            await engine.dispose()
+        await direct_db.execute(_text("""
+            INSERT INTO payroll.BranchPayrollSetupAssignments
+                (CompanyID, BranchID, PayrollSetupID, EffectiveFromDate, CreatedByUserID)
+            VALUES (:cid, :bid, :sid, :effective, :uid)
+        """), {
+            "cid": cp1c_setup["company_id"], "bid": bid, "sid": setup_id,
+            "effective": _d(cp1c_setup["anchor"]), "uid": cp1c_setup["user_id"],
+        })
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         assert r.status_code == 409
-        assert r.json()["detail"]["code"] == "PAYROLL_SETUP_INCOMPLETE"
-
-        # Restore
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        assert r.json()["detail"]["code"] == "VERSION_NOT_FOUND"
 
     @pytest.mark.asyncio
     async def test_40_inactive_branch_returns_error(self, session_client, auth_token, cp1c_setup, direct_db):
@@ -1072,7 +1109,7 @@ class TestDateAndSetup:
         """T41: Latest non-Cancelled period end date shifts the next candidate start."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        await _setup_payroll_weekly(cp1c_setup)
 
         # Create one Open period (anchor 2096-01-07 → 2096-01-13)
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
@@ -1090,7 +1127,7 @@ class TestDateAndSetup:
         """T42: Cancelled periods are excluded from predecessor computation."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        await _setup_payroll_weekly(cp1c_setup)
 
         # Insert a Cancelled period with a far-future end date
         await direct_db.execute(
@@ -1115,7 +1152,7 @@ class TestDateAndSetup:
         """T43: Approved/Locked/Archived periods count as predecessor for date derivation."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        await _setup_payroll_weekly(cp1c_setup)
 
         # Insert an Approved period ending 2096-02-28
         await direct_db.execute(
@@ -1140,7 +1177,7 @@ class TestDateAndSetup:
         """T44: If dates overlap an existing period (race condition), creation returns 409 PERIOD_DATE_OVERLAP."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        await _setup_payroll_weekly(cp1c_setup)
 
         # Get a candidate key while branch is empty
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
@@ -1371,7 +1408,7 @@ class TestConcurrency:
         """T53: Advisory locks on different branches are independent (different keys)."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid)
+        await _setup_payroll_weekly(cp1c_setup)
 
         # Both preview endpoints should return 200 concurrently
         r_paytest, r_hq_check = await asyncio.gather(
@@ -1382,49 +1419,52 @@ class TestConcurrency:
         assert r_hq_check.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_54_legacy_create_serializes_with_candidate_create(self, session_client, auth_token, cp1c_setup, direct_db):
-        """T54: Legacy endpoint serializes within the same branch as candidate creation."""
+    async def test_54_disabled_legacy_create_cannot_mutate_candidate_slots(
+        self, session_client, auth_token, cp1c_setup, direct_db,
+    ):
+        """T54: Disabled direct creation cannot mutate current candidate workflow state."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        await _setup_payroll_weekly(cp1c_setup)
 
-        # Create one Open via candidate
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
-        await _create(session_client, auth_token, bid, r.json()["selected"]["candidate_key"])
+        created = await _create(
+            session_client, auth_token, bid, r.json()["selected"]["candidate_key"],
+        )
+        assert created.status_code == 201
 
-        # Legacy endpoint should see the Open and fail with ALREADY_EXISTS slot error (slot_fp conflict)
-        start, end = "2096-01-14", "2096-01-20"
+        # The disabled legacy path cannot create a competing Draft beside the Open.
         lr = await session_client.post(
             "/payroll/periods",
             json={"branch_id": bid, "period_type": "Week",
-                  "start_date": start, "end_date": end},
+                  "start_date": "2096-01-14", "end_date": "2096-01-20"},
             headers=_auth(auth_token),
         )
-        # Legacy creates Draft; since Open exists this is valid but no candidate required
-        assert lr.status_code in (201, 422), f"Unexpected: {lr.text}"
+        assert lr.status_code == 410, lr.text
+        assert lr.json()["detail"]["code"] == "LEGACY_DIRECT_PERIOD_CREATION_ROUTE_DISABLED"
+        count = (await direct_db.execute(_text("""
+            SELECT COUNT(*) FROM payroll.PayrollPeriods
+            WHERE CompanyID = :cid AND BranchID = :bid AND Status <> 'Cancelled'
+        """), {"cid": cp1c_setup["company_id"], "bid": bid})).scalar_one()
+        assert count == 1
 
     @pytest.mark.asyncio
-    async def test_55_legacy_conflict_never_causes_candidate_auto_advance(self, session_client, auth_token, cp1c_setup, direct_db):
-        """T55: Creating via legacy after preview → old candidate becomes CANDIDATE_STALE, not advanced."""
+    async def test_55_period_insert_never_causes_candidate_auto_advance(
+        self, session_client, auth_token, cp1c_setup, direct_db,
+    ):
+        """T55: A competing period after preview stales the key; it is not auto-advanced."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        await _setup_payroll_weekly(cp1c_setup)
 
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         old_key = r.json()["selected"]["candidate_key"]
         sel = r.json()["selected"]
 
-        # B1 guard: insert an Open period before legacy Draft creation
-        await _insert_open_for_legacy(direct_db, bid)
-
-        # Legacy create occupying the same date range
-        lr = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": bid, "period_type": "Week",
-                  "start_date": sel["start_date"], "end_date": sel["end_date"]},
-            headers=_auth(auth_token),
+        await _insert_open_period(
+            direct_db, cp1c_setup["company_id"], bid,
+            sel["start_date"], sel["end_date"],
         )
-        assert lr.status_code == 201
 
         # Old candidate should be stale (slot changed)
         cr = await _create(session_client, auth_token, bid, old_key)
@@ -1436,25 +1476,33 @@ class TestConcurrency:
     # -----------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_p1a_setup_update_waits_behind_creation_lock(
+    async def test_p1a_version_publication_waits_behind_candidate_lock(
         self, session_client, auth_token, cp1c_setup, direct_db, test_database_url,
     ):
-        """P1-A: Setup mutation must not interleave with candidate creation.
+        """P1-A: Publishing shared policy must wait for the affected Branch lock.
 
         Protocol:
         - External raw connection holds the branch advisory lock (two-arg form).
-        - Setup PUT is fired; it should block at the DB level acquiring the same lock.
-        - pg_locks is queried to observe the setup connection waiting (decisive proof).
-        - Lock is released; setup must complete successfully.
-
-        Without the P1 fix, setup bypasses the advisory lock, no waiter appears
-        in pg_locks, and the assert fails.
+        - Version publication is fired and must wait while acquiring that Branch lock.
+        - pg_locks is queried to observe the policy transaction waiting.
         """
         from sqlalchemy import text as _t
         from sqlalchemy.ext.asyncio import create_async_engine
+        from app.payroll_setup.policy import create_draft, publish_version
 
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
+        draft_engine = create_async_engine(test_database_url, echo=False)
+        try:
+            async with draft_engine.begin() as db:
+                draft_id = await create_draft(
+                    cp1c_setup["company_id"], cp1c_setup["user_id"],
+                    cp1c_setup["setup_id"], db,
+                    payroll_frequency="Week", anchor_start_date=_d(cp1c_setup["anchor"]),
+                    normal_days_off_mask=0,
+                )
+        finally:
+            await draft_engine.dispose()
 
         cid_row = await direct_db.execute(
             _text("SELECT companyid FROM core.branches WHERE branchid=:bid"),
@@ -1478,20 +1526,25 @@ class TestConcurrency:
             finally:
                 await engine.dispose()
 
-        async def _update_setup():
-            return await session_client.put(
-                f"/settings/branches/{bid}/payroll-setup",
-                json={"payroll_frequency": "Week", "anchor_start_date": "2096-01-07"},
-                headers=_auth(auth_token),
-            )
+        async def _publish_version():
+            engine = create_async_engine(test_database_url, echo=False)
+            try:
+                async with engine.begin() as conn:
+                    return await publish_version(
+                        cp1c_setup["company_id"], cp1c_setup["user_id"],
+                        cp1c_setup["setup_id"], draft_id,
+                        _d(cp1c_setup["anchor"]), conn,
+                        replaces_version_id=cp1c_setup["version_id"],
+                    )
+            finally:
+                await engine.dispose()
 
         lock_task = asyncio.ensure_future(_hold_lock())
         await asyncio.wait_for(lock_held.wait(), timeout=10.0)
 
-        # Fire setup request — it should block at the DB acquiring the same advisory lock.
-        setup_task = asyncio.ensure_future(_update_setup())
+        publish_task = asyncio.ensure_future(_publish_version())
 
-        # Bounded poll: wait until pg_locks shows the setup connection waiting.
+        # Bounded poll: wait until pg_locks shows the policy transaction waiting.
         # Two-arg advisory lock: classid=company_id, objid=branch_id, objsubid=2.
         import time as _time
         _deadline = _time.monotonic() + 5.0
@@ -1512,79 +1565,63 @@ class TestConcurrency:
             await asyncio.sleep(0.05)
 
         assert waiting_count >= 1, (
-            f"Setup request must be waiting on the advisory lock in pg_locks "
+            f"Version publication must be waiting on the Branch advisory lock in pg_locks "
             f"(classid={cid}, objid={bid}, objsubid=2, NOT granted = 0). "
-            "The P1 fix (advisory lock in upsert_payroll_setup) is missing or ineffective."
+            "The publication path did not wait for the affected Branch lock."
         )
 
         blocker_done.set()
-        setup_resp = await asyncio.wait_for(setup_task, timeout=10.0)
+        published_version_id = await asyncio.wait_for(publish_task, timeout=10.0)
         await asyncio.wait_for(lock_task, timeout=10.0)
 
-        assert setup_resp.status_code in (200, 201), setup_resp.text
-
-        # Assert persisted final setup values in DB.
+        assert published_version_id == draft_id
         setup_row = (await direct_db.execute(
             _t("""
-                SELECT payrollfrequency, anchorstartdate
-                FROM   payroll.branchpayrollsettings
-                WHERE  branchid = :bid
+                SELECT payrollfrequency, anchorstartdate, lifecycleState
+                FROM payroll.PayrollSetupVersions
+                WHERE PayrollSetupVersionID = :version_id
+                  AND CompanyID = :cid
             """),
-            {"bid": bid},
+            {"version_id": published_version_id, "cid": cp1c_setup["company_id"]},
         )).mappings().first()
-        assert setup_row is not None, f"No branchpayrollsettings row found for branch {bid}"
+        assert setup_row is not None
         assert setup_row["payrollfrequency"] == "Week", (
             f"Expected payrollfrequency='Week'; got {setup_row['payrollfrequency']!r}"
         )
         assert str(setup_row["anchorstartdate"]) == "2096-01-07", (
             f"Expected anchorstartdate='2096-01-07'; got {setup_row['anchorstartdate']!r}"
         )
+        assert setup_row["lifecyclestate"] == "Published"
+        cp1c_setup["version_id"] = published_version_id
 
     @pytest.mark.asyncio
     async def test_p1b_stale_candidate_rejected_after_setup_change(
         self, session_client, auth_token, cp1c_setup, direct_db,
     ):
-        """P1-B: Candidate key signed against setup-A is rejected if setup changes.
+        """P1-B: A candidate signed under one assignment is stale after reassignment.
 
         Protocol:
-        - Preview an Open candidate from setup version A (Week/2096-01-07).
-        - Change setup to version B (Biweek/2096-01-14) via HTTP.
+        - Preview an Open candidate under the fixture assignment.
+        - Replace its assignment with a different published setup.
         - Attempt to create with the old candidate key.
-        - Expected: 409 CANDIDATE_SETUP_CHANGED or CANDIDATE_STALE.
+        - Expected: 409 CANDIDATE_STALE.
         - No period is inserted; no PERIOD_CREATED audit is written.
-
-        Without CP-1C's fingerprint revalidation, the stale candidate would
-        silently create a period under the wrong cadence.
         """
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-
-        # Setup A
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
 
         # Preview candidate under setup A
         r = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         assert r.status_code == 200
         old_key = r.json()["selected"]["candidate_key"]
 
-        # Change setup to B (Biweek, different anchor)
-        r_setup = await session_client.put(
-            f"/settings/branches/{bid}/payroll-setup",
-            json={"payroll_frequency": "Biweek", "anchor_start_date": "2096-01-14"},
-            headers=_auth(auth_token),
-        )
-        assert r_setup.status_code in (200, 201)
+        await _setup_payroll(cp1c_setup, "Biweek", "2096-01-14")
 
         # Attempt to create with the stale key
         cr = await _create(session_client, auth_token, bid, old_key)
         assert cr.status_code == 409, cr.text
         code = cr.json()["detail"]["code"]
-        assert code in ("CANDIDATE_SETUP_CHANGED", "CANDIDATE_STALE", "INVALID_CANDIDATE_KEY"), (
-            f"Expected setup-stale rejection, got {code!r}"
-        )
-
-        # Restore setup for subsequent tests
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        assert code == "CANDIDATE_STALE", f"Expected candidate-stale rejection, got {code!r}"
 
     @pytest.mark.asyncio
     async def test_p1c_different_branches_dont_block_each_other_setup(
@@ -1654,39 +1691,27 @@ class TestConcurrency:
 
         Protocol:
         - Preview an Open candidate.
-        - Create it → 201 CREATED.
-        - Clean up.
-        - Preview again (same setup, no slot changes beyond the created period).
-        - Create the new candidate → 201 CREATED.
+        - Repeat preview without changing policy or workflow state.
+        - Create the unchanged candidate → 201 CREATED.
 
-        If the P1 locking logic produces false CANDIDATE_SETUP_CHANGED errors,
+        If unchanged assignment/version authority produces false stale errors,
         this test catches them.
         """
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
+        await _setup_payroll_weekly(cp1c_setup)
 
         r1 = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         assert r1.status_code == 200
         key1 = r1.json()["selected"]["candidate_key"]
 
-        cr1 = await _create(session_client, auth_token, bid, key1)
-        assert cr1.status_code == 201, cr1.text
-        assert cr1.json()["result"] == "CREATED"
-
-        # After creation, setup unchanged → next candidate must also be creatable
-        # (after deleting the first to free the slot)
-        await _cancel_all(direct_db, bid)
-        # Re-setup: anchor stays the same, same setup fingerprint
-        await _setup_payroll_weekly(session_client, auth_token, bid, "2096-01-07")
-
         r2 = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
         assert r2.status_code == 200
         key2 = r2.json()["selected"]["candidate_key"]
-
-        cr2 = await _create(session_client, auth_token, bid, key2)
-        assert cr2.status_code == 201, cr2.text
-        assert cr2.json()["result"] == "CREATED"
+        assert key2 == key1
+        cr = await _create(session_client, auth_token, bid, key2)
+        assert cr.status_code == 201, cr.text
+        assert cr.json()["result"] == "CREATED"
 
 
 # ---------------------------------------------------------------------------
@@ -1754,23 +1779,30 @@ class TestRegressionBoundary:
         assert statuses == {"Open", "Draft"}
 
     @pytest.mark.asyncio
-    async def test_61_legacy_create_still_works(self, session_client, auth_token, cp1c_setup, direct_db):
-        """T61: POST /payroll/periods (legacy endpoint) still creates periods correctly."""
+    async def test_61_candidate_create_binds_persisted_authority(self, session_client, auth_token, cp1c_setup, direct_db):
+        """T61: Candidate creation persists its exact setup assignment and version."""
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
-
-        # B1 guard: insert an Open period so the guard allows Draft creation
-        await _insert_open_for_legacy(direct_db, bid)
-
-        start, end = _next_week()
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": bid, "period_type": "Week",
-                  "start_date": start, "end_date": end},
-            headers=_auth(auth_token),
+        preview = await _preview(session_client, auth_token, bid, "OPEN_CREATION")
+        assert preview.status_code == 200
+        created = await _create(
+            session_client, auth_token, bid,
+            preview.json()["selected"]["candidate_key"],
         )
-        assert r.status_code == 201
-        assert r.json()["status"] == "Draft"
+        assert created.status_code == 201
+        period = (await direct_db.execute(_text("""
+            SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID,
+                   FrozenPayrollSetupID, FrozenPayrollFrequency
+            FROM payroll.PayrollPeriods
+            WHERE CompanyID = :cid AND PayrollPeriodID = :pid
+        """), {
+            "cid": cp1c_setup["company_id"],
+            "pid": created.json()["payroll_period_id"],
+        })).mappings().one()
+        assert period["branchpayrollsetupassignmentid"] == cp1c_setup["assignment_id"]
+        assert period["payrollsetupversionid"] == cp1c_setup["version_id"]
+        assert period["frozenpayrollsetupid"] == cp1c_setup["setup_id"]
+        assert period["frozenpayrollfrequency"] == "Week"
 
     @pytest.mark.asyncio
     async def test_62_candidate_response_includes_required_fields(self, session_client, auth_token, cp1c_setup, direct_db):
@@ -1836,28 +1868,16 @@ class TestMigration0050:
         assert col["character_maximum_length"] == 64
 
     @pytest.mark.asyncio
-    async def test_64_no_backfill_legacy_periods_have_null(self, direct_db):
-        """T64: Legacy periods (created before CP-1C) have NULL for CreationCandidateKeyHash."""
-        # Any period created via /payroll/periods (legacy) should have NULL hash
-        null_count = (await direct_db.execute(
-            _text("""
-                SELECT COUNT(*) FROM payroll.payrollperiods
-                WHERE creationcandidatekeyhash IS NULL
-            """),
-        )).scalar()
-        # There should be at least one legacy period (from other test suites)
-        # This asserts that NULL is allowed (no NOT NULL constraint was added)
-        total = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM payroll.payrollperiods"),
-        )).scalar()
-        # null_count + non-null_count = total
-        non_null = (await direct_db.execute(
-            _text("""
-                SELECT COUNT(*) FROM payroll.payrollperiods
-                WHERE creationcandidatekeyhash IS NOT NULL
-            """),
-        )).scalar()
-        assert null_count + non_null == total
+    async def test_64_candidate_key_hash_remains_nullable(self, direct_db):
+        """T64: Pre-candidate historical periods may retain a NULL key hash."""
+        column = (await direct_db.execute(_text("""
+            SELECT is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'payroll'
+              AND table_name = 'payrollperiods'
+              AND column_name = 'creationcandidatekeyhash'
+        """))).scalar_one_or_none()
+        assert column == "YES"
 
     @pytest.mark.asyncio
     async def test_65_partial_unique_index_on_non_null_only(self, direct_db):
