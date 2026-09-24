@@ -20,6 +20,7 @@ All database access is raw parameterised SQL via sqlalchemy.text().
 import json
 import secrets
 import string as _string
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
@@ -43,6 +44,13 @@ from app.settings.schemas import (
     StatusRateColumn,
     StatusRateColumnCreate,
 )
+
+if TYPE_CHECKING:
+    from app.settings.schemas import (
+        BulkPayItemConfigResult,
+        BulkPayItemConfigUpdate,
+        PayItemOrderUpdate,
+    )
 
 # ---------------------------------------------------------------------------
 # Custom pay item code generation

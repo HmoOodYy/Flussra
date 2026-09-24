@@ -76,7 +76,7 @@ import json
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -103,6 +103,9 @@ from app.payroll.status_payment_sync import (
     _STATUS_PAYMENT_PROJECTION_SQL,
     _resolve_live_status_payment_lines,
 )
+
+if TYPE_CHECKING:
+    from app.payroll.schemas import CalculationPreviewResponse
 
 _RATE_DEPENDENT_BEHAVIORS = frozenset(
     {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}

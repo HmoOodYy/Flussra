@@ -33,6 +33,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 _COMPANY_ID = 1
 

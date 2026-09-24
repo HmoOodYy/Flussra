@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -71,6 +71,9 @@ from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodSummary
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+
+if TYPE_CHECKING:
+    from app.payroll.schemas import FinalizationPreviewResponse
 
 # ===========================================================================
 # Finalization — Approved → Locked
