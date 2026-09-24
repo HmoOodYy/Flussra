@@ -43,6 +43,7 @@ migrations/__pycache__/
 
 # Logs
 *.log
+.artifacts/
 
 # Local DB/data artifacts (not migration/schema SQL under migrations/)
 *.sqlite

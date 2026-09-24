@@ -1,0 +1,130 @@
+﻿{
+  "schemaVersion": 1,
+  "artifactsDir": ".artifacts/validation",
+
+  "profiles": {
+    "quick": [
+      {
+        "name": "backend-ruff",
+        "command": ".venv\\Scripts\\python.exe -m ruff check .",
+        "cwd": "backend",
+        "timeoutSeconds": 900,
+        "continueOnFailure": true
+      },
+      {
+        "name": "frontend-lint",
+        "command": "npm run lint",
+        "cwd": "frontend",
+        "timeoutSeconds": 1200,
+        "continueOnFailure": true
+      },
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "continueOnFailure": true
+      }
+    ],
+
+    "backend": [
+      {
+        "name": "backend-pytest",
+        "command": ".venv\\Scripts\\python.exe -m pytest",
+        "cwd": "backend",
+        "timeoutSeconds": 7200,
+        "continueOnFailure": true
+      },
+      {
+        "name": "backend-ruff",
+        "command": ".venv\\Scripts\\python.exe -m ruff check .",
+        "cwd": "backend",
+        "timeoutSeconds": 900,
+        "continueOnFailure": true
+      },
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "continueOnFailure": true
+      }
+    ],
+
+    "frontend": [
+      {
+        "name": "frontend-cdpi-tests",
+        "command": "npm run test:cdpi",
+        "cwd": "frontend",
+        "timeoutSeconds": 900,
+        "continueOnFailure": true
+      },
+      {
+        "name": "frontend-lint",
+        "command": "npm run lint",
+        "cwd": "frontend",
+        "timeoutSeconds": 1200,
+        "continueOnFailure": true
+      },
+      {
+        "name": "frontend-build",
+        "command": "npm run build",
+        "cwd": "frontend",
+        "timeoutSeconds": 1800,
+        "continueOnFailure": true
+      },
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "continueOnFailure": true
+      }
+    ],
+
+    "full": [
+      {
+        "name": "backend-pytest",
+        "command": ".venv\\Scripts\\python.exe -m pytest",
+        "cwd": "backend",
+        "timeoutSeconds": 7200,
+        "continueOnFailure": true
+      },
+      {
+        "name": "backend-ruff",
+        "command": ".venv\\Scripts\\python.exe -m ruff check .",
+        "cwd": "backend",
+        "timeoutSeconds": 900,
+        "continueOnFailure": true
+      },
+      {
+        "name": "frontend-cdpi-tests",
+        "command": "npm run test:cdpi",
+        "cwd": "frontend",
+        "timeoutSeconds": 900,
+        "continueOnFailure": true
+      },
+      {
+        "name": "frontend-lint",
+        "command": "npm run lint",
+        "cwd": "frontend",
+        "timeoutSeconds": 1200,
+        "continueOnFailure": true
+      },
+      {
+        "name": "frontend-build",
+        "command": "npm run build",
+        "cwd": "frontend",
+        "timeoutSeconds": 1800,
+        "continueOnFailure": true
+      },
+      {
+        "name": "git-diff-check",
+        "command": "git diff --check",
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "continueOnFailure": true
+      }
+    ]
+  }
+}
