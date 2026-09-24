@@ -516,7 +516,8 @@ class TestDoubleSubmitPrevention:
             except Exception as exc:
                 thread_errors.append(exc)
                 try:
-                    conn.rollback(); conn.close()
+                    conn.rollback()
+                    conn.close()
                 except Exception:
                     pass
             finally:

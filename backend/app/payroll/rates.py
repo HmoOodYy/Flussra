@@ -1256,10 +1256,14 @@ async def update_rate(
     rate_behavior = await _resolve_rate_behavior(rate.rate_type_id, company_id, db)
 
     fields: dict[str, Any] = {}
-    if data.amount         is not None: fields["amount"]        = data.amount
-    if data.effective_from is not None: fields["effectivefrom"] = data.effective_from
-    if data.effective_to   is not None: fields["effectiveto"]   = data.effective_to
-    if data.notes          is not None: fields["notes"]         = data.notes
+    if data.amount is not None:
+        fields["amount"] = data.amount
+    if data.effective_from is not None:
+        fields["effectivefrom"] = data.effective_from
+    if data.effective_to is not None:
+        fields["effectiveto"] = data.effective_to
+    if data.notes is not None:
+        fields["notes"] = data.notes
 
     # M13c: block metadata updates
     if data.block_size is not None or data.rounding_rule is not None:

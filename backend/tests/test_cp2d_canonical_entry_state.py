@@ -1805,7 +1805,9 @@ class TestCp2dCanonicalEntryState:
             """),
             {"pid": pid},
         )).mappings().all()
-        as_pairs = lambda rows: sorted((r["evidencedomain"], r["coveragestate"]) for r in rows)
+        def as_pairs(rows):
+            return sorted((r["evidencedomain"], r["coveragestate"]) for r in rows)
+
         assert as_pairs(coverage_after) == as_pairs(coverage_before), (
             "Protected audit-evidence coverage must be unchanged by the rejected DELETE"
         )
