@@ -1,6 +1,7 @@
 """Payroll Trust Phase 7 — source integrity and snapshot finalization trust."""
 import pytest
 import pytest_asyncio
+from uuid import uuid4
 import httpx
 from decimal import Decimal
 from datetime import date as _date
@@ -28,19 +29,27 @@ def _tok(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _cancel_periods(client, token, branch_id):
-    headers = _tok(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get("/payroll/periods",
-                                params={"branch_id": branch_id, "status": s},
-                                headers=headers)
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"}, headers=headers,
-            )
+@pytest_asyncio.fixture
+async def trust_branch_id(direct_db, session_client, auth_token):
+    """Keep each trust flow and its retained history on a fresh branch."""
+    code = f"P7_{uuid4().hex[:12]}"
+    branch_id = (await direct_db.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": code, "name": code})).scalar_one()
+    items = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items", headers=_tok(auth_token),
+    )
+    assert items.status_code == 200, items.text
+    hours_id = next(item["pay_item_id"] for item in items.json()
+                    if item["pay_item_code"] == "HOURS")
+    active = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{hours_id}",
+        json={"is_active": True}, headers=_tok(auth_token),
+    )
+    assert active.status_code == 200, active.text
+    return branch_id
 
 
 async def _create_driver(client, token, branch_id, suffix, hire_date="2066-01-01"):
@@ -120,7 +129,7 @@ async def _advance_to_approved(client, token, pid, driver_id, work_date):
 async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
@@ -130,15 +139,13 @@ async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
     finalization authority without bypassing that database invariant.
     """
     headers = _tok(auth_token)
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
-
-    drv = await _create_driver(session_client, auth_token, paytest_branch_id,
+    drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T1Dup", hire_date="2066-01-01")
     try:
         await _create_and_approve_rate(session_client, auth_token, drv,
                                        paytest_rate_type_id,
                                        effective_from="2066-01-01")
-        pid = await _open_period(direct_db, paytest_branch_id,
+        pid = await _open_period(direct_db, trust_branch_id,
                                  T1_START, T1_END)
         await _advance_to_approved(session_client, auth_token, pid, drv, T1_WORK)
 
@@ -157,7 +164,7 @@ async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
                         FROM payroll.payrollperiods
                         WHERE payrollperiodid = :pid
                     """),
-                    {"bid": paytest_branch_id, "pid": pid, "did": drv,
+                    {"bid": trust_branch_id, "pid": pid, "did": drv,
                      "wdate": _date.fromisoformat(T1_WORK)},
                 )
 
@@ -181,7 +188,7 @@ async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
 async def test_p7_t2_live_eligibility_drift_does_not_block_snapshot_finalization(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
@@ -190,9 +197,7 @@ async def test_p7_t2_live_eligibility_drift_does_not_block_snapshot_finalization
     approval does not alter the immutable packet already approved for finalization.
     """
     headers = _tok(auth_token)
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
-
-    drv = await _create_driver(session_client, auth_token, paytest_branch_id,
+    drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T2Inelig", hire_date="2067-01-01")
     emp_id_row = await direct_db.execute(
         _text("SELECT employeeid FROM core.drivers WHERE driverid = :did"),
@@ -204,7 +209,7 @@ async def test_p7_t2_live_eligibility_drift_does_not_block_snapshot_finalization
         await _create_and_approve_rate(session_client, auth_token, drv,
                                        paytest_rate_type_id,
                                        effective_from="2067-01-01")
-        pid = await _open_period(direct_db, paytest_branch_id,
+        pid = await _open_period(direct_db, trust_branch_id,
                                  T2_START, T2_END)
 
         # Add a HOURS line on T2_WORK (will become ineligible after we terminate)
@@ -278,7 +283,7 @@ async def test_p7_t3_active_company_mappings_do_not_cross_tenants(
 async def test_p7_t4_unresolved_nmr_line_blocks_submit_before_snapshot_capture(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
@@ -287,13 +292,11 @@ async def test_p7_t4_unresolved_nmr_line_blocks_submit_before_snapshot_capture(
     therefore cannot Submit a financial packet for review or finalization.
     """
     headers = _tok(auth_token)
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
-
     # Create driver WITHOUT any approved rate so the HOURS line is unresolved.
-    drv = await _create_driver(session_client, auth_token, paytest_branch_id,
+    drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T4NMR", hire_date="2068-01-01")
     try:
-        pid = await _open_period(direct_db, paytest_branch_id,
+        pid = await _open_period(direct_db, trust_branch_id,
                                  T4_START, T4_END)
 
         # Add HOURS line — NMR=True because no rate exists for this driver
@@ -332,7 +335,7 @@ async def test_p7_t4_unresolved_nmr_line_blocks_submit_before_snapshot_capture(
 async def test_p7_t5_valid_period_preview_and_finalize(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    trust_branch_id: int,
     paytest_rate_type_id: int,
     direct_db,
 ):
@@ -341,15 +344,13 @@ async def test_p7_t5_valid_period_preview_and_finalize(
     must have preview can_finalize=True and finalize must succeed (200 Locked).
     """
     headers = _tok(auth_token)
-    await _cancel_periods(session_client, auth_token, paytest_branch_id)
-
-    drv = await _create_driver(session_client, auth_token, paytest_branch_id,
+    drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T5Valid", hire_date="2069-01-01")
     try:
         await _create_and_approve_rate(session_client, auth_token, drv,
                                        paytest_rate_type_id,
                                        effective_from="2069-01-01")
-        pid = await _open_period(direct_db, paytest_branch_id,
+        pid = await _open_period(direct_db, trust_branch_id,
                                  T5_START, T5_END)
 
         r = await session_client.post(
@@ -383,7 +384,7 @@ async def test_p7_t5_valid_period_preview_and_finalize(
         # ── Final lines must exist ──
         cid_row = await direct_db.execute(
             _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-            {"bid": paytest_branch_id},
+            {"bid": trust_branch_id},
         )
         cid = cid_row.scalar_one()
         cnt = (await direct_db.execute(

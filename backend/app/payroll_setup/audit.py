@@ -19,6 +19,7 @@ async def write_policy_audit(
     payroll_setup_id: int | None = None,
     payroll_setup_version_id: int | None = None,
     branch_payroll_setup_assignment_id: int | None = None,
+    payroll_period_id: int | None = None,
     branch_id: int | None = None,
     old_payroll_setup_id: int | None = None,
     new_payroll_setup_id: int | None = None,
@@ -39,7 +40,7 @@ async def write_policy_audit(
         """
         INSERT INTO payroll.PayrollSetupPolicyAuditEvents (
             CompanyID, ActorUserID, EventType, PayrollSetupID,
-            PayrollSetupVersionID, BranchPayrollSetupAssignmentID, BranchID,
+            PayrollSetupVersionID, BranchPayrollSetupAssignmentID, PayrollPeriodID, BranchID,
             OldPayrollSetupID, NewPayrollSetupID,
             OldPayrollSetupVersionID, NewPayrollSetupVersionID,
             OldBranchPayrollSetupAssignmentID, NewBranchPayrollSetupAssignmentID,
@@ -47,7 +48,7 @@ async def write_policy_audit(
             CorrelationID
         ) VALUES (
             :company_id, :actor_user_id, :event_type, :payroll_setup_id,
-            :payroll_setup_version_id, :assignment_id, :branch_id,
+            :payroll_setup_version_id, :assignment_id, :payroll_period_id, :branch_id,
             :old_setup_id, :new_setup_id, :old_version_id, :new_version_id,
             :old_assignment_id, :new_assignment_id, :effective_date,
             :old_config_hash, :new_config_hash, :old_state, :new_state,
@@ -67,6 +68,7 @@ async def write_policy_audit(
             "payroll_setup_id": payroll_setup_id,
             "payroll_setup_version_id": payroll_setup_version_id,
             "assignment_id": branch_payroll_setup_assignment_id,
+            "payroll_period_id": payroll_period_id,
             "branch_id": branch_id,
             "old_setup_id": old_payroll_setup_id,
             "new_setup_id": new_payroll_setup_id,

@@ -23,7 +23,14 @@ import pytest
 import pytest_asyncio
 import httpx
 from sqlalchemy import text as _text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from app.payroll_setup.policy import (
+    assign_setup,
+    create_draft,
+    create_setup,
+    publish_version,
+    withdraw_assignment,
+)
 
 # ---------------------------------------------------------------------------
 # Unique-username counter (avoids collisions between security tests)
@@ -193,18 +200,48 @@ async def _insert_returned(
     return per_row["payrollperiodid"], ri_id
 
 
-async def _setup_payroll_weekly(client, token, branch_id: int) -> None:
-    r = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": "2097-01-06"},
-        headers=_auth(token),
-    )
-    assert r.status_code in (200, 201), f"payroll-setup: {r.text}"
+async def _withdraw_branch_assignment(test_database_url: str, branch_id: int) -> int:
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            user_id = (await db.execute(_text(
+                "SELECT userid FROM sec.users WHERE username = 'admin' AND companyid = :cid",
+            ), {"cid": _COMPANY_ID})).scalar_one()
+            assignment = (await db.execute(_text("""
+                SELECT BranchPayrollSetupAssignmentID, PayrollSetupID
+                FROM payroll.BranchPayrollSetupAssignments
+                WHERE CompanyID = :cid AND BranchID = :bid AND WithdrawnAtUtc IS NULL
+                ORDER BY EffectiveFromDate DESC
+                LIMIT 1
+            """), {"cid": _COMPANY_ID, "bid": branch_id})).mappings().one()
+            await withdraw_assignment(
+                _COMPANY_ID, user_id, assignment["branchpayrollsetupassignmentid"], db,
+                reason="Workflow capability test precondition",
+            )
+            return assignment["payrollsetupid"]
+    finally:
+        await engine.dispose()
+
+
+async def _restore_branch_assignment(test_database_url: str, branch_id: int,
+                                     setup_id: int) -> None:
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            user_id = (await db.execute(_text(
+                "SELECT userid FROM sec.users WHERE username = 'admin' AND companyid = :cid",
+            ), {"cid": _COMPANY_ID})).scalar_one()
+            await assign_setup(
+                _COMPANY_ID, user_id, branch_id, setup_id, _BASE_DATE, db,
+                reason="Restore workflow capability test setup",
+            )
+    finally:
+        await engine.dispose()
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_client, auth_token, session_db_conn):
-    """Use a fresh branch so slot/capability tests do not share period history."""
+async def paytest_branch_id(session_db_conn, test_database_url):
+    """Create an isolated Branch with a published weekly policy assignment."""
     branch_code = f"CP1E_{uuid.uuid4().hex[:10]}"
     row = (await session_db_conn.execute(
         _text("""
@@ -215,9 +252,30 @@ async def paytest_branch_id(session_client, auth_token, session_db_conn):
         """),
         {"code": branch_code, "name": f"CP1E {branch_code}"},
     )).mappings().first()
-    await session_db_conn.commit()
     branch_id = row["branchid"]
-    await _setup_payroll_weekly(session_client, auth_token, branch_id)
+    user_id = (await session_db_conn.execute(_text(
+        "SELECT userid FROM sec.users WHERE username = 'admin' AND companyid = :cid",
+    ), {"cid": _COMPANY_ID})).scalar_one()
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        async with engine.begin() as db:
+            setup_id = await create_setup(
+                _COMPANY_ID, user_id, f"CP1E_{uuid.uuid4().hex[:12]}",
+                "CP-1E workflow capability setup", db,
+            )
+            draft_id = await create_draft(
+                _COMPANY_ID, user_id, setup_id, db,
+                payroll_frequency="Week", anchor_start_date=_BASE_DATE,
+                normal_days_off_mask=0,
+            )
+            version_id = await publish_version(
+                _COMPANY_ID, user_id, setup_id, draft_id, _BASE_DATE, db,
+            )
+            await assign_setup(
+                _COMPANY_ID, user_id, branch_id, setup_id, _BASE_DATE, db,
+            )
+    finally:
+        await engine.dispose()
     return branch_id
 
 
@@ -657,10 +715,16 @@ class TestCandidateCapabilities:
     ):
         """C01: No active periods + complete setup → can_create_open_candidate allowed."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
         b = _branch_entry(resp.json(), paytest_branch_id)
         assert b["capabilities"]["can_create_open_candidate"]["allowed"] is True
+        candidates = await session_client.get(
+            f"/payroll/branches/{paytest_branch_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
+            headers=_auth(auth_token),
+        )
+        assert candidates.status_code == 200, candidates.text
+        assert candidates.json()["selected"]["creatable"] is True
 
     @pytest.mark.asyncio
     async def test_c02_open_no_draft_can_create_prepared(
@@ -668,7 +732,6 @@ class TestCandidateCapabilities:
     ):
         """C02: Open + no Draft → can_create_prepared_candidate allowed."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         s, e = _week()
         await _insert_period(direct_db, paytest_branch_id, "Open", s, e, "C02")
         resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
@@ -681,7 +744,6 @@ class TestCandidateCapabilities:
     ):
         """C03: Open + Draft → both create candidates blocked (slots full)."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         os, oe = _week()
         ds = oe + datetime.timedelta(days=1)
         de = ds + datetime.timedelta(days=6)
@@ -694,24 +756,22 @@ class TestCandidateCapabilities:
 
     @pytest.mark.asyncio
     async def test_c04_setup_missing_candidate_blocked(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, direct_db, test_database_url,
     ):
         """C04: No payroll setup → candidate capabilities false, NO_PAYROLL_SETUP."""
         await _clean(direct_db, paytest_branch_id)
-        # Remove payroll setup
-        await direct_db.execute(
-            _text("DELETE FROM payroll.branchpayrollsettings WHERE branchid = :bid"),
-            {"bid": paytest_branch_id},
-        )
-        await direct_db.commit()
-        resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
-        b = _branch_entry(resp.json(), paytest_branch_id)
-        co = b["capabilities"]["can_create_open_candidate"]
-        cp = b["capabilities"]["can_create_prepared_candidate"]
-        assert co["allowed"] is False
-        assert co["reason_code"] == "NO_PAYROLL_SETUP"
-        assert cp["allowed"] is False
-        assert cp["reason_code"] == "NO_PAYROLL_SETUP"
+        setup_id = await _withdraw_branch_assignment(test_database_url, paytest_branch_id)
+        try:
+            resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
+            b = _branch_entry(resp.json(), paytest_branch_id)
+            co = b["capabilities"]["can_create_open_candidate"]
+            cp = b["capabilities"]["can_create_prepared_candidate"]
+            assert co["allowed"] is False
+            assert co["reason_code"] == "NO_PAYROLL_SETUP"
+            assert cp["allowed"] is False
+            assert cp["reason_code"] == "NO_PAYROLL_SETUP"
+        finally:
+            await _restore_branch_assignment(test_database_url, paytest_branch_id, setup_id)
 
     @pytest.mark.asyncio
     async def test_c05_returned_backlog_does_not_block_prepared_creation(
@@ -719,7 +779,6 @@ class TestCandidateCapabilities:
     ):
         """C05: Older Returned + Open → can_create_prepared_candidate still true (Returned backlog does NOT block)."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         rs, re = _week()
         os, oe = _week()
         await _insert_returned(direct_db, paytest_branch_id, rs, re, "C05R")
@@ -738,7 +797,6 @@ class TestCandidateCapabilities:
     ):
         """C06: RETURNED_BACKLOG alert affects can_submit_for_review only, not can_create_prepared_candidate."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         rs, re = _week()
         os, oe = _week()
         await _insert_returned(direct_db, paytest_branch_id, rs, re, "C06R")
@@ -910,7 +968,6 @@ class TestPermissionsAndSecurity:
     ):
         """D08: payroll.view without payroll.period.create → 200, but candidate caps PERMISSION_DENIED."""
         await _clean(direct_db, paytest_branch_id)  # clear any leftover state first
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         await _clean(direct_db, paytest_branch_id)  # empty slots so creation would otherwise pass
 
         role_id = await _create_role_with_perms(
@@ -1078,19 +1135,18 @@ class TestAlerts:
 
     @pytest.mark.asyncio
     async def test_e06_setup_missing_alert(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, direct_db, test_database_url,
     ):
         """E06: No payroll setup → SETUP_MISSING warning alert."""
         await _clean(direct_db, paytest_branch_id)
-        await direct_db.execute(
-            _text("DELETE FROM payroll.branchpayrollsettings WHERE branchid = :bid"),
-            {"bid": paytest_branch_id},
-        )
-        await direct_db.commit()
-        resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
-        b = _branch_entry(resp.json(), paytest_branch_id)
-        codes = [a["code"] for a in b["alerts"]]
-        assert "SETUP_MISSING" in codes
+        setup_id = await _withdraw_branch_assignment(test_database_url, paytest_branch_id)
+        try:
+            resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
+            b = _branch_entry(resp.json(), paytest_branch_id)
+            codes = [a["code"] for a in b["alerts"]]
+            assert "SETUP_MISSING" in codes
+        finally:
+            await _restore_branch_assignment(test_database_url, paytest_branch_id, setup_id)
 
 
 # ===========================================================================
@@ -1108,7 +1164,6 @@ class TestCompositionAndSetup:
         the prepared slot — NOT because of the Returned backlog (backlog alone never
         blocks can_create_prepared_candidate)."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
         rs, re = _week()
         os, oe = _week()
         ds = oe + datetime.timedelta(days=1)
@@ -1140,44 +1195,51 @@ class TestCompositionAndSetup:
         assert "can_create_prepared_candidate" not in backlog_alerts[0]["affected_action_codes"]
 
     @pytest.mark.asyncio
-    async def test_f02_inactive_setup_candidate_blocked(
-        self, session_client, auth_token, paytest_branch_id, direct_db,
+    async def test_f02_incomplete_assigned_setup_candidate_blocked(
+        self, session_client, auth_token, paytest_branch_id, direct_db, test_database_url,
     ):
-        """F02: Inactive payroll setup → setup_status='inactive', candidate caps blocked.
-        Provisions setup inside the test so it passes independently (not relying on
-        earlier tests having run)."""
+        """F02: Assignment without a published version is incomplete and blocks candidates."""
         await _clean(direct_db, paytest_branch_id)
-        # Provision setup so the row exists before we deactivate it
-        await _setup_payroll_weekly(session_client, auth_token, paytest_branch_id)
-        # Set setup to inactive
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.branchpayrollsettings
-                SET isactive = FALSE
-                WHERE branchid = :bid
-            """),
-            {"bid": paytest_branch_id},
-        )
+        branch_id = (await direct_db.execute(_text("""
+            INSERT INTO core.Branches
+                (CompanyID, BranchCode, BranchName, Status, IsDefault)
+            VALUES (:cid, :code, 'CP1E unpublished setup branch', 'Active', FALSE)
+            RETURNING BranchID
+        """), {
+            "cid": _COMPANY_ID, "code": f"CP1E_UNPUB_{uuid.uuid4().hex[:10]}",
+        })).scalar_one()
+        user_id = (await direct_db.execute(_text(
+            "SELECT userid FROM sec.users WHERE username = 'admin' AND companyid = :cid",
+        ), {"cid": _COMPANY_ID})).scalar_one()
+        engine = create_async_engine(test_database_url, echo=False)
+        try:
+            async with engine.begin() as db:
+                setup_id = await create_setup(
+                    _COMPANY_ID, user_id, f"CP1E_UNPUBLISHED_{uuid.uuid4().hex[:10]}",
+                    "Unpublished capability test setup", db,
+                )
+                await create_draft(
+                    _COMPANY_ID, user_id, setup_id, db,
+                    payroll_frequency="Week", anchor_start_date=_BASE_DATE,
+                    normal_days_off_mask=0,
+                )
+        finally:
+            await engine.dispose()
+        await direct_db.execute(_text("""
+            INSERT INTO payroll.BranchPayrollSetupAssignments
+                (CompanyID, BranchID, PayrollSetupID, EffectiveFromDate, CreatedByUserID)
+            VALUES (:cid, :bid, :sid, :effective, :uid)
+        """), {
+            "cid": _COMPANY_ID, "bid": branch_id, "sid": setup_id,
+            "effective": _BASE_DATE, "uid": user_id,
+        })
         await direct_db.commit()
 
-        resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
+        resp = await _get_workflow(session_client, auth_token, branch_id)
         assert resp.status_code == 200
-        b = _branch_entry(resp.json(), paytest_branch_id)
-        assert b["setup_status"] == "inactive"
+        b = _branch_entry(resp.json(), branch_id)
+        assert b["setup_status"] == "incomplete"
         co = b["capabilities"]["can_create_open_candidate"]
         assert co["allowed"] is False
         # reason must be setup-related (not slot-related)
-        assert co["reason_code"] in ("SETUP_INCOMPLETE", "NO_PAYROLL_SETUP", "SETUP_INACTIVE"), (
-            f"Unexpected reason_code for inactive setup: {co['reason_code']}"
-        )
-
-        # Restore active setup for other tests
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.branchpayrollsettings
-                SET isactive = TRUE
-                WHERE branchid = :bid
-            """),
-            {"bid": paytest_branch_id},
-        )
-        await direct_db.commit()
+        assert co["reason_code"] == "SETUP_INCOMPLETE"

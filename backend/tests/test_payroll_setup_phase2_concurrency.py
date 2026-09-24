@@ -15,8 +15,8 @@ from psycopg2 import sql as pg_sql
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll.period_creation import create_period
-from app.payroll.schemas import PeriodCreate
+from app.payroll.period_creation import create_period_from_candidate, get_period_candidates
+from app.payroll.schemas import PeriodCreationRequest
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.locks import lock_branches
@@ -314,7 +314,7 @@ async def _wait_until_backend_is_lock_waiting(conn, backend_pid: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reassignment_waits_for_legacy_period_creation_branch_lock(database_engine):
+async def test_reassignment_waits_for_candidate_period_creation_branch_lock(database_engine):
     db = database_engine
     branch_id = db.branch_ids[0]
     async with db.engine.begin() as conn:
@@ -325,29 +325,23 @@ async def test_reassignment_waits_for_legacy_period_creation_branch_lock(databas
         await _publish(db, conn, source, source_draft, _ANCHOR)
         await _publish(db, conn, destination, destination_draft, _ANCHOR)
         await assign_setup(db.company_id, db.user_id, branch_id, source, _ANCHOR, conn)
-        sv_id = (await conn.execute(text("""
-            INSERT INTO payroll.PayrollScheduleVersions
-                (CompanyID, BranchID, VersionNumber, PayrollFrequency,
-                 AnchorStartDate, NormalDaysOffMask, SourceAction)
-            VALUES (:cid, :bid, 1, 'Week', :anchor, 0, 'TEST')
-            RETURNING ScheduleVersionID
-        """), {"cid": db.company_id, "bid": branch_id, "anchor": _ANCHOR})).scalar_one()
-        await conn.execute(text("""
-            INSERT INTO payroll.BranchPayrollSettings
-                (CompanyID, BranchID, PayrollFrequency, AnchorStartDate,
-                 NormalDaysOffMask, CurrentScheduleVersionID, CreatedByUserID)
-            VALUES (:cid, :bid, 'Week', :anchor, 0, :sv, :uid)
-        """), {"cid": db.company_id, "bid": branch_id, "anchor": _ANCHOR,
-               "sv": sv_id, "uid": db.user_id})
-        await conn.execute(text("""
-            INSERT INTO payroll.PayrollPeriods
-                (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType,
-                 StartDate, EndDate, Status, CreatedByUserID, ScheduleVersionID)
-            VALUES (:cid, :bid, 'P2C_OPEN', 'Existing open period', 'Week',
-                    :start, :end, 'Open', :uid, :sv)
-        """), {"cid": db.company_id, "bid": branch_id,
-               "start": _ANCHOR, "end": date(2090, 1, 7),
-               "uid": db.user_id, "sv": sv_id})
+        first = await get_period_candidates(
+            db.company_id, db.user_id, branch_id, "OPEN_CREATION", None, conn,
+        )
+        assert first.selected.creatable
+        opened = await create_period_from_candidate(
+            db.company_id, db.user_id, branch_id,
+            PeriodCreationRequest(candidate_key=first.selected.candidate_key), conn,
+        )
+        assert opened.result == "CREATED"
+
+        prepared = await get_period_candidates(
+            db.company_id, db.user_id, branch_id, "PREPARED_CREATION", None, conn,
+        )
+        assert prepared.selected.creatable
+        assert (prepared.selected.start_date, prepared.selected.end_date) == (
+            date(2090, 1, 8), date(2090, 1, 14),
+        )
 
     async with db.engine.connect() as creator:
         creator_tx = await creator.begin()
@@ -364,13 +358,12 @@ async def test_reassignment_waits_for_legacy_period_creation_branch_lock(databas
             ))
             await _wait_until_backend_is_lock_waiting(creator, backend_pid)
             try:
-                created = await asyncio.wait_for(create_period(
-                    db.company_id, db.user_id,
-                    PeriodCreate(
-                        branch_id=branch_id, period_type="Week",
-                        start_date=date(2090, 1, 8), end_date=date(2090, 1, 14),
-                    ), creator,
+                created = await asyncio.wait_for(create_period_from_candidate(
+                    db.company_id, db.user_id, branch_id,
+                    PeriodCreationRequest(candidate_key=prepared.selected.candidate_key),
+                    creator,
                 ), timeout=5)
+                assert created.result == "CREATED"
                 assert created.start_date == date(2090, 1, 8)
                 await asyncio.wait_for(creator_tx.commit(), timeout=5)
             except BaseException:

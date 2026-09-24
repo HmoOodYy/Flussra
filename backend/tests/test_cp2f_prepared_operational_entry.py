@@ -17,7 +17,6 @@ Run from backend/:
     python -B -m pytest tests/test_cp2f_prepared_operational_entry.py -v -p no:cacheprovider
 """
 import datetime
-import itertools
 from uuid import uuid4
 
 import pytest
@@ -33,16 +32,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 _COMPANY_ID = 1
 # Use late 2097 to avoid any CP-2D2 2097-start collisions
 _BASE_MONDAY_2097_LATE = datetime.date(2097, 7, 7)   # Monday in July 2097
-_CTR = itertools.count(0)
 
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _week(offset: int = 0) -> tuple[datetime.date, datetime.date]:
-    n = next(_CTR) + offset
-    start = _BASE_MONDAY_2097_LATE + datetime.timedelta(weeks=n)
+def _week(offset: int = 1) -> tuple[datetime.date, datetime.date]:
+    start = _BASE_MONDAY_2097_LATE + datetime.timedelta(weeks=offset)
     return start, start + datetime.timedelta(days=6)
 
 
@@ -54,29 +51,50 @@ async def _insert_period_db(
     status: str = "Draft",
     code_suffix: str = "",
 ) -> int:
-    code = f"CP2F-{branch_id}-{start.isoformat()}{code_suffix}"
-    r = (await db.execute(
-        _text("""
-            INSERT INTO payroll.payrollperiods
-                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (1, :bid, :status, :code, :name, 'Week', :start, :end)
-            ON CONFLICT DO NOTHING
-            RETURNING payrollperiodid
-        """),
-        {
-            "bid": branch_id, "status": status, "code": code,
-            "name": f"CP2F {start}", "start": start, "end": end,
-        },
-    )).mappings().first()
-    await db.commit()
-    if r is None:
-        r = (await db.execute(
-            _text("SELECT payrollperiodid FROM payroll.payrollperiods "
-                  "WHERE branchid = :bid AND periodcode = :code"),
-            {"bid": branch_id, "code": code},
-        )).mappings().first()
-    assert r is not None
-    return r["payrollperiodid"]
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.payroll.period_creation import get_period_candidates, create_period_from_candidate
+    from app.payroll.schemas import PeriodCreationRequest
+
+    engine = create_async_engine(db.engine.url, echo=False)
+    try:
+        async with engine.connect() as conn:
+            async with conn.begin():
+                user_id = (await conn.execute(_text("""
+                    SELECT UserID FROM sec.Users
+                    WHERE CompanyID = :cid AND Username = 'admin'
+                """), {"cid": _COMPANY_ID})).scalar_one()
+
+                if status == "Open":
+                    mode = "OPEN_CREATION"
+                else:
+                    existing_open = (await conn.execute(_text("""
+                        SELECT PayrollPeriodID FROM payroll.PayrollPeriods
+                        WHERE CompanyID = :cid AND BranchID = :bid AND Status = 'Open'
+                    """), {"cid": _COMPANY_ID, "bid": branch_id})).scalar_one_or_none()
+                    if existing_open is None:
+                        opened = await get_period_candidates(
+                            _COMPANY_ID, user_id, branch_id, "OPEN_CREATION", None, conn,
+                        )
+                        open_result = await create_period_from_candidate(
+                            _COMPANY_ID, user_id, branch_id,
+                            PeriodCreationRequest(candidate_key=opened.selected.candidate_key), conn,
+                        )
+                        assert open_result.status == "Open"
+                    mode = "PREPARED_CREATION"
+
+                preview = await get_period_candidates(
+                    _COMPANY_ID, user_id, branch_id, mode, None, conn,
+                )
+                result = await create_period_from_candidate(
+                    _COMPANY_ID, user_id, branch_id,
+                    PeriodCreationRequest(candidate_key=preview.selected.candidate_key), conn,
+                )
+                assert result.status == status
+                assert result.start_date == start, (result.start_date, start)
+                assert result.end_date == end, (result.end_date, end)
+                return int(result.payroll_period_id)
+    finally:
+        await engine.dispose()
 
 
 async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
@@ -260,15 +278,15 @@ async def _ensure_status_key(
 # Module-scoped fixtures
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture
 async def branch_id(
-    session_db_conn: AsyncConnection,
+    direct_db: AsyncConnection,
     session_client: httpx.AsyncClient,
     auth_token: str,
 ) -> int:
-    """Create a branch-local CP2F fixture so workflow slots are not shared."""
+    """Create isolated branch policy authority for one operational-entry test."""
     code = f"CP2F_{uuid4().hex[:10]}".upper()
-    row = (await session_db_conn.execute(
+    row = (await direct_db.execute(
         _text("""
             INSERT INTO core.branches
                 (companyid, branchcode, branchname, status, isdefault)
@@ -279,12 +297,32 @@ async def branch_id(
     )).mappings().one()
     branch = int(row["branchid"])
 
-    setup = await session_client.put(
-        f"/settings/branches/{branch}/payroll-setup",
-        json={"payroll_frequency": "Week", "anchor_start_date": "2097-07-07"},
-        headers=_auth(auth_token),
-    )
-    assert setup.status_code in (200, 201), setup.text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+
+    engine = create_async_engine(direct_db.engine.url, echo=False)
+    try:
+        async with engine.connect() as conn:
+            async with conn.begin():
+                user_id = (await conn.execute(_text("""
+                    SELECT UserID FROM sec.Users
+                    WHERE CompanyID = :cid AND Username = 'admin'
+                """), {"cid": _COMPANY_ID})).scalar_one()
+                setup_id = await create_setup(
+                    _COMPANY_ID, user_id, code, f"CP2F {code}", conn,
+                )
+                anchor = _BASE_MONDAY_2097_LATE
+                draft_id = await create_draft(
+                    _COMPANY_ID, user_id, setup_id, conn,
+                    payroll_frequency="Week", anchor_start_date=anchor,
+                    normal_days_off_mask=0,
+                )
+                await publish_version(
+                    _COMPANY_ID, user_id, setup_id, draft_id, anchor, conn,
+                )
+                await assign_setup(_COMPANY_ID, user_id, branch, setup_id, anchor, conn)
+    finally:
+        await engine.dispose()
 
     # Force an explicit HOURS config. The default catalog flag alone is not
     # enough for every rate-matrix/day-grid query on a new branch.
@@ -303,7 +341,7 @@ async def branch_id(
     return branch
 
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture
 async def driver_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
@@ -1296,16 +1334,7 @@ class TestDraftDirectDraftLineAPI:
             )
         finally:
             await _cancel_period_db(direct_db, pid)
-            # Clean up test pay item and its branch config
-            await direct_db.execute(
-                _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :piid"),
-                {"piid": pi_id},
-            )
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payitems WHERE payitemid = :piid"),
-                {"piid": pi_id},
-            )
-            await direct_db.commit()
+            # Period pay-item snapshots retain the test item by FK. The cluster is disposable.
 
     async def test_cp2f_draft_direct_daily_line_stores_rate_amount_null_for_allowed_source(
         self,
@@ -1820,7 +1849,7 @@ class TestDraftToOpenActivation:
         The Open period has a DraftLine so it can be submitted.
         The Draft period has HOURS data saved via day-grid.
         """
-        open_start, open_end = _week()
+        open_start, open_end = _week(offset=0)
         draft_start = open_end + datetime.timedelta(days=1)
         draft_end = draft_start + datetime.timedelta(days=6)
 
@@ -1962,7 +1991,7 @@ class TestDraftToOpenActivation:
         driver_id: int,
         direct_db: AsyncConnection,
     ):
-        """After Draft→Open, eligibility snapshot rows exist for the promoted period."""
+        """After Draft→Open, the eligibility marker and rows are frozen."""
         open_pid, draft_pid, draft_work_date = await self._setup_adjacent_periods(
             client, auth_token, branch_id, driver_id, direct_db
         )
@@ -1972,16 +2001,14 @@ class TestDraftToOpenActivation:
                 json={"status": "InReview"},
                 headers=_auth(auth_token),
             )
-            if r_submit.status_code not in (200, 422):
-                pytest.skip(f"Submit returned unexpected status: {r_submit.status_code}")
+            assert r_submit.status_code == 200, r_submit.text
 
-            # Check if Draft got promoted
             period_r = await client.get(
                 f"/payroll/periods/{draft_pid}",
                 headers=_auth(auth_token),
             )
-            if period_r.status_code != 200 or period_r.json().get("status") != "Open":
-                pytest.skip("Draft period was not promoted to Open — skip eligibility check")
+            assert period_r.status_code == 200, period_r.text
+            assert period_r.json()["status"] == "Open"
 
             # Check snapshot marker exists
             marker = (await direct_db.execute(
@@ -1997,6 +2024,16 @@ class TestDraftToOpenActivation:
             assert marker["frozenatutc"] is not None, (
                 "Eligibility snapshot should be frozen after Draft→Open promotion"
             )
+            rows = (await direct_db.execute(
+                _text("""
+                    SELECT driverid, frozenatutc
+                    FROM payroll.payrollperioddrivereligibility
+                    WHERE payrollperiodid = :pid
+                """),
+                {"pid": draft_pid},
+            )).mappings().all()
+            assert any(row["driverid"] == driver_id for row in rows)
+            assert all(row["frozenatutc"] is not None for row in rows)
         finally:
             await _cancel_period_db(direct_db, open_pid)
             await _cancel_period_db(direct_db, draft_pid)
@@ -2100,7 +2137,7 @@ class TestStatusPTORegression:
         """Status is saved in PPDES (DailyStatus/entry-state), not as a DraftLine pay item with money."""
         sk_id, sk_code = await _ensure_status_key(direct_db, branch_id, code="CP2F_REG_SK")
 
-        start, end = _week()
+        start, end = _week(offset=0)
         pid = await _insert_period_db(direct_db, branch_id, start, end, status="Open")
         try:
             work_date = start.isoformat()

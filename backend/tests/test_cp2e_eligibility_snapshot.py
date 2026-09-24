@@ -22,12 +22,14 @@ Run from backend/:
 """
 import datetime
 import itertools
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 import httpx
 from sqlalchemy import text as _text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -1205,68 +1207,159 @@ class TestGetPeriodEligibleDriversSnapshot:
 
 
 # ===========================================================================
-# P1 Fix 3: Legacy create_period creates provisional snapshot
+# Current candidate creation: Open snapshots are frozen; Prepared snapshots are provisional.
 # ===========================================================================
 
-@pytest.mark.asyncio
-class TestLegacyCreatePeriodSnapshot:
-    """Legacy create_period should create a provisional snapshot."""
+@pytest_asyncio.fixture
+async def cp2e_candidate_db(test_database_url):
+    """Use a fresh Branch and roll back candidate creation and policy setup."""
+    engine = create_async_engine(test_database_url, echo=False)
+    marker = uuid4().hex[:12]
+    try:
+        async with engine.connect() as conn:
+            transaction = await conn.begin()
+            try:
+                tenant = (await conn.execute(_text("""
+                    SELECT c.companyid, u.userid
+                    FROM core.companies c
+                    JOIN sec.users u ON u.companyid = c.companyid
+                    WHERE c.companycode = 'DEMO' AND u.username = 'admin'
+                """))).mappings().one()
+                company_id = int(tenant["companyid"])
+                user_id = int(tenant["userid"])
+                branch_id = int((await conn.execute(_text("""
+                    INSERT INTO core.branches
+                        (companyid, branchcode, branchname, status, isdefault)
+                    VALUES (:cid, :code, :name, 'Active', FALSE)
+                    RETURNING branchid
+                """), {
+                    "cid": company_id,
+                    "code": f"CP2E_{marker}",
+                    "name": f"CP2E eligibility {marker}",
+                })).scalar_one())
+                employee_id = int((await conn.execute(_text("""
+                    INSERT INTO core.employees
+                        (companyid, branchid, fullname, employeetype,
+                         employmentstatus, createdbyuserid)
+                    VALUES (:cid, :bid, :name, 'Driver', 'Active', :uid)
+                    RETURNING employeeid
+                """), {
+                    "cid": company_id,
+                    "bid": branch_id,
+                    "name": f"CP2E Employee {marker}",
+                    "uid": user_id,
+                })).scalar_one())
+                driver_id = int((await conn.execute(_text("""
+                    INSERT INTO core.drivers
+                        (companyid, branchid, employeeid, drivercode, driverstatus)
+                    VALUES (:cid, :bid, :eid, :code, 'Active')
+                    RETURNING driverid
+                """), {
+                    "cid": company_id,
+                    "bid": branch_id,
+                    "eid": employee_id,
+                    "code": f"CP2E-{marker}",
+                })).scalar_one())
+                yield SimpleNamespace(
+                    db=conn, company_id=company_id, user_id=user_id,
+                    branch_id=branch_id, driver_id=driver_id, marker=marker,
+                )
+            finally:
+                await transaction.rollback()
+    finally:
+        await engine.dispose()
 
-    async def test_cp2e_legacy_create_period_creates_provisional_snapshot(
-        self, direct_db: AsyncConnection, branch_id: int
-    ):
-        """After _create_period_driver_eligibility_rows with freeze=False, marker exists."""
-        from app.payroll.service import (
-            _create_period_driver_eligibility_rows,
-            _period_has_driver_eligibility_snapshot,
+
+async def _create_candidate_period(db, mode: str):
+    from app.payroll.period_creation import (
+        create_period_from_candidate,
+        get_period_candidates,
+    )
+    from app.payroll.schemas import PeriodCreationRequest
+    from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+
+    anchor = datetime.date(2090, 1, 1)
+    setup_id = await create_setup(
+        db.company_id, db.user_id, f"CP2E_{db.marker}", "CP2E eligibility", db.db,
+    )
+    draft_id = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=anchor,
+        normal_days_off_mask=0,
+    )
+    await publish_version(db.company_id, db.user_id, setup_id, draft_id, anchor, db.db)
+    await assign_setup(db.company_id, db.user_id, db.branch_id, setup_id, anchor, db.db)
+
+    if mode == "PREPARED_CREATION":
+        open_preview = await get_period_candidates(
+            db.company_id, db.user_id, db.branch_id, "OPEN_CREATION", None, db.db,
         )
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end, status="Draft")
-        try:
-            await _create_period_driver_eligibility_rows(
-                pid, _COMPANY_ID, branch_id, direct_db,
-                snapshot_source="Generated", freeze=False,
-            )
-            assert await _period_has_driver_eligibility_snapshot(pid, direct_db) is True
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
+        await create_period_from_candidate(
+            db.company_id, db.user_id, db.branch_id,
+            PeriodCreationRequest(candidate_key=open_preview.selected.candidate_key), db.db,
+        )
 
-    async def test_cp2e_legacy_create_period_snapshot_is_unfrozen(
-        self, direct_db: AsyncConnection, branch_id: int, driver_id: int
+    preview = await get_period_candidates(
+        db.company_id, db.user_id, db.branch_id, mode, None, db.db,
+    )
+    created = await create_period_from_candidate(
+        db.company_id, db.user_id, db.branch_id,
+        PeriodCreationRequest(candidate_key=preview.selected.candidate_key), db.db,
+    )
+    return created
+
+
+@pytest.mark.asyncio
+class TestCandidateCreatedPeriodSnapshot:
+    """Current candidate creation records eligibility at the period boundary."""
+
+    async def test_cp2e_open_candidate_creates_frozen_eligibility_snapshot(
+        self, cp2e_candidate_db
     ):
-        """Provisional snapshot has frozenatutc = NULL (unfrozen)."""
-        from app.payroll.service import _create_period_driver_eligibility_rows
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end, status="Draft")
-        try:
-            await _create_period_driver_eligibility_rows(
-                pid, _COMPANY_ID, branch_id, direct_db,
-                snapshot_source="Generated", freeze=False,
-            )
-            row = (await direct_db.execute(
-                _text("SELECT frozenatutc FROM payroll.payrollperioddrivereligibility "
-                      "WHERE payrollperiodid = :pid AND driverid = :did"),
-                {"pid": pid, "did": driver_id},
-            )).mappings().first()
-            assert row is not None
-            assert row["frozenatutc"] is None, "Draft snapshot must be unfrozen"
-            marker = (await direct_db.execute(
-                _text("SELECT frozenatutc FROM payroll.payrollperiodeligibilitysnapshots "
-                      "WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )).mappings().first()
-            assert marker is not None
-            assert marker["frozenatutc"] is None, "Draft marker must be unfrozen"
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
+        db = cp2e_candidate_db
+        created = await _create_candidate_period(db, "OPEN_CREATION")
+        assert created.status == "Open"
+
+        marker = (await db.db.execute(_text("""
+            SELECT frozenatutc, frozenbyuserid
+            FROM payroll.payrollperiodeligibilitysnapshots
+            WHERE payrollperiodid = :pid
+        """), {"pid": created.payroll_period_id})).mappings().one()
+        row = (await db.db.execute(_text("""
+            SELECT driverid, eligibilityreasoncode, frozenatutc, frozenbyuserid
+            FROM payroll.payrollperioddrivereligibility
+            WHERE payrollperiodid = :pid
+        """), {"pid": created.payroll_period_id})).mappings().one()
+        assert row["driverid"] == db.driver_id
+        assert row["eligibilityreasoncode"] == "Active"
+        assert marker["frozenatutc"] is not None
+        assert row["frozenatutc"] is not None
+        assert marker["frozenbyuserid"] == db.user_id
+        assert row["frozenbyuserid"] == db.user_id
+
+    async def test_cp2e_prepared_candidate_creates_provisional_snapshot(
+        self, cp2e_candidate_db
+    ):
+        db = cp2e_candidate_db
+        created = await _create_candidate_period(db, "PREPARED_CREATION")
+        assert created.status == "Draft"
+
+        marker = (await db.db.execute(_text("""
+            SELECT frozenatutc, frozenbyuserid
+            FROM payroll.payrollperiodeligibilitysnapshots
+            WHERE payrollperiodid = :pid
+        """), {"pid": created.payroll_period_id})).mappings().one()
+        row = (await db.db.execute(_text("""
+            SELECT driverid, eligibilityreasoncode, frozenatutc, frozenbyuserid
+            FROM payroll.payrollperioddrivereligibility
+            WHERE payrollperiodid = :pid
+        """), {"pid": created.payroll_period_id})).mappings().one()
+        assert row["driverid"] == db.driver_id
+        assert row["eligibilityreasoncode"] == "Active"
+        assert marker["frozenatutc"] is None
+        assert row["frozenatutc"] is None
+        assert marker["frozenbyuserid"] is None
+        assert row["frozenbyuserid"] is None
 
 
 # ===========================================================================

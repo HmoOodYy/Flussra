@@ -414,18 +414,13 @@ class TestCustomRoleAssignment:
             f"payroll.view must allow reading periods. Got {resp_read.status_code}"
         )
 
-        # POST period requires payroll.period.create — not payroll.view
-        resp_create = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id": hq_branch_id,
-                "period_name": "Test Period",
-                "start_date": "2026-01-01",
-                "end_date": "2026-01-31",
-            },
+        # Candidate preview requires payroll.period.create — not payroll.view.
+        resp_create = await client.get(
+            f"/payroll/branches/{hq_branch_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=_hdr(tok),
         )
         assert resp_create.status_code == 403, (
-            f"payroll.view alone must NOT allow creating a period "
+            f"payroll.view alone must NOT allow period candidate creation "
             f"(needs payroll.period.create). Got {resp_create.status_code}"
         )

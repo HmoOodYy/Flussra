@@ -129,17 +129,11 @@ class TestBranchScopeDenial:
         paytest_branch_id: int,
     ):
         """
-        POST /payroll/periods with PAYTEST branch_id.
-        Branch check fires before permission check → 403 for branch access denial.
+        Candidate preview for PAYTEST is denied by branch scope before permissions.
         """
-        resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_branch_id,
-                "period_type": "Week",
-                "start_date":  "2040-03-03",
-                "end_date":    "2040-03-09",
-            },
+        resp = await client.get(
+            f"/payroll/branches/{paytest_branch_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=auth(branch_user_token),
         )
         assert resp.status_code == 403
@@ -163,17 +157,11 @@ class TestPermissionDenial:
         hq_branch_id: int,
     ):
         """
-        POST /payroll/periods on HQ branch.
-        Branch access check passes; payroll.period.create permission check fires → 403.
+        Candidate preview on HQ passes branch scope but requires payroll.period.create.
         """
-        resp = await client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   hq_branch_id,
-                "period_type": "Week",
-                "start_date":  "2041-05-05",
-                "end_date":    "2041-05-11",
-            },
+        resp = await client.get(
+            f"/payroll/branches/{hq_branch_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=auth(branch_user_token),
         )
         assert resp.status_code == 403

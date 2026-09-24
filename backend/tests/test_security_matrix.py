@@ -34,6 +34,8 @@ import pytest
 import pytest_asyncio
 import httpx
 from sqlalchemy import text as _sqla_text
+from sqlalchemy.ext.asyncio import create_async_engine
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 # ---------------------------------------------------------------------------
 # Unique username counter — keeps each test's users separate
@@ -1387,11 +1389,11 @@ class TestSecurityMatrix:
             f"branch_user must be able to list review items; got {r3.status_code}"
         )
 
-        # Write blocked: creating a period on HQ requires payroll.entry
-        r4 = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": sm_hq_id, "period_type": "Week",
-                  "start_date": "2099-01-06", "end_date": "2099-01-12"},
+        # Candidate preview requires payroll.period.create, which this read-only
+        # role does not have.
+        r4 = await session_client.get(
+            f"/payroll/branches/{sm_hq_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=_hdr(tok),
         )
         assert r4.status_code == 403, (
@@ -1542,36 +1544,33 @@ class TestLegacyODABlock:
 
         tok = await _login(session_client, uname)
 
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": sm_hq_id, "period_type": "Week",
-                  "start_date": "2099-03-01", "end_date": "2099-03-07"},
+        r = await session_client.get(
+            f"/payroll/branches/{sm_hq_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=_hdr(tok),
         )
         assert r.status_code == 403, (
-            f"Legacy ODA user must be blocked from create_period even with payroll.entry; "
+            f"Legacy ODA user must be blocked from candidate creation even with payroll.entry; "
             f"got {r.status_code}: {r.text}"
         )
         assert "driver" in r.json()["detail"].lower(), (
             f"403 detail must mention driver; got: {r.json()['detail']}"
         )
 
-    async def test_operational_user_can_create_period(
+    async def test_operational_user_can_create_open_candidate(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        sm_hq_id: int,
         direct_db,
+        test_database_url: str,
     ):
         """
-        A normal operational user (PAYROLL_ADMIN, no ODA/DRIVER role) can create
-        a period — verifies the driver block does not over-fire.
+        An operational role without ODA/DRIVER or Setup permissions can create
+        an Open period on its assigned branch through the candidate workflow.
         """
         uname = _uid()
         # Grant both payroll.period.create (create gate, migration 0030) and
-        # payroll.entry (entry/open/submit gate).  The test purpose is to verify
-        # the DRIVER block does not over-fire for non-driver operational users,
-        # not to test the specific permission code on create_period.
+        # payroll.entry (entry/open/submit gate), but no payroll_setup.* grant.
         op_role_id = await _create_role_with_perms(
             session_client, auth_token,
             f"SM_ENTRY_{uname}",
@@ -1587,37 +1586,52 @@ class TestLegacyODABlock:
         assert me.status_code == 200, f"Login failed: {me.text}"
         tok = me.json()["access_token"]
 
-        # Cancel any active periods on HQ so the Draft slot is free
-        await _cancel_branch_active_periods(session_client, auth_token, sm_hq_id)
-
-        # B1 guard: insert an Open period so legacy create is allowed
-        await direct_db.execute(
+        branch_code = f"SM-CAND-{uname}"
+        branch_id = (await direct_db.execute(
             _sqla_text("""
-                INSERT INTO payroll.payrollperiods
-                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-                VALUES (1, :bid, 'Open', 'SM-OPCTL-2099', 'SM OpCtl Open', 'Week', '2099-03-24', '2099-03-30')
-                ON CONFLICT DO NOTHING
+                INSERT INTO core.branches
+                    (companyid, branchcode, branchname, status, isdefault)
+                SELECT companyid, :code, :name, 'Active', FALSE
+                FROM core.companies WHERE companycode = 'DEMO'
+                RETURNING branchid
             """),
-            {"bid": sm_hq_id},
-        )
-        await direct_db.commit()
+            {"code": branch_code, "name": f"Candidate gate {uname}"},
+        )).scalar_one()
+        anchor = datetime.date(2099, 4, 1)
+        engine = create_async_engine(test_database_url, echo=False)
+        try:
+            async with engine.begin() as db:
+                admin_id = (await db.execute(_sqla_text("""
+                    SELECT userid FROM sec.users
+                    WHERE companyid = 1 AND username = 'admin'
+                """))).scalar_one()
+                setup_id = await create_setup(
+                    1, admin_id, branch_code, "Operational candidate gate", db,
+                )
+                draft_id = await create_draft(
+                    1, admin_id, setup_id, db,
+                    payroll_frequency="Week", anchor_start_date=anchor,
+                    normal_days_off_mask=0,
+                )
+                await publish_version(1, admin_id, setup_id, draft_id, anchor, db)
+                await assign_setup(1, admin_id, branch_id, setup_id, anchor, db)
+        finally:
+            await engine.dispose()
 
-        r = await session_client.post(
-            "/payroll/periods",
-            json={"branch_id": sm_hq_id, "period_type": "Week",
-                  "start_date": "2099-04-01", "end_date": "2099-04-07"},
+        preview = await session_client.get(
+            f"/payroll/branches/{branch_id}/period-candidates",
+            params={"mode": "OPEN_CREATION"},
             headers=_hdr(tok),
         )
-        # 201 = success; 409 = duplicate Draft slot; 422 = date overlap — all acceptable
-        assert r.status_code in (201, 409, 422), (
-            f"Operational user (payroll.period.create + payroll.entry, no driver role) "
-            f"must be able to create periods; got {r.status_code}: {r.text}"
+        assert preview.status_code == 200, preview.text
+        selected = preview.json()["selected"]
+        assert selected["creatable"] is True
+
+        created = await session_client.post(
+            f"/payroll/branches/{branch_id}/period-creations",
+            json={"candidate_key": selected["candidate_key"]},
+            headers=_hdr(tok),
         )
-        if r.status_code == 201:
-            # Cleanup
-            pid = r.json()["payroll_period_id"]
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Cancelled"},
-                headers=_hdr(tok),
-            )
+        assert created.status_code == 201, created.text
+        assert created.json()["status"] == "Open"
+        assert created.json()["branch_id"] == branch_id

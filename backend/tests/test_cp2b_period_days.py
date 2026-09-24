@@ -6,10 +6,10 @@ Product contracts verified:
     constraints (unique, checks, FKs), and indexes.
   - Alembic head is exactly 0052.
   - Candidate-created Open/Draft periods get one row per calendar day.
-  - Legacy POST /payroll/periods also creates day rows.
+  - Candidate-created Prepared periods also create day rows.
   - Day rows: WorkDate range inclusive, DayOfWeek correct, NormalDaysOffMask
     applied correctly (bit 0=Sun, bit 1=Mon, etc.).
-  - ScheduleVersionID on day rows matches the period's ScheduleVersionID.
+  - New periods and day rows bind the same Payroll Setup Assignment and Version.
   - Company/branch values on rows match the period.
   - IsAddedWorkDay=FALSE and Add Day metadata all NULL on CP-2B-created rows.
   - Setup change after period creation does not mutate existing day rows.
@@ -20,7 +20,7 @@ Product contracts verified:
   - save_day_grid rejects work_date not in snapshot.
   - Legacy period (no day rows) falls back to StartDate/EndDate bounds check.
   - Configured-off-day does NOT block get_day_grid (metadata-only in CP-2B).
-  - SemiMonthly still not enabled; no PayDate behavior; no Prepared entry.
+  - SemiMonthly remains unsupported by schedule chronology.
 
 Dates: 2095-* — isolated year, no conflict with other test suites.
 Run from backend/:
@@ -42,10 +42,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 _COMPANY_ID = 1
 
 
-@pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_db_conn) -> int:
-    """Use a suite-owned branch so retained P6D periods cannot move PAYTEST's anchor."""
-    row = (await session_db_conn.execute(
+@pytest_asyncio.fixture(autouse=True)
+async def activate_paytest_system_items():
+    """These tests use fresh branches and do not depend on PAYTEST activation."""
+
+
+@pytest_asyncio.fixture
+async def paytest_branch_id(direct_db) -> int:
+    """Give each test an isolated branch authority timeline."""
+    row = (await direct_db.execute(
         _text("""
             INSERT INTO core.branches
                 (companyid, branchcode, branchname, status, isdefault)
@@ -54,7 +59,6 @@ async def paytest_branch_id(session_db_conn) -> int:
         """),
         {"code": (code := f"CP2B_{uuid.uuid4().hex[:10]}"), "name": code},
     )).mappings().first()
-    await session_db_conn.commit()
     assert row is not None
     return row["branchid"]
 
@@ -116,18 +120,77 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
     await db.commit()
 
 
-async def _setup(client, token, branch_id: int, freq: str = "Week",
-                 anchor: str = "2095-01-07", interval: int | None = None) -> dict:
-    body: dict = {"payroll_frequency": freq, "anchor_start_date": anchor}
-    if interval is not None:
-        body["custom_interval_days"] = interval
-    r = await client.put(
-        f"/settings/branches/{branch_id}/payroll-setup",
-        json=body,
-        headers=_auth(token),
+async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
+                 anchor: str = "2095-01-07", interval: int | None = None,
+                 mask: int = 0) -> dict:
+    """Create current Setup/Published Version/Branch Assignment policy state."""
+    from app.payroll_setup.policy import (
+        assign_setup, create_draft, create_setup, publish_version,
     )
-    assert r.status_code in (200, 201), f"setup failed: {r.text}"
-    return r.json()
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(db.engine.url, echo=False)
+    try:
+        async with engine.connect() as conn:
+            async with conn.begin():
+                tenant = (await conn.execute(_text("""
+                SELECT c.CompanyID, u.UserID
+                FROM core.Companies c
+                JOIN sec.Users u ON u.CompanyID = c.CompanyID
+                WHERE c.CompanyID = :cid AND u.Username = 'admin'
+                """), {"cid": _COMPANY_ID})).mappings().one()
+                company_id, user_id = int(tenant["companyid"]), int(tenant["userid"])
+                suffix = uuid.uuid4().hex[:12]
+                setup_id = await create_setup(
+                    company_id, user_id, f"CP2B_{suffix}", f"CP2B {suffix}", conn,
+                )
+                draft_id = await create_draft(
+                    company_id, user_id, setup_id, conn,
+                    payroll_frequency=freq,
+                    anchor_start_date=datetime.date.fromisoformat(anchor),
+                    custom_interval_days=interval,
+                    normal_days_off_mask=mask,
+                )
+                version_id = await publish_version(
+                    company_id, user_id, setup_id, draft_id,
+                    datetime.date.fromisoformat(anchor), conn,
+                )
+                assignment_id = await assign_setup(
+                    company_id, user_id, branch_id, setup_id,
+                    datetime.date.fromisoformat(anchor), conn,
+                )
+    finally:
+        await engine.dispose()
+    return {
+        "payroll_setup_id": setup_id,
+        "version_id": version_id,
+        "assignment_id": assignment_id,
+    }
+
+
+async def _publish_future_version(db: AsyncConnection, setup_id: int,
+                                  effective: datetime.date, mask: int) -> int:
+    from app.payroll_setup.policy import create_draft, publish_version
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(db.engine.url, echo=False)
+    try:
+        async with engine.connect() as conn:
+            async with conn.begin():
+                user_id = (await conn.execute(_text("""
+                    SELECT UserID FROM sec.Users
+                    WHERE CompanyID = :cid AND Username = 'admin'
+                """), {"cid": _COMPANY_ID})).scalar_one()
+                draft_id = await create_draft(
+                    _COMPANY_ID, user_id, setup_id, conn,
+                    payroll_frequency="Week", anchor_start_date=effective,
+                    normal_days_off_mask=mask,
+                )
+                return await publish_version(
+                    _COMPANY_ID, user_id, setup_id, draft_id, effective, conn,
+                )
+    finally:
+        await engine.dispose()
 
 
 async def _preview(client, token, branch_id: int, mode: str = "OPEN_CREATION") -> dict:
@@ -173,7 +236,9 @@ async def _day_rows_simple(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
             SELECT workdate, dayofweek, isdefaultworkday, isconfiguredoffday,
-                   isaddedworkday, scheduleversionid, companyid, branchid,
+                   isaddedworkday, scheduleversionid,
+                   branchpayrollsetupassignmentid, payrollsetupversionid,
+                   companyid, branchid,
                    addedbyuserid, addedatutc, addedreason
             FROM   payroll.PayrollPeriodDays
             WHERE  payrollperiodid = :pid
@@ -182,14 +247,6 @@ async def _day_rows_simple(db: AsyncConnection, period_id: int) -> list[dict]:
         {"pid": period_id},
     )).mappings().all()
     return [dict(r) for r in rows]
-
-
-async def _period_sv(db: AsyncConnection, period_id: int) -> int | None:
-    row = (await db.execute(
-        _text("SELECT scheduleversionid FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-        {"pid": period_id},
-    )).mappings().first()
-    return row["scheduleversionid"] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +344,7 @@ class TestCp2bPeriodDays:
     ):
         """D03: Candidate-created Open Week period has exactly 7 PayrollPeriodDays rows."""
         await _clean(direct_db, paytest_branch_id)
-        setup = await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
-        sv_id = setup.get("schedule_version_id")
-        assert sv_id is not None
+        setup = await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -308,7 +363,11 @@ class TestCp2bPeriodDays:
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
         """D04: Candidate-created Draft (Prepared) Week period also gets 7 day rows."""
-        # D03 left an Open period; we can now create a Draft via PREPARED_CREATION
+        await _clean(direct_db, paytest_branch_id)
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
+        open_preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        await _create_period(session_client, auth_token, paytest_branch_id,
+                             open_preview["selected"]["candidate_key"])
         preview = await _preview(session_client, auth_token, paytest_branch_id, "PREPARED_CREATION")
         ck = preview["selected"]["candidate_key"]
         result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
@@ -328,7 +387,7 @@ class TestCp2bPeriodDays:
     ):
         """D05: Candidate-created Biweek period has exactly 14 day rows."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Biweek", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Biweek", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -348,7 +407,7 @@ class TestCp2bPeriodDays:
     ):
         """D06: Candidate-created Month period gets exactly 31 rows (March 2095)."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Month", "2095-03-01")
+        await _setup(direct_db, paytest_branch_id, "Month", "2095-03-01")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -364,57 +423,32 @@ class TestCp2bPeriodDays:
         )
 
     # ------------------------------------------------------------------ #
-    # D07 — Legacy POST creates day rows
+    # D07 — Candidate Prepared creation creates day rows
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_d07_legacy_post_creates_rows(
+    async def test_d07_prepared_candidate_creates_rows(
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
-        """D07: Legacy POST /payroll/periods also creates PayrollPeriodDays rows."""
-        # Need an Open period first (legacy Draft creation requires exactly one Open)
+        """D07: Candidate-based Prepared creation creates PayrollPeriodDays rows."""
         await _clean(direct_db, paytest_branch_id)
-        setup = await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
-        sv_id = setup.get("schedule_version_id")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         # Create Open via candidate
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
         await _create_period(session_client, auth_token, paytest_branch_id, ck)
 
-        # Now create a Draft via legacy POST
-        open_row = (await direct_db.execute(
-            _text("""
-                SELECT startdate, enddate FROM payroll.payrollperiods
-                WHERE branchid = :bid AND status = 'Open'
-                ORDER BY startdate DESC LIMIT 1
-            """),
-            {"bid": paytest_branch_id},
-        )).mappings().first()
-        assert open_row is not None, "No Open period to anchor legacy Draft creation"
-        open_end = open_row["enddate"]
-        draft_start = open_end + datetime.timedelta(days=1)
-        draft_end = draft_start + datetime.timedelta(days=6)
-
-        r = await session_client.post(
-            "/payroll/periods",
-            json={
-                "branch_id":   paytest_branch_id,
-                "period_type": "Week",
-                "start_date":  draft_start.isoformat(),
-                "end_date":    draft_end.isoformat(),
-                "period_name": "D07 Legacy Draft",
-            },
-            headers=_auth(auth_token),
+        preview_draft = await _preview(
+            session_client, auth_token, paytest_branch_id, "PREPARED_CREATION",
         )
-        if r.status_code in (200, 201):
-            period_id = r.json()["payroll_period_id"]
-            rows = await _day_rows_simple(direct_db, period_id)
-            assert len(rows) == 7, f"Legacy POST period got {len(rows)} day rows, expected 7"
-        else:
-            # 409 is acceptable if slot state changed; skip with note
-            assert r.status_code == 409, f"Unexpected legacy create status {r.status_code}: {r.text}"
-            pytest.skip("D07 skipped: legacy POST slot conditions not met in this run")
+        result = await _create_period(
+            session_client, auth_token, paytest_branch_id,
+            preview_draft["selected"]["candidate_key"],
+        )
+        assert result["status"] == "Draft"
+        rows = await _day_rows_simple(direct_db, result["payroll_period_id"])
+        assert len(rows) == 7, f"Prepared period got {len(rows)} day rows, expected 7"
 
     # ------------------------------------------------------------------ #
     # D08 — WorkDate range is inclusive
@@ -426,7 +460,7 @@ class TestCp2bPeriodDays:
     ):
         """D08: Day rows span exactly [StartDate, EndDate] inclusive."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-04-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-04-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -451,7 +485,7 @@ class TestCp2bPeriodDays:
     ):
         """D09: DayOfWeek uses Sun=0...Sat=6; values match (date.weekday()+1)%7 for all rows."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -493,17 +527,7 @@ class TestCp2bPeriodDays:
         """D10: NormalDaysOffMask=1 (bit 0=Sun) → Sunday rows IsConfiguredOffDay=TRUE."""
         await _clean(direct_db, paytest_branch_id)
 
-        # Setup with Sunday off (mask bit 0 = 1)
-        r = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2095-01-07",
-                "normal_days_off_mask": 1,  # bit 0 = Sunday
-            },
-            headers=_auth(auth_token),
-        )
-        assert r.status_code in (200, 201), f"setup with mask failed: {r.text}"
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07", mask=1)
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -530,16 +554,7 @@ class TestCp2bPeriodDays:
         """D11: NormalDaysOffMask=2 (bit 1=Mon) → Monday rows IsConfiguredOffDay=TRUE."""
         await _clean(direct_db, paytest_branch_id)
 
-        r = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2095-01-07",
-                "normal_days_off_mask": 2,  # bit 1 = Monday
-            },
-            headers=_auth(auth_token),
-        )
-        assert r.status_code in (200, 201), f"setup with mask=2 failed: {r.text}"
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07", mask=2)
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -565,7 +580,7 @@ class TestCp2bPeriodDays:
     ):
         """D12: NULL NormalDaysOffMask → all day rows have IsDefaultWorkDay=TRUE."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
         # no mask → defaults to NULL
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
@@ -580,30 +595,35 @@ class TestCp2bPeriodDays:
             assert row["isconfiguredoffday"] is False, f"Expected none configured off: {row}"
 
     # ------------------------------------------------------------------ #
-    # D13 — ScheduleVersionID on rows matches period's ScheduleVersionID
+    # D13 — Period and day rows share exact Setup authority
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
     async def test_d13_sv_id_matches_period(
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
-        """D13: Every PayrollPeriodDays.ScheduleVersionID equals the period's ScheduleVersionID."""
+        """D13: Every day row binds the period's exact Assignment and Version."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
         result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
-        period_sv = await _period_sv(direct_db, period_id)
-        assert period_sv is not None
+        period_authority = (await direct_db.execute(_text("""
+            SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID, ScheduleVersionID
+            FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :pid
+        """), {"pid": period_id})).mappings().one()
+        assert period_authority["branchpayrollsetupassignmentid"] is not None
+        assert period_authority["payrollsetupversionid"] is not None
+        assert period_authority["scheduleversionid"] is None
 
         rows = await _day_rows_simple(direct_db, period_id)
         for row in rows:
-            assert row["scheduleversionid"] == period_sv, (
-                f"Row sv_id {row['scheduleversionid']} != period sv_id {period_sv}"
-            )
+            assert row["scheduleversionid"] is None
+            assert row["branchpayrollsetupassignmentid"] == period_authority["branchpayrollsetupassignmentid"]
+            assert row["payrollsetupversionid"] == period_authority["payrollsetupversionid"]
 
     # ------------------------------------------------------------------ #
     # D14 — Company/branch on rows match the period
@@ -615,7 +635,7 @@ class TestCp2bPeriodDays:
     ):
         """D14: CompanyID and BranchID on day rows match the period."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -637,7 +657,7 @@ class TestCp2bPeriodDays:
     ):
         """D15: IsAddedWorkDay=FALSE and AddedBy/At/Reason=NULL on all CP-2B-created rows."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -661,7 +681,7 @@ class TestCp2bPeriodDays:
     ):
         """D16: Updating payroll setup after period creation leaves existing day rows unchanged."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -669,30 +689,23 @@ class TestCp2bPeriodDays:
         period_id = result["payroll_period_id"]
 
         rows_before = await _day_rows_simple(direct_db, period_id)
-        sv_id_before = rows_before[0]["scheduleversionid"]
+        authority_before = (await direct_db.execute(_text("""
+            SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID
+            FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :pid
+        """), {"pid": period_id})).mappings().one()
         assert all(r["isdefaultworkday"] is True for r in rows_before), (
             "All rows should be default work days (no mask set)"
         )
 
-        # Change setup: advance anchor past the current period end, add Sunday-off mask.
-        # The new anchor must be after the current period's end date.
+        # Publish a future effective version after the period boundary.
         period_end = datetime.date.fromisoformat(result["end_date"])
         new_anchor = (period_end + datetime.timedelta(days=1)).isoformat()
-        r_setup = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": new_anchor,
-                "normal_days_off_mask": 1,
-            },
-            headers=_auth(auth_token),
-        )
-        assert r_setup.status_code in (200, 201), (
-            f"Setup update failed: {r_setup.text}"
-        )
-        new_sv_id = r_setup.json().get("schedule_version_id")
-        assert new_sv_id is not None and new_sv_id != sv_id_before, (
-            "Expected a new schedule version ID after setup update"
+        setup_id = (await direct_db.execute(_text("""
+            SELECT FrozenPayrollSetupID FROM payroll.PayrollPeriods
+            WHERE PayrollPeriodID = :pid
+        """), {"pid": period_id})).scalar_one()
+        await _publish_future_version(
+            direct_db, setup_id, period_end + datetime.timedelta(days=1), 1,
         )
 
         # Existing period's day rows must remain unchanged
@@ -702,13 +715,15 @@ class TestCp2bPeriodDays:
             assert before["workdate"] == after["workdate"]
             assert before["isdefaultworkday"] == after["isdefaultworkday"]
             assert before["isconfiguredoffday"] == after["isconfiguredoffday"]
-            assert before["scheduleversionid"] == after["scheduleversionid"], (
-                f"ScheduleVersionID changed from {before['scheduleversionid']} "
-                f"to {after['scheduleversionid']} after setup update"
-            )
-        assert all(r["scheduleversionid"] == sv_id_before for r in rows_after), (
-            "Some day rows now reference the new schedule version — snapshot was mutated"
-        )
+            assert before["branchpayrollsetupassignmentid"] == after["branchpayrollsetupassignmentid"]
+            assert before["payrollsetupversionid"] == after["payrollsetupversionid"]
+        assert all(r["scheduleversionid"] is None for r in rows_after)
+        current_authority = (await direct_db.execute(_text("""
+            SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID
+            FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :pid
+        """), {"pid": period_id})).mappings().one()
+        assert current_authority["branchpayrollsetupassignmentid"] == authority_before["branchpayrollsetupassignmentid"]
+        assert current_authority["payrollsetupversionid"] == authority_before["payrollsetupversionid"]
 
     # ------------------------------------------------------------------ #
     # D17 — Draft→Open promotion preserves day rows unchanged
@@ -720,7 +735,7 @@ class TestCp2bPeriodDays:
     ):
         """D17: Draft→Open promotion does not change or remove day rows."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         # Create Draft via PREPARED_CREATION — requires an Open first
         preview_open = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
@@ -762,7 +777,7 @@ class TestCp2bPeriodDays:
     ):
         """D18: Re-submitting the same candidate key returns ALREADY_EXISTS with unchanged day rows."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -791,7 +806,7 @@ class TestCp2bPeriodDays:
     ):
         """D19: Manually inserting a duplicate (PayrollPeriodID, WorkDate) raises a DB error."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -802,6 +817,7 @@ class TestCp2bPeriodDays:
         existing = (await direct_db.execute(
             _text("""
                 SELECT payrollperiodid, companyid, branchid, scheduleversionid,
+                       branchpayrollsetupassignmentid, payrollsetupversionid,
                        workdate, dayofweek, isdefaultworkday, isconfiguredoffday
                 FROM payroll.PayrollPeriodDays
                 WHERE payrollperiodid = :pid
@@ -817,15 +833,19 @@ class TestCp2bPeriodDays:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.PayrollPeriodDays
-                        (PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID,
+                    (PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID,
+                     BranchPayrollSetupAssignmentID, PayrollSetupVersionID,
                          WorkDate, DayOfWeek, IsDefaultWorkDay, IsConfiguredOffDay)
-                    VALUES (:pid, :cid, :bid, :sv, :wd, :dow, :isd, :ico)
+                    VALUES (:pid, :cid, :bid, :sv, :assignment, :version,
+                            :wd, :dow, :isd, :ico)
                 """),
                 {
                     "pid": existing["payrollperiodid"],
                     "cid": existing["companyid"],
                     "bid": existing["branchid"],
                     "sv":  existing["scheduleversionid"],
+                    "assignment": existing["branchpayrollsetupassignmentid"],
+                    "version": existing["payrollsetupversionid"],
                     "wd":  existing["workdate"],
                     "dow": existing["dayofweek"],
                     "isd": existing["isdefaultworkday"],
@@ -851,7 +871,7 @@ class TestCp2bPeriodDays:
     ):
         """D20: get_day_grid returns 400 when work_date is in StartDate/EndDate but not in snapshot."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -891,41 +911,19 @@ class TestCp2bPeriodDays:
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
         """D21: save_day_grid returns 400 when work_date is in bounds but not in snapshot."""
-        # Reuse state from D20 — the last row for the current Open period is deleted
-        period_row = (await direct_db.execute(
-            _text("""
-                SELECT payrollperiodid, enddate FROM payroll.payrollperiods
-                WHERE branchid = :bid AND status = 'Open'
-                ORDER BY startdate DESC LIMIT 1
-            """),
-            {"bid": paytest_branch_id},
-        )).mappings().first()
-
-        if period_row is None:
-            pytest.skip("D21 skipped: no Open period available after D20")
-
-        period_id = period_row["payrollperiodid"]
-        end_date = period_row["enddate"]
-
-        # Verify the end_date row is still missing (D20 deleted it)
-        missing = (await direct_db.execute(
-            _text("""
-                SELECT 1 FROM payroll.PayrollPeriodDays
-                WHERE payrollperiodid = :pid AND workdate = :wd
-            """),
-            {"pid": period_id, "wd": end_date},
-        )).first()
-
-        if missing is not None:
-            # Re-delete it in case D20 ran in a different order
-            await direct_db.execute(
-                _text("""
-                    DELETE FROM payroll.PayrollPeriodDays
-                    WHERE payrollperiodid = :pid AND workdate = :wd
-                """),
-                {"pid": period_id, "wd": end_date},
-            )
-            await direct_db.commit()
+        await _setup(direct_db, paytest_branch_id)
+        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        created = await _create_period(
+            session_client, auth_token, paytest_branch_id,
+            preview["selected"]["candidate_key"],
+        )
+        period_id = created["payroll_period_id"]
+        end_date = datetime.date.fromisoformat(created["end_date"])
+        await direct_db.execute(_text("""
+            DELETE FROM payroll.PayrollPeriodDays
+            WHERE PayrollPeriodID = :pid AND WorkDate = :work_date
+        """), {"pid": period_id, "work_date": end_date})
+        await direct_db.commit()
 
         r = await session_client.post(
             f"/payroll/periods/{period_id}/day-grid",
@@ -946,18 +944,13 @@ class TestCp2bPeriodDays:
     ):
         """D22: get_day_grid for a legacy period (no day rows) uses StartDate/EndDate bounds."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
-
-        # Get the current sv_id for the branch
-        sv_row = (await direct_db.execute(
-            _text("""
-                SELECT currentscheduleversionid FROM payroll.branchpayrollsettings
-                WHERE branchid = :bid AND isactive = TRUE
-            """),
-            {"bid": paytest_branch_id},
-        )).mappings().first()
-        assert sv_row is not None, "No active setup for paytest branch"
-        sv_id = sv_row["currentscheduleversionid"]
+        sv_id = (await direct_db.execute(_text("""
+            INSERT INTO payroll.PayrollScheduleVersions
+                (CompanyID, BranchID, VersionNumber, PayrollFrequency,
+                 AnchorStartDate, NormalDaysOffMask, EffectiveFromDate, SourceAction)
+            VALUES (:cid, :bid, 1, 'Week', '2095-09-01', 0, '2095-09-01', 'LegacyFallbackTest')
+            RETURNING ScheduleVersionID
+        """), {"cid": _COMPANY_ID, "bid": paytest_branch_id})).scalar_one()
 
         # Insert a legacy period with 'Locked' status (no slot-uniqueness constraint on Locked).
         # Use a date range in 2095-09 (no overlap with other tests).
@@ -970,11 +963,12 @@ class TestCp2bPeriodDays:
                 INSERT INTO payroll.payrollperiods
                     (companyid, branchid, periodcode, periodname, periodtype,
                      startdate, enddate, status, createdbyuserid, scheduleversionid)
-                VALUES (1, :bid, 'D22-LEGACY', 'D22 Legacy Period', 'Week',
+                VALUES (1, :bid, :code, 'D22 Legacy Period', 'Week',
                         :start, :end, 'Locked', 1, :sv_id)
                 RETURNING payrollperiodid
             """),
-            {"bid": paytest_branch_id, "start": legacy_start, "end": legacy_end, "sv_id": sv_id},
+            {"bid": paytest_branch_id, "code": f"D22-{uuid.uuid4().hex[:10]}",
+             "start": legacy_start, "end": legacy_end, "sv_id": sv_id},
         )).mappings().first()
         await direct_db.commit()
         period_id = period_row["payrollperiodid"]
@@ -1035,16 +1029,7 @@ class TestCp2bPeriodDays:
     ):
         """D23: IsConfiguredOffDay=TRUE does not cause get_day_grid to reject the date."""
         await _clean(direct_db, paytest_branch_id)
-        r = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={
-                "payroll_frequency": "Week",
-                "anchor_start_date": "2095-01-07",
-                "normal_days_off_mask": 1,  # Sunday off
-            },
-            headers=_auth(auth_token),
-        )
-        assert r.status_code in (200, 201), f"setup failed: {r.text}"
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07", mask=1)
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -1075,16 +1060,16 @@ class TestCp2bPeriodDays:
         )
 
     # ------------------------------------------------------------------ #
-    # D24 — ScheduleVersionID mismatch impossible via service path
+    # D24 — PeriodDay authority matches parent Period
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
     async def test_d24_sv_id_integrity(
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
-        """D24: All day rows have ScheduleVersionID matching their period's ScheduleVersionID."""
+        """D24: All day rows carry the exact parent Assignment and Version authority."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -1098,29 +1083,28 @@ class TestCp2bPeriodDays:
                 JOIN payroll.payrollperiods pp
                      ON pp.payrollperiodid = ppd.payrollperiodid
                 WHERE ppd.payrollperiodid = :pid
-                  AND ppd.scheduleversionid != pp.scheduleversionid
+                  AND (ppd.scheduleversionid IS NOT NULL
+                       OR pp.scheduleversionid IS NOT NULL
+                       OR ppd.branchpayrollsetupassignmentid
+                            IS DISTINCT FROM pp.branchpayrollsetupassignmentid
+                       OR ppd.payrollsetupversionid
+                            IS DISTINCT FROM pp.payrollsetupversionid)
             """),
             {"pid": period_id},
         )).scalar()
-        assert mismatch == 0, f"Found {mismatch} day rows with mismatched ScheduleVersionID"
+        assert mismatch == 0, f"Found {mismatch} day rows with mismatched Setup authority"
 
     # ------------------------------------------------------------------ #
     # D25 — SemiMonthly still not enabled
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_d25_semimonthly_still_rejected(
-        self, session_client, auth_token, paytest_branch_id
-    ):
-        """D25: SemiMonthly setup is rejected; CP-2B does not enable it."""
-        r = await session_client.put(
-            f"/settings/branches/{paytest_branch_id}/payroll-setup",
-            json={"payroll_frequency": "SemiMonthly", "anchor_start_date": "2095-01-01"},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code in (400, 422), (
-            f"SemiMonthly should be rejected, got {r.status_code}: {r.text}"
-        )
+    async def test_d25_semimonthly_still_rejected(self):
+        """D25: Current schedule chronology rejects unsupported SemiMonthly frequency."""
+        from app.payroll_setup.chronology import Schedule
+
+        with pytest.raises(ValueError):
+            Schedule("SemiMonthly", datetime.date(2095, 1, 1), None, 0)
 
     # ------------------------------------------------------------------ #
     # D26 — Direct draft-line creation rejects work_date missing from snapshot
@@ -1128,12 +1112,23 @@ class TestCp2bPeriodDays:
 
     @pytest.mark.asyncio
     async def test_d26_add_draft_line_rejects_missing_snapshot_date(
-        self, session_client, auth_token, direct_db, paytest_branch_id, paytest_driver_id
+        self, session_client, auth_token, direct_db, paytest_branch_id
     ):
         """D26: POST /payroll/periods/{id}/draft-lines rejects a work_date that is in
         StartDate/EndDate but has been removed from PayrollPeriodDays snapshot."""
         await _clean(direct_db, paytest_branch_id)
-        await _setup(session_client, auth_token, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
+        driver_response = await session_client.post(
+            "/core/drivers",
+            json={
+                "branch_id": paytest_branch_id,
+                "full_name": "CP2B Snapshot Driver",
+                "driver_code": f"CP2B-{uuid.uuid4().hex[:10]}",
+            },
+            headers=_auth(auth_token),
+        )
+        assert driver_response.status_code == 201, driver_response.text
+        driver_id = driver_response.json()["driver_id"]
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -1170,7 +1165,7 @@ class TestCp2bPeriodDays:
         r = await session_client.post(
             f"/payroll/periods/{period_id}/lines",
             json={
-                "driver_id": paytest_driver_id,
+                "driver_id": driver_id,
                 "work_date": end_date.isoformat(),
                 "line_type": "HOURS",
                 "quantity": "8",
