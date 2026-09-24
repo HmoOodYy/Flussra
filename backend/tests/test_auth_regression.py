@@ -16,9 +16,8 @@ These tests run against the session-scoped isolated PostgreSQL cluster that
 conftest.py applies all migration SQL files to, so they also prove that a
 freshly migrated DB passes every auth scenario.
 """
-import pytest
-import pytest_asyncio
 import psycopg2
+import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers

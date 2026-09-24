@@ -13,8 +13,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Literal
-from pydantic import BaseModel, field_validator, model_validator
 
+from pydantic import BaseModel, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Constants

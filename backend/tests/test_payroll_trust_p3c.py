@@ -19,14 +19,14 @@ Isolation strategy
 All tests use years 2043–2051 (8 year slots) on fresh per-test branches.
 Finalized period history remains in the disposable test database.
 """
+from datetime import date as _date
+from decimal import Decimal
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-from uuid import uuid4
-import httpx
-from decimal import Decimal
-from datetime import date as _date
 from sqlalchemy import text as _text
-from sqlalchemy.exc import ProgrammingError
 
 # ---------------------------------------------------------------------------
 # Year constants — one per test to avoid locked-period conflicts

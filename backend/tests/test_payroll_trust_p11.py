@@ -19,20 +19,18 @@ Year slots: 2111-2130 (distinct from prior phases).
 from __future__ import annotations
 
 import json as _json
-import pytest
-import pytest_asyncio
-import httpx
 from datetime import date as _date
 from decimal import Decimal
-from unittest.mock import patch
+from uuid import uuid4
+
+import httpx
+import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import create_async_engine
-import psycopg2
-from uuid import uuid4
-from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
-import app.db.schema_guard as _guard
 from app.db.schema_guard import _check_payroll_trust
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 
 @pytest_asyncio.fixture

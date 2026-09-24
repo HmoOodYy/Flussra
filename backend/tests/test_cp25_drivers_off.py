@@ -17,13 +17,12 @@ flow above, which requires exactly one pre-existing Open period per branch
 and is unrelated to this unit.
 """
 import itertools
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 
-import pytest
-import pytest_asyncio
 import httpx
-from datetime import date as _date, timedelta as _timedelta
+import pytest
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Helpers

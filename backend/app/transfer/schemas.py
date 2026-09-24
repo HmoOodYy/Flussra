@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel
-
 
 # ---------------------------------------------------------------------------
 # Request bodies
@@ -23,23 +22,23 @@ class DriverTransferCreate(BaseModel):
     target_branch_id: int
     effective_date: date
     initiated_by: Literal["Driver", "SourceBranch"]
-    reason: Optional[str] = None
-    notes: Optional[str] = None
+    reason: str | None = None
+    notes: str | None = None
 
 
 class SourceApprovalRequest(BaseModel):
     """Source-branch manager approves a PendingSourceApproval request."""
-    notes: Optional[str] = None
+    notes: str | None = None
 
 
 class TargetDecisionRequest(BaseModel):
     """Target-branch manager accepts or rejects a PendingTargetApproval request."""
     decision: Literal["Approved", "Rejected", "Returned"]
-    decision_notes: Optional[str] = None
+    decision_notes: str | None = None
 
 
 class CancelRequest(BaseModel):
-    cancel_reason: Optional[str] = None
+    cancel_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -56,27 +55,27 @@ class DriverTransferResponse(BaseModel):
     initiated_by: str
     status: str
     effective_date: date
-    reason: Optional[str]
-    notes: Optional[str]
-    source_approved_by_user_id: Optional[int]
-    source_approved_at_utc: Optional[datetime]
-    target_decided_by_user_id: Optional[int]
-    target_decided_at_utc: Optional[datetime]
-    target_decision_notes: Optional[str]
-    new_driver_id: Optional[int]
-    completed_at_utc: Optional[datetime]
-    completed_by_user_id: Optional[int]
-    cancelled_at_utc: Optional[datetime]
-    cancelled_by_user_id: Optional[int]
-    cancel_reason: Optional[str]
+    reason: str | None
+    notes: str | None
+    source_approved_by_user_id: int | None
+    source_approved_at_utc: datetime | None
+    target_decided_by_user_id: int | None
+    target_decided_at_utc: datetime | None
+    target_decision_notes: str | None
+    new_driver_id: int | None
+    completed_at_utc: datetime | None
+    completed_by_user_id: int | None
+    cancelled_at_utc: datetime | None
+    cancelled_by_user_id: int | None
+    cancel_reason: str | None
     created_at_utc: datetime
-    updated_at_utc: Optional[datetime]
+    updated_at_utc: datetime | None
 
     # Denormalized for display
-    driver_name: Optional[str] = None
-    source_branch_name: Optional[str] = None
-    target_branch_name: Optional[str] = None
-    requested_by_name: Optional[str] = None
+    driver_name: str | None = None
+    source_branch_name: str | None = None
+    target_branch_name: str | None = None
+    requested_by_name: str | None = None
 
     model_config = {"from_attributes": True}
 

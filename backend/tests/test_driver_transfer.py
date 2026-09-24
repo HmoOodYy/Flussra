@@ -15,10 +15,10 @@ to attempt a BranchID update. The guard in ensure_driver_profile intercepts
 this and returns 422 if payroll/rate history exists.
 """
 import random
-import pytest
-import httpx
-from sqlalchemy import text as _text
 
+import httpx
+import pytest
+from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
 # Helpers

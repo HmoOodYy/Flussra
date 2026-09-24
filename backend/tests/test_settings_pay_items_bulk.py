@@ -20,11 +20,10 @@ Tests
     requested_branch_count, updated_branch_count, results[].config_id / .status
 12. SelectedBranches with empty branch_ids → 422 (schema validation)
 """
-import pytest
-import pytest_asyncio
-import httpx
 from datetime import date, timedelta
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
+
+import httpx
 
 from app.settings import service as settings_service
 

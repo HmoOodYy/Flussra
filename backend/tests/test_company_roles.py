@@ -12,9 +12,8 @@ Coverage:
   - GET /company-roles/{id}/users endpoint
 """
 import re
-import pytest
-import pytest_asyncio
 
+import pytest
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -401,7 +400,8 @@ class TestRoleRename:
     @pytest.mark.asyncio
     async def test_rename_audit_log_written(self, client, auth_token):
         """_write_admin_audit must be called with COMPANY_ROLE_UPDATED on a successful rename."""
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
+
         import app.admin.service as admin_service
 
         role = await self._create_role(client, auth_token, "Audit Rename Role")
@@ -640,6 +640,7 @@ class TestRoleArchive:
     async def test_archive_audit_log_written(self, client, auth_token):
         """_write_admin_audit must be called with COMPANY_ROLE_ARCHIVED on archive."""
         from unittest.mock import patch
+
         import app.admin.service as admin_service
 
         role = await self._create_role(client, auth_token, "Audit Archive Role")
@@ -1033,6 +1034,7 @@ class TestLoginGate:
     @pytest.mark.asyncio
     async def test_user_with_no_role_cannot_login(self, client, direct_db, auth_token):
         from sqlalchemy import text as _text
+
         from app.auth.security import hash_password
 
         pw = hash_password("TestPass123!")

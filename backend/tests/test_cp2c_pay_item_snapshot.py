@@ -34,15 +34,14 @@ Dates: 2094-* — isolated year, no conflict with other test suites.
 Run from backend/:
     python -m pytest tests/test_cp2c_pay_item_snapshot.py -v
 """
-import itertools
 import datetime
+import itertools
 import uuid
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
-from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
@@ -314,7 +313,8 @@ class TestCp2cPayItemSnapshot:
 
     def test_s03_alembic_head(self):
         """S03: Alembic migration chain is linear and head is 0068."""
-        import subprocess, sys
+        import subprocess
+        import sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             capture_output=True, text=True,
@@ -1881,9 +1881,8 @@ class TestCp2cPayItemSnapshot:
 
     def test_s35_downgrade_refusal_with_rows(self, direct_db):
         """S35: Migration 0053 downgrade raises RuntimeError when rows exist."""
-        import sys
-        from pathlib import Path
         import importlib.util
+        from pathlib import Path
 
         migration_path = (
             Path(__file__).parent.parent.parent

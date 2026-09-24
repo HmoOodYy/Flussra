@@ -31,7 +31,6 @@ from app.payroll_setup.policy import (
     reassign_setup,
 )
 
-
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATIONS = _ROOT / "migrations" / "sql"
 _ANCHOR = date(2090, 1, 1)

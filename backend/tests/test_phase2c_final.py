@@ -7,11 +7,11 @@ Covers:
   TestCopyRatesAdvanced      — advanced/tier/block rates rejected (Fix 3)
   TestPayRulesODA            — ODA cannot access other driver's pay rules
 """
-import pytest
-import httpx
 from datetime import date
-from sqlalchemy import text as _text
 
+import httpx
+import pytest
+from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -540,6 +540,7 @@ class TestPayRulesODA:
         Reuses _create_oda_linked_driver_user from TestMatrixODAScope.
         """
         import random
+
         from tests.test_pay_rates import TestMatrixODAScope  # type: ignore[import]
         username1 = f"oda_pr_read_{random.randint(10000, 99999)}"
         oda_token, own_driver_id = await TestMatrixODAScope._create_oda_linked_driver_user(
@@ -570,6 +571,7 @@ class TestPayRulesODA:
     ):
         """ODA user cannot create a pay rule for another driver."""
         import random
+
         from tests.test_pay_rates import TestMatrixODAScope  # type: ignore[import]
         username2 = f"oda_pr_write_{random.randint(10000, 99999)}"
         oda_token, _own = await TestMatrixODAScope._create_oda_linked_driver_user(
@@ -825,8 +827,9 @@ class TestCopyRatesAdvanced:
         row into driverratetiers (using direct_db) to simulate a tiered rate
         without needing a full M13C pay item setup.
         """
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"TIER-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"TIER-TGT-{random.randint(100,999)}")
@@ -892,8 +895,9 @@ class TestCopyRatesAdvanced:
         When a tiered rate causes rejection, no rates from the same source
         driver are copied (not even flat rates) — atomicity check.
         """
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"NOPART-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"NOPART-TGT-{random.randint(100,999)}")
@@ -991,9 +995,10 @@ class TestCopyRatesSupersessionDate:
           - new rate effectivefrom   = copy effective_from
           - no inclusive overlap on copy date
         """
-        from sqlalchemy import text as _text
         import random
         from datetime import date, timedelta
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"SUP-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"SUP-TGT-{random.randint(100,999)}")
@@ -1092,9 +1097,10 @@ class TestCopyRatesSupersessionDate:
         On the copy effective_from date, exactly one Approved rate should exist.
         The old Superseded rate must NOT cover that date.
         """
-        from sqlalchemy import text as _text
         import random
         from datetime import date
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"NOVLP-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"NOVLP-TGT-{random.randint(100,999)}")
@@ -1177,8 +1183,9 @@ class TestPayRulesFinalizedGuard:
     async def _insert_locked_period(self, direct_db, company_id: int, branch_id: int,
                                     start_date: str, end_date: str, status: str = "Locked") -> int:
         """Insert a finalized payroll period directly into the DB for testing."""
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
         start = _date.fromisoformat(start_date)
         end = _date.fromisoformat(end_date)
         result = await direct_db.execute(
@@ -1210,7 +1217,6 @@ class TestPayRulesFinalizedGuard:
         direct_db,
     ):
         """POST /payroll/driver-pay-rules with effective_from inside a Locked period → 422."""
-        import random
         from sqlalchemy import text as _text
 
         # Get company_id from the test DB
@@ -1363,6 +1369,7 @@ class TestPayRulesFinalizedGuard:
           session-scoped test client.
         """
         import random
+
         from sqlalchemy import text as _text
 
         cid_result = await direct_db.execute(
@@ -1565,7 +1572,7 @@ class TestCopyPayRulesEffectiveFrom:
         period.  Both rates and pay rules are written on the target.
         """
         import random
-        from sqlalchemy import text as _text
+
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id,
                                     f"CPOK-SRC-{random.randint(100,999)}")
@@ -1644,6 +1651,7 @@ class TestCopyPayRulesEffectiveFrom:
         fires first.  The result is the same: 422, nothing written.
         """
         import random
+
         from sqlalchemy import text as _text
 
         cid_result = await direct_db.execute(
@@ -1723,8 +1731,9 @@ class TestCopyPayRulesEffectiveFrom:
                                     start_date: str, end_date: str,
                                     status: str = "Locked") -> int:
         """Shared helper — insert a finalized period directly into the DB."""
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
         start = _date.fromisoformat(start_date)
         end = _date.fromisoformat(end_date)
         result = await direct_db.execute(
@@ -1765,8 +1774,9 @@ class TestCopyRatesAudit:
         direct_db,
     ):
         """A RATE_CREATED audit row is written for each copied rate."""
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"AUD-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"AUD-TGT-{random.randint(100,999)}")
@@ -1833,8 +1843,9 @@ class TestCopyRatesAudit:
         direct_db,
     ):
         """RATE_SUPERSEDED audit is written for the old Approved rate that gets superseded."""
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"SAUD-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"SAUD-TGT-{random.randint(100,999)}")
@@ -1907,8 +1918,9 @@ class TestCopyRatesAudit:
         direct_db,
     ):
         """RATE_VOIDED audit is written for any PendingApproval rate that gets voided."""
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"VAUD-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"VAUD-TGT-{random.randint(100,999)}")
@@ -1980,8 +1992,9 @@ class TestCopyRatesAudit:
         direct_db,
     ):
         """DRIVER_PAY_RULE_CREATED audit is written for each copied pay rule."""
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"PRAUD-SRC-{random.randint(100,999)}")
         tgt_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"PRAUD-TGT-{random.randint(100,999)}")
@@ -2242,6 +2255,7 @@ class TestCopyRatesFutureConflict:
         Old rate EffectiveTo = copy_date - 1; new rate EffectiveFrom = copy_date.
         """
         import random
+
         from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id,
@@ -2282,7 +2296,8 @@ class TestCopyRatesFutureConflict:
                                           headers=auth(auth_token))
         assert apr2.status_code == 200, f"Old target approve failed: {apr2.text}"
 
-        from datetime import date as _date, timedelta as _td
+        from datetime import date as _date
+        from datetime import timedelta as _td
         copy_date = _date(2050, 7, 1)
         expected_close = copy_date - _td(days=1)  # 2050-06-30
 
@@ -2337,6 +2352,7 @@ class TestCopyRatesFutureConflict:
         Copy succeeds and the old closed record is unchanged.
         """
         import random
+
         from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id,
@@ -2428,6 +2444,7 @@ class TestCopyRatesFutureConflict:
         or RATE_CREATED audit rows are written for the target driver.
         """
         import random
+
         from sqlalchemy import text as _text
 
         src_id = await _make_driver(session_client, auth_token, paytest_branch_id,

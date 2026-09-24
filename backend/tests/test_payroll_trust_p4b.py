@@ -25,12 +25,12 @@ Environment:
   Company B is created fresh per-test via p4b_env fixture.
   All fixture-created rows are cleaned up in teardown.
 """
+from decimal import Decimal
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # p4b_env fixture
@@ -717,7 +717,6 @@ async def test_t5_same_company_custom_rate_type_works(
     ), {"rid": rate_id})
 
     # Rate matrix for Company A's driver must include CPI_P4B_RT
-    from datetime import date
     resp_matrix = await client.get(
         f"/payroll/drivers/{drv_a_id}/rate-matrix",
         params={"as_of": "2059-06-01"},

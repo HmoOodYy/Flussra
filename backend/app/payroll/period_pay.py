@@ -48,11 +48,11 @@ from app.payroll.pay_item_write_lock import _lock_pay_item_for_source_write
 from app.payroll.period_pay_item_snapshot import _period_has_pay_item_snapshot
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import (
-    DraftLineSummary,
+    _WRITE_BLOCKED_STATUSES,
     ENTRY_ALLOWED_STATUSES,
+    DraftLineSummary,
     PeriodPayLineCreate,
     PeriodPayLineUpdate,
-    _WRITE_BLOCKED_STATUSES,
 )
 from app.payroll.source_evidence import _capture_source_evidence
 from app.payroll.source_line_read import _LINE_SELECT, _get_line_by_id, _line_row_to_summary

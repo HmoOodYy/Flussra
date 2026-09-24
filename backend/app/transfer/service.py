@@ -30,7 +30,7 @@ P2 behavior:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
@@ -43,11 +43,11 @@ from app.core.service import (
     _require_not_driver_role,
 )
 from app.transfer.schemas import (
+    CancelRequest,
     DriverTransferCreate,
     DriverTransferResponse,
     SourceApprovalRequest,
     TargetDecisionRequest,
-    CancelRequest,
     TransferListResponse,
 )
 
@@ -71,7 +71,7 @@ _TRANSFER_READ_PERMS = ["drivers.view", "drivers.edit"]
 # ---------------------------------------------------------------------------
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def _get_transfer_or_404(

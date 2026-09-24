@@ -19,15 +19,16 @@ TestRateSafety covers:
   - finalized payroll unaffected by rate change
   - full rollback when audit write fails (create, approve, approve-with-supersession)
 """
+from decimal import Decimal
+from unittest.mock import patch
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
-from unittest.mock import patch, AsyncMock
 from sqlalchemy import text as _text
-from uuid import uuid4
-from app.payroll import rates as payroll_rates
 
+from app.payroll import rates as payroll_rates
 
 # ---------------------------------------------------------------------------
 # Helpers

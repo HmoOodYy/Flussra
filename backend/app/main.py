@@ -7,21 +7,22 @@ Responsibilities:
   - Manage the database engine lifecycle via lifespan
 """
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db.session import dispose_engine
-from app.db.schema_guard import run_schema_guard
-from app.auth.router      import router as auth_router
-from app.core.router      import router as core_router
-from app.payroll.router   import router as payroll_router
-from app.review.router    import router as review_router
-from app.settings.router  import router as settings_router
-from app.admin.router     import router as admin_router
+from app.admin.router import router as admin_router
+from app.auth.router import router as auth_router
+from app.cdpi.router import router as cdpi_router
+from app.config import settings
+from app.core.router import router as core_router
 from app.dashboard.router import router as dashboard_router
-from app.transfer.router  import router as transfer_router
-from app.cdpi.router      import router as cdpi_router
-from app.config           import settings
+from app.db.schema_guard import run_schema_guard
+from app.db.session import dispose_engine
+from app.payroll.router import router as payroll_router
+from app.review.router import router as review_router
+from app.settings.router import router as settings_router
+from app.transfer.router import router as transfer_router
 
 
 @asynccontextmanager

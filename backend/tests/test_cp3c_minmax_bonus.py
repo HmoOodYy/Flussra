@@ -28,9 +28,9 @@ import itertools
 import uuid
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 

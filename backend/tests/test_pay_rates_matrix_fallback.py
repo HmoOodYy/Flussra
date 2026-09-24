@@ -30,9 +30,10 @@ System PayItems NOT active by default (IsDefaultBranchActive=FALSE):
   Overnight Stay   payitemid=4  ratetypeid=4  OVERNIGHT
 """
 import uuid
-import pytest
-import httpx
 from datetime import date
+
+import httpx
+import pytest
 
 AS_OF_TODAY = date.today().isoformat()
 

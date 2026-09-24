@@ -124,10 +124,14 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
                  anchor: str = "2095-01-07", interval: int | None = None,
                  mask: int = 0) -> dict:
     """Create current Setup/Published Version/Branch Assignment policy state."""
-    from app.payroll_setup.policy import (
-        assign_setup, create_draft, create_setup, publish_version,
-    )
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.payroll_setup.policy import (
+        assign_setup,
+        create_draft,
+        create_setup,
+        publish_version,
+    )
 
     engine = create_async_engine(db.engine.url, echo=False)
     try:
@@ -170,8 +174,9 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
 
 async def _publish_future_version(db: AsyncConnection, setup_id: int,
                                   effective: datetime.date, mask: int) -> int:
-    from app.payroll_setup.policy import create_draft, publish_version
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.payroll_setup.policy import create_draft, publish_version
 
     engine = create_async_engine(db.engine.url, echo=False)
     try:
@@ -322,7 +327,8 @@ class TestCp2bPeriodDays:
 
     def test_d02_alembic_head_current(self):
         """D02: Migration chain is linear and head is 0068."""
-        import subprocess, sys
+        import subprocess
+        import sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             capture_output=True, text=True,

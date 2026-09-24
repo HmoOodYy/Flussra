@@ -32,15 +32,14 @@ import contextlib
 import datetime
 import decimal
 import uuid
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import ROUND_HALF_EVEN, Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 
 from app.payroll.service import _compute_calculated_amount
-
 
 # ---------------------------------------------------------------------------
 # Module-level constants (2091 dates — isolated from other test modules)

@@ -44,9 +44,9 @@ import pathlib
 import uuid
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 
 _PERIOD_CODE_PREFIX = "P4CP4B-"

@@ -47,15 +47,13 @@ with other test modules (2097=CP-2D2, 2096=CP-2D1, 2091=Slice 1, 2087=ledger,
 """
 import contextlib
 import datetime
-import decimal
 import uuid
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Module-level constants (2098 dates — isolated from other test modules)

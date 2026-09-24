@@ -1,19 +1,19 @@
 """FastAPI router for the Driver Transfer workflow."""
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_current_user, get_db
 from app.transfer import service
 from app.transfer.schemas import (
+    CancelRequest,
     DriverTransferCreate,
     DriverTransferResponse,
     SourceApprovalRequest,
     TargetDecisionRequest,
-    CancelRequest,
     TransferListResponse,
 )
 
@@ -42,8 +42,8 @@ async def create_transfer(
 async def list_transfers(
     token: TokenDep,
     db: DbDep,
-    branch_id: Optional[int] = None,
-    status: Optional[str] = None,
+    branch_id: int | None = None,
+    status: str | None = None,
 ) -> TransferListResponse:
     """List driver transfer requests visible to the caller."""
     return await service.list_transfer_requests(

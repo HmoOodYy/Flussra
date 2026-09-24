@@ -10,13 +10,13 @@ Strategy:
 Run from Payroll_App_v3/backend/:
     pytest tests/ -v
 """
-import os
-import asyncio
 import glob as _glob
+import os
 import subprocess
 import time
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import AsyncGenerator
+
 
 # ---------------------------------------------------------------------------
 # On Windows, PostgreSQL bin/ is typically NOT on PATH.
@@ -39,14 +39,14 @@ _PG_BIN = _find_pg_bin()
 if _PG_BIN and _PG_BIN not in os.environ.get("PATH", ""):
     os.environ["PATH"] = _PG_BIN + os.pathsep + os.environ.get("PATH", "")
 
+import httpx
+import psycopg2
 import pytest
 import pytest_asyncio
 import testing.postgresql
-import psycopg2
-import httpx
-from httpx import ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
 from fastapi import FastAPI
+from httpx import ASGITransport
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 
 def _stop_test_postgresql_safely(pg: testing.postgresql.Postgresql) -> None:
@@ -384,8 +384,8 @@ async def test_app(test_database_url) -> FastAPI:
     engine does NOT work because dependencies.py captures the reference at
     import time.
     """
-    from app.main import app as real_app
     from app.dependencies import get_db
+    from app.main import app as real_app
 
     test_engine = create_async_engine(test_database_url, echo=False)
 
@@ -501,7 +501,6 @@ async def created_period_id(session_db_conn) -> int:
     CP-1D: POST /payroll/periods requires an existing Open period (B1 guard), so
     we insert directly. Used by read-only period tests.
     """
-    import datetime
     from sqlalchemy import text as _sqla_text
     # Cancel any stale HQ Draft/Open periods from prior runs
     await session_db_conn.execute(

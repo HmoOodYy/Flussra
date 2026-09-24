@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
-from uuid import uuid4
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.payroll_setup.chronology import Schedule
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.policy import (
     archive_setup,
@@ -21,13 +22,12 @@ from app.payroll_setup.policy import (
     create_setup,
     discard_draft,
     edit_draft,
+    preview_policy_impact,
     publish_version,
     reassign_setup,
     set_default_setup,
     withdraw_assignment,
-    preview_policy_impact,
 )
-from app.payroll_setup.chronology import Schedule
 from app.payroll_setup.resolver import resolve_payroll_setup_version
 
 

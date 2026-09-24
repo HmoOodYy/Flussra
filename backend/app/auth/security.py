@@ -4,7 +4,7 @@ Password hashing and JWT token utilities.
 No passlib wrapper — bcrypt is called directly to avoid a dependency on a
 package in maintenance-only mode.
 """
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
@@ -48,7 +48,7 @@ def create_access_token(user_id: int, company_id: int) -> str:
     Create a signed JWT access token containing user_id and company_id.
     Expiry is controlled by settings.ACCESS_TOKEN_EXPIRE_HOURS.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         # RFC 7519 §4.1.2 requires "sub" to be a string; PyJWT 2.13+ enforces this.
         "sub": str(user_id),

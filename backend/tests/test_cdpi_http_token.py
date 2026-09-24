@@ -12,7 +12,6 @@ via a real authenticated token through TestClient, not direct service calls.
 """
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 1. GET /settings/cdpi/branches/{branch_id}/items
 # ---------------------------------------------------------------------------

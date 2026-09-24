@@ -22,14 +22,14 @@ Test isolation strategy
   existing lifecycle endpoint rather than candidate creation.
 """
 import datetime as _dt
-import pytest
-import pytest_asyncio
+from uuid import uuid4
+
 import httpx
+import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 from sqlalchemy.ext.asyncio import create_async_engine
-from uuid import uuid4
-from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 # ---------------------------------------------------------------------------
 # Module-level helpers

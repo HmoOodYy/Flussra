@@ -27,12 +27,12 @@ Isolation strategy:
   after so tests are independent of each other and of test_m13a.py.
 """
 
+from datetime import date
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-
-from datetime import date
 
 _COMPANY_ID = 1
 

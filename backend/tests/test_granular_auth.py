@@ -6,10 +6,8 @@ Covers:
 - Fix 2: DB trigger preventing duplicate active Company Owner assignments
 - Fix 5: Company Owner dynamic full permissions in /auth/me
 """
-import pytest
-import pytest_asyncio
 import httpx
-
+import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers

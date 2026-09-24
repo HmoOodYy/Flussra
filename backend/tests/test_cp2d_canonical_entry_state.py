@@ -139,7 +139,7 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
         review_items_subq = (
             "(SELECT reviewitemid FROM review.managerreviewitems "
             "WHERE entityschema = 'payroll' AND entityname = 'PayrollPeriods' "
-            f"AND entityid IN (SELECT payrollperiodid::text FROM payroll.payrollperiods WHERE branchid = :bid))"
+            "AND entityid IN (SELECT payrollperiodid::text FROM payroll.payrollperiods WHERE branchid = :bid))"
         )
 
         # Leaf-to-root, verified against each table's actual FK targets:
@@ -181,8 +181,8 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
             # deleting the review item it points to -- clear it first (the
             # period row is being deleted below anyway, so this is a pure
             # unblock, not a behavior change).
-            f"UPDATE payroll.payrollperiods SET currentreturnreviewitemid = NULL "
-            f"WHERE branchid = :bid",
+            "UPDATE payroll.payrollperiods SET currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid",
 
             # ManagerReviewDecisions (0001) RESTRICTs deleting the
             # ManagerReviewItems row it belongs to -- delete children first.

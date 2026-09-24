@@ -21,13 +21,14 @@ Isolation strategy
 All tests use year 2035 dates on the PAYTEST branch.  Ephemeral drivers
 (created per-test) are cleaned up in fixture teardown.
 """
+from datetime import date as _date
+from decimal import Decimal
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from datetime import date as _date, timedelta as _td
-from decimal import Decimal
 from sqlalchemy import text as _text
-from uuid import uuid4
 
 
 @pytest_asyncio.fixture(scope="session")

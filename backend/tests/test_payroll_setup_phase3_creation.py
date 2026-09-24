@@ -12,15 +12,14 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.payroll.off_drivers import _scheduled_work_days
 from app.payroll.period_creation import (
     create_period_from_candidate,
     get_period_candidates,
 )
 from app.payroll.period_lifecycle import change_period_status
-from app.payroll.off_drivers import _scheduled_work_days
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodCreationRequest, PeriodStatusChange
-from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.policy import (
     assign_setup,
     create_draft,

@@ -10,13 +10,12 @@ can be verified without infrastructure.
 import pytest
 
 from app.cdpi.methods import (
-    RateFieldDescriptor,
     PerUnitAdapter,
-    get_adapter,
+    RateFieldDescriptor,
     all_known_keys,
+    get_adapter,
 )
 from app.cdpi.schemas import CdpiCalcMethodKey
-
 
 # ===========================================================================
 # Registry coverage
@@ -186,8 +185,9 @@ class TestSubmitUsesAdapter:
 
     async def test_per_unit_complete_draft_submits(self, direct_db):
         from sqlalchemy import text as _text
-        from app.cdpi.schemas import CdpiRequestCreate, CdpiSubmitRequest
+
         from app.cdpi import service as cdpi_service
+        from app.cdpi.schemas import CdpiRequestCreate, CdpiSubmitRequest
 
         company_id = (await direct_db.execute(
             _text("SELECT companyid FROM core.companies WHERE companycode = 'DEMO'")
@@ -241,8 +241,9 @@ class TestSubmitUsesAdapter:
         """Each non-PerUnit method produces a clean 422 via the adapter registry."""
         from fastapi import HTTPException
         from sqlalchemy import text as _text
-        from app.cdpi.schemas import CdpiRequestCreate, CdpiSubmitRequest
+
         from app.cdpi import service as cdpi_service
+        from app.cdpi.schemas import CdpiRequestCreate, CdpiSubmitRequest
 
         company_id = (await direct_db.execute(
             _text("SELECT companyid FROM core.companies WHERE companycode = 'DEMO'")

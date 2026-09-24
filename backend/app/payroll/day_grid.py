@@ -63,7 +63,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import (
-    _build_in_clause, _check_any_permission, _check_permission,
+    _build_in_clause,
+    _check_any_permission,
+    _check_permission,
 )
 from app.payroll import status_evidence
 from app.payroll.day_entry_state import (
@@ -109,7 +111,6 @@ from app.payroll.schemas import (
     DraftLineUpdate,
 )
 from app.payroll.status_payment_sync import _sync_status_payment_for_entry_state
-
 
 # ===========================================================================
 # CP-1 — Day Grid
@@ -792,7 +793,7 @@ async def save_day_grid(
 
         # P1 #2: parse all quantities; reject unknown or branch-inactive codes
         # before any writes so the batch is rejected atomically.
-        parsed_values: dict[str, "Decimal | None"] = {}
+        parsed_values: dict[str, Decimal | None] = {}
         for pay_item_code, raw_val in save_row.values.items():
             canonical = _LEGACY_TO_CANONICAL.get(pay_item_code, pay_item_code)
             if canonical not in active_col_codes:

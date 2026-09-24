@@ -12,12 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.schemas import (
     BranchSummary,
-    PersonSummary,
-    DriverSummary,
     DriverCreate,
+    DriverSummary,
     DriverUpdate,
+    PersonSummary,
 )
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers

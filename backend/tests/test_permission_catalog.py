@@ -18,10 +18,8 @@ Also verifies:
   • dispatch permissions untouched
   • settings.manage / setup.manage fallback behaviour unchanged
 """
-import pytest
-import pytest_asyncio
 import httpx
-
+import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_granular_auth.py)

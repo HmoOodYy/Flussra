@@ -15,10 +15,8 @@ transitions the Draft period to Open so that entry is allowed.
 `paytest_driver_id` (session-scoped, from conftest) gives us a valid driver
 on the PAYTEST branch for every test that needs to POST a line.
 """
-import pytest
-import pytest_asyncio
 import httpx
-
+import pytest_asyncio
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (copied pattern from test_payroll.py)

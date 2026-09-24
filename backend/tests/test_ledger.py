@@ -24,12 +24,12 @@ Covered:
 - PeriodSummary includes final_gross and final_driver_count after finalization
 """
 import datetime
+from decimal import Decimal
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
 from sqlalchemy import text as _sqla_text
-
 
 # ---------------------------------------------------------------------------
 # Helpers

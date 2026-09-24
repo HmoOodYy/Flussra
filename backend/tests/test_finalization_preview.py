@@ -17,13 +17,14 @@ local fixture that follows the exact same pattern (Draft->'Open->'InReview->'App
 via review flow, then voids the dummy line) so this file is self-contained.
 """
 import datetime
-import pytest
 import itertools
-import pytest_asyncio
-import httpx
 from decimal import Decimal
-from sqlalchemy import text as _text
 from uuid import uuid4
+
+import httpx
+import pytest
+import pytest_asyncio
+from sqlalchemy import text as _text
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -792,8 +793,8 @@ class TestFinalizationPreview:
 
             # Extract the two HOURS lines from the preview response
             preview_lines = {l["draft_line_id"]: l for l in body["lines"]}
-            assert line1_id in preview_lines, f"Line1 (2085-03-05) not in preview"
-            assert line2_id in preview_lines, f"Line2 (2085-03-07) not in preview"
+            assert line1_id in preview_lines, "Line1 (2085-03-05) not in preview"
+            assert line2_id in preview_lines, "Line2 (2085-03-07) not in preview"
 
             amt1 = Decimal(str(preview_lines[line1_id]["calculated_amount"]))
             amt2 = Decimal(str(preview_lines[line2_id]["calculated_amount"]))

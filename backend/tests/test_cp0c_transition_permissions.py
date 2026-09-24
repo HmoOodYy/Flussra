@@ -25,13 +25,12 @@ CP-0B (2091) test modules.
 Run from backend/:
     python -m pytest tests/test_cp0c_transition_permissions.py -v
 """
-import asyncio
 import datetime
 import itertools
-import threading
+
+import httpx
 import psycopg2
 import pytest
-import httpx
 from sqlalchemy import text
 
 # ---------------------------------------------------------------------------

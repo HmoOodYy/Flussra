@@ -8,8 +8,8 @@ Covers:
   - Company roles (create, update, delete, permission management)
 """
 from datetime import datetime
-from pydantic import BaseModel, field_validator
 
+from pydantic import BaseModel, field_validator
 
 # ---------------------------------------------------------------------------
 # Constants

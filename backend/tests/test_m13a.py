@@ -22,14 +22,12 @@ unique codes prefixed M13A_ to avoid collisions with M12 test codes.
 Approved driver rates are function-scoped with cleanup via a rates_clean
 wrapper so they don't collide with test_rates.py.
 """
-import pytest
-import pytest_asyncio
-import httpx
 import uuid
 from decimal import Decimal
-from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
+import httpx
+import pytest_asyncio
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,8 +109,9 @@ async def _void_all_rates(client: httpx.AsyncClient, token: str) -> None:
 
 
 async def _make_period(db, branch_id: int, start: str, end: str, status: str = "Open") -> int:
-    from sqlalchemy import text as _sqla_text
     from datetime import date as _date
+
+    from sqlalchemy import text as _sqla_text
     code = f"M13X-{branch_id}-{start}-{uuid.uuid4().hex[:8]}"
     row = (await db.execute(
         _sqla_text(f"""
@@ -432,8 +431,6 @@ class TestM13aValidation:
         """
         # Seed a temporary item and immediately retire it via smart-delete
         # (force the retire path by mocking meaningful usage).
-        from unittest.mock import AsyncMock, patch
-        from app.payroll import service as payroll_service
         from app.settings import service as settings_service
         from app.settings.schemas import CustomPayItemUsage
         from tests.seed_helpers import seed_legacy_item
@@ -1348,7 +1345,8 @@ class TestM13bCodexFixes:
         (not paytest_driver_id, which is a driver ID, not a branch ID).
         Issue 4 fix: all updates (quantity, notes, status) trigger revalidation.
         """
-        from unittest.mock import AsyncMock, patch as mock_patch
+        from unittest.mock import patch as mock_patch
+
         from app.settings import service as settings_service
         from app.settings.schemas import CustomPayItemUsage
         from tests.seed_helpers import seed_legacy_item

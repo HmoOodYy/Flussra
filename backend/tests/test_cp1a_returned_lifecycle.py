@@ -21,8 +21,8 @@ Dates: 2095-* — isolated year.  Run from backend/:
 import datetime
 import itertools
 
-import pytest
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 

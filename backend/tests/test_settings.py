@@ -19,10 +19,12 @@ TestSetDefaultBranch    — POST /settings/branches/{id}/set-default (promotion,
 TestSettingsAudit       — audit-log rollback: company update and branch create roll back on audit failure
 """
 import re
+from unittest.mock import patch
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from unittest.mock import patch
+
 from app.settings import service as settings_service
 
 

@@ -30,11 +30,13 @@ Matrix:
 
 import datetime
 import itertools
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _sqla_text
 from sqlalchemy.ext.asyncio import create_async_engine
+
 from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 # ---------------------------------------------------------------------------

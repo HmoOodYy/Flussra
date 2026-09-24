@@ -22,12 +22,11 @@ All dates are in 2082-06-xx or 2082-07-xx range.
 """
 import contextlib
 import itertools
-import pytest
-import pytest_asyncio
-import httpx
 from decimal import Decimal
-from sqlalchemy import text as _text
 
+import httpx
+import pytest
+from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -105,12 +104,13 @@ async def _open_period(
 ) -> int:
     """Insert an Open period directly into DB. Returns period_id."""
     from datetime import date as _date
+
     from sqlalchemy import text as _text
     if db is None:
         raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
     code = f"RCB-{branch_id}-{start}-{next(_period_counter)}"
     row = (await db.execute(
-        _text(f"""
+        _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)

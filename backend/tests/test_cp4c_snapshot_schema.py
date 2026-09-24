@@ -1,13 +1,13 @@
 """CP-4C immutable calculation snapshot schema and hash foundation tests."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
 import importlib.util
 import json
+from collections.abc import AsyncIterator
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import AsyncIterator
 from uuid import uuid4
 
 import pytest
@@ -22,7 +22,6 @@ from app.payroll.snapshot_hash import (
     calculate_source_config_hash,
     canonical_json,
 )
-
 
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64

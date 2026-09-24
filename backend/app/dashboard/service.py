@@ -23,17 +23,18 @@ Permission model (Dashboard D1):
   - If no section is available → 403 (user exists but has no dashboard
     permissions at all — should never happen for real operational users).
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import HTTPException, status as http_status
+from fastapi import HTTPException
+from fastapi import status as http_status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import (
     _check_branch_access,
-    _require_not_driver_role,
     _has_any_permission,
+    _require_not_driver_role,
 )
 from app.dashboard.schemas import (
     ApprovedPeriodItem,
@@ -298,7 +299,7 @@ async def get_dashboard_summary(
                 s.active_driver_count = branch_driver_count.get(s.branch_id, 0)
 
     return DashboardResponse(
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
         scope=scope,
         sections_available=sections_available,
         periods_draft=periods_draft,

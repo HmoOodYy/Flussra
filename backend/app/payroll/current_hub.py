@@ -20,8 +20,6 @@ from app.payroll.eligibility import (
 )
 from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.period_creation import _check_slot_matrix
-from app.payroll_setup.errors import PolicyError
-from app.payroll_setup.resolver import resolve_payroll_setup_version
 from app.payroll.schemas import (
     BranchWorkflowCapabilities,
     BranchWorkflowEntry,
@@ -40,6 +38,8 @@ from app.payroll.schemas import (
     WorkflowCapability,
     WorkflowSlotItem,
 )
+from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.resolver import resolve_payroll_setup_version
 
 _TOP_DRIVER_LIMIT = 5
 _NON_WORK_DAILY_LINE_TYPES = (

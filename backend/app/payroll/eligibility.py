@@ -21,7 +21,7 @@ zero-app-dependency leaf: it now imports app.core.service (permission/role
 guards) and app.payroll.period_read (the period access gate), verified to
 introduce no import cycle in either direction.
 """
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _build_in_clause, _check_any_permission, _require_not_driver_role
 from app.payroll.period_read import get_period_by_id
-
 
 # ---------------------------------------------------------------------------
 # Driver eligibility helpers (shared by all payroll write/finalization paths)
@@ -363,7 +362,7 @@ async def _create_period_driver_eligibility_rows(
     created_by_user_id: int | None = None,
     frozen_by_user_id: int | None = None,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     frozen_at = now if freeze else None
 
     # Paths 1–3: Active / TerminatedHistorical / Transferred
@@ -523,7 +522,7 @@ async def _freeze_period_driver_eligibility_snapshot(
     frozen_by_user_id: int | None = None,
 ) -> None:
     """Freeze all unfrozen eligibility rows and the marker row for a period."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     await db.execute(
         text("""
             UPDATE payroll.payrollperioddrivereligibility

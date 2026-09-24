@@ -16,12 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_any_permission
 from app.payroll.guards import (
-    _check_own_driver_only,
-    _check_not_in_finalized_period,
     _check_driver_read_access,
+    _check_not_in_finalized_period,
+    _check_own_driver_only,
 )
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
-
 
 # ===========================================================================
 # M15 — Driver Pay Rules (Minimum / Maximum Pay)

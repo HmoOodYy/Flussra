@@ -32,11 +32,10 @@ Run from backend/:
 import datetime
 import itertools
 import uuid
-from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -226,7 +225,9 @@ async def test_alembic_head_is_current() -> None:
     # CP-3B2a introduced migration 0059; CP-3B2b later added 0060, which is now
     # the head. This test only asserts the chain is linear and that 0059 is
     # applied (i.e. head is 0059 or a later revision that builds on it).
-    import subprocess, sys, pathlib
+    import pathlib
+    import subprocess
+    import sys
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "heads"],
         capture_output=True, text=True,

@@ -1,7 +1,6 @@
 """Integration tests for payroll status keys and legacy setup authentication."""
-import pytest
-import pytest_asyncio
 import httpx
+import pytest_asyncio
 
 
 def auth(token: str) -> dict[str, str]:

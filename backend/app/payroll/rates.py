@@ -50,9 +50,9 @@ from app.payroll.schemas import (
     CopyRatesResult,
     DriverRateCreate,
     DriverRateMatrix,
+    DriverRatesSummary,
     DriverRateSummary,
     DriverRateUpdate,
-    DriverRatesSummary,
     OrdinalTierCreate,
     RangeTierCreate,
     RateMatrixCurrentRate,
@@ -60,7 +60,6 @@ from app.payroll.schemas import (
     RateTypeSummary,
     TierSummary,
 )
-
 
 # ===========================================================================
 # Pay Rates â€” rate type catalog + driver rate matrix

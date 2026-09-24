@@ -28,10 +28,10 @@ Run from backend/:
 import asyncio
 import datetime
 import itertools
-import threading
+
+import httpx
 import psycopg2
 import pytest
-import httpx
 from sqlalchemy import text
 
 # ---------------------------------------------------------------------------

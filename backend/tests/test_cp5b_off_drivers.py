@@ -2,13 +2,13 @@
 import datetime
 import itertools
 from decimal import Decimal
+from uuid import uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
-from uuid import uuid4
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2097, 1, 1)

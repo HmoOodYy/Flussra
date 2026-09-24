@@ -4,6 +4,8 @@ Auth service — business logic for login and identity resolution.
 All database access is raw parameterised SQL via sqlalchemy.text().
 No ORM models.
 """
+from datetime import UTC
+
 from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -102,8 +104,8 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
         )
 
     # Locked-out check (brute-force protection — field exists in schema)
-    from datetime import datetime, timezone
-    if row["lockeduntilutc"] and row["lockeduntilutc"] > datetime.now(timezone.utc):
+    from datetime import datetime
+    if row["lockeduntilutc"] and row["lockeduntilutc"] > datetime.now(UTC):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is temporarily locked due to too many failed attempts.",

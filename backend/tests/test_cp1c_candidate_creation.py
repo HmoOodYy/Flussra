@@ -25,13 +25,12 @@ import itertools
 import json
 import uuid
 
-import psycopg2
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-import testing.postgresql
 from sqlalchemy import text as _text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from app.payroll_setup.policy import (
     assign_setup,
     create_draft,
@@ -1488,6 +1487,7 @@ class TestConcurrency:
         """
         from sqlalchemy import text as _t
         from sqlalchemy.ext.asyncio import create_async_engine
+
         from app.payroll_setup.policy import create_draft, publish_version
 
         bid = cp1c_setup["branch_id"]
@@ -1636,6 +1636,7 @@ class TestConcurrency:
         - Proves lock namespace is branch-scoped, not global.
         """
         import time
+
         from sqlalchemy import text as _t
         from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -1900,10 +1901,10 @@ class TestMigration0050:
     @pytest.mark.asyncio
     async def test_66_downgrade_migration_refuses_populated_hashes(self, test_database_url):
         """T66: Migration 0050 downgrade refuses if any hashes are present."""
-        import sys
         from pathlib import Path
-        from sqlalchemy.ext.asyncio import create_async_engine
+
         from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
 
         engine = create_async_engine(test_database_url, echo=False)
         try:

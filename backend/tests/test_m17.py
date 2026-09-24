@@ -11,13 +11,14 @@ Test strategy:
     SpecificBranch scope + payroll.entry so the branch-scoped read tests work.
   - Tests are function-scoped to avoid cross-test state issues.
 """
-import pytest
-import pytest_asyncio
+from datetime import UTC, datetime
+from uuid import uuid4
+
 import httpx
 import psycopg2
-from datetime import date, datetime, timezone, timedelta
+import pytest
+import pytest_asyncio
 from sqlalchemy import text
-from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -125,10 +126,11 @@ async def hq_entry_token(
 async def _make_open_period(db, branch_id: int, start: str, end: str) -> int:
     """Insert an Open period directly into DB. Returns period_id."""
     from datetime import date as _date
+
     from sqlalchemy import text as _sqla_text
     code = f"M17-{branch_id}-{start}"
     row = (await db.execute(
-        _sqla_text(f"""
+        _sqla_text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
@@ -255,7 +257,7 @@ class TestDashboardResponseShape:
         # Should parse as ISO datetime
         dt = datetime.fromisoformat(data["generated_at"].replace("Z", "+00:00"))
         # Should be within the last 60 seconds
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         assert abs((now - dt).total_seconds()) < 60
 
     async def test_required_fields_present(
@@ -762,8 +764,8 @@ class TestDashboardSetupWarnings:
         expect OPEN_PERIOD_NEEDS_MANAGER_REVIEW warning.
         """
         # Create Open period
+
         from app.auth.security import hash_password as _hp  # noqa: F401
-        import httpx as _httpx
 
         transport = httpx.AsyncClient  # just to import; use client fixture
 

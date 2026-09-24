@@ -26,13 +26,15 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_branch_access, _check_permission, _build_in_clause
+from app.core.service import _build_in_clause, _check_branch_access, _check_permission
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
     BranchUpdate,
     CompanyProfile,
     CompanyUpdate,
+    PayItemRateTypeMapCreate,
+    PayItemRateTypeMapSummary,
     PayrollSetup,
     PayrollSetupUpsert,
     StatusKey,
@@ -40,10 +42,7 @@ from app.settings.schemas import (
     StatusKeyUpdate,
     StatusRateColumn,
     StatusRateColumnCreate,
-    PayItemRateTypeMapCreate,
-    PayItemRateTypeMapSummary,
 )
-
 
 # ---------------------------------------------------------------------------
 # Custom pay item code generation
@@ -1990,19 +1989,21 @@ async def _ensure_default_status_rate_column_for_branch(
 # Pay items & branch configuration
 # ===========================================================================
 
-from datetime import date as _date, timedelta as _timedelta               # noqa: E402
-from app.settings.schemas import (                                        # noqa: E402
-    BranchPayItemState,
+from datetime import date as _date  # noqa: E402
+from datetime import timedelta as _timedelta
+
+from app.settings.schemas import (  # noqa: E402
     BranchPayItemConfigVersion,
-    PayItemConfigUpdate,
+    BranchPayItemState,
     CustomPayItem,
     CustomPayItemCreate,
-    CustomPayItemUpdate,
-    CustomPayItemUsage,
     CustomPayItemDeleteResult,
     CustomPayItemRequest,
     CustomPayItemRequestCreate,
     CustomPayItemRequestDecide,
+    CustomPayItemUpdate,
+    CustomPayItemUsage,
+    PayItemConfigUpdate,
 )
 
 _SETTINGS_AUDIT_REASONS.update({
@@ -2426,7 +2427,7 @@ async def _apply_pay_item_config_to_branch(
 
     action_code: str
     config_id: int
-    old_value: "dict | None" = None
+    old_value: dict | None = None
 
     if open_row is None:
         # No existing config: INSERT fresh row
@@ -2642,9 +2643,9 @@ async def bulk_update_pay_item_config(
     Requires AllCompanyBranches scope + setup.manage permission.
     """
     from app.settings.schemas import (
-        BulkPayItemTarget,
-        BulkPayItemConfigResult,
         BulkPayItemBranchResult,
+        BulkPayItemConfigResult,
+        BulkPayItemTarget,
     )
 
     await _ensure_company_admin(company_id, user_id, db)
@@ -3168,7 +3169,7 @@ async def _compute_usage(
         """),
         {"cid": company_id, "code": pay_item_code},
     )
-    final_count = int((final_result.scalar_one() or 0))
+    final_count = int(final_result.scalar_one() or 0)
 
     # Count DriverRates rows linked to this Pay Item via PayItemRateTypeMap.
     # A custom pay item with existing driver rates must be retired, not physically
@@ -3717,7 +3718,7 @@ async def delete_custom_pay_item(
             """),
             {"iid": item_id},
         )
-        snap_count = int((snap_count_row.scalar_one() or 0))
+        snap_count = int(snap_count_row.scalar_one() or 0)
         if snap_count > 0:
             # Force retire path — physical delete would violate the FK.
             usage = usage.model_copy(update={"deletion_would_retire": True})

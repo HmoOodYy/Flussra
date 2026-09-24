@@ -12,13 +12,13 @@ Covers:
   TestCreateRateBranchValidation — branch-active rate type check (Fix 8)
   TestDriverInfoPermissions   — /admin/users/{id}/driver caller permission gate (Fix 5)
 """
-import pytest
-import pytest_asyncio
-import httpx
 from datetime import date, timedelta
-from sqlalchemy import text as _sqla_text
 from uuid import uuid4
 
+import httpx
+import pytest
+import pytest_asyncio
+from sqlalchemy import text as _sqla_text
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1452,6 +1452,7 @@ class TestBackdatingGuard:
         """Insert a payroll period directly into the DB with the given status."""
         import random as _random
         from datetime import date as _date
+
         from sqlalchemy import text as _text
         code = f"GRDTEST-{status[:3].upper()}-{_random.randint(100000, 999999)}"
         await direct_db.execute(
@@ -2470,7 +2471,6 @@ class TestODAScopeDetection:
         assign_company_role revokes the previous assignment before creating a new one.
         After reassignment, exactly one active assignment exists — no ambiguity.
         """
-        from sqlalchemy import text as _text
 
         role_id = await _create_role_with_perms(
             session_client, auth_token, "ScopeRevokeRole1",
@@ -3290,8 +3290,9 @@ class TestPhase2B:
         This confirms the backdating guard is active on the approve endpoint
         (the endpoint that the Pending Changes UI calls).
         """
-        from sqlalchemy import text as _text
         import random
+
+        from sqlalchemy import text as _text
 
         # Insert a Locked period covering a far-future date
         code = f"P2BTEST-{random.randint(100000, 999999)}"
@@ -4715,6 +4716,7 @@ class TestCustomPayItemRateStructure:
         run backfill_custom_pay_item_rate_structure, and confirm the item is repaired.
         """
         from sqlalchemy import text as _text
+
         from app.settings.service import backfill_custom_pay_item_rate_structure
         from tests.seed_helpers import seed_legacy_item_with_rate_structure
 
@@ -4787,6 +4789,7 @@ class TestCustomPayItemRateStructure:
         (Phase 3C rule), but not in day-grid before EffectiveFrom.
         """
         from datetime import timedelta
+
         from tests.seed_helpers import seed_legacy_item_with_rate_structure
         h = auth(auth_token)
 

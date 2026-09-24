@@ -17,14 +17,11 @@ Dates: 2094-* — isolated year.  Run from backend/:
 """
 import datetime
 import itertools
-from decimal import Decimal
 
+import httpx
 import psycopg2
 import pytest
-import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-from sqlalchemy.ext.asyncio import AsyncConnection
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -223,7 +220,8 @@ class TestMigration:
 
     def test_0049_in_alembic_heads(self):
         """Migration chain must be linear (single current head)."""
-        import subprocess, sys
+        import subprocess
+        import sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             capture_output=True, text=True,
@@ -281,8 +279,9 @@ class TestMigration:
         Disposable PostgreSQL: applying 0049 SQL fails when duplicate InReview
         periods exist (blocking preflight RAISE EXCEPTION).
         """
-        import testing.postgresql
         from pathlib import Path
+
+        import testing.postgresql
 
         pg = testing.postgresql.Postgresql()
         try:

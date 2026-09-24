@@ -27,14 +27,14 @@ Tests:
 Note: the tests share a session-scoped DB + app (via conftest fixtures) but
 each test creates its OWN distinct driver/request so they are fully isolated.
 """
-import random
 import datetime
+import random
 import uuid
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1605,7 +1605,6 @@ async def test_db_composite_fk_blocks_cross_company_driver(
     We use companyid=0 (non-existent) while using a real driver_id to trigger
     the composite FK (DriverID, CompanyID) → core.Drivers(DriverID, CompanyID).
     """
-    import asyncpg
 
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=_rnd()

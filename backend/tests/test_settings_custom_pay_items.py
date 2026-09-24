@@ -31,12 +31,13 @@ TestCustomPayItemUpdateInvariants  scope/unit immutability on PATCH (items seede
 TestUsageVoidStatus            _compute_usage void-row semantics (items seeded via DB)
 TestApprovalEffectiveDate      BranchPayItemConfig effective-date rule (now blocked via HTTP)
 """
-import pytest
-import pytest_asyncio
-import httpx
-from unittest.mock import patch, AsyncMock
-from sqlalchemy import text
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+
+import httpx
+import pytest
+from sqlalchemy import text
+
 from app.settings import service as settings_service
 
 
@@ -776,6 +777,7 @@ class TestCustomPayItemCodeGeneration:
     ):
         """LLR-A fires before the code-generation retry path is reached."""
         from unittest.mock import patch
+
         from app.settings import service as svc
 
         call_count = 0
@@ -899,7 +901,6 @@ class TestCustomPayItemUpdate:
         self, client: httpx.AsyncClient, auth_token: str, db_conn
     ):
         """After retirement, item excluded from normal list but visible with include_retired."""
-        from unittest.mock import AsyncMock
         from app.settings.schemas import CustomPayItemUsage
 
         item_id = await _seed_legacy_item(
@@ -1032,7 +1033,6 @@ class TestCustomPayItemDelete:
         db_conn,
     ):
         """Item with meaningful draft usage → retire (Status=Retired), not physical delete."""
-        from unittest.mock import AsyncMock
         from app.settings.schemas import CustomPayItemUsage
 
         item_id = await _seed_legacy_item(
@@ -1146,7 +1146,6 @@ class TestCustomPayItemDelete:
         db_conn,
     ):
         """Item with only non-meaningful draft rows → physical delete."""
-        from unittest.mock import AsyncMock
         from app.settings.schemas import CustomPayItemUsage
 
         item_id = await _seed_legacy_item(
@@ -2003,7 +2002,6 @@ class TestUsageVoidStatus:
             db_conn, code="M12_VOID_TEST", name="Void Status Test"
         )
 
-        from unittest.mock import AsyncMock
         from app.settings.schemas import CustomPayItemUsage
 
         void_usage = CustomPayItemUsage(
@@ -2035,7 +2033,6 @@ class TestUsageVoidStatus:
     ):
         """A NeedsReview or Rejected draft line with Quantity>0 is meaningful usage."""
         from app.settings.schemas import CustomPayItemUsage
-        from unittest.mock import AsyncMock
 
         item_id = await _seed_legacy_item(
             db_conn, code="M12_NEEDS_REVIEW", name="NeedsReview Usage Test"

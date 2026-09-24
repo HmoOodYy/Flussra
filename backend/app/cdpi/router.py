@@ -20,19 +20,19 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 
-from app.dependencies import get_db, get_current_user
 from app.cdpi import service
 from app.cdpi.schemas import (
+    CdpiBranchItemState,
+    CdpiBranchItemUpdate,
+    CdpiDecideRequest,
+    CdpiDirectCreateRequest,
+    CdpiDirectCreateSummary,
     CdpiRequestCreate,
     CdpiRequestSummary,
     CdpiRequestUpdate,
     CdpiSubmitRequest,
-    CdpiDecideRequest,
-    CdpiDirectCreateRequest,
-    CdpiDirectCreateSummary,
-    CdpiBranchItemState,
-    CdpiBranchItemUpdate,
 )
+from app.dependencies import get_current_user, get_db
 
 router = APIRouter()
 

@@ -8,9 +8,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import psycopg2
-from psycopg2 import sql
 import pytest
-
+from psycopg2 import sql
 
 _ROOT = Path(__file__).resolve().parents[2]
 

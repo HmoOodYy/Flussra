@@ -19,13 +19,10 @@ Covers:
   - Audit rollback: all writes roll back if audit or period update fails
   - Non-PeriodApproval review items are unaffected (no period write-back)
 """
-import json
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-import psycopg2
-from typing import AsyncGenerator
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,6 +97,7 @@ async def _create_open_period(client: httpx.AsyncClient, token: str, branch_id: 
     direct_db is required; the parameter is kept optional only for backwards-compat signature.
     """
     from datetime import date
+
     from sqlalchemy import text as _text
     assert direct_db is not None, "_create_open_period requires direct_db after CP-1D"
     row = (await direct_db.execute(
@@ -196,6 +194,7 @@ async def m16_open_period(client: httpx.AsyncClient, auth_token: str,
     global _m16_period_counter
     _m16_period_counter += 1
     from datetime import date, timedelta
+
     from sqlalchemy import text as _text
     # CP-1A: cancel Returned (clear pointer), InReview, and Approved periods that
     # PATCH cannot reach, so the one-Returned slot is always free for test setup.
@@ -780,7 +779,6 @@ class TestAuditRollback:
         change and the review item INSERT must both roll back.
         ASGITransport re-raises unhandled exceptions, so we use pytest.raises.
         """
-        import pytest
         import app.payroll.period_lifecycle as payroll_lifecycle
 
         pid = m16_open_period["payroll_period_id"]
@@ -815,7 +813,6 @@ class TestAuditRollback:
         ASGITransport re-raises unhandled exceptions, so we use pytest.raises.
         Note: monkeypatch must target app.review.service (where it's imported into).
         """
-        import pytest
         import app.review.service as review_svc
 
         pid = m16_open_period["payroll_period_id"]

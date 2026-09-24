@@ -21,9 +21,9 @@ import datetime
 import itertools
 import json
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -1349,7 +1349,8 @@ class TestGenericRatesBypassClosed:
             # But cp2d2_driver is in cp2d2_branch, so STATUS_PAY for other branch
             # is still valid because STATUS_PAY is system-level (companyid=NULL) and
             # belongs to cp2d2_branch too. Let's create a CUSTOM SRC_ type for other_branch only.
-            import string, random
+            import random
+            import string
             suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
             custom_rt = (await direct_db.execute(
                 _text("""
@@ -1472,7 +1473,8 @@ class TestResolveBehaviorDbMembership:
     ):
         """A RateType with SRC_ prefix but NOT in StatusRateColumns gets normal 422 (no PayItemMap)."""
         # Insert an orphan SRC_ RateType with no StatusRateColumns row
-        import string, random
+        import random
+        import string
         suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
         orphan_rt = (await direct_db.execute(
             _text("""
@@ -1761,7 +1763,8 @@ class TestApproveRateStatusGuard:
         direct_db: AsyncConnection,
     ):
         """Approve a contaminated PendingApproval rate using another branch's status RateType — 422."""
-        import string, random
+        import random
+        import string
 
         other_branch = (await direct_db.execute(
             _text("""

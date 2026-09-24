@@ -15,13 +15,14 @@ the PAYTEST branch so we can seed draft lines before finalizing.
 """
 import datetime
 import uuid
+from decimal import Decimal
+from unittest.mock import patch
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
-from unittest.mock import AsyncMock, patch
 from sqlalchemy import text as _sqla_text
-from uuid import uuid4
 
 # Stage B4-19: _write_finalization_audit's real implementation now lives in
 # app.payroll.finalization, and finalize_period (also in finalization)
@@ -138,7 +139,6 @@ async def paytest_clean(
     paytest_branch_id: int,
     direct_db,
 ):
-    from sqlalchemy import text as _text
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
     # Force-cancel any Locked/Archived periods left by previous tests
     await _force_cancel_locked_periods(direct_db, paytest_branch_id)
@@ -225,7 +225,6 @@ async def approved_period(
     so tests can add their own lines).
     Yields the Approved period response dict.
     """
-    from sqlalchemy import text as _text
     headers = auth(auth_token)
     branch_id = paytest_clean
 
@@ -513,7 +512,6 @@ class TestFinalizePeriod:
         paytest_rate_type_id: int,
     ):
         """Voided draft lines must be excluded from FinalLines."""
-        from sqlalchemy import text as _text
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 

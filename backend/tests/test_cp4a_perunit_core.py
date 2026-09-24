@@ -25,11 +25,11 @@ import contextlib
 import datetime
 import decimal
 import uuid
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import ROUND_HALF_EVEN, Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 
 from app.payroll.calculation.per_unit import (
@@ -38,7 +38,6 @@ from app.payroll.calculation.per_unit import (
     calculate_per_unit,
 )
 from app.payroll.service import _compute_calculated_amount
-
 
 # ---------------------------------------------------------------------------
 # 1. Pure-core tests (no database)

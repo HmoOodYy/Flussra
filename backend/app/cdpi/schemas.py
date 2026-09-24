@@ -10,7 +10,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 # ---------------------------------------------------------------------------
 # Lifecycle status enumeration
 # ---------------------------------------------------------------------------

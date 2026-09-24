@@ -26,12 +26,14 @@ All tests use year 2034 dates on the PAYTEST branch.  Ephemeral drivers
 bleed into other test modules.  The paytest_driver_id fixture driver is
 never mutated by this module.
 """
+from datetime import date as _date
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from datetime import date as _date, timedelta as _td
-from sqlalchemy import text as _text, text as _sqla_text
-from uuid import uuid4
+from sqlalchemy import text as _sqla_text
+from sqlalchemy import text as _text
 
 
 @pytest_asyncio.fixture(scope="session")

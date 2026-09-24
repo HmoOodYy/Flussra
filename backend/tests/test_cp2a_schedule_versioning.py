@@ -688,7 +688,6 @@ class TestCp2aScheduleVersioning:
            even when VersionNumber=1 (e.g. first-ever SETUP_UPDATED or REPAIR row, no periods
            reference it yet). This prevents silent data loss on downgrade.
         """
-        import sqlalchemy as sa
 
         # --- Guard A: period-reference ---
         period_count = (await direct_db.execute(

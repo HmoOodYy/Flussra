@@ -11,13 +11,11 @@ Covers:
   P1  - Draft-line mutations write audit entries (+ rollback on audit failure)
   P1  - Period-pay mutations write audit entries (+ rollback on audit failure)
 """
-import pytest
-import pytest_asyncio
+
 import httpx
 import psycopg2
-from datetime import date
+import pytest
 from sqlalchemy import text
-from unittest.mock import AsyncMock, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,7 +68,7 @@ async def _create_open_period(
         raise RuntimeError("_create_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
     code = f"CP0P1-{branch_id}-{start}"
     row = (await db.execute(
-        text(f"""
+        text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)

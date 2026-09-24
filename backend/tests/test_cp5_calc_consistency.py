@@ -20,12 +20,13 @@ Tests cover:
 
 Isolation: all periods use dates in 2089 to avoid conflicts with other modules.
 """
+from decimal import Decimal
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
 from sqlalchemy import text as _text
-from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -127,7 +128,7 @@ async def _open_period(
         raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
     code = f"CP5-{branch_id}-{start}"
     row = (await db.execute(
-        _text(f"""
+        _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)

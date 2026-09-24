@@ -13,13 +13,12 @@ Verifies:
      PayItemRateTypeMap inserts at the database level.
   E. Phase 4B regression: all prior 4B protections remain intact via structural check.
 """
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 
-from tests.test_payroll_trust_p4b import _get_token_b, _auth
-
+from tests.test_payroll_trust_p4b import _auth
 
 # ---------------------------------------------------------------------------
 # Fixture: minimal 2-company environment for Phase 4C tests
