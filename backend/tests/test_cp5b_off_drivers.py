@@ -886,8 +886,8 @@ class TestOffDrivers:
                 "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
                 "wdate": days[0],
                 "snap": (
-                    '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
-                    '"snapshot_hash": "%s"}' % (snapshot_id, "1" * 64)
+                    f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                    f'"snapshot_hash": "{"1" * 64}"}}'
                 ),
             },
         )
@@ -956,8 +956,8 @@ class TestOffDrivers:
                 "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
                 "wdate": days[0],
                 "snap": (
-                    '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
-                    '"snapshot_hash": "%s"}' % (snapshot_id, "2" * 64)
+                    f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                    f'"snapshot_hash": "{"2" * 64}"}}'
                 ),
             },
         )
