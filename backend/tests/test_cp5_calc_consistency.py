@@ -519,7 +519,7 @@ class TestSavedLinePersistsAfterTermination:
                 headers=headers,
             )
             assert lines_resp.status_code == 200
-            line_ids = [l["draft_line_id"] for l in lines_resp.json()]
+            line_ids = [line["draft_line_id"] for line in lines_resp.json()]
             assert line_id in line_ids, (
                 "Draft line must persist in DB even after driver is terminated"
             )
@@ -806,8 +806,8 @@ class TestSubmitAutoRefresh:
             )
             assert lines_resp.status_code == 200
             hours_line = next(
-                (l for l in lines_resp.json()
-                 if l["draft_line_id"] == line["draft_line_id"]),
+                (item for item in lines_resp.json()
+                 if item["draft_line_id"] == line["draft_line_id"]),
                 None,
             )
             assert hours_line is not None
@@ -911,7 +911,7 @@ class TestFinalizeAutoRefresh:
                 headers=headers,
             )
             assert fl.status_code == 200
-            hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
+            hours_finals = [line for line in fl.json() if line["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found"
             final_amount = Decimal(str(hours_finals[0]["final_amount"]))
             assert final_amount == Decimal("160.0000"), (

@@ -913,7 +913,7 @@ class TestStatusPaymentLines:
         )
         assert resp.status_code == 200, resp.text
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 0
 
     @pytest.mark.asyncio
@@ -943,7 +943,7 @@ class TestStatusPaymentLines:
         assert resp.status_code == 200, resp.text
 
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(sp) == 1
         from decimal import Decimal
         assert sp[0]["sourcetype"] == "System"
@@ -976,7 +976,7 @@ class TestStatusPaymentLines:
         )
         assert resp.status_code == 200, resp.text
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         assert sp[0]["needsmanagerreview"] is True
         assert sp[0]["calculatedamount"] is None
@@ -1005,8 +1005,8 @@ class TestStatusPaymentLines:
             headers=_auth(auth_token),
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
-        active_before = [l for l in await _get_draft_lines(direct_db, pid)
-                         if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        active_before = [line for line in await _get_draft_lines(direct_db, pid)
+                         if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(active_before) == 1
 
         await client.post(
@@ -1014,8 +1014,8 @@ class TestStatusPaymentLines:
             headers=_auth(auth_token),
             json=_day_grid_body(cp2d2_driver_id, start, status_key=None),
         )
-        active_after = [l for l in await _get_draft_lines(direct_db, pid)
-                        if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        active_after = [line for line in await _get_draft_lines(direct_db, pid)
+                        if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(active_after) == 0
 
     @pytest.mark.asyncio
@@ -1053,7 +1053,7 @@ class TestStatusPaymentLines:
         )
 
         lines = await _get_draft_lines(direct_db, pid)
-        active_sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        active_sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(active_sp) == 1
         from decimal import Decimal
         assert Decimal(str(active_sp[0]["quantity"])) == Decimal("8.0")
@@ -1097,7 +1097,7 @@ class TestSourceSnapshot:
         )
 
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         snap_raw = sp[0]["sourcesnapshot"]
         assert snap_raw is not None, "SourceSnapshot must be populated"
@@ -1187,7 +1187,7 @@ class TestManualEditGuards:
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         sp_lid = sp[0]["draftlineid"]
 
@@ -1224,7 +1224,7 @@ class TestManualEditGuards:
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         sp_lid = sp[0]["draftlineid"]
 

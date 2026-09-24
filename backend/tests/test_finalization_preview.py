@@ -592,7 +592,7 @@ class TestFinalizationPreview:
             assert resp.status_code == 200
             body = resp.json()
 
-            assert not any(l["line_type"] == "HOURS" for l in body["lines"])
+            assert not any(line["line_type"] == "HOURS" for line in body["lines"])
             assert Decimal(str(body["total_final_gross"])) == Decimal("0")
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=auth(auth_token))
@@ -792,7 +792,7 @@ class TestFinalizationPreview:
             body = resp.json()
 
             # Extract the two HOURS lines from the preview response
-            preview_lines = {l["draft_line_id"]: l for l in body["lines"]}
+            preview_lines = {line["draft_line_id"]: line for line in body["lines"]}
             assert line1_id in preview_lines, "Line1 (2085-03-05) not in preview"
             assert line2_id in preview_lines, "Line2 (2085-03-07) not in preview"
 
@@ -1727,7 +1727,7 @@ class TestPreviewFinalizeConsistencyCP5:
 
             # Preview must retain submitted amount $160 (8 x $20)
             hours_line = next(
-                (l for l in preview["lines"] if l["line_type"] in ("HOURS", "Hours")),
+                (line for line in preview["lines"] if line["line_type"] in ("HOURS", "Hours")),
                 None,
             )
             assert hours_line is not None, "HOURS line not in preview"
@@ -2002,7 +2002,7 @@ class TestPreviewFinalizeConsistencyCP5:
 
             # The preview line must show the submitted calc=$160, not live $280.
             hours_line = next(
-                (l for l in preview["lines"] if l["line_type"] in ("HOURS", "Hours")),
+                (line for line in preview["lines"] if line["line_type"] in ("HOURS", "Hours")),
                 None,
             )
             assert hours_line is not None

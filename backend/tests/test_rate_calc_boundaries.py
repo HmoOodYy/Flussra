@@ -895,7 +895,7 @@ class TestRateCalculationBoundaries:
                 headers=headers,
             )
             assert fl.status_code == 200
-            hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
+            hours_finals = [line for line in fl.json() if line["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found"
             final_amount = Decimal(str(hours_finals[0]["final_amount"]))
             assert final_amount == Decimal("160.00"), (
@@ -980,7 +980,7 @@ class TestRateCalculationBoundaries:
                 headers=headers,
             )
             assert fl.status_code == 200
-            hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
+            hours_finals = [line for line in fl.json() if line["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found after finalization"
             original_final_amount = Decimal(str(hours_finals[0]["final_amount"]))
             assert original_final_amount == Decimal("120.00"), (
@@ -1005,7 +1005,7 @@ class TestRateCalculationBoundaries:
                 headers=headers,
             )
             assert fl2.status_code == 200
-            hours_finals2 = [l for l in fl2.json() if l["line_type"] == "HOURS"]
+            hours_finals2 = [line for line in fl2.json() if line["line_type"] == "HOURS"]
             assert hours_finals2, "HOURS final line not found after rate change"
             new_final_amount = Decimal(str(hours_finals2[0]["final_amount"]))
             assert new_final_amount == original_final_amount, (

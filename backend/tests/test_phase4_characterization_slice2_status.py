@@ -1821,7 +1821,7 @@ class TestPreviewFinalizationDivergence:
                 )
                 assert preview_resp.status_code == 200, f"Preview failed: {preview_resp.text}"
                 preview_line = next(
-                    (l for l in preview_resp.json()["lines"] if l["line_type"] == "STATUS_PAY"),
+                    (line for line in preview_resp.json()["lines"] if line["line_type"] == "STATUS_PAY"),
                     None,
                 )
                 assert preview_line is not None, "STATUS_PAY snapshot line not found in preview lines"
@@ -1838,7 +1838,7 @@ class TestPreviewFinalizationDivergence:
                 fl_resp = await session_client.get(f"/payroll/periods/{pid}/final-lines", headers=headers)
                 assert fl_resp.status_code == 200
                 final_line = next(
-                    (l for l in fl_resp.json() if l["line_type"] == "STATUS_PAY"),
+                    (line for line in fl_resp.json() if line["line_type"] == "STATUS_PAY"),
                     None,
                 )
                 assert final_line is not None, "STATUS_PAY final line not found"
@@ -2120,9 +2120,9 @@ class TestDacAndFutureRuleBoundary:
                 assert r2.status_code == 200
 
                 lines_1 = await _get_status_pay_lines(direct_db, pid, driver_id)
-                lines_1 = [l for l in lines_1 if l["workdate"] == datetime.date.fromisoformat(DATE_FEB02)]
+                lines_1 = [line for line in lines_1 if line["workdate"] == datetime.date.fromisoformat(DATE_FEB02)]
                 lines_2 = await _get_status_pay_lines(direct_db, pid, driver_id)
-                lines_2 = [l for l in lines_2 if l["workdate"] == datetime.date.fromisoformat(DATE_FEB03)]
+                lines_2 = [line for line in lines_2 if line["workdate"] == datetime.date.fromisoformat(DATE_FEB03)]
                 assert len(lines_1) == 1 and len(lines_2) == 1
                 amt_1 = Decimal(str(lines_1[0]["calculatedamount"]))
                 amt_2 = Decimal(str(lines_2[0]["calculatedamount"]))

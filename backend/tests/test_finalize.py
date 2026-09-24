@@ -499,7 +499,7 @@ class TestFinalizePeriod:
         assert ledger.status_code == 200
         lines = ledger.json()
         assert len(lines) == 2
-        types = {l["line_type"] for l in lines}
+        types = {line["line_type"] for line in lines}
         assert types == {"HOURS"}
 
     async def test_void_draft_lines_not_finalized(
@@ -545,7 +545,7 @@ class TestFinalizePeriod:
             headers=headers,
         )
         assert ledger.status_code == 200
-        types = [l["line_type"] for l in ledger.json()]
+        types = [line["line_type"] for line in ledger.json()]
         assert types == ["HOURS"]
 
     async def test_final_amount_computed_from_rate(
@@ -577,7 +577,7 @@ class TestFinalizePeriod:
                 f"/payroll/periods/{pid}/final-lines",
                 headers=auth(auth_token),
             )
-            miles_lines = [l for l in ledger.json() if l["line_type"] == "MILES"]
+            miles_lines = [line for line in ledger.json() if line["line_type"] == "MILES"]
             assert len(miles_lines) == 1
             assert Decimal(str(miles_lines[0]["final_amount"])) == Decimal("50.00")
         finally:
@@ -886,7 +886,7 @@ class TestGetFinalLines:
             f"/payroll/periods/{pid}/final-lines",
             headers=auth(auth_token),
         )
-        pto_lines = [l for l in ledger.json() if l["line_type"] == "HOURS"]
+        pto_lines = [line for line in ledger.json() if line["line_type"] == "HOURS"]
         assert len(pto_lines) == 1
         assert pto_lines[0]["draft_line_id"] == draft["draft_line_id"]
 

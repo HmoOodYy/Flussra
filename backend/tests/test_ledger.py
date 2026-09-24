@@ -585,7 +585,7 @@ class TestFinalLines:
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        types = {l["line_type"] for l in resp.json()}
+        types = {line["line_type"] for line in resp.json()}
         assert "HOURS" in types
 
     @pytest.mark.asyncio
@@ -602,7 +602,7 @@ class TestFinalLines:
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        bonus_lines = [l for l in resp.json() if l["line_type"] == "BONUS"]
+        bonus_lines = [line for line in resp.json() if line["line_type"] == "BONUS"]
         assert len(bonus_lines) >= 1, "BONUS final line not found"
         # Bonus final_amount should be $50
         assert Decimal(str(bonus_lines[0]["final_amount"])) == Decimal("50.00")
@@ -621,7 +621,7 @@ class TestFinalLines:
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        hours_lines = [l for l in resp.json() if l["line_type"] == "HOURS"]
+        hours_lines = [line for line in resp.json() if line["line_type"] == "HOURS"]
         assert hours_lines, "HOURS final line not found"
         assert Decimal(str(hours_lines[0]["final_amount"])) == Decimal("200.00")
 
@@ -964,7 +964,7 @@ class TestSysAdjFinalLines:
             headers=headers,
         )
         assert fl_resp.status_code == 200
-        types = [l["line_type"] for l in fl_resp.json()]
+        types = [line["line_type"] for line in fl_resp.json()]
         assert "SYS_MIN_TOPUP" in types, f"SYS_MIN_TOPUP missing; got types: {types}"
 
         # Cleanup: void the pay rule via API.

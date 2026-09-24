@@ -1236,7 +1236,7 @@ class TestLegacyManualFallbackCharacterization:
             assert preview_resp.status_code == 200, f"Preview failed: {preview_resp.text}"
             preview_body = preview_resp.json()
             preview_line = next(
-                (l for l in preview_body["lines"] if l["draft_line_id"] == draft_line_id),
+                (line for line in preview_body["lines"] if line["draft_line_id"] == draft_line_id),
                 None,
             )
             assert preview_line is not None, "Fallback line not found in preview lines"
@@ -1259,7 +1259,7 @@ class TestLegacyManualFallbackCharacterization:
             fl = await session_client.get(f"/payroll/periods/{pid}/final-lines", headers=headers)
             assert fl.status_code == 200
             final_line = next(
-                (l for l in fl.json() if l["draft_line_id"] == draft_line_id),
+                (line for line in fl.json() if line["draft_line_id"] == draft_line_id),
                 None,
             )
             assert final_line is not None, "Fallback line not found in the final-lines ledger endpoint"

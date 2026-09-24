@@ -252,7 +252,7 @@ class TestListLines:
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        ids = [l["draft_line_id"] for l in resp.json()]
+        ids = [line["draft_line_id"] for line in resp.json()]
         assert line_id in ids
 
         # Void filter should not return it yet
@@ -262,7 +262,7 @@ class TestListLines:
             headers=auth(auth_token),
         )
         assert resp2.status_code == 200
-        ids2 = [l["draft_line_id"] for l in resp2.json()]
+        ids2 = [line["draft_line_id"] for line in resp2.json()]
         assert line_id not in ids2
 
 
@@ -752,7 +752,7 @@ class TestVoidLine:
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        ids = [l["draft_line_id"] for l in resp.json()]
+        ids = [line["draft_line_id"] for line in resp.json()]
         assert lid in ids
 
     async def test_void_is_idempotent(

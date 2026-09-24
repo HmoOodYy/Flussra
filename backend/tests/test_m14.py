@@ -504,7 +504,7 @@ class TestPeriodPayCreate:
             f"/payroll/periods/{pid}/lines", headers=auth(auth_token)
         )
         assert daily.status_code == 200
-        daily_ids = [l["draft_line_id"] for l in daily.json()]
+        daily_ids = [line["draft_line_id"] for line in daily.json()]
         assert line_id not in daily_ids, (
             "Period-scope DraftLine (WorkDate=NULL) must not appear in /lines endpoint"
         )
@@ -514,7 +514,7 @@ class TestPeriodPayCreate:
             f"/payroll/periods/{pid}/period-pay", headers=auth(auth_token)
         )
         assert pp.status_code == 200
-        pp_ids = [l["draft_line_id"] for l in pp.json()]
+        pp_ids = [line["draft_line_id"] for line in pp.json()]
         assert line_id in pp_ids
 
 

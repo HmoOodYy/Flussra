@@ -750,7 +750,7 @@ async def test_preview_includes_bonus_events(
 
     # CP-4F exposes immutable normalized snapshot lines. BONUS is therefore
     # present as a snapshot line, while still having no synthetic DraftLine ID.
-    bonus_in_lines = [l for l in preview["lines"] if l["line_type"] == "BONUS"]
+    bonus_in_lines = [line for line in preview["lines"] if line["line_type"] == "BONUS"]
     assert len(bonus_in_lines) == 1
     assert bonus_in_lines[0]["draft_line_id"] is None
     assert Decimal(str(bonus_in_lines[0]["final_amount"])) == Decimal("200.00")
@@ -805,7 +805,7 @@ async def test_non_bonus_period_pay_unaffected(
     )
     assert r.status_code == 200, r.text
     lines = r.json()
-    adj_lines = [l for l in lines if l.get("line_type") in ("ADJUSTMENT", "Adjustment")]
+    adj_lines = [line for line in lines if line.get("line_type") in ("ADJUSTMENT", "Adjustment")]
     assert len(adj_lines) == 1, f"Expected 1 ADJUSTMENT line, got: {lines}"
 
     await _cancel_period_db(db_conn, period_id)
@@ -988,7 +988,7 @@ async def test_legacy_bonus_draftline_hidden_from_period_pay_list(
         headers=_auth(auth_token),
     )
     assert r.status_code == 200, r.text
-    bonus_rows = [l for l in r.json() if l.get("line_type", "").upper() == "BONUS"]
+    bonus_rows = [line for line in r.json() if line.get("line_type", "").upper() == "BONUS"]
     assert bonus_rows == [], (
         f"GET /period-pay must not expose BONUS DraftLines. Found: {bonus_rows}"
     )

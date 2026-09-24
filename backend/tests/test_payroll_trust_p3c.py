@@ -491,7 +491,7 @@ class TestT6_FinalizationStillWorks:
         assert result.get("status") == "Locked" or result.get("payroll_period_id") is not None
 
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        hours_lines = [l for l in lines if l["line_type"] == "HOURS"]
+        hours_lines = [line for line in lines if line["line_type"] == "HOURS"]
         assert len(hours_lines) == 1
         assert Decimal(str(hours_lines[0]["final_amount"])) == Decimal("144.0000")
 
@@ -527,7 +527,7 @@ class TestT7_LedgerReadWorks:
         await _finalize(c, tok, pid)
 
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        hours_lines = [l for l in lines if l["line_type"] == "HOURS"]
+        hours_lines = [line for line in lines if line["line_type"] == "HOURS"]
         assert len(hours_lines) == 1
         ln = hours_lines[0]
 

@@ -237,7 +237,7 @@ async def test_lg1_cdpi_final_line_in_ledger(
         assert r.status_code == 200, f"GET /final-lines: {r.text}"
         lines = r.json()
 
-        cdpi_lines = [l for l in lines if l.get("pay_item_id") == pay_item_id]
+        cdpi_lines = [line for line in lines if line.get("pay_item_id") == pay_item_id]
         assert len(cdpi_lines) == 1, (
             f"Expected 1 final line for CDPI pay_item_id={pay_item_id}, "
             f"got {len(cdpi_lines)}"
@@ -319,7 +319,7 @@ async def test_lg2_cdpi_final_line_source_snapshot(
         )
         assert r.status_code == 200
         lines = r.json()
-        cdpi_lines = [l for l in lines if l.get("pay_item_id") == pay_item_id]
+        cdpi_lines = [line for line in lines if line.get("pay_item_id") == pay_item_id]
         assert len(cdpi_lines) == 1
         line = cdpi_lines[0]
 
@@ -525,12 +525,12 @@ async def test_lg3_ledger_includes_cdpi_amount_with_standard_line(
         lines = r.json()
 
         # HOURS line
-        hours_lines = [l for l in lines if l["line_type"] == "HOURS"]
+        hours_lines = [line for line in lines if line["line_type"] == "HOURS"]
         assert len(hours_lines) >= 1, "HOURS final line missing"
         assert Decimal(str(hours_lines[0]["final_amount"])) == Decimal("144.00")  # 8 * 18
 
         # CDPI line
-        cdpi_lines = [l for l in lines if l.get("pay_item_id") == pay_item_id]
+        cdpi_lines = [line for line in lines if line.get("pay_item_id") == pay_item_id]
         assert len(cdpi_lines) == 1, "CDPI final line missing"
         assert Decimal(str(cdpi_lines[0]["final_amount"])) == Decimal("50.00")  # 5 * 10
 
@@ -615,7 +615,7 @@ async def test_lg4_finalized_period_blocks_cdpi_day_grid_edits(
         # Final line is unchanged (still 2 * 10 = 20)
         fl = await session_client.get(FINAL_LINES.format(pid=pid), headers=_tok(auth_token))
         assert fl.status_code == 200
-        cdpi_lines = [l for l in fl.json() if l.get("pay_item_id") == pay_item_id]
+        cdpi_lines = [line for line in fl.json() if line.get("pay_item_id") == pay_item_id]
         assert len(cdpi_lines) == 1
         assert Decimal(str(cdpi_lines[0]["final_amount"])) == Decimal("20.00")
 
@@ -669,7 +669,7 @@ async def test_lg5_standard_hours_final_line_regression(
         assert r.status_code == 200
         lines = r.json()
 
-        hours_lines = [l for l in lines if l["line_type"] == "HOURS"]
+        hours_lines = [line for line in lines if line["line_type"] == "HOURS"]
         assert len(hours_lines) >= 1, "HOURS final line missing"
         assert Decimal(str(hours_lines[0]["final_amount"])) == Decimal("220.00")  # 10 * 22
         assert hours_lines[0]["driver_rate_id"] == rate_id
