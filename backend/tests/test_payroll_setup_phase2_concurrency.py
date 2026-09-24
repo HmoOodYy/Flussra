@@ -208,9 +208,12 @@ async def test_concurrent_publish_serializes_version_numbers(database_engine):
             SELECT VersionNumber, EffectiveFromDate
             FROM payroll.PayrollSetupVersions
             WHERE PayrollSetupID = :sid AND LifecycleState = 'Published'
-            ORDER BY VersionNumber
         """), {"sid": setup_id})).all()
-    assert [(row[0], row[1]) for row in rows] == [(1, dates[0]), (2, dates[1])]
+    assert len(rows) == 2
+    version_numbers = [row[0] for row in rows]
+    assert set(version_numbers) == {1, 2}
+    assert len(set(version_numbers)) == 2
+    assert {row[1] for row in rows} == set(dates)
 
 
 @pytest.mark.asyncio

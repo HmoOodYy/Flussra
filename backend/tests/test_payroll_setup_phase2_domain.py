@@ -260,6 +260,100 @@ async def test_reassignment_records_exact_audit_and_archive_guards(payroll_setup
 
 
 @pytest.mark.asyncio
+async def test_archive_rejects_open_ended_and_future_assignments(payroll_setup_db):
+    db = payroll_setup_db
+    setup_id = await _new_setup(db)
+    anchor = date(2090, 1, 1)
+    await _publish(db, setup_id, frequency="Week", anchor=anchor)
+    await assign_setup(db.company_id, db.user_id, db.branch_id, setup_id, anchor, db.db)
+
+    with pytest.raises(PolicyError) as error:
+        await archive_setup(db.company_id, db.user_id, setup_id, db.db)
+    assert error.value.code == "SETUP_ASSIGNED"
+
+    future_branch = (await db.db.execute(text("""
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName)
+        VALUES (:cid, :code, :name) RETURNING BranchID
+    """), {"cid": db.company_id, "code": f"P2_{db.marker}_F",
+           "name": f"Future branch {db.marker}"})).scalar_one()
+    future_setup = await _new_setup(db, suffix="F")
+    await _publish(db, future_setup, frequency="Week", anchor=date(2090, 2, 5))
+    await assign_setup(db.company_id, db.user_id, future_branch,
+                       future_setup, date(2090, 2, 5), db.db)
+    with pytest.raises(PolicyError) as error:
+        await archive_setup(db.company_id, db.user_id, future_setup, db.db)
+    assert error.value.code == "SETUP_ASSIGNED"
+
+
+@pytest.mark.asyncio
+async def test_archive_requires_payroll_chronology_beyond_ended_assignment(payroll_setup_db):
+    db = payroll_setup_db
+    first = await _new_setup(db, suffix="A")
+    second = await _new_setup(db, suffix="B")
+    anchor = date(2090, 1, 1)
+    version_id = await _publish(db, first, frequency="Week", anchor=anchor)
+    await _publish(db, second, frequency="Week", anchor=anchor)
+    assignment_id = await assign_setup(
+        db.company_id, db.user_id, db.branch_id, first, anchor, db.db,
+    )
+    await reassign_setup(
+        db.company_id, db.user_id, db.branch_id, second, date(2090, 1, 8), db.db,
+    )
+
+    # An ended interval can still be used when its first payroll has not been created.
+    with pytest.raises(PolicyError) as error:
+        await archive_setup(db.company_id, db.user_id, first, db.db)
+    assert error.value.code == "SETUP_ASSIGNED"
+
+    period_id = (await db.db.execute(text("""
+        INSERT INTO payroll.PayrollPeriods
+            (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType,
+             StartDate, EndDate, Status, BranchPayrollSetupAssignmentID,
+             PayrollSetupVersionID, FrozenPayrollSetupID, FrozenPayrollSetupCode,
+             FrozenPayrollSetupVersionNumber, FrozenPayrollFrequency,
+             FrozenAnchorStartDate, FrozenCustomIntervalDays,
+             FrozenNormalDaysOffMask, ScheduleConfigHash)
+        SELECT :cid, :bid, :code, 'Historical A', 'Week',
+               '2090-01-01', '2090-01-07', 'Approved', :aid,
+               v.PayrollSetupVersionID, s.PayrollSetupID, s.SetupCode,
+               v.VersionNumber, v.PayrollFrequency, v.AnchorStartDate,
+               v.CustomIntervalDays, v.NormalDaysOffMask, v.ConfigHash
+        FROM payroll.PayrollSetupVersions v
+        JOIN payroll.PayrollSetups s ON s.PayrollSetupID = v.PayrollSetupID
+        WHERE v.PayrollSetupVersionID = :vid AND v.CompanyID = :cid
+        RETURNING PayrollPeriodID
+    """), {"cid": db.company_id, "bid": db.branch_id,
+           "code": f"P2_ARCHIVE_{db.marker}", "aid": assignment_id,
+           "vid": version_id})).scalar_one()
+
+    await archive_setup(db.company_id, db.user_id, first, db.db)
+    history = (await db.db.execute(text("""
+        SELECT p.BranchPayrollSetupAssignmentID, p.PayrollSetupVersionID,
+               p.ScheduleConfigHash, a.EffectiveToDate, a.WithdrawnAtUtc,
+               s.Status, v.ConfigHash
+        FROM payroll.PayrollPeriods p
+        JOIN payroll.BranchPayrollSetupAssignments a
+          ON a.BranchPayrollSetupAssignmentID = p.BranchPayrollSetupAssignmentID
+        JOIN payroll.PayrollSetupVersions v
+          ON v.PayrollSetupVersionID = p.PayrollSetupVersionID
+        JOIN payroll.PayrollSetups s ON s.PayrollSetupID = a.PayrollSetupID
+        WHERE p.CompanyID = :cid AND p.PayrollPeriodID = :pid
+    """), {"cid": db.company_id, "pid": period_id})).mappings().one()
+    assert history["branchpayrollsetupassignmentid"] == assignment_id
+    assert history["payrollsetupversionid"] == version_id
+    assert history["scheduleconfighash"] == history["confighash"]
+    assert history["effectivetodate"] == date(2090, 1, 8)
+    assert history["withdrawnatutc"] is None
+    assert history["status"] == "Archived"
+    events = (await db.db.execute(text("""
+        SELECT EventType FROM payroll.PayrollSetupPolicyAuditEvents
+        WHERE CompanyID = :cid AND PayrollSetupID = :sid
+    """), {"cid": db.company_id, "sid": first})).scalars().all()
+    assert "BranchAssigned" in events
+    assert "SetupArchived" in events
+
+
+@pytest.mark.asyncio
 async def test_company_policy_permission_rejects_branch_scoped_user(payroll_setup_db):
     db = payroll_setup_db
     branch_user_id = (await db.db.execute(text("""

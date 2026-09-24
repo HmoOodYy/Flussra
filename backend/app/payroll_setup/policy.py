@@ -683,12 +683,25 @@ async def archive_setup(
     if result.first() is not None:
         raise PolicyError("DEFAULT_SETUP_IN_USE", "Select another default before archiving")
     result = await db.execute(text("""
-        SELECT 1 FROM payroll.BranchPayrollSetupAssignments
+        SELECT DISTINCT BranchID FROM payroll.BranchPayrollSetupAssignments
         WHERE CompanyID = :cid AND PayrollSetupID = :sid
-          AND WithdrawnAtUtc IS NULL LIMIT 1
+          AND WithdrawnAtUtc IS NULL
     """), {"cid": company_id, "sid": setup_id})
-    if result.first() is not None:
-        raise PolicyError("SETUP_ASSIGNED", "Non-withdrawn assignments still govern this Setup")
+    await lock_branches(company_id, result.scalars().all(), db)
+    result = await db.execute(text("""
+        SELECT a.EffectiveToDate,
+               (SELECT MAX(p.EndDate) FROM payroll.PayrollPeriods p
+                WHERE p.CompanyID = a.CompanyID AND p.BranchID = a.BranchID
+                  AND p.Status <> 'Cancelled') AS LastPeriodEnd
+        FROM payroll.BranchPayrollSetupAssignments a
+        WHERE a.CompanyID = :cid AND a.PayrollSetupID = :sid
+          AND a.WithdrawnAtUtc IS NULL
+    """), {"cid": company_id, "sid": setup_id})
+    for assignment in result.mappings():
+        end = assignment["effectivetodate"]
+        last_period_end = assignment["lastperiodend"]
+        if end is None or last_period_end is None or last_period_end < end - timedelta(days=1):
+            raise PolicyError("SETUP_ASSIGNED", "An assignment can still govern new period creation")
     await db.execute(text("""
         UPDATE payroll.PayrollSetups SET Status = 'Archived',
             UpdatedByUserID = :uid, UpdatedAtUtc = NOW()
