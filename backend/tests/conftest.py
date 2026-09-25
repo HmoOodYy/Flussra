@@ -106,6 +106,12 @@ def _stop_test_postgresql_safely(pg: testing.postgresql.Postgresql) -> None:
     if process.poll() is None or base_dir.exists():
         raise RuntimeError(f"Temporary PostgreSQL cleanup incomplete: {base_dir}")
 
+@pytest.fixture
+def safe_test_postgresql_stop():
+    """Return the shared safe cleanup function for test-owned PostgreSQL clusters."""
+    return _stop_test_postgresql_safely
+
+
 # All migration SQL files, applied in order.
 # conftest discovers them automatically so new migrations are picked up
 # without editing this file.

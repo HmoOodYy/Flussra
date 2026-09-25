@@ -294,7 +294,10 @@ class TestMigration:
         ))).first()
         assert row is not None, "0048 OneReturnedPerBranch index must still exist after 0049"
 
-    def test_disposable_duplicate_inreview_blocks_upgrade(self):
+    def test_disposable_duplicate_inreview_blocks_upgrade(
+        self,
+        safe_test_postgresql_stop,
+    ):
         """
         Disposable PostgreSQL: applying 0049 SQL fails when duplicate InReview
         periods exist (blocking preflight RAISE EXCEPTION).
@@ -389,10 +392,7 @@ class TestMigration:
             cur.close()
             conn.close()
         finally:
-            try:
-                pg.stop()
-            except (ValueError, OSError):
-                pass  # Windows: SIGINT not supported; cluster exits with pytest
+            safe_test_postgresql_stop(pg)
 
 
 # ---------------------------------------------------------------------------
