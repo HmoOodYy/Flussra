@@ -8,8 +8,9 @@ Responsibilities:
 """
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.admin.router import router as admin_router
 from app.auth.router import router as auth_router
@@ -20,6 +21,8 @@ from app.dashboard.router import router as dashboard_router
 from app.db.schema_guard import run_schema_guard
 from app.db.session import dispose_engine
 from app.payroll.router import router as payroll_router
+from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.router import router as payroll_setup_router
 from app.review.router import router as review_router
 from app.settings.router import router as settings_router
 from app.transfer.router import router as transfer_router
@@ -60,6 +63,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.exception_handler(PolicyError)
+async def payroll_setup_policy_error_handler(request: Request, exc: PolicyError) -> JSONResponse:
+    del request
+    code = exc.code
+    if code.endswith("_NOT_FOUND") or code == "COMPANY_NOT_FOUND":
+        status_code = 404
+    elif code.startswith("INVALID_"):
+        status_code = 422
+    else:
+        status_code = 409
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": {"code": code, "message": str(exc)}},
+    )
+
 # ---------------------------------------------------------------------------
 # CORS
 #
@@ -98,6 +117,7 @@ app.add_middleware(
 app.include_router(auth_router,      prefix="/auth",      tags=["Auth"])
 app.include_router(core_router,      prefix="/core",      tags=["Core"])
 app.include_router(payroll_router,   prefix="/payroll",   tags=["Payroll"])
+app.include_router(payroll_setup_router, prefix="/payroll-setup", tags=["Payroll Setup"])
 app.include_router(review_router,    prefix="/review",    tags=["Review"])
 app.include_router(settings_router,  prefix="/settings",  tags=["Settings"])
 app.include_router(admin_router,     prefix="/admin",     tags=["Admin"])

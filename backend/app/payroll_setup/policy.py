@@ -105,10 +105,15 @@ async def create_setup(
         INSERT INTO payroll.PayrollSetups
             (CompanyID, SetupCode, SetupName, Description, CreatedByUserID)
         VALUES (:cid, :code, :name, :description, :uid)
+        ON CONFLICT (CompanyID, SetupCode) DO NOTHING
         RETURNING PayrollSetupID
     """), {"cid": company_id, "code": setup_code, "name": setup_name,
            "description": description, "uid": user_id})
-    setup_id = result.scalar_one()
+    setup_id = result.scalar_one_or_none()
+    if setup_id is None:
+        raise PolicyError(
+            "SETUP_CODE_CONFLICT", "Payroll Setup code already exists for this Company",
+        )
     await write_policy_audit(db, company_id=company_id, actor_user_id=user_id,
                              event_type="SetupCreated", payroll_setup_id=setup_id,
                              new_state={"code": setup_code, "name": setup_name,
@@ -374,7 +379,7 @@ async def publish_version(
 async def set_default_setup(
     company_id: int, user_id: int, setup_id: int | None, db: AsyncConnection,
 ) -> None:
-    await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+    await _authorize_write(company_id, user_id, "payroll_setup.assign", db)
     await lock_company(company_id, db)
     prior = await _one(db, """
         SELECT DefaultPayrollSetupID FROM core.Companies WHERE CompanyID = :cid
