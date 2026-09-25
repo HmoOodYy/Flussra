@@ -4022,7 +4022,7 @@ class TestDayGridCDPI:
             await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
     @pytest.mark.asyncio
-    async def test_save_time_cdpi_value(  # noqa: too-many-locals
+    async def test_save_time_cdpi_value(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
