@@ -24,9 +24,8 @@ payroll.entry         — enter payroll lines / open / submit periods
 drivers.manage        — create driver (create_driver)
 payroll.approve_rate  — approve / void a rate (approve_rate / void_rate)
 """
-import pytest
-import pytest_asyncio
 import httpx
+import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
 
@@ -45,7 +44,6 @@ async def paytest_draft_period_id(
     paytest_branch_id: int,
 ) -> int:
     """Insert one Draft period on PAYTEST directly. CP-1D: POST needs an existing Open."""
-    import datetime
     row = (await session_db_conn.execute(
         _sqla_text("""
             INSERT INTO payroll.payrollperiods

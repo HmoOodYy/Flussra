@@ -17,14 +17,11 @@ Dates: 2094-* — isolated year.  Run from backend/:
 """
 import datetime
 import itertools
-from decimal import Decimal
 
+import httpx
 import psycopg2
 import pytest
-import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-from sqlalchemy.ext.asyncio import AsyncConnection
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -223,7 +220,8 @@ class TestMigration:
 
     def test_0049_in_alembic_heads(self):
         """Migration chain must be linear (single current head)."""
-        import subprocess, sys
+        import subprocess
+        import sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             capture_output=True, text=True,
@@ -281,8 +279,9 @@ class TestMigration:
         Disposable PostgreSQL: applying 0049 SQL fails when duplicate InReview
         periods exist (blocking preflight RAISE EXCEPTION).
         """
-        import testing.postgresql
         from pathlib import Path
+
+        import testing.postgresql
 
         pg = testing.postgresql.Postgresql()
         try:
@@ -465,7 +464,7 @@ class TestFriendlyGuard:
         start2_d = datetime.date.fromisoformat(start1) + datetime.timedelta(weeks=1)
         end2_d   = start2_d + datetime.timedelta(days=6)
         start2   = start2_d.isoformat()
-        r_cr = (await direct_db.execute(
+        await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrollperiods
                     (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
@@ -474,10 +473,9 @@ class TestFriendlyGuard:
             """),
             {"bid": paytest_branch_id, "code": f"CP1B-T2-{start2}", "name": f"CP1B T2 {start2}",
              "start": start2_d, "end": end2_d},
-        )).mappings().first()
+        )
         await direct_db.commit()
-        pid2 = r_cr["payrollperiodid"]
-        # Now pid2 is InReview; pid1 is Returned → resubmit must be blocked
+        # Now the period-2 row is InReview; pid1 is Returned → resubmit must be blocked
 
         r_resub = await session_client.post(
             f"/payroll/periods/{pid1}/resubmissions",

@@ -20,12 +20,11 @@ System period items used:
 Both default to IsDefaultBranchActive=FALSE so tests activate them via the
 session fixture.
 """
-import pytest
-import pytest_asyncio
-import httpx
 import uuid
 from decimal import Decimal
 
+import httpx
+import pytest_asyncio
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,6 +75,7 @@ async def _open_period(
     so we insert directly — same pattern used by test_cp2d and test_cp1d.
     """
     from datetime import date as _date
+
     from sqlalchemy import text as _sqla_text
     code = f"M14-{branch_id}-{start}-{uuid.uuid4().hex[:8]}"
     row = (await db.execute(
@@ -418,7 +418,6 @@ class TestPeriodPayCreate:
         direct_db,
     ):
         """Period in non-entry status (Draft) → 422 (cannot add period pay lines)."""
-        from sqlalchemy import text as _text
 
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         result = await _open_period(direct_db, paytest_branch_id, start="2034-02-01", end="2034-02-07", status="Draft")
@@ -505,7 +504,7 @@ class TestPeriodPayCreate:
             f"/payroll/periods/{pid}/lines", headers=auth(auth_token)
         )
         assert daily.status_code == 200
-        daily_ids = [l["draft_line_id"] for l in daily.json()]
+        daily_ids = [line["draft_line_id"] for line in daily.json()]
         assert line_id not in daily_ids, (
             "Period-scope DraftLine (WorkDate=NULL) must not appear in /lines endpoint"
         )
@@ -515,7 +514,7 @@ class TestPeriodPayCreate:
             f"/payroll/periods/{pid}/period-pay", headers=auth(auth_token)
         )
         assert pp.status_code == 200
-        pp_ids = [l["draft_line_id"] for l in pp.json()]
+        pp_ids = [line["draft_line_id"] for line in pp.json()]
         assert line_id in pp_ids
 
 
@@ -1334,7 +1333,6 @@ class TestM14SafetyFixes:
     ):
         """An item active as of period.start_date is accepted, even for future periods."""
         from sqlalchemy import text as _text
-
         from sqlalchemy import text as _text_sq
         row = (await direct_db.execute(
             _text_sq("SELECT payitemid FROM payroll.payitems WHERE payitemcode = 'ADJUSTMENT' AND companyid IS NULL LIMIT 1")
@@ -1403,7 +1401,6 @@ class TestM14SafetyFixes:
         bypasses the period-pay activation check.
         """
         from sqlalchemy import text as _text
-
         from sqlalchemy import text as _text_sq
         row = (await direct_db.execute(
             _text_sq("SELECT payitemid FROM payroll.payitems WHERE payitemcode = 'ADJUSTMENT' AND companyid IS NULL LIMIT 1")

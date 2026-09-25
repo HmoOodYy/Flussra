@@ -44,9 +44,9 @@ import pathlib
 import uuid
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 
 _PERIOD_CODE_PREFIX = "P4CP4B-"
@@ -2228,7 +2228,7 @@ class TestBonusAndMinMax:
         DriverPayRule owner has yielded) must still leave zero rule/audit
         residue -- the context manager's `finally` runs regardless of the
         exception type propagating out of the `with` body."""
-        async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open") as pid:
+        async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open"):
             async with _owned_driver_and_employee(session_client, auth_token, paytest_branch_id, direct_db, name="CP4B MinAssertFail") as driver_id:
                 with pytest.raises(AssertionError, match="deliberate min-rule body failure"):
                     async with _owned_driver_pay_rule(
@@ -2291,7 +2291,7 @@ class TestBonusAndMinMax:
         self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
     ):
         """Same proof as the minimum-pay case, for MaximumPay."""
-        async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open") as pid:
+        async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open"):
             async with _owned_driver_and_employee(session_client, auth_token, paytest_branch_id, direct_db, name="CP4B MaxAssertFail") as driver_id:
                 with pytest.raises(AssertionError, match="deliberate max-rule body failure"):
                     async with _owned_driver_pay_rule(
@@ -2708,7 +2708,6 @@ class TestPayrollAcquisitionFailure:
         self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
     ):
         marker_name = f"CP4B-DRV-FAIL-{uuid.uuid4().hex[:8]}"
-        driver_id = None
         with pytest.raises(_DeliberateSetupFailure):
             async with _owned_driver_and_employee(
                 session_client, auth_token, paytest_branch_id, direct_db, name=marker_name,

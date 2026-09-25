@@ -22,14 +22,13 @@ Coverage:
 import pytest
 from sqlalchemy import text as _text
 
+from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import (
-    CdpiDecideRequest,
     CdpiDecideAction,
+    CdpiDecideRequest,
     CdpiDirectCreateRequest,
 )
-from app.cdpi import service as cdpi_service
 from app.pay_item_rate_slots import ensure_cdpi_per_unit_rate_slot
-
 
 # ===========================================================================
 # DB helpers (shared pattern with test_cdpi_approval.py)
@@ -533,8 +532,8 @@ class TestCdpiPerUnitBackfill:
 
     async def _run_backfill(self, db):
         """Execute the 0047 backfill DO block against the live test DB."""
-        from pathlib import Path
         import sys
+        from pathlib import Path
         migrations_dir = Path(__file__).parent.parent.parent / "migrations"
         if str(migrations_dir) not in sys.path:
             sys.path.insert(0, str(migrations_dir))

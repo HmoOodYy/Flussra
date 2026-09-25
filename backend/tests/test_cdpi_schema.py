@@ -13,8 +13,8 @@ Fixtures:
     direct_db  -- function-scoped AUTOCOMMIT AsyncConnection (SQLAlchemy asyncpg)
 """
 import uuid
+
 import pytest
-import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 

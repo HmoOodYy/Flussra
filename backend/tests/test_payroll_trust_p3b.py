@@ -21,13 +21,14 @@ Isolation strategy
 All tests use year 2035 dates on the PAYTEST branch.  Ephemeral drivers
 (created per-test) are cleaned up in fixture teardown.
 """
+from datetime import date as _date
+from decimal import Decimal
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from datetime import date as _date, timedelta as _td
-from decimal import Decimal
 from sqlalchemy import text as _text
-from uuid import uuid4
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -381,7 +382,7 @@ class TestA_PerUnitSourceSnapshot:
         await _finalize(c, tok, pid)
 
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        hours_lines = [l for l in lines if l["line_type"] == "HOURS"]
+        hours_lines = [line for line in lines if line["line_type"] == "HOURS"]
         assert len(hours_lines) == 1, f"expected 1 HOURS final line, got lines={lines}"
         fl = hours_lines[0]
 
@@ -422,7 +423,7 @@ class TestB_SupersededRateSnapshot:
         )
 
         # New rate effective from Apr 15 2036 — supersedes old for that date+
-        new_rate_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             c, tok, drv, mileage_rtid, "0.6000",
             effective_from="2036-04-15",
         )
@@ -435,7 +436,7 @@ class TestB_SupersededRateSnapshot:
         await _finalize(c, tok, pid)
 
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        miles_lines = [l for l in lines if l["line_type"] == "MILES"]
+        miles_lines = [line for line in lines if line["line_type"] == "MILES"]
         assert len(miles_lines) == 1
         fl = miles_lines[0]
 
@@ -475,7 +476,7 @@ class TestC_ImmutableAfterFinalize:
 
         # Verify locked source before rate change
         lines_before = await _get_final_lines(c, tok, pid, driver_id=drv)
-        hours_before = next(l for l in lines_before if l["line_type"] == "HOURS")
+        hours_before = next(line for line in lines_before if line["line_type"] == "HOURS")
         assert Decimal(str(hours_before["resolved_rate_amount"])) == Decimal("20.0000")
         assert hours_before["driver_rate_id"] == rate_id
 
@@ -488,7 +489,7 @@ class TestC_ImmutableAfterFinalize:
 
         # Final lines must be unchanged
         lines_after = await _get_final_lines(c, tok, pid, driver_id=drv)
-        hours_after = next(l for l in lines_after if l["line_type"] == "HOURS")
+        hours_after = next(line for line in lines_after if line["line_type"] == "HOURS")
         assert Decimal(str(hours_after["resolved_rate_amount"])) == Decimal("20.0000"), (
             "resolved_rate_amount changed after rate update — immutability broken"
         )
@@ -544,8 +545,8 @@ class TestG_PreviewRateSourceFields:
         preview = r.json()
 
         hours_lines = [
-            l for l in preview.get("lines", [])
-            if l["line_type"] == "HOURS"
+            line for line in preview.get("lines", [])
+            if line["line_type"] == "HOURS"
         ]
         assert len(hours_lines) >= 1, f"no Hours lines in preview: {preview}"
         pl = hours_lines[0]
@@ -596,7 +597,7 @@ class TestH_PreMigrationRowsTolerated:
 
         # Verify normal finalized row has source fields populated
         normal_lines = await _get_final_lines(c, tok, pid, driver_id=drv)
-        hours_normal = [l for l in normal_lines if l["line_type"] == "HOURS"]
+        hours_normal = [line for line in normal_lines if line["line_type"] == "HOURS"]
         assert len(hours_normal) >= 1
         assert Decimal(str(hours_normal[0]["final_amount"])) == Decimal("72.0000")
         assert hours_normal[0]["rate_behavior"] is not None  # snapshot populated
@@ -641,8 +642,8 @@ class TestH_PreMigrationRowsTolerated:
         # API must return the synthetic row with NULL source fields without error
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)
         null_lines = [
-            l for l in lines
-            if l["line_type"] == "HOURS" and l["rate_behavior"] is None
+            line for line in lines
+            if line["line_type"] == "HOURS" and line["rate_behavior"] is None
         ]
         assert len(null_lines) >= 1, (
             f"Expected at least one HOURS row with NULL rate_behavior; got {lines}"

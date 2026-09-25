@@ -9,13 +9,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .audit import write_policy_audit
-from .chronology import Schedule, is_period_start, period_end
+from .chronology import Schedule, is_period_start
 from .errors import PolicyError
 from .locks import lock_branches, lock_company, lock_setups
 from .security import require_policy_permission
 from .validation import (
-    next_version_boundary, terminal_version, validate_boundary,
-    validate_next_version, version_schedule,
+    next_version_boundary,
+    terminal_version,
+    validate_boundary,
+    validate_next_version,
+    version_schedule,
 )
 
 

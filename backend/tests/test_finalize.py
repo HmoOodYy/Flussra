@@ -15,13 +15,14 @@ the PAYTEST branch so we can seed draft lines before finalizing.
 """
 import datetime
 import uuid
+from decimal import Decimal
+from unittest.mock import patch
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
-from unittest.mock import AsyncMock, patch
 from sqlalchemy import text as _sqla_text
-from uuid import uuid4
 
 # Stage B4-19: _write_finalization_audit's real implementation now lives in
 # app.payroll.finalization, and finalize_period (also in finalization)
@@ -138,7 +139,6 @@ async def paytest_clean(
     paytest_branch_id: int,
     direct_db,
 ):
-    from sqlalchemy import text as _text
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
     # Force-cancel any Locked/Archived periods left by previous tests
     await _force_cancel_locked_periods(direct_db, paytest_branch_id)
@@ -225,8 +225,6 @@ async def approved_period(
     so tests can add their own lines).
     Yields the Approved period response dict.
     """
-    from sqlalchemy import text as _text
-    headers = auth(auth_token)
     branch_id = paytest_clean
 
     # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
@@ -500,7 +498,7 @@ class TestFinalizePeriod:
         assert ledger.status_code == 200
         lines = ledger.json()
         assert len(lines) == 2
-        types = {l["line_type"] for l in lines}
+        types = {line["line_type"] for line in lines}
         assert types == {"HOURS"}
 
     async def test_void_draft_lines_not_finalized(
@@ -513,7 +511,6 @@ class TestFinalizePeriod:
         paytest_rate_type_id: int,
     ):
         """Voided draft lines must be excluded from FinalLines."""
-        from sqlalchemy import text as _text
         pid = approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
@@ -522,7 +519,7 @@ class TestFinalizePeriod:
         await _create_and_approve_rate(
             client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
         )
-        seeded = await _seed_open_lines_and_approve(
+        await _seed_open_lines_and_approve(
             client,
             auth_token,
             pid,
@@ -547,7 +544,7 @@ class TestFinalizePeriod:
             headers=headers,
         )
         assert ledger.status_code == 200
-        types = [l["line_type"] for l in ledger.json()]
+        types = [line["line_type"] for line in ledger.json()]
         assert types == ["HOURS"]
 
     async def test_final_amount_computed_from_rate(
@@ -579,7 +576,7 @@ class TestFinalizePeriod:
                 f"/payroll/periods/{pid}/final-lines",
                 headers=auth(auth_token),
             )
-            miles_lines = [l for l in ledger.json() if l["line_type"] == "MILES"]
+            miles_lines = [line for line in ledger.json() if line["line_type"] == "MILES"]
             assert len(miles_lines) == 1
             assert Decimal(str(miles_lines[0]["final_amount"])) == Decimal("50.00")
         finally:
@@ -888,7 +885,7 @@ class TestGetFinalLines:
             f"/payroll/periods/{pid}/final-lines",
             headers=auth(auth_token),
         )
-        pto_lines = [l for l in ledger.json() if l["line_type"] == "HOURS"]
+        pto_lines = [line for line in ledger.json() if line["line_type"] == "HOURS"]
         assert len(pto_lines) == 1
         assert pto_lines[0]["draft_line_id"] == draft["draft_line_id"]
 

@@ -65,11 +65,11 @@ from app.payroll.pay_item_write_lock import _lock_pay_item_for_source_write
 from app.payroll.period_day_calendar import _validate_period_work_date
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import (
+    _WRITE_BLOCKED_STATUSES,
+    ENTRY_ALLOWED_STATUSES,
     DraftLineCreate,
     DraftLineSummary,
     DraftLineUpdate,
-    ENTRY_ALLOWED_STATUSES,
-    _WRITE_BLOCKED_STATUSES,
 )
 from app.payroll.source_evidence import _capture_source_evidence
 from app.payroll.source_line_read import _get_line_by_id

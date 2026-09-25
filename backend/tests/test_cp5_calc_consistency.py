@@ -20,12 +20,13 @@ Tests cover:
 
 Isolation: all periods use dates in 2089 to avoid conflicts with other modules.
 """
+from decimal import Decimal
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from decimal import Decimal
 from sqlalchemy import text as _text
-from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -127,7 +128,7 @@ async def _open_period(
         raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
     code = f"CP5-{branch_id}-{start}"
     row = (await db.execute(
-        _text(f"""
+        _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
@@ -518,7 +519,7 @@ class TestSavedLinePersistsAfterTermination:
                 headers=headers,
             )
             assert lines_resp.status_code == 200
-            line_ids = [l["draft_line_id"] for l in lines_resp.json()]
+            line_ids = [line["draft_line_id"] for line in lines_resp.json()]
             assert line_id in line_ids, (
                 "Draft line must persist in DB even after driver is terminated"
             )
@@ -805,8 +806,8 @@ class TestSubmitAutoRefresh:
             )
             assert lines_resp.status_code == 200
             hours_line = next(
-                (l for l in lines_resp.json()
-                 if l["draft_line_id"] == line["draft_line_id"]),
+                (item for item in lines_resp.json()
+                 if item["draft_line_id"] == line["draft_line_id"]),
                 None,
             )
             assert hours_line is not None
@@ -910,7 +911,7 @@ class TestFinalizeAutoRefresh:
                 headers=headers,
             )
             assert fl.status_code == 200
-            hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
+            hours_finals = [line for line in fl.json() if line["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found"
             final_amount = Decimal(str(hours_finals[0]["final_amount"]))
             assert final_amount == Decimal("160.0000"), (
@@ -1072,7 +1073,6 @@ class TestODASecurityRegression:
         CP-5 changes must not relax any ODA/Driver access boundaries.
         ODA users must still receive 403 on GET day-grid.
         """
-        headers = auth(auth_token)
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 

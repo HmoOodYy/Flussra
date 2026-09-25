@@ -9,9 +9,10 @@ Seed credentials:
     password:     TestPass123!
     company_code: DEMO
 """
-import pytest
-import httpx
+from datetime import UTC
 
+import httpx
+import pytest
 
 # ---------------------------------------------------------------------------
 # POST /auth/login
@@ -165,15 +166,17 @@ class TestMe:
         get_me() now validates u.companyid = :company_id in the DB query, so a
         token forged with cid=99999 returns 401 even though the signature is valid.
         """
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+
         import jwt
+
         from app.config import settings
 
         forged_payload = {
             "sub": "1",   # real user_id in the test DB
             "cid": 99999, # non-existent company_id
-            "iat": datetime.now(timezone.utc),
-            "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+            "iat": datetime.now(UTC),
+            "exp": datetime.now(UTC) + timedelta(hours=1),
         }
         forged_token = jwt.encode(forged_payload, settings.SECRET_KEY, algorithm="HS256")
 
@@ -185,15 +188,17 @@ class TestMe:
 
     async def test_me_with_expired_token_returns_401(self, client: httpx.AsyncClient):
         """Fabricate an already-expired token."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+
         import jwt
+
         from app.config import settings
 
         expired_payload = {
             "sub": "1",  # sub must be a string (RFC 7519 / PyJWT 2.13+)
             "cid": 1,
-            "iat": datetime.now(timezone.utc) - timedelta(hours=10),
-            "exp": datetime.now(timezone.utc) - timedelta(hours=2),
+            "iat": datetime.now(UTC) - timedelta(hours=10),
+            "exp": datetime.now(UTC) - timedelta(hours=2),
         }
         expired_token = jwt.encode(expired_payload, settings.SECRET_KEY, algorithm="HS256")
 

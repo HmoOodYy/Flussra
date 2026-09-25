@@ -13,12 +13,14 @@ contain lines with unresolvable rate type mappings.
 
 Year slots: 2076-2090 (distinct from P6 2058-2064, P7 2066-2075).
 """
+from datetime import date as _date
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-from uuid import uuid4
-import httpx
-from datetime import date as _date
-from sqlalchemy import text as _text, text as _sqla_text
+from sqlalchemy import text as _sqla_text
+from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
 # Year slots / URL templates

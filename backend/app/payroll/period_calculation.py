@@ -76,7 +76,7 @@ import json
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -104,6 +104,8 @@ from app.payroll.status_payment_sync import (
     _resolve_live_status_payment_lines,
 )
 
+if TYPE_CHECKING:
+    from app.payroll.schemas import CalculationPreviewResponse
 
 _RATE_DEPENDENT_BEHAVIORS = frozenset(
     {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
@@ -153,9 +155,9 @@ async def _refresh_draft_calculations(
 
     # Step 2: for each unique canonical line type, fetch ratebehavior + rate_code
     # once and cache.  Avoids per-line round-trips for the metadata lookup.
-    lt_info_cache: dict[str, "_LineTypeInfo | None"] = {}
+    lt_info_cache: dict[str, _LineTypeInfo | None] = {}
 
-    async def _get_lt_info(canonical: str) -> "_LineTypeInfo | None":
+    async def _get_lt_info(canonical: str) -> _LineTypeInfo | None:
         if canonical in lt_info_cache:
             return lt_info_cache[canonical]
         pi_result = await db.execute(
@@ -279,8 +281,8 @@ async def _validate_period_can_finalize(
     period_id: int,
     company_id: int,
     branch_id: int,
-    period_start: "date",
-    period_end: "date",
+    period_start: date,
+    period_end: date,
     db: AsyncConnection,
 ) -> list[str]:
     """
@@ -555,7 +557,7 @@ async def _compute_draft_line_preview_amounts(
     company_id: int,
     period_start_date: date,
     db: AsyncConnection,
-) -> "dict[int, tuple[Decimal | None, bool]]":
+) -> dict[int, tuple[Decimal | None, bool]]:
     """
     Read-only virtual equivalent of _refresh_draft_calculations.
 
@@ -587,9 +589,9 @@ async def _compute_draft_line_preview_amounts(
     if not rows:
         return {}
 
-    lt_info_cache: "dict[str, _LineTypeInfo | None]" = {}
+    lt_info_cache: dict[str, _LineTypeInfo | None] = {}
 
-    async def _get_lt_info(canonical: str) -> "_LineTypeInfo | None":
+    async def _get_lt_info(canonical: str) -> _LineTypeInfo | None:
         if canonical in lt_info_cache:
             return lt_info_cache[canonical]
         pi_result = await db.execute(
@@ -624,7 +626,7 @@ async def _compute_draft_line_preview_amounts(
         lt_info_cache[canonical] = info
         return info
 
-    result: "dict[int, tuple[Decimal | None, bool]]" = {}
+    result: dict[int, tuple[Decimal | None, bool]] = {}
     for row in rows:
         canonical = _LEGACY_TO_CANONICAL.get(row["linetype"], row["linetype"])
         lt_info = await _get_lt_info(canonical)
@@ -1385,12 +1387,12 @@ async def get_calculation_preview(
     company_id: int,
     user_id: int,
     db: AsyncConnection,
-) -> "CalculationPreviewResponse":
+) -> CalculationPreviewResponse:
     """Adapt the shared live packet to CP-4B's unchanged public contract."""
     from app.payroll.schemas import (
-        CalculationPreviewResponse,
         CalculationPreviewDriverTotal,
         CalculationPreviewLine,
+        CalculationPreviewResponse,
     )
 
     own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)

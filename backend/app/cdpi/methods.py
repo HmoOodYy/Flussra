@@ -22,7 +22,6 @@ and can be unit-tested without a database.
 """
 from dataclasses import dataclass
 
-
 # ---------------------------------------------------------------------------
 # Rate-field descriptor
 # ---------------------------------------------------------------------------

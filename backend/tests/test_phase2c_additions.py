@@ -7,10 +7,10 @@ Covers:
   TestBulkDriverSummary    — bulk rates-summary endpoint
   TestPayRulesSecurity     — pay rules now use payrates.view/edit
 """
-import pytest
-import httpx
 from datetime import date
 
+import httpx
+import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers

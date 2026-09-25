@@ -25,12 +25,13 @@ Users tested
 admin        AllCompanyBranches scope, PAYROLL_ADMIN (all permissions)
 branch_user  SpecificBranch=HQ, PAYROLL_VIEWER (no write permissions)
 """
-import pytest
-import pytest_asyncio
-import httpx
 from datetime import date, timedelta
 from unittest.mock import patch
 from uuid import uuid4
+
+import httpx
+import pytest
+
 from app.settings import service as settings_service
 
 
@@ -864,8 +865,10 @@ class TestPayItemDeleteSafety:
         code: str | None = None,
     ) -> dict:
         """Seed a legacy custom item directly (LLR-A: legacy HTTP creation is blocked)."""
+        import random
+        import string
+
         from tests.seed_helpers import seed_legacy_item_with_rate_structure
-        import random, string
         actual_code = code or "DS_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
         result = await seed_legacy_item_with_rate_structure(
             db_conn,

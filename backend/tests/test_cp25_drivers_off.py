@@ -17,13 +17,12 @@ flow above, which requires exactly one pre-existing Open period per branch
 and is unrelated to this unit.
 """
 import itertools
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 
-import pytest
-import pytest_asyncio
 import httpx
-from datetime import date as _date, timedelta as _timedelta
+import pytest
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -987,8 +986,8 @@ class TestDriversOffFinalized:
                 "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
                 "wdate": start,
                 "snap": (
-                    '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
-                    '"snapshot_hash": "%s"}' % (snapshot_id, "4" * 64)
+                    f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                    f'"snapshot_hash": "{"4" * 64}"}}'
                 ),
             },
         )
@@ -1055,8 +1054,8 @@ class TestDriversOffFinalized:
                 "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
                 "wdate": start,
                 "snap": (
-                    '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
-                    '"snapshot_hash": "%s"}' % (snapshot_id, "5" * 64)
+                    f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                    f'"snapshot_hash": "{"5" * 64}"}}'
                 ),
             },
         )

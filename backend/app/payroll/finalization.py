@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -72,6 +72,8 @@ from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodSummary
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 
+if TYPE_CHECKING:
+    from app.payroll.schemas import FinalizationPreviewResponse
 
 # ===========================================================================
 # Finalization — Approved → Locked
@@ -358,9 +360,15 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     return await get_period_by_id(company_id, user_id, period_id, db)
 
 
-async def get_finalization_preview(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> "FinalizationPreviewResponse":
+async def get_finalization_preview(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> FinalizationPreviewResponse:
     """Read the same immutable approved packet that finalization will project."""
-    from app.payroll.schemas import BonusEventPreviewEntry, FinalizationPreviewDriverTotal, FinalizationPreviewLine, FinalizationPreviewResponse, FinalizationPreviewSysAdjustment
+    from app.payroll.schemas import (
+        BonusEventPreviewEntry,
+        FinalizationPreviewDriverTotal,
+        FinalizationPreviewLine,
+        FinalizationPreviewResponse,
+        FinalizationPreviewSysAdjustment,
+    )
     if await _get_oda_own_driver_id(company_id, user_id, db) is not None:
         raise HTTPException(status_code=403, detail="Current Payroll is not accessible to driver-role users.")
     period = await get_period_by_id(company_id, user_id, period_id, db)

@@ -21,9 +21,9 @@ import datetime
 import itertools
 import json
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -913,7 +913,7 @@ class TestStatusPaymentLines:
         )
         assert resp.status_code == 200, resp.text
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 0
 
     @pytest.mark.asyncio
@@ -943,7 +943,7 @@ class TestStatusPaymentLines:
         assert resp.status_code == 200, resp.text
 
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(sp) == 1
         from decimal import Decimal
         assert sp[0]["sourcetype"] == "System"
@@ -976,7 +976,7 @@ class TestStatusPaymentLines:
         )
         assert resp.status_code == 200, resp.text
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         assert sp[0]["needsmanagerreview"] is True
         assert sp[0]["calculatedamount"] is None
@@ -1005,8 +1005,8 @@ class TestStatusPaymentLines:
             headers=_auth(auth_token),
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
-        active_before = [l for l in await _get_draft_lines(direct_db, pid)
-                         if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        active_before = [line for line in await _get_draft_lines(direct_db, pid)
+                         if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(active_before) == 1
 
         await client.post(
@@ -1014,8 +1014,8 @@ class TestStatusPaymentLines:
             headers=_auth(auth_token),
             json=_day_grid_body(cp2d2_driver_id, start, status_key=None),
         )
-        active_after = [l for l in await _get_draft_lines(direct_db, pid)
-                        if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        active_after = [line for line in await _get_draft_lines(direct_db, pid)
+                        if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(active_after) == 0
 
     @pytest.mark.asyncio
@@ -1053,7 +1053,7 @@ class TestStatusPaymentLines:
         )
 
         lines = await _get_draft_lines(direct_db, pid)
-        active_sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:") and l["status"] == "Active"]
+        active_sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
         assert len(active_sp) == 1
         from decimal import Decimal
         assert Decimal(str(active_sp[0]["quantity"])) == Decimal("8.0")
@@ -1097,7 +1097,7 @@ class TestSourceSnapshot:
         )
 
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         snap_raw = sp[0]["sourcesnapshot"]
         assert snap_raw is not None, "SourceSnapshot must be populated"
@@ -1187,7 +1187,7 @@ class TestManualEditGuards:
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         sp_lid = sp[0]["draftlineid"]
 
@@ -1224,7 +1224,7 @@ class TestManualEditGuards:
             json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
         )
         lines = await _get_draft_lines(direct_db, pid)
-        sp = [l for l in lines if (l.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
+        sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
         assert len(sp) == 1
         sp_lid = sp[0]["draftlineid"]
 
@@ -1333,7 +1333,7 @@ class TestGenericRatesBypassClosed:
         rt_id = status_pay_rt["ratetypeid"]
 
         # Create a status column for the OTHER branch
-        other_src = (await direct_db.execute(
+        (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.statusratecolumns
                     (companyid, branchid, ratetypeid, columnname, normalizedcolumnname, isdefault, isactive)
@@ -1349,7 +1349,8 @@ class TestGenericRatesBypassClosed:
             # But cp2d2_driver is in cp2d2_branch, so STATUS_PAY for other branch
             # is still valid because STATUS_PAY is system-level (companyid=NULL) and
             # belongs to cp2d2_branch too. Let's create a CUSTOM SRC_ type for other_branch only.
-            import string, random
+            import random
+            import string
             suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
             custom_rt = (await direct_db.execute(
                 _text("""
@@ -1472,7 +1473,8 @@ class TestResolveBehaviorDbMembership:
     ):
         """A RateType with SRC_ prefix but NOT in StatusRateColumns gets normal 422 (no PayItemMap)."""
         # Insert an orphan SRC_ RateType with no StatusRateColumns row
-        import string, random
+        import random
+        import string
         suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
         orphan_rt = (await direct_db.execute(
             _text("""
@@ -1761,7 +1763,8 @@ class TestApproveRateStatusGuard:
         direct_db: AsyncConnection,
     ):
         """Approve a contaminated PendingApproval rate using another branch's status RateType — 422."""
-        import string, random
+        import random
+        import string
 
         other_branch = (await direct_db.execute(
             _text("""

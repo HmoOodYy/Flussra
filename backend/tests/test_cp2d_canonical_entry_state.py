@@ -139,7 +139,7 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
         review_items_subq = (
             "(SELECT reviewitemid FROM review.managerreviewitems "
             "WHERE entityschema = 'payroll' AND entityname = 'PayrollPeriods' "
-            f"AND entityid IN (SELECT payrollperiodid::text FROM payroll.payrollperiods WHERE branchid = :bid))"
+            "AND entityid IN (SELECT payrollperiodid::text FROM payroll.payrollperiods WHERE branchid = :bid))"
         )
 
         # Leaf-to-root, verified against each table's actual FK targets:
@@ -181,8 +181,8 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
             # deleting the review item it points to -- clear it first (the
             # period row is being deleted below anyway, so this is a pure
             # unblock, not a behavior change).
-            f"UPDATE payroll.payrollperiods SET currentreturnreviewitemid = NULL "
-            f"WHERE branchid = :bid",
+            "UPDATE payroll.payrollperiods SET currentreturnreviewitemid = NULL "
+            "WHERE branchid = :bid",
 
             # ManagerReviewDecisions (0001) RESTRICTs deleting the
             # ManagerReviewItems row it belongs to -- delete children first.
@@ -1274,8 +1274,8 @@ class TestCp2dCanonicalEntryState:
                     "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
                     "wdate": start,
                     "snap": (
-                        '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
-                        '"snapshot_hash": "%s"}' % (snapshot_id, "1" * 64)
+                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                        f'"snapshot_hash": "{"1" * 64}"}}'
                     ),
                 },
             )
@@ -1359,8 +1359,8 @@ class TestCp2dCanonicalEntryState:
                     "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
                     "wdate": start,
                     "snap": (
-                        '{"payroll_calculation_snapshot_id": %d, "revision_number": 1, '
-                        '"snapshot_hash": "%s"}' % (snapshot_id, "2" * 64)
+                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                        f'"snapshot_hash": "{"2" * 64}"}}'
                     ),
                 },
             )
@@ -1805,7 +1805,9 @@ class TestCp2dCanonicalEntryState:
             """),
             {"pid": pid},
         )).mappings().all()
-        as_pairs = lambda rows: sorted((r["evidencedomain"], r["coveragestate"]) for r in rows)
+        def as_pairs(rows):
+            return sorted((r["evidencedomain"], r["coveragestate"]) for r in rows)
+
         assert as_pairs(coverage_after) == as_pairs(coverage_before), (
             "Protected audit-evidence coverage must be unchanged by the rejected DELETE"
         )
@@ -2265,7 +2267,6 @@ class TestCp2dCanonicalEntryState:
         DailyStatus at all) must not trigger LEGACY_STATUS_NOT_CANONICAL."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e22")
-        wdate = str(start)
         headers = _auth(auth_token)
         try:
             # Insert DailyNote directly — bypasses canonical write. No DailyStatus exists.
@@ -2320,7 +2321,6 @@ class TestCp2dCanonicalEntryState:
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e23")
         code = _sk_code("E23VOID", start)
-        wdate = str(start)
         headers = _auth(auth_token)
         sk_id = None
         try:

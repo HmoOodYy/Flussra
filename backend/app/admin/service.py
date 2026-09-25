@@ -15,34 +15,35 @@ Design rules
 import json
 import random
 import string
+
 from fastapi import HTTPException
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.auth.security import hash_password
-from app.core.service import _check_permission, _check_any_permission, _check_branch_access
 from app.admin.schemas import (
-    UserAdmin,
-    UserCreate,
-    UserUpdate,
-    UserPasswordReset,
-    RoleAssignment,
-    RoleAssignmentCreate,
-    Role,
-    Permission,
     CompanyRole,
-    CompanyRoleCreate,
-    CompanyRoleUpdate,
-    CompanyRolePermissions,
-    CompanyRolePermissionsUpdate,
-    CompanyRoleUser,
     CompanyRoleAssignmentCreate,
     CompanyRoleAssignmentDetail,
-    UserPermissionOverridesUpdate,
+    CompanyRoleCreate,
+    CompanyRolePermissions,
+    CompanyRolePermissionsUpdate,
+    CompanyRoleUpdate,
+    CompanyRoleUser,
     OwnerTransferRequest,
     OwnerTransferResult,
+    Permission,
+    Role,
+    RoleAssignment,
+    RoleAssignmentCreate,
+    UserAdmin,
+    UserCreate,
+    UserPasswordReset,
+    UserPermissionOverridesUpdate,
+    UserUpdate,
 )
+from app.auth.security import hash_password
+from app.core.service import _check_any_permission, _check_branch_access
 
 # ---------------------------------------------------------------------------
 # Audit reason map

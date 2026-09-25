@@ -15,14 +15,14 @@ Tests:
 All tests use year slots 2058-2064 (distinct from P3C 2043-2051, P5 2052-2057).
 Isolated drivers are created per test to avoid cross-test contamination.
 """
-import pytest
-import pytest_asyncio
-import httpx
-import sqlalchemy.exc
 from datetime import date as _date
-from sqlalchemy import text as _text
 from uuid import uuid4
 
+import httpx
+import pytest
+import pytest_asyncio
+import sqlalchemy.exc
+from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
 # Year slots

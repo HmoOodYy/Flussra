@@ -23,12 +23,10 @@ item physical-delete path does not remove lines from non-Open periods.
 import asyncio
 import datetime
 import threading
-import time
 
+import httpx
 import psycopg2
 import pytest
-import pytest_asyncio
-import httpx
 from sqlalchemy import text
 
 # ---------------------------------------------------------------------------
@@ -2363,9 +2361,6 @@ class TestZeroToMeaningfulRace:
         initial usage check (before period locks), it would have seen zero usage
         and proceeded to physical delete, orphaning the meaningful DraftLine.
         """
-        import app.payroll.service as svc_payroll
-
-        loop = asyncio.get_running_loop()
 
         cid = (await direct_db.execute(
             text("SELECT companyid FROM core.branches WHERE branchid = :bid"),

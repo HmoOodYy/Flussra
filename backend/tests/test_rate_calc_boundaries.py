@@ -22,12 +22,11 @@ All dates are in 2082-06-xx or 2082-07-xx range.
 """
 import contextlib
 import itertools
-import pytest
-import pytest_asyncio
-import httpx
 from decimal import Decimal
-from sqlalchemy import text as _text
 
+import httpx
+import pytest
+from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -105,12 +104,13 @@ async def _open_period(
 ) -> int:
     """Insert an Open period directly into DB. Returns period_id."""
     from datetime import date as _date
+
     from sqlalchemy import text as _text
     if db is None:
         raise RuntimeError("_open_period requires db= since CP-1D B1 guard blocks HTTP POST")
     code = f"RCB-{branch_id}-{start}-{next(_period_counter)}"
     row = (await db.execute(
-        _text(f"""
+        _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
             VALUES (1, :bid, 'Open', :code, :name, 'Week', :start, :end)
@@ -875,7 +875,7 @@ class TestRateCalculationBoundaries:
 
             # Void Rate A, approve Rate B ($30) — same effective date
             await session_client.delete(f"/payroll/rates/{rate_a_id}", headers=headers)
-            rate_b_id = await _create_and_approve_rate(
+            await _create_and_approve_rate(
                 session_client, auth_token,
                 driver_id, hourly_rt_id,
                 amount="30.00",
@@ -895,7 +895,7 @@ class TestRateCalculationBoundaries:
                 headers=headers,
             )
             assert fl.status_code == 200
-            hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
+            hours_finals = [line for line in fl.json() if line["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found"
             final_amount = Decimal(str(hours_finals[0]["final_amount"]))
             assert final_amount == Decimal("160.00"), (
@@ -944,7 +944,7 @@ class TestRateCalculationBoundaries:
             "4B LockedImmutable Driver",
         )
 
-        rate_a_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             session_client, auth_token,
             driver_id, hourly_rt_id,
             amount="15.00",
@@ -980,7 +980,7 @@ class TestRateCalculationBoundaries:
                 headers=headers,
             )
             assert fl.status_code == 200
-            hours_finals = [l for l in fl.json() if l["line_type"] == "HOURS"]
+            hours_finals = [line for line in fl.json() if line["line_type"] == "HOURS"]
             assert hours_finals, "HOURS final line not found after finalization"
             original_final_amount = Decimal(str(hours_finals[0]["final_amount"]))
             assert original_final_amount == Decimal("120.00"), (
@@ -992,7 +992,7 @@ class TestRateCalculationBoundaries:
             # so we supersede it instead by creating rate_c at a later effective date.
             # The immutability assertion below verifies FinalAmount is still $120 despite
             # the new rate — this is the core correctness guarantee under test.
-            rate_c_id = await _create_and_approve_rate(
+            await _create_and_approve_rate(
                 session_client, auth_token,
                 driver_id, hourly_rt_id,
                 amount="99.00",
@@ -1005,7 +1005,7 @@ class TestRateCalculationBoundaries:
                 headers=headers,
             )
             assert fl2.status_code == 200
-            hours_finals2 = [l for l in fl2.json() if l["line_type"] == "HOURS"]
+            hours_finals2 = [line for line in fl2.json() if line["line_type"] == "HOURS"]
             assert hours_finals2, "HOURS final line not found after rate change"
             new_final_amount = Decimal(str(hours_finals2[0]["final_amount"]))
             assert new_final_amount == original_final_amount, (

@@ -19,9 +19,9 @@ Run from backend/:
 import datetime
 from uuid import uuid4
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -52,7 +52,8 @@ async def _insert_period_db(
     code_suffix: str = "",
 ) -> int:
     from sqlalchemy.ext.asyncio import create_async_engine
-    from app.payroll.period_creation import get_period_candidates, create_period_from_candidate
+
+    from app.payroll.period_creation import create_period_from_candidate, get_period_candidates
     from app.payroll.schemas import PeriodCreationRequest
 
     engine = create_async_engine(db.engine.url, echo=False)
@@ -298,6 +299,7 @@ async def branch_id(
     branch = int(row["branchid"])
 
     from sqlalchemy.ext.asyncio import create_async_engine
+
     from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
     engine = create_async_engine(direct_db.engine.url, echo=False)
@@ -749,7 +751,7 @@ class TestDraftDirectDraftLineAPI:
                     f"Draft line should have null calculated_amount, got {data.get('calculated_amount')}"
                 )
                 assert data.get("needs_manager_review") is False, (
-                    f"Draft line should have needs_manager_review=False"
+                    "Draft line should have needs_manager_review=False"
                 )
             elif r.status_code in (422, 409, 403):
                 # Also acceptable — document as blocked cleanly
@@ -1366,10 +1368,10 @@ class TestDraftDirectDraftLineAPI:
                 f"Draft HOURS line should have NULL rate_amount, got {data.get('rate_amount')}"
             )
             assert data.get("calculated_amount") is None, (
-                f"Draft HOURS line should have NULL calculated_amount"
+                "Draft HOURS line should have NULL calculated_amount"
             )
             assert data.get("needs_manager_review") is False, (
-                f"Draft HOURS line should have NMR=False"
+                "Draft HOURS line should have NMR=False"
             )
         finally:
             await _cancel_period_db(direct_db, pid)
@@ -1517,13 +1519,13 @@ class TestDraftReadEndpointProtection:
             if r.status_code == 200:
                 for ln in r.json():
                     assert ln.get("calculated_amount") is None, (
-                        f"Draft line should have null calculated_amount in list response"
+                        "Draft line should have null calculated_amount in list response"
                     )
                     assert ln.get("rate_amount") is None, (
-                        f"Draft line should have null rate_amount in list response"
+                        "Draft line should have null rate_amount in list response"
                     )
                     assert ln.get("needs_manager_review") is False, (
-                        f"Draft line should have needs_manager_review=False"
+                        "Draft line should have needs_manager_review=False"
                     )
             elif r.status_code in (422, 409, 403):
                 pass  # blocking is also acceptable

@@ -4,12 +4,12 @@ Auth router — POST /auth/login and GET /auth/me.
 All other routes in the app require a valid JWT (via get_current_user).
 These two are the entry points that create or verify tokens.
 """
-from sqlalchemy.ext.asyncio import AsyncConnection
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.auth.schemas import LoginRequest, LoginResponse, UserInfo
-from app.auth.service import login, get_me
-from app.dependencies import get_db, get_current_user
+from app.auth.service import get_me, login
+from app.dependencies import get_current_user, get_db
 
 router = APIRouter()
 

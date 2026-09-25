@@ -9,15 +9,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.core import service
 from app.core.schemas import (
     BranchSummary,
-    PersonSummary,
-    DriverSummary,
     DriverCreate,
+    DriverSummary,
     DriverUpdate,
+    PersonSummary,
 )
-from app.core import service
-from app.dependencies import get_db, get_current_user
+from app.dependencies import get_current_user, get_db
 
 router = APIRouter()
 

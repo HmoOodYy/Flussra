@@ -17,13 +17,12 @@ All entry tests use PAYTEST branch on period dates in 2033 (no conflicts with
 other test modules which use 2026-2032).
 """
 import datetime
-
-import pytest
-import pytest_asyncio
-import httpx
 from decimal import Decimal
-from sqlalchemy import text as _text
 
+import httpx
+import pytest_asyncio
+from sqlalchemy import text as _text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 # ---------------------------------------------------------------------------
 # Helpers

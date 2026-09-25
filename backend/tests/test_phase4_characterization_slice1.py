@@ -32,15 +32,14 @@ import contextlib
 import datetime
 import decimal
 import uuid
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import ROUND_HALF_EVEN, Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 
 from app.payroll.service import _compute_calculated_amount
-
 
 # ---------------------------------------------------------------------------
 # Module-level constants (2091 dates — isolated from other test modules)
@@ -872,7 +871,6 @@ class TestPerUnitCharacterization:
         dispatch's calculated_amount is Decimal, is not float, is not None,
         and matches the exact expected value.
         """
-        headers = auth(auth_token)
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S1 PerUnit CaseE")
@@ -1237,7 +1235,7 @@ class TestLegacyManualFallbackCharacterization:
             assert preview_resp.status_code == 200, f"Preview failed: {preview_resp.text}"
             preview_body = preview_resp.json()
             preview_line = next(
-                (l for l in preview_body["lines"] if l["draft_line_id"] == draft_line_id),
+                (line for line in preview_body["lines"] if line["draft_line_id"] == draft_line_id),
                 None,
             )
             assert preview_line is not None, "Fallback line not found in preview lines"
@@ -1260,7 +1258,7 @@ class TestLegacyManualFallbackCharacterization:
             fl = await session_client.get(f"/payroll/periods/{pid}/final-lines", headers=headers)
             assert fl.status_code == 200
             final_line = next(
-                (l for l in fl.json() if l["draft_line_id"] == draft_line_id),
+                (line for line in fl.json() if line["draft_line_id"] == draft_line_id),
                 None,
             )
             assert final_line is not None, "Fallback line not found in the final-lines ledger endpoint"

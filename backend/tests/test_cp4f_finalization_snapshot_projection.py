@@ -18,8 +18,8 @@ import app.payroll.service as payroll_service
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
-    _LiveCalculationPacket,
     _capture_calculation_snapshot,
+    _LiveCalculationPacket,
     finalize_period,
     get_finalization_preview,
 )

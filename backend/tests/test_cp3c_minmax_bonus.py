@@ -28,9 +28,9 @@ import itertools
 import uuid
 from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -731,7 +731,7 @@ async def test_preview_finalization_parity_minimum(
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
     await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "40.00")
-    rule_id = await _add_pay_rule(
+    await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
     )
 

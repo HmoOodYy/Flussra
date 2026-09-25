@@ -27,7 +27,6 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
@@ -699,6 +698,7 @@ class TestAssertEligibilityViaSnapshot:
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -742,6 +742,7 @@ class TestAssertEligibilityViaSnapshot:
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -858,6 +859,7 @@ class TestMarkerTable:
     ):
         """Marker present + zero detail rows → not in snapshot → raises 422 (no live fallback)."""
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -881,6 +883,7 @@ class TestMarkerTable:
     ):
         """Driver absent from snapshot → 422 even though it's live-active."""
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -997,8 +1000,9 @@ class TestGetDayGridSnapshotRoster:
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
         """TerminatedHistorical driver shows in grid for work_date <= termination date."""
-        from app.payroll.service import _is_snapshot_row_eligible_for_workdate
         from types import SimpleNamespace
+
+        from app.payroll.service import _is_snapshot_row_eligible_for_workdate
         term_date = datetime.date(2099, 3, 10)
         row = SimpleNamespace(
             iseligibleforperiod=True,
@@ -1016,8 +1020,9 @@ class TestGetDayGridSnapshotRoster:
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
         """TerminatedHistorical driver does NOT show in grid for work_date > termination date."""
-        from app.payroll.service import _is_snapshot_row_eligible_for_workdate
         from types import SimpleNamespace
+
+        from app.payroll.service import _is_snapshot_row_eligible_for_workdate
         term_date = datetime.date(2099, 3, 10)
         row = SimpleNamespace(
             iseligibleforperiod=True,
@@ -1374,11 +1379,12 @@ class TestStatusPaymentRefreshEligibilityAware:
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
         """Eligible Active driver in snapshot → status refresh proceeds normally."""
+        from types import SimpleNamespace
+
         from app.payroll.service import (
             _create_period_driver_eligibility_rows,
             _is_snapshot_row_eligible_for_workdate,
         )
-        from types import SimpleNamespace
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
         try:
@@ -1417,8 +1423,9 @@ class TestStatusPaymentRefreshEligibilityAware:
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
         """TerminatedHistorical driver ineligible after termination date → skipped."""
-        from app.payroll.service import _is_snapshot_row_eligible_for_workdate
         from types import SimpleNamespace
+
+        from app.payroll.service import _is_snapshot_row_eligible_for_workdate
         start, end = _week_2099()
         term_date = start + datetime.timedelta(days=2)  # terminated mid-period
         row = SimpleNamespace(
@@ -1532,6 +1539,7 @@ class TestFinalizationSnapshotAware:
     ):
         """Driver absent from snapshot → workdate assert raises 422."""
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -1555,6 +1563,7 @@ class TestFinalizationSnapshotAware:
     ):
         """Driver absent from snapshot → period assert raises 422."""
         from fastapi import HTTPException
+
         from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -1577,6 +1586,7 @@ class TestFinalizationSnapshotAware:
     ):
         """Marker present, no detail rows → driver not found → 422 (not live fallback)."""
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -1729,9 +1739,10 @@ class TestMigrationBackfillZeroDetailPeriods:
         This proves the empty snapshot is respected and live roster is not consulted.
         """
         from fastapi import HTTPException
+
         from app.payroll.service import (
-            _period_has_driver_eligibility_snapshot,
             _assert_driver_eligible_for_workdate_via_snapshot,
+            _period_has_driver_eligibility_snapshot,
         )
         start, end = _week_2108()
         pid = await _insert_open_period(direct_db, branch_id, start, end, status="Open")
@@ -1857,8 +1868,9 @@ class TestGeneratedRowExistingSourceRescue:
             direct_db, _COMPANY_ID, branch_id, pid, driver_id, start
         )
         try:
-            from app.payroll.service import _is_snapshot_row_eligible_for_workdate
             from types import SimpleNamespace
+
+            from app.payroll.service import _is_snapshot_row_eligible_for_workdate
             row_ns = SimpleNamespace(
                 iseligibleforperiod=True,
                 eligibilityreasoncode="Active",
@@ -1912,8 +1924,9 @@ class TestGeneratedRowExistingSourceRescue:
                 direct_db, _COMPANY_ID, branch_id, pid, driver_id, start
             )
         try:
-            from app.payroll.service import _is_snapshot_row_eligible_for_workdate
             from types import SimpleNamespace
+
+            from app.payroll.service import _is_snapshot_row_eligible_for_workdate
             row_ns = SimpleNamespace(
                 iseligibleforperiod=True,
                 eligibilityreasoncode="Active",
@@ -2016,6 +2029,7 @@ class TestGeneratedRowExistingSourceRescue:
     ):
         """add_draft_line uses allow_existing_source_rescue=False → raises 422."""
         from fastapi import HTTPException
+
         from app.payroll.service import _assert_driver_eligible_for_workdate_via_snapshot
         start, end = _week_2108()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
@@ -2094,11 +2108,12 @@ class TestGeneratedRowExistingSourceRescue:
         existing DraftLine (existing source) → refresh must proceed (not skip).
         This mirrors the case where a PPDES row exists outside the eligibility window.
         """
+        from types import SimpleNamespace
+
         from app.payroll.service import (
             _driver_has_existing_daily_source_on_date,
             _is_snapshot_row_eligible_for_workdate,
         )
-        from types import SimpleNamespace
         start, end = _week_2108()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
         eff_to = start - datetime.timedelta(days=1)

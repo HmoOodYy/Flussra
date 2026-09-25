@@ -39,7 +39,7 @@ Current consumers, each in its own module:
     and references _STATUS_PAYMENT_PROJECTION_SQL.
 """
 from datetime import date
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any, NamedTuple
 
 from sqlalchemy import text
@@ -141,7 +141,7 @@ async def _sync_status_payment_for_entry_state(
     src_col_id: int | None = None
     src_rate_type_id: int | None = None
     rate_code: str | None = None
-    hours_value: "Decimal | None" = None
+    hours_value: Decimal | None = None
     status_code_val: str | None = None
     key_name_val: str | None = None
     col_name_val: str | None = None

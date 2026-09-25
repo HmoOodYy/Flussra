@@ -60,9 +60,9 @@ import datetime
 import itertools
 import threading
 
+import httpx
 import psycopg2
 import pytest
-import httpx
 from sqlalchemy import text
 
 # ---------------------------------------------------------------------------
@@ -516,7 +516,8 @@ class TestDoubleSubmitPrevention:
             except Exception as exc:
                 thread_errors.append(exc)
                 try:
-                    conn.rollback(); conn.close()
+                    conn.rollback()
+                    conn.close()
                 except Exception:
                     pass
             finally:
@@ -799,7 +800,7 @@ class TestSourceMutationFirstSerialization:
             try:
                 await asyncio.wait_for(asyncio.shield(submit_task), timeout=1.0)
                 submit_completed_early = True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass  # expected — submit is blocked on the period row lock
             assert not submit_completed_early, (
                 "Submit transition completed before the source mutation released "

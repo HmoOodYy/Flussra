@@ -19,10 +19,12 @@ TestSetDefaultBranch    — POST /settings/branches/{id}/set-default (promotion,
 TestSettingsAudit       — audit-log rollback: company update and branch create roll back on audit failure
 """
 import re
+from unittest.mock import patch
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from unittest.mock import patch
+
 from app.settings import service as settings_service
 
 
@@ -465,7 +467,6 @@ class TestCreateBranch:
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
-        new_id = resp.json()["branch_id"]
         assert resp.json()["is_default"] is True
 
         # Verify HQ is no longer the default.
@@ -553,8 +554,6 @@ class TestCreateBranch:
         collision_code = "BR_COLLISION"
         unique_code    = "BR_UNIQUEONE"
         call_count = {"n": 0}
-
-        original_gen = settings_service._generate_branch_code
 
         def _patched_gen():
             call_count["n"] += 1

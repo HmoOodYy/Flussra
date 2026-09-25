@@ -12,7 +12,7 @@ import calendar as _calendar
 import hashlib
 import hmac as _hmac_mod
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
@@ -20,7 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import settings
 from app.core.service import (
-    _check_any_permission, _check_branch_access, _check_permission, _require_not_driver_role,
+    _check_any_permission,
+    _check_branch_access,
+    _check_permission,
+    _require_not_driver_role,
 )
 from app.payroll.audit_evidence import initialize_period_audit_evidence_coverage
 from app.payroll.eligibility import _create_period_driver_eligibility_rows
@@ -39,7 +42,6 @@ from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.payroll_setup.audit import write_policy_audit
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.resolver import Authority, resolve_payroll_setup_version
-
 
 # ---------------------------------------------------------------------------
 # CP-1C: Branch-locked candidate-based period creation
@@ -1170,7 +1172,7 @@ async def create_period_from_candidate(
         frozen_by_user_id=user_id if _is_open_creation else None,
     )
 
-    created_at = datetime.now(timezone.utc)
+    created_at = datetime.now(UTC)
 
     return PeriodCreationResponse(
         result="CREATED",

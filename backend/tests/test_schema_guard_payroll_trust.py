@@ -19,21 +19,17 @@ so we also confirm the helpers work correctly against a live PostgreSQL.
 """
 from __future__ import annotations
 
-import pytest
+from unittest.mock import patch
+
 import psycopg2
-from unittest.mock import patch, MagicMock
+import pytest
 
 import app.db.schema_guard as _guard
 from app.db.schema_guard import (
     _check_payroll_trust,
-    _column_exists,
-    _index_exists,
-    _function_exists,
     _trigger_exists_and_enabled,
     run_schema_guard,
-    _build_sync_dsn,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helper: build a fake cursor whose responses can be controlled per-call
@@ -102,7 +98,7 @@ def test_p10_t1_guard_passes_on_full_db(apply_schema):
         conn.close()
 
     assert errors == [], (
-        f"Expected no payroll trust errors on fully-migrated DB, got:\n"
+        "Expected no payroll trust errors on fully-migrated DB, got:\n"
         + "\n".join(f"  {e}" for e in errors)
     )
 

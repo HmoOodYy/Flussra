@@ -17,9 +17,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.dashboard.schemas import DashboardResponse
 from app.dashboard import service
-from app.dependencies import get_db, get_current_user
+from app.dashboard.schemas import DashboardResponse
+from app.dependencies import get_current_user, get_db
 
 router = APIRouter()
 

@@ -11,20 +11,20 @@ Part B -- service integration (async, direct_db):
   TestScopeAndSafety
 """
 import uuid
+
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import text as _text
 
+from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import (
+    CdpiDecideAction,
+    CdpiDecideRequest,
     CdpiRequestCreate,
     CdpiRequestUpdate,
     CdpiSubmitRequest,
-    CdpiDecideRequest,
-    CdpiDecideAction,
 )
-from app.cdpi import service as cdpi_service
-
 
 # ===========================================================================
 # Shared DB helpers (same pattern as test_cdpi_draft.py)
@@ -976,7 +976,7 @@ class TestCopyRejected:
             direct_db, company_id, paytest_id, admin_id
         )
         try:
-            pending = await _submit(direct_db, company_id, admin_id, draft.request_id)
+            await _submit(direct_db, company_id, admin_id, draft.request_id)
             with pytest.raises(HTTPException) as exc_info:
                 await cdpi_service.copy_rejected(
                     company_id, hq_user_id, draft.request_id, direct_db
@@ -1082,7 +1082,7 @@ class TestScopeAndSafety:
             assert fetched.status == "PendingCompanyApproval"
 
             # Pending -> Rejected
-            rejected = await _decide(
+            await _decide(
                 direct_db, company_id, admin_id, draft.request_id,
                 CdpiDecideAction.Reject, pending.revision
             )

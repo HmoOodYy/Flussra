@@ -16,7 +16,6 @@ from sqlalchemy import text as _text
 
 from app.pay_item_rate_slots import ensure_pay_item_rate_slot
 
-
 # ===========================================================================
 # Shared DB helpers
 # ===========================================================================

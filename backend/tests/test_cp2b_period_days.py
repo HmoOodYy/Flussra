@@ -124,10 +124,14 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
                  anchor: str = "2095-01-07", interval: int | None = None,
                  mask: int = 0) -> dict:
     """Create current Setup/Published Version/Branch Assignment policy state."""
-    from app.payroll_setup.policy import (
-        assign_setup, create_draft, create_setup, publish_version,
-    )
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.payroll_setup.policy import (
+        assign_setup,
+        create_draft,
+        create_setup,
+        publish_version,
+    )
 
     engine = create_async_engine(db.engine.url, echo=False)
     try:
@@ -170,8 +174,9 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
 
 async def _publish_future_version(db: AsyncConnection, setup_id: int,
                                   effective: datetime.date, mask: int) -> int:
-    from app.payroll_setup.policy import create_draft, publish_version
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.payroll_setup.policy import create_draft, publish_version
 
     engine = create_async_engine(db.engine.url, echo=False)
     try:
@@ -322,7 +327,8 @@ class TestCp2bPeriodDays:
 
     def test_d02_alembic_head_current(self):
         """D02: Migration chain is linear and head is 0068."""
-        import subprocess, sys
+        import subprocess
+        import sys
         result = subprocess.run(
             [sys.executable, "-m", "alembic", "heads"],
             capture_output=True, text=True,
@@ -344,7 +350,7 @@ class TestCp2bPeriodDays:
     ):
         """D03: Candidate-created Open Week period has exactly 7 PayrollPeriodDays rows."""
         await _clean(direct_db, paytest_branch_id)
-        setup = await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -699,7 +705,6 @@ class TestCp2bPeriodDays:
 
         # Publish a future effective version after the period boundary.
         period_end = datetime.date.fromisoformat(result["end_date"])
-        new_anchor = (period_end + datetime.timedelta(days=1)).isoformat()
         setup_id = (await direct_db.execute(_text("""
             SELECT FrozenPayrollSetupID FROM payroll.PayrollPeriods
             WHERE PayrollPeriodID = :pid
@@ -752,7 +757,7 @@ class TestCp2bPeriodDays:
         assert len(rows_before) == 7
 
         # Promote Draft → Open by submitting
-        r = await session_client.post(
+        await session_client.post(
             f"/payroll/periods/{draft_id}/submit",
             headers=_auth(auth_token),
         )

@@ -19,7 +19,6 @@ import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

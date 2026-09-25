@@ -13,12 +13,13 @@ Verifies that a DriverRate referenced by PayrollFinalLines cannot be voided:
 All tests use years 2052-2058 on fresh per-test branches.
 Finalized period history remains in the disposable test database.
 """
+from datetime import date as _date
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-from uuid import uuid4
-import httpx
 import sqlalchemy.exc
-from datetime import date as _date
 from sqlalchemy import text as _text
 
 # ---------------------------------------------------------------------------

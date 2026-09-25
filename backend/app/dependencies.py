@@ -5,14 +5,14 @@ Every route that needs a DB connection or the current authenticated user
 injects these via Depends(). Nothing else in the codebase imports from
 here except routers.
 """
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.db.session import engine
 from app.auth.security import decode_token
+from app.db.session import engine
 
 # Bearer token extractor — requires "Authorization: Bearer <token>" header
 _bearer = HTTPBearer()

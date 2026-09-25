@@ -17,11 +17,12 @@ Tests cover:
 
 Isolation: all periods use dates in 2091 to avoid conflicts with other test suites.
 """
+from uuid import uuid4
+
 import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
-from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Constants

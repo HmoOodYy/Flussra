@@ -13,9 +13,7 @@ Seed data (company DEMO + branch HQ + admin user) is applied in conftest.py.
 The `created_driver_id` session fixture creates one driver record at session
 start; tests that read or mutate a specific driver rely on it.
 """
-import pytest
 import httpx
-
 
 # ---------------------------------------------------------------------------
 # Helpers

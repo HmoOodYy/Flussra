@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_any_permission
 
-
 # ---------------------------------------------------------------------------
 # OwnDriverDataOnly scope guard — shared by all rate read/write endpoints
 # ---------------------------------------------------------------------------

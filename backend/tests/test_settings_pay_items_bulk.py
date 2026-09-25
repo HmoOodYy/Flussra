@@ -20,11 +20,10 @@ Tests
     requested_branch_count, updated_branch_count, results[].config_id / .status
 12. SelectedBranches with empty branch_ids → 422 (schema validation)
 """
-import pytest
-import pytest_asyncio
-import httpx
 from datetime import date, timedelta
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
+
+import httpx
 
 from app.settings import service as settings_service
 
@@ -401,7 +400,6 @@ class TestBulkPeriodProtection:
         before_config = before_item["current_config"] if before_item else None
 
         # Simulate an open period on HQ branch by mocking the period-end helper
-        future_date = date.today() + timedelta(days=30)
 
         async def mock_period_end(branch_id: int, company_id: int, db) -> "date | None":  # noqa: F821
             if branch_id == hq_branch_id:

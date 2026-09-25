@@ -14,14 +14,14 @@ Part B -- service integration (async, direct_db):
   TestCreateDraft, TestGetRequest, TestListRequests, TestUpdateDraft
 """
 import uuid
+
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import text as _text
 
-from app.cdpi.schemas import CdpiRequestCreate, CdpiRequestUpdate
 from app.cdpi import service as cdpi_service
-
+from app.cdpi.schemas import CdpiRequestCreate, CdpiRequestUpdate
 
 # ===========================================================================
 # Shared DB helpers

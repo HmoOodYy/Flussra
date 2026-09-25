@@ -47,21 +47,21 @@ Coverage:
     34. submit/return/reject/copy still work with branch routes present
 """
 import datetime
+
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import text as _text
 
+from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import (
+    CdpiBranchItemUpdate,
+    CdpiDecideAction,
+    CdpiDecideRequest,
+    CdpiDirectCreateRequest,
     CdpiRequestCreate,
     CdpiSubmitRequest,
-    CdpiDecideRequest,
-    CdpiDecideAction,
-    CdpiDirectCreateRequest,
-    CdpiBranchItemUpdate,
 )
-from app.cdpi import service as cdpi_service
-
 
 # ===========================================================================
 # DB helpers (mirrors test_cdpi_approval.py conventions)

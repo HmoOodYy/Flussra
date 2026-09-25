@@ -6,30 +6,30 @@ Transactions are managed by the get_db() dependency (engine.begin()),
 which auto-commits on success and rolls back on exception.
 """
 import uuid as _uuid
-from datetime import date as _date, timedelta as _timedelta
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 from uuid import UUID
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_branch_access
 from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
 from app.cdpi.methods import get_adapter
-from app.pay_item_rate_slots import ensure_cdpi_per_unit_rate_slot
 from app.cdpi.schemas import (
+    CdpiBranchItemState,
+    CdpiBranchItemUpdate,
+    CdpiDecideAction,
+    CdpiDecideRequest,
+    CdpiDirectCreateRequest,
+    CdpiDirectCreateSummary,
     CdpiRequestCreate,
     CdpiRequestSummary,
     CdpiRequestUpdate,
     CdpiSubmitRequest,
-    CdpiDecideRequest,
-    CdpiDecideAction,
-    CdpiDirectCreateRequest,
-    CdpiDirectCreateSummary,
-    CdpiBranchItemState,
-    CdpiBranchItemUpdate,
 )
-
+from app.core.service import _check_branch_access
+from app.pay_item_rate_slots import ensure_cdpi_per_unit_rate_slot
 
 # ---------------------------------------------------------------------------
 # Internal helpers

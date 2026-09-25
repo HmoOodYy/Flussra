@@ -1,13 +1,13 @@
 """Payroll Trust Phase 7 — source integrity and snapshot finalization trust."""
+from datetime import date as _date
+from uuid import uuid4
+
+import httpx
 import pytest
 import pytest_asyncio
-from uuid import uuid4
-import httpx
-from decimal import Decimal
-from datetime import date as _date
-from sqlalchemy import text as _text, text as _sqla_text
+from sqlalchemy import text as _sqla_text
+from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
-
 
 # ---------------------------------------------------------------------------
 # Year slots

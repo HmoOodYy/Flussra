@@ -9,7 +9,8 @@ The engine is created once at application startup (via FastAPI lifespan)
 and disposed at shutdown. Every request gets a connection from the pool
 via the get_db() FastAPI dependency.
 """
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
 from app.config import settings
 
 # ---------------------------------------------------------------------------

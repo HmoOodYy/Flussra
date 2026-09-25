@@ -21,7 +21,7 @@ legacy methods (OrdinalTier, RangeBracket, RangeProgressive, Block) are out
 of scope for this module and remain unchanged in their current call sites.
 """
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import ROUND_HALF_EVEN, Decimal
 
 PER_UNIT_CALCULATION_VERSION = "cp4a-per-unit-v1"
 

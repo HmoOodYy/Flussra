@@ -20,11 +20,12 @@ CF6  Standard HOURS calculation is unaffected (regression)
 
 Year slots: all periods use 2090 dates (unused by other test files).
 """
-import pytest
-import httpx
-from decimal import Decimal
 import json
 from datetime import date as _date
+from decimal import Decimal
+
+import httpx
+import pytest
 from sqlalchemy import text as _text
 
 from app.cdpi import service as cdpi_service

@@ -70,7 +70,8 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, IntegrityError as SAIntegrityError
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.core.service import _check_permission, _require_not_driver_role
@@ -84,10 +85,9 @@ from app.payroll.period_calculation import (
     _refresh_draft_calculations,
 )
 from app.payroll.period_read import get_period_by_id
-from app.payroll.schemas import PeriodStatusChange, PeriodSummary, _VALID_TRANSITIONS
+from app.payroll.schemas import _VALID_TRANSITIONS, PeriodStatusChange, PeriodSummary
 from app.payroll.status_payment_sync import _refresh_status_payment_lines
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
-
 
 # ---------------------------------------------------------------------------
 # Period status-change: permission gates and audit
@@ -811,7 +811,7 @@ async def resubmit_period(
     user_id: int,
     period_id: int,
     db: AsyncConnection,
-) -> "PeriodSummary":
+) -> PeriodSummary:
     """
     POST /payroll/periods/{period_id}/resubmissions
 

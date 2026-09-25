@@ -8,13 +8,13 @@ Test isolation: all tests use year 2081 dates and the PAYTEST branch so they
 don't collide with other test files' periods.  Each test class creates its own
 period and cancels it in teardown.
 """
+import itertools
+from datetime import date
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from datetime import date
-import itertools
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -313,7 +313,6 @@ class TestDayGridColumns:
         dg_open_period: dict,
         direct_db,
     ):
-        from sqlalchemy import text as _text
         pid = dg_open_period["payroll_period_id"]
 
         # Temporarily retire LOADS if it exists — then verify it's not in columns
@@ -508,7 +507,6 @@ class TestDayGridSummary:
         paytest_driver_id: int,
         direct_db,
     ):
-        from sqlalchemy import text as _text
         pid = dg_open_period["payroll_period_id"]
 
         # Add an HOURS line without an approved rate — should get NeedsManagerReview
@@ -523,7 +521,6 @@ class TestDayGridSummary:
             headers=auth(auth_token),
         )
         assert add_resp.status_code == 201
-        line = add_resp.json()
 
         # Verify via grid
         resp = await session_client.get(
@@ -1017,8 +1014,9 @@ class TestDayGridLineStorage:
         Saving a status_key via POST day-grid creates a DailyStatus draft line
         where the Notes column stores the status key code string.
         """
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = dg_open_period["payroll_period_id"]
         wdate = "2081-01-16"
@@ -1063,8 +1061,9 @@ class TestDayGridLineStorage:
         Saving free-text notes via POST day-grid creates a DailyNote draft line
         where the Notes column stores the note text.
         """
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = dg_open_period["payroll_period_id"]
         wdate = "2081-01-17"
@@ -1213,8 +1212,10 @@ class TestDayGridDateLoading:
         Omitting work_date when today IS inside the period → returns today's date.
         Creates a special period around today for this test.
         """
+        from datetime import date as _date
+        from datetime import timedelta
+
         from sqlalchemy import text as _text
-        from datetime import date as _date, timedelta
 
         today = _date.today()
         start = (today - timedelta(days=1)).isoformat()
@@ -1292,8 +1293,9 @@ class TestDayGridQuantityValidation:
         Invalid quantity in one row → no rows created (all-or-nothing).
         Send MILES=5 (valid) plus HOURS=abc (invalid) — neither should be written.
         """
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = p1_open_period["payroll_period_id"]
         wdate = "2081-02-02"
@@ -1707,8 +1709,9 @@ class TestDayGridLegacyDuplicates:
         direct_db,
     ):
         """DB row with linetype='Hours' → GET returns 'HOURS' key in values."""
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = p1_open_period["payroll_period_id"]
         wdate = _date(2081, 2, 14)
@@ -1762,8 +1765,9 @@ class TestDayGridLegacyDuplicates:
         Existing 'Hours' DB row + POST HOURS=9 → updates the existing row,
         no new row created.
         """
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = p1_open_period["payroll_period_id"]
         wdate = _date(2081, 2, 15)
@@ -1818,8 +1822,9 @@ class TestDayGridLegacyDuplicates:
         direct_db,
     ):
         """Existing 'Hours' DB row + POST HOURS=0 → voids the existing row."""
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = p1_open_period["payroll_period_id"]
         wdate = _date(2081, 2, 16)
@@ -1870,8 +1875,9 @@ class TestDayGridLegacyDuplicates:
         direct_db,
     ):
         """No existing row + POST HOURS → new DB row has linetype='HOURS' (canonical)."""
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = p1_open_period["payroll_period_id"]
         wdate = _date(2081, 2, 17)
@@ -1912,8 +1918,9 @@ class TestDayGridLegacyDuplicates:
         Both 'Hours' AND 'HOURS' rows exist for same driver/date →
         POST day-grid returns 409 (ambiguous, contact admin).
         """
-        from sqlalchemy import text as _text
         from datetime import date as _date
+
+        from sqlalchemy import text as _text
 
         pid = p1_open_period["payroll_period_id"]
         wdate = _date(2081, 2, 18)
@@ -3139,6 +3146,7 @@ async def _create_test_pay_item(
     item_scope   : 'Daily' only (Period-scope items are blocked; tests expecting 422 use HTTP)
     """
     import hashlib
+
     from tests.seed_helpers import seed_legacy_item_with_rate_structure
     code = "P3B_" + hashlib.md5(name.encode()).hexdigest()[:8].upper()
     result = await seed_legacy_item_with_rate_structure(
@@ -3249,7 +3257,7 @@ class TestPayItemEffectiveDateBoundaries:
             assert r2.status_code == 200, r2.text
             codes2 = {c["pay_item_code"] for c in r2.json()["columns"]}
             assert item["pay_item_code"] in codes2, (
-                f"Pay item should still appear on second day (work_date=2082-06-22)."
+                "Pay item should still appear on second day (work_date=2082-06-22)."
             )
         finally:
             await _delete_test_pay_item(session_client, auth_token, iid)
@@ -3547,7 +3555,6 @@ class TestPayItemEffectiveDateBoundaries:
             "P3B Test Rate Matrix EffFrom",
         )
         iid = item["pay_item_id"]
-        item_code = item["pay_item_code"]
         try:
             # Configure for PAYTEST with effective_from=2082-06-22
             await _configure_branch_pay_item(
@@ -3623,7 +3630,6 @@ class TestPayItemEffectiveDateBoundaries:
             "P3B Test Rate Matrix Branch Iso",
         )
         iid = item["pay_item_id"]
-        item_code = item["pay_item_code"]
         try:
             # Activate only on HQ
             await _configure_branch_pay_item(
@@ -3727,7 +3733,6 @@ class TestPayItemEffectiveDateBoundaries:
             "P3B Test Delete Behavior",
         )
         iid = item["pay_item_id"]
-        item_code = item["pay_item_code"]
 
         # Check usage first
         usage_resp = await session_client.get(
@@ -4017,7 +4022,7 @@ class TestDayGridCDPI:
             await _delete_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
     @pytest.mark.asyncio
-    async def test_save_time_cdpi_value(  # noqa: too-many-locals
+    async def test_save_time_cdpi_value(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,

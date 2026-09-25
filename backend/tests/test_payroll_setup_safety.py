@@ -8,15 +8,17 @@ level chronology cases are seeded without rewriting finalized history.
 """
 
 import itertools
-import pytest
-import httpx
 from datetime import date, timedelta
 from uuid import uuid4
+
+import httpx
+import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
-from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+
 from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
 
 # ---------------------------------------------------------------------------
 # Helpers

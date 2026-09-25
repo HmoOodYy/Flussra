@@ -9,9 +9,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
+import psycopg2
 import pytest
 import pytest_asyncio
-import psycopg2
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text

@@ -47,15 +47,13 @@ with other test modules (2097=CP-2D2, 2096=CP-2D1, 2091=Slice 1, 2087=ledger,
 """
 import contextlib
 import datetime
-import decimal
 import uuid
-from decimal import Decimal, ROUND_HALF_EVEN
+from decimal import Decimal
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 from sqlalchemy import text as _text
-
 
 # ---------------------------------------------------------------------------
 # Module-level constants (2098 dates — isolated from other test modules)
@@ -1775,7 +1773,6 @@ class TestPreviewFinalizationDivergence:
 
                 lines_before = await _get_status_pay_lines(direct_db, pid, driver_id)
                 assert len(lines_before) == 1
-                draft_line_id = lines_before[0]["draftlineid"]
                 expected_source_id = f"STATUS_PAYMENT:{entry_state_id}:{status_key_id}:{src_col_id}"
                 assert lines_before[0]["sourceid"] == expected_source_id, (
                     f"Exact production SourceID format is "
@@ -1809,7 +1806,7 @@ class TestPreviewFinalizationDivergence:
                 # instant this rate is created, even though it's created
                 # partway through the test body -- a later assertion failure
                 # still unwinds and removes it along with everything else.
-                rate_b_id = await stack.enter_async_context(
+                await stack.enter_async_context(
                     _owned_driver_rate(
                         direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
                         "30.0000", "2099-01-01",
@@ -1823,7 +1820,7 @@ class TestPreviewFinalizationDivergence:
                 )
                 assert preview_resp.status_code == 200, f"Preview failed: {preview_resp.text}"
                 preview_line = next(
-                    (l for l in preview_resp.json()["lines"] if l["line_type"] == "STATUS_PAY"),
+                    (line for line in preview_resp.json()["lines"] if line["line_type"] == "STATUS_PAY"),
                     None,
                 )
                 assert preview_line is not None, "STATUS_PAY snapshot line not found in preview lines"
@@ -1840,7 +1837,7 @@ class TestPreviewFinalizationDivergence:
                 fl_resp = await session_client.get(f"/payroll/periods/{pid}/final-lines", headers=headers)
                 assert fl_resp.status_code == 200
                 final_line = next(
-                    (l for l in fl_resp.json() if l["line_type"] == "STATUS_PAY"),
+                    (line for line in fl_resp.json() if line["line_type"] == "STATUS_PAY"),
                     None,
                 )
                 assert final_line is not None, "STATUS_PAY final line not found"
@@ -1910,7 +1907,7 @@ class TestMinMaxRealParticipation:
                 driver_id=driver_id, branch_id=paytest_branch_id,
                 rule_type="MinimumPay", amount="200.00",
                 effective_from=PERIOD_A_START, effective_to=PERIOD_A_END,
-            ) as rule_id:
+            ):
                 await _advance_to_approved(session_client, auth_token, pid)
                 preview_resp = await session_client.get(
                     f"/payroll/periods/{pid}/finalization-preview", headers=auth(auth_token),
@@ -2122,9 +2119,9 @@ class TestDacAndFutureRuleBoundary:
                 assert r2.status_code == 200
 
                 lines_1 = await _get_status_pay_lines(direct_db, pid, driver_id)
-                lines_1 = [l for l in lines_1 if l["workdate"] == datetime.date.fromisoformat(DATE_FEB02)]
+                lines_1 = [line for line in lines_1 if line["workdate"] == datetime.date.fromisoformat(DATE_FEB02)]
                 lines_2 = await _get_status_pay_lines(direct_db, pid, driver_id)
-                lines_2 = [l for l in lines_2 if l["workdate"] == datetime.date.fromisoformat(DATE_FEB03)]
+                lines_2 = [line for line in lines_2 if line["workdate"] == datetime.date.fromisoformat(DATE_FEB03)]
                 assert len(lines_1) == 1 and len(lines_2) == 1
                 amt_1 = Decimal(str(lines_1[0]["calculatedamount"]))
                 amt_2 = Decimal(str(lines_2[0]["calculatedamount"]))

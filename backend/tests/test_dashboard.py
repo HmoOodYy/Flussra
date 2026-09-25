@@ -29,10 +29,9 @@ Test matrix:
      18. Admin (all perms): pending_transfers is int, transfers section available.
 """
 import itertools
-import pytest
-import pytest_asyncio
-import httpx
 from uuid import uuid4
+
+import httpx
 
 _counter = itertools.count(500)
 

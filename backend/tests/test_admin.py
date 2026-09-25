@@ -32,10 +32,12 @@ TestListRoles        — returns seeded roles, scope guard
 TestListPermissions  — returns seeded permissions, scope guard
 TestAdminAudit       — rollback when audit fails on create_user, rollback on assign_role
 """
+from unittest.mock import patch
+
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
-from unittest.mock import patch
+
 from app.admin import service as admin_service
 
 
@@ -1139,7 +1141,6 @@ class TestAdminAudit:
             f"/admin/users/{target_user_id}/roles",
             headers=auth(auth_token),
         )
-        before_count = len(before_resp.json())
 
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on assign_role")

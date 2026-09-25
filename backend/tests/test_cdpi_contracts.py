@@ -11,24 +11,23 @@ Part B — permission guard tests (integration, uses direct_db):
   require_cdpi_branch_edit and require_cdpi_company_edit.
 """
 import uuid
+
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import text as _text
 
+from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
 from app.cdpi.schemas import (
-    CdpiStatus,
+    _MAX_UNIT_LENGTH,
+    CdpiCalcMethodKey,
     CdpiEventType,
     CdpiInputType,
-    CdpiCalcMethodKey,
     CdpiRequestDraftFields,
-    validate_input_type,
+    CdpiStatus,
     validate_calc_method_key,
-    validate_unit,
-    _MAX_UNIT_LENGTH,
+    validate_input_type,
 )
-from app.cdpi.guards import require_cdpi_branch_edit, require_cdpi_company_edit
-
 
 # ===========================================================================
 # Part A — contracts (pure Python, no DB)
