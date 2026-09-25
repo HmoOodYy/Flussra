@@ -410,7 +410,6 @@ class TestSnapshotHelpers:
             await direct_db.commit()
 
 
-@pytest.mark.asyncio
 class TestIsSnapshotRowEligibleForWorkdate:
     """Unit tests for _is_snapshot_row_eligible_for_workdate (pure logic)."""
 
