@@ -30,7 +30,7 @@ class SetupWarning(BaseModel):
     code: str
     """
     Known codes:
-      BRANCH_NO_PAYROLL_SETTINGS    — branch has no BranchPayrollSettings row
+      BRANCH_NO_PAYROLL_SETTINGS    — no complete canonical Payroll Setup schedule
       OPEN_PERIOD_NEEDS_MANAGER_REVIEW — open/in-review period has NeedsManagerReview draft lines
       DRIVERS_NO_APPROVED_RATE      — active driver(s) have zero Approved DriverRates
                                        (broad check — does not validate per-rate-type completeness)
