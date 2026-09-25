@@ -42,7 +42,7 @@ DATE_JUN27 = "2089-06-27"
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_db_conn) -> int:
+async def cp5_branch_id(session_db_conn) -> int:
     row = (await session_db_conn.execute(_text("""
         INSERT INTO core.branches
             (companyid, branchcode, branchname, status, isdefault)
@@ -56,15 +56,15 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(
+async def cp5_driver_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    cp5_branch_id: int,
 ) -> int:
     response = await session_client.post(
         "/core/drivers",
         json={
-            "branch_id": paytest_branch_id,
+            "branch_id": cp5_branch_id,
             "full_name": "CP5 Isolated Driver",
             "driver_code": f"CP5-D-{uuid4().hex[:10]}",
         },
@@ -330,7 +330,7 @@ class TestDriverEligibilityByDate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
@@ -338,11 +338,11 @@ class TestDriverEligibilityByDate:
         2089-06-21 (two days before hire).
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 HireMid Driver", hire_date=DATE_JUN23,
         )
         try:
@@ -357,25 +357,25 @@ class TestDriverEligibilityByDate:
                 f"Driver hired {DATE_JUN23} must not appear on {DATE_JUN21}"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_driver_hired_midperiod_visible_from_hire_date(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
         Same driver (hire_date=2089-06-23) MUST appear on 2089-06-23 and later.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 HireVis Driver", hire_date=DATE_JUN23,
         )
         try:
@@ -391,25 +391,25 @@ class TestDriverEligibilityByDate:
                     f"Driver hired {DATE_JUN23} must appear on {wdate}"
                 )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_driver_terminated_midperiod_absent_after_termination(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
         Driver terminated on 2089-06-25 must NOT appear on 2089-06-27.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 TermAbsent Driver",
         )
         await _set_termination_date(
@@ -427,25 +427,25 @@ class TestDriverEligibilityByDate:
                 f"Driver terminated {DATE_JUN25} must not appear on {DATE_JUN27}"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_driver_terminated_midperiod_visible_until_termination(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
         Driver terminated on 2089-06-25 must appear on 2089-06-25 (inclusive).
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 TermVis Driver",
         )
         await _set_termination_date(
@@ -464,7 +464,7 @@ class TestDriverEligibilityByDate:
                     f"Driver terminated {DATE_JUN25} must appear on {wdate}"
                 )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -478,8 +478,8 @@ class TestSavedLinePersistsAfterTermination:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
+        cp5_branch_id: int,
+        cp5_driver_id: int,
         direct_db,
     ):
         """
@@ -490,14 +490,14 @@ class TestSavedLinePersistsAfterTermination:
         so the session fixture is not permanently disrupted.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         # Add a line on JUN23 for the main paytest driver
         line_resp = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={
-                "driver_id": paytest_driver_id,
+                "driver_id": cp5_driver_id,
                 "work_date": DATE_JUN23,
                 "line_type": "DailyNote",
                 "quantity": 1,
@@ -510,7 +510,7 @@ class TestSavedLinePersistsAfterTermination:
 
         # Now set a termination date BEFORE the line's work_date
         await _set_termination_date(
-            session_client, auth_token, paytest_driver_id, DATE_JUN21
+            session_client, auth_token, cp5_driver_id, DATE_JUN21
         )
         try:
             # The line must still be retrievable via GET /lines
@@ -526,11 +526,11 @@ class TestSavedLinePersistsAfterTermination:
         finally:
             # Restore: clear termination_date so the driver is active again
             await session_client.patch(
-                f"/core/drivers/{paytest_driver_id}",
+                f"/core/drivers/{cp5_driver_id}",
                 json={"termination_date": None},
                 headers=headers,
             )
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -544,8 +544,8 @@ class TestRateLookupByWorkDate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
+        cp5_branch_id: int,
+        cp5_driver_id: int,
         direct_db,
     ):
         """
@@ -558,8 +558,8 @@ class TestRateLookupByWorkDate:
         not the date the rate was entered into the system.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         # Get HOURLY rate type
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
@@ -568,7 +568,7 @@ class TestRateLookupByWorkDate:
         line_resp = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={
-                "driver_id": paytest_driver_id,
+                "driver_id": cp5_driver_id,
                 "work_date": DATE_JUN23,
                 "line_type": "HOURS",
                 "quantity": 8,
@@ -588,7 +588,7 @@ class TestRateLookupByWorkDate:
         effective_from = "2089-06-01"  # before JUN23, making it valid for JUN23
         rate_id = await _create_and_approve_rate(
             session_client, auth_token,
-            paytest_driver_id, hourly_rt_id,
+            cp5_driver_id, hourly_rt_id,
             amount="30.00",
             effective_from=effective_from,
         )
@@ -617,15 +617,15 @@ class TestRateLookupByWorkDate:
                 f"/payroll/rates/{rate_id}",
                 headers=headers,
             )
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_pending_rate_not_used_for_calculation(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
+        cp5_branch_id: int,
+        cp5_driver_id: int,
         direct_db,
     ):
         """
@@ -634,8 +634,8 @@ class TestRateLookupByWorkDate:
         if only a Pending rate exists for the work_date.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
@@ -643,7 +643,7 @@ class TestRateLookupByWorkDate:
         rc = await session_client.post(
             "/payroll/rates",
             json={
-                "driver_id": paytest_driver_id,
+                "driver_id": cp5_driver_id,
                 "rate_type_id": hourly_rt_id,
                 "amount": "99.00",
                 "effective_from": "2089-06-01",
@@ -659,7 +659,7 @@ class TestRateLookupByWorkDate:
             line_resp = await session_client.post(
                 f"/payroll/periods/{pid}/lines",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_id": cp5_driver_id,
                     "work_date": DATE_JUN23,
                     "line_type": "HOURS",
                     "quantity": 5,
@@ -677,14 +677,14 @@ class TestRateLookupByWorkDate:
                 )
         finally:
             await session_client.delete(f"/payroll/rates/{pending_rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
     @pytest.mark.asyncio
     async def test_missing_approved_rate_sets_needs_manager_review(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
@@ -694,12 +694,12 @@ class TestRateLookupByWorkDate:
         Uses a fresh driver with no rates to guarantee isolation.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         # Create a fresh driver with no rates
         fresh_driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 NoRate Driver 2089",
         )
         try:
@@ -722,7 +722,7 @@ class TestRateLookupByWorkDate:
                 "needsmanagerreview must be True when no approved rate exists"
             )
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +736,7 @@ class TestSubmitAutoRefresh:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
@@ -753,14 +753,14 @@ class TestSubmitAutoRefresh:
         each line after a rate is approved.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
 
         # Fresh driver — no rates
         fresh_driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 SubmitRefresh Driver",
         )
 
@@ -816,7 +816,7 @@ class TestSubmitAutoRefresh:
             assert Decimal(str(hours_line["calculated_amount"])) == Decimal("250.0000")
         finally:
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
 
 
 # ---------------------------------------------------------------------------
@@ -830,7 +830,7 @@ class TestFinalizeAutoRefresh:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
@@ -848,12 +848,12 @@ class TestFinalizeAutoRefresh:
         This is the strictest form of the backdated-rate scenario.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         fresh_driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 FinalRefresh Driver",
         )
 
@@ -955,7 +955,7 @@ class TestLockedPeriodNotMutated:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
@@ -975,15 +975,15 @@ class TestLockedPeriodNotMutated:
         isolated driver ensures this does not contaminate other tests.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         # Isolated driver: rate stays in PayrollFinalLines after finalization
         # (Phase 5 guard would reject a void attempt) but does not contaminate
         # the shared paytest_driver_id used by other test modules.
         isolated_driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id,
+            session_client, auth_token, cp5_branch_id,
             "CP5 LockedNotMutated Driver",
         )
         rate_id = await _create_and_approve_rate(
@@ -1066,15 +1066,15 @@ class TestODASecurityRegression:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        cp5_branch_id: int,
         direct_db,
     ):
         """
         CP-5 changes must not relax any ODA/Driver access boundaries.
         ODA users must still receive 403 on GET day-grid.
         """
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
+        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
+        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
         role_id = await _create_role_with_perms(
             session_client, auth_token,
@@ -1084,7 +1084,7 @@ class TestODASecurityRegression:
             session_client, auth_token,
             "cp5_oda_dg_user", role_id,
             scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            branch_id=cp5_branch_id,
         )
         try:
             resp = await session_client.get(
@@ -1094,4 +1094,4 @@ class TestODASecurityRegression:
             )
             assert resp.status_code == 403
         finally:
-            await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
+            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
