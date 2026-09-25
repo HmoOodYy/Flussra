@@ -17,6 +17,7 @@ Dates: 2094-* — isolated year.  Run from backend/:
 """
 import datetime
 import itertools
+import uuid
 
 import httpx
 import psycopg2
@@ -117,6 +118,25 @@ async def _reject_to_returned(client, token, ri_id) -> None:
         headers=_auth(token),
     )
     assert dec.status_code == 200, f"reject: {dec.text}"
+
+
+async def _create_cp1b_driver(client, token: str, branch_id: int) -> int:
+    """
+    Create a CP-1B-owned driver on the given branch; return its driver_id.
+
+    TestDeterministicConcurrency seeds an approved HOURLY rate for its driver.
+    Doing that on the session-scoped paytest_driver_id leaked a future-dated
+    Approved rate into later tests (e.g. backdated approvals then hit the
+    future-approved-rate conflict guard), so the rate-dependent scenarios use
+    their own driver instead.
+    """
+    r = await client.post(
+        "/core/drivers",
+        json={"branch_id": branch_id, "full_name": f"CP1B Driver {uuid.uuid4().hex[:8]}"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 201, f"create CP-1B driver: {r.text}"
+    return r.json()["driver_id"]
 
 
 async def _ensure_hourly_rate(
@@ -542,7 +562,7 @@ class TestDeterministicConcurrency:
     """
 
     async def _setup(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
+        self, session_client, auth_token, paytest_branch_id, direct_db
     ) -> tuple[int, str, int, str, int, int, int]:
         """
         Build test fixture:
@@ -558,16 +578,18 @@ class TestDeterministicConcurrency:
         """
         await _cancel_active(direct_db, paytest_branch_id)
 
-        # Ensure an approved HOURLY rate exists for the driver (idempotent).
-        await _ensure_hourly_rate(session_client, auth_token, paytest_driver_id, direct_db)
+        driver_id = await _create_cp1b_driver(session_client, auth_token, paytest_branch_id)
+
+        # Seed an approved HOURLY rate for this test's own driver.
+        await _ensure_hourly_rate(session_client, auth_token, driver_id, direct_db)
 
         # Period A: Draft → Open → DailyNote line → HOURS line → InReview → Returned
         pid_a, start_a = await _create_and_open_period(
             session_client, auth_token, paytest_branch_id, direct_db
         )
-        await _add_line(session_client, auth_token, pid_a, paytest_driver_id, start_a)
+        await _add_line(session_client, auth_token, pid_a, driver_id, start_a)
         hours_a = await _add_hours_line(
-            session_client, auth_token, pid_a, paytest_driver_id, start_a
+            session_client, auth_token, pid_a, driver_id, start_a
         )
         ri_a = await _submit_to_inreview(session_client, auth_token, pid_a)
         await _reject_to_returned(session_client, auth_token, ri_a)
@@ -590,9 +612,9 @@ class TestDeterministicConcurrency:
         )).mappings().first()
         pid_b = b_row["payrollperiodid"]
 
-        await _add_line(session_client, auth_token, pid_b, paytest_driver_id, start_b)
+        await _add_line(session_client, auth_token, pid_b, driver_id, start_b)
         hours_b = await _add_hours_line(
-            session_client, auth_token, pid_b, paytest_driver_id, start_b
+            session_client, auth_token, pid_b, driver_id, start_b
         )
 
         # Stale-ify both HOURS lines so refresh mutations are visible as rollback proof.
@@ -608,7 +630,6 @@ class TestDeterministicConcurrency:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
-        paytest_driver_id: int,
         direct_db,
     ):
         """
@@ -626,7 +647,7 @@ class TestDeterministicConcurrency:
         """
         (pid_open, start_open, pid_returned, start_returned, ri_old,
          hours_line_open, hours_line_returned) = await self._setup(
-            session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
+            session_client, auth_token, paytest_branch_id, direct_db
         )
 
         pre_audit = (await direct_db.execute(
@@ -698,7 +719,6 @@ class TestDeterministicConcurrency:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
-        paytest_driver_id: int,
         direct_db,
     ):
         """
@@ -714,7 +734,7 @@ class TestDeterministicConcurrency:
         """
         (pid_open, start_open, pid_returned, start_returned, ri_old,
          hours_line_open, hours_line_returned) = await self._setup(
-            session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db
+            session_client, auth_token, paytest_branch_id, direct_db
         )
 
         pre_audit_open = (await direct_db.execute(
