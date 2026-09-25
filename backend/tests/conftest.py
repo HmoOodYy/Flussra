@@ -17,11 +17,21 @@ import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+import httpx
+import psycopg2
+import pytest
+import pytest_asyncio
+import testing.postgresql
+from fastapi import FastAPI
+from httpx import ASGITransport
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+
 
 # ---------------------------------------------------------------------------
 # On Windows, PostgreSQL bin/ is typically NOT on PATH.
 # testing.postgresql calls find_program('initdb', ['bin']) which searches PATH,
 # so we prepend the highest-version PG bin dir before the first fixture runs.
+# Only fixture-time Postgresql() construction reads PATH, so imports need not follow this.
 # ---------------------------------------------------------------------------
 def _find_pg_bin() -> str | None:
     """Return the PostgreSQL bin directory, preferring the highest version."""
@@ -38,15 +48,6 @@ def _find_pg_bin() -> str | None:
 _PG_BIN = _find_pg_bin()
 if _PG_BIN and _PG_BIN not in os.environ.get("PATH", ""):
     os.environ["PATH"] = _PG_BIN + os.pathsep + os.environ.get("PATH", "")
-
-import httpx
-import psycopg2
-import pytest
-import pytest_asyncio
-import testing.postgresql
-from fastapi import FastAPI
-from httpx import ASGITransport
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 
 def _stop_test_postgresql_safely(pg: testing.postgresql.Postgresql) -> None:

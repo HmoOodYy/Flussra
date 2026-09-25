@@ -18,8 +18,11 @@ Race safety:
 All database access is raw parameterised SQL via sqlalchemy.text().
 """
 import json
+import random as _random
 import secrets
 import string as _string
+from datetime import date as _date
+from datetime import timedelta as _timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, status
@@ -31,9 +34,20 @@ from app.core.service import _build_in_clause, _check_branch_access, _check_perm
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
+    BranchPayItemConfigVersion,
+    BranchPayItemState,
     BranchUpdate,
     CompanyProfile,
     CompanyUpdate,
+    CustomPayItem,
+    CustomPayItemCreate,
+    CustomPayItemDeleteResult,
+    CustomPayItemRequest,
+    CustomPayItemRequestCreate,
+    CustomPayItemRequestDecide,
+    CustomPayItemUpdate,
+    CustomPayItemUsage,
+    PayItemConfigUpdate,
     PayItemRateTypeMapCreate,
     PayItemRateTypeMapSummary,
     PayrollSetup,
@@ -1192,9 +1206,6 @@ async def upsert_payroll_setup(
 # Payroll status keys
 # ===========================================================================
 
-import random as _random
-import string as _string
-
 _SK_CODE_CHARS = _string.ascii_uppercase + _string.digits
 
 
@@ -1996,23 +2007,6 @@ async def _ensure_default_status_rate_column_for_branch(
 # ===========================================================================
 # Pay items & branch configuration
 # ===========================================================================
-
-from datetime import date as _date  # noqa: E402
-from datetime import timedelta as _timedelta
-
-from app.settings.schemas import (  # noqa: E402
-    BranchPayItemConfigVersion,
-    BranchPayItemState,
-    CustomPayItem,
-    CustomPayItemCreate,
-    CustomPayItemDeleteResult,
-    CustomPayItemRequest,
-    CustomPayItemRequestCreate,
-    CustomPayItemRequestDecide,
-    CustomPayItemUpdate,
-    CustomPayItemUsage,
-    PayItemConfigUpdate,
-)
 
 _SETTINGS_AUDIT_REASONS.update({
     "PAY_ITEM_CONFIG_CREATED":        "Branch pay item configuration created",
