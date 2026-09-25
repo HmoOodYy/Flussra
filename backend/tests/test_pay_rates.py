@@ -968,9 +968,10 @@ class TestMatrixHistoricalAsOf:
         )
         assert cr_a.status_code == 201, cr_a.text
         rate_a_id = cr_a.json()["driver_rate_id"]
-        await session_client.post(
+        approve_a = await session_client.post(
             f"/payroll/rates/{rate_a_id}/approve", headers=auth(auth_token)
         )
+        assert approve_a.status_code == 200, approve_a.text
 
         # Rate B: newer effective date, amount 88.88 (supersedes A)
         cr_b = await session_client.post(
@@ -985,9 +986,10 @@ class TestMatrixHistoricalAsOf:
         )
         assert cr_b.status_code == 201, cr_b.text
         rate_b_id = cr_b.json()["driver_rate_id"]
-        await session_client.post(
+        approve_b = await session_client.post(
             f"/payroll/rates/{rate_b_id}/approve", headers=auth(auth_token)
         )
+        assert approve_b.status_code == 200, approve_b.text
 
         # Verify Rate A is now Superseded (approve of B superseded A)
         rate_a_resp = await session_client.get(
