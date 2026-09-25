@@ -1034,6 +1034,26 @@ class TestMatrixHistoricalAsOf:
         # (asserted above) confirms the approval + supersession logic works.
 
 
+async def _delete_direct_cdpi_item(db, pay_item_id: int) -> None:
+    """
+    Remove a never-used direct-created CDPI item and its generated rate graph.
+
+    DELETE /settings/pay-items/{id} deliberately retires CDPI items (their
+    CdpiDefinitions row is ON DELETE RESTRICT) and leaves the generated
+    CDPI_{id}_PER_UNIT RateType active in the company catalog, so a test that
+    must not leak that RateType removes exactly the rows it created.
+    """
+    params = {"pid": pay_item_id, "code": f"CDPI_{pay_item_id}_PER_UNIT"}
+    for sql in (
+        "DELETE FROM payroll.payitemrateslots WHERE payitemid = :pid",
+        "DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid",
+        "DELETE FROM payroll.ratetypes WHERE ratecode = :code",
+        "DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid",
+        "DELETE FROM payroll.payitems WHERE payitemid = :pid",
+    ):
+        await db.execute(_sqla_text(sql), params)
+
+
 # ---------------------------------------------------------------------------
 # TestCreateRateBranchValidation  (Fix 8)
 # ---------------------------------------------------------------------------
@@ -1067,39 +1087,62 @@ class TestCreateRateBranchValidation:
         assert resp.status_code == 201
 
     @pytest.mark.asyncio
-    async def test_create_rate_for_inactive_rate_type_fails(
+    async def test_create_rate_for_branch_inactive_cdpi_rate_type_fails(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         created_driver_id: int,
+        direct_db,
     ):
-        """A rate type with no BranchPayItemConfig mapping → 422."""
-        rt_create = await session_client.post(
-            "/payroll/rate-types",
-            json={
-                "rate_code": "UNMAPPED_TEST",
-                "rate_name": "Unmapped Test Rate",
-                "unit_name": "unit",
-                "is_active": True,
-            },
-            headers=auth(auth_token),
-        )
-        if rt_create.status_code not in (200, 201):
-            pytest.skip(f"Could not create test rate type: {rt_create.text}")
-        new_rt_id = rt_create.json()["rate_type_id"]
+        """
+        An active, company-owned rate type whose only mapped Pay Item is not
+        active for the driver's branch → 422.
 
-        resp = await session_client.post(
-            "/payroll/rates",
+        A direct-created CDPI PerUnit item gets its own RateType + mapping but
+        starts inactive on every branch (IsDefaultBranchActive=FALSE, no
+        BranchPayItemConfig rows), so the rate type passes the existence and
+        company-ownership checks and is rejected only by the branch check.
+        """
+        item_resp = await session_client.post(
+            "/settings/cdpi/direct-company-items",
             json={
-                "driver_id": created_driver_id,
-                "rate_type_id": new_rt_id,
-                "amount": "5.00",
-                "effective_from": "2037-01-01",
+                "item_name": f"Branch Inactive Rate Guard {uuid4().hex[:8]}",
+                "input_type": "Number",
+                "calc_method_key": "PerUnit",
             },
             headers=auth(auth_token),
         )
-        assert resp.status_code == 422
-        assert "not active" in resp.json()["detail"].lower()
+        assert item_resp.status_code == 201, item_resp.text
+        pay_item_id = item_resp.json()["pay_item_id"]
+        rate_code = f"CDPI_{pay_item_id}_PER_UNIT"
+
+        try:
+            rt_resp = await session_client.get("/payroll/rate-types", headers=auth(auth_token))
+            assert rt_resp.status_code == 200, rt_resp.text
+            cdpi_rt = next((r for r in rt_resp.json() if r["rate_code"] == rate_code), None)
+            assert cdpi_rt is not None, f"{rate_code} missing from the rate-type catalog"
+            assert cdpi_rt["is_active"] is True
+
+            resp = await session_client.post(
+                "/payroll/rates",
+                json={
+                    "driver_id": created_driver_id,
+                    "rate_type_id": cdpi_rt["rate_type_id"],
+                    "amount": "5.00",
+                    "effective_from": "2037-01-01",
+                },
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 422, resp.text
+            assert resp.json()["detail"] == "This rate type is not active for this driver's branch."
+        finally:
+            await _delete_direct_cdpi_item(direct_db, pay_item_id)
+
+        after = await session_client.get("/payroll/rate-types", headers=auth(auth_token))
+        assert after.status_code == 200, after.text
+        assert all(r["rate_code"] != rate_code for r in after.json()), (
+            f"{rate_code} must not remain in the rate-type catalog after cleanup"
+        )
 
 
 # ---------------------------------------------------------------------------
