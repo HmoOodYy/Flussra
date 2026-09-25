@@ -11,7 +11,7 @@ Covers:
 """
 from datetime import date, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -659,7 +659,7 @@ class PayItemConfigUpdate(BaseModel):
 # Bulk branch pay item configuration (M12)
 # ---------------------------------------------------------------------------
 
-class BulkPayItemTarget(str, Enum):
+class BulkPayItemTarget(StrEnum):
     """Whether the bulk update applies to all active branches or a selected subset."""
     AllBranches      = "AllBranches"
     SelectedBranches = "SelectedBranches"

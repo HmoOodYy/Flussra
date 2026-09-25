@@ -5,7 +5,7 @@ Covers the shared request container, status/event enumerations, and pure
 validation helpers.  No services, routers, or DB access.
 """
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # Lifecycle status enumeration
 # ---------------------------------------------------------------------------
 
-class CdpiStatus(str, Enum):
+class CdpiStatus(StrEnum):
     """Valid values for CdpiRequests.Status.
 
     ReturnedToDraft is an event type (CdpiEventType), not a separate status.
@@ -30,7 +30,7 @@ class CdpiStatus(str, Enum):
 # Event type enumeration
 # ---------------------------------------------------------------------------
 
-class CdpiEventType(str, Enum):
+class CdpiEventType(StrEnum):
     """Valid values for CdpiRequestEvents.EventType.
 
     ReturnedToDraft is an event type, not a request status.
@@ -48,13 +48,13 @@ class CdpiEventType(str, Enum):
 # Domain value enumerations
 # ---------------------------------------------------------------------------
 
-class CdpiInputType(str, Enum):
+class CdpiInputType(StrEnum):
     """Permitted values for CdpiRequests.InputType."""
     Time = "Time"
     Number = "Number"
 
 
-class CdpiCalcMethodKey(str, Enum):
+class CdpiCalcMethodKey(StrEnum):
     """Permitted values for CdpiRequests.CalcMethodKey."""
     PerUnit = "PerUnit"
     OrdinalTier = "OrdinalTier"
@@ -231,7 +231,7 @@ class CdpiSubmitRequest(BaseModel):
     expected_revision: int
 
 
-class CdpiDecideAction(str, Enum):
+class CdpiDecideAction(StrEnum):
     """Permitted decision actions for POST /settings/cdpi/requests/{id}/decide."""
     ReturnToDraft = "ReturnToDraft"
     Reject = "Reject"
