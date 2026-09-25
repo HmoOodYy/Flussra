@@ -95,8 +95,10 @@ class BranchAdmin(BaseModel):
     notes: str | None = None
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
-    # Operational metrics (gracefully degraded — None if query failed)
+    # Compatibility readiness flag is derived from canonical Payroll Setup authority.
     payroll_setup_done: bool = False
+    # Null unless caller has branch payroll.view/non-driver access or onboarding assign access.
+    schedule_readiness_reason: str | None = None
     status_keys_count: int | None = None
     total_people_count: int | None = None
     active_drivers_count: int | None = None
@@ -115,6 +117,7 @@ class BranchCreate(BaseModel):
     postal_code: str | None = None
     country: str | None = None
     notes: str | None = None
+    first_payroll_start_date: date | None = None
 
     @field_validator("branch_name")
     @classmethod

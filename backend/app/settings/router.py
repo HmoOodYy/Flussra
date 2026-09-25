@@ -170,9 +170,13 @@ async def get_branch(
     description=(
         "Creates a branch for the authenticated user's company.  "
         "`branch_code` is auto-generated from `branch_name` when omitted.  "
+        "An optional `first_payroll_start_date` onboards the branch to the "
+        "company's current default Payroll Setup; it requires "
+        "`payroll_setup.assign`.  "
         "If `is_default=true`, all other branches lose their default flag "
         "atomically.\n\n"
-        "Requires AllCompanyBranches scope."
+        "Requires AllCompanyBranches scope and `branches.create`; driver-only "
+        "roles are not permitted."
     ),
     responses={
         403: {"description": "Insufficient scope (requires all-branches access)"},

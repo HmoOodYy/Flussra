@@ -30,7 +30,16 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _build_in_clause, _check_branch_access, _check_permission
+from app.core.service import (
+    _build_in_clause,
+    _check_branch_access,
+    _check_permission,
+    _require_not_driver_role,
+)
+from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.locks import lock_company, lock_setups
+from app.payroll_setup.policy import assign_setup
+from app.payroll_setup.readiness import branch_schedule_readiness
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
@@ -197,6 +206,44 @@ async def _ensure_company_admin(
     await _check_permission(company_id, user_id, None, "setup.manage", db)
 
 
+async def _ensure_branch_creator(
+    company_id: int, user_id: int, db: AsyncConnection,
+    *, with_payroll_start: bool,
+) -> None:
+    """Require the explicit company-wide branch-create authorization contract."""
+    can_see_all, _ = await _check_branch_access(company_id, user_id, db)
+    if not can_see_all:
+        raise HTTPException(status_code=403, detail="This action requires company-level (all-branches) access.")
+    await _require_not_driver_role(company_id, user_id, db)
+    await _check_permission(company_id, user_id, None, "branches.create", db)
+    if with_payroll_start:
+        await _check_permission(company_id, user_id, None, "payroll_setup.assign", db)
+
+
+async def _attach_readiness_reasons(
+    branches: list[BranchAdmin], company_id: int, user_id: int,
+    db: AsyncConnection,
+) -> None:
+    """Expose reason codes only to non-drivers with payroll.view on each branch."""
+    if not branches:
+        return
+    try:
+        await _require_not_driver_role(company_id, user_id, db)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return
+        raise
+    for branch in branches:
+        try:
+            await _check_permission(company_id, user_id, branch.branch_id, "payroll.view", db)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                continue
+            raise
+        _, reason = await branch_schedule_readiness(company_id, branch.branch_id, db)
+        branch.schedule_readiness_reason = reason
+
+
 def _generate_branch_code() -> str:
     """
     Generate a random branch code in the format BR_XXXXXXXX where XXXXXXXX
@@ -239,14 +286,16 @@ async def _fetch_branch_metrics(
     db: AsyncConnection,
 ) -> dict[int, dict]:
     """
-    Run 5 branch-metric queries against the given branch IDs.
+    Resolve canonical Payroll Setup readiness for each branch and run four
+    operational metric queries against the given branch IDs.
 
-    Each query is individually wrapped in try/except so a missing table or
-    failing index on one metric does not prevent the other four from loading.
+    Each operational query is individually wrapped in try/except so a missing
+    table or failing index on one metric does not prevent the other three from
+    loading.
 
     Returns dict[branch_id → {metric_name: value}].  A missing key in the
-    inner dict means that metric query failed; callers substitute safe
-    defaults (False / 0 / None).
+    inner dict means an operational metric query failed; callers substitute
+    safe defaults (0 / None). Readiness resolution failures are not suppressed.
     """
     if not branch_ids:
         return {}
@@ -258,22 +307,11 @@ async def _fetch_branch_metrics(
     def _put(bid: int, key: str, val) -> None:
         result.setdefault(bid, {})[key] = val
 
-    # 1 — Payroll setup done: branch has an active BranchPayrollSettings row.
-    try:
-        r = await db.execute(
-            text(f"""
-                SELECT branchid
-                FROM   payroll.branchpayrollsettings
-                WHERE  companyid = :cid
-                  AND  isactive  = TRUE
-                  AND  branchid IN ({in_clause})
-            """),
-            base,
-        )
-        for row in r.mappings().all():
-            _put(row["branchid"], "payroll_setup_done", True)
-    except Exception:
-        pass  # graceful degradation — key stays absent
+    # 1 — Canonical Payroll Setup readiness; never consult legacy settings.
+    for branch_id in branch_ids:
+        ready, _ = await branch_schedule_readiness(company_id, branch_id, db)
+        if ready:
+            _put(branch_id, "payroll_setup_done", True)
 
     # 2 — Active status-keys count.
     try:
@@ -563,7 +601,9 @@ async def get_branches(
 
     all_ids = [r["branchid"] for r in rows]
     metrics = await _fetch_branch_metrics(company_id, all_ids, db)
-    return [_row_to_branch_admin(r, metrics) for r in rows]
+    branches = [_row_to_branch_admin(r, metrics) for r in rows]
+    await _attach_readiness_reasons(branches, company_id, user_id, db)
+    return branches
 
 
 async def get_branch_by_id(
@@ -597,7 +637,9 @@ async def get_branch_by_id(
         )
 
     metrics = await _fetch_branch_metrics(company_id, [branch_id], db)
-    return _row_to_branch_admin(row, metrics)
+    branch = _row_to_branch_admin(row, metrics)
+    await _attach_readiness_reasons([branch], company_id, user_id, db)
+    return branch
 
 
 async def create_branch(
@@ -613,7 +655,29 @@ async def create_branch(
     If is_default=True, all existing defaults are cleared first.
     Requires AllCompanyBranches scope.
     """
-    await _ensure_company_admin(company_id, user_id, db)
+    await _ensure_branch_creator(
+        company_id, user_id, db,
+        with_payroll_start=data.first_payroll_start_date is not None,
+    )
+
+    default_setup_id = None
+    if data.first_payroll_start_date is not None:
+        await lock_company(company_id, db)
+        default_result = await db.execute(text(
+            "SELECT DefaultPayrollSetupID FROM core.Companies WHERE CompanyID = :cid"
+        ), {"cid": company_id})
+        default_setup_id = default_result.scalar_one_or_none()
+        if default_setup_id is not None:
+            await lock_setups(company_id, [default_setup_id], db)
+            setup_result = await db.execute(text("""
+                SELECT Status FROM payroll.PayrollSetups
+                WHERE CompanyID = :cid AND PayrollSetupID = :sid
+            """), {"cid": company_id, "sid": default_setup_id})
+            setup_status = setup_result.scalar_one_or_none()
+            if setup_status is None:
+                raise PolicyError("SETUP_NOT_FOUND", "Company default Payroll Setup does not belong to Company")
+            if setup_status != "Active":
+                raise PolicyError("SETUP_NOT_ACTIVE", "Company default Payroll Setup is not Active")
 
     explicit_code = bool(data.branch_code)
     branch_code = data.branch_code.upper() if explicit_code else _generate_branch_code()
@@ -705,7 +769,24 @@ async def create_branch(
     # CP-2D2: every new branch gets a default Status Pay rate column automatically.
     await _ensure_default_status_rate_column_for_branch(company_id, new_id, db)
 
-    return await get_branch_by_id(new_id, company_id, user_id, db)
+    if data.first_payroll_start_date is not None and default_setup_id is not None:
+        await assign_setup(
+            company_id, user_id, new_id, default_setup_id,
+            data.first_payroll_start_date, db,
+            reason="Initial branch Payroll Setup assignment",
+        )
+
+    created = await get_branch_by_id(new_id, company_id, user_id, db)
+    ready, reason = await branch_schedule_readiness(
+        company_id, new_id, db, period_start_date=data.first_payroll_start_date,
+    )
+    created.payroll_setup_done = ready
+    if data.first_payroll_start_date is not None:
+        # The supplied-date path already passed company-wide payroll_setup.assign.
+        created.schedule_readiness_reason = (
+            "NO_COMPANY_DEFAULT" if default_setup_id is None else reason
+        )
+    return created
 
 
 async def update_branch(
