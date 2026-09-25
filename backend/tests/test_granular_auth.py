@@ -856,11 +856,6 @@ class TestCompanyOwnerTriggerUpdate:
         import psycopg2
         import psycopg2.errors
 
-        # Get admin's current COMPANY_OWNER assignment ID (active)
-        users_r = await client.get("/admin/users", headers=_hdr(auth_token))
-        admin = next(u for u in users_r.json() if u["username"] == "admin")
-        owner_assignment_id = admin["company_role_assignment_id"]
-
         # Create a second user and insert a revoked COMPANY_OWNER row for them
         other = await _create_user(client, auth_token, "trigg_upd_other")
 

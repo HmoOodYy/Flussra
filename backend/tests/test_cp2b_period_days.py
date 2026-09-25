@@ -350,7 +350,7 @@ class TestCp2bPeriodDays:
     ):
         """D03: Candidate-created Open Week period has exactly 7 PayrollPeriodDays rows."""
         await _clean(direct_db, paytest_branch_id)
-        setup = await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
+        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
@@ -705,7 +705,6 @@ class TestCp2bPeriodDays:
 
         # Publish a future effective version after the period boundary.
         period_end = datetime.date.fromisoformat(result["end_date"])
-        new_anchor = (period_end + datetime.timedelta(days=1)).isoformat()
         setup_id = (await direct_db.execute(_text("""
             SELECT FrozenPayrollSetupID FROM payroll.PayrollPeriods
             WHERE PayrollPeriodID = :pid
@@ -758,7 +757,7 @@ class TestCp2bPeriodDays:
         assert len(rows_before) == 7
 
         # Promote Draft → Open by submitting
-        r = await session_client.post(
+        await session_client.post(
             f"/payroll/periods/{draft_id}/submit",
             headers=_auth(auth_token),
         )

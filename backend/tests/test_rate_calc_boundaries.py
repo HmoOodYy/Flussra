@@ -875,7 +875,7 @@ class TestRateCalculationBoundaries:
 
             # Void Rate A, approve Rate B ($30) — same effective date
             await session_client.delete(f"/payroll/rates/{rate_a_id}", headers=headers)
-            rate_b_id = await _create_and_approve_rate(
+            await _create_and_approve_rate(
                 session_client, auth_token,
                 driver_id, hourly_rt_id,
                 amount="30.00",
@@ -944,7 +944,7 @@ class TestRateCalculationBoundaries:
             "4B LockedImmutable Driver",
         )
 
-        rate_a_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             session_client, auth_token,
             driver_id, hourly_rt_id,
             amount="15.00",
@@ -992,7 +992,7 @@ class TestRateCalculationBoundaries:
             # so we supersede it instead by creating rate_c at a later effective date.
             # The immutability assertion below verifies FinalAmount is still $120 despite
             # the new rate — this is the core correctness guarantee under test.
-            rate_c_id = await _create_and_approve_rate(
+            await _create_and_approve_rate(
                 session_client, auth_token,
                 driver_id, hourly_rt_id,
                 amount="99.00",

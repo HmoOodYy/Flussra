@@ -361,7 +361,6 @@ class TestCp2cPayItemSnapshot:
             _text("SELECT payitemid FROM payroll.payitems LIMIT 1")
         )).mappings().first()
         assert pi_row, "No PayItems seeded"
-        pid = 999999999  # non-existent period — FK will fail first unless we bypass
 
         # Insert with invalid ItemScope — expect integrity error
         with pytest.raises(Exception) as exc_info:
@@ -1274,7 +1273,7 @@ class TestCp2cPayItemSnapshot:
 
         # Insert a custom Daily item (Period scope not needed; use None ratebehavior
         # so no rate computation is required).
-        item_id = (await direct_db.execute(
+        (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payitems
                     (companyid, payitemcode, payitemname, category, datatype,
@@ -1349,7 +1348,7 @@ class TestCp2cPayItemSnapshot:
         """S27: A custom Period item active in snapshot remains usable after live retire."""
         await _clean(direct_db, snap_branch_id)
 
-        item_id = (await direct_db.execute(
+        (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payitems
                     (companyid, payitemcode, payitemname, category, datatype,

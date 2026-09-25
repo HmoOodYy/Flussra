@@ -2362,8 +2362,6 @@ class TestZeroToMeaningfulRace:
         and proceeded to physical delete, orphaning the meaningful DraftLine.
         """
 
-        loop = asyncio.get_running_loop()
-
         cid = (await direct_db.execute(
             text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
             {"bid": paytest_branch_id},

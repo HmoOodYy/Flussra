@@ -976,7 +976,7 @@ class TestCopyRejected:
             direct_db, company_id, paytest_id, admin_id
         )
         try:
-            pending = await _submit(direct_db, company_id, admin_id, draft.request_id)
+            await _submit(direct_db, company_id, admin_id, draft.request_id)
             with pytest.raises(HTTPException) as exc_info:
                 await cdpi_service.copy_rejected(
                     company_id, hq_user_id, draft.request_id, direct_db
@@ -1082,7 +1082,7 @@ class TestScopeAndSafety:
             assert fetched.status == "PendingCompanyApproval"
 
             # Pending -> Rejected
-            rejected = await _decide(
+            await _decide(
                 direct_db, company_id, admin_id, draft.request_id,
                 CdpiDecideAction.Reject, pending.revision
             )

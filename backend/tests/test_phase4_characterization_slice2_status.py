@@ -1773,7 +1773,6 @@ class TestPreviewFinalizationDivergence:
 
                 lines_before = await _get_status_pay_lines(direct_db, pid, driver_id)
                 assert len(lines_before) == 1
-                draft_line_id = lines_before[0]["draftlineid"]
                 expected_source_id = f"STATUS_PAYMENT:{entry_state_id}:{status_key_id}:{src_col_id}"
                 assert lines_before[0]["sourceid"] == expected_source_id, (
                     f"Exact production SourceID format is "
@@ -1807,7 +1806,7 @@ class TestPreviewFinalizationDivergence:
                 # instant this rate is created, even though it's created
                 # partway through the test body -- a later assertion failure
                 # still unwinds and removes it along with everything else.
-                rate_b_id = await stack.enter_async_context(
+                await stack.enter_async_context(
                     _owned_driver_rate(
                         direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
                         "30.0000", "2099-01-01",
@@ -1908,7 +1907,7 @@ class TestMinMaxRealParticipation:
                 driver_id=driver_id, branch_id=paytest_branch_id,
                 rule_type="MinimumPay", amount="200.00",
                 effective_from=PERIOD_A_START, effective_to=PERIOD_A_END,
-            ) as rule_id:
+            ):
                 await _advance_to_approved(session_client, auth_token, pid)
                 preview_resp = await session_client.get(
                     f"/payroll/periods/{pid}/finalization-preview", headers=auth(auth_token),

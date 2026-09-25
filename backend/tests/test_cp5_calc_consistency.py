@@ -1073,7 +1073,6 @@ class TestODASecurityRegression:
         CP-5 changes must not relax any ODA/Driver access boundaries.
         ODA users must still receive 403 on GET day-grid.
         """
-        headers = auth(auth_token)
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = await _open_period(session_client, auth_token, paytest_branch_id, db=direct_db)
 

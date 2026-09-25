@@ -1783,7 +1783,7 @@ class TestPreviewFinalizeConsistencyCP5:
 
         # Replace rate
         await _void_rate(session_client, auth_token, old_rate_id)
-        new_rate_id = await _create_and_approve_rate_preview(
+        await _create_and_approve_rate_preview(
             session_client, auth_token,
             driver_id, rate_type_id,
             amount="35.00",

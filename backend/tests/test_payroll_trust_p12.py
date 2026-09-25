@@ -829,7 +829,6 @@ async def test_p12b_t1_void_rate_acquires_advisory_lock(
     would fail.
     """
     driver_id = None
-    pid = None
     conn_a = None
 
     try:
@@ -935,7 +934,7 @@ async def test_p12b_t2_approve_rate_backdating_guard_under_lock(
             session_client, auth_token, trust_branch_id,
             "12BT2AP", hire_date="2152-01-01",
         )
-        rate_a_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             session_client, auth_token, driver_id, rt_id, T12B2_START, amount="18.00",
         )
 
@@ -1218,7 +1217,6 @@ async def test_p12c_t2_stale_pending_void_blocked_after_approval(
     """
     driver_id = None
     rate_id_a = None
-    rate_id_b = None
 
     try:
         rt_id = await _get_rate_type_id(session_client, auth_token, "HOURLY")

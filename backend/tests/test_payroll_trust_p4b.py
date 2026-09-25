@@ -1164,7 +1164,6 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
     No DriverRate row must be created.
     """
     cid_b    = p4b_env["cid_b"]
-    bid_b    = p4b_env["bid_b"]
     pi_b_id  = p4b_env["pi_b_id"]
     rt_a_id  = p4b_env["rt_a_custom_id"]
     drv_b_id = p4b_env["driver_b_id"]

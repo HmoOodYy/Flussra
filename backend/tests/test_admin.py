@@ -1141,7 +1141,6 @@ class TestAdminAudit:
             f"/admin/users/{target_user_id}/roles",
             headers=auth(auth_token),
         )
-        before_count = len(before_resp.json())
 
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on assign_role")

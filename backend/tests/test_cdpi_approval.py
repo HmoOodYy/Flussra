@@ -1111,7 +1111,7 @@ class TestRegressionExistingDecideActions:
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
         req = await _make_pending_request(direct_db, company_id=cid, branch_id=hq_id,
                                           user_id=admin_id)
-        rejected = await cdpi_service.decide_request(
+        await cdpi_service.decide_request(
             cid, admin_id, req.request_id,
             CdpiDecideRequest(
                 action=CdpiDecideAction.Reject,

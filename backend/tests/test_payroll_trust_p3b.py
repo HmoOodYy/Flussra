@@ -423,7 +423,7 @@ class TestB_SupersededRateSnapshot:
         )
 
         # New rate effective from Apr 15 2036 — supersedes old for that date+
-        new_rate_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             c, tok, drv, mileage_rtid, "0.6000",
             effective_from="2036-04-15",
         )

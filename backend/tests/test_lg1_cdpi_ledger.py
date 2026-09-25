@@ -480,7 +480,7 @@ async def test_lg3_ledger_includes_cdpi_amount_with_standard_line(
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG3A")
         hourly_rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, hourly_rt_id, amount="18.00")
-        cdpi_rate_id = await _create_and_approve_rate(
+        await _create_and_approve_rate(
             session_client, auth_token, driver_id, cdpi_rt_id, amount="10.00")
 
         pid = await _open_period(direct_db, paytest_branch_id)

@@ -961,7 +961,6 @@ async def test_get_user_driver_info_returns_active_after_transfer(
     )
     emp_row = emp_r.mappings().first()
     emp_id = emp_row["employeeid"]
-    company_id = emp_row["companyid"]
 
     # Create a user and link to the employee via direct_db
     uname = f"drv_usr_{sfx}"
@@ -1112,18 +1111,6 @@ async def oda_driver_token_and_id(
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=sfx
     )
-
-    # Get employee_id
-    resp = await session_client.get(
-        f"/core/drivers/{drv_id}",
-        headers=auth(auth_token),
-    )
-    # If no GET /core/drivers/{id} endpoint, use list
-    if resp.status_code == 404:
-        # fall back to direct lookup — handled in tests that need it
-        emp_id = None
-    else:
-        emp_id = resp.json().get("employee_id")
 
     uname = f"oda_driver_{sfx}"
     r_u = await session_client.post(

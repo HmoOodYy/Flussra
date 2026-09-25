@@ -400,7 +400,6 @@ class TestBulkPeriodProtection:
         before_config = before_item["current_config"] if before_item else None
 
         # Simulate an open period on HQ branch by mocking the period-end helper
-        future_date = date.today() + timedelta(days=30)
 
         async def mock_period_end(branch_id: int, company_id: int, db) -> "date | None":  # noqa: F821
             if branch_id == hq_branch_id:

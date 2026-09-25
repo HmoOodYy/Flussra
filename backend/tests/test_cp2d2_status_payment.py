@@ -1333,7 +1333,7 @@ class TestGenericRatesBypassClosed:
         rt_id = status_pay_rt["ratetypeid"]
 
         # Create a status column for the OTHER branch
-        other_src = (await direct_db.execute(
+        (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.statusratecolumns
                     (companyid, branchid, ratetypeid, columnname, normalizedcolumnname, isdefault, isactive)

@@ -2267,7 +2267,6 @@ class TestCp2dCanonicalEntryState:
         DailyStatus at all) must not trigger LEGACY_STATUS_NOT_CANONICAL."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e22")
-        wdate = str(start)
         headers = _auth(auth_token)
         try:
             # Insert DailyNote directly — bypasses canonical write. No DailyStatus exists.
@@ -2322,7 +2321,6 @@ class TestCp2dCanonicalEntryState:
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e23")
         code = _sk_code("E23VOID", start)
-        wdate = str(start)
         headers = _auth(auth_token)
         sk_id = None
         try:

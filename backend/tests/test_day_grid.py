@@ -521,7 +521,6 @@ class TestDayGridSummary:
             headers=auth(auth_token),
         )
         assert add_resp.status_code == 201
-        line = add_resp.json()
 
         # Verify via grid
         resp = await session_client.get(
@@ -3556,7 +3555,6 @@ class TestPayItemEffectiveDateBoundaries:
             "P3B Test Rate Matrix EffFrom",
         )
         iid = item["pay_item_id"]
-        item_code = item["pay_item_code"]
         try:
             # Configure for PAYTEST with effective_from=2082-06-22
             await _configure_branch_pay_item(
@@ -3632,7 +3630,6 @@ class TestPayItemEffectiveDateBoundaries:
             "P3B Test Rate Matrix Branch Iso",
         )
         iid = item["pay_item_id"]
-        item_code = item["pay_item_code"]
         try:
             # Activate only on HQ
             await _configure_branch_pay_item(
@@ -3736,7 +3733,6 @@ class TestPayItemEffectiveDateBoundaries:
             "P3B Test Delete Behavior",
         )
         iid = item["pay_item_id"]
-        item_code = item["pay_item_code"]
 
         # Check usage first
         usage_resp = await session_client.get(

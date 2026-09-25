@@ -871,7 +871,6 @@ class TestPerUnitCharacterization:
         dispatch's calculated_amount is Decimal, is not float, is not None,
         and matches the exact expected value.
         """
-        headers = auth(auth_token)
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S1 PerUnit CaseE")

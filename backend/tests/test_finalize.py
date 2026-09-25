@@ -225,7 +225,6 @@ async def approved_period(
     so tests can add their own lines).
     Yields the Approved period response dict.
     """
-    headers = auth(auth_token)
     branch_id = paytest_clean
 
     # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
@@ -520,7 +519,7 @@ class TestFinalizePeriod:
         await _create_and_approve_rate(
             client, auth_token, paytest_driver_id, paytest_rate_type_id, "25.00"
         )
-        seeded = await _seed_open_lines_and_approve(
+        await _seed_open_lines_and_approve(
             client,
             auth_token,
             pid,

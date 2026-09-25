@@ -269,7 +269,7 @@ async def paytest_branch_id(session_db_conn, test_database_url):
                 payroll_frequency="Week", anchor_start_date=_BASE_DATE,
                 normal_days_off_mask=0,
             )
-            version_id = await publish_version(
+            await publish_version(
                 _COMPANY_ID, user_id, setup_id, draft_id, _BASE_DATE, db,
             )
             await assign_setup(

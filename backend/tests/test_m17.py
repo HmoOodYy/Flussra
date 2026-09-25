@@ -469,18 +469,7 @@ class TestDashboardReviewCounts:
         after = (await _get_dashboard(client, auth_token)).json()
         assert after["review_pending"] >= base_pending + 1
 
-        # Cleanup: reject → return to Open → cancel
-        items = await client.get(
-            "/review/items",
-            params={"status": "Pending"},
-            headers={"Authorization": f"Bearer {auth_token}"},
-        )
-        review_id = None
-        for item in items.json():
-            if item.get("entity_id") == str(pid):
-                review_id = item["review_item_id"]
-                break
-        # Force-cancel via direct DB: CP-1A blocks Returned→Cancelled via HTTP.
+        # Cleanup: force-cancel via direct DB: CP-1A blocks Returned→Cancelled via HTTP.
         await direct_db.execute(
             text("UPDATE payroll.payrollperiods SET status = 'Cancelled', currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
             {"pid": pid},
@@ -766,8 +755,6 @@ class TestDashboardSetupWarnings:
         # Create Open period
 
         from app.auth.security import hash_password as _hp  # noqa: F401
-
-        transport = httpx.AsyncClient  # just to import; use client fixture
 
         # Get company_id from PAYTEST branch
         result = await direct_db.execute(
