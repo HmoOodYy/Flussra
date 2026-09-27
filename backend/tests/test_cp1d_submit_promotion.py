@@ -160,17 +160,6 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
         """),
         p,
     )
-    # 7. Ensure branchpayrollsettings row exists (required by CP-2A ensure_current_schedule_version).
-    # The PAYTEST branch is created in seed stmts but never configured — this is a test-only upsert.
-    await direct_db.execute(
-        _text("""
-            INSERT INTO payroll.branchpayrollsettings
-                (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
-            VALUES (:cid, :bid, 'Week', '2024-01-01', TRUE)
-            ON CONFLICT (companyid, branchid) DO NOTHING
-        """),
-        {"cid": _COMPANY_ID, "bid": branch_id},
-    )
 
 
 async def _ensure_prepared_creation_setup(
