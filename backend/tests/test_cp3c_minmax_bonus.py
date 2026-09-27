@@ -297,14 +297,6 @@ async def cp3c_branch_id(direct_db: AsyncConnection) -> int:
         },
     )).mappings().first()
     branch_id = row["branchid"]
-    await direct_db.execute(
-        _text("""
-            INSERT INTO payroll.branchpayrollsettings
-                (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
-            VALUES (1, :bid, 'Week', '2092-01-06', TRUE)
-        """),
-        {"bid": branch_id},
-    )
     await direct_db.commit()
     return branch_id
 

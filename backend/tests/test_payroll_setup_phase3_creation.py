@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.payroll.off_drivers import _scheduled_work_days
 from app.payroll.period_creation import (
+    _decode_candidate_key,
     create_period_from_candidate,
     get_period_candidates,
 )
@@ -242,6 +243,53 @@ async def test_future_version_timeline_change_stales_preview(period_creation_db)
     )
     assert before.version_id == current_version_id
     assert future_version_id != current_version_id
+
+    with pytest.raises(HTTPException) as error:
+        await _confirm(db, preview.selected.candidate_key)
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "CANDIDATE_STALE"
+
+
+@pytest.mark.asyncio
+async def test_preview_stales_on_timeline_fingerprint_change_with_authority_unchanged(
+    period_creation_db,
+):
+    """A timeline-only mutation must stale an otherwise unchanged candidate."""
+    db = period_creation_db
+    setup_id, current_version_id = await _setup(db, "FINGERPRINT")
+    await _assign(db, setup_id)
+
+    preview = await _preview(db)
+    payload_before, _ = _decode_candidate_key(preview.selected.candidate_key)
+    assert payload_before["setup_version_id"] == current_version_id
+
+    # Pure timeline mutation: a future version, effective after this
+    # candidate's period, cannot change which authority resolves for the
+    # already-previewed start date.
+    future_draft = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=date(2090, 1, 1),
+        normal_days_off_mask=5,
+    )
+    await publish_version(
+        db.company_id, db.user_id, setup_id, future_draft, date(2090, 1, 8), db.db,
+    )
+
+    after_preview = await _preview(db)
+    payload_after, _ = _decode_candidate_key(after_preview.selected.candidate_key)
+
+    # Resolved authority, candidate dates, and slot state are byte-identical...
+    assert payload_after["assignment_id"] == payload_before["assignment_id"]
+    assert payload_after["setup_id"] == payload_before["setup_id"]
+    assert payload_after["setup_version_id"] == payload_before["setup_version_id"]
+    assert payload_after["config_hash"] == payload_before["config_hash"]
+    assert payload_after["start"] == payload_before["start"]
+    assert payload_after["end"] == payload_before["end"]
+    assert payload_after["slot_fp"] == payload_before["slot_fp"]
+
+    # ...yet the signed setup timeline fingerprint itself has moved.
+    assert payload_after["setup_timeline"] != payload_before["setup_timeline"]
+    assert payload_after["branch_timeline"] == payload_before["branch_timeline"]
 
     with pytest.raises(HTTPException) as error:
         await _confirm(db, preview.selected.candidate_key)
