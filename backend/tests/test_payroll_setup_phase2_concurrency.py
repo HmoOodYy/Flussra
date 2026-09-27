@@ -20,7 +20,7 @@ from app.payroll.schemas import PeriodCreationRequest
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.locks import lock_branches
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
     create_setup,

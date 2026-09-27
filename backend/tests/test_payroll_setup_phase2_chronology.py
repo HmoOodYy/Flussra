@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from app.payroll_setup.chronology import Schedule, is_period_start, period_end
-from app.payroll_setup.policy import canonical_config_hash
+from app.payroll_setup.payroll_policy import canonical_config_hash
 
 
 @pytest.mark.parametrize(

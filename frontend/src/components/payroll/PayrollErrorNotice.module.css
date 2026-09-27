@@ -1,0 +1,42 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-light);
+}
+
+.message {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-danger);
+  line-height: 1.5;
+}
+
+.details {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.detailsSummary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.detailsBody {
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.detailsRow {
+  margin: 0;
+}
+
+.detailsLabel {
+  font-weight: var(--font-weight-semi);
+}

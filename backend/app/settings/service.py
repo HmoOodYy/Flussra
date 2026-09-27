@@ -36,10 +36,15 @@ from app.core.service import (
     _check_permission,
     _require_not_driver_role,
 )
+from app.payroll_setup import boundaries
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.locks import lock_company, lock_setups
-from app.payroll_setup.policy import assign_setup
-from app.payroll_setup.readiness import branch_schedule_readiness
+from app.payroll_setup.payroll_policy import assign_setup
+from app.payroll_setup.readiness import (
+    branch_schedule_readiness,
+    branch_schedule_readiness_detail,
+)
+from app.payroll_setup.schemas import SetupResponse
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
@@ -56,6 +61,7 @@ from app.settings.schemas import (
     CustomPayItemRequestDecide,
     CustomPayItemUpdate,
     CustomPayItemUsage,
+    OnboardingOptionsResponse,
     PayItemConfigUpdate,
     PayItemRateTypeMapCreate,
     PayItemRateTypeMapSummary,
@@ -208,9 +214,9 @@ async def _ensure_company_admin(
 
 async def _ensure_branch_creator(
     company_id: int, user_id: int, db: AsyncConnection,
-    *, with_payroll_start: bool,
+    *, with_payroll_start: bool, with_default: bool,
 ) -> None:
-    """Require the explicit company-wide branch-create authorization contract."""
+    """branches.create (company-wide, non-driver); payroll_setup.assign when a first payroll start date is sent; settings-admin (setup.manage via _ensure_company_admin) when the new branch is to become the Company default."""
     can_see_all, _ = await _check_branch_access(company_id, user_id, db)
     if not can_see_all:
         raise HTTPException(status_code=403, detail="This action requires company-level (all-branches) access.")
@@ -218,13 +224,16 @@ async def _ensure_branch_creator(
     await _check_permission(company_id, user_id, None, "branches.create", db)
     if with_payroll_start:
         await _check_permission(company_id, user_id, None, "payroll_setup.assign", db)
+    if with_default:
+        await _ensure_company_admin(company_id, user_id, db)
 
 
 async def _attach_readiness_reasons(
     branches: list[BranchAdmin], company_id: int, user_id: int,
     db: AsyncConnection,
 ) -> None:
-    """Expose reason codes only to non-drivers with payroll.view on each branch."""
+    """Expose reason codes and evaluated dates only to non-drivers with
+    payroll.view on each branch."""
     if not branches:
         return
     try:
@@ -240,8 +249,11 @@ async def _attach_readiness_reasons(
             if exc.status_code == 403:
                 continue
             raise
-        _, reason = await branch_schedule_readiness(company_id, branch.branch_id, db)
+        _, reason, evaluated_date = await branch_schedule_readiness_detail(
+            company_id, branch.branch_id, db,
+        )
         branch.schedule_readiness_reason = reason
+        branch.schedule_readiness_date = evaluated_date
 
 
 def _generate_branch_code() -> str:
@@ -658,6 +670,7 @@ async def create_branch(
     await _ensure_branch_creator(
         company_id, user_id, db,
         with_payroll_start=data.first_payroll_start_date is not None,
+        with_default=data.is_default,
     )
 
     default_setup_id = None
@@ -786,6 +799,7 @@ async def create_branch(
         created.schedule_readiness_reason = (
             "NO_COMPANY_DEFAULT" if default_setup_id is None else reason
         )
+        created.schedule_readiness_date = data.first_payroll_start_date
     return created
 
 
@@ -990,6 +1004,53 @@ async def set_default_branch(
     )
 
     return await get_branch_by_id(branch_id, company_id, user_id, db)
+
+
+async def get_onboarding_options(
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    around: _date | None = None,
+) -> OnboardingOptionsResponse:
+    """
+    Return the company's default Payroll Setup together with the canonical
+    boundary choices (nearest valid previous/next first-payroll dates and a
+    server-suggested date) for onboarding a not-yet-created Branch onto it.
+
+    default_setup is null when the company has no default Payroll Setup, in
+    which case choices is also null — an archived default is NOT special-cased
+    here; boundaries.onboarding_choices reports it as a SETUP_NOT_ACTIVE
+    conflict like any other invalid date.
+
+    Authorization mirrors the create-with-date write this feeds
+    (POST /settings/branches with first_payroll_start_date): company-wide
+    access, branches.create, and payroll_setup.assign.
+    """
+    await _ensure_branch_creator(
+        company_id, user_id, db, with_payroll_start=True, with_default=False,
+    )
+    result = await db.execute(text("""
+        SELECT s.PayrollSetupID, s.SetupCode, s.SetupName, s.Description, s.Status
+        FROM core.Companies c
+        LEFT JOIN payroll.PayrollSetups s
+          ON s.CompanyID = c.CompanyID AND s.PayrollSetupID = c.DefaultPayrollSetupID
+        WHERE c.CompanyID = :cid
+    """), {"cid": company_id})
+    row = result.mappings().one_or_none()
+    if row is None:
+        raise PolicyError("COMPANY_NOT_FOUND", "Company not found")
+    if row["payrollsetupid"] is None:
+        return OnboardingOptionsResponse(default_setup=None, choices=None)
+    default_setup = SetupResponse(
+        setup_id=row["payrollsetupid"], setup_code=row["setupcode"],
+        setup_name=row["setupname"], description=row["description"],
+        status=row["status"],
+    )
+    choices = await boundaries.onboarding_choices(
+        company_id, row["payrollsetupid"], around, db,
+    )
+    return OnboardingOptionsResponse(default_setup=default_setup, choices=choices)
 
 
 # ===========================================================================

@@ -25,7 +25,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
     create_setup,

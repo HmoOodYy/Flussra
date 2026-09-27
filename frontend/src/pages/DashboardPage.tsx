@@ -10,8 +10,7 @@ import {
   canViewLedger,
   canViewPeople,
   canViewPayRates,
-  canViewSettings,
-  canManageSettingsAdmin,
+  canViewPayrollSetups,
 } from '../lib/permissions';
 import type {
   DashboardResponse,
@@ -103,10 +102,10 @@ function QuickActions() {
       accent: '#0369a1',
     });
 
-  if (canViewSettings(user) && canManageSettingsAdmin(user))
+  if (canViewPayrollSetups(user))
     actions.push({
-      label: 'Payroll Setup',
-      description: 'Configure payroll periods and rules',
+      label: 'Payroll Policies',
+      description: 'Company payroll schedules and branch assignments',
       to: '/settings/payroll',
       icon: <SetupQAIcon />,
       accent: '#475569',

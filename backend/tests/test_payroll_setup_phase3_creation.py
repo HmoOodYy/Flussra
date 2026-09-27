@@ -20,7 +20,7 @@ from app.payroll.period_creation import (
 from app.payroll.period_lifecycle import change_period_status
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodCreationRequest, PeriodStatusChange
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
     create_setup,
@@ -424,13 +424,13 @@ async def test_legacy_period_days_remain_authority_for_historical_reads(
 
     # A later current policy has a different schedule; historical reads use stored days.
     current_setup, _ = await _setup(
-        db, "CURRENT_AFTER_LEGACY", anchor=date(2090, 1, 1), mask=127,
+        db, "CURRENT_AFTER_LEGACY", anchor=date(2090, 1, 1), mask=65,
     )
     await _assign(db, current_setup, date(2090, 1, 1))
     current_authority = await resolve_payroll_setup_version(
         db.company_id, db.branch_id, date(2090, 1, 1), db.db,
     )
-    assert current_authority.schedule.normal_days_off_mask == 127
+    assert current_authority.schedule.normal_days_off_mask == 65
 
     historical_work_days = await _scheduled_work_days(historical, db.db)
     assert historical_work_days == {

@@ -307,6 +307,79 @@ export function canViewDailyPayItems(user: UserProfile | null | undefined): bool
   return canManageSettingsAdmin(user) || hasPayItemsEdit(user);
 }
 
+// ── Payroll Setup policy helpers ────────────────────────────────────────────────
+//
+// Mirror backend app/payroll_setup/*.py authorization rules (require_policy_permission,
+// _require_not_driver_role, _branch_read_access, _ensure_branch_creator). Backend
+// remains the authoritative security boundary — these helpers drive UI visibility only.
+
+/**
+ * Company Payroll Setup policy permission: company scope only (AllCompanyBranches
+ * via authority.company_permissions) and never for Driver/ODA users, including
+ * mixed Driver + company-admin users — mirrors backend require_policy_permission
+ * (company-wide access + _require_not_driver_role + permission at company scope).
+ */
+function _hasCompanyPolicyPermission(user: UserProfile, code: string): boolean {
+  return !isDriverUser(user) && _hasCompanyPermission(user, code);
+}
+
+/** View Payroll Setups: company-wide payroll_setup.view, never Driver/ODA. */
+export function canViewPayrollSetups(user: UserProfile): boolean {
+  return _hasCompanyPolicyPermission(user, 'payroll_setup.view');
+}
+
+/** Manage Payroll Setups (Setup create/metadata/archive, Draft create/edit/discard): company-wide payroll_setup.manage, never Driver/ODA. */
+export function canManagePayrollSetups(user: UserProfile): boolean {
+  return _hasCompanyPolicyPermission(user, 'payroll_setup.manage');
+}
+
+/** Publish Payroll Setups: company-wide payroll_setup.publish, never Driver/ODA. */
+export function canPublishPayrollSetups(user: UserProfile): boolean {
+  return _hasCompanyPolicyPermission(user, 'payroll_setup.publish');
+}
+
+/** Assign Payroll Setups to branches: company-wide payroll_setup.assign, never Driver/ODA. */
+export function canAssignPayrollSetups(user: UserProfile): boolean {
+  return _hasCompanyPolicyPermission(user, 'payroll_setup.assign');
+}
+
+/**
+ * Branch read-only Payroll Schedule: exactly payroll.view for that branch (a
+ * company-wide grant applies everywhere); never Driver/ODA. Deliberately NOT
+ * PAYROLL_READ — payroll.entry etc. must not grant schedule/history visibility.
+ * Mirrors backend _branch_read_access.
+ */
+export function canViewBranchPayrollSchedule(user: UserProfile, branchId: number): boolean {
+  return !isDriverUser(user) && hasAuthorityPermission(user.authority, 'payroll.view', branchId);
+}
+
+/**
+ * Discovery for the Payroll Schedule page: payroll.view at company scope or on
+ * at least one branch; never Driver/ODA.
+ */
+export function canViewAnyBranchPayrollSchedule(user: UserProfile): boolean {
+  return !isDriverUser(user) && hasAuthorityPermissionAnywhere(user.authority, 'payroll.view');
+}
+
+/**
+ * Branch creation: company-wide branches.create, non-driver — mirrors backend
+ * _ensure_branch_creator (payroll_setup.assign is additionally required only
+ * when a first payroll start date is sent; combine with canAssignPayrollSetups
+ * at the call site).
+ */
+export function canCreateBranches(user: UserProfile): boolean {
+  return !isDriverUser(user) && _hasCompanyPermission(user, 'branches.create');
+}
+
+/**
+ * Company & Branches page access: settings admin (setup.manage) or branch
+ * creator. Entering the page does not grant edit actions; those keep
+ * canManageSettingsAdmin.
+ */
+export function canAccessCompanyBranches(user: UserProfile): boolean {
+  return canManageSettingsAdmin(user) || canCreateBranches(user);
+}
+
 // ── Driver Transfer helpers ───────────────────────────────────────────────────
 
 const TRANSFER_READ = [

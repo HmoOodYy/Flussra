@@ -16,7 +16,12 @@ from psycopg2 import sql as pg_sql
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll_setup.policy import create_draft, create_setup, publish_version, set_default_setup
+from app.payroll_setup.payroll_policy import (
+    create_draft,
+    create_setup,
+    publish_version,
+    set_default_setup,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATIONS = _ROOT / "migrations" / "sql"
@@ -248,6 +253,11 @@ async def test_default_mutation_requires_assign_company_scope_and_non_driver(pha
         setup_id = await create_setup(
             db.company_id, db.user_id, "AUTHZ", "Authorization", conn,
         )
+        authz_draft = await create_draft(
+            db.company_id, db.user_id, setup_id, conn,
+            payroll_frequency="Week", anchor_start_date=_ANCHOR, normal_days_off_mask=0,
+        )
+        await publish_version(db.company_id, db.user_id, setup_id, authz_draft, _ANCHOR, conn)
 
     manage_only = await _create_actor(
         db, permissions=("payroll_setup.manage",), scope="AllCompanyBranches",

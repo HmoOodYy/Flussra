@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider } from './providers/AuthProvider';
 import { WarningsProvider } from './providers/WarningsProvider';
 import { AuthBootstrap } from './components/AuthBootstrap';
@@ -14,7 +14,10 @@ import { PeriodDetailPage } from './pages/payroll/PeriodDetailPage';
 import { LedgerPage } from './pages/payroll/LedgerPage';
 import { SettingsShell } from './pages/settings/SettingsShell';
 import { CompanyBranchesPage } from './pages/settings/company-branches/CompanyBranchesPage';
-import { PayrollSetupPage } from './pages/settings/payroll/PayrollSetupPage';
+import { PayrollSetupsPage } from './pages/settings/payroll/PayrollSetupsPage';
+import { BranchPayrollSchedulePage } from './pages/payroll/schedule/BranchPayrollSchedulePage';
+import { legacyPayrollSettingsRedirect } from './pages/settings/payroll/payrollSetupsView';
+import { StatusKeysPage } from './pages/settings/status-keys/StatusKeysPage';
 import { PayItemsPage } from './pages/settings/pay-items/PayItemsPage';
 import { RolesPage } from './pages/settings/roles/RolesPage';
 import { PeoplePage } from './pages/people/PeoplePage';
@@ -32,6 +35,10 @@ import {
   canManageSettingsAdmin,
   canManageRoles,
   canViewDailyPayItems,
+  canViewPayrollSetups,
+  canViewAnyBranchPayrollSchedule,
+  canAccessCompanyBranches,
+  canCreateBranches,
 } from './lib/permissions';
 
 /**
@@ -58,10 +65,26 @@ function Gate({
 function SettingsDefaultRedirect() {
   const { user } = useAuth();
   if (!user) return <Navigate to="/settings/pay-items" replace />;
-  if (canManageSettingsAdmin(user)) return <Navigate to="/settings/company-branches" replace />;
-  if (canViewSettings(user))        return <Navigate to="/settings/roles" replace />;
-  // payitems.edit-only users have no roles/company access — send to pay-items.
+  if (canAccessCompanyBranches(user)) return <Navigate to="/settings/company-branches" replace />;
+  if (canViewSettings(user))          return <Navigate to="/settings/roles" replace />;
+  if (canViewPayrollSetups(user))     return <Navigate to="/settings/payroll" replace />;
+  // payitems.edit-only users have no roles/company/payroll-setup access — send to pay-items.
   return <Navigate to="/settings/pay-items" replace />;
+}
+
+/**
+ * The legacy Status Keys tab of the old /settings/payroll URL (with an
+ * optional branchId) must keep redirecting to /settings/status-keys now
+ * that the old branch-owned settings page is gone — see
+ * legacyPayrollSettingsRedirect for the exact query-string contract. Runs
+ * OUTSIDE the payroll route's Gate so old links still reach Status Keys
+ * even for users who cannot view Payroll Setups — the status-keys route's
+ * own canManageSettingsAdmin gate still applies there.
+ */
+function LegacyStatusKeysRedirect({ children }: { children: React.ReactNode }) {
+  const { search } = useLocation();
+  const target = legacyPayrollSettingsRedirect(search);
+  return target ? <Navigate to={target} replace /> : <>{children}</>;
 }
 
 function ProtectedShell() {
@@ -111,6 +134,10 @@ export default function App() {
               path="/payroll/ledger"
               element={<Gate check={canViewLedger}><LedgerPage /></Gate>}
             />
+            <Route
+              path="/payroll/schedule"
+              element={<Gate check={canViewAnyBranchPayrollSchedule}><BranchPayrollSchedulePage /></Gate>}
+            />
 
             {/* Review */}
             <Route
@@ -122,13 +149,21 @@ export default function App() {
             {/* Settings — outer gate, inner pages gated individually */}
             <Route
               path="/settings"
-              element={<Gate check={(u) => canViewSettings(u) || canViewDailyPayItems(u)}><SettingsShell /></Gate>}
+              element={<Gate check={(u) => canViewSettings(u) || canViewDailyPayItems(u) || canViewPayrollSetups(u) || canCreateBranches(u)}><SettingsShell /></Gate>}
             >
               <Route index element={<SettingsDefaultRedirect />} />
-              <Route path="company-branches" element={<Gate check={canManageSettingsAdmin}><CompanyBranchesPage /></Gate>} />
+              <Route path="company-branches" element={<Gate check={canAccessCompanyBranches}><CompanyBranchesPage /></Gate>} />
               <Route path="company"  element={<Navigate to="/settings/company-branches" replace />} />
               <Route path="branches" element={<Navigate to="/settings/company-branches" replace />} />
-              <Route path="payroll"   element={<Gate check={canManageSettingsAdmin}><PayrollSetupPage /></Gate>} />
+              <Route
+                path="payroll"
+                element={
+                  <LegacyStatusKeysRedirect>
+                    <Gate check={canViewPayrollSetups}><PayrollSetupsPage /></Gate>
+                  </LegacyStatusKeysRedirect>
+                }
+              />
+              <Route path="status-keys" element={<Gate check={canManageSettingsAdmin}><StatusKeysPage /></Gate>} />
               <Route path="pay-items" element={<Gate check={canViewDailyPayItems}><PayItemsPage /></Gate>} />
               <Route path="roles"     element={<Gate check={canManageRoles}><RolesPage /></Gate>} />
               <Route path="users"     element={<Navigate to="/settings/roles" replace />} />
