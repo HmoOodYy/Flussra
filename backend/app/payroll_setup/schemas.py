@@ -1,6 +1,7 @@
 """Public request and response models for company-owned Payroll Setup policy."""
 
 from datetime import date, datetime
+from datetime import date as _date
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,7 +11,10 @@ class StrictModel(BaseModel):
 
 
 class SetupCreateRequest(StrictModel):
-    setup_code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    setup_code: str | None = Field(
+        default=None, min_length=1, max_length=50,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
     setup_name: str = Field(min_length=1, max_length=200)
     description: str | None = None
 
@@ -27,13 +31,15 @@ class DraftCreateRequest(StrictModel):
     anchor_start_date: date | None = None
     custom_interval_days: int | None = Field(default=None, gt=0)
     normal_days_off_mask: int | None = Field(default=None, ge=0, le=127)
+    planned_effective_from_date: date | None = None
 
 
 class DraftUpdateRequest(StrictModel):
-    payroll_frequency: str = Field(pattern=r"^(Week|Biweek|Month|Custom)$")
-    anchor_start_date: date
+    payroll_frequency: str | None = Field(pattern=r"^(Week|Biweek|Month|Custom)$")
+    anchor_start_date: date | None
     custom_interval_days: int | None = Field(gt=0)
-    normal_days_off_mask: int = Field(ge=0, le=127)
+    normal_days_off_mask: int | None = Field(ge=0, le=127)
+    planned_effective_from_date: date | None = None
 
 
 class PublishRequest(StrictModel):
@@ -42,6 +48,18 @@ class PublishRequest(StrictModel):
 
 
 class PublicationImpactRequest(StrictModel):
+    effective_from_date: date
+    replaces_version_id: int | None = Field(default=None, gt=0)
+
+
+class InlineScheduleRequest(StrictModel):
+    payroll_frequency: str = Field(pattern=r"^(Week|Biweek|Month|Custom)$")
+    anchor_start_date: date
+    custom_interval_days: int | None = Field(gt=0)
+    normal_days_off_mask: int = Field(ge=0, le=127)
+
+
+class InlinePublicationRequest(InlineScheduleRequest):
     effective_from_date: date
     replaces_version_id: int | None = Field(default=None, gt=0)
 
@@ -94,6 +112,7 @@ class DraftResponse(BaseModel):
     anchor_start_date: date | None
     custom_interval_days: int | None
     normal_days_off_mask: int | None
+    planned_effective_from_date: date | None
     created_at_utc: datetime
     discarded_at_utc: datetime | None
 
@@ -110,6 +129,7 @@ class VersionResponse(BaseModel):
     replaces_version_id: int | None
     replaced_by_version_id: int | None
     is_terminal: bool
+    is_current: bool
 
 
 class ConflictResponse(BaseModel):
@@ -177,6 +197,58 @@ class BranchHistoryResponse(BaseModel):
 
 class DefaultSetupResponse(BaseModel):
     setup: SetupResponse | None
+
+
+class BoundaryChoiceResponse(BaseModel):
+    """One legal (or same-date correction) payroll date and its period description."""
+    date: _date
+    period_end_date: _date
+    payroll_frequency: str
+    custom_interval_days: int | None
+    relation: str
+    predecessor_payroll_frequency: str | None = None
+    predecessor_custom_interval_days: int | None = None
+    predecessor_period_end_date: _date | None = None
+    replaces_version_id: int | None = None
+    replaces_version_number: int | None = None
+
+
+class BoundaryChoicesResponse(BaseModel):
+    """Canonical legal-date navigation result: validity, nearest neighbors, suggestion."""
+    reference_date: _date
+    requested_date: _date
+    requested_valid: bool
+    requested: BoundaryChoiceResponse | None
+    conflicts: list[ConflictResponse]
+    previous: BoundaryChoiceResponse | None
+    next: BoundaryChoiceResponse | None
+    suggested: BoundaryChoiceResponse | None
+    earliest_allowed_date: _date | None
+
+
+class PolicyAssignmentSummaryResponse(BaseModel):
+    assignment_id: int
+    setup_id: int
+    setup_code: str
+    setup_name: str
+    effective_from_date: date
+    effective_to_date: date | None
+    payroll_frequency: str | None
+    custom_interval_days: int | None
+
+
+class BranchPolicySummaryResponse(BaseModel):
+    branch_id: int
+    branch_code: str
+    branch_name: str
+    branch_status: str
+    reference_date: date
+    payroll_set_up: bool
+    current: PolicyAssignmentSummaryResponse | None
+    scheduled_change: PolicyAssignmentSummaryResponse | None
+    upcoming_assignments: list[PolicyAssignmentSummaryResponse]
+    readiness_reason: str
+    readiness_date: date | None
 
 
 class EffectiveAuthorityResponse(BaseModel):

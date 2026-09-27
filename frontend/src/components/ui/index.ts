@@ -5,3 +5,4 @@ export { ErrorState } from './ErrorState';
 export { ReadOnlyBanner } from './ReadOnlyBanner';
 export { FormSection } from './FormSection';
 export { ActionBar } from './ActionBar';
+export { DateInput } from './DateInput';

@@ -9,19 +9,23 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
 from app.dependencies import get_current_user, get_db
 
-from . import policy, reads
+from . import boundaries, payroll_policy, reads
 from .chronology import Schedule
 from .errors import PolicyError
 from .schemas import (
     AssignmentCreateRequest,
     AssignmentResponse,
+    BoundaryChoicesResponse,
     BranchHistoryResponse,
+    BranchPolicySummaryResponse,
     DefaultSetupRequest,
     DefaultSetupResponse,
     DraftCreateRequest,
     DraftResponse,
     DraftUpdateRequest,
     EffectiveAuthorityResponse,
+    InlinePublicationRequest,
+    InlineScheduleRequest,
     PublicationImpactRequest,
     PublicationImpactResponse,
     PublishRequest,
@@ -70,13 +74,13 @@ async def _branch_read_access(company_id: int, user_id: int, branch_id: int,
 
 @router.get("/setups", response_model=list[SetupResponse])
 async def get_setups(token: TokenDep, db: DbDep):
-    rows = await policy.list_setups(int(token["cid"]), int(token["sub"]), db)
+    rows = await payroll_policy.list_setups(int(token["cid"]), int(token["sub"]), db)
     return [_setup_response(row) for row in rows]
 
 
 @router.post("/setups", response_model=SetupResponse, status_code=201)
 async def post_setup(body: SetupCreateRequest, token: TokenDep, db: DbDep):
-    setup_id = await policy.create_setup(
+    setup_id = await payroll_policy.create_setup(
         int(token["cid"]), int(token["sub"]), body.setup_code, body.setup_name,
         db, description=body.description,
     )
@@ -85,13 +89,13 @@ async def post_setup(body: SetupCreateRequest, token: TokenDep, db: DbDep):
 
 @router.get("/setups/{setup_id}", response_model=SetupResponse)
 async def get_setup(setup_id: int, token: TokenDep, db: DbDep):
-    row = await policy.get_setup(int(token["cid"]), int(token["sub"]), setup_id, db)
+    row = await payroll_policy.get_setup(int(token["cid"]), int(token["sub"]), setup_id, db)
     return _setup_response(row)
 
 
 @router.put("/setups/{setup_id}", response_model=SetupResponse)
 async def put_setup(setup_id: int, body: SetupUpdateRequest, token: TokenDep, db: DbDep):
-    await policy.update_setup_metadata(
+    await payroll_policy.update_setup_metadata(
         int(token["cid"]), int(token["sub"]), setup_id, body.setup_name,
         db, description=body.description,
     )
@@ -100,7 +104,7 @@ async def put_setup(setup_id: int, body: SetupUpdateRequest, token: TokenDep, db
 
 @router.post("/setups/{setup_id}/archive", status_code=204)
 async def post_archive_setup(setup_id: int, token: TokenDep, db: DbDep):
-    await policy.archive_setup(int(token["cid"]), int(token["sub"]), setup_id, db)
+    await payroll_policy.archive_setup(int(token["cid"]), int(token["sub"]), setup_id, db)
     return Response(status_code=204)
 
 
@@ -114,12 +118,13 @@ async def get_drafts(setup_id: int, token: TokenDep, db: DbDep):
 @router.post("/setups/{setup_id}/drafts", response_model=DraftResponse, status_code=201)
 async def post_draft(setup_id: int, body: DraftCreateRequest, token: TokenDep, db: DbDep):
     company_id, user_id = int(token["cid"]), int(token["sub"])
-    draft_id = await policy.create_draft(
+    draft_id = await payroll_policy.create_draft(
         company_id, user_id, setup_id, db,
         payroll_frequency=body.payroll_frequency,
         anchor_start_date=body.anchor_start_date,
         custom_interval_days=body.custom_interval_days,
         normal_days_off_mask=body.normal_days_off_mask,
+        planned_effective_from_date=body.planned_effective_from_date,
     )
     return await reads.get_draft(company_id, setup_id, draft_id, db)
 
@@ -131,12 +136,13 @@ async def put_draft(
     company_id, user_id = int(token["cid"]), int(token["sub"])
     await require_policy_permission(company_id, user_id, "payroll_setup.manage", db)
     await reads.get_draft(company_id, setup_id, draft_id, db)
-    await policy.edit_draft(
+    await payroll_policy.edit_draft(
         company_id, user_id, setup_id, draft_id, db,
         payroll_frequency=body.payroll_frequency,
         anchor_start_date=body.anchor_start_date,
         custom_interval_days=body.custom_interval_days,
         normal_days_off_mask=body.normal_days_off_mask,
+        planned_effective_from_date=body.planned_effective_from_date,
     )
     return await reads.get_draft(company_id, setup_id, draft_id, db)
 
@@ -146,7 +152,7 @@ async def delete_draft(setup_id: int, draft_id: int, token: TokenDep, db: DbDep)
     company_id, user_id = int(token["cid"]), int(token["sub"])
     await require_policy_permission(company_id, user_id, "payroll_setup.manage", db)
     await reads.get_draft(company_id, setup_id, draft_id, db)
-    await policy.discard_draft(company_id, user_id, setup_id, draft_id, db)
+    await payroll_policy.discard_draft(company_id, user_id, setup_id, draft_id, db)
     return Response(status_code=204)
 
 
@@ -172,8 +178,56 @@ async def post_publication_impact(
         schedule_data["frequency"], schedule_data["anchor_start_date"],
         schedule_data["custom_interval_days"], schedule_data["normal_days_off_mask"],
     )
-    impact = await policy.preview_policy_impact(
+    impact = await payroll_policy.preview_policy_impact(
         company_id, user_id, setup_id, body.effective_from_date, schedule, db,
+        replaces_version_id=body.replaces_version_id,
+    )
+    return {
+        **impact,
+        "successor_schedule": {
+            "payroll_frequency": impact["successor_schedule"]["frequency"],
+            "anchor_start_date": impact["successor_schedule"]["anchor_start_date"],
+            "custom_interval_days": impact["successor_schedule"]["custom_interval_days"],
+            "normal_days_off_mask": impact["successor_schedule"]["normal_days_off_mask"],
+        },
+    }
+
+
+@router.post(
+    "/setups/{setup_id}/publication-choices",
+    response_model=BoundaryChoicesResponse,
+)
+async def post_inline_publication_choices(
+    setup_id: int, body: InlineScheduleRequest, token: TokenDep, db: DbDep,
+    around: date | None = Query(None),
+):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    schedule = payroll_policy._schedule(
+        body.payroll_frequency, body.anchor_start_date,
+        body.custom_interval_days, body.normal_days_off_mask,
+    )
+    return await boundaries.publication_choices(
+        company_id, user_id, setup_id, None, around, db,
+        proposed_schedule=schedule,
+    )
+
+
+@router.post(
+    "/setups/{setup_id}/publication-impact",
+    response_model=PublicationImpactResponse,
+)
+async def post_inline_publication_impact(
+    setup_id: int, body: InlinePublicationRequest, token: TokenDep, db: DbDep,
+):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    await require_policy_permission(company_id, user_id, "payroll_setup.manage", db)
+    await require_policy_permission(company_id, user_id, "payroll_setup.publish", db)
+    schedule = payroll_policy._schedule(
+        body.payroll_frequency, body.anchor_start_date,
+        body.custom_interval_days, body.normal_days_off_mask,
+    )
+    impact = await payroll_policy._policy_impact(
+        company_id, setup_id, body.effective_from_date, schedule, db,
         replaces_version_id=body.replaces_version_id,
     )
     return {
@@ -198,7 +252,7 @@ async def post_publish(
     company_id, user_id = int(token["cid"]), int(token["sub"])
     await require_policy_permission(company_id, user_id, "payroll_setup.publish", db)
     await reads.get_draft(company_id, setup_id, draft_id, db)
-    version_id = await policy.publish_version(
+    version_id = await payroll_policy.publish_version(
         company_id, user_id, setup_id, draft_id, body.effective_from_date, db,
         replaces_version_id=body.replaces_version_id,
     )
@@ -207,6 +261,44 @@ async def post_publish(
     if version is None:
         raise PolicyError("VERSION_NOT_FOUND", "Published Version was not found")
     return _version_response(version)
+
+
+@router.post(
+    "/setups/{setup_id}/publish",
+    response_model=VersionResponse,
+    status_code=201,
+)
+async def post_inline_publish(
+    setup_id: int, body: InlinePublicationRequest, token: TokenDep, db: DbDep,
+):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    schedule = payroll_policy._schedule(
+        body.payroll_frequency, body.anchor_start_date,
+        body.custom_interval_days, body.normal_days_off_mask,
+    )
+    version_id = await payroll_policy.publish_inline_version(
+        company_id, user_id, setup_id, schedule, body.effective_from_date, db,
+        replaces_version_id=body.replaces_version_id,
+    )
+    versions = await reads.list_versions(company_id, setup_id, db)
+    version = next((row for row in versions if row["version_id"] == version_id), None)
+    if version is None:
+        raise PolicyError("VERSION_NOT_FOUND", "Published Version was not found")
+    return _version_response(version)
+
+
+@router.get(
+    "/setups/{setup_id}/drafts/{draft_id}/publication-choices",
+    response_model=BoundaryChoicesResponse,
+)
+async def get_publication_choices(
+    setup_id: int, draft_id: int, token: TokenDep, db: DbDep,
+    around: date | None = Query(None),
+):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    return await boundaries.publication_choices(
+        company_id, user_id, setup_id, draft_id, around, db,
+    )
 
 
 @router.get("/default", response_model=DefaultSetupResponse)
@@ -219,10 +311,17 @@ async def get_default(token: TokenDep, db: DbDep):
 
 @router.put("/default", status_code=204)
 async def put_default(body: DefaultSetupRequest, token: TokenDep, db: DbDep):
-    await policy.set_default_setup(
+    await payroll_policy.set_default_setup(
         int(token["cid"]), int(token["sub"]), body.setup_id, db,
     )
     return Response(status_code=204)
+
+
+@router.get("/branch-summaries", response_model=list[BranchPolicySummaryResponse])
+async def get_branch_summaries(token: TokenDep, db: DbDep):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
+    return await reads.list_branch_policy_summaries(company_id, db)
 
 
 @router.get("/branches/{branch_id}/assignments", response_model=list[AssignmentResponse])
@@ -239,11 +338,41 @@ async def post_assignment(
     branch_id: int, body: AssignmentCreateRequest, token: TokenDep, db: DbDep,
 ):
     company_id, user_id = int(token["cid"]), int(token["sub"])
-    assignment_id = await policy.assign_setup(
+    assignment_id = await payroll_policy.assign_setup(
         company_id, user_id, branch_id, body.setup_id, body.effective_from_date,
         db, reason=body.reason,
     )
     return await reads.get_assignment(company_id, assignment_id, db)
+
+
+@router.get(
+    "/branches/{branch_id}/assignment-choices",
+    response_model=BoundaryChoicesResponse,
+)
+async def get_assignment_choices(
+    branch_id: int, token: TokenDep, db: DbDep,
+    setup_id: int = Query(..., gt=0),
+    around: date | None = Query(None),
+):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    return await boundaries.assignment_choices(
+        company_id, user_id, branch_id, setup_id, around, db,
+    )
+
+
+@router.get(
+    "/branches/{branch_id}/reassignment-choices",
+    response_model=BoundaryChoicesResponse,
+)
+async def get_reassignment_choices(
+    branch_id: int, token: TokenDep, db: DbDep,
+    destination_setup_id: int = Query(..., gt=0),
+    around: date | None = Query(None),
+):
+    company_id, user_id = int(token["cid"]), int(token["sub"])
+    return await boundaries.reassignment_choices(
+        company_id, user_id, branch_id, destination_setup_id, around, db,
+    )
 
 
 @router.post(
@@ -255,7 +384,7 @@ async def post_reassignment(
     branch_id: int, body: ReassignmentRequest, token: TokenDep, db: DbDep,
 ):
     company_id, user_id = int(token["cid"]), int(token["sub"])
-    assignment_id = await policy.reassign_setup(
+    assignment_id = await payroll_policy.reassign_setup(
         company_id, user_id, branch_id, body.destination_setup_id,
         body.effective_from_date, db, reason=body.reason,
     )
@@ -269,7 +398,7 @@ async def post_reassignment(
 async def post_reassignment_impact(
     branch_id: int, body: ReassignmentImpactRequest, token: TokenDep, db: DbDep,
 ):
-    return await policy.preview_reassignment_impact(
+    return await payroll_policy.preview_reassignment_impact(
         int(token["cid"]), int(token["sub"]), branch_id,
         body.destination_setup_id, body.effective_from_date, db,
     )
@@ -280,7 +409,7 @@ async def post_withdrawal(
     assignment_id: int, token: TokenDep, db: DbDep,
     body: WithdrawalRequest = Body(default=WithdrawalRequest()),
 ):
-    await policy.withdraw_assignment(
+    await payroll_policy.withdraw_assignment(
         int(token["cid"]), int(token["sub"]), assignment_id, db,
         reason=body.reason,
     )

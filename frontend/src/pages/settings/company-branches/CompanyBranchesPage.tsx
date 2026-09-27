@@ -1,12 +1,32 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
-import { canManageSettingsAdmin } from '../../../lib/permissions';
 import type { CompanyProfile, CompanyUpdate, BranchAdmin } from '../../../types/settings';
 import { CompanyStatusBadge, BranchStatusBadge } from '../../../components/StatusBadge';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import { EmptyState, ErrorState, ReadOnlyBanner } from '../../../components/ui';
+import { readApiError } from '../../../lib/payrollSetupErrors';
+import type { ApiErrorInfo } from '../../../lib/payrollSetupErrors';
+import { formatIsoLong } from '../../../lib/isoDate';
+import { getBranchOnboardingOptions } from '../../../lib/payrollSetupApi';
+import { useBoundaryChoices } from '../../../lib/useBoundaryChoices';
+import { isChoicesCurrent } from '../../../lib/payrollBoundaryView';
+import { PayrollBoundaryDateInput } from '../../../components/payroll/PayrollBoundaryDateInput';
+import { PayrollErrorNotice } from '../../../components/payroll/PayrollErrorNotice';
+import type { SetupResponse } from '../../../types/payrollSetup';
+import {
+  companyBranchesCapabilities,
+  accessNotice,
+  buildBranchUpdatePayload,
+  buildBranchCreatePayload,
+  canCreateBranchWithOnboarding,
+  showOnboardingCheckbox,
+  onboardingResult,
+  setupNeededLink,
+  branchScheduleLink,
+  readinessTitle,
+} from './companyBranchesView';
 import styles from './CompanyBranchesPage.module.css';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -63,7 +83,8 @@ function toForm(b: BranchAdmin): BranchForm {
 export function CompanyBranchesPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const canEdit = user !== null && canManageSettingsAdmin(user);
+  const caps = companyBranchesCapabilities(user);
+  const notice = accessNotice(caps);
 
   // ── Company ──────────────────────────────────────────────────────────────
   const [company, setCompany]             = useState<CompanyProfile | null>(null);
@@ -73,7 +94,13 @@ export function CompanyBranchesPage() {
   const [coForm, setCoForm]               = useState<CompanyUpdate>({ company_name: '' });
   const [savingCo, setSavingCo]           = useState(false);
   const [coSaveErr, setCoSaveErr]         = useState('');
-  const [successInfo, setSuccessInfo]     = useState<{ title: string; sub: string } | null>(null);
+  const [successInfo, setSuccessInfo]     = useState<{
+    title: string;
+    sub: string;
+    detail?: string;
+    code?: string | null;
+    links?: { to: string; label: string }[];
+  } | null>(null);
 
   // ── Branches ──────────────────────────────────────────────────────────────
   const [branches, setBranches]           = useState<BranchAdmin[]>([]);
@@ -88,7 +115,78 @@ export function CompanyBranchesPage() {
   const [bForm, setBForm]                 = useState<BranchForm>(EMPTY_FORM);
   const [savingBranch, setSavingBranch]   = useState(false);
   const [bSaveErr, setBSaveErr]           = useState('');
+  const [bCreateErr, setBCreateErr]       = useState<ApiErrorInfo | null>(null);
+  const [firstPayrollStart, setFirstPayrollStart] = useState('');
   const [settingDefault, setSettingDefault] = useState(false);
+
+  // ── Onboarding checkbox (create mode only, Unit B) ────────────────────────
+  const [setUpPayrollNow, setSetUpPayrollNow] = useState(false);
+  const [onboardingDefaultSetup, setOnboardingDefaultSetup] = useState<SetupResponse | null>(null);
+  const [onboardingDefaultLoading, setOnboardingDefaultLoading] = useState(false);
+  const [onboardingDefaultError, setOnboardingDefaultError] = useState<ApiErrorInfo | null>(null);
+  const hasCompanyDefault = onboardingDefaultSetup != null;
+
+  // Loaded once (no `around`) whenever the checkbox is turned on — gives us
+  // default_setup for display and for the useBoundaryChoices key below.
+  useEffect(() => {
+    if (modal !== 'create' || !setUpPayrollNow) return;
+    let active = true;
+    function markLoading() {
+      setOnboardingDefaultLoading(true);
+    }
+    markLoading();
+    getBranchOnboardingOptions()
+      .then((r) => {
+        if (active) {
+          setOnboardingDefaultSetup(r.default_setup);
+          setOnboardingDefaultError(null);
+          setOnboardingDefaultLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setOnboardingDefaultError(readApiError(err, 'Failed to load onboarding options.'));
+          setOnboardingDefaultLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [modal, setUpPayrollNow]);
+
+  const onboardingChoicesKey = `onboarding|${onboardingDefaultSetup?.setup_id ?? 'none'}`;
+  const onboardingChoicesFetcher =
+    setUpPayrollNow && onboardingDefaultSetup != null
+      ? (around?: string) =>
+          getBranchOnboardingOptions(around).then((r) => {
+            if (r.choices == null) throw new Error('No onboarding choices available.');
+            return r.choices;
+          })
+      : null;
+  const onboardingBoundary = useBoundaryChoices(onboardingChoicesFetcher, onboardingChoicesKey, firstPayrollStart);
+
+  // Apply the backend's own suggestion (the current payroll period start)
+  // exactly once per key, and only while the date is still blank — never
+  // defaults to browser today.
+  useEffect(() => {
+    function applySuggestedDate() {
+      if (onboardingBoundary.choices?.suggested) setFirstPayrollStart(onboardingBoundary.choices.suggested.date);
+    }
+    if (firstPayrollStart === '' && onboardingBoundary.choices?.suggested) {
+      applySuggestedDate();
+    }
+  }, [onboardingBoundary.choices, firstPayrollStart]);
+
+  const onboardingChoicesReady =
+    onboardingBoundary.choices != null &&
+    isChoicesCurrent(onboardingBoundary.choices, firstPayrollStart) &&
+    onboardingBoundary.choices.requested_valid;
+
+  const canCreateNow = canCreateBranchWithOnboarding({
+    setUpPayrollNow,
+    hasCompanyDefault,
+    choicesCurrentAndValid: onboardingChoicesReady,
+  });
 
   // ── Confirmation dialog ───────────────────────────────────────────────────
   type ConfirmKind = 'save-company' | 'save-branch' | 'set-default';
@@ -204,43 +302,68 @@ export function CompanyBranchesPage() {
   }
 
   // ── Branch modal ──────────────────────────────────────────────────────────
-  function openCreate() { setBForm(EMPTY_FORM); setBSaveErr(''); setEditingBranch(null); setModal('create'); }
+  function openCreate() {
+    setBForm(EMPTY_FORM); setBSaveErr(''); setBCreateErr(null); setFirstPayrollStart('');
+    setSetUpPayrollNow(false); setOnboardingDefaultSetup(null); setOnboardingDefaultError(null);
+    setEditingBranch(null); setModal('create');
+  }
 
   function openEdit(b: BranchAdmin) {
     setBForm(toForm(b)); setBSaveErr(''); setEditingBranch(b);
     setModal('edit');
   }
 
-  function closeModal() { setModal(null); setEditingBranch(null); setBSaveErr(''); }
+  function closeModal() {
+    setModal(null); setEditingBranch(null); setBSaveErr(''); setBCreateErr(null); setFirstPayrollStart('');
+    setSetUpPayrollNow(false); setOnboardingDefaultSetup(null); setOnboardingDefaultError(null);
+  }
 
   async function saveBranch() {
     if (!bForm.branch_name.trim()) { setBSaveErr('Branch name is required.'); return; }
-    setSavingBranch(true); setBSaveErr('');
+    setSavingBranch(true); setBSaveErr(''); setBCreateErr(null);
     try {
-      const payload = {
-        branch_name:    bForm.branch_name.trim(),
-        branch_code:    bForm.branch_code.trim() || undefined,
-        status:         bForm.status,
-        ...(modal === 'create' ? { is_default: bForm.is_default } : {}),
-        address_line1:  bForm.address_line1 || null,
-        city:           bForm.city || null,
-        state_province: bForm.state_province || null,
-        postal_code:    bForm.postal_code || null,
-        country:        bForm.country || null,
-        notes:          bForm.notes || null,
-      };
       if (modal === 'create') {
+        const payload = buildBranchCreatePayload(bForm, firstPayrollStart, {
+          canOnboard: caps.canOnboard,
+          setUpPayroll: setUpPayrollNow,
+          canSetDefaultOnCreate: caps.canSetDefaultOnCreate,
+        });
+        const submittedOnboarding = 'first_payroll_start_date' in payload;
         const { data } = await apiClient.post<BranchAdmin>('/settings/branches', payload);
         setBranches((p) => [...p, data]);
         closeModal();
-        setSuccessInfo({ title: `Branch Created!`, sub: `"${data.branch_name}" has been successfully added.` });
+        const links: { to: string; label: string }[] = [];
+        const scheduleHref = branchScheduleLink(user, data.branch_id);
+        if (scheduleHref) links.push({ to: scheduleHref, label: 'View payroll schedule' });
+        if (caps.canViewSetups) links.push({ to: '/settings/payroll', label: 'Open Payroll Setups' });
+
+        if (!submittedOnboarding) {
+          setSuccessInfo({
+            title: `Branch Created!`,
+            sub: `"${data.branch_name}" has been successfully added.`,
+            links,
+          });
+        } else {
+          const result = onboardingResult(data);
+          setSuccessInfo({
+            title: 'Branch Created!',
+            sub: result.message,
+            detail: result.evaluatedDate != null ? `Evaluated payroll start: ${result.evaluatedDate}` : undefined,
+            code: result.tone !== 'ready' && result.code != null ? result.code : undefined,
+            links,
+          });
+        }
       } else if (editingBranch) {
+        const payload = buildBranchUpdatePayload(bForm);
         const { data } = await apiClient.patch<BranchAdmin>(`/settings/branches/${editingBranch.branch_id}`, payload);
         setBranches((p) => p.map((b) => b.branch_id === data.branch_id ? data : b));
         closeModal();
         setSuccessInfo({ title: `Branch Updated!`, sub: `"${data.branch_name}" has been saved successfully.` });
       }
-    } catch (e) { setBSaveErr(apiError(e)); }
+    } catch (e) {
+      if (modal === 'create') setBCreateErr(readApiError(e, 'Could not create the Branch.'));
+      else setBSaveErr(apiError(e));
+    }
     finally { setSavingBranch(false); }
   }
 
@@ -260,6 +383,19 @@ export function CompanyBranchesPage() {
             </div>
             <h2 className={styles.successTitle}>{successInfo.title}</h2>
             <p className={styles.successSub}>{successInfo.sub}</p>
+            {successInfo.detail && <p className={styles.successSub}>{successInfo.detail}</p>}
+            {successInfo.code != null && (
+              <p className={styles.successSub}><code className={styles.errorCode}>{successInfo.code}</code></p>
+            )}
+            {successInfo.links && successInfo.links.length > 0 && (
+              <div className={styles.successLinks}>
+                {successInfo.links.map((l) => (
+                  <Link key={l.to} to={l.to} className={styles.scheduleLink} onClick={() => setSuccessInfo(null)}>
+                    {l.label}
+                  </Link>
+                ))}
+              </div>
+            )}
             <button className={styles.btnPrimary} onClick={() => setSuccessInfo(null)}>Done</button>
           </div>
         </div>
@@ -277,11 +413,11 @@ export function CompanyBranchesPage() {
         </div>
       )}
 
-      {!canEdit && (
+      {notice && (
         <ReadOnlyBanner
           tone="locked"
-          title="View only"
-          message="You don't have permission to edit company or branch settings."
+          title={caps.canCreate || caps.canAdmin ? 'Limited access' : 'View only'}
+          message={notice}
         />
       )}
 
@@ -310,7 +446,7 @@ export function CompanyBranchesPage() {
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              {canEdit && (
+              {caps.canAdmin && (
                 <button className={styles.btnSecondary} onClick={startEditCo}>
                   <EditIcon /> Edit Company
                 </button>
@@ -433,7 +569,7 @@ export function CompanyBranchesPage() {
                   </button>
                 ))}
               </div>
-              {canEdit && (
+              {caps.canCreate && (
                 <button className={styles.btnPrimary} onClick={openCreate}>
                   <PlusIcon /> Add Branch
                 </button>
@@ -469,7 +605,7 @@ export function CompanyBranchesPage() {
                   <col style={{ width: '7%'  }} />
                   <col style={{ width: '7%'  }} />
                   <col style={{ width: '13%' }} />
-                  {canEdit && <col style={{ width: '6%' }} />}
+                  {caps.canAdmin && <col style={{ width: '6%' }} />}
                 </colgroup>
                 <thead>
                   <tr>
@@ -481,11 +617,15 @@ export function CompanyBranchesPage() {
                     <th className={styles.thCenter}>Drivers</th>
                     <th className={styles.thCenter}>Approvals</th>
                     <th>Location</th>
-                    {canEdit && <th></th>}
+                    {caps.canAdmin && <th></th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((b) => (
+                  {filtered.map((b) => {
+                    const link = setupNeededLink(user, b.branch_id);
+                    const readinessTitleText = readinessTitle(b.schedule_readiness_reason);
+                    const scheduleHref = branchScheduleLink(user, b.branch_id);
+                    return (
                     <tr
                       key={b.branch_id}
                       className={styles.tableRow}
@@ -502,23 +642,49 @@ export function CompanyBranchesPage() {
                         )}
                       </td>
                       <td>
-                        {b.payroll_setup_done
-                          ? <span className={`${styles.setupBadge} ${styles.setupDone}`}><CheckIcon /> Complete</span>
-                          : (
-                            <button
-                              type="button"
-                              className={`${styles.setupBadge} ${styles.setupMissing} ${styles.setupMissingLink}`}
-                              title="Open payroll setup for this branch"
-                              aria-label={`Open payroll setup for ${b.branch_name}`}
-                              onClick={e => {
-                                e.stopPropagation(); // don't trigger row double-click
-                                navigate(`/settings/payroll?branchId=${b.branch_id}&tab=pay-schedule`);
-                              }}
-                            >
-                              <WarnIcon /> Setup Needed
-                            </button>
-                          )
-                        }
+                        {b.payroll_setup_done ? (
+                          <span className={`${styles.setupBadge} ${styles.setupDone}`}><CheckIcon /> Complete</span>
+                        ) : link.kind === 'setups' ? (
+                          <button
+                            type="button"
+                            className={`${styles.setupBadge} ${styles.setupMissing} ${styles.setupMissingLink}`}
+                            title={readinessTitleText
+                              ? `Open Payroll Policies (company administration) — ${readinessTitleText}`
+                              : 'Open Payroll Policies (company administration)'}
+                            aria-label={`Open Payroll Policies for ${b.branch_name}`}
+                            onClick={e => {
+                              e.stopPropagation(); // don't trigger row double-click
+                              navigate(link.to);
+                            }}
+                          >
+                            <WarnIcon /> Payroll not set up
+                          </button>
+                        ) : link.kind === 'schedule' ? (
+                          <button
+                            type="button"
+                            className={`${styles.setupBadge} ${styles.setupMissing} ${styles.setupMissingLink}`}
+                            title={readinessTitleText
+                              ? `View this branch's read-only payroll schedule — ${readinessTitleText}`
+                              : "View this branch's read-only payroll schedule"}
+                            aria-label={`View payroll schedule for ${b.branch_name}`}
+                            onClick={e => {
+                              e.stopPropagation(); // don't trigger row double-click
+                              navigate(link.to);
+                            }}
+                          >
+                            <WarnIcon /> Payroll not set up
+                          </button>
+                        ) : (
+                          <span
+                            className={`${styles.setupBadge} ${styles.setupMissing}`}
+                            title={readinessTitleText}
+                          >
+                            <WarnIcon /> Payroll not set up
+                          </span>
+                        )}
+                        {scheduleHref && (
+                          <Link to={scheduleHref} className={styles.scheduleLink}>View payroll schedule</Link>
+                        )}
                       </td>
                       <td className={styles.tdCenter}>{b.status_keys_count ?? '—'}</td>
                       <td className={styles.tdCenter}>{b.active_drivers_count ?? '—'}</td>
@@ -531,7 +697,7 @@ export function CompanyBranchesPage() {
                       <td className={styles.tdLocation}>
                         {[b.city, b.country].filter(Boolean).join(', ') || '—'}
                       </td>
-                      {canEdit && (
+                      {caps.canAdmin && (
                         <td className={styles.tdAction}>
                           <button
                             className={styles.rowActionBtn}
@@ -542,7 +708,8 @@ export function CompanyBranchesPage() {
                         </td>
                       )}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -583,7 +750,9 @@ export function CompanyBranchesPage() {
             : confirmKind === 'set-default'
             ? `Set "${editingBranch?.branch_name}" as the default branch? This will replace the current default.`
             : modal === 'create'
-            ? 'Create this new branch?'
+            ? (caps.canOnboard && setUpPayrollNow && hasCompanyDefault && firstPayrollStart.trim() !== ''
+                ? `Create this new branch? The server will try to set up payroll for it, effective ${formatIsoLong(firstPayrollStart.trim())}.`
+                : 'Create this new branch?')
             : `Save changes to "${editingBranch?.branch_name}"?`
         }
         confirmLabel={
@@ -621,7 +790,7 @@ export function CompanyBranchesPage() {
                         </span>
                       </div>
                     </div>
-                  ) : editingBranch.status === 'Active' && (
+                  ) : modal === 'edit' && caps.canAdmin && editingBranch.status === 'Active' && (
                     <button
                       className={styles.btnSetDefault}
                       onClick={() => setConfirmKind('set-default')}
@@ -638,15 +807,82 @@ export function CompanyBranchesPage() {
                 onChange={(p) => setBForm((f) => ({ ...f, ...p }))}
                 disabled={savingBranch}
                 isCreate={modal === 'create'}
+                canSetDefault={caps.canSetDefaultOnCreate}
                 styles={styles}
               />
+
+              {modal === 'create' && showOnboardingCheckbox(caps) && (
+                <div className={styles.onboardingSection}>
+                  <label className={styles.onboardingCheckboxRow}>
+                    <input
+                      type="checkbox"
+                      checked={setUpPayrollNow}
+                      onChange={(e) => {
+                        setSetUpPayrollNow(e.target.checked);
+                        setFirstPayrollStart('');
+                      }}
+                      disabled={savingBranch}
+                    />
+                    <span>Set up payroll for this branch now</span>
+                  </label>
+
+                  {setUpPayrollNow && (
+                    onboardingDefaultError ? (
+                      <PayrollErrorNotice info={onboardingDefaultError} />
+                    ) : onboardingDefaultLoading ? (
+                      <p className={styles.fieldHelp}>Loading…</p>
+                    ) : hasCompanyDefault ? (
+                      <>
+                        <div className={styles.onboardingDefaultInfo}>
+                          <span className={styles.onboardingDefaultInfoLabel}>Payroll policy</span>
+                          <span>{`Company default: ${onboardingDefaultSetup!.setup_name}`}</span>
+                        </div>
+                        <p className={styles.fieldHelp}>
+                          This branch will use the company&apos;s default payroll policy.
+                        </p>
+                        <PayrollBoundaryDateInput
+                          id="branch-onboarding-date"
+                          label="First payroll period starts on"
+                          value={firstPayrollStart}
+                          onChange={setFirstPayrollStart}
+                          choices={onboardingBoundary.choices}
+                          loading={onboardingBoundary.loading}
+                          error={onboardingBoundary.error}
+                          disabled={savingBranch}
+                          context="onboarding"
+                        />
+                      </>
+                    ) : (
+                      <div className={styles.onboardingMissingDefault}>
+                        <p>
+                          No company default payroll policy is set, so payroll can&apos;t be set up for this branch
+                          yet.
+                        </p>
+                        {caps.canViewSetups ? (
+                          <Link to="/settings/payroll">Choose a default payroll policy</Link>
+                        ) : (
+                          <span>Ask an administrator to choose a company default payroll policy.</span>
+                        )}
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+              {modal === 'create' && !caps.canOnboard && (
+                <p className={`${styles.fieldHelp} ${styles.onboardingUnavailableNote}`}>
+                  Setting up payroll for a new branch requires the payroll policy assign permission. The branch can
+                  still be created without it.
+                </p>
+              )}
+
               {bSaveErr && <div className={styles.errorAlert} style={{ marginTop: '0.75rem' }}><AlertIcon /> {bSaveErr}</div>}
+              {bCreateErr && <PayrollErrorNotice info={bCreateErr} />}
             </div>
             <div className={styles.modalFooter}>
               <button
                 className={styles.btnPrimary}
                 onClick={() => setConfirmKind('save-branch')}
-                disabled={savingBranch}
+                disabled={savingBranch || (modal === 'create' && !canCreateNow)}
               >
                 {savingBranch ? <><SpinnerIcon /> Saving…</> : modal === 'create' ? 'Create Branch' : 'Save Changes'}
               </button>
@@ -854,12 +1090,13 @@ function CountryPicker({ value, onChange, disabled }: {
 // ─── Branch form fields ────────────────────────────────────────────────────────
 
 function BranchFormFields({
-  form, onChange, disabled, isCreate, styles: s,
+  form, onChange, disabled, isCreate, canSetDefault, styles: s,
 }: {
   form: BranchForm;
   onChange: (p: Partial<BranchForm>) => void;
   disabled: boolean;
   isCreate: boolean;
+  canSetDefault: boolean;
   styles: Record<string, string>;
 }) {
   return (
@@ -911,7 +1148,7 @@ function BranchFormFields({
           onChange={(e) => onChange({ notes: e.target.value })}
           disabled={disabled} placeholder="Optional" maxLength={500} />
       </div>
-      {isCreate && (
+      {isCreate && canSetDefault && (
         <div className={`${s.formGroup} ${s.formGroupFull}`}>
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem',
             cursor: 'pointer', fontSize: '0.875rem', fontWeight: 500, color: '#374151' }}>
@@ -920,6 +1157,13 @@ function BranchFormFields({
               disabled={disabled} style={{ accentColor: '#2563eb', width: 16, height: 16 }} />
             Set as default branch
           </label>
+        </div>
+      )}
+      {isCreate && !canSetDefault && (
+        <div className={`${s.formGroup} ${s.formGroupFull}`}>
+          <p className={s.fieldHelp}>
+            Only settings administrators can make a new Branch the Company default.
+          </p>
         </div>
       )}
     </div>

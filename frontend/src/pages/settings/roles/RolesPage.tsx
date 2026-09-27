@@ -12,56 +12,28 @@ import type {
   Permission,
 } from '../../../types/admin';
 import styles from './RolesPage.module.css';
+import {
+  PERM_DEPS,
+  getRiskTier,
+  groupPermissionsByDomain,
+  permsReducer,
+} from './rolePermissionModel';
+import type { RiskTier } from './rolePermissionModel';
 
 // ─── Permission grouping & metadata ──────────────────────────────────────────
+// Group data/order/codes/notes live in rolePermissionModel.ts (pure, testable).
+// Icons are rendering-only and stay here, keyed by group id.
 
-type BusinessGroup = {
-  id: string;
-  label: string;
-  icon: React.ReactNode;
-  codes: readonly string[];
+const GROUP_ICONS: Record<string, React.ReactNode> = {
+  'org-admin': <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/><rect x="13" y="13" width="3" height="3"/><rect x="13" y="6" width="3" height="3"/><rect x="6" y="13" width="3" height="3"/><rect x="6" y="6" width="3" height="3"/></svg>,
+  'payroll-ops': <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>,
+  'payroll-config': <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  'payroll-setup': <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+  'workforce': <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="3" width="15" height="13" rx="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>,
+  'reporting': <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
 };
 
-// Business-domain groups — order and membership are explicit, independent of API module_code
-const BUSINESS_GROUPS: BusinessGroup[] = [
-  {
-    id: 'org-admin',
-    label: 'Organization Administration',
-    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/><rect x="13" y="13" width="3" height="3"/><rect x="13" y="6" width="3" height="3"/><rect x="6" y="13" width="3" height="3"/><rect x="6" y="6" width="3" height="3"/></svg>,
-    codes: ['company.view', 'company.edit', 'branches.view', 'branches.create', 'branches.edit', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
-  },
-  {
-    id: 'payroll-ops',
-    label: 'Payroll Operations',
-    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>,
-    codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'payroll.approve', 'review.decide', 'payroll.finalize'],
-  },
-  {
-    id: 'payroll-config',
-    label: 'Payroll Configuration',
-    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
-    codes: ['settings.view', 'settings.manage', 'setup.manage', 'payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
-  },
-  {
-    id: 'workforce',
-    label: 'Workforce',
-    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="3" width="15" height="13" rx="2"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>,
-    codes: ['drivers.view', 'drivers.create', 'drivers.edit'],
-  },
-  {
-    id: 'reporting',
-    label: 'Reporting',
-    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
-    codes: ['reports.view'],
-  },
-];
-
-// Permissions excluded from the UI — preserved unchanged on every save via permsSt.codes
-const HIDDEN_PERM_CODES = new Set(['dispatch.view', 'dispatch.edit']);
-
 // Risk tiers — visual only, no enforcement
-type RiskTier = 'readonly' | 'write' | 'approval' | 'critical';
-
 const RISK_LABELS: Record<RiskTier, string> = {
   readonly: 'Read',
   write:    'Write',
@@ -75,46 +47,6 @@ const RISK_CLASS: Record<RiskTier, string> = {
   approval: styles.riskApproval,
   critical: styles.riskCritical,
 };
-
-function getRiskTier(code: string): RiskTier {
-  if (code === 'payroll.finalize' || code === 'users.deactivate' || code === 'roles.delete') return 'critical';
-  if (code === 'payroll.approve' || code === 'review.decide' || code === 'roles.edit' || code === 'company.edit') return 'approval';
-  if (code.endsWith('.view')) return 'readonly';
-  return 'write';
-}
-
-// Child → required parent permission (for dependency enforcement)
-const PERM_DEPS: Record<string, string> = {
-  'company.edit':          'company.view',
-  'branches.create':       'branches.view',
-  'branches.edit':         'branches.view',
-  'roles.create':          'roles.view',
-  'roles.edit':            'roles.view',
-  'roles.delete':          'roles.view',
-  'users.create':          'users.view',
-  'users.edit':            'users.view',
-  'users.deactivate':      'users.view',
-  'payroll.edit':          'payroll.view',
-  'payroll.approve':       'payroll.view',
-  'payroll.finalize':      'payroll.view',
-  'payroll.entry':         'payroll.view',
-  'payroll.period.create': 'payroll.view',
-  'review.decide':         'payroll.view',
-  'payitems.edit':         'payitems.view',
-  'payrates.edit':         'payrates.view',
-  'drivers.create':        'drivers.view',
-  'drivers.edit':          'drivers.view',
-  'dispatch.edit':         'dispatch.view',
-  'settings.manage':       'settings.view',
-};
-
-// Parent → children that depend on it (only visible codes are toggled — hidden dispatch.* are safe)
-const PERM_DEPENDENTS: Record<string, string[]> = {};
-for (const [child, parent] of Object.entries(PERM_DEPS)) {
-  if (HIDDEN_PERM_CODES.has(child)) continue; // dispatch cascade never triggered from visible UI
-  if (!PERM_DEPENDENTS[parent]) PERM_DEPENDENTS[parent] = [];
-  PERM_DEPENDENTS[parent].push(child);
-}
 
 // ─── State / reducers ─────────────────────────────────────────────────────────
 
@@ -136,66 +68,6 @@ function rolesReducer(s: RolesState, a: RolesAction): RolesState {
     case 'ROLE_DELETED': return { ...s, roles: s.roles.filter(r => r.company_role_id !== a.id) };
     case 'ROLE_RENAMED': return { ...s, roles: s.roles.map(r => r.company_role_id === a.id ? { ...r, role_name: a.name } : r) };
     default:             return s;
-  }
-}
-
-type PermsState = { codes: Set<string>; savedCodes: Set<string>; loading: boolean; error: string; dirty: boolean };
-type PermsAction =
-  | { type: 'FETCH_START' }
-  | { type: 'FETCH_OK'; codes: string[] }
-  | { type: 'FETCH_ERROR'; error: string }
-  | { type: 'TOGGLE'; code: string }
-  | { type: 'SET_MANY'; codes: string[]; enable: boolean }
-  | { type: 'RESET_DIRTY' };
-
-function setsEqual(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
-function permsReducer(s: PermsState, a: PermsAction): PermsState {
-  switch (a.type) {
-    case 'FETCH_START':   return { codes: new Set<string>(), savedCodes: new Set<string>(), loading: true, error: '', dirty: false };
-    case 'FETCH_OK': {
-      const codes = new Set<string>(a.codes);
-      return { codes, savedCodes: codes, loading: false, error: '', dirty: false };
-    }
-    case 'FETCH_ERROR':   return { codes: new Set<string>(), savedCodes: new Set<string>(), loading: false, error: a.error, dirty: false };
-    case 'TOGGLE': {
-      const next = new Set<string>(s.codes);
-      if (next.has(a.code)) {
-        // Disabling: cascade-disable all dependents
-        next.delete(a.code);
-        for (const dep of PERM_DEPENDENTS[a.code] ?? []) {
-          next.delete(dep);
-        }
-      } else {
-        // Enabling: auto-enable required parent
-        next.add(a.code);
-        const parent = PERM_DEPS[a.code];
-        if (parent) next.add(parent);
-      }
-      return { ...s, codes: next, dirty: !setsEqual(next, s.savedCodes) };
-    }
-    case 'SET_MANY': {
-      const next = new Set<string>(s.codes);
-      if (a.enable) {
-        for (const code of a.codes) {
-          next.add(code);
-          const parent = PERM_DEPS[code];
-          if (parent) next.add(parent);
-        }
-      } else {
-        for (const code of a.codes) {
-          next.delete(code);
-          for (const dep of PERM_DEPENDENTS[code] ?? []) next.delete(dep);
-        }
-      }
-      return { ...s, codes: next, dirty: !setsEqual(next, s.savedCodes) };
-    }
-    case 'RESET_DIRTY':   return { ...s, savedCodes: s.codes, dirty: false };
-    default:              return s;
   }
 }
 
@@ -233,18 +105,6 @@ function apiError(err: unknown): string {
   if (Array.isArray(d)) return d.map((i: unknown) => (i as { msg?: string })?.msg ?? '').filter(Boolean).join(' ');
   if (d && typeof d === 'object' && 'message' in d) return String((d as { message: unknown }).message);
   return 'An unexpected error occurred.';
-}
-
-function groupPermissionsByDomain(perms: Permission[]): [BusinessGroup, Permission[]][] {
-  const byCode = new Map(perms.map(p => [p.permission_code, p]));
-  return BUSINESS_GROUPS
-    .map(group => {
-      const grouped = group.codes
-        .map(code => byCode.get(code))
-        .filter((p): p is Permission => p !== undefined);
-      return [group, grouped] as [BusinessGroup, Permission[]];
-    })
-    .filter(([, grouped]) => grouped.length > 0);
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -695,9 +555,14 @@ export function RolesPage() {
                     {!permsSt.loading && !permsSt.error && groupedDomains.map(([group, perms]) => (
                       <div key={group.id} className={styles.permGroup}>
                         <div className={styles.permGroupTitle}>
-                          <span className={styles.permGroupIcon}>{group.icon}</span>
+                          <span className={styles.permGroupIcon}>{GROUP_ICONS[group.id]}</span>
                           {group.label}
                         </div>
+                        {group.note && (
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 400, fontStyle: 'italic', textTransform: 'none', letterSpacing: 'normal', margin: '-0.35rem 0 0.55rem 0.4rem' }}>
+                            {group.note}
+                          </div>
+                        )}
                         {perms.map(perm => (
                           <div key={perm.permission_code} className={`${styles.permRow} ${styles.permRowReadOnly}`}>
                             <CheckboxCheckedReadOnly />
@@ -750,7 +615,7 @@ export function RolesPage() {
                       return (
                       <div key={group.id} className={styles.permGroup}>
                         <div className={styles.permGroupTitle}>
-                          <span className={styles.permGroupIcon}>{group.icon}</span>
+                          <span className={styles.permGroupIcon}>{GROUP_ICONS[group.id]}</span>
                           {group.label}
                           {!readOnly && (
                             <input
@@ -766,6 +631,11 @@ export function RolesPage() {
                             />
                           )}
                         </div>
+                        {group.note && (
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 400, fontStyle: 'italic', textTransform: 'none', letterSpacing: 'normal', margin: '-0.35rem 0 0.55rem 0.4rem' }}>
+                            {group.note}
+                          </div>
+                        )}
                         {perms.map(perm => {
                           const checked   = permsSt.codes.has(perm.permission_code);
                           const parent    = PERM_DEPS[perm.permission_code];

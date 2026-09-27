@@ -126,7 +126,7 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
     """Create current Setup/Published Version/Branch Assignment policy state."""
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from app.payroll_setup.policy import (
+    from app.payroll_setup.payroll_policy import (
         assign_setup,
         create_draft,
         create_setup,
@@ -176,7 +176,7 @@ async def _publish_future_version(db: AsyncConnection, setup_id: int,
                                   effective: datetime.date, mask: int) -> int:
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from app.payroll_setup.policy import create_draft, publish_version
+    from app.payroll_setup.payroll_policy import create_draft, publish_version
 
     engine = create_async_engine(db.engine.url, echo=False)
     try:
@@ -326,7 +326,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0068."""
+        """D02: Migration chain is linear and head is 0070."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -338,7 +338,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0068" in lines[0], f"Expected head 0068, got: {lines[0]}"
+        assert "0070" in lines[0], f"Expected head 0070, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows

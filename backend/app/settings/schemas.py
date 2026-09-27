@@ -16,6 +16,8 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.payroll_setup.schemas import BoundaryChoicesResponse, SetupResponse
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -99,6 +101,8 @@ class BranchAdmin(BaseModel):
     payroll_setup_done: bool = False
     # Null unless caller has branch payroll.view/non-driver access or onboarding assign access.
     schedule_readiness_reason: str | None = None
+    # Period start date the readiness reason was evaluated against; same visibility as the reason.
+    schedule_readiness_date: date | None = None
     status_keys_count: int | None = None
     total_people_count: int | None = None
     active_drivers_count: int | None = None
@@ -179,6 +183,22 @@ class BranchUpdate(BaseModel):
         if v is not None and v not in _BRANCH_STATUSES:
             raise ValueError(f"status must be one of {sorted(_BRANCH_STATUSES)}")
         return v
+
+
+class OnboardingOptionsResponse(BaseModel):
+    """
+    Returned by GET /settings/branches/onboarding-options.
+
+    default_setup is the company's current default Payroll Setup, or null when
+    none is configured. choices is the canonical boundary-choices navigation
+    (nearest valid previous/next first-payroll dates, a suggested date, and
+    why an explicit `around` date is invalid) computed against that Setup's
+    onboarding window; it is null whenever default_setup is null. An archived
+    default Setup still returns choices — with a SETUP_NOT_ACTIVE conflict —
+    rather than being special-cased here.
+    """
+    default_setup: SetupResponse | None
+    choices: BoundaryChoicesResponse | None
 
 
 # ---------------------------------------------------------------------------

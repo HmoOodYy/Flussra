@@ -9,14 +9,15 @@ from .errors import PolicyError
 from .resolver import resolve_payroll_setup_version
 
 
-async def branch_schedule_readiness(
+async def branch_schedule_readiness_detail(
     company_id: int,
     branch_id: int,
     db: AsyncConnection,
     *,
     period_start_date: date | None = None,
-) -> tuple[bool, str]:
-    """Return (ready, reason-code), without consulting legacy branch settings."""
+) -> tuple[bool, str, date | None]:
+    """Return (ready, reason-code, evaluated period start date or None),
+    without consulting legacy branch settings or wall-clock time."""
     result = await db.execute(text("""
         SELECT b.Status AS BranchStatus, c.Status AS CompanyStatus,
                c.IsSuspended AS CompanyIsSuspended
@@ -29,7 +30,7 @@ async def branch_schedule_readiness(
     if (operational["branchstatus"] != "Active"
             or operational["companystatus"] != "Active"
             or operational["companyissuspended"]):
-        return False, "BRANCH_NOT_OPERATIONAL"
+        return False, "BRANCH_NOT_OPERATIONAL", None
     start_date = period_start_date
     if start_date is None:
         result = await db.execute(text("""
@@ -45,7 +46,7 @@ async def branch_schedule_readiness(
         row = result.mappings().one()
         start_date = row["nextafterperiod"] or row["firstassignmentstart"]
     if start_date is None:
-        return False, "NO_ASSIGNMENT"
+        return False, "NO_ASSIGNMENT", None
     try:
         await resolve_payroll_setup_version(company_id, branch_id, start_date, db)
     except PolicyError as exc:
@@ -59,5 +60,19 @@ async def branch_schedule_readiness(
         }
         if exc.code not in reason_map:
             raise
-        return False, reason_map[exc.code]
-    return True, "READY"
+        return False, reason_map[exc.code], start_date
+    return True, "READY", start_date
+
+
+async def branch_schedule_readiness(
+    company_id: int,
+    branch_id: int,
+    db: AsyncConnection,
+    *,
+    period_start_date: date | None = None,
+) -> tuple[bool, str]:
+    """Return (ready, reason-code), without consulting legacy branch settings."""
+    ready, reason, _start_date = await branch_schedule_readiness_detail(
+        company_id, branch_id, db, period_start_date=period_start_date,
+    )
+    return ready, reason

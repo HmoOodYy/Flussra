@@ -22,6 +22,7 @@ Test isolation strategy
   existing lifecycle endpoint rather than candidate creation.
 """
 import datetime as _dt
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
@@ -29,7 +30,13 @@ import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+from app.payroll_setup import clock
+from app.payroll_setup.payroll_policy import (
+    assign_setup,
+    create_draft,
+    create_setup,
+    publish_version,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -62,7 +69,10 @@ async def _new_authorized_branch(test_database_url: str, frequency: str,
                 normal_days_off_mask=0,
             )
             await publish_version(1, user_id, setup_id, draft_id, anchor, db)
-            await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
+            # Historical scenario: the Branch is onboarded during its first
+            # period, so company-local "today" is the anchor, not the wall clock.
+            with patch.object(clock, "company_today", AsyncMock(return_value=anchor)):
+                await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
             return branch_id, code
     finally:
         await engine.dispose()

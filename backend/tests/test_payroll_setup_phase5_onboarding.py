@@ -20,8 +20,7 @@ from app.auth.security import create_access_token
 from app.dashboard.service import _compute_setup_warnings
 from app.dependencies import get_db
 from app.main import app as real_app
-from app.payroll_setup import policy as payroll_policy
-from app.payroll_setup import readiness
+from app.payroll_setup import payroll_policy, readiness
 from app.payroll_setup.errors import PolicyError
 from app.settings import service as settings_service
 
@@ -827,10 +826,24 @@ async def test_no_applicable_version_and_inactive_branch_both_roll_back(
     actor = await _actor(db, permissions=("branches.create", "payroll_setup.assign"),
                          scope="AllCompanyBranches")
     setup = await client.post("/payroll-setup/setups", headers=_auth(token), json={
-        "setup_code": "P5NV_" + marker[:10], "setup_name": "No published version",
+        "setup_code": "P5NV_" + marker[:10], "setup_name": "No applicable version",
     })
     assert setup.status_code == 201, setup.text
     setup_id = setup.json()["setup_id"]
+    # A Published Version is required to be the default; this one starts after the
+    # branches' first payroll start (2090-01-01), so no version is applicable to them.
+    late_draft = await client.post(
+        f"/payroll-setup/setups/{setup_id}/drafts", headers=_auth(token), json={
+            "payroll_frequency": "Week", "anchor_start_date": "2091-01-01",
+            "custom_interval_days": None, "normal_days_off_mask": 0,
+        },
+    )
+    assert late_draft.status_code == 201, late_draft.text
+    late_publish = await client.post(
+        f"/payroll-setup/setups/{setup_id}/drafts/{late_draft.json()['version_id']}/publish",
+        headers=_auth(token), json={"effective_from_date": "2091-01-01"},
+    )
+    assert late_publish.status_code == 201, late_publish.text
     default = await client.put("/payroll-setup/default", headers=_auth(token),
                                json={"setup_id": setup_id})
     assert default.status_code == 204, default.text
@@ -855,6 +868,152 @@ async def test_no_applicable_version_and_inactive_branch_both_roll_back(
             WHERE CompanyID = :cid AND ActionCode = 'BRANCH_CREATED'
               AND NewValueJson::jsonb ->> 'branch_code' = :code
         """), {"cid": fixture.company_id, "code": branch_code})).scalar_one() == 0
+
+
+@pytest.mark.asyncio
+async def test_branch_create_default_requires_settings_admin(
+    phase5_onboarding_db, phase5_onboarding_conn,
+):
+    """POST /settings/branches with is_default=true must additionally require
+    settings-admin (_ensure_company_admin), matching the dedicated
+    set-default endpoint's authority — branches.create alone must not be able
+    to change the Company default indirectly via create.
+
+    The fixture's admin token does not hold setup.manage in this isolated
+    database, so setup.manage-gated calls use an explicit admin_only actor.
+    """
+    client = phase5_onboarding_db.client
+    db_conn = phase5_onboarding_conn
+    marker = uuid4().hex
+    company_id = phase5_onboarding_db.company_id
+
+    admin_only = await _actor(db_conn, permissions=("setup.manage",),
+                              scope="AllCompanyBranches")
+
+    # Establish a known Company default branch before the scenario begins.
+    seeded_default = await client.post(
+        f"/settings/branches/{phase5_onboarding_db.branch_id}/set-default",
+        headers=_auth(admin_only),
+    )
+    assert seeded_default.status_code == 200, seeded_default.text
+
+    original_default_id = (await db_conn.execute(text(
+        "SELECT BranchID FROM core.Branches WHERE CompanyID = :cid AND IsDefault = TRUE"
+    ), {"cid": company_id})).scalar_one()
+
+    try:
+        create_only = await _actor(db_conn, permissions=("branches.create",),
+                                   scope="AllCompanyBranches")
+        create_assign = await _actor(db_conn, permissions=("branches.create", "payroll_setup.assign"),
+                                     scope="AllCompanyBranches")
+        create_admin = await _actor(db_conn, permissions=("branches.create", "setup.manage"),
+                                    scope="AllCompanyBranches")
+
+        # 1. create_only ordinary create (no is_default) -> 201, is_default False;
+        #    original default still default.
+        code1 = "P6D" + uuid4().hex[:7]
+        ordinary = await client.post("/settings/branches", headers=_auth(create_only), json={
+            "branch_name": "P6 ordinary " + marker[:8],
+            "branch_code": code1,
+        })
+        assert ordinary.status_code == 201, ordinary.text
+        assert ordinary.json()["is_default"] is False
+        assert (await db_conn.execute(text(
+            "SELECT IsDefault FROM core.Branches WHERE BranchID = :bid"
+        ), {"bid": original_default_id})).scalar_one() is True
+
+        # 2. create_only with is_default=True -> 403; no branch created;
+        #    original default unchanged.
+        code2 = "P6D" + uuid4().hex[:7]
+        denied_create_only = await client.post("/settings/branches", headers=_auth(create_only), json={
+            "branch_name": "P6 denied create-only " + marker[:8],
+            "branch_code": code2, "is_default": True,
+        })
+        assert denied_create_only.status_code == 403, denied_create_only.text
+        assert (await db_conn.execute(text("""
+            SELECT COUNT(*) FROM core.Branches WHERE CompanyID = :cid AND BranchCode = :code
+        """), {"cid": company_id, "code": code2})).scalar_one() == 0
+        assert (await db_conn.execute(text(
+            "SELECT IsDefault FROM core.Branches WHERE BranchID = :bid"
+        ), {"bid": original_default_id})).scalar_one() is True
+
+        # 3. create_assign with is_default=True -> 403 (assign is unrelated to
+        #    default authority); no branch created.
+        code3 = "P6D" + uuid4().hex[:7]
+        denied_assign = await client.post("/settings/branches", headers=_auth(create_assign), json={
+            "branch_name": "P6 denied assign " + marker[:8],
+            "branch_code": code3, "is_default": True,
+        })
+        assert denied_assign.status_code == 403, denied_assign.text
+        assert (await db_conn.execute(text("""
+            SELECT COUNT(*) FROM core.Branches WHERE CompanyID = :cid AND BranchCode = :code
+        """), {"cid": company_id, "code": code3})).scalar_one() == 0
+
+        # 4. admin_only with is_default=True -> 403 (branches.create still
+        #    required); no branch created.
+        code4 = "P6D" + uuid4().hex[:7]
+        denied_admin_only = await client.post("/settings/branches", headers=_auth(admin_only), json={
+            "branch_name": "P6 denied admin-only " + marker[:8],
+            "branch_code": code4, "is_default": True,
+        })
+        assert denied_admin_only.status_code == 403, denied_admin_only.text
+        assert (await db_conn.execute(text("""
+            SELECT COUNT(*) FROM core.Branches WHERE CompanyID = :cid AND BranchCode = :code
+        """), {"cid": company_id, "code": code4})).scalar_one() == 0
+
+        # 5. create_admin with is_default=True and NO first_payroll_start_date
+        #    -> 201, response is_default True, and the original default branch
+        #    now reads is_default False.
+        code5 = "P6D" + uuid4().hex[:7]
+        promoted = await client.post("/settings/branches", headers=_auth(create_admin), json={
+            "branch_name": "P6 promoted " + marker[:8],
+            "branch_code": code5, "is_default": True,
+        })
+        assert promoted.status_code == 201, promoted.text
+        assert promoted.json()["is_default"] is True
+        new_default_id = promoted.json()["branch_id"]
+        old_default_reread = await client.get(
+            f"/settings/branches/{original_default_id}", headers=_auth(admin_only),
+        )
+        assert old_default_reread.status_code == 200, old_default_reread.text
+        assert old_default_reread.json()["is_default"] is False
+
+        # 6. create_admin with is_default=True AND first_payroll_start_date
+        #    -> 403 (assign still independently required); no branch created.
+        code6 = "P6D" + uuid4().hex[:7]
+        denied_dated = await client.post("/settings/branches", headers=_auth(create_admin), json={
+            "branch_name": "P6 denied dated " + marker[:8],
+            "branch_code": code6, "is_default": True,
+            "first_payroll_start_date": "2090-01-01",
+        })
+        assert denied_dated.status_code == 403, denied_dated.text
+        assert (await db_conn.execute(text("""
+            SELECT COUNT(*) FROM core.Branches WHERE CompanyID = :cid AND BranchCode = :code
+        """), {"cid": company_id, "code": code6})).scalar_one() == 0
+
+        # 7. set-default contract unchanged: create_only -> 403; admin_only
+        #    (setup.manage) -> success. Restoring original_default_id here
+        #    also serves as part of the test's cleanup.
+        denied_set_default = await client.post(
+            f"/settings/branches/{original_default_id}/set-default", headers=_auth(create_only),
+        )
+        assert denied_set_default.status_code == 403, denied_set_default.text
+        allowed_set_default = await client.post(
+            f"/settings/branches/{original_default_id}/set-default", headers=_auth(admin_only),
+        )
+        assert allowed_set_default.status_code == 200, allowed_set_default.text
+        assert allowed_set_default.json()["is_default"] is True
+        # Sanity: the promoted branch from step 5 is no longer the default.
+        reread_new_default = await client.get(
+            f"/settings/branches/{new_default_id}", headers=_auth(admin_only),
+        )
+        assert reread_new_default.status_code == 200, reread_new_default.text
+        assert reread_new_default.json()["is_default"] is False
+    finally:
+        restored = await client.post(
+            f"/settings/branches/{original_default_id}/set-default", headers=_auth(admin_only),
+        )
+        assert restored.status_code == 200, restored.text
 
 
 @pytest.mark.asyncio

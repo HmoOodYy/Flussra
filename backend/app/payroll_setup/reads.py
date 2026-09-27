@@ -3,8 +3,10 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from . import clock, readiness
 from .errors import PolicyError
 from .resolver import resolve_payroll_setup_version
+from .validation import terminal_version, version_schedule
 
 
 def _setup(row) -> dict:
@@ -44,7 +46,8 @@ async def get_draft(
     result = await db.execute(text("""
         SELECT PayrollSetupID, PayrollSetupVersionID, LifecycleState,
                PayrollFrequency, AnchorStartDate, CustomIntervalDays,
-               NormalDaysOffMask, CreatedAtUtc, DiscardedAtUtc
+               NormalDaysOffMask, PlannedEffectiveFromDate,
+               CreatedAtUtc, DiscardedAtUtc
         FROM payroll.PayrollSetupVersions
         WHERE CompanyID = :cid AND PayrollSetupID = :sid
           AND PayrollSetupVersionID = :vid AND LifecycleState = 'Draft'
@@ -59,6 +62,7 @@ async def get_draft(
         "anchor_start_date": row["anchorstartdate"],
         "custom_interval_days": row["customintervaldays"],
         "normal_days_off_mask": row["normaldaysoffmask"],
+        "planned_effective_from_date": row["plannedeffectivefromdate"],
         "created_at_utc": row["createdatutc"],
         "discarded_at_utc": row["discardedatutc"],
     }
@@ -69,7 +73,8 @@ async def list_drafts(company_id: int, setup_id: int, db: AsyncConnection) -> li
     result = await db.execute(text("""
         SELECT PayrollSetupID, PayrollSetupVersionID, LifecycleState,
                PayrollFrequency, AnchorStartDate, CustomIntervalDays,
-               NormalDaysOffMask, CreatedAtUtc, DiscardedAtUtc
+               NormalDaysOffMask, PlannedEffectiveFromDate,
+               CreatedAtUtc, DiscardedAtUtc
         FROM payroll.PayrollSetupVersions
         WHERE CompanyID = :cid AND PayrollSetupID = :sid AND LifecycleState = 'Draft'
           AND DiscardedAtUtc IS NULL
@@ -84,6 +89,7 @@ async def list_drafts(company_id: int, setup_id: int, db: AsyncConnection) -> li
             "anchor_start_date": row["anchorstartdate"],
             "custom_interval_days": row["customintervaldays"],
             "normal_days_off_mask": row["normaldaysoffmask"],
+            "planned_effective_from_date": row["plannedeffectivefromdate"],
             "created_at_utc": row["createdatutc"],
             "discarded_at_utc": row["discardedatutc"],
         }
@@ -117,6 +123,10 @@ async def list_versions(company_id: int, setup_id: int, db: AsyncConnection) -> 
         ORDER BY v.EffectiveFromDate, v.VersionNumber, v.PayrollSetupVersionID
     """), {"cid": company_id, "sid": setup_id})
     rows = result.mappings().all()
+    # Display/read-model only: which published Version is in effect on company-local today.
+    today = await clock.company_today(company_id, db)
+    current_row = await terminal_version(db, setup_id, today)
+    current_id = current_row["payrollsetupversionid"] if current_row else None
     return [
         {
             "setup_id": row["payrollsetupid"], "version_id": row["payrollsetupversionid"],
@@ -127,6 +137,7 @@ async def list_versions(company_id: int, setup_id: int, db: AsyncConnection) -> 
             "replaces_version_id": row["replacesversionid"],
             "replaced_by_version_id": row["replacedbyversionid"],
             "is_terminal": row["replacedbyversionid"] is None,
+            "is_current": row["payrollsetupversionid"] == current_id,
         }
         for row in rows
     ]
@@ -141,12 +152,14 @@ async def get_publication_schedule(
     if row["payroll_frequency"] is None or row["anchor_start_date"] is None:
         raise PolicyError("INVALID_SCHEDULE", "Draft schedule is incomplete")
     try:
-        from .chronology import Schedule
+        from .chronology import DaysOffLimitError, Schedule
 
         Schedule(
             row["payroll_frequency"], row["anchor_start_date"],
             row["custom_interval_days"], row["normal_days_off_mask"],
         )
+    except DaysOffLimitError as exc:
+        raise PolicyError("INVALID_NORMAL_DAYS_OFF", str(exc)) from exc
     except (TypeError, ValueError) as exc:
         raise PolicyError("INVALID_SCHEDULE", str(exc)) from exc
     return {
@@ -268,6 +281,96 @@ async def get_branch_history(
             })
         histories.append({**assignment, "versions": versions})
     return {"branch_id": branch_id, "assignments": histories}
+
+
+def _policy_assignment_summary(row: dict, schedule) -> dict:
+    return {
+        "assignment_id": row["branchpayrollsetupassignmentid"],
+        "setup_id": row["payrollsetupid"],
+        "setup_code": row["setupcode"],
+        "setup_name": row["setupname"],
+        "effective_from_date": row["effectivefromdate"],
+        "effective_to_date": row["effectivetodate"],
+        "payroll_frequency": schedule.frequency if schedule else None,
+        "custom_interval_days": schedule.custom_interval_days if schedule else None,
+    }
+
+
+async def list_branch_policy_summaries(company_id: int, db: AsyncConnection) -> list[dict]:
+    """One compact row per Branch: current/scheduled-next assignment and readiness.
+
+    `scheduled_change` is the first future non-withdrawn assignment; `upcoming_assignments`
+    lists ALL future non-withdrawn assignments (in effective-date order), since a Branch can
+    hold more than one — `scheduled_change` is always `upcoming_assignments[0]` (or None).
+
+    Display/read-model only — `today` (clock.company_today) never decides
+    payroll authority, only which non-withdrawn assignment is "current" here.
+    """
+    branches = (await db.execute(text("""
+        SELECT BranchID, BranchCode, BranchName, Status
+        FROM core.Branches WHERE CompanyID = :cid
+        ORDER BY BranchName, BranchID
+    """), {"cid": company_id})).mappings().all()
+
+    today = await clock.company_today(company_id, db)
+
+    summaries = []
+    for branch in branches:
+        branch_id = branch["branchid"]
+        assignments = (await db.execute(text("""
+            SELECT a.BranchPayrollSetupAssignmentID, a.PayrollSetupID,
+                   s.SetupCode, s.SetupName, a.EffectiveFromDate, a.EffectiveToDate
+            FROM payroll.BranchPayrollSetupAssignments a
+            JOIN payroll.PayrollSetups s
+              ON s.CompanyID = a.CompanyID AND s.PayrollSetupID = a.PayrollSetupID
+            WHERE a.CompanyID = :cid AND a.BranchID = :bid AND a.WithdrawnAtUtc IS NULL
+            ORDER BY a.EffectiveFromDate, a.BranchPayrollSetupAssignmentID
+        """), {"cid": company_id, "bid": branch_id})).mappings().all()
+
+        payroll_set_up = bool(assignments)
+        current_row = next(
+            (row for row in assignments
+             if row["effectivefromdate"] <= today
+             and (row["effectivetodate"] is None or row["effectivetodate"] > today)),
+            None,
+        )
+        future_rows = [row for row in assignments if row["effectivefromdate"] > today]
+
+        current = None
+        if current_row is not None:
+            schedule_date = max(today, current_row["effectivefromdate"])
+            schedule = version_schedule(
+                await terminal_version(db, current_row["payrollsetupid"], schedule_date),
+            )
+            current = _policy_assignment_summary(current_row, schedule)
+
+        upcoming_assignments = []
+        for row in future_rows:
+            schedule = version_schedule(
+                await terminal_version(db, row["payrollsetupid"], row["effectivefromdate"]),
+            )
+            upcoming_assignments.append(_policy_assignment_summary(row, schedule))
+
+        scheduled_change = upcoming_assignments[0] if upcoming_assignments else None
+
+        _ready, reason, readiness_date = await readiness.branch_schedule_readiness_detail(
+            company_id, branch_id, db,
+        )
+
+        summaries.append({
+            "branch_id": branch_id,
+            "branch_code": branch["branchcode"],
+            "branch_name": branch["branchname"],
+            "branch_status": branch["status"],
+            "reference_date": today,
+            "payroll_set_up": payroll_set_up,
+            "current": current,
+            "scheduled_change": scheduled_change,
+            "upcoming_assignments": upcoming_assignments,
+            "readiness_reason": reason,
+            "readiness_date": readiness_date,
+        })
+    return summaries
 
 
 async def get_effective_authority(

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import text
 
 from app.auth.security import create_access_token
-from app.payroll_setup import policy
+from app.payroll_setup import payroll_policy
 from app.payroll_setup.errors import PolicyError
 
 
@@ -117,6 +117,9 @@ async def test_payroll_setup_routes_are_registered(test_app):
         "/payroll-setup/setups/{setup_id}/drafts/{draft_id}",
         "/payroll-setup/setups/{setup_id}/drafts/{draft_id}/publication-impact",
         "/payroll-setup/setups/{setup_id}/drafts/{draft_id}/publish",
+        "/payroll-setup/setups/{setup_id}/publication-choices",
+        "/payroll-setup/setups/{setup_id}/publication-impact",
+        "/payroll-setup/setups/{setup_id}/publish",
         "/payroll-setup/setups/{setup_id}/versions", "/payroll-setup/default",
         "/payroll-setup/branches/{branch_id}/assignments",
         "/payroll-setup/branches/{branch_id}/reassignments",
@@ -186,6 +189,18 @@ async def test_default_permission_gates_manage_assign_scope_and_driver(client, a
     })
     assert created.status_code == 201, created.text
     sid = created.json()["setup_id"]
+    default_draft = await client.post(
+        f"/payroll-setup/setups/{sid}/drafts", headers=_auth(auth_token), json={
+            "payroll_frequency": "Week", "anchor_start_date": "2090-01-01",
+            "custom_interval_days": None, "normal_days_off_mask": 0,
+        },
+    )
+    assert default_draft.status_code == 201, default_draft.text
+    default_publish = await client.post(
+        f"/payroll-setup/setups/{sid}/drafts/{default_draft.json()['version_id']}/publish",
+        headers=_auth(auth_token), json={"effective_from_date": "2090-01-01"},
+    )
+    assert default_publish.status_code == 201, default_publish.text
     branch_id = (await db_conn.execute(text("""
         SELECT b.BranchID FROM core.Branches b JOIN core.Companies c USING (CompanyID)
         WHERE c.CompanyCode = 'DEMO' AND b.BranchCode = 'HQ'
@@ -337,6 +352,84 @@ async def test_drafts_publication_versions_and_discarded_draft_hidden(
     assert timeline_by_id[future_id]["effective_from_date"] == "2090-01-08"
     assert timeline_by_id[future_id]["effective_to_date"] is None
     assert timeline_by_id[future_id]["is_terminal"] is True
+
+
+@pytest.mark.asyncio
+async def test_inline_version_planning_publish_does_not_create_a_draft(
+    client, auth_token, db_conn,
+):
+    headers = _auth(auth_token)
+    created = await client.post("/payroll-setup/setups", headers=headers, json={
+        "setup_code": "P4INLINE_" + uuid4().hex[:8], "setup_name": "Inline version",
+    })
+    assert created.status_code == 201, created.text
+    sid = created.json()["setup_id"]
+    schedule = {
+        "payroll_frequency": "Week",
+        "anchor_start_date": "2090-01-01",
+        "custom_interval_days": None,
+        "normal_days_off_mask": 0,
+    }
+    choices = await client.post(
+        f"/payroll-setup/setups/{sid}/publication-choices",
+        headers=headers,
+        params={"around": "2090-01-01"},
+        json=schedule,
+    )
+    assert choices.status_code == 200, choices.text
+    assert choices.json()["requested"]["date"] == "2090-01-01"
+
+    impact_body = {**schedule, "effective_from_date": "2090-01-01", "replaces_version_id": None}
+    impact = await client.post(
+        f"/payroll-setup/setups/{sid}/publication-impact",
+        headers=headers,
+        json=impact_body,
+    )
+    assert impact.status_code == 200, impact.text
+    assert impact.json()["allowed"] is True
+
+    published = await client.post(
+        f"/payroll-setup/setups/{sid}/publish",
+        headers=headers,
+        json=impact_body,
+    )
+    assert published.status_code == 201, published.text
+    assert published.json()["lifecycle_state"] == "Published"
+
+    drafts = await client.get(f"/payroll-setup/setups/{sid}/drafts", headers=headers)
+    assert drafts.status_code == 200, drafts.text
+    assert drafts.json() == []
+    audit_types = (await db_conn.execute(text("""
+        SELECT EventType FROM payroll.PayrollSetupPolicyAuditEvents
+        WHERE PayrollSetupID = :sid ORDER BY PayrollSetupPolicyAuditEventID
+    """), {"sid": sid})).scalars().all()
+    assert "DraftCreated" not in audit_types
+    assert "DraftDiscarded" not in audit_types
+
+
+@pytest.mark.asyncio
+async def test_incomplete_draft_preserves_nullable_schedule_and_planned_date(
+    client, auth_token,
+):
+    headers = _auth(auth_token)
+    created = await client.post("/payroll-setup/setups", headers=headers, json={
+        "setup_code": "P4PARTIAL_" + uuid4().hex[:8], "setup_name": "Partial version",
+    })
+    assert created.status_code == 201, created.text
+    sid = created.json()["setup_id"]
+    body = {
+        "payroll_frequency": None,
+        "anchor_start_date": None,
+        "custom_interval_days": None,
+        "normal_days_off_mask": None,
+        "planned_effective_from_date": "2090-02-01",
+    }
+    draft = await client.post(f"/payroll-setup/setups/{sid}/drafts", headers=headers, json=body)
+    assert draft.status_code == 201, draft.text
+    listed = await client.get(f"/payroll-setup/setups/{sid}/drafts", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]["planned_effective_from_date"] == "2090-02-01"
+    assert listed.json()[0]["payroll_frequency"] is None
 
 
 @pytest.mark.asyncio
@@ -717,7 +810,7 @@ async def test_setup_mutation_audit_policy_error_mapping_and_transaction_rollbac
     """), {"sid": created["setup_id"]})).scalar_one()
     assert success_audit_count == 1
 
-    real_create_setup = policy.create_setup
+    real_create_setup = payroll_policy.create_setup
     failed_code = f"P4ROLLBACK_{unique}"
     inserted_setup_ids: list[int] = []
 
@@ -731,7 +824,7 @@ async def test_setup_mutation_audit_policy_error_mapping_and_transaction_rollbac
         inserted_setup_ids.append(inserted_id)
         raise PolicyError("SETUP_IN_USE", "Synthetic post-write conflict for rollback check")
 
-    monkeypatch.setattr(policy, "create_setup", create_then_raise_policy_error)
+    monkeypatch.setattr(payroll_policy, "create_setup", create_then_raise_policy_error)
     failed_response = await client.post(
         "/payroll-setup/setups",
         headers=token_headers,

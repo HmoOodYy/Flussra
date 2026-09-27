@@ -1,0 +1,88 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.legend {
+  padding: 0;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+
+.legend .required {
+  color: var(--color-danger);
+  margin-left: var(--space-1);
+}
+
+.fieldsRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.fieldLabel {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.input {
+  padding: var(--space-2) var(--space-2);
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  outline: none;
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+  box-sizing: border-box;
+  font-family: inherit;
+  text-align: center;
+}
+
+.inputDay,
+.inputMonth {
+  width: 2.75rem;
+}
+
+.inputYear {
+  width: 4rem;
+}
+
+.input:focus {
+  border-color: var(--color-blue-600);
+  box-shadow: 0 0 0 3px var(--color-blue-100);
+}
+
+.input:disabled {
+  background: var(--color-gray-100);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.input[aria-invalid='true'] {
+  border-color: var(--color-danger);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.message {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-danger);
+}

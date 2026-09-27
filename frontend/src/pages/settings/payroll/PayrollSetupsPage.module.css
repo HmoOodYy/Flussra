@@ -1,0 +1,1518 @@
+/* ═══════════════════════════════════════════════════════
+   Payroll Setups page
+   Company-owned Setups -> published immutable Versions.
+   Visual vocabulary follows StatusKeysPage.module.css.
+═══════════════════════════════════════════════════════ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.page > * {
+  flex-shrink: 0;
+}
+
+.mutedText {
+  font-size: 0.875rem;
+  color: #9ca3af;
+  margin: 0;
+}
+
+.mutedNote {
+  font-size: 0.82rem;
+  color: #6b7280;
+  font-style: italic;
+  margin: 0.5rem 0 0;
+}
+
+/* ═══════════════════════════════════════════════════════
+   TABS
+═══════════════════════════════════════════════════════ */
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1.5px solid #e5e7eb;
+}
+
+.tabBtn {
+  padding: 0.6rem 1.1rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #6b7280;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.12s, border-color 0.12s;
+}
+.tabBtn:hover { color: #334155; }
+.tabBtnActive { color: #2563eb; border-bottom-color: #2563eb; }
+
+/* ═══════════════════════════════════════════════════════
+   COMPANY DEFAULT CARD
+═══════════════════════════════════════════════════════ */
+
+.defaultRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.defaultText {
+  font-size: 0.9rem;
+  color: #0f172a;
+  font-weight: 500;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SETUPS LIST + DETAIL
+═══════════════════════════════════════════════════════ */
+
+.setupsBody {
+  display: grid;
+  /* Master ~280–320px per the master-detail spec; detail takes the rest. */
+  grid-template-columns: clamp(280px, 30%, 320px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  /* Two separate cards side by side, gap mirrors RolesPage's .body — no
+     frame of its own (no border/background/shadow/overflow here; each card
+     draws its own). */
+  gap: 1.25rem;
+  /* Fills the page height below the tabs; the min-height is only a floor
+     for short viewports, where the page scrolls instead. */
+  flex: 1 1 0;
+  min-height: 420px;
+}
+
+.setupsDetailPanel {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  min-height: 0;
+}
+
+/* The master pane is a flex column: a controls block (search + filter
+   chips), a scrollable list region, and a pinned footer. The pane itself no
+   longer scrolls — only .setupListScroll does — so the controls/footer stay
+   in place as the list grows. Card treatment mirrors RolesPage's
+   .rolesPanel exactly (border, radius, white, full height, own overflow). */
+.setupsListCard {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 4px 16px rgba(0,0,0,0.03);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Detail pane — card treatment mirrors RolesPage's .permPanel. Intentionally
+   empty in Step 1 (see PolicyDetailPanel.tsx, not yet mounted). */
+.setupsDetailPane {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 4px 16px rgba(0,0,0,0.03);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.detailPaneInner {
+  padding: 1.35rem 1.5rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  min-width: 0;
+}
+
+/* Empty detail state — no selectable policy. */
+.detailPaneEmpty {
+  height: 100%;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 2rem 1.5rem;
+  text-align: center;
+}
+.detailPaneEmptyTitle {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #334155;
+}
+.detailPaneEmptyText {
+  margin: 0;
+  font-size: 0.84rem;
+  color: #64748b;
+}
+
+/* Policy header (Step 3A): a clean summary row followed by one inset
+   details card, matching the compact master-detail reference treatment. */
+.policyHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.policyHeaderTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem 1.35rem;
+  min-width: 0;
+}
+.policyHeaderMain {
+  min-width: 0;
+  flex: 1 1 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.policyTitleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.65rem;
+}
+.policyTitle {
+  margin: 0;
+  font-size: 1.7rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+.policyHeader .badge {
+  padding: 0.28rem 0.65rem;
+  font-size: 0.76rem;
+}
+.policyHeader .badgeGreen::before {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: #16a34a;
+}
+.policyHeader .badgeBlue::before {
+  content: '★';
+  color: #2563eb;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+.policyDescription {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: #64748b;
+}
+.policyHeaderActions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  min-width: 0;
+  max-width: 100%;
+  padding-top: 0.05rem;
+}
+.policyActionRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+.policyActionHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  max-width: 100%;
+  padding: 0.38rem 0.6rem;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: #475569;
+}
+.policyActionHint::before {
+  content: '';
+  width: 0.35rem;
+  height: 0.35rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #60a5fa;
+}
+.policyHeaderNotice {
+  flex: 1 1 100%;
+}
+
+/* Payroll schedule card (Step 3A): read-only facts in the same white-card,
+   slate-border vocabulary as the master pane and Roles page. */
+.policyDetailsCard {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+}
+.policyDetailsHead {
+  padding: 0.9rem 1.05rem 0.8rem;
+  background: #fff;
+  border-bottom: 1px solid #edf0f4;
+  box-shadow: inset 3px 0 0 #93c5fd;
+}
+.policyDetailsHeading {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+.policyDetailsIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #eaf2ff;
+  color: #2563eb;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.policyDetailsTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+.policyDetailsSubtitle {
+  margin: 0.15rem 0 0;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+.policyDetailsBody {
+  padding: 1rem 1.25rem;
+}
+.policyDetailsGrid {
+  margin: 0;
+  padding: 0.85rem 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+.policyDetailsItem {
+  min-width: 0;
+  padding: 0.15rem 1.05rem;
+  border-left: 1px solid #e2e8f0;
+}
+.policyDetailsItem:first-child {
+  border-left: 0;
+}
+.policyDetailsItem dt {
+  margin-bottom: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #64748b;
+}
+.policyDetailsItem dd {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+.scheduleEmpty {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0.75rem 1rem 1rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid #e0ecff;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+.scheduleEmptyTitle {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #334155;
+}
+.scheduleEmptyText {
+  margin: 0;
+  font-size: 0.84rem;
+  color: #64748b;
+}
+@media (max-width: 720px) {
+  .policyHeaderTop { flex-direction: column; }
+  .policyDetailsGrid { grid-template-columns: 1fr; gap: 0; padding: 0.4rem 0; }
+  .policyDetailsItem {
+    flex: 0 0 auto;
+    border-left: 0;
+    border-top: 1px solid #f1f5f9;
+    padding: 0.7rem 1.25rem;
+  }
+  .policyDetailsItem:first-child { border-top: 0; }
+  .policyHeaderActions { align-items: flex-start; }
+  .policyActionRow { justify-content: flex-start; }
+  .policyActionHint { text-align: left; max-width: none; white-space: normal; }
+}
+
+/* VERSION PLANNING — Step 3B-1. One cohesive surface for future Published
+   Versions and saved Drafts; no tabs, timeline, or standalone CRUD cards. */
+.versionPlanning {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+}
+.versionPlanningHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.15rem 0.9rem;
+  border-bottom: 1px solid #edf0f4;
+}
+.versionPlanningTitle {
+  margin: 0;
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.versionPlanningSubtitle {
+  margin: 0.18rem 0 0;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+.versionPlanningHeader .btnPrimary {
+  flex: 0 0 auto;
+}
+.versionPlanningContent {
+  display: flex;
+  flex-direction: column;
+}
+.versionPlanningGroup {
+  padding: 0.9rem 1.15rem 1rem;
+}
+.versionPlanningGroup + .versionPlanningGroup {
+  padding-top: 0.85rem;
+  border-top: 1px solid #f1f5f9;
+}
+.versionPlanningGroupHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+}
+.versionPlanningGroupHeader h4 {
+  margin: 0;
+  color: #334155;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.versionPlanningGroupHeader span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.versionPlanningRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.versionPlanningQuiet {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  background: #fbfdff;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+.upcomingVersionRow,
+.planningDraftRow {
+  display: flex;
+  align-items: stretch;
+  gap: 0.9rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+}
+.upcomingVersionDate {
+  display: flex;
+  flex: 0 0 3.6rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem 0.45rem;
+  border-right: 1px solid #e2e8f0;
+  color: #64748b;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.upcomingVersionDate span {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.upcomingVersionDate strong {
+  margin: 0.18rem 0;
+  color: #1d4ed8;
+  font-size: 1.35rem;
+  font-weight: 800;
+}
+.upcomingVersionDateFallback {
+  font-size: 0.68rem !important;
+  line-height: 1.2;
+  text-align: center;
+}
+.upcomingVersionBody,
+.planningDraftBody {
+  min-width: 0;
+  flex: 1;
+}
+.upcomingVersionTopline,
+.planningDraftTopline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.upcomingVersionTopline strong,
+.planningDraftTopline strong {
+  color: #0f172a;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+.scheduledBadge,
+.draftBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.scheduledBadge {
+  background: #eff6ff;
+  color: #2563eb;
+}
+.draftBadge {
+  background: #f1f5f9;
+  color: #64748b;
+}
+.upcomingVersionBody p {
+  margin: 0.25rem 0 0;
+  color: #475569;
+  font-size: 0.78rem;
+}
+.upcomingVersionEffective {
+  color: #64748b !important;
+}
+.upcomingVersionMeta,
+.planningDraftMeta {
+  display: block;
+  margin-top: 0.35rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
+}
+.planningDraftRow {
+  align-items: center;
+}
+.planningDraftActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.planningDraftError {
+  flex: 1 1 100%;
+}
+.versionPlanningEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 1.8rem 1.5rem 2rem;
+  text-align: center;
+}
+.versionPlanningEmptyIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.35rem;
+  height: 2.35rem;
+  margin-bottom: 0.2rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+.versionPlanningEmptyTitle {
+  margin: 0;
+  color: #334155;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+.versionPlanningEmptyText {
+  max-width: 42ch;
+  margin: 0 0 0.45rem;
+  color: #64748b;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+@media (max-width: 720px) {
+  .versionPlanningHeader { flex-direction: column; }
+  .versionPlanningHeader .btnPrimary { width: 100%; justify-content: center; }
+  .upcomingVersionRow,
+  .planningDraftRow { align-items: flex-start; flex-wrap: wrap; }
+  .planningDraftActions { width: 100%; justify-content: flex-start; }
+}
+
+/* Search + filter controls block — mirrors RolesPage's .rolesControls. */
+.setupsControls {
+  flex-shrink: 0;
+  padding: 0.6rem 0.75rem 0.5rem;
+  border-bottom: 1px solid #f1f5f9;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+/* Search box (Step 2) — mirrors RolesPage's .searchInput (no icon, no clear
+   button here). */
+.policySearchInput {
+  width: 100%;
+  height: 34px;
+  padding: 0 0.75rem;
+  background: #f8fafc;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: #1e293b;
+  font-family: inherit;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s, background 0.15s;
+}
+.policySearchInput::placeholder { color: #b0bcc9; }
+.policySearchInput:focus { border-color: #93c5fd; background: #fff; }
+
+/* Filter segmented control (Step 2) — mirrors RolesPage's
+   .filterChips / .filterChip / .filterChipActive (no counts here). */
+.policyFilterRow {
+  display: flex;
+  gap: 0;
+  background: #e8edf4;
+  border-radius: 9px;
+  padding: 3px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.07);
+}
+
+.policyFilterBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.32rem 0.5rem;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #5a6a80;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
+}
+.policyFilterBtn:hover { color: #334155; background: rgba(255,255,255,0.4); }
+.policyFilterBtnActive {
+  background: #fff;
+  color: #1d4ed8;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.16), 0 0 1px rgba(0,0,0,0.10);
+}
+.policyFilterBtnActive:hover { background: #fff; }
+
+/* The scrollable list region — the only part of the master pane that
+   scrolls; flex:1 + min-height:0 lets it shrink inside the flex column.
+   Mirrors RolesPage's .rolesList, including its thin scrollbar. The empty
+   and loading lines carry their own comfortable padding (.setupListMessage)
+   since this container has none of its own — same as Roles. */
+.setupListScroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #c8d5e8 transparent;
+}
+.setupListScroll::-webkit-scrollbar { width: 6px; }
+.setupListScroll::-webkit-scrollbar-track { background: transparent; }
+.setupListScroll::-webkit-scrollbar-thumb { background: #c8d5e8; border-radius: 99px; }
+.setupListScroll::-webkit-scrollbar-thumb:hover { background: #93aec9; }
+
+.setupListMessage {
+  padding: 1.25rem 1rem;
+}
+
+/* Pinned footer holding the "+ Add policy" action (canManage-gated) —
+   mirrors RolesPage's .addRoleBtnWrap. */
+.setupsPaneFooter {
+  flex-shrink: 0;
+  padding: 0.6rem 0.75rem 0.75rem;
+  border-top: 1px solid #edf0f4;
+}
+
+/* "+ Add policy" — mirrors RolesPage's .addRoleBtn (full width, prominent). */
+.addPolicyBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.58rem 1rem;
+  background: #2563eb;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+  box-shadow: 0 1px 4px rgba(37,99,235,0.30), 0 0 0 1px rgba(37,99,235,0.12);
+  transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+.addPolicyBtn:hover {
+  background: #1d4ed8;
+  box-shadow: 0 3px 10px rgba(37,99,235,0.35), 0 0 0 1px rgba(37,99,235,0.18);
+}
+.addPolicyBtn:active {
+  transform: translateY(1px);
+  box-shadow: 0 1px 3px rgba(37,99,235,0.20);
+}
+.addPolicyBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.setupList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Mirrors RolesPage's .roleRow spacing/alignment; the selected treatment
+   mirrors .roleRowSelected (gradient + left accent bar) instead of the old
+   filled-pill selection. */
+.setupRow {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem 0.6rem 1rem;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #f8fafc;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background 0.1s;
+}
+.setupRow:hover { background: #f8faff; }
+.setupRowActive {
+  background: linear-gradient(90deg, #eff6ff 0%, #f8faff 100%);
+  box-shadow: inset 3px 0 0 #2563eb;
+}
+.setupRowActive .setupRowName { color: #2563eb; font-weight: 700; }
+
+.setupRowCode {
+  font-weight: 700;
+  font-size: 0.82rem;
+  color: #0f172a;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+}
+
+.setupRowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.setupRowName {
+  font-size: 0.85rem;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setupRowSecondary {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setupRowBadges {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.detailEmpty {
+  padding: 2.5rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ═══════════════════════════════════════════════════════
+   WELCOME / EMPTY-STATE CARD, NEXT-STEPS GUIDE, SPACING UTILITIES
+═══════════════════════════════════════════════════════ */
+
+.welcomeCard {
+  flex-direction: column;
+  gap: 0.5rem;
+  text-align: center;
+}
+
+.welcomeBody {
+  max-width: 480px;
+}
+
+.nextStepAction {
+  margin-left: 0.6rem;
+}
+
+.sectionSpacer {
+  margin-top: 1rem;
+}
+
+.sectionSpacerSmall {
+  margin-top: 0.5rem;
+}
+
+.paddedNotice {
+  padding: 1rem;
+}
+
+.detailContent {
+  padding: 1.1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.detailRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #f8fafc;
+}
+
+.detailLabel {
+  font-size: 0.79rem;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.detailValue {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #1e293b;
+  text-align: right;
+}
+
+.detailActions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding-top: 0.9rem;
+}
+
+.archiveBlocked {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.archiveBlockedReason {
+  font-size: 0.78rem;
+  color: #92400e;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ERROR NOTICE (local — includes code chip)
+═══════════════════════════════════════════════════════ */
+
+.errorNotice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 1rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #b91c1c;
+  font-size: 0.84rem;
+  margin-top: 0.5rem;
+}
+
+.errorCodeChip {
+  padding: 0.1rem 0.45rem;
+  background: #fff;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #991b1b;
+  font-family: 'Courier New', monospace;
+}
+
+/* ═══════════════════════════════════════════════════════
+   TABLE
+═══════════════════════════════════════════════════════ */
+
+.tableWrap {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.855rem;
+}
+
+.table th {
+  padding: 0.6rem 0.9rem;
+  text-align: left;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #9ca3af;
+  background: #fafafa;
+  border-bottom: 1px solid #f3f4f6;
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 0.75rem 0.9rem;
+  color: #374151;
+  vertical-align: middle;
+  border-bottom: 1px solid #f9fafb;
+}
+
+.table tbody tr:last-child td { border-bottom: none; }
+
+.assignmentMuted {
+  opacity: 0.55;
+}
+
+.assignmentBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid #f8fafc;
+}
+.assignmentBlock:last-child { border-bottom: none; }
+
+.assignmentMeta {
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+/* ═══════════════════════════════════════════════════════
+   BADGES
+═══════════════════════════════════════════════════════ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badgeGreen { background: #f0fdf4; color: #16a34a; }
+.badgeGray  { background: #f1f5f9; color: #64748b; }
+.badgeBlue  { background: #eff6ff; color: #1d4ed8; }
+/* Distinct muted style for Archived — lighter than badgeGray, with a border,
+   so an Archived policy never reads as an ordinary Inactive one. */
+.badgeMuted { background: #f8fafc; color: #94a3b8; border: 1px solid #e2e8f0; }
+
+/* ═══════════════════════════════════════════════════════
+   FORM ELEMENTS
+═══════════════════════════════════════════════════════ */
+
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.9rem;
+}
+
+.label {
+  font-size: 0.81rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.fieldHint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #9ca3af;
+  line-height: 1.4;
+}
+
+.input,
+.textarea {
+  padding: 0.5rem 0.75rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  color: #0f172a;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.14s, box-shadow 0.14s;
+  box-sizing: border-box;
+  font-family: inherit;
+  width: 100%;
+}
+.input:focus, .textarea:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.11);
+}
+.input:disabled, .textarea:disabled {
+  background: #f8fafc; color: #94a3b8; cursor: not-allowed;
+}
+.textarea { min-height: 80px; resize: vertical; }
+
+/* ═══════════════════════════════════════════════════════
+   BUTTONS
+═══════════════════════════════════════════════════════ */
+
+.btnPrimary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.48rem 1rem;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s;
+  font-family: inherit;
+}
+.btnPrimary:hover { background: #1d4ed8; }
+.btnPrimary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btnSecondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.48rem 1rem;
+  background: #fff;
+  color: #374151;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+  font-family: inherit;
+}
+.btnSecondary:hover { background: #f9fafb; }
+.btnSecondary:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.btnDanger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.48rem 1rem;
+  background: #fff;
+  color: #b91c1c;
+  border: 1.5px solid #fecaca;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+  font-family: inherit;
+}
+.btnDanger:hover { background: #fef2f2; }
+.btnDanger:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ═══════════════════════════════════════════════════════
+   ALERTS
+═══════════════════════════════════════════════════════ */
+
+.successAlert {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.65rem 1rem;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  color: #166534;
+  font-size: 0.84rem;
+  font-weight: 500;
+}
+
+/* ═══════════════════════════════════════════════════════
+   MODAL
+═══════════════════════════════════════════════════════ */
+
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.18);
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.1rem 1.5rem;
+  border-bottom: 1px solid #f3f4f6;
+  flex-shrink: 0;
+}
+
+.modalTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.modalSubtitle {
+  margin: 0.2rem 0 0;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.modalCloseBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #6b7280;
+  font-size: 1rem;
+  line-height: 1;
+  transition: background 0.12s;
+  flex-shrink: 0;
+}
+.modalCloseBtn:hover { background: #f1f5f9; color: #0f172a; }
+
+.modalBody {
+  padding: 1.5rem;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modalFormColumn {
+  width: 100%;
+  max-width: 460px;
+  margin-inline: auto;
+}
+
+.modalFooter {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid #f3f4f6;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+
+.derivedField {
+  margin: -0.45rem 0 0.9rem;
+  color: #475569;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.reviewContent {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.reviewSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #fbfdff;
+}
+
+/* ═══════════════════════════════════════════════════════
+   DRAFTS
+═══════════════════════════════════════════════════════ */
+
+.draftList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.draftRow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fafafa;
+}
+
+.draftRowMain {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.draftRowTitle {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #0f172a;
+  flex-shrink: 0;
+}
+
+.draftRowSchedule {
+  flex: 1;
+  font-size: 0.84rem;
+  color: #374151;
+}
+
+.draftRowCreated {
+  font-size: 0.76rem;
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.draftRowActions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+/* ═══════════════════════════════════════════════════════
+   PUBLISH PANEL
+═══════════════════════════════════════════════════════ */
+
+.publishPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.previewResult {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid #f3f4f6;
+}
+
+.correctionCheckboxRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: #374151;
+  padding-top: 0.5rem;
+}
+
+/* ═══════════════════════════════════════════════════════
+   DAY-OFF TOGGLES
+═══════════════════════════════════════════════════════ */
+
+.dayToggleRow {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.dayToggle {
+  padding: 0.35rem 0.65rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #374151;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.dayToggle:hover { background: #f8faff; }
+.dayToggleActive { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.dayToggleDisabled,
+.dayToggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+.dayToggleDisabled:hover {
+  background: #fff;
+  border-color: #e2e8f0;
+  color: #94a3b8;
+}
+
+/* Compact accessible segmented control used for the modal's primary schedule choice. */
+.frequencySegmented {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.frequencySegment {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, box-shadow 0.12s;
+}
+.frequencySegment:hover:not(:disabled) {
+  border-color: #93c5fd;
+  background: #f8fbff;
+  color: #1d4ed8;
+}
+.frequencySegment:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+.frequencySegmentSelected {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+  box-shadow: inset 0 0 0 1px #bfdbfe;
+}
+.frequencySegment:disabled { cursor: not-allowed; opacity: 0.58; }
+
+@media (max-width: 480px) {
+  .frequencySegment { flex-basis: calc(50% - 0.2rem); }
+}
+
+/* VERSION TIMELINE — published effective chronology only. */
+.versionTimeline {
+  margin-top: 0.9rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+}
+.versionTimelineHeader {
+  padding: 1rem 1.15rem 0.9rem;
+  border-bottom: 1px solid #edf0f4;
+}
+.versionTimelineTitle {
+  margin: 0;
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.versionTimelineSubtitle {
+  margin: 0.18rem 0 0;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+.versionTimelineMessage {
+  margin: 0;
+  padding: 1rem 1.15rem 1.1rem;
+  color: #64748b;
+  font-size: 0.82rem;
+}
+.versionTimelineList {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 1rem 1.15rem 1.1rem 2.1rem;
+  list-style: none;
+}
+.versionTimelineList::before {
+  position: absolute;
+  top: 1.4rem;
+  bottom: 1.4rem;
+  left: 1.42rem;
+  width: 1px;
+  background: #dbe7f5;
+  content: '';
+}
+.versionTimelineItem {
+  position: relative;
+}
+.versionTimelineNode {
+  position: absolute;
+  top: 1.05rem;
+  left: -1.02rem;
+  z-index: 1;
+  width: 0.58rem;
+  height: 0.58rem;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #60a5fa;
+  box-shadow: 0 0 0 1px #bfdbfe;
+}
+.versionTimelineCard {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #fbfdff;
+}
+.versionTimelineCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.versionTimelineVersion {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #0f172a;
+  font-size: 0.85rem;
+}
+.versionTimelineCurrent {
+  padding: 0.18rem 0.45rem;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.versionTimelineDate {
+  color: #64748b;
+  font-size: 0.76rem;
+}
+.versionTimelineSummary {
+  margin: 0.3rem 0 0;
+  color: #475569;
+  font-size: 0.78rem;
+}
+
+/* ═══════════════════════════════════════════════════════
+   RESPONSIVE
+═══════════════════════════════════════════════════════ */
+
+@media (max-width: 1024px) {
+  .setupsBody {
+    /* Stacked: master above detail, each card sized to its own content so
+       the page scrolls instead of the grid compressing or overflowing. */
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+  .setupsListCard {
+    /* max-height (not height) lets the flex column shrink to its content
+       when there are few rows, while .setupListScroll still absorbs any
+       overflow — the header controls and pinned footer stay visible
+       either way. */
+    max-height: min(60vh, 560px);
+  }
+  .setupsDetailPane {
+    min-height: 240px;
+  }
+}
