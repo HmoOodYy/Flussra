@@ -2,7 +2,7 @@
 
 **Status:** APPROVED FOR IMPLEMENTATION.  
 **Execution authority:** Implement only one dependency-closed work unit from §6A at a time, beginning with P1a after §14 start conditions are verified.  
-**Repository baseline:** `docs/people-workforce-access-contract-lock` at `a38c9306c51f00957719c22a1508e7e84a32503c`; migration-script head `0071`. The People master plan is an existing untracked input in this checkout.  
+**Repository baseline:** `docs/people-workforce-access-contract-lock` at `a38c9306c51f00957719c22a1508e7e84a32503c`; migration-script head `0071`.
 **Authority:** The locked [People / Workforce / Access contract](PEOPLE_WORKFORCE_ACCESS_ARCHITECTURE_CONTRACT.md) owns its domain rules. The [People master plan](PEOPLE_AND_ACCESS_REFOUNDATION_MASTER_PLAN.md) and [Compensation master plan](FLUSSRA_COMPENSATION_MODERNIZATION_MASTER_PLAN.md) retain their detailed product decisions. This document supersedes their separate execution orders. In particular, People-plan D6's proposed call to legacy `copy_driver_rates` is superseded by the target-assignment transfer copy required here. An implementation must reconcile any other genuine contract conflict before changing a locked decision.
 
 ## 1. Executive Verdict
