@@ -110,23 +110,91 @@ async def _ledger_token_with_driver_scope(
     return token
 
 
-async def _schedule_version(direct_db, branch_id: int, start_date: date) -> int:
+async def _canonical_authority(
+    direct_db, branch_id: int, start_date: date, *, company_id: int = 1,
+) -> dict[str, int | str]:
+    """Create or reuse one canonical Payroll Setup authority for the branch."""
     existing = (await direct_db.execute(text("""
-        SELECT scheduleversionid
-        FROM payroll.payrollscheduleversions
-        WHERE companyid = 1 AND branchid = :branch_id
-        ORDER BY scheduleversionid DESC
+        SELECT a.branchpayrollsetupassignmentid AS assignment_id,
+               v.payrollsetupversionid AS version_id,
+               s.payrollsetupid AS setup_id, s.setupcode AS setup_code
+        FROM payroll.branchpayrollsetupassignments a
+        JOIN payroll.payrollsetups s ON s.payrollsetupid = a.payrollsetupid
+        JOIN payroll.payrollsetupversions v
+          ON v.payrollsetupid = s.payrollsetupid AND v.companyid = s.companyid
+        WHERE a.companyid = :company_id AND a.branchid = :branch_id
+          AND a.effectivefromdate = :start_date
+          AND v.lifecyclestate = 'Published'
+        ORDER BY a.branchpayrollsetupassignmentid
         LIMIT 1
-    """), {"branch_id": branch_id})).scalar_one_or_none()
+    """), {
+        "company_id": company_id, "branch_id": branch_id, "start_date": start_date,
+    })).mappings().first()
     if existing is not None:
-        return int(existing)
+        return dict(existing) | {"config_hash": "b" * 64}
+
+    setup_code = f"P6B_{company_id}_{branch_id}_{start_date:%Y%m%d}"
+    setup_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.payrollsetups
+            (companyid, setupcode, setupname, status, createdbyuserid)
+        VALUES (:company_id, :setup_code, :setup_name, 'Active', 1)
+        RETURNING payrollsetupid
+    """), {
+        "company_id": company_id, "setup_code": setup_code,
+        "setup_name": f"P6B {company_id}/{branch_id}",
+    })).scalar_one())
+    version_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.payrollsetupversions
+            (companyid, payrollsetupid, lifecyclestate, versionnumber,
+             effectivefromdate, payrollfrequency, anchorstartdate,
+             normaldaysoffmask, confighash, publishedbyuserid, publishedatutc)
+        VALUES (:company_id, :setup_id, 'Published', 1, :start_date, 'Week', :start_date,
+                0, :config_hash, 1, NOW())
+        RETURNING payrollsetupversionid
+    """), {
+        "company_id": company_id, "setup_id": setup_id,
+        "start_date": start_date, "config_hash": "b" * 64,
+    })).scalar_one())
+    assignment_id = int((await direct_db.execute(text("""
+        INSERT INTO payroll.branchpayrollsetupassignments
+            (companyid, branchid, payrollsetupid, effectivefromdate)
+        VALUES (:company_id, :branch_id, :setup_id, :start_date)
+        RETURNING branchpayrollsetupassignmentid
+    """), {
+        "company_id": company_id, "branch_id": branch_id,
+        "setup_id": setup_id, "start_date": start_date,
+    })).scalar_one())
+    await direct_db.commit()
+    return {
+        "assignment_id": assignment_id, "version_id": version_id,
+        "setup_id": setup_id, "setup_code": setup_code, "config_hash": "b" * 64,
+    }
+
+
+async def _insert_canonical_period_without_day_snapshot(
+    direct_db, branch_id: int, start_date: date, *, status: str, code: str, name: str,
+    company_id: int = 1,
+) -> int:
+    authority = await _canonical_authority(
+        direct_db, branch_id, start_date, company_id=company_id,
+    )
+    end_date = start_date + timedelta(days=6)
     return int((await direct_db.execute(text("""
-        INSERT INTO payroll.payrollscheduleversions
-            (companyid, branchid, versionnumber, payrollfrequency, anchorstartdate,
-             normaldaysoffmask, sourceaction)
-        VALUES (1, :branch_id, 1, 'Week', :start_date, 0, 'P6B_TEST')
-        RETURNING scheduleversionid
-    """), {"branch_id": branch_id, "start_date": start_date})).scalar_one())
+        INSERT INTO payroll.payrollperiods
+            (companyid, branchid, status, periodcode, periodname, periodtype,
+             startdate, enddate, branchpayrollsetupassignmentid, payrollsetupversionid,
+             frozenpayrollsetupid, frozenpayrollsetupcode, frozenpayrollsetupversionnumber,
+             frozenpayrollfrequency, frozenanchorstartdate, frozennormaldaysoffmask,
+             scheduleconfighash)
+        VALUES (:company_id, :branch_id, :status, :code, :name, 'Week', :start_date, :end_date,
+                :assignment_id, :version_id, :setup_id, :setup_code, 1, 'Week',
+                :start_date, 0, :config_hash)
+        RETURNING payrollperiodid
+    """), {
+        "company_id": company_id, "branch_id": branch_id, "status": status,
+        "code": code, "name": name,
+        "start_date": start_date, "end_date": end_date, **authority,
+    })).scalar_one())
 
 
 async def _seed_finalized_off_period(
@@ -150,16 +218,20 @@ async def _seed_finalized_off_period(
     """), {
         "branch_id": branch_id, "employee_id": employee_id, "code": f"P6B-{marker[:20]}",
     })).scalar_one())
-    schedule_version_id = await _schedule_version(direct_db, branch_id, start_date)
+    authority = await _canonical_authority(direct_db, branch_id, start_date)
     period_id = int((await direct_db.execute(text("""
         INSERT INTO payroll.payrollperiods
-            (companyid, branchid, scheduleversionid, status, periodcode, periodname, periodtype,
-             startdate, enddate)
-        VALUES (1, :branch_id, :schedule_version_id, 'Open', :code, :name, 'Week',
-                :start_date, :end_date)
+            (companyid, branchid, status, periodcode, periodname, periodtype,
+             startdate, enddate, branchpayrollsetupassignmentid, payrollsetupversionid,
+             frozenpayrollsetupid, frozenpayrollsetupcode, frozenpayrollsetupversionnumber,
+             frozenpayrollfrequency, frozenanchorstartdate, frozennormaldaysoffmask,
+             scheduleconfighash)
+        VALUES (1, :branch_id, 'Open', :code, :name, 'Week', :start_date, :end_date,
+                :assignment_id, :version_id, :setup_id, :setup_code, 1, 'Week',
+                :start_date, 0, :config_hash)
         RETURNING payrollperiodid
     """), {
-        "branch_id": branch_id, "schedule_version_id": schedule_version_id,
+        "branch_id": branch_id, **authority,
         "code": f"P6B-{marker}", "name": f"P6B {marker}",
         "start_date": start_date, "end_date": end_date,
     })).scalar_one())
@@ -167,13 +239,15 @@ async def _seed_finalized_off_period(
     for work_date in days:
         await direct_db.execute(text("""
             INSERT INTO payroll.payrollperioddays
-                (payrollperiodid, companyid, branchid, scheduleversionid, workdate, dayofweek,
+                (payrollperiodid, companyid, branchid,
+                 branchpayrollsetupassignmentid, payrollsetupversionid, workdate, dayofweek,
                  isdefaultworkday, isconfiguredoffday, isaddedworkday)
-            VALUES (:period_id, 1, :branch_id, :schedule_version_id, :work_date, :day_of_week,
+            VALUES (:period_id, 1, :branch_id, :assignment_id, :version_id, :work_date, :day_of_week,
                     TRUE, FALSE, FALSE)
         """), {
             "period_id": period_id, "branch_id": branch_id,
-            "schedule_version_id": schedule_version_id, "work_date": work_date,
+            "assignment_id": authority["assignment_id"], "version_id": authority["version_id"],
+            "work_date": work_date,
             "day_of_week": (work_date.weekday() + 1) % 7,
         })
     await direct_db.execute(text("""
@@ -340,12 +414,6 @@ async def test_finalized_off_drivers_use_frozen_status_calendar_and_eligibility(
     await direct_db.execute(text("""
         UPDATE core.drivers SET driverstatus = 'Inactive' WHERE driverid = :driver_id
     """), {"driver_id": seed["driver_id"]})
-    await direct_db.execute(text("""
-        UPDATE payroll.payrollscheduleversions SET normaldaysoffmask = 127
-        WHERE scheduleversionid = (
-            SELECT scheduleversionid FROM payroll.payrollperiods WHERE payrollperiodid = :period_id
-        )
-    """), {"period_id": seed["period_id"]})
     await direct_db.commit()
     frozen = await session_client.get(
         f"/payroll/finalized/{seed['period_id']}/off-drivers", headers=_auth(auth_token),
@@ -400,7 +468,7 @@ async def test_finalized_off_drivers_do_not_treat_bonus_or_status_payment_as_nor
 
 
 @pytest.mark.asyncio
-async def test_finalized_off_drivers_distinguish_zero_evidence_from_legacy_unavailable(
+async def test_finalized_off_drivers_distinguish_zero_evidence_from_snapshot_unavailable(
     session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
     paytest_driver_id: int, direct_db, test_database_url: str,
 ):
@@ -415,12 +483,10 @@ async def test_finalized_off_drivers_distinguish_zero_evidence_from_legacy_unava
     assert zero_response.json()["metadata"]["section_availability"]["status_evidence"]["state"] == "EMPTY"
 
     marker = uuid4().hex
-    legacy_period_id = int((await direct_db.execute(text("""
-        INSERT INTO payroll.payrollperiods
-            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-        VALUES (1, :branch_id, 'Locked', :code, 'P6B legacy', 'Week', '2076-01-01', '2076-01-07')
-        RETURNING payrollperiodid
-    """), {"branch_id": paytest_branch_id, "code": f"P6B-LEGACY-{marker}"})).scalar_one())
+    snapshot_unavailable_period_id = await _insert_canonical_period_without_day_snapshot(
+        direct_db, paytest_branch_id, date(2096, 1, 1), status="Locked",
+        code=f"P6B-NOSNAPSHOT-{marker}", name="P6B no snapshot",
+    )
     await direct_db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)"))
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollfinallines
@@ -429,12 +495,13 @@ async def test_finalized_off_drivers_distinguish_zero_evidence_from_legacy_unava
         VALUES (1, :branch_id, :period_id, :driver_id, '2076-01-01', 'HOURS', 'Daily', 1,
                 12.0000, 'DraftLine', 1, NOW(), NOW())
     """), {
-        "branch_id": paytest_branch_id, "period_id": legacy_period_id,
+            "branch_id": paytest_branch_id, "period_id": snapshot_unavailable_period_id,
         "driver_id": paytest_driver_id,
     })
     await direct_db.commit()
     legacy_response = await session_client.get(
-        f"/payroll/finalized/{legacy_period_id}/off-drivers", headers=_auth(auth_token),
+        f"/payroll/finalized/{snapshot_unavailable_period_id}/off-drivers",
+        headers=_auth(auth_token),
     )
     assert legacy_response.status_code == 200, legacy_response.text
     assert legacy_response.json()["metadata"]["report_evidence_available"] is False
@@ -478,14 +545,10 @@ async def test_finalized_off_drivers_enforce_ledger_role_branch_and_company_scop
     )
     assert foreign_branch.status_code == 403
     assert str(seed["period_id"]) not in foreign_branch.text
-    non_finalized_id = int((await direct_db.execute(text("""
-        INSERT INTO payroll.payrollperiods
-            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-        VALUES (1, :branch_id, 'Approved', :code, 'P6B non-finalized', 'Week', '2076-01-01', '2076-01-07')
-        RETURNING payrollperiodid
-    """), {
-        "branch_id": paytest_branch_id, "code": f"P6B-APPROVED-{uuid4().hex}",
-    })).scalar_one())
+    non_finalized_id = await _insert_canonical_period_without_day_snapshot(
+        direct_db, paytest_branch_id, date(2096, 1, 1), status="Approved",
+        code=f"P6B-APPROVED-{uuid4().hex}", name="P6B non-finalized",
+    )
     await direct_db.commit()
     non_finalized = await session_client.get(
         f"/payroll/finalized/{non_finalized_id}/off-drivers", headers=_auth(ledger_token),
@@ -506,15 +569,10 @@ async def test_finalized_off_drivers_enforce_ledger_role_branch_and_company_scop
     """), {
         "company_id": company_id, "code": f"P6B-{marker}", "name": f"P6B foreign {marker}",
     })).scalar_one())
-    foreign_period_id = int((await direct_db.execute(text("""
-        INSERT INTO payroll.payrollperiods
-            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-        VALUES (:company_id, :branch_id, 'Locked', :code, :name, 'Week', '2076-02-01', '2076-02-07')
-        RETURNING payrollperiodid
-    """), {
-        "company_id": company_id, "branch_id": branch_id,
-        "code": f"P6B-{marker}", "name": f"P6B foreign {marker}",
-    })).scalar_one())
+    foreign_period_id = await _insert_canonical_period_without_day_snapshot(
+        direct_db, branch_id, date(2076, 2, 1), status="Locked",
+        code=f"P6B-{marker}", name=f"P6B foreign {marker}", company_id=company_id,
+    )
     await direct_db.commit()
     try:
         foreign_company = await session_client.get(
@@ -525,12 +583,6 @@ async def test_finalized_off_drivers_enforce_ledger_role_branch_and_company_scop
     finally:
         await direct_db.execute(text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :period_id"), {
             "period_id": foreign_period_id,
-        })
-        await direct_db.execute(text("DELETE FROM core.branches WHERE branchid = :branch_id"), {
-            "branch_id": branch_id,
-        })
-        await direct_db.execute(text("DELETE FROM core.companies WHERE companyid = :company_id"), {
-            "company_id": company_id,
         })
         await direct_db.commit()
 

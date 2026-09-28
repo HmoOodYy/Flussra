@@ -1,4 +1,4 @@
-"""Integration tests for payroll status keys and legacy setup authentication."""
+"""Integration tests for payroll status keys."""
 import httpx
 import pytest_asyncio
 
@@ -29,19 +29,6 @@ async def setup_branch_id(
     )
     assert resp.status_code == 201, f"Setup branch seed failed: {resp.text}"
     return resp.json()["branch_id"]
-
-
-class TestGetPayrollSetup:
-
-    async def test_unauthenticated_rejected(
-        self,
-        client: httpx.AsyncClient,
-        setup_branch_id: int,
-    ):
-        response = await client.get(
-            f"/settings/branches/{setup_branch_id}/payroll-setup"
-        )
-        assert response.status_code == 401
 
 
 # Session-scoped fixture: one status key created for read/update/delete tests.
