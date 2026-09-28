@@ -296,18 +296,12 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
             SELECT COUNT(*) FROM payroll.BranchPayrollSetupAssignments
             WHERE CompanyID = :cid AND BranchID = :bid
         """), {"cid": company_id, "bid": branch_id})).scalar_one() == 0
-        assert (await db_conn.execute(text("""
-            SELECT COUNT(*) FROM payroll.BranchPayrollSettings
-            WHERE CompanyID = :cid AND BranchID = :bid
-        """), {"cid": company_id, "bid": branch_id})).scalar_one() == 0
         assert (await db_conn.execute(text(
             "SELECT DefaultPayrollSetupID FROM core.Companies WHERE CompanyID = :cid"
         ), {"cid": company_id})).scalar_one() == setup_id
-        await db_conn.execute(text("""
-            INSERT INTO payroll.BranchPayrollSettings
-                (CompanyID, BranchID, PayrollFrequency, AnchorStartDate, IsActive)
-            VALUES (:cid, :bid, 'Week', '2090-01-01', TRUE)
-        """), {"cid": company_id, "bid": branch_id})
+        # No assignment exists for this branch (asserted above) -- the setup
+        # warning must fire from the canonical resolver alone, with no legacy
+        # authority row involved at all.
         warnings = await _compute_setup_warnings(
             db_conn, company_id, False, [branch_id], {},
             has_setup=True, has_payroll=False, has_rates=False,
@@ -333,7 +327,7 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
 
 
 @pytest.mark.asyncio
-async def test_existing_branch_zero_legacy_setup_then_policy_assignment(
+async def test_existing_branch_without_policy_assignment_then_policy_assignment(
     phase5_onboarding_db, phase5_onboarding_conn,
 ):
     fixture = phase5_onboarding_db
@@ -344,11 +338,9 @@ async def test_existing_branch_zero_legacy_setup_then_policy_assignment(
             (SELECT COUNT(*) FROM payroll.PayrollSetups WHERE CompanyID = :cid) AS Setups,
             (SELECT COUNT(*) FROM payroll.PayrollSetupVersions WHERE CompanyID = :cid) AS Versions,
             (SELECT COUNT(*) FROM payroll.BranchPayrollSetupAssignments
-             WHERE CompanyID = :cid AND BranchID = :bid) AS Assignments,
-            (SELECT COUNT(*) FROM payroll.BranchPayrollSettings
-             WHERE CompanyID = :cid AND BranchID = :bid) AS Legacy
+             WHERE CompanyID = :cid AND BranchID = :bid) AS Assignments
     """), {"cid": company_id, "bid": branch_id})).mappings().one()
-    assert tuple(baseline.values()) == (0, 0, 0, 0)
+    assert tuple(baseline.values()) == (0, 0, 0)
 
     setup_id = await _create_published_setup(client, token, uuid4().hex)
     selected_default = await client.put("/payroll-setup/default", headers=_auth(token),
@@ -370,11 +362,9 @@ async def test_existing_branch_zero_legacy_setup_then_policy_assignment(
             (SELECT COUNT(*) FROM payroll.PayrollSetups WHERE CompanyID = :cid) AS Setups,
             (SELECT COUNT(*) FROM payroll.PayrollSetupVersions WHERE CompanyID = :cid) AS Versions,
             (SELECT COUNT(*) FROM payroll.BranchPayrollSetupAssignments
-             WHERE CompanyID = :cid AND BranchID = :bid) AS Assignments,
-            (SELECT COUNT(*) FROM payroll.BranchPayrollSettings
-             WHERE CompanyID = :cid AND BranchID = :bid) AS Legacy
+             WHERE CompanyID = :cid AND BranchID = :bid) AS Assignments
     """), {"cid": company_id, "bid": branch_id})).mappings().one()
-    assert tuple(final_counts.values()) == (1, 1, 1, 0)
+    assert tuple(final_counts.values()) == (1, 1, 1)
 
 
 @pytest.mark.asyncio

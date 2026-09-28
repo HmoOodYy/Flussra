@@ -11,7 +11,7 @@ Write endpoints require AllCompanyBranches scope — see _ensure_company_admin()
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
@@ -39,8 +39,6 @@ from app.settings.schemas import (
     PayItemOrderUpdate,
     PayItemRateTypeMapCreate,
     PayItemRateTypeMapSummary,
-    PayrollSetup,
-    PayrollSetupUpsert,
     StatusKey,
     StatusKeyCreate,
     StatusKeyUpdate,
@@ -291,65 +289,6 @@ async def set_default_branch(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Branch payroll setup
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/branches/{branch_id}/payroll-setup",
-    response_model=PayrollSetup,
-    summary="Legacy payroll setup route (gone)",
-    description=(
-        "This legacy branch-owned payroll setup route has been disabled. "
-        "Payroll setup is managed through the Phase 2 policy domain."
-    ),
-    responses={
-        410: {"description": "Legacy branch-owned payroll setup route is disabled"},
-        403: {"description": "No access to this branch"},
-    },
-)
-async def get_payroll_setup(
-    branch_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> PayrollSetup:
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "code": "LEGACY_PAYROLL_SETUP_ROUTE_DISABLED",
-            "message": "Branch-owned payroll setup is disabled; use the payroll setup policy domain.",
-        },
-    )
-
-
-@router.put(
-    "/branches/{branch_id}/payroll-setup",
-    response_model=PayrollSetup,
-    summary="Legacy payroll setup route (gone)",
-    description=(
-        "This legacy branch-owned payroll setup route has been disabled. "
-        "Payroll setup is managed through the Phase 2 policy domain."
-    ),
-    responses={
-        410: {"description": "Legacy branch-owned payroll setup route is disabled"},
-        403: {"description": "Insufficient scope (requires all-branches access)"},
-    },
-)
-async def upsert_payroll_setup(
-    branch_id: int,
-    body: PayrollSetupUpsert,
-    token: TokenDep,
-    db: DbDep,
-) -> PayrollSetup:
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "code": "LEGACY_PAYROLL_SETUP_ROUTE_DISABLED",
-            "message": "Branch-owned payroll setup is disabled; use the payroll setup policy domain.",
-        },
     )
 
 

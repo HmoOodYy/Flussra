@@ -222,7 +222,7 @@ async def _day_rows(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
             SELECT periodday_id_alias, payrollperiodid, companyid, branchid,
-                   scheduleversionid, workdate, dayofweek,
+                   workdate, dayofweek,
                    isdefaultworkday, isconfiguredoffday,
                    isaddedworkday, addedbyuserid, addedatutc, addedreason
             FROM   payroll.PayrollPeriodDays
@@ -241,7 +241,7 @@ async def _day_rows_simple(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
             SELECT workdate, dayofweek, isdefaultworkday, isconfiguredoffday,
-                   isaddedworkday, scheduleversionid,
+                   isaddedworkday,
                    branchpayrollsetupassignmentid, payrollsetupversionid,
                    companyid, branchid,
                    addedbyuserid, addedatutc, addedreason
@@ -286,7 +286,8 @@ class TestCp2bPeriodDays:
         cols = {row["column_name"] for row in cols_r.mappings().all()}
         for required in (
             "payrollperioddayid", "payrollperiodid", "companyid", "branchid",
-            "scheduleversionid", "workdate", "dayofweek",
+            "branchpayrollsetupassignmentid", "payrollsetupversionid",
+            "workdate", "dayofweek",
             "isdefaultworkday", "isconfiguredoffday",
             "isaddedworkday", "addedbyuserid", "addedatutc", "addedreason",
             "createdatutc",
@@ -326,7 +327,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0070."""
+        """D02: Migration chain is linear and head is 0071."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -338,7 +339,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0070" in lines[0], f"Expected head 0070, got: {lines[0]}"
+        assert "0071" in lines[0], f"Expected head 0071, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows
@@ -601,11 +602,11 @@ class TestCp2bPeriodDays:
             assert row["isconfiguredoffday"] is False, f"Expected none configured off: {row}"
 
     # ------------------------------------------------------------------ #
-    # D13 — Period and day rows share exact Setup authority
+    # D13 — Period and day rows share exact canonical Setup authority
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_d13_sv_id_matches_period(
+    async def test_d13_authority_matches_period(
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
         """D13: Every day row binds the period's exact Assignment and Version."""
@@ -618,16 +619,14 @@ class TestCp2bPeriodDays:
         period_id = result["payroll_period_id"]
 
         period_authority = (await direct_db.execute(_text("""
-            SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID, ScheduleVersionID
+            SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID
             FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :pid
         """), {"pid": period_id})).mappings().one()
         assert period_authority["branchpayrollsetupassignmentid"] is not None
         assert period_authority["payrollsetupversionid"] is not None
-        assert period_authority["scheduleversionid"] is None
 
         rows = await _day_rows_simple(direct_db, period_id)
         for row in rows:
-            assert row["scheduleversionid"] is None
             assert row["branchpayrollsetupassignmentid"] == period_authority["branchpayrollsetupassignmentid"]
             assert row["payrollsetupversionid"] == period_authority["payrollsetupversionid"]
 
@@ -722,7 +721,6 @@ class TestCp2bPeriodDays:
             assert before["isconfiguredoffday"] == after["isconfiguredoffday"]
             assert before["branchpayrollsetupassignmentid"] == after["branchpayrollsetupassignmentid"]
             assert before["payrollsetupversionid"] == after["payrollsetupversionid"]
-        assert all(r["scheduleversionid"] is None for r in rows_after)
         current_authority = (await direct_db.execute(_text("""
             SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID
             FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :pid
@@ -818,10 +816,10 @@ class TestCp2bPeriodDays:
         result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
-        # Fetch the first existing row to know sv_id and a workdate
+        # Fetch the first existing row and workdate.
         existing = (await direct_db.execute(
             _text("""
-                SELECT payrollperiodid, companyid, branchid, scheduleversionid,
+                SELECT payrollperiodid, companyid, branchid,
                        branchpayrollsetupassignmentid, payrollsetupversionid,
                        workdate, dayofweek, isdefaultworkday, isconfiguredoffday
                 FROM payroll.PayrollPeriodDays
@@ -838,17 +836,16 @@ class TestCp2bPeriodDays:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.PayrollPeriodDays
-                    (PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID,
+                    (PayrollPeriodID, CompanyID, BranchID,
                      BranchPayrollSetupAssignmentID, PayrollSetupVersionID,
                          WorkDate, DayOfWeek, IsDefaultWorkDay, IsConfiguredOffDay)
-                    VALUES (:pid, :cid, :bid, :sv, :assignment, :version,
+                    VALUES (:pid, :cid, :bid, :assignment, :version,
                             :wd, :dow, :isd, :ico)
                 """),
                 {
                     "pid": existing["payrollperiodid"],
                     "cid": existing["companyid"],
                     "bid": existing["branchid"],
-                    "sv":  existing["scheduleversionid"],
                     "assignment": existing["branchpayrollsetupassignmentid"],
                     "version": existing["payrollsetupversionid"],
                     "wd":  existing["workdate"],
@@ -940,89 +937,8 @@ class TestCp2bPeriodDays:
         )
 
     # ------------------------------------------------------------------ #
-    # D22 — Legacy period (no day rows) falls back to bounds check
+    # D22 — Pre-authority period (no day rows) falls back to bounds check
     # ------------------------------------------------------------------ #
-
-    @pytest.mark.asyncio
-    async def test_d22_legacy_period_fallback(
-        self, session_client, auth_token, direct_db, paytest_branch_id
-    ):
-        """D22: get_day_grid for a legacy period (no day rows) uses StartDate/EndDate bounds."""
-        await _clean(direct_db, paytest_branch_id)
-        sv_id = (await direct_db.execute(_text("""
-            INSERT INTO payroll.PayrollScheduleVersions
-                (CompanyID, BranchID, VersionNumber, PayrollFrequency,
-                 AnchorStartDate, NormalDaysOffMask, EffectiveFromDate, SourceAction)
-            VALUES (:cid, :bid, 1, 'Week', '2095-09-01', 0, '2095-09-01', 'LegacyFallbackTest')
-            RETURNING ScheduleVersionID
-        """), {"cid": _COMPANY_ID, "bid": paytest_branch_id})).scalar_one()
-
-        # Insert a legacy period with 'Locked' status (no slot-uniqueness constraint on Locked).
-        # Use a date range in 2095-09 (no overlap with other tests).
-        # Intentionally do NOT insert any PayrollPeriodDays rows — simulating pre-0052 period.
-        legacy_start = datetime.date(2095, 9, 1)
-        legacy_end = datetime.date(2095, 9, 7)
-        period_id = None
-        period_row = (await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollperiods
-                    (companyid, branchid, periodcode, periodname, periodtype,
-                     startdate, enddate, status, createdbyuserid, scheduleversionid)
-                VALUES (1, :bid, :code, 'D22 Legacy Period', 'Week',
-                        :start, :end, 'Locked', 1, :sv_id)
-                RETURNING payrollperiodid
-            """),
-            {"bid": paytest_branch_id, "code": f"D22-{uuid.uuid4().hex[:10]}",
-             "start": legacy_start, "end": legacy_end, "sv_id": sv_id},
-        )).mappings().first()
-        await direct_db.commit()
-        period_id = period_row["payrollperiodid"]
-
-        # Verify no day rows for this period (legacy fallback condition)
-        day_count = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM payroll.PayrollPeriodDays WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )).scalar()
-        assert day_count == 0, f"Expected 0 day rows for legacy period, got {day_count}"
-
-        try:
-            # No day rows — should fall back to bounds check and succeed for a valid date
-            r = await session_client.get(
-                f"/payroll/periods/{period_id}/day-grid",
-                params={"work_date": legacy_start.isoformat()},
-                headers=_auth(auth_token),
-            )
-            assert r.status_code == 200, (
-                f"Expected 200 for legacy period start_date, got {r.status_code}: {r.text}"
-            )
-
-            # A date outside the period's bounds should still be rejected (400)
-            out_of_bounds = (legacy_end + datetime.timedelta(days=1)).isoformat()
-            r2 = await session_client.get(
-                f"/payroll/periods/{period_id}/day-grid",
-                params={"work_date": out_of_bounds},
-                headers=_auth(auth_token),
-            )
-            assert r2.status_code == 400, (
-                f"Expected 400 for out-of-bounds date on legacy period, got {r2.status_code}"
-            )
-        finally:
-            await direct_db.execute(
-                _text("""
-                    DELETE FROM payroll.payrollperiods period
-                    WHERE period.payrollperiodid = :pid
-                      AND NOT EXISTS (
-                          SELECT 1 FROM payroll.payrollperiodauditevidencecoverage coverage
-                          WHERE coverage.payrollperiodid = period.payrollperiodid
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM payroll.payrollperiodauditevidenceevents evidence
-                          WHERE evidence.payrollperiodid = period.payrollperiodid
-                      )
-                """),
-                {"pid": period_id},
-            )
-            await direct_db.commit()
 
     # ------------------------------------------------------------------ #
     # D23 — Configured-off day does NOT block get_day_grid (metadata-only)
@@ -1069,7 +985,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_d24_sv_id_integrity(
+    async def test_d24_authority_integrity(
         self, session_client, auth_token, direct_db, paytest_branch_id
     ):
         """D24: All day rows carry the exact parent Assignment and Version authority."""
@@ -1081,16 +997,14 @@ class TestCp2bPeriodDays:
         result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
-        # Verify at DB level: all day rows reference the same sv_id as the period
+        # Verify at DB level: all day rows reference the exact parent authority.
         mismatch = (await direct_db.execute(
             _text("""
                 SELECT COUNT(*) FROM payroll.PayrollPeriodDays ppd
                 JOIN payroll.payrollperiods pp
                      ON pp.payrollperiodid = ppd.payrollperiodid
                 WHERE ppd.payrollperiodid = :pid
-                  AND (ppd.scheduleversionid IS NOT NULL
-                       OR pp.scheduleversionid IS NOT NULL
-                       OR ppd.branchpayrollsetupassignmentid
+                   AND (ppd.branchpayrollsetupassignmentid
                             IS DISTINCT FROM pp.branchpayrollsetupassignmentid
                        OR ppd.payrollsetupversionid
                             IS DISTINCT FROM pp.payrollsetupversionid)

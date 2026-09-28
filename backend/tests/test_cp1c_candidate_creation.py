@@ -1432,15 +1432,14 @@ class TestConcurrency:
         )
         assert created.status_code == 201
 
-        # The disabled legacy path cannot create a competing Draft beside the Open.
+        # The retired legacy path is not registered and cannot create a period.
         lr = await session_client.post(
             "/payroll/periods",
             json={"branch_id": bid, "period_type": "Week",
                   "start_date": "2096-01-14", "end_date": "2096-01-20"},
             headers=_auth(auth_token),
         )
-        assert lr.status_code == 410, lr.text
-        assert lr.json()["detail"]["code"] == "LEGACY_DIRECT_PERIOD_CREATION_ROUTE_DISABLED"
+        assert lr.status_code == 405, lr.text
         count = (await direct_db.execute(_text("""
             SELECT COUNT(*) FROM payroll.PayrollPeriods
             WHERE CompanyID = :cid AND BranchID = :bid AND Status <> 'Cancelled'

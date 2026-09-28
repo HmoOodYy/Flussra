@@ -40,38 +40,6 @@ class PeriodSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Period creation
-# ---------------------------------------------------------------------------
-
-_VALID_PERIOD_TYPES = {"Week", "Biweek", "Month", "Custom"}
-
-
-class PeriodCreate(BaseModel):
-    branch_id: int
-    period_type: str = "Week"
-    start_date: date
-    end_date: date
-    pay_date: date | None = None
-    period_name: str | None = None   # auto-generated from dates if omitted
-    notes: str | None = None
-
-    @field_validator("period_type")
-    @classmethod
-    def period_type_valid(cls, v: str) -> str:
-        if v not in _VALID_PERIOD_TYPES:
-            raise ValueError(
-                f"period_type must be one of {sorted(_VALID_PERIOD_TYPES)}"
-            )
-        return v
-
-    @model_validator(mode="after")
-    def end_after_start(self) -> "PeriodCreate":
-        if self.end_date <= self.start_date:
-            raise ValueError("end_date must be strictly after start_date")
-        return self
-
-
-# ---------------------------------------------------------------------------
 # Status change
 # ---------------------------------------------------------------------------
 
@@ -106,29 +74,6 @@ _ALL_STATUSES = set(_VALID_TRANSITIONS.keys())
 #   Locked   — reachable only through POST /periods/{id}/finalize.
 #   Returned — reachable only through the review decision flow (POST /review/items/{id}/decide).
 _PATCH_RESERVED_STATUSES = {"Locked", "Returned"}
-
-
-class NextPeriodDates(BaseModel):
-    """
-    Computed suggested dates for the next payroll period of a branch.
-
-    For Custom frequency with a saved interval:
-      is_custom=True, start_date/end_date are populated, custom_interval_days is set.
-
-    For Custom frequency without a saved interval (setup incomplete):
-      is_custom=True, start_date=None, end_date=None, custom_interval_days=None.
-
-    For all other frequencies:
-      is_custom=False, start_date/end_date populated, custom_interval_days=None.
-    """
-    branch_id: int
-    period_type: str               # Week | Biweek | Month | Custom
-    anchor_start_date: date        # from BranchPayrollSettings
-    last_period_end_date: date | None   # MAX(end_date) of non-cancelled periods; None = first ever
-    start_date: date | None        # None when Custom cadence is incomplete
-    end_date: date | None          # None when Custom cadence is incomplete
-    is_custom: bool
-    custom_interval_days: int | None = None  # inclusive period length for Custom cadence
 
 
 class PeriodEntryCount(BaseModel):

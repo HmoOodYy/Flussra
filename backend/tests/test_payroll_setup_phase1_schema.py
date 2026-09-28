@@ -1,4 +1,4 @@
-"""Phase 1 database invariants; the legacy runtime remains in use."""
+"""Phase 1 database invariants for the canonical Payroll Setup authority model."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -105,17 +105,17 @@ def assignment(cursor, company_id, branch_id, setup_id, start="2026-01-05", end=
 
 
 def period(cursor, company_id, branch_id, *, assignment_id=None, version_id=None,
-           setup_id=None, setup_code=None, schedule_version_id=None):
+           setup_id=None, setup_code=None):
     code = "P_" + uuid4().hex[:12]
     cursor.execute(
         "INSERT INTO payroll.PayrollPeriods "
         "(CompanyID, BranchID, PeriodCode, PeriodName, PeriodType, StartDate, EndDate, "
-        "ScheduleVersionID, BranchPayrollSetupAssignmentID, PayrollSetupVersionID, "
+        "BranchPayrollSetupAssignmentID, PayrollSetupVersionID, "
         "FrozenPayrollSetupID, FrozenPayrollSetupCode, FrozenPayrollSetupVersionNumber, "
         "FrozenPayrollFrequency, FrozenAnchorStartDate, FrozenNormalDaysOffMask, ScheduleConfigHash) "
         "VALUES (%s, %s, %s, %s, 'Week', '2026-01-05', '2026-01-11', "
-        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING PayrollPeriodID",
-        (company_id, branch_id, code, code, schedule_version_id,
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING PayrollPeriodID",
+        (company_id, branch_id, code, code,
          assignment_id, version_id, setup_id, setup_code,
          1 if version_id else None, "Week" if version_id else None,
          "2026-01-05" if version_id else None, 0 if version_id else None,
@@ -124,15 +124,15 @@ def period(cursor, company_id, branch_id, *, assignment_id=None, version_id=None
     return cursor.fetchone()[0]
 
 
-def day(cursor, period_id, company_id, branch_id, *, schedule_version_id=None,
+def day(cursor, period_id, company_id, branch_id, *,
         assignment_id=None, version_id=None):
     cursor.execute(
         "INSERT INTO payroll.PayrollPeriodDays "
-        "(PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID, "
+        "(PayrollPeriodID, CompanyID, BranchID, "
         "BranchPayrollSetupAssignmentID, PayrollSetupVersionID, WorkDate, DayOfWeek, "
         "IsDefaultWorkDay, IsConfiguredOffDay) "
-        "VALUES (%s, %s, %s, %s, %s, %s, '2026-01-05', 0, TRUE, FALSE)",
-        (period_id, company_id, branch_id, schedule_version_id, assignment_id, version_id),
+        "VALUES (%s, %s, %s, %s, %s, '2026-01-05', 0, TRUE, FALSE)",
+        (period_id, company_id, branch_id, assignment_id, version_id),
     )
 
 
@@ -364,11 +364,11 @@ def test_period_and_day_bind_exact_new_authority_without_legacy_version(cursor):
     day(cursor, period_id, company_id, branch_id, assignment_id=assignment_id,
         version_id=version_id)
     cursor.execute(
-        "SELECT p.ScheduleVersionID, d.ScheduleVersionID, d.PayrollSetupVersionID "
+        "SELECT d.PayrollSetupVersionID "
         "FROM payroll.PayrollPeriods p JOIN payroll.PayrollPeriodDays d "
         "USING (PayrollPeriodID) WHERE p.PayrollPeriodID = %s", (period_id,),
     )
-    assert cursor.fetchone() == (None, None, version_id)
+    assert cursor.fetchone() == (version_id,)
     with rejected(cursor):
         day(cursor, period_id, company_id, branch_id, assignment_id=assignment_id,
             version_id=version_id + 10000)
@@ -386,25 +386,6 @@ def test_period_new_authority_rejects_cross_tenant_and_wrong_setup(cursor):
     with rejected(cursor):
         period(cursor, company_a, branch_a, assignment_id=assignment_a,
                version_id=version_a, setup_id=setup_b, setup_code=code_b)
-
-
-def test_legacy_period_and_day_remain_representable(cursor):
-    company_id, branch_id = company(cursor)
-    cursor.execute(
-        "INSERT INTO payroll.PayrollScheduleVersions "
-        "(CompanyID, BranchID, VersionNumber, PayrollFrequency, AnchorStartDate, "
-        "SourceAction) VALUES (%s, %s, 1, 'Week', '2026-01-05', 'TEST') "
-        "RETURNING ScheduleVersionID", (company_id, branch_id),
-    )
-    old_version = cursor.fetchone()[0]
-    period_id = period(cursor, company_id, branch_id, schedule_version_id=old_version)
-    day(cursor, period_id, company_id, branch_id, schedule_version_id=old_version)
-    cursor.execute(
-        "SELECT p.BranchPayrollSetupAssignmentID, d.PayrollSetupVersionID "
-        "FROM payroll.PayrollPeriods p JOIN payroll.PayrollPeriodDays d "
-        "USING (PayrollPeriodID) WHERE p.PayrollPeriodID = %s", (period_id,),
-    )
-    assert cursor.fetchone() == (None, None)
 
 
 def test_new_period_snapshot_is_frozen_and_matches_published_version(cursor):

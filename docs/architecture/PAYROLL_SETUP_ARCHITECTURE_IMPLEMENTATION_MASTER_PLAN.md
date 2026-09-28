@@ -1,6 +1,6 @@
 # Flussra Payroll Setup Architecture Implementation Master Plan
 
-**Status:** Approved for Phase 0
+**Status:** Closed after Phase 8 legacy authority retirement
 
 **Purpose:** Implement the closed Payroll Setup Architecture Contract safely and make it the single payroll-schedule authority.
 
@@ -1099,6 +1099,21 @@ Never silently delete or cascade unexpected payroll data.
 
 One runtime schedule authority remains; clean-path retirement and seeded unexpected-data rollback are proven, all dropped-structure consumers are gone, and the complete backend suite passes after retirement with every residual failure explicitly classified.
 
+### Completion evidence
+
+Phase 8 is complete. Migration `0071` retires the legacy tables, columns, indexes,
+foreign keys, checks, and provenance trigger only after a fail-closed preflight.
+The preflight rejects retained legacy period/day authority and incomplete
+canonical PeriodDay authority before destructive DDL. Clean `0070 → 0071`,
+fresh-chain, and supported historical upgrade paths are covered, as are
+atomic failure, canonical provenance immutability, route-surface retirement,
+canonical period creation, onboarding, PeriodDays snapshots, off-driver
+reporting, and finalized payroll behavior.
+
+The active backend/runtime scan is clear of legacy schedule-authority
+dependencies. Historical migrations and intentional retirement tests retain
+their legacy references as evidence.
+
 ---
 
 # 11. Areas that should remain untouched unless evidence requires adaptation
@@ -1257,28 +1272,28 @@ Exact commit count is not a contract requirement.
 
 This plan is `CLOSED` only when all of the following are true:
 
-- [ ] Company-owned Payroll Setups exist.
-- [ ] Published effective-dated immutable Versions exist.
-- [ ] Branches use persisted effective-dated assignments.
-- [ ] Company default is onboarding-only and never runtime fallback.
-- [ ] New Branch onboarding can create a valid assignment without legacy Setup rows.
-- [ ] `PayrollPeriod.StartDate` drives one canonical resolver.
-- [ ] Periods cannot cross authority boundaries.
-- [ ] Candidate preview/confirm revalidate exact assignment/version authority.
-- [ ] Every new Period freezes exact Assignment + Version + schedule provenance.
-- [ ] Historical payroll never resolves mutable current schedule state.
-- [ ] Branch read-only access uses branch access + `payroll.view`.
-- [ ] Company shared-policy actions use dedicated `payroll_setup.*` permissions.
-- [ ] Shared policy changes leave immutable, branch-attributable audit evidence.
-- [ ] Existing immutable calculation/finalization/reporting authority remains correct.
-- [ ] Frontend no longer treats Payroll Setup as a mutable Branch-owned object.
-- [ ] Full backend regression is green at the agreed baseline.
-- [ ] Fresh `0001 → head` migration works.
-- [ ] Empty `0065 → head` migration works.
-- [ ] Legacy retirement aborts safely if unexpected old data is seeded.
-- [ ] No runtime reads/writes remain against legacy schedule authority.
-- [ ] `BranchPayrollSettings`, branch-owned schedule versions, and `CurrentScheduleVersionID` are retired as authority.
-- [ ] One schedule source of truth remains.
+- [x] Company-owned Payroll Setups exist.
+- [x] Published effective-dated immutable Versions exist.
+- [x] Branches use persisted effective-dated assignments.
+- [x] Company default is onboarding-only and never runtime fallback.
+- [x] New Branch onboarding can create a valid assignment without legacy Setup rows.
+- [x] `PayrollPeriod.StartDate` drives one canonical resolver.
+- [x] Periods cannot cross authority boundaries.
+- [x] Candidate preview/confirm revalidate exact assignment/version authority.
+- [x] Every new Period freezes exact Assignment + Version + schedule provenance.
+- [x] Historical payroll never resolves mutable current schedule state.
+- [x] Branch read-only access uses branch access + `payroll.view`.
+- [x] Company shared-policy actions use dedicated `payroll_setup.*` permissions.
+- [x] Shared policy changes leave immutable, branch-attributable audit evidence.
+- [x] Existing immutable calculation/finalization/reporting authority remains correct.
+- [x] Frontend no longer treats Payroll Setup as a mutable Branch-owned object.
+- [x] Full backend regression is green at the agreed baseline.
+- [x] Fresh `0001 → head` migration works.
+- [x] Empty `0065 → head` migration works.
+- [x] Legacy retirement aborts safely if unexpected old data is seeded.
+- [x] No runtime reads/writes remain against legacy schedule authority.
+- [x] `BranchPayrollSettings`, branch-owned schedule versions, and `CurrentScheduleVersionID` are retired as authority.
+- [x] One schedule source of truth remains.
 
 Final state:
 

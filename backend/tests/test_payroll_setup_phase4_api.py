@@ -433,7 +433,7 @@ async def test_incomplete_draft_preserves_nullable_schedule_and_planned_date(
 
 
 @pytest.mark.asyncio
-async def test_cross_tenant_assignments_and_legacy_setup_routes(client, auth_token, db_conn):
+async def test_cross_tenant_assignments_and_removed_setup_routes(client, auth_token, db_conn):
     headers = _auth(auth_token)
     foreign_company = (await db_conn.execute(text("""
         INSERT INTO core.Companies (CompanyCode, CompanyName, Status, IsSuspended)
@@ -466,7 +466,7 @@ async def test_cross_tenant_assignments_and_legacy_setup_routes(client, auth_tok
         legacy = await getattr(client, method)(
             f"/settings/branches/{branch_id}/payroll-setup", **kwargs,
         )
-        assert legacy.status_code == 410, legacy.text
+        assert legacy.status_code == 404, legacy.text
 
 
 @pytest.mark.asyncio
