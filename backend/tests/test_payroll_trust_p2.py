@@ -626,35 +626,39 @@ class TestTransferEligibility:
 
         driver_id = await _create_driver(c, tok, bid, "T12", hire_date="2034-01-01")
         p2_env["created_drivers"].append(driver_id)
-
-        # Simulate completed transfer: effectiveto = 2034-05-09 (day before WORK_MID 2034-05-12)
-        await direct_db.execute(
-            _text("""
-                UPDATE core.drivers
-                SET    driverstatus = 'Transferred',
-                       effectiveto  = :eto
-                WHERE  driverid = :did
-            """),
-            {"eto": _date(2034, 5, 9), "did": driver_id},
-        )
-
-        pid = await _make_open_period(p2_env["db"], bid)
-
-        # Source driver's effectiveto < work_date → ineligible
-        resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
-        assert resp.status_code == 422, resp.text
-        assert "eligible" in resp.text.lower()
-
-        # Restore driver so fixture cleanup (delete) works
-        await direct_db.execute(
-            _text("""
-                UPDATE core.drivers
-                SET    driverstatus = 'Active',
-                       effectiveto  = NULL
-                WHERE  driverid = :did
-            """),
+        employee_id = (await direct_db.execute(
+            _text("SELECT employeeid FROM core.drivers WHERE driverid = :did"),
             {"did": driver_id},
-        )
+        )).scalar_one()
+
+        try:
+            # Simulate transfer: EffectiveTo is before WORK_MID.
+            await direct_db.execute(
+                _text("""
+                    UPDATE core.drivers
+                    SET    driverstatus = 'Transferred',
+                           effectiveto  = :eto
+                    WHERE  driverid = :did
+                """),
+                {"eto": _date(2034, 5, 9), "did": driver_id},
+            )
+
+            pid = await _make_open_period(p2_env["db"], bid)
+
+            # Source driver's effectiveto < work_date → ineligible
+            resp = await _add_line(c, tok, pid, driver_id, work_date=WORK_MID)
+            assert resp.status_code == 422, resp.text
+            assert "eligible" in resp.text.lower()
+        finally:
+            # Remove only this disposable test profile; never reopen history.
+            await direct_db.execute(
+                _text("DELETE FROM core.drivers WHERE driverid = :did"),
+                {"did": driver_id},
+            )
+            await direct_db.execute(
+                _text("DELETE FROM core.employees WHERE employeeid = :eid"),
+                {"eid": employee_id},
+            )
 
     @pytest.mark.asyncio
     async def test_t13_target_branch_rejected_before_effective_date(self, p2_env, direct_db):

@@ -1,18 +1,14 @@
 """
-tests/test_driver_transfer.py — Driver branch reassignment guard tests.
+tests/test_driver_transfer.py — Driver branch immutability guard tests.
 
-Covers Part D of Foundation Lockdown Phase 2.1:
-  - Driver with no history → branch reassignment succeeds (regression)
-  - Driver with DraftLines → reassignment returns 422
-  - Driver with FinalLines → reassignment returns 422
-  - Driver with DriverRates → reassignment returns 422
-  - Driver with DriverPayRules → reassignment returns 422
-  - Error message is clear and branch is not mutated
+Covers immutable Driver branch behavior:
+  - Driver branch reassignment returns 422 with or without payroll history
+  - Error message directs callers to Driver Transfer
+  - DriverID and original branch remain unchanged
 
-The reassignment trigger: POST /admin/users/{id}/company-role-assignments
-with a DRIVER company role on a different branch causes ensure_driver_profile
-to attempt a BranchID update. The guard in ensure_driver_profile intercepts
-this and returns 422 if payroll/rate history exists.
+The reassignment trigger is POST /admin/users/{id}/company-role-assignments
+with a DRIVER company role on a different branch. The immutable branch guard
+in ensure_driver_profile rejects the direct Workforce mutation.
 """
 import random
 
@@ -141,30 +137,31 @@ async def _make_fresh_driver(
 @pytest.mark.asyncio
 class TestDriverBranchReassignment:
 
-    async def test_driver_no_history_can_be_reassigned(
+    async def test_driver_without_history_cannot_be_reassigned(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         hq_branch_id: int,
         paytest_branch_id: int,
     ):
-        """Driver with zero history can be directly reassigned to another branch."""
+        """A history-free Driver still cannot be directly reassigned."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
         user_id, driver_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
 
-        # Reassign to PAYTEST — no history, must succeed
+        # Role reassignment cannot move the Driver profile, even without history.
         r = await _assign_driver_role(
             session_client, auth_token, user_id, driver_role_id, paytest_branch_id
         )
-        assert r.status_code == 201, (
-            f"Expected 201 for history-free driver reassignment, got {r.status_code}: {r.text}"
+        assert r.status_code == 422, (
+            f"Expected 422 for direct branch reassignment, got {r.status_code}: {r.text}"
         )
+        assert "transfer" in r.text.lower(), "Error should direct caller to Driver Transfer."
 
-        # Confirm branch updated
+        # Confirm the original profile remains authoritative.
         profile = await _get_driver_profile(session_client, auth_token, user_id)
-        assert profile["branch_id"] == paytest_branch_id
+        assert profile["branch_id"] == hq_branch_id
         assert profile["driver_id"] == driver_id
 
     async def test_driver_with_draft_lines_cannot_be_reassigned(
@@ -354,7 +351,7 @@ class TestDriverBranchReassignment:
         direct_db,
         created_period_id: int,
     ):
-        """422 detail mentions payroll/rate history and transfer workflow."""
+        """422 detail explains that branch changes require Driver Transfer."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
         user_id, driver_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id

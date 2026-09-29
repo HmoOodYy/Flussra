@@ -49,12 +49,10 @@ async def _assert_driver_eligible_for_date(
     write paths are consistent with what the grid shows:
       - driver belongs to company and branch
       - employee employment_status = 'Active'
-      - driver_status = 'Active'
-        OR (driver_status = 'Transferred' AND effectiveto IS NOT NULL AND effectiveto >= work_date)
+      - this DriverID is the canonical effective profile for work_date
+      - driver_status is 'Active', or 'Transferred' for its effective historical dates
       - hire_date IS NULL OR hire_date <= work_date
       - termination_date IS NULL OR termination_date >= work_date
-      - effective_from IS NULL OR effective_from <= work_date
-      - effective_to   IS NULL OR effective_to   >= work_date
     """
     result = await db.execute(
         text("""
@@ -64,17 +62,11 @@ async def _assert_driver_eligible_for_date(
             WHERE  d.driverid         = :did
               AND  d.companyid        = :cid
               AND  d.branchid         = :bid
+              AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid, :dt) = d.driverid
+              AND  d.driverstatus IN ('Active', 'Transferred')
               AND  e.employmentstatus = 'Active'
-              AND  (
-                       d.driverstatus = 'Active'
-                    OR (d.driverstatus = 'Transferred'
-                        AND d.effectiveto IS NOT NULL
-                        AND d.effectiveto >= :dt)
-                   )
               AND  (e.hiredate IS NULL OR e.hiredate <= :dt)
               AND  (e.terminationdate IS NULL OR e.terminationdate >= :dt)
-              AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :dt)
-              AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :dt)
         """),
         {"did": driver_id, "cid": company_id, "bid": branch_id, "dt": work_date},
     )
