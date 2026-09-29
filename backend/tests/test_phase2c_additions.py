@@ -2,7 +2,7 @@
 tests/test_phase2c_additions.py — Phase 2C tests
 
 Covers:
-  TestDriverBranchSync     — branch sync bug fix (ensure_driver_profile)
+  TestDriverBranchImmutability — immutable Driver branch compatibility
   TestCopyRates            — copy-from endpoint
   TestBulkDriverSummary    — bulk rates-summary endpoint
   TestPayRulesSecurity     — pay rules now use payrates.view/edit
@@ -72,18 +72,17 @@ async def _make_driver(
 
 
 # ===========================================================================
-# Part A — Branch Sync
+# Part A — Driver Branch Immutability
 # ===========================================================================
 
-class TestDriverBranchSync:
+class TestDriverBranchImmutability:
     """
-    ensure_driver_profile now syncs core.Drivers.BranchID and
-    core.Employees.BranchID when a Driver role is re-assigned to a
-    different branch.
+    Reassigning a DRIVER role cannot mutate the existing Driver profile's
+    immutable branch. Branch movement requires Driver Transfer.
     """
 
     @pytest.mark.asyncio
-    async def test_branch_sync_on_reassignment(
+    async def test_role_reassignment_rejects_driver_branch_movement(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -92,10 +91,8 @@ class TestDriverBranchSync:
         """
         1. Create user + assign DRIVER role on branch 1 (HQ).
         2. Verify driver profile → branch 1.
-        3. Reassign to PAYTEST branch.
-        4. Verify driver profile → PAYTEST branch.
-        5. No duplicate driver row.
-        6. DriverID unchanged.
+        3. Attempt role reassignment to PAYTEST and require 422.
+        4. Verify the existing DriverID and HQ branch remain unchanged.
         """
         import random
         username = f"bsync_{random.randint(10000, 99999)}"
@@ -131,15 +128,14 @@ class TestDriverBranchSync:
                   "scope_type": "SpecificBranch", "branch_id": paytest_branch_id},
             headers=auth(auth_token),
         )
-        assert r2.status_code == 201, r2.text
+        assert r2.status_code == 422, r2.text
+        assert "transfer" in r2.text.lower()
 
-        # Verify branch updated
+        # Verify the rejected role reassignment left the profile unchanged.
         info2 = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
         assert info2.status_code == 200
         data2 = info2.json()
-        assert data2["branch_id"] == paytest_branch_id, (
-            f"Driver profile branch should be {paytest_branch_id}, got {data2['branch_id']}"
-        )
+        assert data2["branch_id"] == hq_branch_id
 
         # DriverID must be unchanged (no duplicate created)
         assert data2["driver_id"] == original_driver_id
@@ -191,13 +187,13 @@ class TestDriverBranchSync:
         )
 
     @pytest.mark.asyncio
-    async def test_pay_rates_matrix_uses_new_branch(
+    async def test_rate_matrix_keeps_original_branch_after_rejected_reassignment(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
     ):
-        """Rate matrix reflects the driver's new branch after sync."""
+        """Rate matrix retains the Driver profile branch after rejected role reassignment."""
         import random
         username = f"matbsync_{random.randint(10000, 99999)}"
         user_id = await _create_user(session_client, auth_token, username, "Matrix Branch Sync")
@@ -208,22 +204,34 @@ class TestDriverBranchSync:
 
         hq_branch_id = 1
 
-        await session_client.post(
+        initial_assignment = await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
             json={"company_role_id": driver_role_id,
                   "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
             headers=auth(auth_token),
         )
+        assert initial_assignment.status_code == 201, initial_assignment.text
         info = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
+        assert info.status_code == 200
         driver_id = info.json()["driver_id"]
+        assert info.json()["branch_id"] == hq_branch_id
 
-        # Reassign to paytest
-        await session_client.post(
+        # Reassignment is rejected and does not move the Driver profile.
+        reassignment = await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
             json={"company_role_id": driver_role_id,
                   "scope_type": "SpecificBranch", "branch_id": paytest_branch_id},
             headers=auth(auth_token),
         )
+        assert reassignment.status_code == 422, reassignment.text
+        assert "transfer" in reassignment.text.lower()
+
+        info_after = await session_client.get(
+            f"/admin/users/{user_id}/driver", headers=auth(auth_token)
+        )
+        assert info_after.status_code == 200
+        assert info_after.json()["driver_id"] == driver_id
+        assert info_after.json()["branch_id"] == hq_branch_id
 
         matrix_resp = await session_client.get(
             f"/payroll/drivers/{driver_id}/rate-matrix",
@@ -231,7 +239,7 @@ class TestDriverBranchSync:
             headers=auth(auth_token),
         )
         assert matrix_resp.status_code == 200
-        assert matrix_resp.json()["branch_id"] == paytest_branch_id
+        assert matrix_resp.json()["branch_id"] == hq_branch_id
 
 
 # ===========================================================================

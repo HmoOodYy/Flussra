@@ -680,6 +680,23 @@ async def update_driver(
     # Permission gate: branch access is necessary but not sufficient.
     await _check_permission(company_id, user_id, existing.branch_id, "drivers.manage", db)
 
+    if data.driver_status is not None and data.driver_status != existing.driver_status and (
+        existing.driver_status in {"Transferred", "Terminated"}
+        or data.driver_status in {"Transferred", "Terminated"}
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Transferred and terminated Driver status is controlled by the Workforce lifecycle.",
+        )
+    if (
+        data.employment_status is not None
+        and data.employment_status != existing.employment_status
+        and "Terminated" in {data.employment_status, existing.employment_status}
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Employee termination and reactivation are controlled by the Workforce lifecycle.",
+        )
     # --- Update core.employees ---
     emp_fields: dict[str, Any] = {}
     if data.full_name is not None:

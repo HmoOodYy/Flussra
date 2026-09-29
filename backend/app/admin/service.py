@@ -2363,26 +2363,6 @@ async def set_user_permission_overrides(
 # Driver profile auto-linking (Phase 1)
 # ===========================================================================
 
-async def _driver_has_payroll_history(driver_id: int, db: AsyncConnection) -> bool:
-    """Return True if the driver has any payroll/rate/pay-rule history.
-
-    Used to block unsafe direct Driver.BranchID mutation: if history exists,
-    callers must use the Driver Transfer workflow instead.
-    """
-    # Check each table individually to avoid asyncpg's limitation with repeated
-    # positional parameters ($1) across UNION ALL branches.
-    for query in (
-        "SELECT 1 FROM payroll.payrolldraftlines WHERE driverid = :did LIMIT 1",
-        "SELECT 1 FROM payroll.payrollfinallines  WHERE driverid = :did LIMIT 1",
-        "SELECT 1 FROM payroll.driverrates        WHERE driverid = :did LIMIT 1",
-        "SELECT 1 FROM payroll.driverpayrules     WHERE driverid = :did LIMIT 1",
-    ):
-        row = await db.execute(text(query), {"did": driver_id})
-        if row.first() is not None:
-            return True
-    return False
-
-
 async def ensure_driver_profile(
     db: AsyncConnection,
     user_id: int,
@@ -2426,36 +2406,11 @@ async def ensure_driver_profile(
         )
         drv_row = drv_result.mappings().first()
         if drv_row is not None:
-            # Driver already exists — sync branch if the role assignment changed it.
-            # Guard: if the target branch differs and driver has payroll/rate history,
-            # refuse the direct mutation — use Driver Transfer workflow instead.
+            # A Driver profile's branch is immutable; branch movement uses transfer.
             if branch_id is not None and branch_id != drv_row["branchid"]:
-                if await _driver_has_payroll_history(drv_row["driverid"], db):
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            "Driver has payroll/rate history attached to their current branch. "
-                            "Use Driver Transfer workflow to move the driver to a new branch."
-                        ),
-                    )
-                # No history — safe to reassign branch directly
-                await db.execute(
-                    text("""
-                        UPDATE core.drivers
-                        SET    branchid = :bid
-                        WHERE  driverid  = :did
-                          AND  companyid = :cid
-                    """),
-                    {"bid": branch_id, "did": drv_row["driverid"], "cid": company_id},
-                )
-                await db.execute(
-                    text("""
-                        UPDATE core.employees
-                        SET    branchid = :bid
-                        WHERE  employeeid = :eid
-                          AND  companyid  = :cid
-                    """),
-                    {"bid": branch_id, "eid": existing_emp_id, "cid": company_id},
+                raise HTTPException(
+                    status_code=422,
+                    detail="Driver branch is immutable. Use Driver Transfer workflow to change branches.",
                 )
             return {"employee_id": existing_emp_id, "driver_id": drv_row["driverid"], "created": False}
         # Employee exists but no driver row — create it
@@ -2525,33 +2480,11 @@ async def ensure_driver_profile(
     )
     existing_drv = drv_check.mappings().first()
     if existing_drv is not None:
-        # Sync branch — same guard as Case 1: block if driver has history
+        # A Driver profile's branch is immutable; branch movement uses transfer.
         if branch_id is not None and branch_id != existing_drv["branchid"]:
-            if await _driver_has_payroll_history(existing_drv["driverid"], db):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Driver has payroll/rate history attached to their current branch. "
-                        "Use Driver Transfer workflow to move the driver to a new branch."
-                    ),
-                )
-            await db.execute(
-                text("""
-                    UPDATE core.drivers
-                    SET    branchid = :bid
-                    WHERE  driverid  = :did
-                      AND  companyid = :cid
-                """),
-                {"bid": branch_id, "did": existing_drv["driverid"], "cid": company_id},
-            )
-            await db.execute(
-                text("""
-                    UPDATE core.employees
-                    SET    branchid = :bid
-                    WHERE  employeeid = :eid
-                      AND  companyid  = :cid
-                """),
-                {"bid": branch_id, "eid": employee_id, "cid": company_id},
+            raise HTTPException(
+                status_code=422,
+                detail="Driver branch is immutable. Use Driver Transfer workflow to change branches.",
             )
         return {"employee_id": employee_id, "driver_id": existing_drv["driverid"], "created": False}
 

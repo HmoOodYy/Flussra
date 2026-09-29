@@ -658,16 +658,20 @@ async def complete_driver_transfer(
     )
     new_driver_id: int = new_drv_ins.scalar_one()
 
-    # 2. Close old profile
+    # 2. Close old profile atomically so history guards never observe a
+    #    Transferred profile with an open effective window.
+    effective_date: date = row["effectivedate"]
     await db.execute(
         text("""
             UPDATE core.drivers
             SET    driverstatus          = 'Transferred',
-                   transferredtodriverid = :new_did
+                   transferredtodriverid = :new_did,
+                   effectiveto           = :effective_to
             WHERE  driverid  = :old_did
               AND  companyid = :cid
         """),
-        {"new_did": new_driver_id, "old_did": row["driverid"], "cid": company_id},
+        {"new_did": new_driver_id, "effective_to": effective_date - timedelta(days=1),
+         "old_did": row["driverid"], "cid": company_id},
     )
 
     # 3. Update Employee.BranchID to target branch
@@ -709,20 +713,6 @@ async def complete_driver_transfer(
     #    Old source profile: valid up to and including effective_date - 1 day.
     #    New target profile: valid starting effective_date.
     #    Existing rows with NULL windows are unaffected (treated as always valid).
-    effective_date: date = row["effectivedate"]
-    await db.execute(
-        text("""
-            UPDATE core.drivers
-            SET    effectiveto = :eto
-            WHERE  driverid   = :did
-              AND  companyid  = :cid
-        """),
-        {
-            "eto": effective_date - timedelta(days=1),
-            "did": row["driverid"],
-            "cid": company_id,
-        },
-    )
     await db.execute(
         text("""
             UPDATE core.drivers
