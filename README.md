@@ -17,22 +17,18 @@ docs/           Architecture and status notes
 scripts/        Dev/ops helper scripts
 ```
 
-## Backend setup
+## Backend setup (Windows PowerShell)
 
-```bash
-cd backend
-pip install -e ".[dev]"
-cp .env.example .env   # fill in database and secret values
-alembic upgrade head
-uvicorn app.main:app --reload
+```powershell
+.\scripts\setup_backend.ps1
+.\scripts\test_backend.ps1
+.\scripts\dev_backend.ps1
 ```
 
-Run tests:
-
-```bash
-cd backend
-pytest
-```
+Each Git worktree uses its own ignored `backend/.venv`. Setup installs the
+editable backend and `[dev]` dependencies from `backend/pyproject.toml`. The
+scripts do not create or copy `.env`; configure local environment values
+manually when needed.
 
 ## Frontend setup
 

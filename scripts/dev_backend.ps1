@@ -18,9 +18,10 @@ $ErrorActionPreference = "Stop"
 # Resolve project root relative to this script file
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $PYTHON = Join-Path $ROOT "backend\.venv\Scripts\python.exe"
+$SETUP_SCRIPT = Join-Path $ROOT "scripts\setup_backend.ps1"
 
 if (-not (Test-Path $PYTHON)) {
-    Write-Error "Python venv not found at: $PYTHON`nRun: cd backend && python -m venv .venv && pip install -r requirements.txt"
+    Write-Host "Python venv not found at: $PYTHON`nRun $SETUP_SCRIPT first." -ForegroundColor Red
     exit 1
 }
 
@@ -36,7 +37,6 @@ Set-Location $ROOT
 & $PYTHON -m alembic upgrade head
 if ($LASTEXITCODE -ne 0) {
     throw ("alembic upgrade head failed. Exit code: {0}. Fix migrations before starting the backend." -f $LASTEXITCODE)
-}
 }
 Write-Host "      Migrations OK." -ForegroundColor Green
 Write-Host ""
