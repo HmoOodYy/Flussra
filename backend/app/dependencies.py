@@ -7,12 +7,11 @@ here except routers.
 """
 from collections.abc import AsyncGenerator
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.auth.security import decode_token
-from app.db.session import engine
 
 # Bearer token extractor — requires "Authorization: Bearer <token>" header
 _bearer = HTTPBearer()
@@ -22,7 +21,7 @@ _bearer = HTTPBearer()
 # Database connection dependency
 # ---------------------------------------------------------------------------
 
-async def get_db() -> AsyncGenerator[AsyncConnection, None]:
+async def get_db(request: Request) -> AsyncGenerator[AsyncConnection, None]:
     """
     Yield an async database connection from the shared pool.
 
@@ -31,6 +30,10 @@ async def get_db() -> AsyncGenerator[AsyncConnection, None]:
     - Commits on successful yield exit
     - Rolls back on exception
     """
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        raise RuntimeError("Database engine is not available outside the application lifespan.")
+
     async with engine.begin() as conn:
         yield conn
 

@@ -284,7 +284,7 @@ class TestCandidateKeyDeterminism:
     @pytest.mark.asyncio
     async def test_05_wrong_purpose_rejected(self, session_client, auth_token, cp1c_setup, direct_db):
         """T5: A key re-signed with wrong purpose is rejected."""
-        from app.config import settings
+        from app.config import get_settings
 
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)
@@ -310,7 +310,9 @@ class TestCandidateKeyDeterminism:
         }
         canonical = json.dumps(bad_payload, sort_keys=True, separators=(",", ":"))
         b64 = base64.urlsafe_b64encode(canonical.encode()).decode().rstrip("=")
-        sig = _hmac_mod.new(settings.SECRET_KEY.encode(), b64.encode(), "sha256").hexdigest()
+        sig = _hmac_mod.new(
+            get_settings().SECRET_KEY.encode(), b64.encode(), "sha256"
+        ).hexdigest()
         bad_key = f"{b64}.{sig}"
 
         cr = await _create(session_client, auth_token, bid, bad_key)

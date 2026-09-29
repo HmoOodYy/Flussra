@@ -26,6 +26,16 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+# Tests that need process configuration must never inherit a developer DSN or
+# secret. Database access itself remains owned by the testing.postgresql fixture.
+os.environ["DATABASE_URL"] = "postgresql+asyncpg://test:test@127.0.0.1:1/test_configuration_only"
+os.environ["SECRET_KEY"] = "test-only-secret-key-never-use-outside-tests-000000000000000000000000"
+os.environ["ENVIRONMENT"] = "test"
+
+from app.config import get_settings  # noqa: E402
+
+get_settings.cache_clear()
+
 
 # ---------------------------------------------------------------------------
 # On Windows, PostgreSQL bin/ is typically NOT on PATH.
@@ -394,7 +404,9 @@ async def test_app(test_database_url) -> FastAPI:
     import time.
     """
     from app.dependencies import get_db
-    from app.main import app as real_app
+    from app.main import create_app
+
+    real_app = create_app()
 
     test_engine = create_async_engine(test_database_url, echo=False)
 

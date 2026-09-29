@@ -11,7 +11,6 @@ Run from Payroll_App_v3/ (the project root):
     alembic history
 """
 import asyncio
-import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
@@ -33,7 +32,7 @@ if _env_file.exists():
     from dotenv import load_dotenv
     load_dotenv(_env_file)
 
-from app.config import settings  # noqa: E402 — must come after sys.path insert
+from app.config import get_settings
 
 # ---------------------------------------------------------------------------
 # Alembic boilerplate
@@ -48,7 +47,7 @@ if config.config_file_name is not None:
 target_metadata = None
 
 # Override the URL from settings (ignores the blank sqlalchemy.url in alembic.ini)
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)
 
 
 # ---------------------------------------------------------------------------

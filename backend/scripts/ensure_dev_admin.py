@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import asyncpg
 
 from app.auth.security import hash_password
-from app.config import settings
+from app.config import get_settings
 
 # ── Target credentials ────────────────────────────────────────────────────────
 COMPANY_CODE = "DEMO"
@@ -47,6 +47,7 @@ PERMISSIONS = [
 
 
 async def main() -> None:
+    settings = get_settings()
     dsn = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(dsn)
 

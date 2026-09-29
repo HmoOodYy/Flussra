@@ -46,4 +46,4 @@ Write-Host "[2/2] Starting uvicorn on http://0.0.0.0:8000 ..." -ForegroundColor 
 Write-Host "      Press Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
 Set-Location (Join-Path $ROOT "backend")
-& $PYTHON -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+& $PYTHON -m uvicorn app.main:create_app --factory --reload --host 0.0.0.0 --port 8000

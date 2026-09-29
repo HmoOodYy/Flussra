@@ -19,13 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from app.auth.security import create_access_token
 from app.dashboard.service import _compute_setup_warnings
 from app.dependencies import get_db
-from app.main import app as real_app
+from app.main import create_app
 from app.payroll_setup import payroll_policy, readiness
 from app.payroll_setup.errors import PolicyError
 from app.settings import service as settings_service
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATIONS = _ROOT / "migrations" / "sql"
+real_app = create_app()
 
 
 @pytest_asyncio.fixture

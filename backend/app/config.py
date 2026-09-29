@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,7 +11,7 @@ class Settings(BaseSettings):
     finds .env in the current working directory:
 
         cd Payroll_App_v3/backend
-        uvicorn app.main:app --reload
+        uvicorn app.main:create_app --factory --reload
     """
 
     model_config = SettingsConfigDict(
@@ -35,5 +37,7 @@ class Settings(BaseSettings):
         return self.ENVIRONMENT.lower() == "development"
 
 
-# Module-level singleton — imported everywhere as `from app.config import settings`
-settings = Settings()
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return process configuration, validating required values on first use."""
+    return Settings()

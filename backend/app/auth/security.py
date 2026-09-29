@@ -10,7 +10,7 @@ import bcrypt
 import jwt
 from fastapi import HTTPException, status
 
-from app.config import settings
+from app.config import get_settings
 
 # ---------------------------------------------------------------------------
 # Password hashing
@@ -48,6 +48,7 @@ def create_access_token(user_id: int, company_id: int) -> str:
     Create a signed JWT access token containing user_id and company_id.
     Expiry is controlled by settings.ACCESS_TOKEN_EXPIRE_HOURS.
     """
+    settings = get_settings()
     now = datetime.now(UTC)
     payload = {
         # RFC 7519 §4.1.2 requires "sub" to be a string; PyJWT 2.13+ enforces this.
@@ -67,7 +68,7 @@ def decode_token(token: str) -> dict:
     Raises HTTP 401 on expiry or any invalidity — never returns None.
     """
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[_ALGORITHM])
+        payload = jwt.decode(token, get_settings().SECRET_KEY, algorithms=[_ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(
