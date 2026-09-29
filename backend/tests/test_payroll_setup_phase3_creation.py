@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,15 +12,14 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll.off_drivers import _scheduled_work_days
 from app.payroll.period_creation import (
+    _decode_candidate_key,
     create_period_from_candidate,
     get_period_candidates,
 )
 from app.payroll.period_lifecycle import change_period_status
-from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodCreationRequest, PeriodStatusChange
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
     create_setup,
@@ -120,11 +119,6 @@ async def test_preview_confirm_binds_exact_authority_and_replay_is_idempotent(
     assert selected.creatable is True
     assert "pay_date" not in preview.model_dump()
 
-    legacy_versions_before = (await db.db.execute(text("""
-        SELECT COUNT(*) FROM payroll.PayrollScheduleVersions
-        WHERE CompanyID = :cid AND BranchID = :bid
-    """), {"cid": db.company_id, "bid": db.branch_id})).scalar_one()
-
     created = await _confirm(db, selected.candidate_key)
     assert created.result == "CREATED"
     assert (created.start_date, created.end_date, created.status) == (
@@ -136,7 +130,7 @@ async def test_preview_confirm_binds_exact_authority_and_replay_is_idempotent(
                FrozenPayrollSetupID, FrozenPayrollSetupCode,
                FrozenPayrollSetupVersionNumber, FrozenPayrollFrequency,
                FrozenAnchorStartDate, FrozenCustomIntervalDays,
-               FrozenNormalDaysOffMask, ScheduleConfigHash, ScheduleVersionID
+               FrozenNormalDaysOffMask, ScheduleConfigHash
         FROM payroll.PayrollPeriods
         WHERE CompanyID = :cid AND PayrollPeriodID = :pid
     """), {"cid": db.company_id, "pid": created.payroll_period_id})).mappings().one()
@@ -154,21 +148,15 @@ async def test_preview_confirm_binds_exact_authority_and_replay_is_idempotent(
     assert period["frozencustomintervaldays"] is None
     assert period["frozennormaldaysoffmask"] == 5
     assert period["scheduleconfighash"] == version["confighash"]
-    assert period["scheduleversionid"] is None
-    legacy_versions_after = (await db.db.execute(text("""
-        SELECT COUNT(*) FROM payroll.PayrollScheduleVersions
-        WHERE CompanyID = :cid AND BranchID = :bid
-    """), {"cid": db.company_id, "bid": db.branch_id})).scalar_one()
-    assert legacy_versions_after == legacy_versions_before
 
     days = (await db.db.execute(text("""
-        SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID, ScheduleVersionID
+        SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID
         FROM payroll.PayrollPeriodDays
         WHERE CompanyID = :cid AND PayrollPeriodID = :pid
         ORDER BY WorkDate
     """), {"cid": db.company_id, "pid": created.payroll_period_id})).all()
     assert len(days) == 7
-    assert all(row == (assignment_id, version_id, None) for row in days)
+    assert all(row == (assignment_id, version_id) for row in days)
 
     audit = (await db.db.execute(text("""
         SELECT EventType, PayrollSetupID, PayrollSetupVersionID,
@@ -242,6 +230,53 @@ async def test_future_version_timeline_change_stales_preview(period_creation_db)
     )
     assert before.version_id == current_version_id
     assert future_version_id != current_version_id
+
+    with pytest.raises(HTTPException) as error:
+        await _confirm(db, preview.selected.candidate_key)
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "CANDIDATE_STALE"
+
+
+@pytest.mark.asyncio
+async def test_preview_stales_on_timeline_fingerprint_change_with_authority_unchanged(
+    period_creation_db,
+):
+    """A timeline-only mutation must stale an otherwise unchanged candidate."""
+    db = period_creation_db
+    setup_id, current_version_id = await _setup(db, "FINGERPRINT")
+    await _assign(db, setup_id)
+
+    preview = await _preview(db)
+    payload_before, _ = _decode_candidate_key(preview.selected.candidate_key)
+    assert payload_before["setup_version_id"] == current_version_id
+
+    # Pure timeline mutation: a future version, effective after this
+    # candidate's period, cannot change which authority resolves for the
+    # already-previewed start date.
+    future_draft = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=date(2090, 1, 1),
+        normal_days_off_mask=5,
+    )
+    await publish_version(
+        db.company_id, db.user_id, setup_id, future_draft, date(2090, 1, 8), db.db,
+    )
+
+    after_preview = await _preview(db)
+    payload_after, _ = _decode_candidate_key(after_preview.selected.candidate_key)
+
+    # Resolved authority, candidate dates, and slot state are byte-identical...
+    assert payload_after["assignment_id"] == payload_before["assignment_id"]
+    assert payload_after["setup_id"] == payload_before["setup_id"]
+    assert payload_after["setup_version_id"] == payload_before["setup_version_id"]
+    assert payload_after["config_hash"] == payload_before["config_hash"]
+    assert payload_after["start"] == payload_before["start"]
+    assert payload_after["end"] == payload_before["end"]
+    assert payload_after["slot_fp"] == payload_before["slot_fp"]
+
+    # ...yet the signed setup timeline fingerprint itself has moved.
+    assert payload_after["setup_timeline"] != payload_before["setup_timeline"]
+    assert payload_after["branch_timeline"] == payload_before["branch_timeline"]
 
     with pytest.raises(HTTPException) as error:
         await _confirm(db, preview.selected.candidate_key)
@@ -339,8 +374,6 @@ async def test_candidate_preview_rejects_period_crossing_invalid_authority_bound
         await _preview(db)
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "AUTHORITY_BOUNDARY_CROSSING"
-
-
 @pytest.mark.asyncio
 async def test_candidate_preview_rejects_period_crossing_invalid_assignment_boundary(
     period_creation_db,
@@ -371,158 +404,3 @@ async def test_candidate_preview_rejects_period_crossing_invalid_assignment_boun
         await _preview(db)
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "AUTHORITY_BOUNDARY_CROSSING"
-
-
-@pytest.mark.asyncio
-async def test_legacy_period_days_remain_authority_for_historical_reads(
-    period_creation_db,
-):
-    db = period_creation_db
-    legacy_start = date(2080, 1, 1)
-    legacy_end = legacy_start + timedelta(days=6)
-    schedule_version_id = (await db.db.execute(text("""
-        INSERT INTO payroll.PayrollScheduleVersions
-            (CompanyID, BranchID, VersionNumber, PayrollFrequency,
-             AnchorStartDate, NormalDaysOffMask, SourceAction)
-        VALUES (:cid, :bid, 1, 'Week', :anchor, 0, 'PHASE3_TEST')
-        RETURNING ScheduleVersionID
-    """), {
-        "cid": db.company_id, "bid": db.branch_id, "anchor": legacy_start,
-    })).scalar_one()
-    period_id = (await db.db.execute(text("""
-        INSERT INTO payroll.PayrollPeriods
-            (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType,
-             StartDate, EndDate, Status, ScheduleVersionID)
-        VALUES (:cid, :bid, :code, 'Legacy history', 'Week',
-                :start, :end, 'Open', :schedule_version_id)
-        RETURNING PayrollPeriodID
-    """), {
-        "cid": db.company_id, "bid": db.branch_id,
-        "code": f"P3_LEGACY_{db.marker}", "start": legacy_start,
-        "end": legacy_end, "schedule_version_id": schedule_version_id,
-    })).scalar_one()
-
-    # Preserve an existing legacy PeriodDay representation through the new schema.
-    for offset in range(7):
-        work_date = legacy_start + timedelta(days=offset)
-        await db.db.execute(text("""
-            INSERT INTO payroll.PayrollPeriodDays
-                (PayrollPeriodID, CompanyID, BranchID, ScheduleVersionID,
-                 WorkDate, DayOfWeek, IsDefaultWorkDay, IsConfiguredOffDay)
-            VALUES (:pid, :cid, :bid, :schedule_version_id,
-                    :work_date, :weekday, TRUE, FALSE)
-        """), {
-            "pid": period_id, "cid": db.company_id, "bid": db.branch_id,
-            "schedule_version_id": schedule_version_id, "work_date": work_date,
-            "weekday": (work_date.weekday() + 1) % 7,
-        })
-
-    historical = await get_period_by_id(
-        db.company_id, db.user_id, period_id, db.db,
-    )
-    assert (historical.start_date, historical.end_date) == (legacy_start, legacy_end)
-
-    # A later current policy has a different schedule; historical reads use stored days.
-    current_setup, _ = await _setup(
-        db, "CURRENT_AFTER_LEGACY", anchor=date(2090, 1, 1), mask=127,
-    )
-    await _assign(db, current_setup, date(2090, 1, 1))
-    current_authority = await resolve_payroll_setup_version(
-        db.company_id, db.branch_id, date(2090, 1, 1), db.db,
-    )
-    assert current_authority.schedule.normal_days_off_mask == 127
-
-    historical_work_days = await _scheduled_work_days(historical, db.db)
-    assert historical_work_days == {
-        legacy_start + timedelta(days=offset) for offset in range(7)
-    }
-
-    legacy_authority = (await db.db.execute(text("""
-        SELECT p.ScheduleVersionID, p.BranchPayrollSetupAssignmentID,
-               p.PayrollSetupVersionID, d.ScheduleVersionID,
-               d.BranchPayrollSetupAssignmentID, d.PayrollSetupVersionID
-        FROM payroll.PayrollPeriods p
-        JOIN payroll.PayrollPeriodDays d USING (PayrollPeriodID)
-        WHERE p.CompanyID = :cid AND p.PayrollPeriodID = :pid
-        ORDER BY d.WorkDate LIMIT 1
-    """), {"cid": db.company_id, "pid": period_id})).one()
-    assert legacy_authority == (
-        schedule_version_id, None, None, schedule_version_id, None, None,
-    )
-
-
-@pytest.mark.asyncio
-async def test_legacy_branch_settings_and_current_version_do_not_affect_candidates(
-    period_creation_db,
-):
-    db = period_creation_db
-    setup_id, version_id = await _setup(db, "LEGACY_SETTINGS")
-    assignment_id = await _assign(db, setup_id)
-    before_legacy = await _preview(db)
-
-    legacy_version_id = (await db.db.execute(text("""
-        INSERT INTO payroll.PayrollScheduleVersions
-            (CompanyID, BranchID, VersionNumber, PayrollFrequency,
-             AnchorStartDate, NormalDaysOffMask, SourceAction)
-        VALUES (:cid, :bid, 1, 'Biweek', '2090-01-05', 65, 'PHASE3_TEST')
-        RETURNING ScheduleVersionID
-    """), {"cid": db.company_id, "bid": db.branch_id})).scalar_one()
-    await db.db.execute(text("""
-        INSERT INTO payroll.BranchPayrollSettings
-            (CompanyID, BranchID, PayrollFrequency, AnchorStartDate,
-             IsActive, CreatedByUserID, NormalDaysOffMask,
-             CurrentScheduleVersionID)
-        VALUES (:cid, :bid, 'Biweek', '2090-01-05', TRUE, :uid, 65, :sv_id)
-    """), {
-        "cid": db.company_id, "bid": db.branch_id, "uid": db.user_id,
-        "sv_id": legacy_version_id,
-    })
-
-    after_legacy_insert = await _preview(db)
-    assert (after_legacy_insert.selected.start_date,
-            after_legacy_insert.selected.end_date) == (
-        before_legacy.selected.start_date, before_legacy.selected.end_date,
-    )
-    assert after_legacy_insert.selected.candidate_key == before_legacy.selected.candidate_key
-
-    mutated_legacy_version_id = (await db.db.execute(text("""
-        INSERT INTO payroll.PayrollScheduleVersions
-            (CompanyID, BranchID, VersionNumber, PayrollFrequency,
-             AnchorStartDate, NormalDaysOffMask, SourceAction)
-        VALUES (:cid, :bid, 2, 'Month', '2090-01-05', 127, 'PHASE3_TEST')
-        RETURNING ScheduleVersionID
-    """), {"cid": db.company_id, "bid": db.branch_id})).scalar_one()
-    await db.db.execute(text("""
-        UPDATE payroll.BranchPayrollSettings
-        SET PayrollFrequency = 'Month', AnchorStartDate = '2090-01-05',
-            NormalDaysOffMask = 127, CurrentScheduleVersionID = :sv_id
-        WHERE CompanyID = :cid AND BranchID = :bid
-    """), {
-        "sv_id": mutated_legacy_version_id,
-        "cid": db.company_id, "bid": db.branch_id,
-    })
-
-    created = await _confirm(db, before_legacy.selected.candidate_key)
-    assert (created.result, created.start_date, created.end_date) == (
-        "CREATED", date(2090, 1, 1), date(2090, 1, 7),
-    )
-    stored = (await db.db.execute(text("""
-        SELECT BranchPayrollSetupAssignmentID, PayrollSetupVersionID,
-               FrozenPayrollSetupID, FrozenPayrollFrequency,
-               FrozenNormalDaysOffMask, ScheduleConfigHash, ScheduleVersionID
-        FROM payroll.PayrollPeriods
-        WHERE CompanyID = :cid AND PayrollPeriodID = :pid
-    """), {"cid": db.company_id, "pid": created.payroll_period_id})).one()
-    assert stored == (assignment_id, version_id, setup_id, "Week", 5,
-                      (await db.db.execute(text("""
-                          SELECT ConfigHash FROM payroll.PayrollSetupVersions
-                          WHERE PayrollSetupVersionID = :vid
-                      """), {"vid": version_id})).scalar_one(), None)
-
-    day_authority = (await db.db.execute(text("""
-        SELECT DISTINCT BranchPayrollSetupAssignmentID, PayrollSetupVersionID,
-                        ScheduleVersionID
-        FROM payroll.PayrollPeriodDays
-        WHERE CompanyID = :cid AND PayrollPeriodID = :pid
-    """), {"cid": db.company_id, "pid": created.payroll_period_id})).one()
-    assert day_authority == (assignment_id, version_id, None)

@@ -156,6 +156,8 @@ _SEED_STMTS = [
         ('payroll.approve_rate',   'Approve Pay Rates',        'payroll'),
         ('payroll.finalize',       'Finalize Payroll',         'payroll'),
         ('drivers.manage',         'Manage Drivers',           'core'),
+        ('employees.view',         'View Employees',           'employees'),
+        ('employees.manage',       'Manage Employees',         'employees'),
         ('review.decide',          'Decide on Review Items',   'review'),
         ('setup.manage',           'Manage Settings',          'settings')
     ON CONFLICT (permissioncode) DO NOTHING

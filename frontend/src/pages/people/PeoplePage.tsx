@@ -40,47 +40,7 @@ import type {
 } from '../../types/admin';
 import type { Branch } from '../../types/core';
 import styles from './PeoplePage.module.css';
-
-// ─── Permission metadata (mirrors RolesPage) ─────────────────────────────────
-
-const MODULE_LABELS: Record<string, string> = {
-  company:  'Company & Branches',
-  roles:    'Roles & Permissions',
-  users:    'Members',
-  payroll:  'Payroll',
-  payitems: 'Pay Items',
-  payrates: 'Pay Rates',
-  drivers:  'Drivers',
-  dispatch: 'Dispatch / Operations',
-  reports:  'Reports',
-  settings: 'Settings',
-};
-const MODULE_ORDER = Object.keys(MODULE_LABELS);
-
-const PERM_DEPS: Record<string, string> = {
-  'company.edit':     'company.view',
-  'branches.create':  'branches.view',
-  'branches.edit':    'branches.view',
-  'roles.create':     'roles.view',
-  'roles.edit':       'roles.view',
-  'roles.delete':     'roles.view',
-  'users.create':     'users.view',
-  'users.edit':       'users.view',
-  'users.deactivate': 'users.view',
-  'payroll.edit':     'payroll.view',
-  'payroll.approve':  'payroll.view',
-  'payroll.finalize': 'payroll.view',
-  'payitems.edit':    'payitems.view',
-  'payrates.edit':    'payrates.view',
-  'drivers.create':   'drivers.view',
-  'drivers.edit':     'drivers.view',
-  'dispatch.edit':    'dispatch.view',
-  'settings.manage':  'settings.view',
-};
-const PERM_DEPENDENTS: Record<string, string[]> = {};
-for (const [child, parent] of Object.entries(PERM_DEPS)) {
-  (PERM_DEPENDENTS[parent] ??= []).push(child);
-}
+import { PERM_DEPS, applyToggle, groupPerms } from './peoplePermissionModel';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -130,33 +90,6 @@ function accessStatus(p: UserAdmin): AccessStatus {
   if (!p.can_login)       return { label: 'Login disabled',   kind: 'warn' };
   if (!p.company_role_id) return { label: 'No role assigned', kind: 'warn' };
   return { label: 'Complete', kind: 'ok' };
-}
-
-// Group permissions by module, sorted by MODULE_ORDER
-function groupPerms(perms: Permission[]): Array<{ module: string; label: string; perms: Permission[] }> {
-  const map = new Map<string, Permission[]>();
-  for (const p of perms) {
-    if (!map.has(p.module_code)) map.set(p.module_code, []);
-    map.get(p.module_code)!.push(p);
-  }
-  return MODULE_ORDER
-    .filter(m => map.has(m))
-    .map(m => ({ module: m, label: MODULE_LABELS[m] ?? m, perms: map.get(m)! }));
-}
-
-// Apply PERM_DEPS: adding a code also adds its parent; removing a code removes its dependents
-function applyToggle(current: Set<string>, code: string, checked: boolean): Set<string> {
-  const next = new Set(current);
-  if (checked) {
-    next.add(code);
-    const parent = PERM_DEPS[code];
-    if (parent) next.add(parent);
-  } else {
-    next.delete(code);
-    const children = PERM_DEPENDENTS[code] ?? [];
-    for (const child of children) next.delete(child);
-  }
-  return next;
 }
 
 // ─── Page state ───────────────────────────────────────────────────────────────
@@ -1187,6 +1120,11 @@ function PermissionPicker({ allPerms, rolePerms, extraPerms, onToggle }: Permiss
       {groups.map(g => (
         <div key={g.module} className={styles.permGroup}>
           <div className={styles.permGroupTitle}>{g.label}</div>
+          {g.note && (
+            <div style={{ padding: '0 0.9rem 0.35rem', fontSize: '0.72rem', color: '#9ca3af', fontStyle: 'italic' }}>
+              {g.note}
+            </div>
+          )}
           {g.perms.map(perm => {
             const code = perm.permission_code;
             const inRole = rolePerms.has(code);

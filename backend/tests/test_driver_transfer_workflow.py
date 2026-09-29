@@ -1677,15 +1677,15 @@ async def test_people_no_duplicate_after_completed_transfer(
 
 
 @pytest.mark.asyncio
-async def test_people_surfaces_active_driver_id_after_transfer(
+async def test_people_surfaces_effective_source_until_future_transfer_date(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
     """
-    After a transfer completes, the single person row returned by /core/people
-    must carry the NEW (Active) driver_id, not the old Transferred one.
+    A completed future-dated transfer does not make its destination current
+    early. The source remains current until the effective date.
     """
     sfx = _rnd()
     old_drv_id = await _create_driver(
@@ -1711,16 +1711,10 @@ async def test_people_surfaces_active_driver_id_after_transfer(
     assert len(matching) == 1
     row = matching[0]
 
-    assert row.get("driver_id") == new_drv_id, (
-        f"Expected new driver_id={new_drv_id}, got {row.get('driver_id')}. "
-        "Old Transferred profile is being surfaced."
-    )
-    assert row.get("driver_status") == "Active", (
-        f"Expected driver_status=Active, got {row.get('driver_status')!r}"
-    )
-    assert row.get("driver_id") != old_drv_id, (
-        "Old Transferred driver_id is still being surfaced in /core/people."
-    )
+    assert row.get("driver_id") == old_drv_id
+    assert row.get("driver_status") == "Transferred"
+    assert row.get("driver_state") == "current"
+    assert row.get("driver_id") != new_drv_id
 
 
 # ===========================================================================

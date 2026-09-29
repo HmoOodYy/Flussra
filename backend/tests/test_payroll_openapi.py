@@ -1,7 +1,7 @@
 from app.main import app
 
 
-def test_legacy_period_creation_is_deprecated_in_openapi() -> None:
-    operation = app.openapi()["paths"]["/payroll/periods"]["post"]
+def test_legacy_period_creation_is_absent_from_openapi() -> None:
+    operation = app.openapi()["paths"].get("/payroll/periods", {})
 
-    assert operation["deprecated"] is True
+    assert "post" not in operation

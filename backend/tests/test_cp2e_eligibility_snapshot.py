@@ -1280,7 +1280,12 @@ async def _create_candidate_period(db, mode: str):
         get_period_candidates,
     )
     from app.payroll.schemas import PeriodCreationRequest
-    from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+    from app.payroll_setup.payroll_policy import (
+        assign_setup,
+        create_draft,
+        create_setup,
+        publish_version,
+    )
 
     anchor = datetime.date(2090, 1, 1)
     setup_id = await create_setup(

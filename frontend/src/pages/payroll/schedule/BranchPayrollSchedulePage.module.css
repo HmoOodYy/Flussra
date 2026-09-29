@@ -1,0 +1,273 @@
+/* ═══════════════════════════════════════════════════════
+   Branch read-only Payroll Schedule page
+   Visual vocabulary follows PayrollSetupsPage.module.css /
+   CompanyBranchesPage.module.css; uses the shared CSS variable tokens
+   defined in src/styles/tokens.css.
+═══════════════════════════════════════════════════════ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.introLine {
+  margin: 0;
+  font-size: var(--font-size-base);
+  color: var(--text-secondary);
+}
+
+.mutedText {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.mutedNote {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 0 0 0.5rem;
+}
+
+.noticeText {
+  margin: 0;
+  padding: 0.65rem 1rem;
+  background: var(--color-warning-light);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* ═══════════════════════════════════════════════════════
+   BRANCH PICKER
+═══════════════════════════════════════════════════════ */
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.pickerLabel {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semi);
+  color: var(--text-primary);
+}
+
+.pickerSelect {
+  padding: 0.4rem 0.6rem;
+  border: 1.5px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  background: var(--surface-card);
+  color: var(--text-primary);
+  min-width: 220px;
+}
+
+/* ═══════════════════════════════════════════════════════
+   ERROR NOTICE (local — includes code + status chips)
+═══════════════════════════════════════════════════════ */
+
+.errorNotice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 1rem;
+  background: var(--color-danger-light);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+.errorCodeChip {
+  padding: 0.1rem 0.45rem;
+  background: var(--surface-card);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semi);
+  color: var(--color-danger);
+  font-family: 'Courier New', monospace;
+}
+
+/* ═══════════════════════════════════════════════════════
+   READINESS
+═══════════════════════════════════════════════════════ */
+
+.readinessBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.branchName {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semi);
+  color: var(--text-primary);
+}
+
+.readinessLine {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.readinessLabel {
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semi);
+  color: var(--text-primary);
+}
+
+.rawChip {
+  padding: 0.1rem 0.45rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semi);
+  color: var(--text-secondary);
+  font-family: 'Courier New', monospace;
+}
+
+/* ═══════════════════════════════════════════════════════
+   NEXT PAYROLL PERIOD (effective authority)
+═══════════════════════════════════════════════════════ */
+
+.effectiveBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.effectiveLine {
+  margin: 0;
+  font-size: var(--font-size-base);
+  color: var(--text-primary);
+}
+
+.monospace {
+  font-family: 'Courier New', monospace;
+  font-size: var(--font-size-sm);
+  word-break: break-all;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCHEDULE BLOCK (shared: effective + version rows)
+═══════════════════════════════════════════════════════ */
+
+.scheduleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.scheduleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.scheduleLabel {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semi);
+  color: var(--text-muted);
+  min-width: 130px;
+}
+
+.scheduleValue {
+  font-size: var(--font-size-sm);
+  color: var(--text-primary);
+}
+
+/* ═══════════════════════════════════════════════════════
+   ASSIGNMENT HISTORY
+═══════════════════════════════════════════════════════ */
+
+.assignmentList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.assignmentRow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.muted {
+  opacity: 0.6;
+}
+
+.assignmentTitle {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semi);
+  color: var(--text-primary);
+}
+
+.assignmentLine {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.tagRow {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.tag {
+  padding: 0.1rem 0.5rem;
+  background: var(--color-blue-50);
+  border: 1px solid var(--color-blue-100);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semi);
+  color: var(--color-blue-700);
+}
+
+.versionList {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0 0 0 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-left: 2px solid var(--border-subtle);
+}
+
+.versionRow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--surface-muted);
+  border-radius: var(--radius-sm);
+}
+
+.versionLine {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}

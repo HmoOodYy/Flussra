@@ -43,7 +43,12 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+from app.payroll_setup.payroll_policy import (
+    assign_setup,
+    create_draft,
+    create_setup,
+    publish_version,
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -312,7 +317,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0068."""
+        """S03: Alembic migration chain is linear and head is 0073."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -324,7 +329,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0068" in lines[0], f"Expected head 0068, got: {lines[0]}"
+        assert "0073" in lines[0], f"Expected head 0073, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist

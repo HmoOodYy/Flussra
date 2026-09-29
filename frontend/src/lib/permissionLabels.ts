@@ -17,6 +17,7 @@ const _MODULE_LABELS: Record<string, string> = {
   roles:    'Roles',
   users:    'Members',
   payroll:  'Payroll',
+  payroll_setup: 'Payroll Setup',
   payitems: 'Pay Items',
   payrates: 'Pay Rates',
   drivers:  'Drivers',
@@ -37,6 +38,8 @@ const _ACTION_LABELS: Record<string, string> = {
   entry:       'Enter',
   decide:      'Decide',
   approve_rate: 'Approve Rates',
+  publish:     'Publish',
+  assign:      'Assign',
 };
 
 export function friendlyPermLabel(code: string): string {

@@ -315,7 +315,7 @@ export function TransferRequestsTab({ branches }: Props) {
     dispatch({ type: 'CREATE_OPEN' });
     dispatch({ type: 'CREATE_DRIVERS_LOADING', val: true });
     try {
-      const r = await apiClient.get<PersonSummary[]>('/core/people?employee_type=Driver');
+      const r = await apiClient.get<PersonSummary[]>('/core/people?driver_state=current');
       // Restrict to drivers whose source branch the user can edit, so the form never becomes submit-capable for an unauthorized branch.
       dispatch({
         type: 'CREATE_DRIVERS',

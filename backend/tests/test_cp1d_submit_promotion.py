@@ -31,7 +31,12 @@ import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from app.payroll_setup.policy import assign_setup, create_draft, create_setup, publish_version
+from app.payroll_setup.payroll_policy import (
+    assign_setup,
+    create_draft,
+    create_setup,
+    publish_version,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -154,17 +159,6 @@ async def _clean(direct_db: AsyncConnection, branch_id: int) -> None:
               )
         """),
         p,
-    )
-    # 7. Ensure branchpayrollsettings row exists (required by CP-2A ensure_current_schedule_version).
-    # The PAYTEST branch is created in seed stmts but never configured — this is a test-only upsert.
-    await direct_db.execute(
-        _text("""
-            INSERT INTO payroll.branchpayrollsettings
-                (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
-            VALUES (:cid, :bid, 'Week', '2024-01-01', TRUE)
-            ON CONFLICT (companyid, branchid) DO NOTHING
-        """),
-        {"cid": _COMPANY_ID, "bid": branch_id},
     )
 
 
@@ -1414,10 +1408,10 @@ class TestSerializationConcurrency:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
-            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id},
+            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id, "workdate": ret_start},
         )
         await direct_db.commit()
 
@@ -1477,10 +1471,10 @@ class TestSerializationConcurrency:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
-            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id},
+            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id, "workdate": ret_start},
         )
         await direct_db.commit()
 
@@ -1564,10 +1558,10 @@ class TestSerializationConcurrency:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
-                     linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                     linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
-            {"pid": pid_b, "cid": _COMPANY_ID, "bid": hq_branch_id, "did": hq_driver_id},
+            {"pid": pid_b, "cid": _COMPANY_ID, "bid": hq_branch_id, "did": hq_driver_id, "workdate": start_b},
         )
         await direct_db.commit()
 
@@ -1900,14 +1894,15 @@ class TestDeterministicLockBoundary:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
-                     linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                     linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
             {
                 "pid": pid_b,
                 "cid": _COMPANY_ID,
                 "bid": hq_branch_id,
                 "did": hq_driver_id,
+                "workdate": b_start,
             },
         )
 

@@ -13,6 +13,10 @@ import {
   canViewPayRates,
   canViewSettings,
   canViewDailyPayItems,
+  canManageSettingsAdmin,
+  canViewPayrollSetups,
+  canViewAnyBranchPayrollSchedule,
+  canAccessCompanyBranches,
 } from '../lib/permissions';
 import styles from './AppShell.module.css';
 
@@ -33,6 +37,8 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
     payrollItems.push({ to: '/review', label: 'Review', icon: <ReviewIcon />, end: false });
   if (canViewLedger(user))
     payrollItems.push({ to: '/payroll/ledger', label: 'Ledger', icon: <LedgerIcon />, end: false });
+  if (canViewAnyBranchPayrollSchedule(user))
+    payrollItems.push({ to: '/payroll/schedule', label: 'Payroll Schedule', icon: <CalendarIcon />, end: false });
   if (payrollItems.length > 0)
     groups.push({ label: 'Payroll', items: payrollItems });
 
@@ -44,27 +50,22 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
   if (peopleItems.length > 0)
     groups.push({ label: 'People', items: peopleItems });
 
-  if (canViewSettings(user)) {
-    // Full settings access: show all four settings pages unchanged.
-    groups.push({
-      label: 'Settings',
-      items: [
-        { to: '/settings/payroll',          label: 'Payroll Setup',       icon: <CalendarIcon />, end: false },
-        { to: '/settings/pay-items',        label: 'Daily Pay Items',     icon: <TagIcon />,      end: false },
-        { to: '/settings/roles',            label: 'Roles & Permissions', icon: <ShieldIcon />,   end: false },
-        { to: '/settings/company-branches', label: 'Company & Branches',  icon: <BuildingIcon />, end: false },
-      ],
-    });
-  } else if (canViewDailyPayItems(user)) {
-    // payitems.edit-only users: show Settings group with Daily Pay Items only.
-    // Other settings pages remain inaccessible — individual route gates hold.
-    groups.push({
-      label: 'Settings',
-      items: [
-        { to: '/settings/pay-items', label: 'Daily Pay Items', icon: <TagIcon />, end: false },
-      ],
-    });
-  }
+  // Settings nav: each item gated individually so it matches its own route
+  // gate exactly; the group is only shown when at least one item is visible.
+  const settingsItems: NavItem[] = [];
+  if (canViewPayrollSetups(user))
+    settingsItems.push({ to: '/settings/payroll', label: 'Payroll Policies', icon: <CalendarIcon />, end: false });
+  if (canManageSettingsAdmin(user))
+    settingsItems.push({ to: '/settings/status-keys', label: 'Status Keys', icon: <KeyIcon />, end: false });
+  if (canViewSettings(user) || canViewDailyPayItems(user))
+    settingsItems.push({ to: '/settings/pay-items', label: 'Daily Pay Items', icon: <TagIcon />, end: false });
+  if (canViewSettings(user))
+    settingsItems.push({ to: '/settings/roles', label: 'Roles & Permissions', icon: <ShieldIcon />, end: false });
+  if (canAccessCompanyBranches(user))
+    settingsItems.push({ to: '/settings/company-branches', label: 'Company & Branches', icon: <BuildingIcon />, end: false });
+  if (settingsItems.length > 0)
+    groups.push({ label: 'Settings', items: settingsItems });
+
   return groups;
 }
 
@@ -73,11 +74,13 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
 function usePageTitle(): string {
   const { pathname } = useLocation();
   if (pathname.startsWith('/settings/company-branches')) return 'Company & Branches';
-  if (pathname.startsWith('/settings/payroll'))          return 'Payroll Setup';
+  if (pathname.startsWith('/settings/payroll'))          return 'Payroll Policies';
+  if (pathname.startsWith('/settings/status-keys'))      return 'Status Keys';
   if (pathname.startsWith('/settings/pay-items'))        return 'Daily Pay Items';
   if (pathname.startsWith('/settings/roles'))            return 'Roles & Permissions';
   if (pathname.startsWith('/people/pay-rates'))          return 'Drivers Pay Rate';
   if (pathname.startsWith('/people'))                    return 'People & Access';
+  if (pathname.startsWith('/payroll/schedule'))          return 'Payroll Schedule';
   if (pathname.startsWith('/payroll/ledger'))            return 'Ledger';
   if (pathname.startsWith('/payroll'))                   return 'Current Payroll';
   if (pathname.startsWith('/review'))                    return 'Review';
@@ -89,10 +92,12 @@ function usePageIcon(): React.ReactNode {
   const { pathname } = useLocation();
   if (pathname.startsWith('/settings/company-branches')) return <BuildingIcon />;
   if (pathname.startsWith('/settings/payroll'))          return <CalendarIcon />;
+  if (pathname.startsWith('/settings/status-keys'))      return <KeyIcon />;
   if (pathname.startsWith('/settings/pay-items'))        return <TagIcon />;
   if (pathname.startsWith('/settings/roles'))            return <ShieldIcon />;
   if (pathname.startsWith('/people/pay-rates'))          return <PayRatesIcon />;
   if (pathname.startsWith('/people'))                    return <PeopleIcon />;
+  if (pathname.startsWith('/payroll/schedule'))          return <CalendarIcon />;
   if (pathname.startsWith('/payroll/ledger'))            return <LedgerIcon />;
   if (pathname.startsWith('/payroll'))                   return <PayrollIcon />;
   if (pathname.startsWith('/review'))                    return <ReviewIcon />;
@@ -399,6 +404,16 @@ function CalendarIcon() {
       <line x1="16" y1="2" x2="16" y2="6"/>
       <line x1="8" y1="2" x2="8" y2="6"/>
       <line x1="3" y1="10" x2="21" y2="10"/>
+    </svg>
+  );
+}
+
+function KeyIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="15.5" r="5.5"/>
+      <path d="M21 2l-9.6 9.6"/>
+      <path d="M15.5 7.5l3 3L22 7l-3-3"/>
     </svg>
   );
 }

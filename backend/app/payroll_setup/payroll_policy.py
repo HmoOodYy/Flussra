@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import secrets
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -9,17 +10,43 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .audit import write_policy_audit
-from .chronology import Schedule, is_period_start
+from .chronology import DaysOffLimitError, Schedule, validate_normal_days_off_mask
 from .errors import PolicyError
 from .locks import lock_branches, lock_company, lock_setups
+from .onboarding import ensure_onboarding_window
 from .security import require_policy_permission
 from .validation import (
     next_version_boundary,
     terminal_version,
     validate_boundary,
     validate_next_version,
+    validate_period_history,
+    validate_policy_version_transition,
     version_schedule,
 )
+
+# Every server-generated Setup reference lives in this reserved namespace, so
+# it never collides with (and is trivially distinguishable from) a
+# human-chosen explicit code. Identity is still the PayrollSetupID PK; this
+# is only a human/system-facing reference.
+SETUP_CODE_PREFIX = "PPOL-"
+# Ambiguous characters (0/O, 1/I) excluded so a printed/read-aloud code is unambiguous.
+_GENERATED_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_GENERATED_CODE_SUFFIX_LENGTH = 8
+_GENERATED_CODE_ATTEMPTS = 10
+
+
+def generated_setup_code(choice=secrets.choice) -> str:
+    """A random system-generated Payroll Setup reference: `PPOL-` plus 8
+    characters drawn from an unambiguous alphabet. Used for every Setup
+    created without an explicit `setup_code`, whatever the Setup's name —
+    the name is never transliterated or otherwise used to derive the code.
+    `choice` mirrors `secrets.choice`'s signature (sequence -> one element)
+    and is overridable so tests can force deterministic collisions."""
+    suffix = "".join(
+        choice(_GENERATED_CODE_ALPHABET) for _ in range(_GENERATED_CODE_SUFFIX_LENGTH)
+    )
+    return f"{SETUP_CODE_PREFIX}{suffix}"
 
 
 def canonical_config_hash(schedule: Schedule) -> str:
@@ -75,7 +102,20 @@ async def _draft(db: AsyncConnection, company_id: int, setup_id: int, draft_id: 
 def _schedule(frequency: str, anchor: date, interval: int | None, mask: int) -> Schedule:
     try:
         return Schedule(frequency, anchor, interval, mask)
+    except DaysOffLimitError as exc:
+        raise PolicyError("INVALID_NORMAL_DAYS_OFF", str(exc)) from exc
     except (ValueError, TypeError) as exc:
+        raise PolicyError("INVALID_SCHEDULE", str(exc)) from exc
+
+
+def _require_days_off_limit(mask: int | None) -> None:
+    if mask is None:
+        return
+    try:
+        validate_normal_days_off_mask(mask)
+    except DaysOffLimitError as exc:
+        raise PolicyError("INVALID_NORMAL_DAYS_OFF", str(exc)) from exc
+    except ValueError as exc:
         raise PolicyError("INVALID_SCHEDULE", str(exc)) from exc
 
 
@@ -96,22 +136,63 @@ async def get_setup(
     return dict(await _setup(db, company_id, setup_id))
 
 
-async def create_setup(
-    company_id: int, user_id: int, setup_code: str, setup_name: str,
-    db: AsyncConnection, *, description: str | None = None,
-) -> int:
-    await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+async def _insert_setup(
+    db: AsyncConnection, company_id: int, code: str, name: str,
+    description: str | None, user_id: int,
+) -> int | None:
     result = await db.execute(text("""
         INSERT INTO payroll.PayrollSetups
             (CompanyID, SetupCode, SetupName, Description, CreatedByUserID)
         VALUES (:cid, :code, :name, :description, :uid)
+        ON CONFLICT (CompanyID, SetupCode) DO NOTHING
         RETURNING PayrollSetupID
-    """), {"cid": company_id, "code": setup_code, "name": setup_name,
+    """), {"cid": company_id, "code": code, "name": name,
            "description": description, "uid": user_id})
-    setup_id = result.scalar_one()
+    return result.scalar_one_or_none()
+
+
+async def create_setup(
+    company_id: int, user_id: int, setup_code: str | None, setup_name: str,
+    db: AsyncConnection, *, description: str | None = None,
+) -> int:
+    """Create a Setup. An explicit `setup_code` is a single insert attempt
+    (`SETUP_CODE_CONFLICT` on duplicate) and may not use the reserved
+    `PPOL-` prefix. When `setup_code` is None, a random system-generated
+    reference (`generated_setup_code`) is drawn and inserted; the Setup's
+    name is never used to derive the code, whatever script it's written in.
+    Collision safety comes from the (CompanyID, SetupCode) unique
+    constraint via `ON CONFLICT ... DO NOTHING RETURNING`, not the
+    generator: on conflict we simply draw a fresh suffix, up to 10 attempts,
+    then raise `SETUP_CODE_CONFLICT`."""
+    await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+    if setup_code is not None and setup_code.upper().startswith(SETUP_CODE_PREFIX):
+        raise PolicyError(
+            "INVALID_SETUP_CODE",
+            "The PPOL- prefix is reserved for system-generated references",
+        )
+    setup_id = final_code = None
+    if setup_code is not None:
+        setup_id = await _insert_setup(
+            db, company_id, setup_code, setup_name, description, user_id,
+        )
+        final_code = setup_code if setup_id is not None else None
+    else:
+        for _ in range(_GENERATED_CODE_ATTEMPTS):
+            candidate = generated_setup_code()
+            setup_id = await _insert_setup(
+                db, company_id, candidate, setup_name, description, user_id,
+            )
+            if setup_id is not None:
+                final_code = candidate
+                break
+    if setup_id is None:
+        message = ("Payroll Setup code already exists for this Company"
+                   if setup_code is not None else
+                   "Could not generate a unique Payroll Setup code")
+        raise PolicyError("SETUP_CODE_CONFLICT", message)
     await write_policy_audit(db, company_id=company_id, actor_user_id=user_id,
                              event_type="SetupCreated", payroll_setup_id=setup_id,
-                             new_state={"code": setup_code, "name": setup_name,
+                             new_state={"code": final_code, "name": setup_name,
                                         "description": description})
     return setup_id
 
@@ -140,55 +221,72 @@ async def create_draft(
     company_id: int, user_id: int, setup_id: int, db: AsyncConnection,
     *, payroll_frequency: str | None = None, anchor_start_date: date | None = None,
     custom_interval_days: int | None = None, normal_days_off_mask: int | None = None,
+    planned_effective_from_date: date | None = None,
 ) -> int:
     await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+    _require_days_off_limit(normal_days_off_mask)
+    if payroll_frequency is not None and payroll_frequency != "Custom" and custom_interval_days is not None:
+        raise PolicyError("INVALID_SCHEDULE", "Non-Custom frequency must not carry a custom interval")
     await lock_setups(company_id, [setup_id], db)
     await _setup(db, company_id, setup_id, active=True)
     result = await db.execute(text("""
         INSERT INTO payroll.PayrollSetupVersions
             (CompanyID, PayrollSetupID, PayrollFrequency, AnchorStartDate,
-             CustomIntervalDays, NormalDaysOffMask, CreatedByUserID)
-        VALUES (:cid, :sid, :frequency, :anchor, :interval, :mask, :uid)
+             CustomIntervalDays, NormalDaysOffMask, PlannedEffectiveFromDate,
+             CreatedByUserID)
+        VALUES (:cid, :sid, :frequency, :anchor, :interval, :mask, :planned, :uid)
         RETURNING PayrollSetupVersionID
     """), {"cid": company_id, "sid": setup_id, "frequency": payroll_frequency,
            "anchor": anchor_start_date, "interval": custom_interval_days,
-           "mask": normal_days_off_mask, "uid": user_id})
+           "mask": normal_days_off_mask, "planned": planned_effective_from_date,
+           "uid": user_id})
     draft_id = result.scalar_one()
     await write_policy_audit(db, company_id=company_id, actor_user_id=user_id,
                              event_type="DraftCreated", payroll_setup_id=setup_id,
                              payroll_setup_version_id=draft_id,
                              new_state={"frequency": payroll_frequency,
                                         "anchor": anchor_start_date.isoformat() if anchor_start_date else None,
-                                        "interval": custom_interval_days, "mask": normal_days_off_mask})
+                                         "interval": custom_interval_days, "mask": normal_days_off_mask,
+                                         "planned_effective_from_date": planned_effective_from_date.isoformat()
+                                         if planned_effective_from_date else None})
     return draft_id
 
 
 async def edit_draft(
     company_id: int, user_id: int, setup_id: int, draft_id: int, db: AsyncConnection,
-    *, payroll_frequency: str, anchor_start_date: date,
-    custom_interval_days: int | None, normal_days_off_mask: int,
+    *, payroll_frequency: str | None, anchor_start_date: date | None,
+    custom_interval_days: int | None, normal_days_off_mask: int | None,
+    planned_effective_from_date: date | None = None,
 ) -> None:
     await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+    _require_days_off_limit(normal_days_off_mask)
+    if payroll_frequency is not None and payroll_frequency != "Custom" and custom_interval_days is not None:
+        raise PolicyError("INVALID_SCHEDULE", "Non-Custom frequency must not carry a custom interval")
     await lock_setups(company_id, [setup_id], db)
     prior = await _draft(db, company_id, setup_id, draft_id)
     await db.execute(text("""
         UPDATE payroll.PayrollSetupVersions SET PayrollFrequency = :frequency,
             AnchorStartDate = :anchor, CustomIntervalDays = :interval,
-            NormalDaysOffMask = :mask
+            NormalDaysOffMask = :mask, PlannedEffectiveFromDate = :planned
         WHERE PayrollSetupVersionID = :vid
     """), {"frequency": payroll_frequency, "anchor": anchor_start_date,
-           "interval": custom_interval_days, "mask": normal_days_off_mask, "vid": draft_id})
+           "interval": custom_interval_days, "mask": normal_days_off_mask,
+           "planned": planned_effective_from_date, "vid": draft_id})
     await write_policy_audit(db, company_id=company_id, actor_user_id=user_id,
                              event_type="DraftChanged", payroll_setup_id=setup_id,
                              payroll_setup_version_id=draft_id,
                              old_state={"frequency": prior["payrollfrequency"],
                                         "anchor": prior["anchorstartdate"].isoformat() if prior["anchorstartdate"] else None,
-                                        "interval": prior["customintervaldays"],
-                                        "mask": prior["normaldaysoffmask"]},
+                                         "interval": prior["customintervaldays"],
+                                         "mask": prior["normaldaysoffmask"],
+                                         "planned_effective_from_date": prior["plannedeffectivefromdate"].isoformat()
+                                         if prior["plannedeffectivefromdate"] else None},
                              new_state={"frequency": payroll_frequency,
-                                        "anchor": anchor_start_date.isoformat(),
+                                         "anchor": anchor_start_date.isoformat() if anchor_start_date else None,
                                         "interval": custom_interval_days,
-                                        "mask": normal_days_off_mask})
+                                         "mask": normal_days_off_mask,
+                                         "planned_effective_from_date": planned_effective_from_date.isoformat()
+                                         if planned_effective_from_date else None})
 
 
 async def discard_draft(
@@ -278,21 +376,52 @@ async def _validate_publication_assignment(
                                 protect_future_periods=False)
 
 
-async def publish_version(
-    company_id: int, user_id: int, setup_id: int, draft_id: int,
-    effective_from_date: date, db: AsyncConnection,
-    *, replaces_version_id: int | None = None,
+async def _validate_publication_period_history(
+    db: AsyncConnection, company_id: int, setup_id: int,
+    effective_from_date: date, next_date: date | None,
+    assignment, current_at_date,
+) -> None:
+    """Run only the established payroll-history guard for publication.
+
+    This is intentionally separate from full assignment cadence validation so
+    history conflicts can retain precedence over the policy-level transition
+    explanation without allowing assigned Branches to become the source of
+    policy timeline validity.
+    """
+    boundary = max(effective_from_date, assignment["effectivefromdate"])
+    impact_end = min(
+        (x for x in (next_date, assignment["effectivetodate"]) if x is not None),
+        default=None,
+    )
+    await validate_period_history(
+        db, company_id, assignment["branchid"], boundary,
+        affected_until=impact_end,
+    )
+
+
+async def _publish_schedule(
+    company_id: int, user_id: int, setup_id: int, effective_from_date: date,
+    db: AsyncConnection, *, schedule: Schedule | None = None,
+    draft_id: int | None = None, replaces_version_id: int | None = None,
 ) -> int:
-    await _authorize_write(company_id, user_id, "payroll_setup.publish", db)
+    """Publish either an existing Draft or an unsaved inline schedule.
+
+    All chronology, locking, branch-impact, numbering, hashing, replacement,
+    and audit behavior is shared here. The inline path inserts its Published
+    Version only after the exact same validation sequence and never creates a
+    Draft row.
+    """
     await lock_setups(company_id, [setup_id], db)
     await _setup(db, company_id, setup_id, active=True)
-    draft = await _draft(db, company_id, setup_id, draft_id)
-    schedule = _schedule(draft["payrollfrequency"], draft["anchorstartdate"],
-                         draft["customintervaldays"], draft["normaldaysoffmask"])
-    if effective_from_date < schedule.anchor_start_date:
-        raise PolicyError("INVALID_EFFECTIVE_DATE", "Publication precedes the schedule anchor")
-    if not is_period_start(schedule, effective_from_date):
-        raise PolicyError("SUCCESSOR_BOUNDARY_INVALID", "Effective date is not a schedule boundary")
+    draft = None
+    if draft_id is not None:
+        draft = await _draft(db, company_id, setup_id, draft_id)
+        schedule = _schedule(
+            draft["payrollfrequency"], draft["anchorstartdate"],
+            draft["customintervaldays"], draft["normaldaysoffmask"],
+        )
+    if schedule is None:
+        raise PolicyError("INVALID_SCHEDULE", "A complete schedule is required")
     current_at_date = await terminal_version(db, setup_id, effective_from_date)
     same_date = (current_at_date is not None
                  and current_at_date["effectivefromdate"] == effective_from_date)
@@ -301,9 +430,18 @@ async def publish_version(
     if replaces_version_id is not None:
         if not same_date or current_at_date["payrollsetupversionid"] != replaces_version_id:
             raise PolicyError("REPLACEMENT_NOT_TERMINAL", "Replacement must target same-date terminal version")
+    # Resolve and lock affected Branches before validating the policy timeline.
+    # When existing payroll history blocks the transition, preserve the
+    # established PERIOD_HISTORY_CONFLICT contract as the most useful reason.
+    # The policy-level invariant is still checked below even when there are no
+    # Branch assignments at all.
     result = await db.execute(text("""
-        SELECT MAX(EffectiveFromDate) FROM payroll.PayrollSetupVersions
-        WHERE PayrollSetupID = :sid AND LifecycleState = 'Published'
+        SELECT MAX(v.EffectiveFromDate) FROM payroll.PayrollSetupVersions v
+        WHERE v.PayrollSetupID = :sid AND v.LifecycleState = 'Published'
+          AND NOT EXISTS (
+              SELECT 1 FROM payroll.PayrollSetupVersions child
+              WHERE child.ReplacesVersionID = v.PayrollSetupVersionID
+          )
     """), {"sid": setup_id})
     latest_existing_date = result.scalar_one_or_none()
     next_date = await next_version_boundary(db, setup_id, effective_from_date)
@@ -326,6 +464,16 @@ async def publish_version(
     if sorted(set(r["branchid"] for r in affected_assignments)) != affected_ids:
         raise PolicyError("CONCURRENT_ASSIGNMENT_CHANGE", "Affected Branches changed during publication")
     for assignment in affected_assignments:
+        await _validate_publication_period_history(
+            db, company_id, setup_id, effective_from_date, next_date,
+            assignment, current_at_date,
+        )
+
+    await validate_policy_version_transition(
+        db, setup_id, effective_from_date, schedule,
+    )
+
+    for assignment in affected_assignments:
         await _validate_publication_assignment(
             db, company_id, setup_id, effective_from_date, next_date,
             schedule, assignment, current_at_date,
@@ -337,25 +485,45 @@ async def publish_version(
     """), {"sid": setup_id})
     version_number = result.scalar_one()
     config_hash = canonical_config_hash(schedule)
-    await db.execute(text("""
-        UPDATE payroll.PayrollSetupVersions SET LifecycleState = 'Published',
-            VersionNumber = :number, EffectiveFromDate = :effective,
-            ConfigHash = :hash, ReplacesVersionID = :replaces,
-            PublishedByUserID = :uid, PublishedAtUtc = NOW()
-        WHERE PayrollSetupVersionID = :vid AND CompanyID = :cid AND PayrollSetupID = :sid
-    """), {"number": version_number, "effective": effective_from_date,
-           "hash": config_hash, "replaces": replaces_version_id, "uid": user_id,
-           "vid": draft_id, "cid": company_id, "sid": setup_id})
+    if draft is not None:
+        await db.execute(text("""
+            UPDATE payroll.PayrollSetupVersions SET LifecycleState = 'Published',
+                VersionNumber = :number, EffectiveFromDate = :effective,
+                ConfigHash = :hash, ReplacesVersionID = :replaces,
+                PlannedEffectiveFromDate = NULL,
+                PublishedByUserID = :uid, PublishedAtUtc = NOW()
+            WHERE PayrollSetupVersionID = :vid AND CompanyID = :cid AND PayrollSetupID = :sid
+        """), {"number": version_number, "effective": effective_from_date,
+               "hash": config_hash, "replaces": replaces_version_id, "uid": user_id,
+               "vid": draft_id, "cid": company_id, "sid": setup_id})
+        published_version_id = draft_id
+    else:
+        result = await db.execute(text("""
+            INSERT INTO payroll.PayrollSetupVersions
+                (CompanyID, PayrollSetupID, LifecycleState, VersionNumber,
+                 EffectiveFromDate, PayrollFrequency, AnchorStartDate,
+                 CustomIntervalDays, NormalDaysOffMask, ConfigHash,
+                 ReplacesVersionID, CreatedByUserID, PublishedByUserID, PublishedAtUtc)
+            VALUES (:cid, :sid, 'Published', :number, :effective, :frequency,
+                    :anchor, :interval, :mask, :hash, :replaces, :uid, :uid, NOW())
+            RETURNING PayrollSetupVersionID
+        """), {"cid": company_id, "sid": setup_id, "number": version_number,
+               "effective": effective_from_date, "frequency": schedule.frequency,
+               "anchor": schedule.anchor_start_date,
+               "interval": schedule.custom_interval_days,
+               "mask": schedule.normal_days_off_mask, "hash": config_hash,
+               "replaces": replaces_version_id, "uid": user_id})
+        published_version_id = result.scalar_one()
     await write_policy_audit(
         db, company_id=company_id, actor_user_id=user_id,
         event_type=("VersionReplaced" if replaces_version_id else
                     "FutureVersionScheduled" if latest_existing_date is not None
                     and effective_from_date > latest_existing_date else "VersionPublished"),
-        payroll_setup_id=setup_id, payroll_setup_version_id=draft_id,
+         payroll_setup_id=setup_id, payroll_setup_version_id=published_version_id,
         old_payroll_setup_id=setup_id if current_at_date else None,
         old_payroll_setup_version_id=(current_at_date["payrollsetupversionid"]
                                       if current_at_date else None),
-        new_payroll_setup_id=setup_id, new_payroll_setup_version_id=draft_id,
+         new_payroll_setup_id=setup_id, new_payroll_setup_version_id=published_version_id,
         effective_date=effective_from_date,
         old_config_hash=current_at_date["confighash"] if current_at_date else None,
         new_config_hash=config_hash,
@@ -368,13 +536,38 @@ async def publish_version(
                    "mask": schedule.normal_days_off_mask},
         affected_branch_ids=affected_ids,
     )
-    return draft_id
+    return published_version_id
+
+
+async def publish_version(
+    company_id: int, user_id: int, setup_id: int, draft_id: int,
+    effective_from_date: date, db: AsyncConnection,
+    *, replaces_version_id: int | None = None,
+) -> int:
+    await _authorize_write(company_id, user_id, "payroll_setup.publish", db)
+    return await _publish_schedule(
+        company_id, user_id, setup_id, effective_from_date, db,
+        draft_id=draft_id, replaces_version_id=replaces_version_id,
+    )
+
+
+async def publish_inline_version(
+    company_id: int, user_id: int, setup_id: int, schedule: Schedule,
+    effective_from_date: date, db: AsyncConnection,
+    *, replaces_version_id: int | None = None,
+) -> int:
+    await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+    await _authorize_write(company_id, user_id, "payroll_setup.publish", db)
+    return await _publish_schedule(
+        company_id, user_id, setup_id, effective_from_date, db,
+        schedule=schedule, replaces_version_id=replaces_version_id,
+    )
 
 
 async def set_default_setup(
     company_id: int, user_id: int, setup_id: int | None, db: AsyncConnection,
 ) -> None:
-    await _authorize_write(company_id, user_id, "payroll_setup.manage", db)
+    await _authorize_write(company_id, user_id, "payroll_setup.assign", db)
     await lock_company(company_id, db)
     prior = await _one(db, """
         SELECT DefaultPayrollSetupID FROM core.Companies WHERE CompanyID = :cid
@@ -387,6 +580,17 @@ async def set_default_setup(
     if setup_id is not None:
         await lock_setups(company_id, [setup_id], db)
         await _setup(db, company_id, setup_id, active=True)
+        # Any Published Version counts (even one effective in the future); Drafts do not.
+        published = await _one(db, """
+            SELECT 1 AS found FROM payroll.PayrollSetupVersions
+            WHERE CompanyID = :cid AND PayrollSetupID = :sid AND LifecycleState = 'Published'
+            LIMIT 1
+        """, cid=company_id, sid=setup_id)
+        if published is None:
+            raise PolicyError(
+                "DEFAULT_SETUP_NOT_PUBLISHED",
+                "Publish a payroll schedule before setting this policy as the default",
+            )
     await db.execute(text("""
         UPDATE core.Companies SET DefaultPayrollSetupID = :sid WHERE CompanyID = :cid
     """), {"sid": setup_id, "cid": company_id})
@@ -419,6 +623,55 @@ async def _branch(db: AsyncConnection, company_id: int, branch_id: int):
     return row
 
 
+async def _check_assignment(
+    db: AsyncConnection, company_id: int, branch_id: int | None, setup_id: int,
+    effective_from_date: date, timeline,
+) -> date | None:
+    """Validate a proposed Branch assignment against its timeline; returns effective_to.
+
+    branch_id=None means a Branch that does not exist yet: pass an empty `timeline`,
+    since the period-history queries below key on BranchID and match no rows for NULL.
+    A first assignment (empty non-withdrawn timeline) is always subject to the
+    onboarding look-back window; it is a canonical business rule, never an opt-in.
+    """
+    prior = next((row for row in timeline if row["effectivetodate"] == effective_from_date), None)
+    future = next((row for row in timeline if row["effectivefromdate"] > effective_from_date), None)
+    if any(row["effectivefromdate"] <= effective_from_date
+           and (row["effectivetodate"] is None or row["effectivetodate"] > effective_from_date)
+           for row in timeline):
+        raise PolicyError("ASSIGNMENT_OVERLAP", "Branch already has effective assignment")
+    earlier = [row for row in timeline if row["effectivefromdate"] < effective_from_date]
+    if earlier and prior is None:
+        raise PolicyError("ASSIGNMENT_GAP", "Assignment would leave earlier schedule coverage gap")
+    if timeline and prior is None and future is None:
+        last = timeline[-1]
+        if last["effectivetodate"] is not None and last["effectivetodate"] < effective_from_date:
+            raise PolicyError("ASSIGNMENT_GAP", "Assignment would leave a schedule gap")
+    version = await terminal_version(db, setup_id, effective_from_date)
+    if version is None:
+        raise PolicyError("VERSION_NOT_FOUND", "No Published Version applies at assignment start")
+    if not timeline:
+        await ensure_onboarding_window(db, company_id, setup_id, effective_from_date)
+    successor = version_schedule(version)
+    predecessor = (version_schedule(await terminal_version(
+        db, prior["payrollsetupid"], effective_from_date - timedelta(days=1)))
+        if prior is not None else None)
+    effective_to = future["effectivefromdate"] if future else None
+    await validate_boundary(db, company_id, branch_id, effective_from_date,
+                            predecessor, successor, affected_until=effective_to)
+    await validate_next_version(db, company_id, branch_id, setup_id,
+                                successor, effective_from_date,
+                                assignment_end=effective_to)
+    if future is not None:
+        following = version_schedule(await terminal_version(
+            db, future["payrollsetupid"], effective_to))
+        if following is None:
+            raise PolicyError("VERSION_NOT_FOUND", "Future assignment has no Published Version")
+        await validate_boundary(db, company_id, branch_id, effective_to,
+                                successor, following, protect_future_periods=False)
+    return effective_to
+
+
 async def assign_setup(
     company_id: int, user_id: int, branch_id: int, setup_id: int,
     effective_from_date: date, db: AsyncConnection, *, reason: str | None = None,
@@ -439,38 +692,9 @@ async def assign_setup(
     prior = next((row for row in timeline if row["effectivetodate"] == effective_from_date), None)
     if (prior["payrollsetupid"] if prior else None) != preceding_setup_id:
         raise PolicyError("CONCURRENT_ASSIGNMENT_CHANGE", "Predecessor changed before lock")
-    future = next((row for row in timeline if row["effectivefromdate"] > effective_from_date), None)
-    if any(row["effectivefromdate"] <= effective_from_date
-           and (row["effectivetodate"] is None or row["effectivetodate"] > effective_from_date)
-           for row in timeline):
-        raise PolicyError("ASSIGNMENT_OVERLAP", "Branch already has effective assignment")
-    earlier = [row for row in timeline if row["effectivefromdate"] < effective_from_date]
-    if earlier and prior is None:
-        raise PolicyError("ASSIGNMENT_GAP", "Assignment would leave earlier schedule coverage gap")
-    if timeline and prior is None and future is None:
-        last = timeline[-1]
-        if last["effectivetodate"] is not None and last["effectivetodate"] < effective_from_date:
-            raise PolicyError("ASSIGNMENT_GAP", "Assignment would leave a schedule gap")
-    version = await terminal_version(db, setup_id, effective_from_date)
-    if version is None:
-        raise PolicyError("VERSION_NOT_FOUND", "No Published Version applies at assignment start")
-    successor = version_schedule(version)
-    predecessor = (version_schedule(await terminal_version(
-        db, prior["payrollsetupid"], effective_from_date - timedelta(days=1)))
-        if prior is not None else None)
-    effective_to = future["effectivefromdate"] if future else None
-    await validate_boundary(db, company_id, branch_id, effective_from_date,
-                            predecessor, successor, affected_until=effective_to)
-    await validate_next_version(db, company_id, branch_id, setup_id,
-                                successor, effective_from_date,
-                                assignment_end=effective_to)
-    if future is not None:
-        following = version_schedule(await terminal_version(
-            db, future["payrollsetupid"], effective_to))
-        if following is None:
-            raise PolicyError("VERSION_NOT_FOUND", "Future assignment has no Published Version")
-        await validate_boundary(db, company_id, branch_id, effective_to,
-                                successor, following, protect_future_periods=False)
+    effective_to = await _check_assignment(
+        db, company_id, branch_id, setup_id, effective_from_date, timeline,
+    )
     correlation_id = uuid4()
     result = await db.execute(text("""
         INSERT INTO payroll.BranchPayrollSetupAssignments
@@ -723,6 +947,18 @@ async def preview_policy_impact(
 ) -> dict:
     """Read-only preflight; commit operations always validate again under locks."""
     await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
+    return await _policy_impact(
+        company_id, setup_id, effective_from_date, successor, db,
+        replaces_version_id=replaces_version_id,
+    )
+
+
+async def _policy_impact(
+    company_id: int, setup_id: int,
+    effective_from_date: date, successor: Schedule,
+    db: AsyncConnection, *, replaces_version_id: int | None = None,
+) -> dict:
+    """Read-only preflight; commit operations always validate again under locks."""
     await _setup(db, company_id, setup_id, active=True)
     current_at_date = await terminal_version(db, setup_id, effective_from_date)
     prior_version = await terminal_version(
@@ -744,20 +980,36 @@ async def preview_policy_impact(
     elif same_date_id is None and replaces_version_id is not None:
         conflicts.append({"branch_id": None, "code": "REPLACEMENT_NOT_TERMINAL",
                           "reason": "No same-date terminal Version exists"})
-    if not is_period_start(successor, effective_from_date):
-        conflicts.append({"branch_id": None, "code": "SUCCESSOR_BOUNDARY_INVALID",
-                          "reason": "Effective date is not a successor period start"})
-    for assignment in assignments:
-        if conflicts and conflicts[0]["branch_id"] is None:
-            break
+    if not conflicts:
+        for assignment in assignments:
+            try:
+                await _validate_publication_period_history(
+                    db, company_id, setup_id, effective_from_date, next_date,
+                    assignment, current_at_date,
+                )
+            except PolicyError as exc:
+                conflicts.append({"branch_id": assignment["branchid"], "code": exc.code,
+                                  "reason": str(exc)})
+                break
+    if not conflicts:
         try:
-            await _validate_publication_assignment(
-                db, company_id, setup_id, effective_from_date, next_date,
-                successor, assignment, current_at_date,
+            await validate_policy_version_transition(
+                db, setup_id, effective_from_date, successor,
             )
         except PolicyError as exc:
-            conflicts.append({"branch_id": assignment["branchid"], "code": exc.code,
+            conflicts.append({"branch_id": None, "code": exc.code,
                               "reason": str(exc)})
+    if not conflicts:
+        for assignment in assignments:
+            try:
+                await _validate_publication_assignment(
+                    db, company_id, setup_id, effective_from_date, next_date,
+                    successor, assignment, current_at_date,
+                )
+            except PolicyError as exc:
+                conflicts.append({"branch_id": assignment["branchid"], "code": exc.code,
+                                  "reason": str(exc)})
+                break
     return {
         "setup_id": setup_id, "affected_branch_ids": branch_ids,
         "effective_date": effective_from_date,
@@ -783,6 +1035,16 @@ async def preview_reassignment_impact(
 ) -> dict:
     """Read-only impact evidence; reassignment repeats this under ordered locks."""
     await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
+    return await _reassignment_impact(
+        company_id, branch_id, destination_setup_id, effective_from_date, db,
+    )
+
+
+async def _reassignment_impact(
+    company_id: int, branch_id: int, destination_setup_id: int,
+    effective_from_date: date, db: AsyncConnection,
+) -> dict:
+    """Read-only impact evidence; reassignment repeats this under ordered locks."""
     await _branch(db, company_id, branch_id)
     await _setup(db, company_id, destination_setup_id, active=True)
     source = await _one(db, """
@@ -852,4 +1114,40 @@ async def preview_reassignment_impact(
         "effective_date": effective_from_date,
         "conflicts": conflicts,
         "allowed": not conflicts,
+    }
+
+
+async def evaluate_assignment(
+    company_id: int, branch_id: int | None, setup_id: int,
+    effective_from_date: date, db: AsyncConnection,
+) -> list[dict]:
+    """Read-only conflict evaluator; callers authorize. An empty list means allowed."""
+    conflicts = []
+    try:
+        if branch_id is not None:
+            await _branch(db, company_id, branch_id)
+        await _setup(db, company_id, setup_id, active=True)
+        timeline = (await _assignment_timeline(db, company_id, branch_id)
+                   if branch_id is not None else [])
+        await _check_assignment(
+            db, company_id, branch_id, setup_id, effective_from_date, timeline,
+        )
+    except PolicyError as exc:
+        conflicts.append({"branch_id": branch_id, "code": exc.code, "reason": str(exc)})
+    return conflicts
+
+
+async def preview_assignment_impact(
+    company_id: int, user_id: int, branch_id: int, setup_id: int,
+    effective_from_date: date, db: AsyncConnection,
+) -> dict:
+    """Read-only preflight for a Branch assignment, including the onboarding guardrail."""
+    await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
+    conflicts = await evaluate_assignment(
+        company_id, branch_id, setup_id, effective_from_date, db,
+    )
+    return {
+        "branch_id": branch_id, "setup_id": setup_id,
+        "effective_date": effective_from_date,
+        "conflicts": conflicts, "allowed": not conflicts,
     }

@@ -24,6 +24,8 @@ export interface CompanyUpdate {
   allow_self_approval?: boolean | null;
 }
 
+import type { BoundaryChoicesResponse, SetupResponse } from './payrollSetup';
+
 // ─── Branches ─────────────────────────────────────────────────────────────────
 
 export interface BranchAdmin {
@@ -43,43 +45,24 @@ export interface BranchAdmin {
   updated_at_utc: string | null;
   // Operational metrics
   payroll_setup_done: boolean;
+  // Canonical readiness (U0): null unless the caller has non-driver payroll.view on this branch,
+  // or in the POST /settings/branches response when first_payroll_start_date was supplied.
+  schedule_readiness_reason: string | null;
+  // Period start date the reason was evaluated against (ISO date); same visibility as the reason.
+  schedule_readiness_date: string | null;
   status_keys_count: number | null;
   total_people_count: number | null;
   active_drivers_count: number | null;
   pending_approvals_count: number | null;
 }
 
-// ─── Payroll Setup ────────────────────────────────────────────────────────────
-
-export interface PayrollSetup {
-  settings_id: number;
-  company_id: number;
-  branch_id: number;
-  branch_name: string | null;
-  payroll_frequency: string;          // Week | Biweek | Month | Custom
-  anchor_start_date: string;          // YYYY-MM-DD
-  pay_date_offset_days: number;
-  pay_day_of_week: number | null;
-  first_pay_date: string | null;
-  include_pay_day_as_work_day: boolean;
-  normal_days_off_mask: number | null; // 7-bit: bit 0=Sun … bit 6=Sat
-  /** Inclusive period length in days for Custom fixed-cadence payroll. */
-  custom_interval_days: number | null;
-  is_active: boolean;
-  notes: string | null;
-  created_at_utc: string;
-  updated_at_utc: string | null;
-}
-
-export interface PayrollSetupUpsert {
-  payroll_frequency: string;
-  anchor_start_date: string;          // YYYY-MM-DD
-  normal_days_off_mask: number | null;
-  notes: string | null;
-  /** Required when payroll_frequency = 'Custom'. Inclusive cycle length in days. */
-  custom_interval_days?: number | null;
-  /** Alternative to custom_interval_days: backend derives interval from (end − anchor) + 1. */
-  first_custom_end_date?: string | null;
+/**
+ * GET /settings/branches/onboarding-options?around=
+ * `choices` is null when there is no company default Setup to onboard against.
+ */
+export interface OnboardingOptionsResponse {
+  default_setup: SetupResponse | null;
+  choices: BoundaryChoicesResponse | null;
 }
 
 // ─── Status Keys ──────────────────────────────────────────────────────────────

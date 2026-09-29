@@ -88,13 +88,9 @@ async def _open_period(client, token, branch_id, start, end, direct_db):
         _text("""
             INSERT INTO payroll.payrollperiods
                 (companyid, branchid, periodcode, periodname, periodtype,
-                 startdate, enddate, status, createdbyuserid, scheduleversionid)
+                 startdate, enddate, status, createdbyuserid)
             VALUES
-                (1, :bid, :code, :code, 'Week', :start, :end, 'Open', 1,
-                 (SELECT currentscheduleversionid
-                    FROM payroll.branchpayrollsettings
-                   WHERE branchid = :bid AND isactive = TRUE
-                   LIMIT 1))
+                (1, :bid, :code, :code, 'Week', :start, :end, 'Open', 1)
             RETURNING payrollperiodid
         """),
         {"bid": branch_id, "code": f"CF1-{start}",

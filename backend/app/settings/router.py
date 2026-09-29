@@ -8,9 +8,10 @@ inside the service layer.
 
 Write endpoints require AllCompanyBranches scope — see _ensure_company_admin().
 """
+from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
@@ -33,12 +34,11 @@ from app.settings.schemas import (
     CustomPayItemRequestDecide,
     CustomPayItemUpdate,
     CustomPayItemUsage,
+    OnboardingOptionsResponse,
     PayItemConfigUpdate,
     PayItemOrderUpdate,
     PayItemRateTypeMapCreate,
     PayItemRateTypeMapSummary,
-    PayrollSetup,
-    PayrollSetupUpsert,
     StatusKey,
     StatusKeyCreate,
     StatusKeyUpdate,
@@ -141,6 +141,40 @@ async def list_branches(
 
 
 @router.get(
+    "/branches/onboarding-options",
+    response_model=OnboardingOptionsResponse,
+    summary="Canonical legal onboarding dates for the company's default Payroll Setup",
+    description=(
+        "Returns the company's default Payroll Setup (if any) together with "
+        "canonical boundary choices — the nearest valid previous/next "
+        "first-payroll dates and a server-suggested date, computed by the "
+        "same read-only validators the write paths use.  `default_setup` is "
+        "null when the company has no default Payroll Setup, in which case "
+        "`choices` is also null.\n\n"
+        "Feeds `first_payroll_start_date` for `POST /settings/branches` so "
+        "the frontend never computes payroll chronology itself.\n\n"
+        "Requires company-level (all-branches) access, `branches.create`, "
+        "and `payroll_setup.assign` — the same authority "
+        "`first_payroll_start_date` requires on branch creation.\n\n"
+        "**Must be declared before `GET /branches/{branch_id}`** so "
+        "`onboarding-options` is not parsed as a branch id."
+    ),
+    responses={403: {"description": "Insufficient scope or permission"}},
+)
+async def get_onboarding_options(
+    token: TokenDep,
+    db: DbDep,
+    around: date | None = Query(None, description="Reference date; defaults to company-local today"),
+) -> OnboardingOptionsResponse:
+    return await service.get_onboarding_options(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+        around=around,
+    )
+
+
+@router.get(
     "/branches/{branch_id}",
     response_model=BranchAdmin,
     summary="Get a single branch with metrics",
@@ -170,9 +204,14 @@ async def get_branch(
     description=(
         "Creates a branch for the authenticated user's company.  "
         "`branch_code` is auto-generated from `branch_name` when omitted.  "
+        "An optional `first_payroll_start_date` onboards the branch to the "
+        "company's current default Payroll Setup; it requires "
+        "`payroll_setup.assign`.  "
         "If `is_default=true`, all other branches lose their default flag "
-        "atomically.\n\n"
-        "Requires AllCompanyBranches scope."
+        "atomically; this additionally requires company-wide `setup.manage` "
+        "(the same authority as the set-default endpoint).\n\n"
+        "Requires AllCompanyBranches scope and `branches.create`; driver-only "
+        "roles are not permitted."
     ),
     responses={
         403: {"description": "Insufficient scope (requires all-branches access)"},
@@ -250,65 +289,6 @@ async def set_default_branch(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Branch payroll setup
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/branches/{branch_id}/payroll-setup",
-    response_model=PayrollSetup,
-    summary="Legacy payroll setup route (gone)",
-    description=(
-        "This legacy branch-owned payroll setup route has been disabled. "
-        "Payroll setup is managed through the Phase 2 policy domain."
-    ),
-    responses={
-        410: {"description": "Legacy branch-owned payroll setup route is disabled"},
-        403: {"description": "No access to this branch"},
-    },
-)
-async def get_payroll_setup(
-    branch_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> PayrollSetup:
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "code": "LEGACY_PAYROLL_SETUP_ROUTE_DISABLED",
-            "message": "Branch-owned payroll setup is disabled; use the payroll setup policy domain.",
-        },
-    )
-
-
-@router.put(
-    "/branches/{branch_id}/payroll-setup",
-    response_model=PayrollSetup,
-    summary="Legacy payroll setup route (gone)",
-    description=(
-        "This legacy branch-owned payroll setup route has been disabled. "
-        "Payroll setup is managed through the Phase 2 policy domain."
-    ),
-    responses={
-        410: {"description": "Legacy branch-owned payroll setup route is disabled"},
-        403: {"description": "Insufficient scope (requires all-branches access)"},
-    },
-)
-async def upsert_payroll_setup(
-    branch_id: int,
-    body: PayrollSetupUpsert,
-    token: TokenDep,
-    db: DbDep,
-) -> PayrollSetup:
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "code": "LEGACY_PAYROLL_SETUP_ROUTE_DISABLED",
-            "message": "Branch-owned payroll setup is disabled; use the payroll setup policy domain.",
-        },
     )
 
 

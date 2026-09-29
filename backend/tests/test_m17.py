@@ -709,15 +709,15 @@ class TestDashboardLastFinalized:
 # ---------------------------------------------------------------------------
 
 class TestDashboardSetupWarnings:
-    async def test_warning_branch_no_payroll_settings(
+    async def test_warning_branch_without_payroll_setup_assignment(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         direct_db,
     ):
         """
-        Insert a new active branch with no BranchPayrollSettings;
-        expect BRANCH_NO_PAYROLL_SETTINGS warning.
+        Insert a new active branch with no canonical Payroll Setup
+        assignment; expect the existing setup-health warning.
         """
         # Insert a bare branch — admin has AllCompanyBranches scope so no extra grant needed
         result = await direct_db.execute(
@@ -901,14 +901,14 @@ class TestDashboardSetupWarnings:
         direct_db,
     ):
         """
-        When HQ has payroll settings, no open NMR lines, and all drivers have
+        When HQ has a canonical Payroll Setup assignment, no open NMR lines, and all drivers have
         approved rates, no warnings should appear for the HQ-scoped user.
         This is a best-effort check; skip if prerequisites aren't met.
         """
-        # Check HQ has payroll settings
+        # Check HQ has canonical Payroll Setup authority
         result = await direct_db.execute(
             text("""
-                SELECT COUNT(*) FROM payroll.branchpayrollsettings
+                SELECT COUNT(*) FROM payroll.branchpayrollsetupassignments
                 WHERE branchid = :bid
             """),
             {"bid": hq_branch_id},

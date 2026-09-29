@@ -1,0 +1,124 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 100%;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.dateInput {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.steppers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 22px; /* aligns with the DateInput fields, below its legend */
+}
+
+.stepperButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 1px solid var(--color-gray-400);
+  border-radius: var(--radius-sm);
+  background: var(--color-gray-50);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.stepperButton:hover:not(:disabled) {
+  border-color: var(--color-blue-600);
+  background: var(--color-blue-50);
+  color: var(--color-blue-700);
+}
+
+.stepperButton:focus-visible {
+  outline: 2px solid var(--color-blue-300);
+  outline-offset: 2px;
+}
+
+.stepperButton:disabled {
+  color: var(--color-gray-400);
+  cursor: not-allowed;
+  background: var(--color-gray-100);
+}
+
+.status {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.statusInvalid {
+  color: var(--color-warning);
+}
+
+.statusNoneFound {
+  color: var(--color-danger);
+}
+
+.nearestList {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+
+.nearestLabel {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.nearestButton {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: var(--surface-card);
+  color: var(--color-blue-700);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.nearestButton:hover {
+  border-color: var(--color-blue-600);
+  background: var(--color-blue-50);
+}
+
+.earliestHint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+
+.details {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.detailsSummary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.detailsBody {
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}

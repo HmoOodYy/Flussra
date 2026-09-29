@@ -79,7 +79,7 @@ async def _readable_period(
 
 
 async def _scheduled_work_days(period, db: AsyncConnection) -> set[date]:
-    """Read the immutable calendar when present; derive the legacy schedule otherwise."""
+    """Read the immutable calendar when present; treat every day as scheduled otherwise."""
     rows = (await db.execute(
         text("""
             SELECT workdate, isdefaultworkday, isaddedworkday
@@ -96,22 +96,13 @@ async def _scheduled_work_days(period, db: AsyncConnection) -> set[date]:
             if row["isdefaultworkday"] or row["isaddedworkday"]
         }
 
-    mask = (await db.execute(
-        text("""
-            SELECT sv.normaldaysoffmask
-            FROM payroll.payrollperiods p
-            LEFT JOIN payroll.payrollscheduleversions sv
-              ON sv.scheduleversionid = p.scheduleversionid
-            WHERE p.payrollperiodid = :period_id
-        """),
-        {"period_id": _period_id(period)},
-    )).scalar_one_or_none() or 0
+    # No PeriodDay snapshot exists for this period (predates canonical PeriodDay
+    # tracking, and predates the retired legacy schedule model too). With no
+    # calendar authority of any kind, every day in the period is scheduled.
     days: set[date] = set()
     current = period.start_date
     while current <= period.end_date:
-        day_of_week = (current.weekday() + 1) % 7
-        if not (int(mask) & (1 << day_of_week)):
-            days.add(current)
+        days.add(current)
         current += timedelta(days=1)
     return days
 

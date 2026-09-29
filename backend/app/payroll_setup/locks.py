@@ -13,9 +13,9 @@ from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 
 
 async def lock_company(company_id: int, db: AsyncConnection) -> None:
-    """Lock the company row, serializing company-scoped policy changes."""
+    """Serialize default changes without blocking FK KEY SHARE on Company."""
     await db.execute(
-        text("SELECT companyid FROM core.companies WHERE companyid = :cid FOR UPDATE"),
+        text("SELECT companyid FROM core.companies WHERE companyid = :cid FOR NO KEY UPDATE"),
         {"cid": company_id},
     )
 

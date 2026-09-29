@@ -30,7 +30,21 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _build_in_clause, _check_branch_access, _check_permission
+from app.core.service import (
+    _build_in_clause,
+    _check_branch_access,
+    _check_permission,
+    _require_not_driver_role,
+)
+from app.payroll_setup import boundaries
+from app.payroll_setup.errors import PolicyError
+from app.payroll_setup.locks import lock_company, lock_setups
+from app.payroll_setup.payroll_policy import assign_setup
+from app.payroll_setup.readiness import (
+    branch_schedule_readiness,
+    branch_schedule_readiness_detail,
+)
+from app.payroll_setup.schemas import SetupResponse
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
@@ -47,11 +61,10 @@ from app.settings.schemas import (
     CustomPayItemRequestDecide,
     CustomPayItemUpdate,
     CustomPayItemUsage,
+    OnboardingOptionsResponse,
     PayItemConfigUpdate,
     PayItemRateTypeMapCreate,
     PayItemRateTypeMapSummary,
-    PayrollSetup,
-    PayrollSetupUpsert,
     StatusKey,
     StatusKeyCreate,
     StatusKeyUpdate,
@@ -197,6 +210,50 @@ async def _ensure_company_admin(
     await _check_permission(company_id, user_id, None, "setup.manage", db)
 
 
+async def _ensure_branch_creator(
+    company_id: int, user_id: int, db: AsyncConnection,
+    *, with_payroll_start: bool, with_default: bool,
+) -> None:
+    """branches.create (company-wide, non-driver); payroll_setup.assign when a first payroll start date is sent; settings-admin (setup.manage via _ensure_company_admin) when the new branch is to become the Company default."""
+    can_see_all, _ = await _check_branch_access(company_id, user_id, db)
+    if not can_see_all:
+        raise HTTPException(status_code=403, detail="This action requires company-level (all-branches) access.")
+    await _require_not_driver_role(company_id, user_id, db)
+    await _check_permission(company_id, user_id, None, "branches.create", db)
+    if with_payroll_start:
+        await _check_permission(company_id, user_id, None, "payroll_setup.assign", db)
+    if with_default:
+        await _ensure_company_admin(company_id, user_id, db)
+
+
+async def _attach_readiness_reasons(
+    branches: list[BranchAdmin], company_id: int, user_id: int,
+    db: AsyncConnection,
+) -> None:
+    """Expose reason codes and evaluated dates only to non-drivers with
+    payroll.view on each branch."""
+    if not branches:
+        return
+    try:
+        await _require_not_driver_role(company_id, user_id, db)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return
+        raise
+    for branch in branches:
+        try:
+            await _check_permission(company_id, user_id, branch.branch_id, "payroll.view", db)
+        except HTTPException as exc:
+            if exc.status_code == 403:
+                continue
+            raise
+        _, reason, evaluated_date = await branch_schedule_readiness_detail(
+            company_id, branch.branch_id, db,
+        )
+        branch.schedule_readiness_reason = reason
+        branch.schedule_readiness_date = evaluated_date
+
+
 def _generate_branch_code() -> str:
     """
     Generate a random branch code in the format BR_XXXXXXXX where XXXXXXXX
@@ -239,14 +296,16 @@ async def _fetch_branch_metrics(
     db: AsyncConnection,
 ) -> dict[int, dict]:
     """
-    Run 5 branch-metric queries against the given branch IDs.
+    Resolve canonical Payroll Setup readiness for each branch and run four
+    operational metric queries against the given branch IDs.
 
-    Each query is individually wrapped in try/except so a missing table or
-    failing index on one metric does not prevent the other four from loading.
+    Each operational query is individually wrapped in try/except so a missing
+    table or failing index on one metric does not prevent the other three from
+    loading.
 
     Returns dict[branch_id → {metric_name: value}].  A missing key in the
-    inner dict means that metric query failed; callers substitute safe
-    defaults (False / 0 / None).
+    inner dict means an operational metric query failed; callers substitute
+    safe defaults (0 / None). Readiness resolution failures are not suppressed.
     """
     if not branch_ids:
         return {}
@@ -258,22 +317,11 @@ async def _fetch_branch_metrics(
     def _put(bid: int, key: str, val) -> None:
         result.setdefault(bid, {})[key] = val
 
-    # 1 — Payroll setup done: branch has an active BranchPayrollSettings row.
-    try:
-        r = await db.execute(
-            text(f"""
-                SELECT branchid
-                FROM   payroll.branchpayrollsettings
-                WHERE  companyid = :cid
-                  AND  isactive  = TRUE
-                  AND  branchid IN ({in_clause})
-            """),
-            base,
-        )
-        for row in r.mappings().all():
-            _put(row["branchid"], "payroll_setup_done", True)
-    except Exception:
-        pass  # graceful degradation — key stays absent
+    # 1 — Canonical Payroll Setup readiness; never consult legacy settings.
+    for branch_id in branch_ids:
+        ready, _ = await branch_schedule_readiness(company_id, branch_id, db)
+        if ready:
+            _put(branch_id, "payroll_setup_done", True)
 
     # 2 — Active status-keys count.
     try:
@@ -563,7 +611,9 @@ async def get_branches(
 
     all_ids = [r["branchid"] for r in rows]
     metrics = await _fetch_branch_metrics(company_id, all_ids, db)
-    return [_row_to_branch_admin(r, metrics) for r in rows]
+    branches = [_row_to_branch_admin(r, metrics) for r in rows]
+    await _attach_readiness_reasons(branches, company_id, user_id, db)
+    return branches
 
 
 async def get_branch_by_id(
@@ -597,7 +647,9 @@ async def get_branch_by_id(
         )
 
     metrics = await _fetch_branch_metrics(company_id, [branch_id], db)
-    return _row_to_branch_admin(row, metrics)
+    branch = _row_to_branch_admin(row, metrics)
+    await _attach_readiness_reasons([branch], company_id, user_id, db)
+    return branch
 
 
 async def create_branch(
@@ -613,7 +665,30 @@ async def create_branch(
     If is_default=True, all existing defaults are cleared first.
     Requires AllCompanyBranches scope.
     """
-    await _ensure_company_admin(company_id, user_id, db)
+    await _ensure_branch_creator(
+        company_id, user_id, db,
+        with_payroll_start=data.first_payroll_start_date is not None,
+        with_default=data.is_default,
+    )
+
+    default_setup_id = None
+    if data.first_payroll_start_date is not None:
+        await lock_company(company_id, db)
+        default_result = await db.execute(text(
+            "SELECT DefaultPayrollSetupID FROM core.Companies WHERE CompanyID = :cid"
+        ), {"cid": company_id})
+        default_setup_id = default_result.scalar_one_or_none()
+        if default_setup_id is not None:
+            await lock_setups(company_id, [default_setup_id], db)
+            setup_result = await db.execute(text("""
+                SELECT Status FROM payroll.PayrollSetups
+                WHERE CompanyID = :cid AND PayrollSetupID = :sid
+            """), {"cid": company_id, "sid": default_setup_id})
+            setup_status = setup_result.scalar_one_or_none()
+            if setup_status is None:
+                raise PolicyError("SETUP_NOT_FOUND", "Company default Payroll Setup does not belong to Company")
+            if setup_status != "Active":
+                raise PolicyError("SETUP_NOT_ACTIVE", "Company default Payroll Setup is not Active")
 
     explicit_code = bool(data.branch_code)
     branch_code = data.branch_code.upper() if explicit_code else _generate_branch_code()
@@ -705,7 +780,25 @@ async def create_branch(
     # CP-2D2: every new branch gets a default Status Pay rate column automatically.
     await _ensure_default_status_rate_column_for_branch(company_id, new_id, db)
 
-    return await get_branch_by_id(new_id, company_id, user_id, db)
+    if data.first_payroll_start_date is not None and default_setup_id is not None:
+        await assign_setup(
+            company_id, user_id, new_id, default_setup_id,
+            data.first_payroll_start_date, db,
+            reason="Initial branch Payroll Setup assignment",
+        )
+
+    created = await get_branch_by_id(new_id, company_id, user_id, db)
+    ready, reason = await branch_schedule_readiness(
+        company_id, new_id, db, period_start_date=data.first_payroll_start_date,
+    )
+    created.payroll_setup_done = ready
+    if data.first_payroll_start_date is not None:
+        # The supplied-date path already passed company-wide payroll_setup.assign.
+        created.schedule_readiness_reason = (
+            "NO_COMPANY_DEFAULT" if default_setup_id is None else reason
+        )
+        created.schedule_readiness_date = data.first_payroll_start_date
+    return created
 
 
 async def update_branch(
@@ -911,295 +1004,51 @@ async def set_default_branch(
     return await get_branch_by_id(branch_id, company_id, user_id, db)
 
 
-# ===========================================================================
-# Branch payroll setup
-# ===========================================================================
-
-_SETUP_COLS = """
-    s.branchpayrollsettingsid, s.companyid, s.branchid,
-    b.branchname,
-    s.payrollfrequency, s.anchorstartdate, s.paydateoffsetdays,
-    s.paydayofweek, s.firstpaydate, s.includepaydayasworkday,
-    s.normaldaysoffmask, s.customintervaldays, s.isactive, s.notes,
-    s.createdatutc, s.updatedatutc,
-    s.currentscheduleversionid
-"""
-
-
-def _row_to_payroll_setup(row) -> PayrollSetup:
-    return PayrollSetup(
-        settings_id=row["branchpayrollsettingsid"],
-        company_id=row["companyid"],
-        branch_id=row["branchid"],
-        branch_name=row.get("branchname"),
-        payroll_frequency=row["payrollfrequency"],
-        anchor_start_date=row["anchorstartdate"],
-        pay_date_offset_days=row.get("paydateoffsetdays") or 0,
-        pay_day_of_week=row.get("paydayofweek"),
-        first_pay_date=row.get("firstpaydate"),
-        include_pay_day_as_work_day=bool(row.get("includepaydayasworkday", False)),
-        normal_days_off_mask=row.get("normaldaysoffmask"),
-        custom_interval_days=row.get("customintervaldays"),
-        is_active=bool(row.get("isactive", True)),
-        notes=row.get("notes"),
-        created_at_utc=row["createdatutc"],
-        updated_at_utc=row.get("updatedatutc"),
-        schedule_version_id=row.get("currentscheduleversionid"),
-    )
-
-
-async def create_schedule_version_for_setup(
-    company_id: int,
-    branch_id: int,
-    user_id: int,
-    data: "PayrollSetupUpsert",
-    db: AsyncConnection,
-) -> int:
-    """
-    Insert an immutable PayrollScheduleVersions row for a setup upsert and
-    update BranchPayrollSettings.CurrentScheduleVersionID.
-
-    Must be called inside the same transaction as the settings upsert, after
-    the upsert has already committed the new settings values, while still
-    holding the branch workflow advisory lock.
-
-    Returns the new ScheduleVersionID.
-    """
-    # Canonical config hash: same format as payroll._setup_fingerprint
-    config_hash = json.dumps(
-        {
-            "anchor":   str(data.anchor_start_date),
-            "freq":     data.payroll_frequency,
-            "interval": data.custom_interval_days,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-    # Next version number = max(existing) + 1 for this branch
-    max_row = await db.execute(
-        text("""
-            SELECT COALESCE(MAX(versionnumber), 0) AS maxver
-            FROM   payroll.PayrollScheduleVersions
-            WHERE  companyid = :cid AND branchid = :bid
-        """),
-        {"cid": company_id, "bid": branch_id},
-    )
-    next_version = (max_row.scalar_one() or 0) + 1
-
-    ins = await db.execute(
-        text("""
-            INSERT INTO payroll.PayrollScheduleVersions
-                (CompanyID, BranchID, VersionNumber,
-                 PayrollFrequency, AnchorStartDate,
-                 CustomIntervalDays, NormalDaysOffMask,
-                 PayDayOfWeek, FirstPayDate, IncludePayDayAsWorkDay,
-                 EffectiveFromDate, EffectiveToDate,
-                 CreatedByUserID, SourceAction, ConfigHash)
-            VALUES
-                (:cid, :bid, :vnum,
-                 :freq, :anchor,
-                 :interval_days, :mask,
-                 :pdow, :fpd, :incl,
-                 :anchor, NULL,
-                 :uid, 'SETUP_UPDATED', :chash)
-            RETURNING ScheduleVersionID
-        """),
-        {
-            "cid":           company_id,
-            "bid":           branch_id,
-            "vnum":          next_version,
-            "freq":          data.payroll_frequency,
-            "anchor":        data.anchor_start_date,
-            "interval_days": data.custom_interval_days,
-            "mask":          data.normal_days_off_mask,
-            "pdow":          data.pay_day_of_week,
-            "fpd":           data.first_pay_date,
-            "incl":          bool(data.include_pay_day_as_work_day),
-            "uid":           user_id,
-            "chash":         config_hash,
-        },
-    )
-    new_sv_id: int = ins.scalar_one()
-
-    await db.execute(
-        text("""
-            UPDATE payroll.BranchPayrollSettings
-            SET    CurrentScheduleVersionID = :sv_id
-            WHERE  CompanyID = :cid AND BranchID = :bid
-        """),
-        {"sv_id": new_sv_id, "cid": company_id, "bid": branch_id},
-    )
-
-    return new_sv_id
-
-
-async def get_payroll_setup(
-    branch_id: int,
+async def get_onboarding_options(
     company_id: int,
     user_id: int,
     db: AsyncConnection,
-) -> PayrollSetup:
+    *,
+    around: _date | None = None,
+) -> OnboardingOptionsResponse:
     """
-    Return the payroll-schedule configuration for a branch.
-    Raises 404 if no configuration has been saved yet.
-    Any authenticated user with branch access can read this.
-    """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    if not can_see_all and branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this branch.",
-        )
+    Return the company's default Payroll Setup together with the canonical
+    boundary choices (nearest valid previous/next first-payroll dates and a
+    server-suggested date) for onboarding a not-yet-created Branch onto it.
 
-    result = await db.execute(
-        text(f"""
-            SELECT {_SETUP_COLS}
-            FROM   payroll.branchpayrollsettings s
-            JOIN   core.branches b
-                   ON  b.branchid  = s.branchid
-                   AND b.companyid = s.companyid
-            WHERE  s.branchid  = :bid
-              AND  s.companyid = :cid
-        """),
-        {"bid": branch_id, "cid": company_id},
+    default_setup is null when the company has no default Payroll Setup, in
+    which case choices is also null — an archived default is NOT special-cased
+    here; boundaries.onboarding_choices reports it as a SETUP_NOT_ACTIVE
+    conflict like any other invalid date.
+
+    Authorization mirrors the create-with-date write this feeds
+    (POST /settings/branches with first_payroll_start_date): company-wide
+    access, branches.create, and payroll_setup.assign.
+    """
+    await _ensure_branch_creator(
+        company_id, user_id, db, with_payroll_start=True, with_default=False,
     )
-    row = result.mappings().first()
+    result = await db.execute(text("""
+        SELECT s.PayrollSetupID, s.SetupCode, s.SetupName, s.Description, s.Status
+        FROM core.Companies c
+        LEFT JOIN payroll.PayrollSetups s
+          ON s.CompanyID = c.CompanyID AND s.PayrollSetupID = c.DefaultPayrollSetupID
+        WHERE c.CompanyID = :cid
+    """), {"cid": company_id})
+    row = result.mappings().one_or_none()
     if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No payroll setup found for branch {branch_id}.",
-        )
-    return _row_to_payroll_setup(row)
-
-
-async def upsert_payroll_setup(
-    branch_id: int,
-    company_id: int,
-    user_id: int,
-    data: PayrollSetupUpsert,
-    db: AsyncConnection,
-) -> PayrollSetup:
-    """
-    Create or fully replace the payroll-schedule configuration for a branch.
-
-    Uses PostgreSQL ON CONFLICT … DO UPDATE for an atomic upsert.
-    Requires AllCompanyBranches scope.
-    """
-    await _ensure_company_admin(company_id, user_id, db)
-
-    # Verify the branch belongs to this company.
-    branch_check = await db.execute(
-        text("SELECT branchid FROM core.branches WHERE branchid=:bid AND companyid=:cid"),
-        {"bid": branch_id, "cid": company_id},
+        raise PolicyError("COMPANY_NOT_FOUND", "Company not found")
+    if row["payrollsetupid"] is None:
+        return OnboardingOptionsResponse(default_setup=None, choices=None)
+    default_setup = SetupResponse(
+        setup_id=row["payrollsetupid"], setup_code=row["setupcode"],
+        setup_name=row["setupname"], description=row["description"],
+        status=row["status"],
     )
-    if branch_check.first() is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Branch {branch_id} not found.",
-        )
-
-    # Acquire the branch workflow advisory lock before reading or mutating
-    # BranchPayrollSettings.  This is the same transaction-level lock used by
-    # CP-1C candidate creation, ensuring setup changes and period creation are
-    # fully serialized per branch.  Lock is released when the transaction
-    # commits or rolls back.
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
-        {"cid": company_id, "bid": branch_id},
+    choices = await boundaries.onboarding_choices(
+        company_id, row["payrollsetupid"], around, db,
     )
-
-    # Safety guard: the new anchor_start_date must not fall inside or before
-    # any existing non-cancelled payroll period for this branch.
-    # Changing the anchor to a date ≤ the last existing period would cause the
-    # next period calculation to generate dates that overlap historical records.
-    max_end_row = await db.execute(
-        text("""
-            SELECT MAX(enddate) AS max_end
-            FROM   payroll.payrollperiods
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  status    != 'Cancelled'
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )
-    max_end = max_end_row.scalar_one_or_none()
-    if max_end is not None and data.anchor_start_date <= max_end:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Cannot set anchor_start_date to {data.anchor_start_date}: "
-                f"existing payroll periods for this branch extend to {max_end}. "
-                f"The new anchor must be after {max_end}. "
-                f"Cancel all active periods first, or choose a later start date."
-            ),
-        )
-
-    await db.execute(
-        text("""
-            INSERT INTO payroll.branchpayrollsettings (
-                companyid, branchid,
-                payrollfrequency, anchorstartdate, paydateoffsetdays,
-                paydayofweek, firstpaydate, includepaydayasworkday,
-                normaldaysoffmask, customintervaldays, isactive, createdbyuserid, notes
-            ) VALUES (
-                :cid, :bid,
-                :freq, :anchor, 0,
-                :pdow, :fpd, :incl,
-                :mask, :interval_days, TRUE, :uid, :notes
-            )
-            ON CONFLICT (companyid, branchid) DO UPDATE
-                SET payrollfrequency       = EXCLUDED.payrollfrequency,
-                    anchorstartdate        = EXCLUDED.anchorstartdate,
-                    paydateoffsetdays      = 0,
-                    paydayofweek           = EXCLUDED.paydayofweek,
-                    firstpaydate           = EXCLUDED.firstpaydate,
-                    includepaydayasworkday = EXCLUDED.includepaydayasworkday,
-                    normaldaysoffmask      = EXCLUDED.normaldaysoffmask,
-                    customintervaldays     = EXCLUDED.customintervaldays,
-                    isactive               = TRUE,
-                    notes                  = EXCLUDED.notes,
-                    updatedatutc           = NOW()
-        """),
-        {
-            "cid":           company_id,
-            "bid":           branch_id,
-            "uid":           user_id,
-            "freq":          data.payroll_frequency,
-            "anchor":        data.anchor_start_date,
-            "pdow":          data.pay_day_of_week,
-            "fpd":           data.first_pay_date,
-            "incl":          data.include_pay_day_as_work_day,
-            "mask":          data.normal_days_off_mask,
-            "interval_days": data.custom_interval_days,
-            "notes":         data.notes,
-        },
-    )
-
-    await _write_settings_audit(
-        db,
-        company_id=company_id,
-        branch_id=branch_id,
-        user_id=user_id,
-        action_code="PAYROLL_SETUP_SAVED",
-        entity_name="BranchPayrollSettings",
-        entity_id=f"{company_id}:{branch_id}",
-        new_value={
-            "payroll_frequency":           data.payroll_frequency,
-            "anchor_start_date":           str(data.anchor_start_date),
-            "pay_day_of_week":             data.pay_day_of_week,
-            "first_pay_date":              str(data.first_pay_date) if data.first_pay_date else None,
-            "include_pay_day_as_work_day": data.include_pay_day_as_work_day,
-            "normal_days_off_mask":        data.normal_days_off_mask,
-            "custom_interval_days":        data.custom_interval_days,
-        },
-    )
-
-    # CP-2A: create an immutable schedule version record for this setup upsert.
-    # Runs inside the same transaction and branch advisory lock as the upsert above.
-    await create_schedule_version_for_setup(company_id, branch_id, user_id, data, db)
-
-    return await get_payroll_setup(branch_id, company_id, user_id, db)
+    return OnboardingOptionsResponse(default_setup=default_setup, choices=choices)
 
 
 # ===========================================================================

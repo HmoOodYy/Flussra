@@ -172,11 +172,18 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
 async def _insert_period(db: AsyncConnection, branch_id: int, suffix: str, status: str = "Open") -> int:
     offset = next(_COUNTER) * 14
     start = _BASE_DATE + datetime.timedelta(days=offset)
+    authority = await _canonical_authority(db, branch_id)
     row = (await db.execute(
         _text("""
             INSERT INTO payroll.payrollperiods
-                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-            VALUES (:company_id, :branch_id, :status, :code, :name, 'Week', :start_date, :end_date)
+                (companyid, branchid, status, periodcode, periodname, periodtype,
+                 startdate, enddate, branchpayrollsetupassignmentid,
+                 payrollsetupversionid, frozenpayrollsetupid, frozenpayrollsetupcode,
+                 frozenpayrollsetupversionnumber, frozenpayrollfrequency,
+                 frozenanchorstartdate, frozennormaldaysoffmask, scheduleconfighash)
+            VALUES (:company_id, :branch_id, :status, :code, :name, 'Week',
+                    :start_date, :end_date, :assignment_id, :version_id,
+                    :setup_id, :setup_code, 1, 'Week', :anchor, 0, :config_hash)
             RETURNING payrollperiodid
         """),
         {
@@ -187,10 +194,72 @@ async def _insert_period(db: AsyncConnection, branch_id: int, suffix: str, statu
             "name": f"CP5B {suffix}",
             "start_date": start,
             "end_date": start + datetime.timedelta(days=6),
+            **authority,
         },
     )).mappings().one()
     await db.commit()
     return int(row["payrollperiodid"])
+
+
+async def _canonical_authority(db: AsyncConnection, branch_id: int) -> dict[str, int | str]:
+    """Create or reuse one canonical Payroll Setup authority for the branch."""
+    existing = (await db.execute(_text("""
+        SELECT a.branchpayrollsetupassignmentid AS assignment_id,
+               v.payrollsetupversionid AS version_id,
+               s.payrollsetupid AS setup_id, s.setupcode AS setup_code
+        FROM payroll.branchpayrollsetupassignments a
+        JOIN payroll.payrollsetups s ON s.payrollsetupid = a.payrollsetupid
+        JOIN payroll.payrollsetupversions v
+          ON v.payrollsetupid = s.payrollsetupid AND v.companyid = s.companyid
+        WHERE a.companyid = :company_id AND a.branchid = :branch_id
+          AND a.effectivefromdate = :effective_from
+          AND v.lifecyclestate = 'Published'
+        ORDER BY a.branchpayrollsetupassignmentid
+        LIMIT 1
+    """), {
+        "company_id": _COMPANY_ID, "branch_id": branch_id,
+        "effective_from": _BASE_DATE,
+    })).mappings().first()
+    if existing is not None:
+        return dict(existing) | {"anchor": _BASE_DATE, "config_hash": "a" * 64}
+
+    setup_code = f"CP5B_{branch_id}"
+    setup_id = int((await db.execute(_text("""
+        INSERT INTO payroll.payrollsetups
+            (companyid, setupcode, setupname, status, createdbyuserid)
+        VALUES (:company_id, :setup_code, :setup_name, 'Active', 1)
+        RETURNING payrollsetupid
+    """), {
+        "company_id": _COMPANY_ID, "setup_code": setup_code,
+        "setup_name": f"CP5B {branch_id}",
+    })).scalar_one())
+    version_id = int((await db.execute(_text("""
+        INSERT INTO payroll.payrollsetupversions
+            (companyid, payrollsetupid, lifecyclestate, versionnumber,
+             effectivefromdate, payrollfrequency, anchorstartdate,
+             normaldaysoffmask, confighash, publishedbyuserid, publishedatutc)
+        VALUES (:company_id, :setup_id, 'Published', 1, :effective_from,
+                'Week', :effective_from, 0, :config_hash, 1, NOW())
+        RETURNING payrollsetupversionid
+    """), {
+        "company_id": _COMPANY_ID, "setup_id": setup_id,
+        "effective_from": _BASE_DATE, "config_hash": "a" * 64,
+    })).scalar_one())
+    assignment_id = int((await db.execute(_text("""
+        INSERT INTO payroll.branchpayrollsetupassignments
+            (companyid, branchid, payrollsetupid, effectivefromdate)
+        VALUES (:company_id, :branch_id, :setup_id, :effective_from)
+        RETURNING branchpayrollsetupassignmentid
+    """), {
+        "company_id": _COMPANY_ID, "branch_id": branch_id, "setup_id": setup_id,
+        "effective_from": _BASE_DATE,
+    })).scalar_one())
+    await db.commit()
+    return {
+        "assignment_id": assignment_id, "version_id": version_id,
+        "setup_id": setup_id, "setup_code": setup_code,
+        "anchor": _BASE_DATE, "config_hash": "a" * 64,
+    }
 
 
 async def _period_dates(db: AsyncConnection, period_id: int) -> list[datetime.date]:
@@ -348,49 +417,26 @@ async def _calendar_with_configured_off_day(
     configured_off_dates = (
         configured_off if isinstance(configured_off, set) else {configured_off}
     )
-    schedule_version_id = (await db.execute(
-        _text("""
-            SELECT scheduleversionid FROM payroll.payrollscheduleversions
-            WHERE companyid = :company_id AND branchid = :branch_id
-            ORDER BY scheduleversionid DESC LIMIT 1
-        """),
-        {"company_id": _COMPANY_ID, "branch_id": branch_id},
-    )).scalar_one_or_none()
-    if schedule_version_id is None:
-        schedule_version_id = (await db.execute(
-            _text("""
-                INSERT INTO payroll.payrollscheduleversions
-                    (companyid, branchid, versionnumber, payrollfrequency, anchorstartdate,
-                     normaldaysoffmask, sourceaction)
-                VALUES (:company_id, :branch_id, 1, 'Week', :anchor_start_date, 0, 'CP5B_TEST')
-                RETURNING scheduleversionid
-            """),
-            {
-                "company_id": _COMPANY_ID,
-                "branch_id": branch_id,
-                "anchor_start_date": _BASE_DATE,
-            },
-        )).scalar_one()
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET scheduleversionid = :schedule_version_id WHERE payrollperiodid = :period_id"),
-        {"schedule_version_id": schedule_version_id, "period_id": period_id},
-    )
+    authority = await _canonical_authority(db, branch_id)
     days = await _period_dates(db, period_id)
     for work_date in days:
         is_configured_off = work_date in configured_off_dates
         await db.execute(
             _text("""
                 INSERT INTO payroll.payrollperioddays
-                    (payrollperiodid, companyid, branchid, scheduleversionid, workdate, dayofweek,
+                    (payrollperiodid, companyid, branchid,
+                     branchpayrollsetupassignmentid, payrollsetupversionid,
+                     workdate, dayofweek,
                      isdefaultworkday, isconfiguredoffday, isaddedworkday)
-                VALUES (:period_id, :company_id, :branch_id, :schedule_version_id, :work_date,
+                VALUES (:period_id, :company_id, :branch_id, :assignment_id, :version_id, :work_date,
                         :day_of_week, :is_default_work_day, :is_configured_off_day, :is_added_work_day)
             """),
             {
                 "period_id": period_id,
                 "company_id": _COMPANY_ID,
                 "branch_id": branch_id,
-                "schedule_version_id": schedule_version_id,
+                "assignment_id": authority["assignment_id"],
+                "version_id": authority["version_id"],
                 "work_date": work_date,
                 "day_of_week": (work_date.weekday() + 1) % 7,
                 "is_default_work_day": not is_configured_off,

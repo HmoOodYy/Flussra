@@ -1,8 +1,7 @@
 /* ═══════════════════════════════════════════════════════
-   Payroll Setup page
-   Top: page header + branch context card + tabs
-   Pay Schedule: two-column (form left, preview right)
-   Status Keys: full-width table + modal
+   Status Keys page
+   Top: page header + branch context card
+   Body: full-width table + detail panel + modal
 ═══════════════════════════════════════════════════════ */
 
 .page {
@@ -111,396 +110,6 @@
   min-width: 200px;
 }
 .branchSelect:focus { border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.11); }
-
-.branchCtxRight {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-}
-
-/* Status chips */
-.chipNeutral, .chipComplete, .chipMissing, .chipWarn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.25rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.chipNeutral  { background: #f1f5f9; color: #64748b; }
-.chipComplete { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
-.chipMissing  { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-.chipWarn     { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
-
-.lastUpdated {
-  font-size: 0.75rem;
-  color: #9ca3af;
-}
-
-/* ═══════════════════════════════════════════════════════
-   INTERNAL TABS
-═══════════════════════════════════════════════════════ */
-
-.tabs {
-  display: flex;
-  gap: 0.25rem;
-  border-bottom: 1.5px solid #e5e7eb;
-  padding-bottom: 0;
-}
-
-.tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.6rem 1rem;
-  background: transparent;
-  border: none;
-  border-bottom: 2.5px solid transparent;
-  margin-bottom: -1.5px;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #6b7280;
-  cursor: pointer;
-  transition: color 0.12s;
-  white-space: nowrap;
-}
-.tab:hover { color: #374151; }
-
-.tabActive {
-  color: #1d4ed8;
-  border-bottom-color: #2563eb;
-  font-weight: 600;
-}
-
-.tabCount {
-  padding: 0.1rem 0.45rem;
-  background: #eff6ff;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #2563eb;
-}
-
-/* ═══════════════════════════════════════════════════════
-   TAB CONTENT WRAPPER
-   Wraps the active tab's content; grows to fill remaining
-   page height so child layouts can use flex:1 / align:stretch.
-═══════════════════════════════════════════════════════ */
-
-.tabContent {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-/* ═══════════════════════════════════════════════════════
-   PAY SCHEDULE — two-column layout
-═══════════════════════════════════════════════════════ */
-
-.scheduleBody {
-  display: grid;
-  grid-template-columns: 1fr clamp(240px, 26%, 320px);
-  gap: 1.5rem;
-  align-items: stretch; /* equal-height columns */
-  /* Fill .tabContent height */
-  flex: 1;
-  min-height: 0;
-}
-
-/* ── Form card ── */
-.formCard {
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 14px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.formCardHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid #f3f4f6;
-  background: #fafafa;
-}
-
-.formCardActions {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-}
-
-.cardTitle {
-  margin: 0;
-  font-size: 0.82rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: #6b7280;
-}
-
-.formBody {
-  padding: 1.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1.1rem;
-}
-
-/* ── Read view ── */
-.readView {
-  padding: 1.5rem;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem 2rem;
-}
-
-.readRow {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-}
-
-.readLabel {
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #9ca3af;
-}
-
-.readValue {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #0f172a;
-}
-
-.readMeta {
-  grid-column: 1 / -1;
-  padding-top: 0.75rem;
-  border-top: 1px solid #f3f4f6;
-  font-size: 0.75rem;
-  color: #9ca3af;
-  display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-}
-
-/* ── Not configured state ── */
-.notConfigured {
-  padding: 2.5rem 1.5rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-  text-align: center;
-  color: #9ca3af;
-}
-
-.notConfiguredTitle {
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: #374151;
-}
-
-.notConfiguredDesc {
-  font-size: 0.84rem;
-  color: #6b7280;
-  max-width: 38ch;
-  line-height: 1.5;
-}
-
-/* ── Preview card ── */
-.previewCard {
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 14px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.04);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.previewHeader {
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid #f3f4f6;
-  background: #fafafa;
-}
-
-.previewBody {
-  padding: 1rem 1.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto; /* scroll if preview content grows */
-}
-
-.previewBody::-webkit-scrollbar { width: 4px; }
-.previewBody::-webkit-scrollbar-track { background: transparent; }
-.previewBody::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 2px; }
-
-.previewEmpty {
-  padding: 1.5rem 0;
-  text-align: center;
-  font-size: 0.82rem;
-  color: #9ca3af;
-  line-height: 1.5;
-}
-
-.previewRow {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.6rem 0;
-  border-bottom: 1px solid #f9fafb;
-}
-.previewRow:last-child { border-bottom: none; }
-
-.previewLabel {
-  font-size: 0.78rem;
-  font-weight: 500;
-  color: #9ca3af;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.previewValue {
-  font-size: 0.84rem;
-  font-weight: 600;
-  color: #0f172a;
-  text-align: right;
-  line-height: 1.35;
-}
-
-.previewSection {
-  padding: 0.9rem 0 0.4rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  border-top: 1px solid #f1f5f9;
-  margin-top: 0.5rem;
-}
-
-.previewSectionLabel {
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #9ca3af;
-  margin-bottom: 0.1rem;
-}
-
-.previewPeriodRow {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-}
-
-.previewPeriodIdx {
-  font-size: 0.7rem;
-  font-weight: 700;
-  color: #cbd5e1;
-  width: 18px;
-  flex-shrink: 0;
-}
-
-.previewPeriodDate {
-  font-size: 0.83rem;
-  font-weight: 500;
-  color: #374151;
-}
-
-.previewStatus {
-  margin-top: 1rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.4rem 0.8rem;
-  border-radius: 8px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  align-self: flex-start;
-}
-.previewStatusOk   { background: #f0fdf4; color: #16a34a; }
-.previewStatusWarn { background: #fffbeb; color: #b45309; }
-
-/* ── Day chips ── */
-.dayChips {
-  display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-}
-
-.dayChip {
-  padding: 0.3rem 0.6rem;
-  border: 1.5px solid #e2e8f0;
-  background: #fff;
-  border-radius: 7px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #6b7280;
-  cursor: pointer;
-  transition: all 0.12s;
-  user-select: none;
-}
-.dayChip:hover { border-color: #2563eb; color: #2563eb; }
-.dayChip:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.dayChipActive {
-  background: #1e3a8a;
-  border-color: #1e3a8a;
-  color: #e0e7ff;
-}
-.dayChipActive:hover {
-  background: #1e40af;
-  border-color: #1e40af;
-  color: #e0e7ff;
-}
-
-/* Day chip that would exceed the limit */
-.dayChipDisabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-
-.fieldLimit {
-  font-size: 0.75rem;
-  font-weight: 400;
-  color: #9ca3af;
-}
-
-.fieldError {
-  font-size: 0.78rem;
-  color: #dc2626;
-  font-weight: 500;
-  margin-top: 0.2rem;
-}
-
-.daysOffWarn {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-top: 0.4rem;
-  padding: 0.5rem 0.75rem;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 6px;
-  font-size: 0.78rem;
-  color: #b45309;
-  font-weight: 500;
-}
 
 /* ═══════════════════════════════════════════════════════
    STATUS KEYS SECTION
@@ -785,17 +394,6 @@
   text-align: right;
 }
 
-.keyDetailValueMono {
-  font-size: 0.74rem;
-  font-weight: 500;
-  color: #475569;
-  font-family: 'Courier New', monospace;
-  background: #f1f5f9;
-  padding: 0.05rem 0.35rem;
-  border-radius: 3px;
-  text-align: right;
-}
-
 /* Small hint text inside detail panel */
 .keyDetailHint {
   font-size: 0.74rem;
@@ -873,22 +471,9 @@
   color: #0f172a;
 }
 
-.normalizedCode {
-  font-family: 'Courier New', monospace;
-  font-size: 0.78rem;
-  color: #6b7280;
-  background: #f1f5f9;
-  padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-}
-
 .numCell {
   text-align: center;
   font-variant-numeric: tabular-nums;
-}
-
-.categoryCell {
-  font-size: 0.82rem;
 }
 
 /* ── Badges ── */
@@ -904,16 +489,10 @@
 }
 .badgeGreen  { background: #f0fdf4; color: #16a34a; }
 .badgeBlue   { background: #eff6ff; color: #1d4ed8; }
-.badgeAmber  { background: #fffbeb; color: #b45309; }
 .badgeGray   { background: #f1f5f9; color: #64748b; }
 .badgeRed    { background: #fef2f2; color: #b91c1c; }
 
 /* ── Row action buttons ── */
-.actionsCell {
-  text-align: right;
-  white-space: nowrap;
-}
-
 .btnRowEdit, .btnRowDeactivate, .btnRowReactivate {
   display: inline-flex;
   align-items: center;
@@ -926,8 +505,6 @@
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.btnRowEdit { color: #6b7280; }
-.btnRowEdit:hover { background: #f1f5f9; color: #2563eb; border-color: #e2e8f0; }
 
 .btnRowDeactivate { color: #9ca3af; }
 .btnRowDeactivate:hover { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
@@ -1033,7 +610,6 @@
 .input:disabled, .textarea:disabled, .select:disabled {
   background: #f8fafc; color: #94a3b8; cursor: not-allowed;
 }
-.textarea { resize: vertical; min-height: 72px; line-height: 1.55; }
 
 .checkboxLabel {
   display: flex;
@@ -1055,15 +631,6 @@
 .checkboxDesc {
   font-size: 0.82rem;
   color: #6b7280;
-}
-
-.formActions {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid #f3f4f6;
-  margin-top: 0.25rem;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1152,14 +719,6 @@
   border-radius: 8px;
   color: #b91c1c;
   font-size: 0.84rem;
-}
-
-.readonlyNote {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.78rem;
-  color: #9ca3af;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1257,18 +816,6 @@
 ═══════════════════════════════════════════════════════ */
 
 @media (max-width: 1024px) {
-  /* Stack schedule columns — preview goes above form */
-  .scheduleBody {
-    grid-template-columns: 1fr;
-    align-items: start;
-    /* Exit fill-height mode; let content scroll the settings content area */
-    flex: none;
-    overflow: visible;
-  }
-  .previewCard {
-    order: -1;
-    min-height: 180px;
-  }
   /* Stack keys columns */
   .keysBody {
     grid-template-columns: 1fr;
@@ -1284,10 +831,6 @@
     height: auto;
     overflow: visible;
   }
-  .tabContent {
-    flex: none;
-    overflow: visible;
-  }
   .statusKeysSection {
     flex: none;
     overflow: visible;
@@ -1300,5 +843,4 @@
 @media (max-width: 768px) {
   .formGrid      { grid-template-columns: 1fr; }
   .formGroupFull { grid-column: 1; }
-  .readView      { grid-template-columns: 1fr; }
 }

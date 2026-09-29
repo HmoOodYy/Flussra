@@ -13,7 +13,7 @@ Permission model (Dashboard D1):
     review_queue     review.decide | payroll.entry | payroll.view
     rates_health     payrates.view | payrates.edit | payroll.approve_rate
     setup_health     setup.manage | settings.manage
-    transfers        drivers.view | drivers.edit | drivers.manage
+    transfers        drivers.view | drivers.edit
 
   - Branch scope: each section is filtered to branches where the user holds a
     qualifying permission.  For AllCompanyBranches users a company-level check
@@ -43,6 +43,7 @@ from app.dashboard.schemas import (
     LastFinalizedPeriod,
     SetupWarning,
 )
+from app.payroll_setup.readiness import branch_schedule_readiness
 
 # ── Permission groups per section ─────────────────────────────────────────────
 
@@ -69,7 +70,6 @@ _SETUP_PERMS = [
 _PEOPLE_PERMS = [
     "drivers.view",
     "drivers.edit",
-    "drivers.manage",
 ]
 _FINALIZE_PERMS = ["payroll.finalize"]
 
@@ -641,7 +641,7 @@ async def _compute_setup_warnings(
     Compute setup warnings filtered by what the user can actually act on.
 
     Warning gating:
-      BRANCH_NO_PAYROLL_SETTINGS    → setup.manage / settings.manage only
+      BRANCH_NO_PAYROLL_SETTINGS      → setup.manage / settings.manage only
       OPEN_PERIOD_NEEDS_MANAGER_REVIEW → payroll.entry / payroll.finalize (has_payroll)
       DRIVERS_NO_APPROVED_RATE      → payrates.view/edit (has_rates) or setup.manage (has_setup)
       PAY_ITEM_MISSING_RATE_TYPE_MAP → setup.manage / settings.manage only
@@ -652,7 +652,7 @@ async def _compute_setup_warnings(
     bf_d, bp_d = _make_branch_filter(can_see_all, branch_ids, "d.branchid")
     bf_p, bp_p = _make_branch_filter(can_see_all, branch_ids, "p.branchid")
 
-    # W1: BRANCH_NO_PAYROLL_SETTINGS — only for setup admins
+    # W1: canonical Payroll Setup readiness — only for setup admins.
     if has_setup:
         result = await db.execute(
             text(f"""
@@ -661,20 +661,19 @@ async def _compute_setup_warnings(
                 WHERE  b.companyid = :company_id
                   AND  b.status    = 'Active'
                   {_and(bf_b)}
-                  AND  NOT EXISTS (
-                      SELECT 1
-                      FROM   payroll.branchpayrollsettings s
-                      WHERE  s.branchid  = b.branchid
-                        AND  s.companyid = :company_id
-                  )
             """),
             {"company_id": company_id, **bp_b},
         )
         for row in result.mappings().all():
+            ready, _ = await branch_schedule_readiness(
+                company_id, row["branchid"], db,
+            )
+            if ready:
+                continue
             warnings.append(SetupWarning(
                 code="BRANCH_NO_PAYROLL_SETTINGS",
                 severity="Warning",
-                message=f"Branch '{row['branchname']}' has no payroll settings configured.",
+                message=f"Branch '{row['branchname']}' has no complete Payroll Setup schedule.",
                 branch_id=row["branchid"],
                 branch_name=row["branchname"],
                 count=None,

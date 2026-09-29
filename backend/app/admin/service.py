@@ -1913,6 +1913,7 @@ async def assign_company_role(
             user_id=target_user_id,
             company_id=company_id,
             branch_id=data.branch_id,
+            actor_user_id=caller_id,
         )
 
     return await _fetch_company_role_assignment(new_assignment_id, target_user_id, company_id, db)
@@ -2363,214 +2364,87 @@ async def set_user_permission_overrides(
 # Driver profile auto-linking (Phase 1)
 # ===========================================================================
 
-async def _driver_has_payroll_history(driver_id: int, db: AsyncConnection) -> bool:
-    """Return True if the driver has any payroll/rate/pay-rule history.
-
-    Used to block unsafe direct Driver.BranchID mutation: if history exists,
-    callers must use the Driver Transfer workflow instead.
-    """
-    # Check each table individually to avoid asyncpg's limitation with repeated
-    # positional parameters ($1) across UNION ALL branches.
-    for query in (
-        "SELECT 1 FROM payroll.payrolldraftlines WHERE driverid = :did LIMIT 1",
-        "SELECT 1 FROM payroll.payrollfinallines  WHERE driverid = :did LIMIT 1",
-        "SELECT 1 FROM payroll.driverrates        WHERE driverid = :did LIMIT 1",
-        "SELECT 1 FROM payroll.driverpayrules     WHERE driverid = :did LIMIT 1",
-    ):
-        row = await db.execute(text(query), {"did": driver_id})
-        if row.first() is not None:
-            return True
-    return False
-
-
 async def ensure_driver_profile(
     db: AsyncConnection,
     user_id: int,
     company_id: int,
     branch_id: int | None,
+    actor_user_id: int,
 ) -> dict:
-    """
-    Ensure a Driver profile exists for a user with the Driver role.
-    Creates core.Employees + core.Drivers rows if missing.
-    Links sec.Users.EmployeeID.
-    Returns {"employee_id": ..., "driver_id": ..., "created": bool}.
-    Idempotent — safe to call multiple times.
-    """
-    # Look up the user to get display_name and existing employee_id
-    u_result = await db.execute(
-        text("""
-            SELECT userid, displayname, employeeid
-            FROM   sec.users
-            WHERE  userid = :uid AND companyid = :cid
-        """),
-        {"uid": user_id, "cid": company_id},
+    """Temporary Access hook delegating all Employee/Profile writes to Workforce."""
+    from app.workforce.schemas import DriverProfileCreate
+    from app.workforce.service import (
+        create_driver_employee,
+        create_first_driver_profile,
+        find_employee_driver_profile,
     )
-    u_row = u_result.mappings().first()
-    if u_row is None:
+
+    user_result = await db.execute(
+        text("""
+            SELECT UserID, DisplayName, EmployeeID
+            FROM sec.Users
+            WHERE UserID = :user_id AND CompanyID = :company_id
+            FOR UPDATE
+        """),
+        {"user_id": user_id, "company_id": company_id},
+    )
+    user = user_result.mappings().first()
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
+    if branch_id is None:
+        raise HTTPException(status_code=422, detail="Driver access requires a home branch.")
 
-    existing_emp_id: int | None = u_row["employeeid"]
-
-    # Case 1 — user already linked to an employee
-    if existing_emp_id is not None:
-        drv_result = await db.execute(
+    employee_id = user["employeeid"]
+    if employee_id is not None:
+        employee_result = await db.execute(
             text("""
-                SELECT driverid, branchid FROM core.drivers
-                WHERE  employeeid  = :eid
-                  AND  companyid   = :cid
-                  AND  driverstatus NOT IN ('Transferred', 'Terminated')
-                ORDER  BY driverid DESC
-                LIMIT  1
+                SELECT EmployeeID, BranchID
+                FROM core.Employees
+                WHERE EmployeeID = :employee_id AND CompanyID = :company_id
             """),
-            {"eid": existing_emp_id, "cid": company_id},
+            {"employee_id": employee_id, "company_id": company_id},
         )
-        drv_row = drv_result.mappings().first()
-        if drv_row is not None:
-            # Driver already exists — sync branch if the role assignment changed it.
-            # Guard: if the target branch differs and driver has payroll/rate history,
-            # refuse the direct mutation — use Driver Transfer workflow instead.
-            if branch_id is not None and branch_id != drv_row["branchid"]:
-                if await _driver_has_payroll_history(drv_row["driverid"], db):
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            "Driver has payroll/rate history attached to their current branch. "
-                            "Use Driver Transfer workflow to move the driver to a new branch."
-                        ),
-                    )
-                # No history — safe to reassign branch directly
-                await db.execute(
-                    text("""
-                        UPDATE core.drivers
-                        SET    branchid = :bid
-                        WHERE  driverid  = :did
-                          AND  companyid = :cid
-                    """),
-                    {"bid": branch_id, "did": drv_row["driverid"], "cid": company_id},
-                )
-                await db.execute(
-                    text("""
-                        UPDATE core.employees
-                        SET    branchid = :bid
-                        WHERE  employeeid = :eid
-                          AND  companyid  = :cid
-                    """),
-                    {"bid": branch_id, "eid": existing_emp_id, "cid": company_id},
-                )
-            return {"employee_id": existing_emp_id, "driver_id": drv_row["driverid"], "created": False}
-        # Employee exists but no driver row — create it
-        drv_ins = await db.execute(
-            text("""
-                INSERT INTO core.drivers (companyid, employeeid, branchid, drivercode, driverstatus)
-                VALUES (:cid, :eid, :bid, :code, 'Active')
-                RETURNING driverid
-            """),
-            {
-                "cid":  company_id,
-                "eid":  existing_emp_id,
-                "bid":  branch_id,
-                "code": f"DRV-{existing_emp_id:05d}",
-            },
-        )
-        new_drv_id: int = drv_ins.scalar_one()
-        return {"employee_id": existing_emp_id, "driver_id": new_drv_id, "created": True}
-
-    # Case 2 — no employee link yet; check for an existing Employee by name/company
-    display_name: str = u_row["displayname"] or f"User {user_id}"
-    emp_key = f"EMP-{user_id:05d}"
-
-    existing_emp_result = await db.execute(
-        text("""
-            SELECT employeeid FROM core.employees
-            WHERE  companyid    = :cid
-              AND  employeekey  = :ekey
-        """),
-        {"cid": company_id, "ekey": emp_key},
-    )
-    existing_emp_row = existing_emp_result.mappings().first()
-
-    if existing_emp_row is not None:
-        employee_id: int = existing_emp_row["employeeid"]
-    else:
-        # Create Employee row
-        emp_ins = await db.execute(
-            text("""
-                INSERT INTO core.employees
-                    (companyid, branchid, employeekey, fullname, employeetype, employmentstatus)
-                VALUES (:cid, :bid, :ekey, :name, 'Driver', 'Active')
-                RETURNING employeeid
-            """),
-            {
-                "cid":  company_id,
-                "bid":  branch_id,
-                "ekey": emp_key,
-                "name": display_name,
-            },
-        )
-        employee_id = emp_ins.scalar_one()
-
-    # Link user to employee
-    await db.execute(
-        text("UPDATE sec.users SET employeeid = :eid WHERE userid = :uid"),
-        {"eid": employee_id, "uid": user_id},
-    )
-
-    # Check if driver row already exists for this employee
-    drv_check = await db.execute(
-        text("""
-            SELECT driverid, branchid FROM core.drivers
-            WHERE  employeeid = :eid AND companyid = :cid
-        """),
-        {"eid": employee_id, "cid": company_id},
-    )
-    existing_drv = drv_check.mappings().first()
-    if existing_drv is not None:
-        # Sync branch — same guard as Case 1: block if driver has history
-        if branch_id is not None and branch_id != existing_drv["branchid"]:
-            if await _driver_has_payroll_history(existing_drv["driverid"], db):
+        employee = employee_result.mappings().first()
+        if employee is None:
+            raise HTTPException(status_code=422, detail="Linked Employee does not belong to this company.")
+        profile = await find_employee_driver_profile(company_id, employee_id, db)
+        if profile is not None:
+            if profile["branchid"] != branch_id:
                 raise HTTPException(
                     status_code=422,
-                    detail=(
-                        "Driver has payroll/rate history attached to their current branch. "
-                        "Use Driver Transfer workflow to move the driver to a new branch."
-                    ),
+                    detail="Driver profile branch differs from the requested branch; use Driver Transfer.",
                 )
-            await db.execute(
-                text("""
-                    UPDATE core.drivers
-                    SET    branchid = :bid
-                    WHERE  driverid  = :did
-                      AND  companyid = :cid
-                """),
-                {"bid": branch_id, "did": existing_drv["driverid"], "cid": company_id},
-            )
-            await db.execute(
-                text("""
-                    UPDATE core.employees
-                    SET    branchid = :bid
-                    WHERE  employeeid = :eid
-                      AND  companyid  = :cid
-                """),
-                {"bid": branch_id, "eid": employee_id, "cid": company_id},
-            )
-        return {"employee_id": employee_id, "driver_id": existing_drv["driverid"], "created": False}
+            return {"employee_id": employee_id, "driver_id": profile["driverid"], "created": False}
 
-    # Create Driver row
-    drv_ins2 = await db.execute(
-        text("""
-            INSERT INTO core.drivers (companyid, employeeid, branchid, drivercode, driverstatus)
-            VALUES (:cid, :eid, :bid, :code, 'Active')
-            RETURNING driverid
-        """),
-        {
-            "cid":  company_id,
-            "eid":  employee_id,
-            "bid":  branch_id,
-            "code": f"DRV-{employee_id:05d}",
-        },
+        detail = await create_first_driver_profile(
+            company_id,
+            actor_user_id,
+            employee_id,
+            DriverProfileCreate(driver_code=f"DRV-{employee_id:05d}"),
+            db,
+            requested_branch_id=branch_id,
+        )
+        profile = detail.current_or_pending_driver
+        if profile is None:
+            raise HTTPException(status_code=500, detail="Workforce profile creation returned no profile.")
+        return {"employee_id": employee_id, "driver_id": profile.driver_id, "created": True}
+
+    detail = await create_driver_employee(
+        company_id,
+        actor_user_id,
+        branch_id=branch_id,
+        full_name=user["displayname"] or f"User {user_id}",
+        driver_code=f"DRV-{user_id:05d}",
+        db=db,
     )
-    new_driver_id: int = drv_ins2.scalar_one()
-    return {"employee_id": employee_id, "driver_id": new_driver_id, "created": True}
+    profile = detail.current_or_pending_driver
+    if profile is None:
+        raise HTTPException(status_code=500, detail="Workforce creation returned no Driver profile.")
+    await db.execute(
+        text("UPDATE sec.Users SET EmployeeID = :employee_id WHERE UserID = :user_id AND CompanyID = :company_id"),
+        {"employee_id": detail.employee_id, "user_id": user_id, "company_id": company_id},
+    )
+    return {"employee_id": detail.employee_id, "driver_id": profile.driver_id, "created": True}
 
 
 async def get_user_driver_info(

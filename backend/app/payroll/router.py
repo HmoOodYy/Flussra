@@ -8,7 +8,7 @@ inside the service layer.
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
@@ -73,9 +73,7 @@ from app.payroll.schemas import (
     FinalizedRatesUsedResponse,
     FinalLineSummary,
     MixedReportResponse,
-    NextPeriodDates,
     OffDriversSummaryResponse,
-    PeriodCreate,
     PeriodCreationRequest,
     PeriodCreationResponse,
     PeriodEligibleDriversResponse,
@@ -158,36 +156,6 @@ async def list_periods(
 
 
 @router.get(
-    "/periods/next-period-dates",
-    response_model=NextPeriodDates,
-    summary="Legacy next-period date route (gone)",
-    description=(
-        "This legacy next-period date route has been disabled. Use the "
-        "payroll period candidate workflow.\n\n"
-        "**Note:** This endpoint must be registered before "
-        "`GET /periods/{period_id}` in the router so FastAPI matches the "
-        "literal path before the parameterised one."
-    ),
-    responses={
-        410: {"description": "Legacy next-period date route is disabled"},
-        403: {"description": "No access to the requested branch"},
-    },
-)
-async def get_next_period_dates(
-    token: TokenDep,
-    db: DbDep,
-    branch_id: int = Query(..., description="Branch to compute the next period for"),
-) -> NextPeriodDates:
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "code": "LEGACY_NEXT_PERIOD_DATES_ROUTE_DISABLED",
-            "message": "Legacy next-period date computation is disabled; use the period candidate workflow.",
-        },
-    )
-
-
-@router.get(
     "/periods/{period_id}/entry-count",
     response_model=PeriodEntryCount,
     summary="Count non-voided draft entries in a period (used to gate cancellation warnings)",
@@ -228,35 +196,6 @@ async def get_period(
         user_id=int(token["sub"]),
         period_id=period_id,
         db=db,
-    )
-
-
-@router.post(
-    "/periods",
-    response_model=PeriodSummary,
-    deprecated=True,
-    summary="Legacy direct period creation route (gone)",
-    description=(
-        "This legacy direct period creation route has been disabled. Use GET "
-        "/payroll/branches/{branch_id}/period-candidates followed by POST "
-        "/payroll/branches/{branch_id}/period-creations instead."
-    ),
-    responses={
-        410: {"description": "Legacy direct period creation route is disabled"},
-        403: {"description": "No access to the target branch or missing payroll.period.create permission"},
-    },
-)
-async def create_period(
-    body: PeriodCreate,
-    token: TokenDep,
-    db: DbDep,
-) -> PeriodSummary:
-    raise HTTPException(
-        status_code=410,
-        detail={
-            "code": "LEGACY_DIRECT_PERIOD_CREATION_ROUTE_DISABLED",
-            "message": "Direct period creation is disabled; use the period candidate workflow.",
-        },
     )
 
 

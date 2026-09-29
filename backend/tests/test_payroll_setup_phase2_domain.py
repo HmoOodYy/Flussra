@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.payroll_setup.chronology import Schedule
 from app.payroll_setup.errors import PolicyError
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     archive_setup,
     assign_setup,
     create_draft,
@@ -188,6 +188,195 @@ async def test_same_date_replacement_resolves_terminal_published_version(payroll
     )
     assert authority.version_id == replacement_id
     assert authority.version_id != original_id
+
+
+@pytest.mark.asyncio
+async def test_policy_timeline_rejects_incompatible_future_successor_without_assignments(
+    payroll_setup_db,
+):
+    """The policy timeline is validated even when no Branch follows it."""
+    db = payroll_setup_db
+    setup_id = await _new_setup(db, suffix="ZERO_BRANCH_SUCCESSOR")
+    successor_date = date(2026, 10, 10)
+    await _publish(
+        db, setup_id, frequency="Week", anchor=successor_date,
+    )
+    candidate_date = date(2026, 9, 27)
+    draft_id = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=candidate_date,
+        normal_days_off_mask=0,
+    )
+
+    preview = await preview_policy_impact(
+        db.company_id, db.user_id, setup_id, candidate_date,
+        Schedule("Week", candidate_date, None, 0), db.db,
+    )
+    assert preview["affected_branch_ids"] == []
+    assert preview["allowed"] is False
+    assert preview["conflicts"] == [{
+        "branch_id": None,
+        "code": "SUCCESSOR_BOUNDARY_INVALID",
+        "reason": (
+            "Existing scheduled update on 2026-10-10 would not start on a valid "
+            "boundary under this schedule"
+        ),
+    }]
+
+    with pytest.raises(PolicyError) as error:
+        await publish_version(
+            db.company_id, db.user_id, setup_id, draft_id,
+            candidate_date, db.db,
+        )
+    assert error.value.code == "SUCCESSOR_BOUNDARY_INVALID"
+    assert str(error.value) == preview["conflicts"][0]["reason"]
+    state = (await db.db.execute(text("""
+        SELECT LifecycleState FROM payroll.PayrollSetupVersions
+        WHERE PayrollSetupVersionID = :vid
+    """), {"vid": draft_id})).scalar_one()
+    assert state == "Draft"
+
+
+@pytest.mark.asyncio
+async def test_policy_timeline_allows_earlier_insertion_when_successor_is_on_candidate_grid(
+    payroll_setup_db,
+):
+    db = payroll_setup_db
+    setup_id = await _new_setup(db, suffix="ZERO_BRANCH_VALID_SUCCESSOR")
+    await _publish(
+        db, setup_id, frequency="Week", anchor=date(2026, 10, 11),
+    )
+    candidate_date = date(2026, 9, 27)
+    draft_id = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=candidate_date,
+        normal_days_off_mask=0,
+    )
+
+    preview = await preview_policy_impact(
+        db.company_id, db.user_id, setup_id, candidate_date,
+        Schedule("Week", candidate_date, None, 0), db.db,
+    )
+    assert preview["affected_branch_ids"] == []
+    assert preview["allowed"] is True
+    assert preview["conflicts"] == []
+    assert await publish_version(
+        db.company_id, db.user_id, setup_id, draft_id,
+        candidate_date, db.db,
+    ) == draft_id
+
+
+@pytest.mark.asyncio
+async def test_policy_timeline_rejects_candidate_that_splits_predecessor_period(
+    payroll_setup_db,
+):
+    db = payroll_setup_db
+    setup_id = await _new_setup(db, suffix="PREDECESSOR")
+    await _publish(
+        db, setup_id, frequency="Week", anchor=date(2026, 9, 1),
+    )
+    candidate_date = date(2026, 9, 10)
+    draft_id = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=candidate_date,
+        normal_days_off_mask=0,
+    )
+
+    preview = await preview_policy_impact(
+        db.company_id, db.user_id, setup_id, candidate_date,
+        Schedule("Week", candidate_date, None, 0), db.db,
+    )
+    assert preview["allowed"] is False
+    assert preview["conflicts"][0]["code"] == "PREDECESSOR_BOUNDARY_INVALID"
+    with pytest.raises(PolicyError) as error:
+        await publish_version(
+            db.company_id, db.user_id, setup_id, draft_id,
+            candidate_date, db.db,
+        )
+    assert error.value.code == "PREDECESSOR_BOUNDARY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_policy_timeline_validates_both_adjacent_terminal_versions(
+    payroll_setup_db,
+):
+    db = payroll_setup_db
+    setup_id = await _new_setup(db, suffix="BOTH_SIDES")
+    await _publish(db, setup_id, frequency="Week", anchor=date(2026, 9, 1))
+    await _publish(db, setup_id, frequency="Week", anchor=date(2026, 9, 22))
+    candidate_date = date(2026, 9, 15)
+    draft_id = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=candidate_date,
+        normal_days_off_mask=0,
+    )
+
+    preview = await preview_policy_impact(
+        db.company_id, db.user_id, setup_id, candidate_date,
+        Schedule("Week", candidate_date, None, 0), db.db,
+    )
+    assert preview["allowed"] is True
+    assert await publish_version(
+        db.company_id, db.user_id, setup_id, draft_id,
+        candidate_date, db.db,
+    ) == draft_id
+
+
+@pytest.mark.asyncio
+async def test_policy_timeline_latest_append_only_requires_valid_predecessor(
+    payroll_setup_db,
+):
+    db = payroll_setup_db
+    setup_id = await _new_setup(db, suffix="LATEST_APPEND")
+    await _publish(db, setup_id, frequency="Week", anchor=date(2026, 9, 1))
+    candidate_date = date(2026, 9, 8)
+    draft_id = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=candidate_date,
+        normal_days_off_mask=0,
+    )
+    assert await publish_version(
+        db.company_id, db.user_id, setup_id, draft_id,
+        candidate_date, db.db,
+    ) == draft_id
+
+
+@pytest.mark.asyncio
+async def test_same_date_replacement_validates_real_predecessor_and_successor_only(
+    payroll_setup_db,
+):
+    db = payroll_setup_db
+    setup_id = await _new_setup(db, suffix="REPLACEMENT_ADJACENCY")
+    await _publish(db, setup_id, frequency="Week", anchor=date(2026, 9, 1))
+    original_id = await _publish(db, setup_id, frequency="Week", anchor=date(2026, 9, 15))
+    await _publish(db, setup_id, frequency="Week", anchor=date(2026, 9, 22))
+    replacement_draft = await create_draft(
+        db.company_id, db.user_id, setup_id, db.db,
+        payroll_frequency="Week", anchor_start_date=date(2026, 9, 15),
+        normal_days_off_mask=1,
+    )
+
+    preview = await preview_policy_impact(
+        db.company_id, db.user_id, setup_id, date(2026, 9, 15),
+        Schedule("Week", date(2026, 9, 15), None, 1), db.db,
+        replaces_version_id=original_id,
+    )
+    assert preview["allowed"] is True
+    replacement_id = await publish_version(
+        db.company_id, db.user_id, setup_id, replacement_draft,
+        date(2026, 9, 15), db.db, replaces_version_id=original_id,
+    )
+    rows = (await db.db.execute(text("""
+        SELECT v.PayrollSetupVersionID,
+               NOT EXISTS (
+                   SELECT 1 FROM payroll.PayrollSetupVersions child
+                   WHERE child.ReplacesVersionID = v.PayrollSetupVersionID
+               ) AS IsTerminal
+        FROM payroll.PayrollSetupVersions v
+        WHERE v.PayrollSetupVersionID IN (:original, :replacement)
+        ORDER BY PayrollSetupVersionID
+    """), {"original": original_id, "replacement": replacement_id})).all()
+    assert rows == [(original_id, False), (replacement_id, True)]
 
 
 @pytest.mark.asyncio
@@ -608,7 +797,7 @@ async def test_archived_and_cross_company_setups_cannot_be_assigned(payroll_setu
 async def test_audit_failure_rolls_back_policy_mutation(payroll_setup_db):
     db = payroll_setup_db
     setup_code = f"P2_AUDIT_FAILURE_{db.marker}"
-    with patch("app.payroll_setup.policy.write_policy_audit", side_effect=RuntimeError("audit unavailable")):
+    with patch("app.payroll_setup.payroll_policy.write_policy_audit", side_effect=RuntimeError("audit unavailable")):
         with pytest.raises(RuntimeError, match="audit unavailable"):
             async with db.db.begin_nested():
                 await create_setup(db.company_id, db.user_id, setup_code,
@@ -755,6 +944,7 @@ async def test_publication_rejects_existing_assignment_version_coverage_gap(payr
 async def test_default_can_be_cleared_and_archived_setup_cannot_be_selected(payroll_setup_db):
     db = payroll_setup_db
     setup_id = await _new_setup(db)
+    await _publish(db, setup_id, frequency="Week", anchor=date(2090, 1, 1))
     await set_default_setup(db.company_id, db.user_id, setup_id, db.db)
     await set_default_setup(db.company_id, db.user_id, None, db.db)
     await archive_setup(db.company_id, db.user_id, setup_id, db.db)

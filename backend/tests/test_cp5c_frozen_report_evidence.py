@@ -60,11 +60,6 @@ async def evidence_db(test_database_url):
                 "code": f"CP5C-{marker[:16]}",
                 "name": f"CP5C isolated {marker[:12]}",
             })).scalar_one()
-            await seed.execute(text("""
-                INSERT INTO payroll.branchpayrollsettings
-                    (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
-                VALUES (:cid, :bid, 'Week', '2089-01-01', TRUE)
-            """), {"cid": ids["company_id"], "bid": branch_id})
             ids["branch_id"] = int(branch_id)
             employee_id = (await seed.execute(text("""
                 INSERT INTO core.employees
@@ -180,9 +175,6 @@ async def evidence_db(test_database_url):
             await cleanup.execute(text("DELETE FROM core.employees WHERE employeeid = :id"), {
                 "id": ids["employee_id"],
             })
-            await cleanup.execute(text(
-                "DELETE FROM payroll.branchpayrollsettings WHERE branchid = :bid"
-            ), {"bid": ids["branch_id"]})
             await cleanup.execute(text("DELETE FROM core.branches WHERE branchid = :bid"), {
                 "bid": ids["branch_id"],
             })

@@ -66,11 +66,6 @@ async def cp4d_db(test_database_url):
                 "code": f"CP4D-{marker[:16]}",
                 "name": f"CP4D isolated {marker[:12]}",
             })).scalar_one()
-            await seed.execute(text("""
-                INSERT INTO payroll.branchpayrollsettings
-                    (companyid, branchid, payrollfrequency, anchorstartdate, isactive)
-                VALUES (:cid, :bid, 'Week', '2088-01-01', TRUE)
-            """), {"cid": seed_ids["company_id"], "bid": branch_id})
             seed_ids["branch_id"] = int(branch_id)
             employee_id = (await seed.execute(text("""
                 INSERT INTO core.employees
@@ -180,9 +175,6 @@ async def cp4d_db(test_database_url):
             await cleanup.execute(text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :id"), {"id": seed_ids["period_id"]})
             await cleanup.execute(text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": seed_ids["driver_id"]})
             await cleanup.execute(text("DELETE FROM core.employees WHERE employeeid = :id"), {"id": seed_ids["employee_id"]})
-            await cleanup.execute(text(
-                "DELETE FROM payroll.branchpayrollsettings WHERE branchid = :bid"
-            ), {"bid": seed_ids["branch_id"]})
             await cleanup.execute(text("DELETE FROM core.branches WHERE branchid = :bid"), {
                 "bid": seed_ids["branch_id"],
             })

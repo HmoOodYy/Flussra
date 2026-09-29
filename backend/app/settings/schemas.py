@@ -16,13 +16,13 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.payroll_setup.schemas import BoundaryChoicesResponse, SetupResponse
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _BRANCH_STATUSES = {"Active", "Inactive", "Closed"}
-
-_PAYROLL_FREQUENCIES = {"Week", "Biweek", "Month", "Custom"}
 
 _ALLOWANCE_CATEGORIES = {
     "Vacation", "Sick", "Bereavement", "Jury Duty", "Personal", "Other",
@@ -95,8 +95,12 @@ class BranchAdmin(BaseModel):
     notes: str | None = None
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
-    # Operational metrics (gracefully degraded — None if query failed)
+    # Compatibility readiness flag is derived from canonical Payroll Setup authority.
     payroll_setup_done: bool = False
+    # Null unless caller has branch payroll.view/non-driver access or onboarding assign access.
+    schedule_readiness_reason: str | None = None
+    # Period start date the readiness reason was evaluated against; same visibility as the reason.
+    schedule_readiness_date: date | None = None
     status_keys_count: int | None = None
     total_people_count: int | None = None
     active_drivers_count: int | None = None
@@ -115,6 +119,7 @@ class BranchCreate(BaseModel):
     postal_code: str | None = None
     country: str | None = None
     notes: str | None = None
+    first_payroll_start_date: date | None = None
 
     @field_validator("branch_name")
     @classmethod
@@ -178,111 +183,20 @@ class BranchUpdate(BaseModel):
         return v
 
 
-# ---------------------------------------------------------------------------
-# Branch payroll setup
-# ---------------------------------------------------------------------------
-
-class PayrollSetup(BaseModel):
+class OnboardingOptionsResponse(BaseModel):
     """
-    Branch payroll-schedule configuration returned by GET and PUT
-    /settings/branches/{id}/payroll-setup.
+    Returned by GET /settings/branches/onboarding-options.
+
+    default_setup is the company's current default Payroll Setup, or null when
+    none is configured. choices is the canonical boundary-choices navigation
+    (nearest valid previous/next first-payroll dates, a suggested date, and
+    why an explicit `around` date is invalid) computed against that Setup's
+    onboarding window; it is null whenever default_setup is null. An archived
+    default Setup still returns choices — with a SETUP_NOT_ACTIVE conflict —
+    rather than being special-cased here.
     """
-    settings_id: int
-    company_id: int
-    branch_id: int
-    branch_name: str | None = None
-    payroll_frequency: str            # Week | Biweek | Month | Custom
-    anchor_start_date: date           # reference date for period calculation
-    pay_date_offset_days: int = 0
-    pay_day_of_week: int | None = None  # 1=Sun … 7=Sat
-    first_pay_date: date | None = None
-    include_pay_day_as_work_day: bool = False
-    normal_days_off_mask: int | None = None  # bitmask (bit 0=Sun … bit 6=Sat)
-    # Custom cadence: inclusive period length in days (required when frequency=Custom)
-    custom_interval_days: int | None = None
-    is_active: bool = True
-    notes: str | None = None
-    created_at_utc: datetime
-    updated_at_utc: datetime | None = None
-    # CP-2A: immutable schedule version bound at last setup update (or backfill).
-    schedule_version_id: int | None = None
-
-
-class PayrollSetupUpsert(BaseModel):
-    """
-    Payload to create or replace the branch payroll-schedule configuration.
-
-    Sent via PUT /settings/branches/{id}/payroll-setup.
-    An existing configuration is fully replaced; missing optional fields
-    revert to their defaults.
-
-    Custom frequency:
-      Either ``custom_interval_days`` (inclusive period length in days, > 0)
-      or ``first_custom_end_date`` (the end date of the first period, from which
-      the interval is derived as ``first_custom_end_date - anchor_start_date + 1 day``)
-      must be provided.  ``custom_interval_days`` takes precedence if both are sent.
-    """
-    payroll_frequency: str
-    anchor_start_date: date
-    pay_day_of_week: int | None = None
-    first_pay_date: date | None = None
-    include_pay_day_as_work_day: bool = False
-    normal_days_off_mask: int | None = None
-    notes: str | None = None
-    # Custom cadence fields
-    custom_interval_days: int | None = None
-    first_custom_end_date: date | None = None  # alternative — derive interval from this
-
-    @field_validator("payroll_frequency")
-    @classmethod
-    def frequency_valid(cls, v: str) -> str:
-        if v not in _PAYROLL_FREQUENCIES:
-            raise ValueError(
-                f"payroll_frequency must be one of {sorted(_PAYROLL_FREQUENCIES)}"
-            )
-        return v
-
-    @field_validator("pay_day_of_week")
-    @classmethod
-    def day_of_week_range(cls, v: int | None) -> int | None:
-        if v is not None and v not in range(1, 8):
-            raise ValueError("pay_day_of_week must be 1 (Sun) through 7 (Sat)")
-        return v
-
-    @field_validator("normal_days_off_mask")
-    @classmethod
-    def mask_range(cls, v: int | None) -> int | None:
-        if v is not None and not (0 <= v <= 127):
-            raise ValueError("normal_days_off_mask must be 0–127 (7-bit bitmask)")
-        return v
-
-    @field_validator("custom_interval_days")
-    @classmethod
-    def interval_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("custom_interval_days must be a positive integer (≥ 1)")
-        return v
-
-    @model_validator(mode="after")
-    def validate_custom_cadence(self) -> "PayrollSetupUpsert":
-        if self.payroll_frequency != "Custom":
-            return self
-
-        # Derive interval from first_custom_end_date if not provided directly
-        if self.custom_interval_days is None and self.first_custom_end_date is not None:
-            delta = (self.first_custom_end_date - self.anchor_start_date).days + 1
-            if delta <= 0:
-                raise ValueError(
-                    "first_custom_end_date must be on or after anchor_start_date"
-                )
-            self.custom_interval_days = delta
-
-        if self.custom_interval_days is None:
-            raise ValueError(
-                "custom_interval_days (or first_custom_end_date) is required "
-                "when payroll_frequency is 'Custom'"
-            )
-        return self
+    default_setup: SetupResponse | None
+    choices: BoundaryChoicesResponse | None
 
 
 # ---------------------------------------------------------------------------

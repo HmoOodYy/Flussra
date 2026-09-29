@@ -61,7 +61,6 @@ from app.payroll.period_calculation import (
 )
 from app.payroll.period_creation import (
     _create_period_pay_item_rows,  # noqa: F401
-    ensure_current_schedule_version,  # noqa: F401
 )
 
 # Compatibility for test_cp4d_submit_snapshot_capture.py (also calls

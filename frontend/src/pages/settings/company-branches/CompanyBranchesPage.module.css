@@ -656,6 +656,94 @@
   outline-offset: 2px;
 }
 
+/* ── Payroll Schedule follow-up link (U7) ── */
+.scheduleLink {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-blue-600);
+  text-decoration: none;
+}
+.scheduleLink:hover { text-decoration: underline; }
+
+/* ── Help text under a form field (U7) ── */
+.fieldHelp {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: #6b7280;
+  line-height: 1.45;
+}
+
+/* ── Branch onboarding (Unit B) ── */
+.onboardingSection {
+  margin-top: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.onboardingUnavailableNote {
+  margin-top: 0.9rem;
+}
+
+.onboardingCheckboxRow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--color-gray-700);
+}
+
+.onboardingDefaultInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--color-blue-50, #eff6ff);
+  border: 1px solid var(--color-blue-100, #dbeafe);
+  border-radius: var(--radius-md);
+}
+
+.onboardingDefaultInfoLabel {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-gray-700);
+}
+
+.onboardingMissingDefault {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.6rem 0.75rem;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+  color: #92400e;
+}
+
+/* ── Inline error/status code chip (U7) ── */
+.errorCode {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  font-family: 'Courier New', monospace;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: rgba(0,0,0,0.06);
+  border-radius: 4px;
+}
+
+/* ── Success dialog follow-up links (U7) ── */
+.successLinks {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
 /* ── Branch default section in edit modal ── */
 .defaultSection {
   margin-bottom: 1.25rem;

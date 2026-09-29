@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.payroll import current_hub
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
     create_setup,

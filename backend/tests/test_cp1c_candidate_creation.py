@@ -31,7 +31,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll_setup.policy import (
+from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
     create_setup,
@@ -1432,15 +1432,14 @@ class TestConcurrency:
         )
         assert created.status_code == 201
 
-        # The disabled legacy path cannot create a competing Draft beside the Open.
+        # The retired legacy path is not registered and cannot create a period.
         lr = await session_client.post(
             "/payroll/periods",
             json={"branch_id": bid, "period_type": "Week",
                   "start_date": "2096-01-14", "end_date": "2096-01-20"},
             headers=_auth(auth_token),
         )
-        assert lr.status_code == 410, lr.text
-        assert lr.json()["detail"]["code"] == "LEGACY_DIRECT_PERIOD_CREATION_ROUTE_DISABLED"
+        assert lr.status_code == 405, lr.text
         count = (await direct_db.execute(_text("""
             SELECT COUNT(*) FROM payroll.PayrollPeriods
             WHERE CompanyID = :cid AND BranchID = :bid AND Status <> 'Cancelled'
@@ -1488,7 +1487,7 @@ class TestConcurrency:
         from sqlalchemy import text as _t
         from sqlalchemy.ext.asyncio import create_async_engine
 
-        from app.payroll_setup.policy import create_draft, publish_version
+        from app.payroll_setup.payroll_policy import create_draft, publish_version
 
         bid = cp1c_setup["branch_id"]
         await _cancel_all(direct_db, bid)

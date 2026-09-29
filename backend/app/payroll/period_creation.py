@@ -3,7 +3,9 @@
 The canonical resolver determines dates and exact Assignment/Version authority.
 Confirmation revalidates its signed candidate under the Branch workflow lock and
 atomically freezes Period, PeriodDay, snapshot, and audit evidence. Legacy direct
-creation and next-date entry points are disabled pending physical retirement.
+creation and next-date entry points have been physically retired (Phase 8); the
+candidate-based flow (get_period_candidates / create_period_from_candidate) is
+the sole period-creation path.
 
 The slot matrix is shared with Current Payroll Hub.
 """
@@ -14,29 +16,24 @@ import hmac as _hmac_mod
 import json
 from datetime import UTC, date, datetime, timedelta
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.config import settings
 from app.core.service import (
-    _check_any_permission,
     _check_branch_access,
     _check_permission,
     _require_not_driver_role,
 )
 from app.payroll.audit_evidence import initialize_period_audit_evidence_coverage
 from app.payroll.eligibility import _create_period_driver_eligibility_rows
-from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import (
     CandidateNavigationInfo,
     CandidatePreviewResponse,
     CandidateSelectedInfo,
-    NextPeriodDates,
-    PeriodCreate,
     PeriodCreationRequest,
     PeriodCreationResponse,
-    PeriodSummary,
 )
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.payroll_setup.audit import write_policy_audit
@@ -60,8 +57,6 @@ def _cp1c_error(code: str, message: str, http_status: int = 409) -> None:
         status_code=http_status,
         detail={"code": code, "message": message},
     )
-
-
 # ---------------------------------------------------------------------------
 # Helper: slot matrix
 # ---------------------------------------------------------------------------
@@ -112,9 +107,7 @@ def _check_slot_matrix(
 # ---------------------------------------------------------------------------
 # Shared period-naming / date-math primitives
 #
-# Used by both the candidate-based path below and the legacy create_period
-# path (see the "Legacy period creation" section at the end of this module,
-# since B4-21).
+# Used by the candidate-based path below.
 # ---------------------------------------------------------------------------
 
 def _auto_period_name(period_type: str, start: date, end: date) -> str:
@@ -244,14 +237,6 @@ def _decode_candidate_key(key: str) -> tuple[dict, str]:
 # Helpers: fingerprints
 # ---------------------------------------------------------------------------
 
-def _setup_fingerprint(freq: str, anchor: date, interval_days: int | None) -> str:
-    return json.dumps(
-        {"anchor": str(anchor), "freq": freq, "interval": interval_days},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
 def _slot_fingerprint(periods: list[dict]) -> str:
     """Deterministic fingerprint of all non-Cancelled periods (sorted status+id pairs)."""
     pairs = sorted(
@@ -347,157 +332,6 @@ async def _timeline_fingerprints(
         payload = json.dumps([rows, revision], separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()
     return fingerprint(setup_state, setup_revision), fingerprint(branch_state, branch_revision)
-
-
-# ---------------------------------------------------------------------------
-# CP-2A: ensure current schedule version
-# ---------------------------------------------------------------------------
-
-async def ensure_current_schedule_version(
-    company_id: int,
-    branch_id: int,
-    user_id: int | None,
-    db: AsyncConnection,
-) -> int | None:
-    """
-    Return the current ScheduleVersionID for this branch.
-
-    Must be called while holding the branch workflow advisory lock.
-
-    If BranchPayrollSettings.CurrentScheduleVersionID is already set and the
-    referenced version row exists for the correct company/branch, return it.
-
-    If it is NULL (e.g. setup pre-dates CP-2A migration and the backfill missed
-    this row, which should not happen but is handled defensively), create a new
-    repair version (SourceAction='REPAIR') and update CurrentScheduleVersionID.
-
-    Returns None if there is no active setup row at all. Callers must treat
-    None as PAYROLL_SETUP_REQUIRED — the same condition as a missing setup.
-
-    Does not create versions for missing/inactive setup; period creation paths
-    must reject PAYROLL_SETUP_REQUIRED before calling this.
-    """
-    setup_row = (await db.execute(
-        text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays,
-                   normaldaysoffmask, paydayofweek, firstpaydate,
-                   includepaydayasworkday, currentscheduleversionid
-            FROM   payroll.branchpayrollsettings
-            WHERE  branchid = :bid AND companyid = :cid AND isactive = TRUE
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )).mappings().first()
-
-    if setup_row is None:
-        return None
-
-    sv_id = setup_row.get("currentscheduleversionid")
-
-    if sv_id is not None:
-        # Verify the referenced version exists for this company/branch.
-        exists = (await db.execute(
-            text("""
-                SELECT 1 FROM payroll.PayrollScheduleVersions
-                WHERE scheduleversionid = :sv_id
-                  AND companyid = :cid AND branchid = :bid
-            """),
-            {"sv_id": sv_id, "cid": company_id, "bid": branch_id},
-        )).first()
-        if exists is not None:
-            return sv_id
-
-    # CurrentScheduleVersionID is missing or points to a stale/wrong row.
-    # Create a repair version from the current live setup values.
-    freq = setup_row["payrollfrequency"]
-    anchor = setup_row["anchorstartdate"]
-    interval_days = setup_row.get("customintervaldays")
-    config_hash = json.dumps(
-        {"anchor": str(anchor), "freq": freq, "interval": interval_days},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-    max_row = await db.execute(
-        text("""
-            SELECT COALESCE(MAX(versionnumber), 0) AS maxver
-            FROM   payroll.PayrollScheduleVersions
-            WHERE  companyid = :cid AND branchid = :bid
-        """),
-        {"cid": company_id, "bid": branch_id},
-    )
-    next_version = (max_row.scalar_one() or 0) + 1
-
-    ins = await db.execute(
-        text("""
-            INSERT INTO payroll.PayrollScheduleVersions
-                (CompanyID, BranchID, VersionNumber,
-                 PayrollFrequency, AnchorStartDate,
-                 CustomIntervalDays, NormalDaysOffMask,
-                 PayDayOfWeek, FirstPayDate, IncludePayDayAsWorkDay,
-                 EffectiveFromDate, EffectiveToDate,
-                 CreatedByUserID, SourceAction, ConfigHash)
-            VALUES
-                (:cid, :bid, :vnum,
-                 :freq, :anchor,
-                 :interval_days, :mask,
-                 :pdow, :fpd, :incl,
-                 :anchor, NULL,
-                 :uid, 'REPAIR', :chash)
-            RETURNING ScheduleVersionID
-        """),
-        {
-            "cid":           company_id,
-            "bid":           branch_id,
-            "vnum":          next_version,
-            "freq":          freq,
-            "anchor":        anchor,
-            "interval_days": interval_days,
-            "mask":          setup_row.get("normaldaysoffmask"),
-            "pdow":          setup_row.get("paydayofweek"),
-            "fpd":           setup_row.get("firstpaydate"),
-            "incl":          bool(setup_row.get("includepaydayasworkday") or False),
-            "uid":           user_id,
-            "chash":         config_hash,
-        },
-    )
-    new_sv_id: int = ins.scalar_one()
-
-    await db.execute(
-        text("""
-            UPDATE payroll.BranchPayrollSettings
-            SET    CurrentScheduleVersionID = :sv_id
-            WHERE  CompanyID = :cid AND BranchID = :bid
-        """),
-        {"sv_id": new_sv_id, "cid": company_id, "bid": branch_id},
-    )
-
-    return new_sv_id
-
-
-# ---------------------------------------------------------------------------
-# Helper: candidate date computation at offset N
-# ---------------------------------------------------------------------------
-
-def _candidate_dates_at_offset(
-    frequency: str,
-    anchor: date,
-    interval_days: int | None,
-    pred_end: date | None,
-    offset: int,
-) -> tuple[date, date]:
-    """Compute (start, end) for the candidate at position `offset` from current."""
-    if pred_end is None:
-        start = anchor
-    else:
-        start = max(anchor, pred_end + timedelta(days=1))
-
-    end = _period_end(frequency, start, interval_days)
-
-    for _ in range(offset):
-        start = end + timedelta(days=1)
-        end = _period_end(frequency, start, interval_days)
-
-    return start, end
 
 
 # ---------------------------------------------------------------------------
@@ -1186,370 +1020,3 @@ async def create_period_from_candidate(
         status=target_status,
         created_at_utc=created_at,
     )
-
-
-# ---------------------------------------------------------------------------
-# Legacy period creation (compatibility entry point)
-# ---------------------------------------------------------------------------
-#
-# Stage B4-21 moved create_period, compute_period_dates, and
-# get_next_period_dates here from app.payroll.service — pure relocation, no
-# behavior change. router.py's deprecated POST /payroll/periods now calls
-# create_period directly; GET /payroll/periods/next-period-dates calls
-# get_next_period_dates directly. Neither is unified with this module's
-# candidate-based path (get_period_candidates / create_period_from_candidate)
-# — see the module docstring for the specific behavioral differences that
-# make them deliberately separate flows.
-
-def compute_period_dates(
-    frequency: str,
-    anchor_start_date: date,
-    last_end_date: date | None = None,
-    custom_interval_days: int | None = None,
-) -> tuple[date, date]:
-    """
-    Compute the next period's (start, end) dates from a branch's payroll setup.
-
-    Rules
-    -----
-    - If *last_end_date* is None the first period starts on *anchor_start_date*.
-    - Otherwise the next period starts the day after *last_end_date*.
-    - Period length depends on *frequency*:
-
-      ======= =============================================
-      Week    7 days  (start + 6 days)
-      Biweek  14 days (start + 13 days)
-      Month   One calendar month (start to same day next month minus 1 day)
-      Custom  Requires custom_interval_days > 0 (inclusive period length)
-      ======= =============================================
-
-    Both start and end are inclusive.
-
-    Raises
-    ------
-    ValueError if *frequency* is unrecognised, or if 'Custom' and
-    *custom_interval_days* is None or ≤ 0.
-    """
-    start = anchor_start_date if last_end_date is None else last_end_date + timedelta(days=1)
-
-    if frequency == "Week":
-        end = start + timedelta(days=6)
-    elif frequency == "Biweek":
-        end = start + timedelta(days=13)
-    elif frequency == "Month":
-        end = _month_end(start)
-    elif frequency == "Custom":
-        if not custom_interval_days or custom_interval_days <= 0:
-            raise ValueError(
-                "Custom frequency requires custom_interval_days > 0. "
-                "Configure the custom cadence in Payroll Setup first."
-            )
-        end = start + timedelta(days=custom_interval_days - 1)
-    else:
-        raise ValueError(f"Unknown payroll frequency: {frequency!r}")
-
-    return start, end
-
-
-async def get_next_period_dates(
-    company_id: int,
-    user_id: int,
-    branch_id: int,
-    db: AsyncConnection,
-) -> NextPeriodDates:
-    """Disabled legacy next-date entry point; candidates own date authority."""
-    _cp1c_error("LEGACY_NEXT_DATES_DISABLED", "Use the canonical period-candidates endpoint.", 410)
-    await _require_not_driver_role(company_id, user_id, db)
-
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    if not can_see_all and branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to the requested branch.",
-        )
-    await _check_any_permission(
-        company_id, user_id, branch_id,
-        ["payroll.view", "payroll.entry", "payroll.finalize"],
-        db,
-    )
-
-    # Fetch branch payroll setup
-    setup_row = await db.execute(
-        text("""
-            SELECT payrollfrequency, anchorstartdate, customintervaldays
-            FROM   payroll.branchpayrollsettings
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  isactive  = TRUE
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )
-    setup = setup_row.mappings().first()
-    if setup is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"No active payroll setup found for branch {branch_id}. "
-                "Configure it in Settings → Payroll Setup first."
-            ),
-        )
-
-    frequency: str         = setup["payrollfrequency"]
-    anchor: date           = setup["anchorstartdate"]
-    interval_days: int | None = setup.get("customintervaldays")
-
-    # MAX end_date of non-cancelled periods for this branch
-    last_row = await db.execute(
-        text("""
-            SELECT MAX(enddate) AS last_end
-            FROM   payroll.payrollperiods
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  status    != 'Cancelled'
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )
-    last_end: date | None = last_row.scalar_one_or_none()
-
-    is_custom = (frequency == "Custom")
-    start_date_out: date | None = None
-    end_date_out:   date | None = None
-
-    if frequency == "Custom":
-        if interval_days and interval_days > 0:
-            # Custom with a valid saved interval — compute automatically
-            start_date_out, end_date_out = compute_period_dates(
-                frequency, anchor, last_end, custom_interval_days=interval_days
-            )
-        # else: interval missing → leave start/end as None (setup incomplete)
-    else:
-        start_date_out, end_date_out = compute_period_dates(frequency, anchor, last_end)
-
-    return NextPeriodDates(
-        branch_id=branch_id,
-        period_type=frequency,
-        anchor_start_date=anchor,
-        last_period_end_date=last_end,
-        start_date=start_date_out,
-        end_date=end_date_out,
-        is_custom=is_custom,
-        custom_interval_days=interval_days,
-    )
-
-
-async def create_period(
-    company_id: int,
-    user_id: int,
-    data: PeriodCreate,
-    db: AsyncConnection,
-) -> PeriodSummary:
-    """Disabled legacy direct-create entry point; candidate confirmation owns creation."""
-    _cp1c_error("LEGACY_PERIOD_CREATION_DISABLED", "Use candidate-based period creation.", 410)
-    # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
-
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-
-    if not can_see_all and data.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to the target branch.",
-        )
-
-    # Permission gate: creating a period requires payroll.period.create.
-    # This is intentionally separate from payroll.entry (data entry/editing).
-    # Migration 0030 seeds this permission and assigns it to appropriate roles.
-    await _check_permission(company_id, user_id, data.branch_id, "payroll.period.create", db)
-
-    # CP-1C: Acquire branch advisory lock before overlap check and insert.
-    # Serializes all period creation (both legacy and candidate-based) for this branch.
-    await _acquire_branch_workflow_lock(company_id, data.branch_id, db)
-
-    # CP-1D: Draft creation guard — legacy POST /payroll/periods creates a Draft;
-    # this is only valid when exactly one Open exists and no Draft already exists.
-    _slot_result = await db.execute(
-        text("""
-            SELECT status FROM payroll.payrollperiods
-            WHERE  companyid = :cid AND branchid = :bid
-              AND  status IN ('Draft', 'Open', 'InReview', 'Returned')
-        """),
-        {"cid": company_id, "bid": data.branch_id},
-    )
-    _slot_statuses = [r["status"] for r in _slot_result.mappings().all()]
-    if "Draft" in _slot_statuses:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "DRAFT_SLOT_OCCUPIED",
-                "message": (
-                    "A Draft period already exists for this branch. "
-                    "Only one Draft period is permitted per branch at a time."
-                ),
-            },
-        )
-    _open_count = _slot_statuses.count("Open")
-    if _open_count == 0:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "DRAFT_CREATION_REQUIRES_OPEN",
-                "message": (
-                    "No Open period exists for this branch. "
-                    "Legacy Draft creation requires exactly one Open period. "
-                    "Use the candidate-based period creation endpoint instead."
-                ),
-            },
-        )
-    if _open_count > 1:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "WORKFLOW_SLOT_CONFLICT",
-                "message": (
-                    "More than one Open period exists for this branch — "
-                    "the workflow is in an inconsistent state."
-                ),
-            },
-        )
-    # Exactly one Open, no Draft → allow (InReview/Returned co-existence is valid)
-
-    # Verify branch belongs to this company and get its BranchCode for period_code
-    br_result = await db.execute(
-        text(
-            "SELECT branchcode FROM core.branches "
-            "WHERE branchid = :bid AND companyid = :cid"
-        ),
-        {"bid": data.branch_id, "cid": company_id},
-    )
-    br_row = br_result.mappings().first()
-    if br_row is None:
-        raise HTTPException(
-            status_code=422,
-            detail="branch_id does not exist in this company.",
-        )
-    branch_code: str = br_row["branchcode"]
-
-    # Guard: reject dates that overlap any existing non-cancelled period for this branch.
-    # Every status except Cancelled reserves the date range — Locked and Archived
-    # represent official historical records that must not be overlapped.
-    overlap_row = await db.execute(
-        text("""
-            SELECT payrollperiodid, status, startdate, enddate
-            FROM   payroll.payrollperiods
-            WHERE  branchid  = :bid
-              AND  companyid = :cid
-              AND  status    != 'Cancelled'
-              AND  startdate <= :end_date
-              AND  enddate   >= :start_date
-            LIMIT  1
-        """),
-        {
-            "bid":        data.branch_id,
-            "cid":        company_id,
-            "start_date": data.start_date,
-            "end_date":   data.end_date,
-        },
-    )
-    existing = overlap_row.mappings().first()
-    if existing is not None:
-        ex_id     = existing["payrollperiodid"]
-        ex_status = existing["status"]
-        ex_start  = existing["startdate"]
-        ex_end    = existing["enddate"]
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"A payroll period already exists for this date range. "
-                f"Existing period (ID {ex_id}) status: {ex_status}, "
-                f"dates: {ex_start} – {ex_end}. "
-                f"Open the existing period instead of creating a new one. "
-                f"Locked and Archived periods are official historical records and cannot be overlapped."
-            ),
-        )
-
-    # Auto-generate period_name if not provided
-    period_name = data.period_name or _auto_period_name(
-        data.period_type, data.start_date, data.end_date
-    )
-
-    # Auto-generate a unique period_code
-    base_code = f"{branch_code}-{data.start_date.strftime('%Y%m%d')}"
-    period_code = await _unique_period_code(base_code, company_id, data.branch_id, db)
-
-    # CP-2A: ensure schedule version and set on new period. Still under advisory lock.
-    # None means no active setup — reject before inserting a period with NULL version.
-    legacy_sv_id = await ensure_current_schedule_version(company_id, data.branch_id, user_id, db)
-    if legacy_sv_id is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code":    "PAYROLL_SETUP_REQUIRED",
-                "message": (
-                    "No active payroll setup or schedule version exists for this branch. "
-                    "Configure payroll setup before creating periods."
-                ),
-            },
-        )
-
-    # Insert
-    insert_result = await db.execute(
-        text("""
-            INSERT INTO payroll.payrollperiods
-                (companyid, branchid, periodcode, periodname, periodtype,
-                 startdate, enddate, paydate, status, notes, createdbyuserid,
-                 scheduleversionid)
-            VALUES
-                (:company_id, :branch_id, :period_code, :period_name, :period_type,
-                 :start_date, :end_date, :pay_date, 'Draft', :notes, :created_by,
-                 :sv_id)
-            RETURNING payrollperiodid
-        """),
-        {
-            "company_id":  company_id,
-            "branch_id":   data.branch_id,
-            "period_code": period_code,
-            "period_name": period_name,
-            "period_type": data.period_type,
-            "start_date":  data.start_date,
-            "end_date":    data.end_date,
-            "pay_date":    data.pay_date,
-            "notes":       data.notes,
-            "created_by":  user_id,
-            "sv_id":       legacy_sv_id,
-        },
-    )
-    period_id: int = insert_result.scalar_one()
-    await initialize_period_audit_evidence_coverage(
-        company_id=company_id, branch_id=data.branch_id, period_id=period_id, db=db,
-    )
-
-    # CP-2B: create period-day snapshot from the schedule version's mask.
-    # Read from PayrollScheduleVersions (immutable) — not from mutable BranchPayrollSettings.
-    sv_mask_row = (await db.execute(
-        text(
-            "SELECT normaldaysoffmask FROM payroll.PayrollScheduleVersions "
-            "WHERE scheduleversionid = :sv_id"
-        ),
-        {"sv_id": legacy_sv_id},
-    )).mappings().first()
-    period_mask = sv_mask_row["normaldaysoffmask"] if sv_mask_row else None
-    await _create_period_day_rows(
-        period_id, company_id, data.branch_id,
-        legacy_sv_id, data.start_date, data.end_date, period_mask, db,
-    )
-
-    # CP-2C: create period pay-item layout snapshot.
-    await _create_period_pay_item_rows(
-        period_id, company_id, data.branch_id, data.start_date, db,
-    )
-
-    # CP-2E: create driver eligibility snapshot for legacy Draft periods.
-    # Draft stays provisional (freeze=False); freeze happens when promoted to Open.
-    await _create_period_driver_eligibility_rows(
-        period_id, company_id, data.branch_id, db,
-        snapshot_source="Generated",
-        freeze=False,
-        created_by_user_id=user_id,
-    )
-
-    return await get_period_by_id(company_id, user_id, period_id, db)
