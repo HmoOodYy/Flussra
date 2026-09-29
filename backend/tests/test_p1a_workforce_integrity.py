@@ -313,7 +313,7 @@ async def test_current_profile_uses_company_business_date(direct_db):
 
 
 @pytest.mark.asyncio
-async def test_legacy_driver_patch_keeps_ordinary_edits_but_rejects_workflow_transitions(
+async def test_core_driver_patch_is_driver_owned_and_rejects_workforce_fields(
     client, auth_token, created_driver_id, direct_db
 ):
     headers = {"Authorization": f"Bearer {auth_token}"}
@@ -325,45 +325,14 @@ async def test_legacy_driver_patch_keeps_ordinary_edits_but_rejects_workflow_tra
     assert ordinary.status_code == 200
     assert ordinary.json()["cdl_number"] == "P1A-LEGACY-EDIT"
 
-    inactive = await client.patch(
-        f"/core/drivers/{created_driver_id}",
-        json={"employment_status": "Inactive"}, headers=headers,
-    )
-    assert inactive.status_code == 200
-    active = await client.patch(
-        f"/core/drivers/{created_driver_id}",
-        json={"employment_status": "Active"}, headers=headers,
-    )
-    assert active.status_code == 200
-
     for payload in (
         {"driver_status": "Transferred"},
         {"driver_status": "Terminated"},
-        {"employment_status": "Terminated", "termination_date": "2026-01-01"},
+        {"employment_status": "Inactive"},
+        {"termination_date": "2026-01-01"},
+        {"full_name": "Employee-owned field"},
     ):
         response = await client.patch(
             f"/core/drivers/{created_driver_id}", json=payload, headers=headers
         )
         assert response.status_code == 422
-
-    employee_id = (await direct_db.execute(text(
-        "SELECT employeeid FROM core.drivers WHERE driverid=:did"
-    ), {"did": created_driver_id})).scalar_one()
-    await direct_db.execute(text("""
-        UPDATE core.employees
-        SET employmentstatus='Terminated', terminationdate='2026-01-01'
-        WHERE employeeid=:eid
-    """), {"eid": employee_id})
-    try:
-        for status in ("Active", "Inactive"):
-            response = await client.patch(
-                f"/core/drivers/{created_driver_id}",
-                json={"employment_status": status}, headers=headers,
-            )
-            assert response.status_code == 422
-    finally:
-        await direct_db.execute(text("""
-            UPDATE core.employees
-            SET employmentstatus='Active', terminationdate=NULL
-            WHERE employeeid=:eid
-        """), {"eid": employee_id})

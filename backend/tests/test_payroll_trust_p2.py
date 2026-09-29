@@ -118,6 +118,7 @@ async def _create_driver(
     token: str,
     branch_id: int,
     suffix: str,
+    db=None,
     hire_date: str | None = None,
     termination_date: str | None = None,
 ) -> int:
@@ -138,14 +139,17 @@ async def _create_driver(
     assert r.status_code == 201, f"driver create failed: {r.text}"
     driver_id = r.json()["driver_id"]
 
-    # DriverCreate does not accept termination_date — patch separately
     if termination_date is not None:
-        patch = await client.patch(
-            f"/core/drivers/{driver_id}",
-            json={"termination_date": termination_date},
-            headers=headers,
-        )
-        assert patch.status_code == 200, f"driver termination patch failed: {patch.text}"
+        assert db is not None, "Termination fixture setup requires the test database connection."
+        await db.execute(_text("""
+            UPDATE core.Employees e
+            SET TerminationDate = :termination_date
+            FROM core.Drivers d
+            WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
+        """), {
+            "driver_id": driver_id,
+            "termination_date": _date.fromisoformat(termination_date),
+        })
 
     return driver_id
 
@@ -277,6 +281,7 @@ class TestAddDraftLineEligibility:
         # terminated day before work date
         driver_id = await _create_driver(
             c, tok, bid, "T3",
+            db=p2_env["db"],
             hire_date="2034-01-01",
             termination_date="2034-05-11",  # one day before WORK_MID
         )
@@ -295,6 +300,7 @@ class TestAddDraftLineEligibility:
 
         driver_id = await _create_driver(
             c, tok, bid, "T4",
+            db=p2_env["db"],
             hire_date="2034-01-01",
             termination_date=WORK_MID,  # exact match — still eligible
         )
@@ -565,6 +571,7 @@ class TestPeriodPayEligibility:
         # Driver terminated before period start
         driver_id = await _create_driver(
             c, tok, bid, "T10",
+            db=p2_env["db"],
             hire_date="2034-01-01",
             termination_date="2034-04-30",  # well before P_START 2034-05-06
         )

@@ -13,7 +13,7 @@ Permission model (Dashboard D1):
     review_queue     review.decide | payroll.entry | payroll.view
     rates_health     payrates.view | payrates.edit | payroll.approve_rate
     setup_health     setup.manage | settings.manage
-    transfers        drivers.view | drivers.edit | drivers.manage
+    transfers        drivers.view | drivers.edit
 
   - Branch scope: each section is filtered to branches where the user holds a
     qualifying permission.  For AllCompanyBranches users a company-level check
@@ -70,7 +70,6 @@ _SETUP_PERMS = [
 _PEOPLE_PERMS = [
     "drivers.view",
     "drivers.edit",
-    "drivers.manage",
 ]
 _FINALIZE_PERMS = ["payroll.finalize"]
 

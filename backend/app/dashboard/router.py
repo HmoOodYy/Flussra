@@ -5,7 +5,7 @@ Read-only. Access is granted to any non-driver authenticated user who holds
 at least one relevant dashboard permission (payroll.view, payroll.entry,
 payroll.period.create, payroll.finalize, review.decide, payrates.view,
 payrates.edit, payroll.approve_rate, setup.manage, settings.manage,
-drivers.view, drivers.edit, or drivers.manage).
+drivers.view or drivers.edit).
 
 Driver / ODA users are blocked; the frontend shows DriverPlaceholder instead.
 

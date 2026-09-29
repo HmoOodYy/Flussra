@@ -95,14 +95,14 @@ class TestPeople:
     ):
         resp = await client.get(
             "/core/people",
-            params={"employee_type": "Driver"},
+            params={"driver_state": "current"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
         drivers = resp.json()
         assert len(drivers) >= 1
         for p in drivers:
-            assert p["employee_type"] == "Driver"
+            assert p["driver_state"] == "current"
             assert p["driver_id"] is not None
             assert p["driver_status"] is not None
 
@@ -147,7 +147,7 @@ class TestPeople:
             assert "branch_id" in p
             assert "branch_name" in p
             assert "full_name" in p
-            assert "employee_type" in p
+            assert p["driver_state"] in {"current", "pending", "none"}
             assert "employment_status" in p
 
 
@@ -433,7 +433,7 @@ class TestDriverPatch:
         )
         assert resp.status_code == 401
 
-    async def test_patch_driver_updates_name(
+    async def test_patch_driver_updates_driver_code(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -441,11 +441,11 @@ class TestDriverPatch:
     ):
         resp = await client.patch(
             f"/core/drivers/{created_driver_id}",
-            json={"preferred_name": "Patched-TD1"},
+            json={"driver_code": "Patched-TD1"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        assert resp.json()["preferred_name"] == "Patched-TD1"
+        assert resp.json()["driver_code"] == "Patched-TD1"
 
     async def test_patch_driver_updates_status(
         self,
@@ -490,12 +490,12 @@ class TestDriverPatch:
     ):
         resp = await client.patch(
             "/core/drivers/999999",
-            json={"preferred_name": "Ghost"},
+            json={"driver_code": "Ghost"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 404
 
-    async def test_patch_driver_blank_name_returns_422(
+    async def test_patch_driver_rejects_employee_owned_fields(
         self,
         client: httpx.AsyncClient,
         auth_token: str,

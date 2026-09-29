@@ -20,6 +20,7 @@ Tests cover:
 
 Isolation: all periods use dates in 2089 to avoid conflicts with other modules.
 """
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
@@ -220,13 +221,17 @@ async def _set_termination_date(
     token: str,
     driver_id: int,
     termination_date: str,
+    db,
 ) -> None:
-    r = await client.patch(
-        f"/core/drivers/{driver_id}",
-        json={"termination_date": termination_date},
-        headers=auth(token),
-    )
-    assert r.status_code == 200, f"Set termination_date failed: {r.text}"
+    await db.execute(_text("""
+        UPDATE core.Employees e
+        SET TerminationDate = :termination_date
+        FROM core.Drivers d
+        WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
+    """), {
+        "driver_id": driver_id,
+        "termination_date": date.fromisoformat(termination_date),
+    })
 
 
 async def _create_and_approve_rate(
@@ -413,7 +418,7 @@ class TestDriverEligibilityByDate:
             "CP5 TermAbsent Driver",
         )
         await _set_termination_date(
-            session_client, auth_token, driver_id, DATE_JUN25
+            session_client, auth_token, driver_id, DATE_JUN25, direct_db
         )
         try:
             resp = await session_client.get(
@@ -449,7 +454,7 @@ class TestDriverEligibilityByDate:
             "CP5 TermVis Driver",
         )
         await _set_termination_date(
-            session_client, auth_token, driver_id, DATE_JUN25
+            session_client, auth_token, driver_id, DATE_JUN25, direct_db
         )
         try:
             for wdate in (DATE_JUN21, DATE_JUN23, DATE_JUN25):
@@ -510,7 +515,7 @@ class TestSavedLinePersistsAfterTermination:
 
         # Now set a termination date BEFORE the line's work_date
         await _set_termination_date(
-            session_client, auth_token, paytest_driver_id, DATE_JUN21
+            session_client, auth_token, paytest_driver_id, DATE_JUN21, direct_db
         )
         try:
             # The line must still be retrievable via GET /lines
@@ -524,12 +529,11 @@ class TestSavedLinePersistsAfterTermination:
                 "Draft line must persist in DB even after driver is terminated"
             )
         finally:
-            # Restore: clear termination_date so the driver is active again
-            await session_client.patch(
-                f"/core/drivers/{paytest_driver_id}",
-                json={"termination_date": None},
-                headers=headers,
-            )
+            await direct_db.execute(_text("""
+                UPDATE core.Employees e SET TerminationDate = NULL
+                FROM core.Drivers d
+                WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_id": paytest_driver_id})
             await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 

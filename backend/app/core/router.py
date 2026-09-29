@@ -56,10 +56,7 @@ async def list_people(
     token: TokenDep,
     db: DbDep,
     branch_id: int | None = Query(None, description="Filter to a specific branch"),
-    employee_type: str | None = Query(
-        None,
-        description="Driver | OfficeStaff | Manager | PayrollUser",
-    ),
+    driver_state: str | None = Query(None, pattern="^(current|pending|none)$"),
     employment_status: str | None = Query(
         None,
         description="Active | Inactive | Terminated",
@@ -71,7 +68,7 @@ async def list_people(
         user_id=int(token["sub"]),
         db=db,
         branch_id=branch_id,
-        employee_type=employee_type,
+        driver_state=driver_state,
         employment_status=employment_status,
         q=q,
     )
