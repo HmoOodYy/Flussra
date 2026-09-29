@@ -19,7 +19,7 @@ export interface PersonSummary {
   employee_key: string | null;
   full_name: string;
   preferred_name: string | null;
-  employee_type: string;
+  driver_state: 'current' | 'pending' | 'none';
   employment_status: string;
   email: string | null;
   primary_phone: string | null;

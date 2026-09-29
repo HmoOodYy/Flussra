@@ -1407,8 +1407,17 @@ class TestM14SafetyFixes:
         )).mappings().first()
         assert row is not None, "ADJUSTMENT system pay item not found"
         item_id = row["payitemid"]
+        original_effective_from = (await direct_db.execute(
+            _text("SELECT EffectiveFrom FROM core.Drivers WHERE DriverID = :driver_id"),
+            {"driver_id": paytest_driver_id},
+        )).scalar_one()
 
         try:
+            await direct_db.execute(_text(
+                "UPDATE core.Drivers SET EffectiveFrom = DATE '2020-01-01' "
+                "WHERE DriverID = :driver_id"
+            ), {"driver_id": paytest_driver_id})
+
             # Activate ADJUSTMENT with effectivefrom 2026-01-01:
             # active today (2026-06-28 >= 2026-01-01) but NOT for period starting 2025-01-01.
             await direct_db.execute(
@@ -1444,6 +1453,10 @@ class TestM14SafetyFixes:
                 f"/payroll/periods/{pid}/status", json={"status": "Cancelled"}, headers=auth(auth_token)
             )
         finally:
+            await direct_db.execute(
+                _text("UPDATE core.Drivers SET EffectiveFrom = :effective_from WHERE DriverID = :driver_id"),
+                {"effective_from": original_effective_from, "driver_id": paytest_driver_id},
+            )
             # Remove the ADJUSTMENT branch config so other tests see it as inactive
             await direct_db.execute(
                 _text(

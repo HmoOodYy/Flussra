@@ -1408,10 +1408,10 @@ class TestSerializationConcurrency:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
-            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id},
+            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id, "workdate": ret_start},
         )
         await direct_db.commit()
 
@@ -1471,10 +1471,10 @@ class TestSerializationConcurrency:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
-            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id},
+            {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id, "workdate": ret_start},
         )
         await direct_db.commit()
 
@@ -1558,10 +1558,10 @@ class TestSerializationConcurrency:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
-                     linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                     linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
-            {"pid": pid_b, "cid": _COMPANY_ID, "bid": hq_branch_id, "did": hq_driver_id},
+            {"pid": pid_b, "cid": _COMPANY_ID, "bid": hq_branch_id, "did": hq_driver_id, "workdate": start_b},
         )
         await direct_db.commit()
 
@@ -1894,14 +1894,15 @@ class TestDeterministicLockBoundary:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
-                     linetype, linescope, quantity, sourcetype, status)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active')
+                     linetype, linescope, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
             """),
             {
                 "pid": pid_b,
                 "cid": _COMPANY_ID,
                 "bid": hq_branch_id,
                 "did": hq_driver_id,
+                "workdate": b_start,
             },
         )
 

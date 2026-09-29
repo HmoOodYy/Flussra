@@ -295,108 +295,41 @@ async def get_people(
     db: AsyncConnection,
     *,
     branch_id: int | None = None,
-    employee_type: str | None = None,
+    driver_state: str | None = None,
     employment_status: str | None = None,
     q: str | None = None,
 ) -> list[PersonSummary]:
-    """
-    Return all employees joined with their driver record (if any).
-    Filters: branch_id, employee_type, employment_status, free-text q.
-    """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    """Compatibility read over the canonical Workforce Employee read model."""
+    from app.workforce.service import list_employees
 
-    conditions: list[str] = ["e.companyid = :company_id"]
-    params: dict[str, Any] = {"company_id": company_id}
-
-    if branch_id is not None:
-        if not can_see_all and branch_id not in branch_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to the requested branch.",
-            )
-        conditions.append("e.branchid = :branch_id")
-        params["branch_id"] = branch_id
-    elif not can_see_all:
-        if not branch_ids:
-            return []
-        in_clause, in_params = _build_in_clause(branch_ids, "eb")
-        conditions.append(f"e.branchid IN ({in_clause})")
-        params.update(in_params)
-
-    if employee_type:
-        conditions.append("e.employeetype = :employee_type")
-        params["employee_type"] = employee_type
-
-    if employment_status:
-        conditions.append("e.employmentstatus = :employment_status")
-        params["employment_status"] = employment_status
-
-    if q:
-        conditions.append(
-            "(LOWER(e.fullname) LIKE :q"
-            " OR LOWER(COALESCE(e.email, '')) LIKE :q"
-            " OR LOWER(COALESCE(e.employeekey, '')) LIKE :q)"
-        )
-        params["q"] = f"%{q.lower()}%"
-
-    where = " AND ".join(conditions)
-
-    result = await db.execute(
-        text(f"""
-            SELECT
-                e.employeeid,
-                e.branchid,
-                b.branchname,
-                e.employeekey,
-                e.fullname,
-                e.preferredname,
-                e.employeetype,
-                e.employmentstatus,
-                e.email,
-                e.primaryphone,
-                e.hiredate,
-                d.driverid,
-                d.drivercode,
-                d.driverstatus,
-                d.cdlnumber
-            FROM   core.employees e
-            JOIN   core.branches  b ON b.branchid  = e.branchid
-            -- One active driver profile per employee; excludes Transferred/Terminated
-            -- so a completed transfer does not produce a duplicate person row.
-            LEFT JOIN LATERAL (
-                SELECT driverid, drivercode, driverstatus, cdlnumber
-                FROM   core.drivers
-                WHERE  employeeid = e.employeeid
-                  AND  companyid  = :company_id
-                  AND  driverstatus NOT IN ('Transferred', 'Terminated')
-                ORDER  BY driverid DESC
-                LIMIT  1
-            ) d ON true
-            WHERE  {where}
-            ORDER  BY e.fullname
-        """),
-        params,
+    employees = await list_employees(
+        company_id,
+        user_id,
+        db,
+        branch_id=branch_id,
+        employment_status=employment_status,
+        driver_state=driver_state,
+        q=q,
     )
-
     return [
         PersonSummary(
-            employee_id=r["employeeid"],
-            branch_id=r["branchid"],
-            branch_name=r["branchname"],
-            employee_key=r["employeekey"],
-            full_name=r["fullname"],
-            preferred_name=r["preferredname"],
-            employee_type=r["employeetype"],
-            employment_status=r["employmentstatus"],
-            email=r["email"],
-            primary_phone=r["primaryphone"],
-            hire_date=r["hiredate"],
-            driver_id=r["driverid"],
-            driver_code=r["drivercode"],
-            driver_status=r["driverstatus"],
-            cdl_number=r["cdlnumber"],
+            employee_id=employee.employee_id,
+            branch_id=employee.branch_id,
+            branch_name=employee.branch_name,
+            employee_key=employee.employee_key,
+            full_name=employee.full_name,
+            preferred_name=employee.preferred_name,
+            driver_state=employee.driver_state,
+            employment_status=employee.employment_status,
+            email=employee.email,
+            primary_phone=employee.primary_phone,
+            hire_date=employee.hire_date,
+            driver_id=employee.current_or_pending_driver.driver_id if employee.current_or_pending_driver else None,
+            driver_code=employee.current_or_pending_driver.driver_code if employee.current_or_pending_driver else None,
+            driver_status=employee.current_or_pending_driver.driver_status if employee.current_or_pending_driver else None,
+            cdl_number=employee.current_or_pending_driver.cdl_number if employee.current_or_pending_driver else None,
         )
-        for r in result.mappings().all()
+        for employee in employees
     ]
 
 
@@ -415,6 +348,23 @@ async def get_drivers(
 ) -> list[DriverSummary]:
     """Return drivers in scope with optional filters."""
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+
+    if branch_id is not None:
+        await _check_permission(company_id, user_id, branch_id, "drivers.view", db)
+    elif can_see_all:
+        await _check_permission(company_id, user_id, None, "drivers.view", db)
+    else:
+        permitted: list[int] = []
+        for bid in branch_ids:
+            result = await db.execute(
+                text("SELECT sec.fn_UserHasPermission(:uid, :cid, :bid, 'drivers.view')"),
+                {"uid": user_id, "cid": company_id, "bid": bid},
+            )
+            if result.scalar_one():
+                permitted.append(bid)
+        if not permitted:
+            raise HTTPException(status_code=403, detail="You do not have permission to view Driver profiles.")
+        branch_ids = permitted
 
     conditions: list[str] = ["d.companyid = :company_id"]
     params: dict[str, Any] = {"company_id": company_id}
@@ -546,6 +496,8 @@ async def get_driver_by_id(
             detail="Access denied to this driver's branch.",
         )
 
+    await _check_permission(company_id, user_id, row["branchid"], "drivers.view", db)
+
     return DriverSummary(
         driver_id=row["driverid"],
         employee_id=row["employeeid"],
@@ -567,8 +519,7 @@ async def get_driver_by_id(
 
 
 # ---------------------------------------------------------------------------
-# Driver mutations
-# ---------------------------------------------------------------------------
+# Driver compatibility mutations: all business writes delegate to Workforce.
 
 async def create_driver(
     company_id: int,
@@ -576,90 +527,50 @@ async def create_driver(
     data: DriverCreate,
     db: AsyncConnection,
 ) -> DriverSummary:
-    """
-    Create a new driver:
-      1. Verify branch access
-      2. Verify branch belongs to this company
-      3. INSERT into core.employees (type = Driver, status = Active)
-      4. INSERT into core.drivers
-      5. Return the full DriverSummary
-    """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    """Compatibility alias to canonical Workforce Employee/profile creation."""
+    from app.workforce.schemas import DriverProfileCreate, EmployeeCreate
+    from app.workforce.service import create_employee
 
-    if not can_see_all and data.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to the target branch.",
-        )
-
-    # Permission gate: branch access is necessary but not sufficient.
-    # Creating a driver is a write operation that requires drivers.manage.
-    await _check_permission(company_id, user_id, data.branch_id, "drivers.manage", db)
-
-    # Verify branch exists in this company
-    br_result = await db.execute(
-        text(
-            "SELECT branchid FROM core.branches "
-            "WHERE branchid = :bid AND companyid = :cid"
+    employee = await create_employee(
+        company_id,
+        user_id,
+        EmployeeCreate(
+            branch_id=data.branch_id,
+            employee_key=data.employee_key,
+            full_name=data.full_name,
+            preferred_name=data.preferred_name,
+            email=data.email,
+            primary_phone=data.primary_phone,
+            hire_date=data.hire_date,
+            driver_profile=DriverProfileCreate(
+                driver_code=data.driver_code,
+                cdl_number=data.cdl_number,
+                external_driver_id=data.external_driver_id,
+            ),
         ),
-        {"bid": data.branch_id, "cid": company_id},
+        db,
     )
-    if br_result.first() is None:
-        raise HTTPException(
-            status_code=422,
-            detail="branch_id does not exist in this company.",
-        )
-
-    # Insert employee
-    emp_result = await db.execute(
-        text("""
-            INSERT INTO core.employees
-                (companyid, branchid, employeekey, fullname, preferredname,
-                 employeetype, employmentstatus, email, primaryphone, hiredate,
-                 createdbyuserid)
-            VALUES
-                (:company_id, :branch_id, :employee_key, :full_name, :preferred_name,
-                 'Driver', 'Active', :email, :primary_phone, :hire_date,
-                 :created_by)
-            RETURNING employeeid
-        """),
-        {
-            "company_id": company_id,
-            "branch_id": data.branch_id,
-            "employee_key": data.employee_key,
-            "full_name": data.full_name,
-            "preferred_name": data.preferred_name,
-            "email": data.email,
-            "primary_phone": data.primary_phone,
-            "hire_date": data.hire_date,
-            "created_by": user_id,
-        },
+    profile = employee.current_or_pending_driver
+    if profile is None:
+        raise HTTPException(status_code=500, detail="Workforce creation did not return its Driver profile.")
+    return DriverSummary(
+        driver_id=profile.driver_id,
+        employee_id=employee.employee_id,
+        branch_id=profile.branch_id,
+        branch_name=profile.branch_name,
+        full_name=employee.full_name,
+        preferred_name=employee.preferred_name,
+        employee_key=employee.employee_key,
+        driver_code=profile.driver_code,
+        cdl_number=profile.cdl_number,
+        external_driver_id=profile.external_driver_id,
+        driver_status=profile.driver_status,
+        employment_status=employee.employment_status,
+        email=employee.email,
+        primary_phone=employee.primary_phone,
+        hire_date=employee.hire_date,
+        termination_date=employee.termination_date,
     )
-    employee_id: int = emp_result.scalar_one()
-
-    # Insert driver
-    drv_result = await db.execute(
-        text("""
-            INSERT INTO core.drivers
-                (companyid, branchid, employeeid, drivercode, cdlnumber,
-                 externaldriverid, driverstatus)
-            VALUES
-                (:company_id, :branch_id, :employee_id, :driver_code, :cdl_number,
-                 :external_driver_id, 'Active')
-            RETURNING driverid
-        """),
-        {
-            "company_id": company_id,
-            "branch_id": data.branch_id,
-            "employee_id": employee_id,
-            "driver_code": data.driver_code,
-            "cdl_number": data.cdl_number,
-            "external_driver_id": data.external_driver_id,
-        },
-    )
-    driver_id: int = drv_result.scalar_one()
-
-    return await get_driver_by_id(company_id, user_id, driver_id, db)
 
 
 async def update_driver(
@@ -669,81 +580,32 @@ async def update_driver(
     data: DriverUpdate,
     db: AsyncConnection,
 ) -> DriverSummary:
-    """
-    Partially update a driver (only supplied non-None fields are touched).
-    Branch access is confirmed by get_driver_by_id; permission is checked
-    explicitly afterward.
-    """
-    # Raises 404 / 403 if not found or no access
-    existing = await get_driver_by_id(company_id, user_id, driver_id, db)
+    """Compatibility alias to canonical Workforce Driver-profile update."""
+    from app.workforce.schemas import DriverProfileUpdate
+    from app.workforce.service import update_driver_profile
 
-    # Permission gate: branch access is necessary but not sufficient.
-    await _check_permission(company_id, user_id, existing.branch_id, "drivers.manage", db)
-
-    if data.driver_status is not None and data.driver_status != existing.driver_status and (
-        existing.driver_status in {"Transferred", "Terminated"}
-        or data.driver_status in {"Transferred", "Terminated"}
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="Transferred and terminated Driver status is controlled by the Workforce lifecycle.",
-        )
-    if (
-        data.employment_status is not None
-        and data.employment_status != existing.employment_status
-        and "Terminated" in {data.employment_status, existing.employment_status}
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="Employee termination and reactivation are controlled by the Workforce lifecycle.",
-        )
-    # --- Update core.employees ---
-    emp_fields: dict[str, Any] = {}
-    if data.full_name is not None:
-        emp_fields["fullname"] = data.full_name
-    if data.preferred_name is not None:
-        emp_fields["preferredname"] = data.preferred_name
-    if data.email is not None:
-        emp_fields["email"] = data.email
-    if data.primary_phone is not None:
-        emp_fields["primaryphone"] = data.primary_phone
-    if data.employment_status is not None:
-        emp_fields["employmentstatus"] = data.employment_status
-    # Use model_fields_set so callers can explicitly clear termination_date by
-    # sending {"termination_date": null}.  The old `is not None` check silently
-    # ignored None, making it impossible to remove a previously-set date.
-    if "termination_date" in data.model_fields_set:
-        emp_fields["terminationdate"] = data.termination_date
-
-    if emp_fields:
-        set_clause = ", ".join(f"{col} = :{col}" for col in emp_fields)
-        await db.execute(
-            text(
-                f"UPDATE core.employees SET {set_clause}, updatedatutc = NOW() "
-                f"WHERE employeeid = :employee_id"
-            ),
-            {**emp_fields, "employee_id": existing.employee_id},
-        )
-
-    # --- Update core.drivers ---
-    drv_fields: dict[str, Any] = {}
-    if data.driver_code is not None:
-        drv_fields["drivercode"] = data.driver_code
-    if data.cdl_number is not None:
-        drv_fields["cdlnumber"] = data.cdl_number
-    if data.external_driver_id is not None:
-        drv_fields["externaldriverid"] = data.external_driver_id
-    if data.driver_status is not None:
-        drv_fields["driverstatus"] = data.driver_status
-
-    if drv_fields:
-        set_clause = ", ".join(f"{col} = :{col}" for col in drv_fields)
-        await db.execute(
-            text(
-                f"UPDATE core.drivers SET {set_clause}, updatedatutc = NOW() "
-                f"WHERE driverid = :driver_id"
-            ),
-            {**drv_fields, "driver_id": driver_id},
-        )
-
-    return await get_driver_by_id(company_id, user_id, driver_id, db)
+    profile = await update_driver_profile(
+        company_id,
+        user_id,
+        driver_id,
+        DriverProfileUpdate(**data.model_dump(exclude_unset=True)),
+        db,
+    )
+    return DriverSummary(
+        driver_id=profile["driverid"],
+        employee_id=profile["employeeid"],
+        branch_id=profile["branchid"],
+        branch_name=profile["branchname"],
+        full_name=profile["fullname"],
+        preferred_name=profile["preferredname"],
+        employee_key=profile["employeekey"],
+        driver_code=profile["drivercode"],
+        cdl_number=profile["cdlnumber"],
+        external_driver_id=profile["externaldriverid"],
+        driver_status=profile["driverstatus"],
+        employment_status=profile["employmentstatus"],
+        email=profile["email"],
+        primary_phone=profile["primaryphone"],
+        hire_date=profile["hiredate"],
+        termination_date=profile["terminationdate"],
+    )

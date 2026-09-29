@@ -21,7 +21,7 @@ Permission codes exercised
 --------------------------
 payroll.period.create — create payroll period (create_period, migration 0030)
 payroll.entry         — enter payroll lines / open / submit periods
-drivers.manage        — create driver (create_driver)
+employees.manage      — create Employee / Driver profile (Workforce)
 payroll.approve_rate  — approve / void a rate (approve_rate / void_rate)
 """
 import httpx
@@ -173,7 +173,7 @@ class TestPermissionDenial:
     ):
         """
         POST /core/drivers on HQ branch.
-        Branch access check passes; drivers.manage permission check fires → 403.
+        Branch access check passes; employees.manage permission check fires → 403.
         """
         resp = await client.post(
             "/core/drivers",

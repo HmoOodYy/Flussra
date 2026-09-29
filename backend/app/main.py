@@ -26,6 +26,7 @@ from app.payroll_setup.router import router as payroll_setup_router
 from app.review.router import router as review_router
 from app.settings.router import router as settings_router
 from app.transfer.router import router as transfer_router
+from app.workforce.router import router as workforce_router
 
 
 @asynccontextmanager
@@ -123,4 +124,5 @@ app.include_router(settings_router,  prefix="/settings",  tags=["Settings"])
 app.include_router(admin_router,     prefix="/admin",     tags=["Admin"])
 app.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(transfer_router,  prefix="/driver-transfers", tags=["DriverTransfer"])
+app.include_router(workforce_router, prefix="/workforce", tags=["Workforce"])
 app.include_router(cdpi_router,      prefix="/settings/cdpi",    tags=["CDPI"])

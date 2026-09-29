@@ -63,7 +63,6 @@ async def _get_driver_id(client: httpx.AsyncClient, token: str, branch_id: int) 
     resp2 = await client.post("/core/drivers", headers=_auth(token), json={
         "branch_id": branch_id,
         "full_name": f"M16 Test Driver {branch_id}",
-        "employee_type": "Driver",
     })
     assert resp2.status_code == 201, resp2.text
     return resp2.json()["driver_id"]
