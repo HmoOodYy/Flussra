@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.config import settings
+from app.config import get_settings
 from app.core.service import (
     _check_branch_access,
     _check_permission,
@@ -193,7 +193,7 @@ def _make_candidate_key(payload: dict) -> tuple[str, str]:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     b64_part = base64.urlsafe_b64encode(canonical.encode()).decode().rstrip("=")
     sig = _hmac_mod.new(
-        settings.SECRET_KEY.encode(),
+        get_settings().SECRET_KEY.encode(),
         b64_part.encode(),
         "sha256",
     ).hexdigest()
@@ -212,7 +212,7 @@ def _decode_candidate_key(key: str) -> tuple[dict, str]:
         _cp1c_error("INVALID_CANDIDATE_KEY", "Malformed candidate key.")
 
     expected = _hmac_mod.new(
-        settings.SECRET_KEY.encode(),
+        get_settings().SECRET_KEY.encode(),
         b64_part.encode(),
         "sha256",
     ).hexdigest()

@@ -43,7 +43,8 @@ class TestSchemaMigrationCompleteness:
     """
 
     @pytest.fixture(scope="class")
-    def pg_cur(self, apply_schema):
+    @classmethod
+    def pg_cur(cls, apply_schema):
         """Synchronous psycopg2 connection to the isolated test cluster."""
         conn = psycopg2.connect(**apply_schema.dsn())
         conn.autocommit = True

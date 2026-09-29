@@ -18,9 +18,10 @@ $ErrorActionPreference = "Stop"
 # Resolve project root relative to this script file
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $PYTHON = Join-Path $ROOT "backend\.venv\Scripts\python.exe"
+$SETUP_SCRIPT = Join-Path $ROOT "scripts\setup_backend.ps1"
 
 if (-not (Test-Path $PYTHON)) {
-    Write-Error "Python venv not found at: $PYTHON`nRun: cd backend && python -m venv .venv && pip install -r requirements.txt"
+    Write-Host "Python venv not found at: $PYTHON`nRun $SETUP_SCRIPT first." -ForegroundColor Red
     exit 1
 }
 
@@ -37,7 +38,6 @@ Set-Location $ROOT
 if ($LASTEXITCODE -ne 0) {
     throw ("alembic upgrade head failed. Exit code: {0}. Fix migrations before starting the backend." -f $LASTEXITCODE)
 }
-}
 Write-Host "      Migrations OK." -ForegroundColor Green
 Write-Host ""
 
@@ -46,4 +46,4 @@ Write-Host "[2/2] Starting uvicorn on http://0.0.0.0:8000 ..." -ForegroundColor 
 Write-Host "      Press Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
 Set-Location (Join-Path $ROOT "backend")
-& $PYTHON -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+& $PYTHON -m uvicorn app.main:create_app --factory --reload --host 0.0.0.0 --port 8000

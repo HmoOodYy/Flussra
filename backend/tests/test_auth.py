@@ -170,7 +170,7 @@ class TestMe:
 
         import jwt
 
-        from app.config import settings
+        from app.config import get_settings
 
         forged_payload = {
             "sub": "1",   # real user_id in the test DB
@@ -178,7 +178,7 @@ class TestMe:
             "iat": datetime.now(UTC),
             "exp": datetime.now(UTC) + timedelta(hours=1),
         }
-        forged_token = jwt.encode(forged_payload, settings.SECRET_KEY, algorithm="HS256")
+        forged_token = jwt.encode(forged_payload, get_settings().SECRET_KEY, algorithm="HS256")
 
         resp = await client.get(
             "/auth/me",
@@ -192,7 +192,7 @@ class TestMe:
 
         import jwt
 
-        from app.config import settings
+        from app.config import get_settings
 
         expired_payload = {
             "sub": "1",  # sub must be a string (RFC 7519 / PyJWT 2.13+)
@@ -200,7 +200,7 @@ class TestMe:
             "iat": datetime.now(UTC) - timedelta(hours=10),
             "exp": datetime.now(UTC) - timedelta(hours=2),
         }
-        expired_token = jwt.encode(expired_payload, settings.SECRET_KEY, algorithm="HS256")
+        expired_token = jwt.encode(expired_payload, get_settings().SECRET_KEY, algorithm="HS256")
 
         resp = await client.get(
             "/auth/me",
