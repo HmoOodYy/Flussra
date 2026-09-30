@@ -11,7 +11,7 @@ Transfer lifecycle:
                    (accepts PendingSourceApproval OR Returned status)
   decide_target  → Approved | Rejected | Returned
   complete       → Completed  (creates new driver profile in target branch,
-                                closes old profile, updates employee branch)
+                                closes old profile, syncs branch projection when effective)
   cancel         → Cancelled
 
 P1 scope rules:
@@ -50,6 +50,10 @@ from app.transfer.schemas import (
     TargetDecisionRequest,
     TransferListResponse,
 )
+from app.workforce.clock import company_today
+from app.workforce.effective import resolve_effective_driver_profile
+from app.workforce.projection import sync_employee_branch_projection
+from app.workforce.service import _write_workforce_audit
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +130,102 @@ async def _get_transfer_or_404(
     if row is None:
         raise HTTPException(status_code=404, detail="Transfer request not found.")
     return dict(row)
+
+
+async def _lock_transfer_lifecycle(
+    transfer_request_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> tuple[int, dict]:
+    """Lock Employee, request, then all Employee Driver rows in canonical order."""
+    identity = await db.execute(
+        text("""
+            SELECT d.EmployeeID
+            FROM core.DriverTransferRequests dtr
+            JOIN core.Drivers d ON d.DriverID = dtr.DriverID
+            WHERE dtr.TransferRequestID = :request_id AND dtr.CompanyID = :company_id
+        """),
+        {"request_id": transfer_request_id, "company_id": company_id},
+    )
+    identity_row = identity.mappings().first()
+    if identity_row is None:
+        raise HTTPException(status_code=404, detail="Transfer request not found.")
+    employee_id = identity_row["employeeid"]
+    locked_employee = await db.execute(
+        text("""
+            SELECT EmployeeID
+            FROM core.Employees
+            WHERE EmployeeID = :employee_id AND CompanyID = :company_id
+            FOR UPDATE
+        """),
+        {"employee_id": employee_id, "company_id": company_id},
+    )
+    if locked_employee.first() is None:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    request_lock = await db.execute(
+        text("""
+            SELECT TransferRequestID
+            FROM core.DriverTransferRequests
+            WHERE TransferRequestID = :request_id AND CompanyID = :company_id
+            FOR UPDATE
+        """),
+        {"request_id": transfer_request_id, "company_id": company_id},
+    )
+    if request_lock.first() is None:
+        raise HTTPException(status_code=404, detail="Transfer request not found.")
+    await db.execute(
+        text("""
+            SELECT DriverID
+            FROM core.Drivers
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+            ORDER BY DriverID
+            FOR UPDATE
+        """),
+        {"company_id": company_id, "employee_id": employee_id},
+    )
+    return employee_id, await _get_transfer_or_404(transfer_request_id, company_id, db)
+
+
+async def _lock_employee_for_transfer_create(
+    driver_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> tuple[int, dict]:
+    identity = await db.execute(
+        text("""
+            SELECT EmployeeID
+            FROM core.Drivers
+            WHERE DriverID = :driver_id AND CompanyID = :company_id
+        """),
+        {"driver_id": driver_id, "company_id": company_id},
+    )
+    row = identity.mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Driver not found.")
+    employee_id = row["employeeid"]
+    employee_result = await db.execute(
+        text("""
+            SELECT EmployeeID, BranchID
+            FROM core.Employees
+            WHERE EmployeeID = :employee_id AND CompanyID = :company_id
+            FOR UPDATE
+        """),
+        {"employee_id": employee_id, "company_id": company_id},
+    )
+    employee = employee_result.mappings().first()
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee not found.")
+    await db.execute(
+        text("""
+            SELECT DriverID
+            FROM core.Drivers
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+            ORDER BY DriverID
+            FOR UPDATE
+        """),
+        {"company_id": company_id, "employee_id": employee_id},
+    )
+    return employee_id, dict(employee)
 
 
 def _row_to_response(row: dict) -> DriverTransferResponse:
@@ -226,20 +326,23 @@ async def _get_driver_source_branch(
     company_id: int,
     db: AsyncConnection,
 ) -> int:
-    """Return the driver's current active branch_id or raise 404."""
+    """Return the requested Driver's branch only when it is effective today."""
     result = await db.execute(
         text("""
-            SELECT branchid FROM core.drivers
+            SELECT employeeid, branchid FROM core.drivers
             WHERE  driverid  = :did
               AND  companyid = :cid
-              AND  driverstatus NOT IN ('Transferred', 'Terminated')
         """),
         {"did": driver_id, "cid": company_id},
     )
     row = result.mappings().first()
     if row is None:
-        raise HTTPException(status_code=404, detail="Active driver not found.")
-    return int(row["branchid"])
+        raise HTTPException(status_code=404, detail="Driver not found.")
+    today = await company_today(company_id, db)
+    current = await resolve_effective_driver_profile(company_id, row["employeeid"], today, db)
+    if current is None or current["driverid"] != driver_id:
+        raise HTTPException(status_code=422, detail="Driver is not the effective current profile.")
+    return int(current["branchid"])
 
 
 async def _is_caller_oda(
@@ -280,13 +383,9 @@ async def _get_oda_own_driver_id(
     """
     result = await db.execute(
         text("""
-            SELECT d.driverid
-            FROM   sec.users      u
-            JOIN   core.employees e ON e.employeeid = u.employeeid
-            JOIN   core.drivers   d ON d.employeeid = e.employeeid
-                                    AND d.companyid  = :cid
-                                    AND d.driverstatus NOT IN ('Transferred', 'Terminated')
-            WHERE  u.userid = :uid
+            SELECT EmployeeID
+            FROM sec.Users
+            WHERE UserID = :uid AND CompanyID = :cid
         """),
         {"uid": user_id, "cid": company_id},
     )
@@ -296,7 +395,16 @@ async def _get_oda_own_driver_id(
             status_code=403,
             detail="No active driver profile linked to your account.",
         )
-    return int(row["driverid"])
+    today = await company_today(company_id, db)
+    current = await resolve_effective_driver_profile(
+        company_id, row["employeeid"], today, db,
+    )
+    if current is None:
+        raise HTTPException(
+            status_code=403,
+            detail="No effective current Driver profile linked to your account.",
+        )
+    return int(current["driverid"])
 
 
 async def _get_accessible_branches_for_transfers(
@@ -367,28 +475,44 @@ async def create_driver_transfer_request(
     """
     caller_is_oda = await _is_caller_oda(company_id, user_id, db)
 
+    if caller_is_oda and data.initiated_by != "Driver":
+        raise HTTPException(
+            status_code=422,
+            detail="Driver-role users must set initiated_by='Driver'.",
+        )
+
+    employee_id, _ = await _lock_employee_for_transfer_create(
+        data.driver_id, company_id, db,
+    )
+    today = await company_today(company_id, db)
+    await sync_employee_branch_projection(
+        company_id, employee_id, today, db,
+    )
+    current = await resolve_effective_driver_profile(company_id, employee_id, today, db)
+    if current is None or current["driverid"] != data.driver_id:
+        raise HTTPException(status_code=422, detail="Transfer source is not the current Driver profile.")
+    if current["driverstatus"] in {"Transferred", "Terminated"}:
+        raise HTTPException(
+            status_code=422,
+            detail="A transferred or terminated Driver profile cannot start another transfer.",
+        )
+    if current["effectivefrom"] is not None and data.effective_date <= current["effectivefrom"]:
+        raise HTTPException(
+            status_code=422,
+            detail="Transfer effective date must be after the source profile start date.",
+        )
     if caller_is_oda:
-        # --- ODA path ---
-        if data.initiated_by != "Driver":
-            raise HTTPException(
-                status_code=422,
-                detail="Driver-role users must set initiated_by='Driver'.",
-            )
-        # Verify driver_id matches the caller's own active profile
         own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
         if data.driver_id != own_driver_id:
             raise HTTPException(
                 status_code=403,
                 detail="You may only create a transfer request for your own driver profile.",
             )
-        source_branch_id = await _get_driver_source_branch(data.driver_id, company_id, db)
-    else:
-        # --- Operational path ---
-        source_branch_id = await _get_driver_source_branch(data.driver_id, company_id, db)
-        await _check_permission(company_id, user_id, source_branch_id, "drivers.edit", db)
 
-    # Common validation (both paths)
+    source_branch_id = int(current["branchid"])
     await _assert_driver_belongs_to_branch(data.driver_id, source_branch_id, company_id, db)
+    if not caller_is_oda:
+        await _check_permission(company_id, user_id, source_branch_id, "drivers.edit", db)
 
     tgt_result = await db.execute(
         text("""
@@ -407,6 +531,27 @@ async def create_driver_transfer_request(
         )
 
     await _assert_no_active_transfer(data.driver_id, company_id, db)
+    pending_result = await db.execute(
+        text("""
+            SELECT 1 FROM core.Drivers
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+              AND DriverID <> :driver_id
+              AND EffectiveFrom > :business_date
+              AND NOT (DriverStatus = 'Terminated' AND EffectiveTo = EffectiveFrom - 1)
+            LIMIT 1
+        """),
+        {
+            "company_id": company_id,
+            "employee_id": employee_id,
+            "driver_id": data.driver_id,
+            "business_date": today,
+        },
+    )
+    if pending_result.first() is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="A pending Driver profile already exists for this Employee.",
+        )
 
     # ODA users always get PendingSourceApproval.
     # SourceBranch-initiated by operational users gets PendingTargetApproval.
@@ -475,7 +620,7 @@ async def approve_source_transfer(
     """
     await _require_not_driver_role(company_id, user_id, db)
 
-    row = await _get_transfer_or_404(transfer_request_id, company_id, db)
+    _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
     if row["status"] not in ("PendingSourceApproval", "Returned"):
         raise HTTPException(
@@ -491,7 +636,7 @@ async def approve_source_transfer(
     )
 
     now = _now_utc()
-    await db.execute(
+    changed = await db.execute(
         text("""
             UPDATE core.drivertransferrequests
             SET    status                  = 'PendingTargetApproval',
@@ -499,10 +644,14 @@ async def approve_source_transfer(
                    sourceapprovedatutc     = :now,
                    notes                  = COALESCE(:notes, notes),
                    updatedatutc           = :now
-            WHERE  transferrequestid = :tid
+            WHERE  transferrequestid = :tid AND status = :old_status
+            RETURNING transferrequestid
         """),
-        {"uid": user_id, "now": now, "notes": data.notes, "tid": transfer_request_id},
+        {"uid": user_id, "now": now, "notes": data.notes,
+         "tid": transfer_request_id, "old_status": row["status"]},
     )
+    if changed.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
     row = await _get_transfer_or_404(transfer_request_id, company_id, db)
     return _row_to_response(row)
 
@@ -523,7 +672,7 @@ async def decide_target_transfer(
     """
     await _require_not_driver_role(company_id, user_id, db)
 
-    row = await _get_transfer_or_404(transfer_request_id, company_id, db)
+    _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
     if row["status"] != "PendingTargetApproval":
         raise HTTPException(
@@ -544,7 +693,7 @@ async def decide_target_transfer(
     else:  # "Returned"
         new_status = "Returned"
 
-    await db.execute(
+    changed = await db.execute(
         text("""
             UPDATE core.drivertransferrequests
             SET    status                 = :status,
@@ -552,7 +701,8 @@ async def decide_target_transfer(
                    targetdecidedatutc    = :now,
                    targetdecisionnotes   = :dnotes,
                    updatedatutc          = :now
-            WHERE  transferrequestid = :tid
+            WHERE  transferrequestid = :tid AND status = 'PendingTargetApproval'
+            RETURNING transferrequestid
         """),
         {
             "status": new_status,
@@ -562,6 +712,8 @@ async def decide_target_transfer(
             "tid":    transfer_request_id,
         },
     )
+    if changed.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
     row = await _get_transfer_or_404(transfer_request_id, company_id, db)
     return _row_to_response(row)
 
@@ -572,22 +724,10 @@ async def complete_driver_transfer(
     transfer_request_id: int,
     db: AsyncConnection,
 ) -> DriverTransferResponse:
-    """
-    Complete an Approved transfer:
-      1. Create new Driver profile in the target branch (status=Active,
-         TransferredFromDriverID=old driver).
-      2. Set old Driver profile DriverStatus='Transferred',
-         TransferredToDriverID=new driver.
-      3. Update Employee.BranchID to target branch.
-      4. Update request: status=Completed, NewDriverID=new driver.
-
-    Old payroll history (draft lines, final lines), rates, and rules remain
-    attached to the old driver record — they are never modified.
-    The caller must hold drivers.edit on EITHER the source OR target branch.
-    """
+    """Complete an approved effective-dated transfer in one transaction."""
     await _require_not_driver_role(company_id, user_id, db)
 
-    row = await _get_transfer_or_404(transfer_request_id, company_id, db)
+    _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
     if row["status"] != "Approved":
         raise HTTPException(
@@ -612,56 +752,87 @@ async def complete_driver_transfer(
             ),
         )
 
-    # Fetch old driver row
-    old_drv_result = await db.execute(
+    source_result = await db.execute(
         text("""
-            SELECT driverid, employeeid, driverstatus
-            FROM   core.drivers
-            WHERE  driverid  = :did AND companyid = :cid
+            SELECT DriverID, EmployeeID, BranchID, DriverStatus, EffectiveFrom, EffectiveTo
+            FROM core.Drivers
+            WHERE DriverID = :driver_id AND CompanyID = :company_id
         """),
-        {"did": row["driverid"], "cid": company_id},
+        {"driver_id": row["driverid"], "company_id": company_id},
     )
-    old_drv = old_drv_result.mappings().first()
-    if old_drv is None or old_drv["driverstatus"] == "Transferred":
+    source = source_result.mappings().first()
+    if source is None or source["driverstatus"] in {"Transferred", "Terminated"}:
         raise HTTPException(
-            status_code=422,
-            detail="Driver profile is already Transferred.",
+            status_code=409,
+            detail="Transfer source is no longer available for completion.",
         )
+
+    employee_id = source["employeeid"]
+    today = await company_today(company_id, db)
+    current = await resolve_effective_driver_profile(company_id, employee_id, today, db)
+    if current is None or current["driverid"] != source["driverid"]:
+        raise HTTPException(status_code=409, detail="Transfer source is no longer current.")
+
+    effective_date: date = row["effectivedate"]
+    if source["effectivefrom"] is not None and effective_date <= source["effectivefrom"]:
+        raise HTTPException(status_code=409, detail="Transfer date precedes the source profile window.")
+    pending_result = await db.execute(
+        text("""
+            SELECT 1 FROM core.Drivers
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+              AND DriverID <> :source_driver_id
+              AND EffectiveFrom > :business_date
+              AND NOT (DriverStatus = 'Terminated' AND EffectiveTo = EffectiveFrom - 1)
+            LIMIT 1
+        """),
+        {
+            "company_id": company_id,
+            "employee_id": employee_id,
+            "source_driver_id": source["driverid"],
+            "business_date": today,
+        },
+    )
+    if pending_result.first() is not None:
+        raise HTTPException(status_code=409, detail="Employee already has a pending Driver profile.")
+
+    employee_before = await db.execute(
+        text("""
+            SELECT BranchID FROM core.Employees
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+        """),
+        {"company_id": company_id, "employee_id": employee_id},
+    )
+    old_employee_branch = employee_before.scalar_one()
 
     now = _now_utc()
 
-    # 1. Create new driver profile in target branch.
-    #    DriverCode uses the transfer_request_id (SERIAL, globally unique)
-    #    to prevent collisions when the same employee is transferred to the
-    #    same branch more than once (ux_Drivers_Company_DriverCode enforces
-    #    UNIQUE on (CompanyID, DriverCode) WHERE DriverCode IS NOT NULL).
+    # Insert the destination with its effective start so it can remain pending.
     new_drv_ins = await db.execute(
         text("""
             INSERT INTO core.drivers (
                 companyid, employeeid, branchid,
-                drivercode, driverstatus,
+                drivercode, driverstatus, effectivefrom,
                 transferredfromdriverid
             ) VALUES (
                 :cid, :eid, :tbid,
-                :code, 'Active',
+                :code, 'Active', :effective_from,
                 :from_did
             )
             RETURNING driverid
         """),
         {
             "cid":      company_id,
-            "eid":      old_drv["employeeid"],
+            "eid":      employee_id,
             "tbid":     row["targetbranchid"],
             "code":     f"DRV-TR{row['transferrequestid']:06d}",
+            "effective_from": effective_date,
             "from_did": row["driverid"],
         },
     )
     new_driver_id: int = new_drv_ins.scalar_one()
 
-    # 2. Close old profile atomically so history guards never observe a
-    #    Transferred profile with an open effective window.
-    effective_date: date = row["effectivedate"]
-    await db.execute(
+    # Close the source in one trigger-compatible update.
+    source_closed = await db.execute(
         text("""
             UPDATE core.drivers
             SET    driverstatus          = 'Transferred',
@@ -669,28 +840,16 @@ async def complete_driver_transfer(
                    effectiveto           = :effective_to
             WHERE  driverid  = :old_did
               AND  companyid = :cid
+              AND  driverstatus NOT IN ('Transferred', 'Terminated')
+            RETURNING driverid
         """),
         {"new_did": new_driver_id, "effective_to": effective_date - timedelta(days=1),
          "old_did": row["driverid"], "cid": company_id},
     )
+    if source_closed.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="Transfer source changed; refresh and retry.")
 
-    # 3. Update Employee.BranchID to target branch
-    await db.execute(
-        text("""
-            UPDATE core.employees
-            SET    branchid = :tbid
-            WHERE  employeeid = :eid
-              AND  companyid  = :cid
-        """),
-        {
-            "tbid": row["targetbranchid"],
-            "eid":  old_drv["employeeid"],
-            "cid":  company_id,
-        },
-    )
-
-    # 4. Complete the request
-    await db.execute(
+    request_completed = await db.execute(
         text("""
             UPDATE core.drivertransferrequests
             SET    status             = 'Completed',
@@ -698,7 +857,8 @@ async def complete_driver_transfer(
                    completedatutc     = :now,
                    completedbyuserid  = :uid,
                    updatedatutc       = :now
-            WHERE  transferrequestid = :tid
+            WHERE  transferrequestid = :tid AND status = 'Approved'
+            RETURNING transferrequestid
         """),
         {
             "new_did": new_driver_id,
@@ -707,23 +867,34 @@ async def complete_driver_transfer(
             "tid":     transfer_request_id,
         },
     )
+    if request_completed.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
 
-    # 5. Apply EffectiveDate to driver profile validity windows.
-    #    effectivedate is the DATE from DriverTransferRequests (always NOT NULL).
-    #    Old source profile: valid up to and including effective_date - 1 day.
-    #    New target profile: valid starting effective_date.
-    #    Existing rows with NULL windows are unaffected (treated as always valid).
-    await db.execute(
-        text("""
-            UPDATE core.drivers
-            SET    effectivefrom = :efrom
-            WHERE  driverid  = :did
-              AND  companyid = :cid
-        """),
-        {
-            "efrom": effective_date,
-            "did":   new_driver_id,
-            "cid":   company_id,
+    _, new_employee_branch = await sync_employee_branch_projection(
+        company_id, employee_id, today, db,
+    )
+    projection_changed = new_employee_branch != old_employee_branch
+    await _write_workforce_audit(
+        db,
+        company_id=company_id,
+        branch_id=row["sourcebranchid"],
+        actor_user_id=user_id,
+        action_code="DRIVER_TRANSFER_COMPLETED",
+        entity_name="DriverTransferRequests",
+        entity_id=transfer_request_id,
+        old_value={"status": "Approved", "employee_branch_id": old_employee_branch},
+        new_value={
+            "transfer_request_id": transfer_request_id,
+            "employee_id": employee_id,
+            "source_driver_id": source["driverid"],
+            "destination_driver_id": new_driver_id,
+            "source_branch_id": row["sourcebranchid"],
+            "target_branch_id": row["targetbranchid"],
+            "effective_date": effective_date,
+            "employee_branch_projection_changed": projection_changed,
+            "employee_branch_id": new_employee_branch,
+            "projection_pending_until_effective_date": not projection_changed
+                and effective_date > today,
         },
     )
 
@@ -745,7 +916,7 @@ async def cancel_driver_transfer(
     """
     await _require_not_driver_role(company_id, user_id, db)
 
-    row = await _get_transfer_or_404(transfer_request_id, company_id, db)
+    _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
     if row["status"] in _TERMINAL:
         raise HTTPException(
@@ -767,7 +938,7 @@ async def cancel_driver_transfer(
         )
 
     now = _now_utc()
-    await db.execute(
+    changed = await db.execute(
         text("""
             UPDATE core.drivertransferrequests
             SET    status             = 'Cancelled',
@@ -775,15 +946,19 @@ async def cancel_driver_transfer(
                    cancelledbyuserid = :uid,
                    cancelreason      = :reason,
                    updatedatutc      = :now
-            WHERE  transferrequestid = :tid
+            WHERE  transferrequestid = :tid AND status = :old_status
+            RETURNING transferrequestid
         """),
         {
             "now":    now,
             "uid":    user_id,
             "reason": data.cancel_reason,
             "tid":    transfer_request_id,
+            "old_status": row["status"],
         },
     )
+    if changed.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
     row = await _get_transfer_or_404(transfer_request_id, company_id, db)
     return _row_to_response(row)
 

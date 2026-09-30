@@ -57,6 +57,20 @@ class EmployeeUpdate(BaseModel):
         return value.strip() if value else value
 
 
+class EmployeeTermination(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    termination_date: date
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("reason must not be blank")
+        return value.strip()
+
+
 class DriverProfileUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
