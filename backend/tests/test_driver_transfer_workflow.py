@@ -11,8 +11,8 @@ Tests:
   6.  Target-branch manager can reject → Rejected.
   7.  Target-branch manager can return → Returned (→ back to PendingSourceApproval).
   8.  Deciding on non-pending-target request returns 422.
-  9.  Complete an Approved request: new driver profile created, old profile
-      marked Transferred, employee branch updated.
+  9.  Complete an Approved future request: destination profile stays pending,
+      source stays effective until its end, Employee branch follows current profile.
   10. Completing a non-Approved request returns 422.
   11. Old payroll history is still attached to the OLD driver_id after completion.
   12. ODA user (driver role) cannot create/approve/decide/complete/cancel transfers.
@@ -392,7 +392,7 @@ async def test_complete_transfer_creates_new_profile(
     Complete an Approved transfer:
     - New driver profile is created in target branch with status=Active.
     - Old driver profile is set to Transferred.
-    - Employee.BranchID is updated to target branch.
+    - Employee.BranchID remains the source branch until the future transfer is effective.
     - Request.NewDriverID is set.
     """
     drv_id = await _create_driver(
@@ -437,7 +437,7 @@ async def test_complete_transfer_creates_new_profile(
     assert old_row["driverstatus"] == "Transferred"
     assert old_row["transferredtodriverid"] == new_did
 
-    # Verify employee branch updated
+    # Future destination stays pending; Employee branch follows today's source.
     emp = await direct_db.execute(
         _text("SELECT e.branchid FROM core.employees e "
               "JOIN core.drivers d ON d.employeeid = e.employeeid "
@@ -445,7 +445,7 @@ async def test_complete_transfer_creates_new_profile(
         {"did": new_did},
     )
     emp_row = emp.mappings().first()
-    assert emp_row["branchid"] == hq_branch_id
+    assert emp_row["branchid"] == paytest_branch_id
 
 
 @pytest.mark.asyncio

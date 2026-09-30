@@ -48,9 +48,9 @@ async def _assert_driver_eligible_for_date(
     Uses the exact same criteria as the day-grid eligibility query so that the
     write paths are consistent with what the grid shows:
       - driver belongs to company and branch
-      - employee employment_status = 'Active'
+      - employee is active, or terminated on/after the historical work date
       - this DriverID is the canonical effective profile for work_date
-      - driver_status is 'Active', or 'Transferred' for its effective historical dates
+      - driver status is Active, Transferred, or Terminated for effective dates
       - hire_date IS NULL OR hire_date <= work_date
       - termination_date IS NULL OR termination_date >= work_date
     """
@@ -63,8 +63,11 @@ async def _assert_driver_eligible_for_date(
               AND  d.companyid        = :cid
               AND  d.branchid         = :bid
               AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid, :dt) = d.driverid
-              AND  d.driverstatus IN ('Active', 'Transferred')
-              AND  e.employmentstatus = 'Active'
+              AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+              AND  (e.employmentstatus = 'Active'
+                    OR (e.employmentstatus = 'Terminated'
+                        AND e.terminationdate IS NOT NULL
+                        AND e.terminationdate >= :dt))
               AND  (e.hiredate IS NULL OR e.hiredate <= :dt)
               AND  (e.terminationdate IS NULL OR e.terminationdate >= :dt)
         """),
@@ -77,6 +80,44 @@ async def _assert_driver_eligible_for_date(
                 "Driver is not eligible for this payroll period, branch, or work date."
             ),
         )
+
+
+async def _lifecycle_eligible_driver_ids(
+    company_id: int,
+    branch_id: int,
+    work_date: date,
+    driver_ids: list[int],
+    db: AsyncConnection,
+) -> set[int]:
+    """Return Drivers whose current lifecycle windows still allow new source."""
+    if not driver_ids:
+        return set()
+    in_clause, in_params = _build_in_clause(driver_ids, "lifecycle_driver")
+    result = await db.execute(
+        text(f"""
+            SELECT d.DriverID
+            FROM core.Drivers d
+            JOIN core.Employees e ON e.EmployeeID = d.EmployeeID
+            WHERE d.CompanyID = :company_id
+              AND d.BranchID = :branch_id
+              AND d.DriverID IN ({in_clause})
+              AND core.fn_EffectiveDriverProfile(d.CompanyID, d.EmployeeID, :work_date) = d.DriverID
+              AND d.DriverStatus IN ('Active', 'Transferred', 'Terminated')
+              AND (e.EmploymentStatus = 'Active'
+                   OR (e.EmploymentStatus = 'Terminated'
+                       AND e.TerminationDate IS NOT NULL
+                       AND e.TerminationDate >= :work_date))
+              AND (e.HireDate IS NULL OR e.HireDate <= :work_date)
+              AND (e.TerminationDate IS NULL OR e.TerminationDate >= :work_date)
+        """),
+        {
+            "company_id": company_id,
+            "branch_id": branch_id,
+            "work_date": work_date,
+            **in_params,
+        },
+    )
+    return {row["driverid"] for row in result.mappings().all()}
 
 
 async def _assert_driver_eligible_for_period(
@@ -276,9 +317,20 @@ async def _assert_driver_eligible_for_workdate_via_snapshot(
     - update_draft_line:     allow_existing_source_rescue=True  (default)
     - add_draft_line:        allow_existing_source_rescue=False (new source — no rescue)
     """
+    lifecycle_eligible = driver_id in await _lifecycle_eligible_driver_ids(
+        company_id, branch_id, work_date, [driver_id], db,
+    )
     if not await _period_has_driver_eligibility_snapshot(period_id, db):
-        await _assert_driver_eligible_for_date(company_id, driver_id, branch_id, work_date, db)
-        return
+        if lifecycle_eligible:
+            return
+        if allow_existing_source_rescue and await _driver_has_existing_daily_source_on_date(
+            period_id, driver_id, work_date, db,
+        ):
+            return
+        raise HTTPException(
+            status_code=422,
+            detail="Driver is not eligible for this work date.",
+        )
     row = await _get_driver_eligibility_row(period_id, driver_id, company_id, branch_id, db)
     if row is None:
         raise HTTPException(
@@ -286,7 +338,7 @@ async def _assert_driver_eligible_for_workdate_via_snapshot(
             detail="Driver has no eligibility snapshot for this period.",
         )
     # Primary: date-window check
-    if _is_snapshot_row_eligible_for_workdate(row, work_date):
+    if _is_snapshot_row_eligible_for_workdate(row, work_date) and lifecycle_eligible:
         return
     # Secondary rescue: existing source on exact date (any reason code)
     if allow_existing_source_rescue:

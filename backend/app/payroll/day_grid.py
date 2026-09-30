@@ -81,6 +81,7 @@ from app.payroll.draft_line_mutation import (
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_workdate_via_snapshot,
     _is_snapshot_row_eligible_for_workdate,
+    _lifecycle_eligible_driver_ids,
     _period_has_driver_eligibility_snapshot,
 )
 from app.payroll.guards import _get_oda_own_driver_id
@@ -311,6 +312,10 @@ async def get_day_grid(
             {"pid": period_id, "cid": company_id, "bid": branch_id},
         )
         snap_rows_all = list(snap_rows_result.mappings().all())
+        snapshot_driver_ids = [r["driverid"] for r in snap_rows_all]
+        lifecycle_eligible_ids = await _lifecycle_eligible_driver_ids(
+            company_id, branch_id, work_date, snapshot_driver_ids, db,
+        )
 
         # Existing-source rescue: for ANY reason code, a driver out of their
         # date window is still shown if they have existing daily source on this
@@ -318,7 +323,10 @@ async def get_day_grid(
         # candidates first, then batch-check them.
         out_of_window_candidates = [
             r["driverid"] for r in snap_rows_all
-            if not _is_snapshot_row_eligible_for_workdate(r, work_date)
+            if (
+                not _is_snapshot_row_eligible_for_workdate(r, work_date)
+                or r["driverid"] not in lifecycle_eligible_ids
+            )
         ]
         rescue_driver_ids_on_date: set[int] = set()
         if out_of_window_candidates:
@@ -345,11 +353,14 @@ async def get_day_grid(
                 r["driverid"] for r in rescue_result.mappings().all()
             }
 
-        # Filter snapshot rows to those eligible for this work_date
-        # (primary: date-window check; secondary: existing-source rescue)
+        # A frozen window must still fit current lifecycle boundaries.
+        # Existing exact-date source remains visible through the rescue path.
         drivers_raw = []
         for snap in snap_rows_all:
-            if _is_snapshot_row_eligible_for_workdate(snap, work_date):
+            if (
+                _is_snapshot_row_eligible_for_workdate(snap, work_date)
+                and snap["driverid"] in lifecycle_eligible_ids
+            ):
                 pass  # window eligible — include
             elif snap["driverid"] in rescue_driver_ids_on_date:
                 pass  # existing source rescue — include
@@ -370,17 +381,14 @@ async def get_day_grid(
                 JOIN   core.employees e ON e.employeeid = d.employeeid
                 WHERE  d.companyid          = :cid
                   AND  d.branchid           = :bid
-                  AND  e.employmentstatus   = 'Active'
-                  AND  (
-                           d.driverstatus = 'Active'
-                        OR (d.driverstatus = 'Transferred'
-                            AND d.effectiveto IS NOT NULL
-                            AND d.effectiveto >= :dt)
-                       )
+                  AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+                  AND  (e.employmentstatus = 'Active'
+                        OR (e.employmentstatus = 'Terminated'
+                            AND e.terminationdate IS NOT NULL
+                            AND e.terminationdate >= :dt))
                   AND  (e.hiredate IS NULL OR e.hiredate <= :dt)
                   AND  (e.terminationdate IS NULL OR e.terminationdate >= :dt)
-                  AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :dt)
-                  AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :dt)
+                  AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid, :dt) = d.driverid
                 ORDER BY e.fullname
             """),
             {"cid": company_id, "bid": branch_id, "dt": work_date},
