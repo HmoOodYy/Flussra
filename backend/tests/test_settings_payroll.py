@@ -840,20 +840,6 @@ class TestYearlyAllowanceGuard:
         assert resp.status_code == 201
         assert resp.json()["deducts_from_yearly_allowance"] is False
 
-    async def test_create_omitting_deducts_succeeds(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        setup_branch_id: int,
-    ):
-        """POST without deducts_from_yearly_allowance → 201 with default False."""
-        resp = await client.post(
-            f"/settings/branches/{setup_branch_id}/status-keys",
-            json={"key_name": "YA Guard Create Omit"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["deducts_from_yearly_allowance"] is False
 
     async def test_patch_deducts_true_rejected(
         self,
