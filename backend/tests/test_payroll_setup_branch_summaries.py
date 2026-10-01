@@ -28,6 +28,7 @@ from app.payroll_setup.payroll_policy import (
     reassign_setup,
     withdraw_assignment,
 )
+from tests.builders.company import create_branch
 
 # ---------------------------------------------------------------------------
 # Rollback-per-test DB fixture against the shared DEMO tenant (copied from
@@ -52,16 +53,11 @@ async def payroll_setup_db(test_database_url):
                 """))).mappings().one()
                 company_id = int(tenant["companyid"])
                 user_id = int(tenant["userid"])
-                branch_id = (await conn.execute(text("""
-                    INSERT INTO core.Branches
-                        (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                    VALUES (:cid, :code, :name, 'Active', FALSE)
-                    RETURNING BranchID
-                """), {
-                    "cid": company_id,
-                    "code": f"BS_{marker}",
-                    "name": f"Branch summaries test branch {marker}",
-                })).scalar_one()
+                branch_id = await create_branch(
+                    conn, company_id, user_id,
+                    branch_code=f"BS_{marker}",
+                    branch_name=f"Branch summaries test branch {marker}",
+                )
                 yield SimpleNamespace(
                     db=conn, company_id=company_id, user_id=user_id,
                     branch_id=int(branch_id), marker=marker,
@@ -70,16 +66,6 @@ async def payroll_setup_db(test_database_url):
                 await transaction.rollback()
     finally:
         await engine.dispose()
-
-
-async def _new_branch(db, suffix: str, *, name: str | None = None) -> int:
-    result = await db.db.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, :code, :name, 'Active', FALSE)
-        RETURNING BranchID
-    """), {"cid": db.company_id, "code": f"BS{suffix}_{db.marker}",
-           "name": name or f"Branch summaries {suffix} {db.marker}"})
-    return result.scalar_one()
 
 
 async def _published_setup(
@@ -268,9 +254,18 @@ async def test_response_ordered_by_branch_name(payroll_setup_db, monkeypatch):
     db = payroll_setup_db
     _stub_today(monkeypatch, date(2090, 3, 15))
     marker = db.marker
-    charlie = await _new_branch(db, "ord1", name=f"ZZBS Charlie {marker}")
-    alpha = await _new_branch(db, "ord2", name=f"ZZBS Alpha {marker}")
-    bravo = await _new_branch(db, "ord3", name=f"ZZBS Bravo {marker}")
+    charlie = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"BSord1_{marker}", branch_name=f"ZZBS Charlie {marker}",
+    )
+    alpha = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"BSord2_{marker}", branch_name=f"ZZBS Alpha {marker}",
+    )
+    bravo = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"BSord3_{marker}", branch_name=f"ZZBS Bravo {marker}",
+    )
 
     summaries = await reads.list_branch_policy_summaries(db.company_id, db.db)
     ours = [row for row in summaries if row["branch_id"] in (charlie, alpha, bravo)]

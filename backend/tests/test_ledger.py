@@ -31,7 +31,10 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -147,50 +150,6 @@ async def _advance_to_approved(
         json={"decision": "Approved"},
     )
     assert decide.status_code == 200, f"Approval failed: {decide.text}"
-
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=auth(token),
-        )
-        assert pr.status_code == 200
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id=None,
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password="TestPass123!",
-    )
-    login = await client.post("/auth/login", json={
-        "username": username,
-        "password": "TestPass123!",
-        "company_code": "DEMO",
-    })
-    assert login.status_code == 200
-    return login.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -709,12 +668,12 @@ class TestFinalLinesODABlock:
     ):
         """ODA user gets 403 on GET final-lines."""
         # Create a role with payroll.view + oda scope (OwnDriverDataOnly)
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "LGR_ODARole_2087",
             ["payroll.view"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "lgr_oda_user_2087", role_id,
             scope_type="OwnDriverDataOnly",
@@ -736,12 +695,12 @@ class TestFinalLinesODABlock:
         paytest_branch_id: int,
     ):
         """Driver-role user with no payroll permissions gets 403 on final-lines."""
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "LGR_DriverRole_2087",
             [],  # no payroll permissions
         )
-        driver_token = await _create_user_with_role(
+        driver_token = await create_user_with_role_token(
             session_client, auth_token,
             "lgr_driver_user_2087", role_id,
             scope_type="OwnDriverDataOnly",
@@ -787,12 +746,12 @@ class TestFinalLinesBranchScope:
             pytest.skip("Need at least 2 branches for this test")
 
         other_branch_id = other_branch["branch_id"]
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "LGR_OtherBranchRole_2087",
             ["payroll.view"],
         )
-        other_token = await _create_user_with_role(
+        other_token = await create_user_with_role_token(
             session_client, auth_token,
             "lgr_other_branch_2087", role_id,
             scope_type="SpecificBranch",

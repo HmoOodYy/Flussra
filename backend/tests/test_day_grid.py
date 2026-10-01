@@ -16,7 +16,10 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -760,58 +763,6 @@ class TestDayGridSave:
 
 
 # ---------------------------------------------------------------------------
-# Helpers for ODA / driver-only user creation (mirror test_pay_rates pattern)
-# ---------------------------------------------------------------------------
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    """Create a custom company role with the given permissions. Returns role_id."""
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201, f"Create role failed: {cr.text}"
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=auth(token),
-        )
-        assert pr.status_code == 200, f"Set permissions failed: {pr.text}"
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id=None,
-    password: str = "TestPass123!",
-) -> str:
-    """Create user, assign company role, return login token."""
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password=password,
-    )
-
-    login = await client.post("/auth/login", json={
-        "username": username,
-        "password": password,
-        "company_code": "DEMO",
-    })
-    assert login.status_code == 200, f"Login failed: {login.text}"
-    return login.json()["access_token"]
-
-
-# ---------------------------------------------------------------------------
 # 7. ODA / Driver-role access block
 # ---------------------------------------------------------------------------
 
@@ -830,11 +781,11 @@ class TestDayGridODABlock:
         paytest_branch_id: int,
     ):
         """ODA user gets 403 on GET day-grid — no data leaked."""
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "DG_ODA_GetRole_2081",
             ["payroll.view", "payroll.entry"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token, "dg_oda_get_user_2081", role_id,
             scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
         )
@@ -860,11 +811,11 @@ class TestDayGridODABlock:
         paytest_driver_id: int,
     ):
         """ODA user gets 403 on POST day-grid — no write permitted."""
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "DG_ODA_PostRole_2081",
             ["payroll.entry"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token, "dg_oda_post_user_2081", role_id,
             scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
         )
@@ -891,11 +842,11 @@ class TestDayGridODABlock:
         Driver-only user (ODA scope, no payroll permissions) gets 403 on GET.
         The ODA guard fires before permission check; either one suffices.
         """
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "DG_DrvOnly_GetRole_2081",
             [],  # no payroll permissions at all
         )
-        drv_token = await _create_user_with_role(
+        drv_token = await create_user_with_role_token(
             session_client, auth_token, "dg_drvonly_get_user_2081", role_id,
             scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
         )
@@ -917,11 +868,11 @@ class TestDayGridODABlock:
         paytest_driver_id: int,
     ):
         """Driver-only user (ODA scope, no payroll permissions) gets 403 on POST."""
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "DG_DrvOnly_PostRole_2081",
             [],  # no payroll permissions at all
         )
-        drv_token = await _create_user_with_role(
+        drv_token = await create_user_with_role_token(
             session_client, auth_token, "dg_drvonly_post_user_2081", role_id,
             scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
         )
@@ -948,11 +899,11 @@ class TestDayGridODABlock:
         Non-ODA user with payroll.entry and SpecificBranch scope gets 200 on GET.
         Confirms the ODA guard does not block legitimate users.
         """
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "DG_Entry_GetRole_2081",
             ["payroll.entry", "payroll.view"],
         )
-        entry_token = await _create_user_with_role(
+        entry_token = await create_user_with_role_token(
             session_client, auth_token, "dg_entry_get_user_2081", role_id,
             scope_type="SpecificBranch", branch_id=paytest_branch_id,
         )

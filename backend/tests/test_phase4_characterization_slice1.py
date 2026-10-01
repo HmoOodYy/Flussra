@@ -40,6 +40,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from app.payroll.service import _compute_calculated_amount
+from tests.builders.compensation import create_approved_rate
 
 # ---------------------------------------------------------------------------
 # Module-level constants (2091 dates — isolated from other test modules)
@@ -188,31 +189,6 @@ async def _get_hourly_rate_type_id(client: httpx.AsyncClient, token: str) -> int
         if rt["rate_code"] == "HOURLY":
             return rt["rate_type_id"]
     raise AssertionError("HOURLY rate type not found")
-
-
-async def _create_and_approve_rate(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_id: int,
-    rate_type_id: int,
-    amount: str,
-    effective_from: str,
-) -> int:
-    rc = await client.post(
-        "/payroll/rates",
-        json={
-            "driver_id": driver_id,
-            "rate_type_id": rate_type_id,
-            "amount": amount,
-            "effective_from": effective_from,
-        },
-        headers=auth(token),
-    )
-    assert rc.status_code == 201, f"Create rate failed: {rc.text}"
-    rate_id = rc.json()["driver_rate_id"]
-    ra = await client.post(f"/payroll/rates/{rate_id}/approve", headers=auth(token))
-    assert ra.status_code == 200, f"Approve rate failed: {ra.text}"
-    return rate_id
 
 
 async def _add_hours_line(
@@ -647,9 +623,13 @@ async def _perunit_period(
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
     hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
     driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, driver_name)
-    rate_id = await _create_and_approve_rate(
-        session_client, auth_token, driver_id, hourly_rt_id,
-        amount=rate_amount, effective_from=effective_from,
+    rate_id = await create_approved_rate(
+        client=session_client,
+        token=auth_token,
+        driver_id=driver_id,
+        rate_type_id=hourly_rt_id,
+        amount=rate_amount,
+        effective_from=effective_from,
     )
     pid = await _open_period(
         session_client, auth_token, paytest_branch_id,
@@ -879,19 +859,14 @@ class TestPerUnitCharacterization:
             _text("SELECT companyid FROM core.drivers WHERE driverid = :did"),
             {"did": driver_id},
         )).mappings().first()
-        rate_row = (await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.driverrates
-                    (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status)
-                VALUES (:cid, :bid, :did, :rtid, :amt, :eff, 'Approved')
-                RETURNING driverrateid
-            """),
-            {
-                "cid": driver_row["companyid"], "bid": paytest_branch_id, "did": driver_id,
-                "rtid": hourly_rt_id, "amt": Decimal("9.2500"),
-                "eff": datetime.date.fromisoformat(DATE_MAR09),
-            },
-        )).mappings().first()
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=hourly_rt_id,
+            amount="9.2500",
+            effective_from=DATE_MAR09,
+        )
         try:
             result = await _compute_calculated_amount(
                 rate_behavior="PerUnit",
@@ -915,7 +890,7 @@ class TestPerUnitCharacterization:
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.driverrates WHERE driverrateid = :id"),
-                {"id": rate_row["driverrateid"]},
+                {"id": rate_id},
             )
 
 

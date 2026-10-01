@@ -30,6 +30,7 @@ from sqlalchemy import text as _text
 
 from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import CdpiDirectCreateRequest
+from tests.builders.workforce import create_driver_employee
 
 # ---------------------------------------------------------------------------
 # Year slot constants
@@ -65,23 +66,7 @@ async def _cancel_periods(client, token, branch_id):
                                json={"status": "Cancelled"}, headers=headers)
 
 
-async def _create_driver(client, token, branch_id, suffix, hire_date="2090-01-01"):
-    r = await client.post("/core/drivers", json={
-        "branch_id": branch_id,
-        "full_name": f"CF1 {suffix}",
-        "driver_code": f"CF1-{suffix[:8]}",
-        "cdl_number": f"CDL-CF1-{suffix[:6]}",
-        "email": f"cf1{suffix[:6].lower().replace('-', '')}@example.com",
-        "hire_date": hire_date,
-    }, headers=_tok(token))
-    assert r.status_code == 201, f"create_driver: {r.text}"
-    return r.json()["driver_id"]
-
-
-async def _delete_driver(client, token, driver_id):
-    await client.delete(f"/core/drivers/{driver_id}", headers=_tok(token))
-
-
+# Each scenario owns a distinct Employee/Driver, retained until disposable DB teardown.
 async def _open_period(client, token, branch_id, start, end, direct_db):
     """Seed an Open period directly; these tests exercise CDPI calculation, not creation."""
     row = (await direct_db.execute(
@@ -315,7 +300,6 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
     """
     cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
-    driver_id = None
     pid = None
 
     try:
@@ -343,8 +327,11 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id, "CF1NUM",
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="CF1 CF1NUM", driver_code="CF1-CF1NUM",
+            cdl_number="CDL-CF1-CF1NUM", email="cf1cf1num@example.com",
+            hire_date="2090-01-01",
         )
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
@@ -374,8 +361,6 @@ async def test_cf1_cdpi_number_perunit_draft_calculation(
     finally:
         if pid:
             await _force_cleanup_period(direct_db, pid)
-        if driver_id:
-            await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
             await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
@@ -396,7 +381,6 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
     """
     cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
-    driver_id = None
     pid = None
 
     try:
@@ -422,8 +406,11 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id, "CF1TME",
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="CF1 CF1TME", driver_code="CF1-CF1TME",
+            cdl_number="CDL-CF1-CF1TME", email="cf1cf1tme@example.com",
+            hire_date="2090-01-01",
         )
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
@@ -453,8 +440,6 @@ async def test_cf2_cdpi_time_perunit_draft_calculation(
     finally:
         if pid:
             await _force_cleanup_period(direct_db, pid)
-        if driver_id:
-            await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
             await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
@@ -477,7 +462,6 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
     """
     cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
-    driver_id = None
     pid = None
 
     try:
@@ -503,8 +487,11 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id, "CF1FIN",
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="CF1 CF1FIN", driver_code="CF1-CF1FIN",
+            cdl_number="CDL-CF1-CF1FIN", email="cf1cf1fin@example.com",
+            hire_date="2090-01-01",
         )
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id,
@@ -551,8 +538,6 @@ async def test_cf3_finalization_includes_cdpi_perunit_line(
     finally:
         if pid:
             await _force_cleanup_period(direct_db, pid)
-        if driver_id:
-            await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
             await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
@@ -575,7 +560,6 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
     """
     cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
-    driver_id = None
     pid = None
 
     try:
@@ -597,8 +581,11 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
         )
 
         # No driver rate created — intentional
-        driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id, "CF1NMR",
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="CF1 CF1NMR", driver_code="CF1-CF1NMR",
+            cdl_number="CDL-CF1-CF1NMR", email="cf1cf1nmr@example.com",
+            hire_date="2090-01-01",
         )
 
         pid = await _open_period(
@@ -624,8 +611,6 @@ async def test_cf4_missing_driver_rate_sets_needs_manager_review(
     finally:
         if pid:
             await _force_cleanup_period(direct_db, pid)
-        if driver_id:
-            await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
             await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
@@ -647,7 +632,6 @@ async def test_cf5_branch_inactive_cdpi_rejected(
     """
     cid, _, _, admin_id = await _get_ids(direct_db)
     pay_item_id = None
-    driver_id = None
     pid = None
 
     try:
@@ -664,8 +648,11 @@ async def test_cf5_branch_inactive_cdpi_rejected(
         await _assert_real_cdpi_shape(direct_db, pay_item_id=pay_item_id, company_id=cid)
         # Deliberately NOT activating for the branch — isdefaultbranchactive=FALSE
 
-        driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id, "CF1INA",
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="CF1 CF1INA", driver_code="CF1-CF1INA",
+            cdl_number="CDL-CF1-CF1INA", email="cf1cf1ina@example.com",
+            hire_date="2090-01-01",
         )
 
         pid = await _open_period(
@@ -685,8 +672,6 @@ async def test_cf5_branch_inactive_cdpi_rejected(
     finally:
         if pid:
             await _force_cleanup_period(direct_db, pid)
-        if driver_id:
-            await _delete_driver(session_client, auth_token, driver_id)
         if pay_item_id:
             await _cleanup_cdpi_item(direct_db, pay_item_id=pay_item_id)
 
@@ -710,8 +695,11 @@ async def test_cf6_standard_hours_calculation_unaffected(
 
     try:
         await _cancel_periods(session_client, auth_token, paytest_branch_id)
-        driver_id = await _create_driver(
-            session_client, auth_token, paytest_branch_id, "CF6"
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="CF1 CF6", driver_code="CF1-CF6",
+            cdl_number="CDL-CF1-CF6", email="cf1cf6@example.com",
+            hire_date="2090-01-01",
         )
 
         r = await session_client.get("/payroll/rate-types", headers=_tok(auth_token))

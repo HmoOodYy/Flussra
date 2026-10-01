@@ -28,6 +28,7 @@ from app.payroll_setup.payroll_policy import (
     set_default_setup,
 )
 from app.payroll_setup.resolver import resolve_payroll_setup_version
+from tests.builders.company import create_branch
 
 
 @pytest_asyncio.fixture
@@ -47,16 +48,11 @@ async def period_creation_db(test_database_url):
                 """))).mappings().one()
                 company_id = int(tenant["companyid"])
                 user_id = int(tenant["userid"])
-                branch_id = (await conn.execute(text("""
-                    INSERT INTO core.Branches
-                        (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                    VALUES (:cid, :code, :name, 'Active', FALSE)
-                    RETURNING BranchID
-                """), {
-                    "cid": company_id,
-                    "code": f"P3_{marker}",
-                    "name": f"Phase 3 creation {marker}",
-                })).scalar_one()
+                branch_id = await create_branch(
+                    conn, company_id, user_id,
+                    branch_code=f"P3_{marker}",
+                    branch_name=f"Phase 3 creation {marker}",
+                )
                 yield SimpleNamespace(
                     db=conn, company_id=company_id, user_id=user_id,
                     branch_id=int(branch_id), marker=marker,

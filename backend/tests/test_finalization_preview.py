@@ -26,7 +26,10 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -206,52 +209,6 @@ async def _add_line_to_approved_period(
     """), {"pid": period_id})).mappings().first()
     assert row is not None, "Snapshot fixture must retain its submitted source line"
     return {"draft_line_id": row["draftlineid"]}
-
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201, f"Create role failed: {cr.text}"
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=auth(token),
-        )
-        assert pr.status_code == 200, f"Set permissions failed: {pr.text}"
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id=None,
-    password: str = "TestPass123!",
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password=password,
-    )
-
-    login = await client.post("/auth/login", json={
-        "username": username,
-        "password": password,
-        "company_code": "DEMO",
-    })
-    assert login.status_code == 200, f"Login failed: {login.text}"
-    return login.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -867,12 +824,12 @@ class TestFinalizationPreview:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_ODA_Preview_Role",
             ["payroll.view", "payroll.entry", "payroll.finalize"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_preview_user",
             role_id,
@@ -903,12 +860,12 @@ class TestFinalizationPreview:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_EntryOnly_Preview_Role",
             ["payroll.view", "payroll.entry"],  # no payroll.finalize
         )
-        entry_token = await _create_user_with_role(
+        entry_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_entryonly_preview_user",
             role_id,
@@ -1039,12 +996,12 @@ class TestFinalizeODABlock:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_ODA_Finalize_Role",
             ["payroll.view", "payroll.entry", "payroll.finalize"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_finalize_user",
             role_id,
@@ -1082,12 +1039,12 @@ class TestFinalizeODABlock:
             {"pid": pid},
         )).scalar_one()
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_ODA_FinalLeak_Role",
             ["payroll.view", "payroll.entry", "payroll.finalize"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_final_leak_user",
             role_id,
@@ -1131,12 +1088,12 @@ class TestFinalizeODABlock:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_EntryOnly_Finalize_Role",
             ["payroll.view", "payroll.entry"],  # no payroll.finalize
         )
-        entry_token = await _create_user_with_role(
+        entry_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_entryonly_finalize_user",
             role_id,
@@ -1165,12 +1122,12 @@ class TestFinalizeODABlock:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_OpFinal_Role",
             ["payroll.view", "payroll.entry", "payroll.finalize"],
         )
-        op_token = await _create_user_with_role(
+        op_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_op_final_user",
             role_id,
@@ -1202,12 +1159,12 @@ class TestFinalizeODABlock:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP3A_ODA_PreviewReg_Role",
             ["payroll.view", "payroll.entry", "payroll.finalize"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_preview_reg_user",
             role_id,

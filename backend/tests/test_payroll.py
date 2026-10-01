@@ -37,6 +37,7 @@ from app.payroll_setup.payroll_policy import (
     create_setup,
     publish_version,
 )
+from tests.builders.company import create_branch
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -52,16 +53,14 @@ async def _new_authorized_branch(test_database_url: str, frequency: str,
     engine = create_async_engine(test_database_url, echo=False)
     try:
         async with engine.begin() as db:
-            code = f"PERIOD_{uuid4().hex[:16]}"
-            branch_id = (await db.execute(_sqla_text("""
-                INSERT INTO core.branches
-                    (companyid, branchcode, branchname, status, isdefault)
-                VALUES (1, :code, :name, 'Active', FALSE)
-                RETURNING branchid
-            """), {"code": code, "name": f"Period API isolated {code}"})).scalar_one()
+            code = f"PERIOD_{uuid4().hex[:16].upper()}"
             user_id = (await db.execute(_sqla_text("""
                 SELECT userid FROM sec.users WHERE companyid = 1 AND username = 'admin'
             """))).scalar_one()
+            branch_id = await create_branch(
+                db, 1, int(user_id), branch_code=code,
+                branch_name=f"Period API isolated {code}",
+            )
             setup_id = await create_setup(1, user_id, code, "Period API setup", db)
             draft_id = await create_draft(
                 1, user_id, setup_id, db,

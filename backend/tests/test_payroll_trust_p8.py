@@ -22,6 +22,8 @@ import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 from sqlalchemy import text as _text
 
+from tests.builders.compensation import create_approved_rate
+
 # ---------------------------------------------------------------------------
 # Year slots / URL templates
 # ---------------------------------------------------------------------------
@@ -95,20 +97,6 @@ async def _create_driver(client, token, branch_id, suffix, hire_date="2076-01-01
 
 async def _delete_driver(client, token, driver_id):
     await client.delete(f"/core/drivers/{driver_id}", headers=_tok(token))
-
-
-async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
-                                   effective_from="2076-01-01", amount="18.00"):
-    headers = _tok(token)
-    r = await client.post("/payroll/rates", json={
-        "driver_id": driver_id, "rate_type_id": rate_type_id,
-        "amount": amount, "effective_from": effective_from,
-    }, headers=headers)
-    assert r.status_code == 201, f"create rate: {r.text}"
-    rid = r.json()["driver_rate_id"]
-    r = await client.post(f"/payroll/rates/{rid}/approve", headers=headers)
-    assert r.status_code == 200, f"approve rate: {r.text}"
-    return rid
 
 
 async def _open_period(db, branch_id, start, end):
@@ -296,9 +284,14 @@ async def test_p8_t3_valid_system_ratetype_still_works(
                                "T3Sys", hire_date="2078-01-01")
     try:
         # Create and approve HOURLY rate — must NOT raise 422
-        await _create_and_approve_rate(session_client, auth_token, drv,
-                                       paytest_rate_type_id,
-                                       effective_from="2078-01-01")
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=drv,
+            rate_type_id=paytest_rate_type_id,
+            amount="18.00",
+            effective_from="2078-01-01",
+        )
 
         pid = await _open_period(direct_db, trust_branch_id,
                                  T3_START, T3_END)

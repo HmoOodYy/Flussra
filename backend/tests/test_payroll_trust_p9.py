@@ -23,23 +23,23 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll_setup.payroll_policy import (
-    assign_setup,
-    create_draft,
-    create_setup,
-    publish_version,
-)
+from tests.builders.company import create_branch
+from tests.builders.compensation import create_approved_rate
+from tests.builders.payroll import create_period_from_candidate, get_period_candidates
+from tests.builders.payroll_setup import create_published_setup_assignment
 
 
 @pytest_asyncio.fixture
 async def trust_branch_id(db_conn, session_client, auth_token) -> int:
     """Give each test a branch whose finalized evidence cannot affect another test."""
-    row = (await db_conn.execute(_text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (1, :code, :name, 'Active', FALSE)
-        RETURNING branchid
-    """), {"code": (code := f"P9_{uuid4().hex}"), "name": code})).scalar_one()
-    branch_id = int(row)
+    code = f"P9_{uuid4().hex}"
+    async with db_conn.engine.begin() as conn:
+        user_id = (await conn.execute(_text(
+            "SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin'"
+        ))).scalar_one()
+        branch_id = await create_branch(
+            conn, 1, user_id, branch_code=code, branch_name=code,
+        )
     items = await session_client.get(
         f"/settings/branches/{branch_id}/pay-items", headers=_tok(auth_token),
     )
@@ -101,55 +101,35 @@ async def _get_hourly_rate_type_id(client, token):
     raise AssertionError("HOURLY RateType not found")
 
 
-async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
-                                   effective_from, amount="18.00"):
-    headers = _tok(token)
-    r = await client.post("/payroll/rates", json={
-        "driver_id": driver_id, "rate_type_id": rate_type_id,
-        "amount": amount, "effective_from": effective_from,
-    }, headers=headers)
-    assert r.status_code == 201, f"create rate: {r.text}"
-    rid = r.json()["driver_rate_id"]
-    r = await client.post(f"/payroll/rates/{rid}/approve", headers=headers)
-    assert r.status_code == 200, f"approve rate: {r.text}"
-    return rid
-
-
 async def _open_period(client, token, branch_id, test_database_url, start, end):
-    headers = _tok(token)
     engine = create_async_engine(test_database_url, echo=False)
     try:
         async with engine.begin() as db:
             user_id = (await db.execute(_text("""
                 SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin'
             """))).scalar_one()
-            setup_id = await create_setup(
-                1, user_id, f"P9_{uuid4().hex[:12]}", "P9 trust setup", db,
-            )
             anchor = _date.fromisoformat(start)
-            draft_id = await create_draft(
-                1, user_id, setup_id, db,
-                payroll_frequency="Week", anchor_start_date=anchor,
+            await create_published_setup_assignment(
+                db, 1, user_id, branch_id,
+                setup_code=f"P9_{uuid4().hex[:12]}",
+                setup_name="P9 trust setup",
+                payroll_frequency="Week",
+                anchor_start_date=anchor,
                 normal_days_off_mask=0,
             )
-            await publish_version(1, user_id, setup_id, draft_id, anchor, db)
-            await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
     finally:
         await engine.dispose()
-    preview = await client.get(
-        f"/payroll/branches/{branch_id}/period-candidates",
-        params={"mode": "OPEN_CREATION"}, headers=headers,
+    preview = await get_period_candidates(
+        client, token, branch_id, mode="OPEN_CREATION",
     )
-    assert preview.status_code == 200, f"candidate preview: {preview.text}"
-    selected = preview.json()["selected"]
+    selected = preview["selected"]
     assert selected["start_date"] == start and selected["end_date"] == end
     assert selected["creatable"], selected
-    created = await client.post(
-        f"/payroll/branches/{branch_id}/period-creations",
-        json={"candidate_key": selected["candidate_key"]}, headers=headers,
+    created = await create_period_from_candidate(
+        client, token, branch_id, selected["candidate_key"],
+        expected_statuses=(201,),
     )
-    assert created.status_code == 201, f"create period: {created.text}"
-    return created.json()["payroll_period_id"]
+    return created["payroll_period_id"]
 
 
 async def _advance_to_approved(client, token, pid, driver_id, work_date):
@@ -204,9 +184,13 @@ async def test_p9_t1_sourcesnapshot_written_on_finalization(
 
         driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T1SNAP", hire_date="2091-01-01")
-        await _create_and_approve_rate(
-            session_client, auth_token, driver_id, rate_type_id,
-            effective_from=T1_START, amount="20.00",
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=rate_type_id,
+            effective_from=T1_START,
+            amount="20.00",
         )
 
         pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
@@ -281,9 +265,13 @@ async def test_p9_t2_ledger_api_exposes_sourcesnapshot(
 
         driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T2LEDG", hire_date="2091-01-01")
-        await _create_and_approve_rate(
-            session_client, auth_token, driver_id, rate_type_id,
-            effective_from=T2_START, amount="22.50",
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=rate_type_id,
+            effective_from=T2_START,
+            amount="22.50",
         )
 
         pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
@@ -344,9 +332,13 @@ async def test_p9_t3_used_driverrate_amount_update_blocked(
 
         driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T3UPDT", hire_date="2091-01-01")
-        rate_id = await _create_and_approve_rate(
-            session_client, auth_token, driver_id, rate_type_id,
-            effective_from=T3_START2, amount="15.00",
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=rate_type_id,
+            effective_from=T3_START2,
+            amount="15.00",
         )
 
         pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
@@ -411,9 +403,13 @@ async def test_p9_t4_used_driverrate_delete_blocked(
 
         driver_id = await _create_driver(session_client, auth_token, trust_branch_id,
                                          "T4DELT", hire_date="2091-01-01")
-        rate_id = await _create_and_approve_rate(
-            session_client, auth_token, driver_id, rate_type_id,
-            effective_from=T4_START2, amount="17.00",
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=rate_type_id,
+            effective_from=T4_START2,
+            amount="17.00",
         )
 
         pid = await _open_period(session_client, auth_token, trust_branch_id, test_database_url,
@@ -548,9 +544,13 @@ async def test_p9_t6_future_rate_approval_after_historical_finalization(
                                          "T6SUPR", hire_date="2093-01-01")
 
         # Create and approve historical rate
-        old_rate_id = await _create_and_approve_rate(
-            session_client, auth_token, driver_id, rate_type_id,
-            effective_from=T6A_START, amount="18.00",
+        old_rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=rate_type_id,
+            effective_from=T6A_START,
+            amount="18.00",
         )
 
         # Finalize a period that uses the old rate
@@ -641,9 +641,13 @@ async def test_p9_t7_sys_min_topup_has_system_snapshot(
                                          "T7MNTOP", hire_date="2095-01-01")
 
         # Give driver a very small HOURLY rate so earned pay will be below minimum
-        await _create_and_approve_rate(
-            session_client, auth_token, driver_id, rate_type_id,
-            effective_from=T7_START, amount="1.00",
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=driver_id,
+            rate_type_id=rate_type_id,
+            effective_from=T7_START,
+            amount="1.00",
         )
 
         # Insert a minimum pay rule that will exceed the driver's earned pay

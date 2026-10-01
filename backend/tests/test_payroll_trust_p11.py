@@ -30,23 +30,22 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db.schema_guard import _check_payroll_trust
-from app.payroll_setup.payroll_policy import (
-    assign_setup,
-    create_draft,
-    create_setup,
-    publish_version,
-)
+from tests.builders.company import create_branch
+from tests.builders.payroll import create_period_from_candidate, get_period_candidates
+from tests.builders.payroll_setup import create_published_setup_assignment
 
 
 @pytest_asyncio.fixture
 async def trust_branch_id(db_conn, session_client, auth_token) -> int:
     """Give each test a branch whose finalized evidence cannot affect another test."""
-    row = (await db_conn.execute(_text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (1, :code, :name, 'Active', FALSE)
-        RETURNING branchid
-    """), {"code": (code := f"P11_{uuid4().hex}"), "name": code})).scalar_one()
-    branch_id = int(row)
+    code = f"P11_{uuid4().hex}"
+    async with db_conn.engine.begin() as conn:
+        user_id = (await conn.execute(_text(
+            "SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin'"
+        ))).scalar_one()
+        branch_id = await create_branch(
+            conn, 1, user_id, branch_code=code, branch_name=code,
+        )
     items = await session_client.get(
         f"/settings/branches/{branch_id}/pay-items", headers=_tok(auth_token),
     )
@@ -135,40 +134,34 @@ async def _approve_rate(client, token, rate_id):
 
 
 async def _open_period(client, token, branch_id, test_database_url, start, end):
-    headers = _tok(token)
     engine = create_async_engine(test_database_url, echo=False)
     try:
         async with engine.begin() as db:
             user_id = (await db.execute(_text("""
                 SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin'
             """))).scalar_one()
-            setup_id = await create_setup(
-                1, user_id, f"P11_{uuid4().hex[:12]}", "P11 trust setup", db,
-            )
             anchor = _date.fromisoformat(start)
-            draft_id = await create_draft(
-                1, user_id, setup_id, db,
-                payroll_frequency="Week", anchor_start_date=anchor,
+            await create_published_setup_assignment(
+                db, 1, user_id, branch_id,
+                setup_code=f"P11_{uuid4().hex[:12]}",
+                setup_name="P11 trust setup",
+                payroll_frequency="Week",
+                anchor_start_date=anchor,
                 normal_days_off_mask=0,
             )
-            await publish_version(1, user_id, setup_id, draft_id, anchor, db)
-            await assign_setup(1, user_id, branch_id, setup_id, anchor, db)
     finally:
         await engine.dispose()
-    preview = await client.get(
-        f"/payroll/branches/{branch_id}/period-candidates",
-        params={"mode": "OPEN_CREATION"}, headers=headers,
+    preview = await get_period_candidates(
+        client, token, branch_id, mode="OPEN_CREATION",
     )
-    assert preview.status_code == 200, f"candidate preview: {preview.text}"
-    selected = preview.json()["selected"]
+    selected = preview["selected"]
     assert selected["start_date"] == start and selected["end_date"] == end
     assert selected["creatable"], selected
-    created = await client.post(
-        f"/payroll/branches/{branch_id}/period-creations",
-        json={"candidate_key": selected["candidate_key"]}, headers=headers,
+    created = await create_period_from_candidate(
+        client, token, branch_id, selected["candidate_key"],
+        expected_statuses=(201,),
     )
-    assert created.status_code == 201, f"create period: {created.text}"
-    return created.json()["payroll_period_id"]
+    return created["payroll_period_id"]
 
 
 async def _advance_to_approved(client, token, pid, driver_id, work_date,

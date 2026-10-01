@@ -43,12 +43,9 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from app.payroll_setup.payroll_policy import (
-    assign_setup,
-    create_draft,
-    create_setup,
-    publish_version,
-)
+from tests.builders.company import create_branch
+from tests.builders.payroll import create_period_from_candidate, get_period_candidates
+from tests.builders.payroll_setup import create_published_setup_assignment
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -133,46 +130,20 @@ async def _setup(db: AsyncConnection, branch_id: int,
                 {"cid": _COMPANY_ID},
             )).scalar_one()
             suffix = uuid.uuid4().hex[:10].upper()
-            setup_id = await create_setup(
-                _COMPANY_ID, user_id, f"CP2C_{suffix}", f"CP-2C Setup {suffix}", conn,
-            )
-            draft_id = await create_draft(
-                _COMPANY_ID, user_id, setup_id, conn,
+            setup_id, version_id, assignment_id = await create_published_setup_assignment(
+                conn,
+                _COMPANY_ID,
+                user_id,
+                branch_id,
+                setup_code=f"CP2C_{suffix}",
+                setup_name=f"CP-2C Setup {suffix}",
                 payroll_frequency=freq,
                 anchor_start_date=datetime.date.fromisoformat(anchor),
                 normal_days_off_mask=0,
             )
-            version_id = await publish_version(
-                _COMPANY_ID, user_id, setup_id, draft_id,
-                datetime.date.fromisoformat(anchor), conn,
-            )
-            assignment_id = await assign_setup(
-                _COMPANY_ID, user_id, branch_id, setup_id,
-                datetime.date.fromisoformat(anchor), conn,
-            )
         return setup_id, version_id, assignment_id
     finally:
         await engine.dispose()
-
-
-async def _preview(client, token, branch_id: int, mode: str = "OPEN_CREATION") -> dict:
-    r = await client.get(
-        f"/payroll/branches/{branch_id}/period-candidates",
-        params={"mode": mode},
-        headers=_auth(token),
-    )
-    assert r.status_code == 200, f"preview failed: {r.text}"
-    return r.json()
-
-
-async def _create_period(client, token, branch_id: int, candidate_key: str) -> dict:
-    r = await client.post(
-        f"/payroll/branches/{branch_id}/period-creations",
-        json={"candidate_key": candidate_key},
-        headers=_auth(token),
-    )
-    assert r.status_code in (200, 201), f"create_period failed: {r.text}"
-    return r.json()
 
 
 async def _snap_rows(db: AsyncConnection, period_id: int) -> list[dict]:
@@ -215,18 +186,14 @@ async def _active_snap_codes(db: AsyncConnection, period_id: int,
 @pytest_asyncio.fixture
 async def snap_branch_id(session_db_conn) -> int:
     """Use an isolated branch so immutable periods cannot move another test's anchor."""
-    row = (await session_db_conn.execute(
-        _text("""
-            INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
-            RETURNING branchid
-        """),
-        {"code": (code := f"CP2C_{uuid.uuid4().hex[:10]}"), "name": code},
-    )).mappings().first()
-    await session_db_conn.commit()
-    assert row is not None
-    return row["branchid"]
+    code = f"CP2C_{uuid.uuid4().hex[:10]}"
+    async with session_db_conn.engine.begin() as conn:
+        user_id = (await conn.execute(_text(
+            "SELECT UserID FROM sec.Users WHERE CompanyID = :cid AND Username = 'admin'"
+        ), {"cid": _COMPANY_ID})).scalar_one()
+        return await create_branch(
+            conn, _COMPANY_ID, user_id, branch_code=code, branch_name=code,
+        )
 
 
 @pytest_asyncio.fixture
@@ -401,11 +368,11 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         assert candidates, "No candidates returned"
         key = candidates["selected"]["candidate_key"]
 
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         rows = await _snap_rows(direct_db, pid)
@@ -425,9 +392,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         rows = await _snap_rows(direct_db, pid)
@@ -468,9 +435,9 @@ class TestCp2cPayItemSnapshot:
         )
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         rows = await _snap_rows(direct_db, pid)
@@ -496,9 +463,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         rows = await _snap_rows(direct_db, pid)
@@ -520,9 +487,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         rows_before = await _snap_rows(direct_db, pid)
@@ -576,9 +543,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         rows = await _snap_rows(direct_db, pid)
@@ -607,9 +574,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         first_row = (await direct_db.execute(
@@ -664,13 +631,13 @@ class TestCp2cPayItemSnapshot:
         await _setup(direct_db, snap_branch_id)
 
         # Create first period
-        c1 = await _preview(client, auth_token, snap_branch_id)
-        p1 = await _create_period(client, auth_token, snap_branch_id, c1["selected"]["candidate_key"])
+        c1 = await get_period_candidates(client, auth_token, snap_branch_id)
+        p1 = await create_period_from_candidate(client, auth_token, snap_branch_id, c1["selected"]["candidate_key"])
         pid1 = p1["payroll_period_id"]
 
         # The next canonical candidate is Prepared and receives its own snapshot.
-        c2 = await _preview(client, auth_token, snap_branch_id, "PREPARED_CREATION")
-        p2 = await _create_period(
+        c2 = await get_period_candidates(client, auth_token, snap_branch_id, mode="PREPARED_CREATION")
+        p2 = await create_period_from_candidate(
             client, auth_token, snap_branch_id, c2["selected"]["candidate_key"],
         )
         pid2 = p2["payroll_period_id"]
@@ -704,9 +671,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -787,9 +754,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -824,9 +791,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -858,9 +825,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -892,9 +859,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         r = await client.post(
@@ -950,9 +917,9 @@ class TestCp2cPayItemSnapshot:
 
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         r = await client.post(
@@ -988,9 +955,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -1069,9 +1036,9 @@ class TestCp2cPayItemSnapshot:
         )
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         snap_row = (await direct_db.execute(
@@ -1124,9 +1091,9 @@ class TestCp2cPayItemSnapshot:
 
         # Create a period (will snapshot the new custom item)
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         # Verify item is in snapshot (should be auto-snapshotted at period creation)
@@ -1175,9 +1142,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         count_before = (await direct_db.execute(
@@ -1246,15 +1213,15 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        open_cands = await _preview(client, auth_token, snap_branch_id)
-        await _create_period(
+        open_cands = await get_period_candidates(client, auth_token, snap_branch_id)
+        await create_period_from_candidate(
             client, auth_token, snap_branch_id,
             open_cands["selected"]["candidate_key"],
         )
-        prepared = await _preview(
-            client, auth_token, snap_branch_id, "PREPARED_CREATION",
+        prepared = await get_period_candidates(
+            client, auth_token, snap_branch_id, mode="PREPARED_CREATION",
         )
-        period = await _create_period(
+        period = await create_period_from_candidate(
             client, auth_token, snap_branch_id,
             prepared["selected"]["candidate_key"],
         )
@@ -1296,9 +1263,9 @@ class TestCp2cPayItemSnapshot:
         )).scalar_one()
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -1371,9 +1338,9 @@ class TestCp2cPayItemSnapshot:
         )).scalar_one()
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         # Verify snapshotted and active
@@ -1445,9 +1412,9 @@ class TestCp2cPayItemSnapshot:
         await direct_db.commit()
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -1531,9 +1498,9 @@ class TestCp2cPayItemSnapshot:
         await direct_db.commit()
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         # Add period pay line
@@ -1587,9 +1554,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         # Read HOURS snapshot label before rename
@@ -1641,9 +1608,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         # Read HOURS snapshot sort order
@@ -1693,9 +1660,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
 
         # Read MILES snapshot datatype
@@ -1774,9 +1741,9 @@ class TestCp2cPayItemSnapshot:
         await direct_db.commit()
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -1833,9 +1800,9 @@ class TestCp2cPayItemSnapshot:
         await _clean(direct_db, snap_branch_id)
         await _setup(direct_db, snap_branch_id)
 
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 
@@ -1943,9 +1910,9 @@ class TestCp2cPayItemSnapshot:
         await direct_db.commit()
 
         await _setup(direct_db, snap_branch_id)
-        candidates = await _preview(client, auth_token, snap_branch_id)
+        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
         key = candidates["selected"]["candidate_key"]
-        period = await _create_period(client, auth_token, snap_branch_id, key)
+        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
         pid = period["payroll_period_id"]
         start = period["start_date"]
 

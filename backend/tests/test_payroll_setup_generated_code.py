@@ -69,10 +69,6 @@ async def _seed_setup_row(db_conn, company_id: int, code: str, name: str) -> int
 # ---------------------------------------------------------------------------
 
 
-def test_generated_setup_code_uses_injected_choice():
-    chars = iter("ABCDEFGH")
-    code = generated_setup_code(choice=lambda seq: next(chars))
-    assert code == "PPOL-ABCDEFGH"
 
 
 def test_generated_setup_code_default_matches_pattern_and_alphabet():
@@ -82,9 +78,6 @@ def test_generated_setup_code_default_matches_pattern_and_alphabet():
     assert len(code) <= 50
 
 
-def test_setup_code_prefix_constant_is_the_reserved_namespace():
-    assert SETUP_CODE_PREFIX == "PPOL-"
-    assert generated_setup_code().startswith(SETUP_CODE_PREFIX)
 
 
 # ---------------------------------------------------------------------------

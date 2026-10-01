@@ -29,7 +29,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
+from tests.builders.compensation import create_approved_rate
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -234,77 +238,6 @@ async def _set_termination_date(
         "driver_id": driver_id,
         "termination_date": date.fromisoformat(termination_date),
     })
-
-
-async def _create_and_approve_rate(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_id: int,
-    rate_type_id: int,
-    amount: str,
-    effective_from: str,
-) -> int:
-    """Create and approve a driver rate. Returns driver_rate_id."""
-    rc = await client.post(
-        "/payroll/rates",
-        json={
-            "driver_id": driver_id,
-            "rate_type_id": rate_type_id,
-            "amount": amount,
-            "effective_from": effective_from,
-        },
-        headers=auth(token),
-    )
-    assert rc.status_code == 201, f"Create rate failed: {rc.text}"
-    rate_id = rc.json()["driver_rate_id"]
-    ra = await client.post(
-        f"/payroll/rates/{rate_id}/approve",
-        headers=auth(token),
-    )
-    assert ra.status_code == 200, f"Approve rate failed: {ra.text}"
-    return rate_id
-
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=auth(token),
-        )
-        assert pr.status_code == 200
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id=None,
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password="TestPass123!",
-    )
-    login = await client.post("/auth/login", json={
-        "username": username, "password": "TestPass123!", "company_code": "DEMO",
-    })
-    assert login.status_code == 200
-    return login.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -577,9 +510,11 @@ class TestRateLookupByWorkDate:
 
         # Now create and approve a rate backdated to JUN21 (before the work date)
         effective_from = "2089-06-01"  # before JUN23, making it valid for JUN23
-        rate_id = await _create_and_approve_rate(
-            session_client, auth_token,
-            cp5_driver_id, hourly_rt_id,
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=cp5_driver_id,
+            rate_type_id=hourly_rt_id,
             amount="30.00",
             effective_from=effective_from,
         )
@@ -772,9 +707,11 @@ class TestSubmitAutoRefresh:
         assert line["calculated_amount"] is None
 
         # Now approve a backdated rate for this driver
-        rate_id = await _create_and_approve_rate(
-            session_client, auth_token,
-            fresh_driver_id, hourly_rt_id,
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=fresh_driver_id,
+            rate_type_id=hourly_rt_id,
             amount="25.00",
             effective_from="2089-06-01",
         )
@@ -849,9 +786,11 @@ class TestFinalizeAutoRefresh:
         )
 
         # Approve an initial rate ($20/hr effective 2089-06-01)
-        rate_id = await _create_and_approve_rate(
-            session_client, auth_token,
-            fresh_driver_id, hourly_rt_id,
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=fresh_driver_id,
+            rate_type_id=hourly_rt_id,
             amount="20.00",
             effective_from="2089-06-01",
         )
@@ -879,9 +818,11 @@ class TestFinalizeAutoRefresh:
         # Void the $20 rate and approve a new $35 rate (same effective_from)
         # This simulates a rate correction made after approval.
         await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-        new_rate_id = await _create_and_approve_rate(
-            session_client, auth_token,
-            fresh_driver_id, hourly_rt_id,
+        new_rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=fresh_driver_id,
+            rate_type_id=hourly_rt_id,
             amount="35.00",
             effective_from="2089-06-01",
         )
@@ -977,9 +918,11 @@ class TestLockedPeriodNotMutated:
             session_client, auth_token, cp5_branch_id,
             "CP5 LockedNotMutated Driver",
         )
-        rate_id = await _create_and_approve_rate(
-            session_client, auth_token,
-            isolated_driver_id, hourly_rt_id,
+        rate_id = await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=isolated_driver_id,
+            rate_type_id=hourly_rt_id,
             amount="22.00",
             effective_from="2089-06-01",
         )
@@ -1067,11 +1010,11 @@ class TestODASecurityRegression:
         await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
         pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP5_ODA_DG_Role", ["payroll.view"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp5_oda_dg_user", role_id,
             scope_type="OwnDriverDataOnly",

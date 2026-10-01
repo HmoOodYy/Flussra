@@ -30,6 +30,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.builders.compensation import create_approved_rate
+
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_branch_id(session_db_conn) -> int:
@@ -147,33 +149,6 @@ async def _delete_driver(
     driver_id: int,
 ) -> None:
     await client.delete(f"/core/drivers/{driver_id}", headers=auth(token))
-
-
-async def _create_and_approve_rate(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_id: int,
-    rate_type_id: int,
-    amount: str,
-    effective_from: str = "2035-01-01",
-) -> int:
-    """Create + approve a DriverRate.  Returns driver_rate_id."""
-    headers = auth(token)
-    rc = await client.post(
-        "/payroll/rates",
-        json={
-            "driver_id":      driver_id,
-            "rate_type_id":   rate_type_id,
-            "amount":         amount,
-            "effective_from": effective_from,
-        },
-        headers=headers,
-    )
-    assert rc.status_code == 201, f"create rate: {rc.text}"
-    rate_id = rc.json()["driver_rate_id"]
-    ra = await client.post(f"/payroll/rates/{rate_id}/approve", headers=headers)
-    assert ra.status_code == 200, f"approve rate: {ra.text}"
-    return rate_id
 
 
 async def _add_draft_line(
@@ -370,8 +345,13 @@ class TestA_PerUnitSourceSnapshot:
         drv = await _create_driver(c, tok, bid, "A1")
         p3b_env["created_drivers"].append(drv)
 
-        rate_id = await _create_and_approve_rate(
-            c, tok, drv, hrly_rtid, "22.50", effective_from="2035-01-01"
+        rate_id = await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=hrly_rtid,
+            amount="22.50",
+            effective_from="2035-01-01",
         )
 
         pid = await _make_period(p3b_env["db"], bid, start=A_START, end=A_END)
@@ -417,14 +397,22 @@ class TestB_SupersededRateSnapshot:
         p3b_env["created_drivers"].append(drv)
 
         # Old rate effective from Jan 1 2036 — will be superseded
-        old_rate_id = await _create_and_approve_rate(
-            c, tok, drv, mileage_rtid, "0.5500",
+        old_rate_id = await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=mileage_rtid,
+            amount="0.5500",
             effective_from="2036-01-01",
         )
 
         # New rate effective from Apr 15 2036 — supersedes old for that date+
-        await _create_and_approve_rate(
-            c, tok, drv, mileage_rtid, "0.6000",
+        await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=mileage_rtid,
+            amount="0.6000",
             effective_from="2036-04-15",
         )
 
@@ -464,8 +452,13 @@ class TestC_ImmutableAfterFinalize:
         drv = await _create_driver(c, tok, bid, "C1")
         p3b_env["created_drivers"].append(drv)
 
-        rate_id = await _create_and_approve_rate(
-            c, tok, drv, hrly_rtid, "20.00", effective_from="2037-01-01"
+        rate_id = await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=hrly_rtid,
+            amount="20.00",
+            effective_from="2037-01-01",
         )
 
         pid = await _make_period(p3b_env["db"], bid, start=C_START, end=C_END)
@@ -483,8 +476,13 @@ class TestC_ImmutableAfterFinalize:
         # Approve a new rate effective after the locked period ends.
         # (The finalized-period guard prevents backdating into locked periods,
         # so we approve a future rate to verify the locked lines stay unchanged.)
-        await _create_and_approve_rate(
-            c, tok, drv, hrly_rtid, "99.00", effective_from="2037-05-01"
+        await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=hrly_rtid,
+            amount="99.00",
+            effective_from="2037-05-01",
         )
 
         # Final lines must be unchanged
@@ -527,8 +525,13 @@ class TestG_PreviewRateSourceFields:
         drv = await _create_driver(c, tok, bid, "G1")
         p3b_env["created_drivers"].append(drv)
 
-        await _create_and_approve_rate(
-            c, tok, drv, hrly_rtid, "30.00", effective_from="2041-01-01"
+        await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=hrly_rtid,
+            amount="30.00",
+            effective_from="2041-01-01",
         )
 
         pid = await _make_period(p3b_env["db"], bid, start=G_START, end=G_END)
@@ -585,8 +588,13 @@ class TestH_PreMigrationRowsTolerated:
         drv = await _create_driver(c, tok, bid, "H1")
         p3b_env["created_drivers"].append(drv)
 
-        await _create_and_approve_rate(
-            c, tok, drv, hrly_rtid, "18.00", effective_from="2042-01-01"
+        await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=hrly_rtid,
+            amount="18.00",
+            effective_from="2042-01-01",
         )
 
         pid = await _make_period(p3b_env["db"], bid, start=H_START, end=H_END)
