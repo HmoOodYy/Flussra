@@ -83,6 +83,10 @@ async def _create_user(
     token: str,
     username: str,
 ) -> dict:
+    empty_role = await client.post(
+        "/admin/company-roles", json={"role_name": f"Security Test {username}"}, headers=_hdr(token),
+    )
+    assert empty_role.status_code == 201, empty_role.text
     resp = await client.post(
         "/admin/users",
         json={
@@ -92,6 +96,7 @@ async def _create_user(
             "is_active": True,
             "can_login": True,
             "must_change_password": False,
+            "role_assignment": {"company_role_id": empty_role.json()["company_role_id"], "scope_type": "AllCompanyBranches"},
         },
         headers=_hdr(token),
     )
@@ -1443,14 +1448,7 @@ class TestLegacyODABlock:
         from sqlalchemy import text as _text
 
         uname = _uid()
-        user_resp = await session_client.post(
-            "/admin/users",
-            json={"username": uname, "display_name": uname,
-                  "password": "TestPass1234!", "is_active": True,
-                  "can_login": True, "must_change_password": False},
-            headers=_hdr(auth_token),
-        )
-        assert user_resp.status_code == 201, f"Create user: {user_resp.text}"
+        await _create_user(session_client, auth_token, uname)
 
         # Inject a legacy ODA row: companyroleId IS NULL, scopetype='OwnDriverDataOnly'
         # branchid must be set (DB constraint); the legacy aspect is NULL companyroleId.
@@ -1514,14 +1512,7 @@ class TestLegacyODABlock:
         from sqlalchemy import text as _text
 
         uname = _uid()
-        user_resp = await session_client.post(
-            "/admin/users",
-            json={"username": uname, "display_name": uname,
-                  "password": "TestPass1234!", "is_active": True,
-                  "can_login": True, "must_change_password": False},
-            headers=_hdr(auth_token),
-        )
-        assert user_resp.status_code == 201
+        await _create_user(session_client, auth_token, uname)
 
         # Give the user a PAYROLL_ADMIN role (payroll.entry) AND a legacy ODA row
         await direct_db.execute(

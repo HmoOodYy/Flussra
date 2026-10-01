@@ -20,6 +20,7 @@ from app.payroll.service import (
     _LiveCalculationPacket,
     finalize_period,
 )
+from tests.access_test_helpers import create_provisioned_test_user
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -195,23 +196,16 @@ async def _scoped_permission_token(
     )
     assert assigned.status_code == 200, assigned.text
     username = f"p6c_{marker[:20]}"
-    user = await client.post("/admin/users", json={
-        "username": username, "display_name": username, "password": "TestPass1234!",
-        "is_active": True, "can_login": True, "must_change_password": False,
-    }, headers=_auth(admin_token))
-    assert user.status_code == 201, user.text
-    assignment = await client.post(
-        f"/admin/users/{user.json()['user_id']}/company-role-assignments",
-        json={"company_role_id": role_id, "scope_type": "SpecificBranch", "branch_id": branch_id},
-        headers=_auth(admin_token),
+    user = await create_provisioned_test_user(
+        client, admin_token, username, role_id, scope_type="SpecificBranch",
+        branch_id=branch_id, password="TestPass1234!",
     )
-    assert assignment.status_code == 201, assignment.text
     login = await client.post("/auth/login", json={
         "username": username, "password": "TestPass1234!", "company_code": "DEMO",
     })
     assert login.status_code == 200, login.text
     token = login.json()["access_token"]
-    return (token, int(user.json()["user_id"])) if return_user_id else token
+    return (token, int(user["user_id"])) if return_user_id else token
 
 
 async def _ledger_token_with_driver_scope(

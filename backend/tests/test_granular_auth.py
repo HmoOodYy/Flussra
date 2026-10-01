@@ -38,6 +38,12 @@ async def _create_user(
     username: str,
     display_name: str = "Test User",
 ) -> dict:
+    roles = await client.get("/admin/company-roles", headers=_hdr(token))
+    assert roles.status_code == 200, f"List company roles failed: {roles.text}"
+    default_role_id = next(
+        role["company_role_id"] for role in roles.json()
+        if role["role_code"] == "PAYROLL_VIEWER_CO"
+    )
     resp = await client.post(
         "/admin/users",
         json={
@@ -47,6 +53,11 @@ async def _create_user(
             "is_active": True,
             "can_login": True,
             "must_change_password": False,
+            "is_staged": False,
+            "role_assignment": {
+                "company_role_id": default_role_id,
+                "scope_type": "AllCompanyBranches",
+            },
         },
         headers=_hdr(token),
     )
@@ -137,10 +148,10 @@ class TestGranularAuth:
         )
         assert resp.status_code == 403
 
-    async def test_users_create_can_create_user(
+    async def test_users_create_can_create_staged_user(
         self, client: httpx.AsyncClient, auth_token: str
     ):
-        """users.create (with users.view dep) is sufficient to POST /admin/users."""
+        """users.create permits staged creation without role-assignment authority."""
         role_id = await _create_role_with_perms(
             client, auth_token, "GA CreateUsers", ["users.view", "users.create"]
         )
@@ -155,12 +166,14 @@ class TestGranularAuth:
                 "display_name": "Created By Custom",
                 "password": "TestPass1234!",
                 "is_active": True,
-                "can_login": True,
+                "is_staged": True,
+                "can_login": False,
                 "must_change_password": False,
             },
             headers=_hdr(tok),
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["is_staged"] is True
 
     async def test_users_edit_can_edit_user(
         self, client: httpx.AsyncClient, auth_token: str
@@ -446,7 +459,7 @@ class TestCompanyOwnerUnique:
             "/admin/company-owner/transfer",
             json={
                 "target_user_id": admin_user["user_id"],
-                "replacement_company_role_id": None,
+                "replacement_company_role_id": repl_role_id,
                 "confirmation": "TRANSFER",
             },
             headers=_hdr(target_token),
@@ -458,6 +471,9 @@ class TestCompanyOwnerUnique:
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
     ):
         """After transfer, exactly one active COMPANY_OWNER exists."""
+        replacement_role_id = await _create_role_with_perms(
+            client, auth_token, "COU OneOwner Replacement", ["users.view"]
+        )
         target = await _create_user(client, auth_token, "cou_one_owner_tgt")
         dr_r = await client.get("/admin/company-roles", headers=_hdr(auth_token))
         dr_id = next(r["company_role_id"] for r in dr_r.json() if r["role_code"] == "DRIVER")
@@ -471,7 +487,7 @@ class TestCompanyOwnerUnique:
             "/admin/company-owner/transfer",
             json={
                 "target_user_id": target["user_id"],
-                "replacement_company_role_id": None,
+                "replacement_company_role_id": replacement_role_id,
                 "confirmation": "TRANSFER",
             },
             headers=_hdr(auth_token),
@@ -495,7 +511,7 @@ class TestCompanyOwnerUnique:
             "/admin/company-owner/transfer",
             json={
                 "target_user_id": admin_id,
-                "replacement_company_role_id": None,
+                "replacement_company_role_id": replacement_role_id,
                 "confirmation": "TRANSFER",
             },
             headers=_hdr(target_token),

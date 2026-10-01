@@ -33,6 +33,22 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _provisioned_account_payload(
+    client: httpx.AsyncClient, token: str,
+) -> dict:
+    roles = await client.get("/admin/company-roles", headers=auth(token))
+    assert roles.status_code == 200, roles.text
+    role = next(item for item in roles.json() if item["role_code"] == "PAYROLL_VIEWER_CO")
+    return {
+        "must_change_password": False,
+        "can_login": True,
+        "role_assignment": {
+            "company_role_id": role["company_role_id"],
+            "scope_type": "AllCompanyBranches",
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Session-scoped fixture: a Draft period on the PAYTEST branch
 # Used by branch-scope denial tests that need a PAYTEST resource to be denied.
@@ -344,13 +360,14 @@ class TestStaleTokenRejection:
         deactivate the account, then verify the old token returns 403.
         """
         # 1. Create a user and assign AllCompanyBranches role
+        account = await _provisioned_account_payload(session_client, auth_token)
         create_resp = await session_client.post(
             "/admin/users",
             json={
                 "username":             "stale_token_user",
                 "display_name":         "Stale Token Test",
                 "password":             "StalePass123!",
-                "must_change_password": False,
+                **account,
             },
             headers=auth(auth_token),
         )
@@ -409,13 +426,14 @@ class TestStaleTokenRejection:
         the user's ability to call protected endpoints.
         """
         # Create, assign role, login
+        account = await _provisioned_account_payload(session_client, auth_token)
         create_resp = await session_client.post(
             "/admin/users",
             json={
                 "username":             "no_login_user",
                 "display_name":         "No Login Test",
                 "password":             "NoLoginPass123!",
-                "must_change_password": False,
+                **account,
             },
             headers=auth(auth_token),
         )

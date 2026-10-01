@@ -12,6 +12,8 @@ from datetime import date
 import httpx
 import pytest
 
+from tests.access_test_helpers import create_neutral_test_user
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -26,20 +28,11 @@ async def _create_user(
     username: str,
     display_name: str = "Test User",
 ) -> int:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": display_name,
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=auth(token),
+    user = await create_neutral_test_user(
+        client, token, username, password="TestPass1234!",
+        display_name=display_name,
     )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["user_id"]
+    return user["user_id"]
 
 
 async def _get_driver_role_id(client: httpx.AsyncClient, token: str) -> int | None:

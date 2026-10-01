@@ -866,6 +866,16 @@ class TestSelfApprovalPolicy:
                 client, auth_token, hq_branch_id, "Different reviewer test"
             )
 
+            company_roles = await session_client.get(
+                "/admin/company-roles",
+                headers=self._auth(auth_token),
+            )
+            assert company_roles.status_code == 200
+            base_role = next(
+                role for role in company_roles.json()
+                if role["role_code"] == "PAYROLL_VIEWER_CO"
+            )
+
             # Create a second PAYROLL_ADMIN user via the admin API.
             create_resp = await session_client.post(
                 "/admin/users",
@@ -873,6 +883,11 @@ class TestSelfApprovalPolicy:
                     "username":    "reviewer2",
                     "display_name": "Reviewer Two",
                     "password":    "TestPass123!",
+                    "can_login":   True,
+                    "role_assignment": {
+                        "company_role_id": base_role["company_role_id"],
+                        "scope_type": "AllCompanyBranches",
+                    },
                 },
                 headers=self._auth(auth_token),
             )

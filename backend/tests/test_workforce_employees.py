@@ -18,6 +18,28 @@ def suffix() -> str:
     return uuid4().hex[:10]
 
 
+async def create_provisioned_test_user(
+    client: httpx.AsyncClient, token: str, username: str, display_name: str,
+) -> httpx.Response:
+    roles = await client.get("/admin/company-roles", headers=auth(token))
+    assert roles.status_code == 200, roles.text
+    role = next(item for item in roles.json() if item["role_code"] == "PAYROLL_VIEWER_CO")
+    return await client.post(
+        "/admin/users",
+        json={
+            "username": username,
+            "display_name": display_name,
+            "password": "TestPass123!",
+            "can_login": True,
+            "role_assignment": {
+                "company_role_id": role["company_role_id"],
+                "scope_type": "AllCompanyBranches",
+            },
+        },
+        headers=auth(token),
+    )
+
+
 async def create_employee(client: httpx.AsyncClient, token: str, branch_id: int, **fields) -> dict:
     body = {"branch_id": branch_id, "full_name": f"P1B {suffix()}", **fields}
     response = await client.post("/workforce/employees", json=body, headers=auth(token))
@@ -544,19 +566,11 @@ async def test_driver_role_workforce_failure_rolls_back_access_assignment(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     tag = suffix()
-    caller = await client.post(
-        "/admin/users",
-        json={"username": f"p1b_access_{tag}", "display_name": f"P1B Access {tag}",
-              "password": "TestPass123!", "company_role_id": None,
-              "scope_type": "AllCompanyBranches", "branch_id": None},
-        headers=auth(auth_token),
+    caller = await create_provisioned_test_user(
+        client, auth_token, f"p1b_access_{tag}", f"P1B Access {tag}",
     )
-    target = await client.post(
-        "/admin/users",
-        json={"username": f"p1b_target_{tag}", "display_name": f"P1B Target {tag}",
-              "password": "TestPass123!", "company_role_id": None,
-              "scope_type": "AllCompanyBranches", "branch_id": None},
-        headers=auth(auth_token),
+    target = await create_provisioned_test_user(
+        client, auth_token, f"p1b_target_{tag}", f"P1B Target {tag}",
     )
     assert caller.status_code in {200, 201}, caller.text
     assert target.status_code in {200, 201}, target.text
@@ -607,11 +621,8 @@ async def test_admin_driver_hook_uses_workforce_key_and_links_user(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     tag = suffix()
-    created = await client.post(
-        "/admin/users",
-        json={"username": f"p1b_{tag}", "display_name": f"P1B Hook {tag}", "password": "TestPass123!",
-               "company_role_id": None, "scope_type": "AllCompanyBranches", "branch_id": None},
-        headers=auth(auth_token),
+    created = await create_provisioned_test_user(
+        client, auth_token, f"p1b_{tag}", f"P1B Hook {tag}",
     )
     assert created.status_code in {200, 201}, created.text
     user_id = created.json()["user_id"]

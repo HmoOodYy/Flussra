@@ -32,6 +32,7 @@ from app.payroll_setup.payroll_policy import (
     publish_version,
     withdraw_assignment,
 )
+from tests.access_test_helpers import create_neutral_test_user
 
 # ---------------------------------------------------------------------------
 # Unique-username counter (avoids collisions between security tests)
@@ -285,20 +286,9 @@ async def paytest_branch_id(session_db_conn, test_database_url):
 # ---------------------------------------------------------------------------
 
 async def _create_user(client, admin_token: str, username: str) -> dict:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": username,
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=_auth(admin_token),
+    return await create_neutral_test_user(
+        client, admin_token, username, password="TestPass1234!",
     )
-    assert resp.status_code == 201, f"Create user {username!r}: {resp.text}"
-    return resp.json()
 
 
 async def _login_as(client, username: str, password: str = "TestPass1234!") -> str:

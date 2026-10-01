@@ -16,6 +16,8 @@ import httpx
 import pytest
 from sqlalchemy import text as _text
 
+from tests.access_test_helpers import create_neutral_test_user
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -29,20 +31,11 @@ async def _create_user(
     token: str,
     username: str,
 ) -> int:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": f"Transfer Test {username}",
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=auth(token),
+    user = await create_neutral_test_user(
+        client, token, username, password="TestPass1234!",
+        display_name=f"Transfer Test {username}",
     )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["user_id"]
+    return user["user_id"]
 
 
 async def _get_driver_role_id(client: httpx.AsyncClient, token: str) -> int:

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { toUserProfile } from '../src/store/authStore.ts';
 import type { BranchAccess, PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
 import {
@@ -9,11 +10,14 @@ import {
   canTogglePeopleActive,
   canAssignPeopleRole,
   canManageRoles,
+  canProvisionPeopleAccount,
   canCreateRoles,
   canEditRoles,
   canDeleteRoles,
   canViewSettings,
 } from '../src/lib/permissions.ts';
+
+const peoplePageSource = readFileSync(new URL('../src/pages/people/PeoplePage.tsx', import.meta.url), 'utf8');
 
 // ── Fixture helpers (duplicated from authAuthority.test.ts — see project notes:
 // that file is already oversized, so this suite keeps its own copies) ─────────
@@ -175,6 +179,38 @@ test('canAssignPeopleRole: company admin fallback authorizes assignment', () => 
 
 test('canAssignPeopleRole: mixed Driver branch row + valid company roles.edit grant is authorized', () => {
   assert.equal(canAssignPeopleRole(mixedDriverPlusCompanyUser('roles.edit')), true);
+});
+
+test('canProvisionPeopleAccount requires users.edit and visible role choices', () => {
+  const roleEditorWithoutUserEdit = makeUser({
+    authority: makeAuthority({ company_permissions: ['users.create', 'roles.edit', 'roles.view'] }),
+  });
+  assert.equal(canProvisionPeopleAccount(roleEditorWithoutUserEdit), false);
+
+  const editorWithoutRoleVisibility = companyUser('users.edit');
+  assert.equal(canProvisionPeopleAccount(editorWithoutRoleVisibility), false);
+
+  const editorWithRoleVisibility = makeUser({
+    authority: makeAuthority({ company_permissions: ['users.edit', 'roles.view'] }),
+  });
+  assert.equal(canProvisionPeopleAccount(editorWithRoleVisibility), true);
+  assert.match(peoplePageSource, /if \(!userCanProvisionAccount\) \{\s*dispatch\(\{ type: 'WIZ_STEP', step: 5 \}\);/);
+});
+
+test('new wizard limits non-Driver scope choices while legacy role editing keeps its scope options', () => {
+  assert.match(peoplePageSource, /allowOwnDriverDataScope=\{false\}/);
+  assert.match(peoplePageSource, /\(allowOwnDriverDataScope \|\| isDriverRole\)/);
+  assert.match(peoplePageSource, /allowOwnDriverDataScope = true/);
+});
+
+test('ownership replacement options exclude Driver without removing it from normal role choices', () => {
+  assert.match(peoplePageSource, /ownerTransferRoles = st\.roles\.filter\(r => r\.is_active && r\.role_code !== 'COMPANY_OWNER' && r\.role_code !== 'DRIVER'\)/);
+  assert.match(peoplePageSource, /assignableRoles = st\.roles\.filter\(r => r\.role_code !== 'COMPANY_OWNER' && r\.is_active\)/);
+});
+
+test('provision failure stays on the staged provisioning step for in-place retry', () => {
+  assert.match(peoplePageSource, /case 'WIZ_PARTIAL': return \{[^\n]*step: 3 \}/);
+  assert.match(peoplePageSource, /Correct the role, scope, or Employee selection and retry; the User will not be recreated/);
 });
 
 // ── Role helpers: view/create/edit/delete stay distinct ─────────────────────

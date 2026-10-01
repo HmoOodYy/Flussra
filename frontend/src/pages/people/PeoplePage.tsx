@@ -22,6 +22,7 @@ import {
   canTogglePeopleActive,
   canAssignPeopleRole,
   canManageRoles,
+  canProvisionPeopleAccount,
   canViewTransfers,
 } from '../../lib/permissions';
 import { TransferRequestsTab } from './TransferRequestsTab';
@@ -37,8 +38,9 @@ import type {
   OwnerTransferRequest,
   OwnerTransferResult,
   Permission,
+  UserProvision,
 } from '../../types/admin';
-import type { Branch } from '../../types/core';
+import type { Branch, PersonSummary } from '../../types/core';
 import styles from './PeoplePage.module.css';
 import { PERM_DEPS, applyToggle, groupPerms } from './peoplePermissionModel';
 
@@ -86,6 +88,7 @@ function scopeLabel(scope: string | null, branchName: string | null): string {
 
 type AccessStatus = { label: string; kind: 'ok' | 'warn' | 'err' };
 function accessStatus(p: UserAdmin): AccessStatus {
+  if (p.is_staged)       return { label: 'Staged',           kind: 'warn' };
   if (!p.is_active)       return { label: 'Inactive',         kind: 'err'  };
   if (!p.can_login)       return { label: 'Login disabled',   kind: 'warn' };
   if (!p.company_role_id) return { label: 'No role assigned', kind: 'warn' };
@@ -140,6 +143,8 @@ interface WizState {
   name: string; username: string; password: string;
   email: string; phone: string; canLogin: boolean; mustChange: boolean;
   roleId: number | null;
+  employeeId: number | null;
+  employeeOptions: PersonSummary[];
   scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
   branchId: number | null;
   extraCodes: Set<string>;
@@ -192,6 +197,7 @@ type Action =
   | { type: 'WIZ_PARTIAL'; user: UserAdmin }
   | { type: 'WIZ_DONE'; user: UserAdmin }
   | { type: 'WIZ_FIELD'; field: keyof WizState; val: unknown }
+  | { type: 'WIZ_EMPLOYEES'; employees: PersonSummary[] }
   | { type: 'WIZ_EXTRA_TOGGLE'; code: string; checked: boolean }
   // Edit
   | { type: 'EDIT_OPEN'; person: UserAdmin }
@@ -232,7 +238,7 @@ type Action =
 const WIZ0: WizState = {
   open: false, step: 1, loading: false, error: null, createdUser: null, partialSuccess: false,
   name: '', username: '', password: '', email: '', phone: '', canLogin: true, mustChange: true,
-  roleId: null, scope: 'AllCompanyBranches', branchId: null, extraCodes: new Set(),
+  roleId: null, employeeId: null, employeeOptions: [], scope: 'AllCompanyBranches', branchId: null, extraCodes: new Set(),
 };
 const EDIT0: EditState = { open: false, loading: false, error: null, name: '', email: '', phone: '', canLogin: true, mustChange: false };
 const RESET0: ResetState = { open: false, loading: false, error: null, pw: '', mustChange: true };
@@ -269,10 +275,11 @@ function reducer(st: PageState, a: Action): PageState {
     case 'WIZ_STEP': return { ...st, wiz: { ...st.wiz, step: a.step, error: null } };
     case 'WIZ_LOADING': return { ...st, wiz: { ...st.wiz, loading: a.val } };
     case 'WIZ_ERROR': return { ...st, wiz: { ...st.wiz, error: a.err, loading: false } };
-    case 'WIZ_USER_CREATED': return { ...st, wiz: { ...st.wiz, createdUser: a.user, loading: false, step: 2, error: null } };
-    case 'WIZ_PARTIAL': return { ...st, wiz: { ...st.wiz, partialSuccess: true, createdUser: a.user, loading: false, step: 5 } };
+    case 'WIZ_USER_CREATED': return { ...st, wiz: { ...st.wiz, createdUser: a.user, partialSuccess: false, loading: false, step: 2, error: null } };
+    case 'WIZ_PARTIAL': return { ...st, wiz: { ...st.wiz, partialSuccess: true, createdUser: a.user, loading: false, step: 3 } };
     case 'WIZ_DONE': return { ...st, wiz: { ...st.wiz, open: false, loading: false }, selectedId: a.user.user_id };
     case 'WIZ_FIELD': return { ...st, wiz: { ...st.wiz, [a.field]: a.val } };
+    case 'WIZ_EMPLOYEES': return { ...st, wiz: { ...st.wiz, employeeOptions: a.employees } };
     case 'WIZ_EXTRA_TOGGLE': return { ...st, wiz: { ...st.wiz, extraCodes: applyToggle(st.wiz.extraCodes, a.code, a.checked) } };
     // Edit
     case 'EDIT_OPEN': return { ...st, edit: { open: true, loading: false, error: null, name: a.person.display_name, email: a.person.email ?? '', phone: a.person.phone ?? '', canLogin: a.person.can_login, mustChange: a.person.must_change_password } };
@@ -375,8 +382,10 @@ export function PeoplePage() {
   const userCanAssignRole = authUser ? canAssignPeopleRole(authUser)   : false;
   const userCanManageRoles = authUser ? canManageRoles(authUser)       : false;
   const userCanChangeRole = userCanAssignRole && userCanManageRoles;
+  const userCanProvisionAccount = authUser ? canProvisionPeopleAccount(authUser) : false;
   const userCanTransfers  = authUser ? canViewTransfers(authUser)      : false;
   const assignableRoles = st.roles.filter(r => r.role_code !== 'COMPANY_OWNER' && r.is_active);
+  const ownerTransferRoles = st.roles.filter(r => r.is_active && r.role_code !== 'COMPANY_OWNER' && r.role_code !== 'DRIVER');
 
   // ── Wizard: step 1 — create user ──
   const wizStep1 = useCallback(async (e: FormEvent) => {
@@ -387,36 +396,58 @@ export function PeoplePage() {
     if (wiz.password.length < 8) { dispatch({ type: 'WIZ_ERROR', err: 'Password must be at least 8 characters.' }); return; }
     dispatch({ type: 'WIZ_LOADING', val: true });
     try {
-      const payload: UserCreate = { display_name: wiz.name.trim(), username: wiz.username.trim().toLowerCase(), password: wiz.password, email: wiz.email.trim() || null, phone: wiz.phone.trim() || null, can_login: wiz.canLogin, must_change_password: wiz.mustChange, is_active: true };
+      const payload: UserCreate = { display_name: wiz.name.trim(), username: wiz.username.trim().toLowerCase(), password: wiz.password, email: wiz.email.trim() || null, phone: wiz.phone.trim() || null, is_staged: true, can_login: false, must_change_password: wiz.mustChange, is_active: true };
       const r = await apiClient.post<UserAdmin>('/admin/users', payload);
       dispatch({ type: 'ADD_PERSON', person: r.data });
       dispatch({ type: 'WIZ_USER_CREATED', user: r.data });
-      if (!userCanChangeRole) {
+      if (!userCanProvisionAccount) {
         dispatch({ type: 'WIZ_STEP', step: 5 });
       }
     } catch (e) { dispatch({ type: 'WIZ_ERROR', err: apiError(e) }); }
-  }, [st, userCanChangeRole]);
+  }, [st, userCanProvisionAccount]);
+
+  const wizSelectRole = useCallback(async (roleId: number) => {
+    dispatch({ type: 'WIZ_FIELD', field: 'roleId', val: roleId });
+    const selectedRole = st.roles.find(role => role.company_role_id === roleId);
+    if (selectedRole?.role_code !== 'DRIVER') {
+      dispatch({ type: 'WIZ_FIELD', field: 'employeeId', val: null });
+      dispatch({ type: 'WIZ_EMPLOYEES', employees: [] });
+      dispatch({ type: 'WIZ_FIELD', field: 'scope', val: 'AllCompanyBranches' });
+      dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: null });
+      return;
+    }
+    try {
+      const result = await apiClient.get<PersonSummary[]>('/core/people?driver_state=current');
+      dispatch({ type: 'WIZ_EMPLOYEES', employees: result.data });
+    } catch (e) {
+      dispatch({ type: 'WIZ_ERROR', err: `Could not load current Driver Employees: ${apiError(e)}` });
+    }
+  }, [st.roles]);
 
   // ── Wizard: step 3 — assign role+scope ──
   const wizStep3 = useCallback(async () => {
     const { wiz } = st;
     if (!wiz.roleId) { dispatch({ type: 'WIZ_ERROR', err: 'Please select a role.' }); return; }
     if (!wiz.createdUser) return;
+    const selectedRole = st.roles.find(role => role.company_role_id === wiz.roleId);
+    if (selectedRole?.role_code === 'DRIVER' && !wiz.employeeId) { dispatch({ type: 'WIZ_ERROR', err: 'Select an existing current Driver Employee.' }); return; }
     if (wiz.scope !== 'AllCompanyBranches' && !wiz.branchId) { dispatch({ type: 'WIZ_ERROR', err: 'Please select a branch.' }); return; }
     dispatch({ type: 'WIZ_LOADING', val: true });
     try {
       const body: CompanyRoleAssignmentCreate = { company_role_id: wiz.roleId, scope_type: wiz.scope, branch_id: wiz.scope === 'AllCompanyBranches' ? null : wiz.branchId };
-      await apiClient.post(`/admin/users/${wiz.createdUser.user_id}/company-role-assignments`, body);
-      // Fix 6: Refresh user so role_permission_codes is populated before step 4 renders
-      const updated = await apiClient.get<UserAdmin>(`/admin/users/${wiz.createdUser.user_id}`);
-      dispatch({ type: 'UPDATE_PERSON', person: updated.data });
-      dispatch({ type: 'WIZ_USER_CREATED', user: updated.data });
+      if (selectedRole?.role_code === 'DRIVER') {
+        await apiClient.put(`/admin/users/${wiz.createdUser.user_id}/employee-link`, { employee_id: wiz.employeeId });
+      }
+      const provision: UserProvision = { role_assignment: body, can_login: wiz.canLogin };
+      const provisioned = await apiClient.post<UserAdmin>(`/admin/users/${wiz.createdUser.user_id}/provision`, provision);
+      dispatch({ type: 'UPDATE_PERSON', person: provisioned.data });
+      dispatch({ type: 'WIZ_USER_CREATED', user: provisioned.data });
       dispatch({ type: 'WIZ_LOADING', val: false });
       dispatch({ type: 'WIZ_STEP', step: userCanEditPeople ? 4 : 5 });
     } catch (e) {
-      // Partial success: user created, role assignment failed
+      // The staged account remains available for a later provisioning attempt.
       dispatch({ type: 'WIZ_PARTIAL', user: wiz.createdUser });
-      dispatch({ type: 'WIZ_ERROR', err: `Person created but role assignment failed: ${apiError(e)}` });
+      dispatch({ type: 'WIZ_ERROR', err: `Access account remains staged and unprovisioned: ${apiError(e)}` });
     }
   }, [st, userCanEditPeople]);
 
@@ -448,7 +479,7 @@ export function PeoplePage() {
     const roleName = st.roles.find(r => r.company_role_id === wiz.roleId)?.role_name ?? '';
     const isDriver = st.roles.find(r => r.company_role_id === wiz.roleId)?.role_code === 'DRIVER';
     dispatch({ type: 'WIZ_DONE', user: wiz.createdUser });
-    showToast(isDriver ? `${wiz.createdUser.display_name} created as Driver. Set up pay rates next.` : `${wiz.createdUser.display_name} added${roleName ? ` as ${roleName}` : ''}.`);
+    showToast(isDriver ? `${wiz.createdUser.display_name} Driver access provisioned.` : `${wiz.createdUser.display_name} added${roleName ? ` as ${roleName}` : ''}.`);
   }, [st]);
 
   // ── Edit submit ──
@@ -688,7 +719,7 @@ export function PeoplePage() {
       {st.wiz.open && (
         <WizardModal
           wiz={st.wiz} roles={assignableRoles} branches={st.branches} allPerms={st.allPerms}
-          dispatch={dispatch} onStep1={wizStep1} onStep3={wizStep3} onStep4={wizStep4} onFinish={wizFinish}
+          dispatch={dispatch} onStep1={wizStep1} onSelectRole={wizSelectRole} onStep3={wizStep3} onStep4={wizStep4} onFinish={wizFinish}
         />
       )}
 
@@ -782,7 +813,7 @@ export function PeoplePage() {
             <Field label="Replacement role for you after transfer (optional)">
               <select className={styles.inp} value={st.transfer.replacementRoleId ?? ''} onChange={e => dispatch({ type: 'TRANSFER_FIELD', field: 'replacementRoleId', val: e.target.value ? parseInt(e.target.value) : null })}>
                 <option value="">— No replacement role —</option>
-                {assignableRoles.map(r => <option key={r.company_role_id} value={r.company_role_id}>{r.role_name}</option>)}
+                {ownerTransferRoles.map(r => <option key={r.company_role_id} value={r.company_role_id}>{r.role_name}</option>)}
               </select>
             </Field>
             <Field label={<>Type <strong>TRANSFER</strong> to confirm *</>}>
@@ -958,6 +989,7 @@ interface WizardModalProps {
   allPerms: Permission[];
   dispatch(a: Action): void;
   onStep1(e: FormEvent): void;
+  onSelectRole(roleId: number): void;
   onStep3(): void;
   onStep4(): void;
   onFinish(): void;
@@ -965,7 +997,7 @@ interface WizardModalProps {
 
 const WIZ_STEPS = ['Person Info', 'Role', 'Scope', 'Extra Permissions', 'Review'] as const;
 
-function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onStep3, onStep4, onFinish }: WizardModalProps) {
+function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onSelectRole, onStep3, onStep4, onFinish }: WizardModalProps) {
   const selectedRole = roles.find(r => r.company_role_id === wiz.roleId);
   const isDriver = selectedRole?.role_code === 'DRIVER';
   // Role permissions for the selected role (for the extra perms step)
@@ -1006,7 +1038,7 @@ function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onStep
               <Field label="Email"><input className={styles.inp} type="email" value={wiz.email} onChange={e => dispatch({ type: 'WIZ_FIELD', field: 'email', val: e.target.value })} /></Field>
               <Field label="Phone"><input className={styles.inp} value={wiz.phone} onChange={e => dispatch({ type: 'WIZ_FIELD', field: 'phone', val: e.target.value })} /></Field>
               <div className={styles.checks}>
-                <label><input type="checkbox" checked={wiz.canLogin} onChange={e => dispatch({ type: 'WIZ_FIELD', field: 'canLogin', val: e.target.checked })} /> Can login</label>
+                <label><input type="checkbox" checked={wiz.canLogin} onChange={e => dispatch({ type: 'WIZ_FIELD', field: 'canLogin', val: e.target.checked })} /> Enable login after provisioning</label>
                 <label><input type="checkbox" checked={wiz.mustChange} onChange={e => dispatch({ type: 'WIZ_FIELD', field: 'mustChange', val: e.target.checked })} /> Must change password on first login</label>
               </div>
               {wiz.error && <ErrMsg msg={wiz.error} />}
@@ -1025,10 +1057,10 @@ function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onStep
                 {roles.map(r => (
                   <button key={r.company_role_id} type="button"
                     className={`${styles.roleCard}${wiz.roleId === r.company_role_id ? ` ${styles.roleCardSel}` : ''}`}
-                    onClick={() => dispatch({ type: 'WIZ_FIELD', field: 'roleId', val: r.company_role_id })}
+                    onClick={() => onSelectRole(r.company_role_id)}
                   >
                     <div className={styles.rcName}>{r.role_name}</div>
-                    {r.role_code === 'DRIVER' && <div className={styles.rcHint}>Pay rates setup required after creation</div>}
+                    {r.role_code === 'DRIVER' && <div className={styles.rcHint}>Requires an existing current Driver profile</div>}
                   </button>
                 ))}
               </div>
@@ -1044,11 +1076,25 @@ function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onStep
           {wiz.step === 3 && (
             <div className={styles.form}>
               <p className={styles.helpTxt}><strong>Scope</strong> defines where this person's access applies — all branches or a specific one.</p>
-              <ScopeFields roles={roles} branches={branches} roleId={wiz.roleId} scope={wiz.scope} branchId={wiz.branchId} showRole={false}
+              {isDriver ? <>
+                <Field label="Existing Driver Employee *">
+                  <select className={styles.inp} value={wiz.employeeId ?? ''} onChange={e => {
+                    const employee = wiz.employeeOptions.find(item => item.employee_id === Number(e.target.value));
+                    dispatch({ type: 'WIZ_FIELD', field: 'employeeId', val: employee?.employee_id ?? null });
+                    dispatch({ type: 'WIZ_FIELD', field: 'scope', val: 'OwnDriverDataOnly' });
+                    dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: employee?.branch_id ?? null });
+                  }}>
+                    <option value="">Select an Employee</option>
+                    {wiz.employeeOptions.map(employee => <option key={employee.employee_id} value={employee.employee_id}>{employee.full_name} · {employee.branch_name}</option>)}
+                  </select>
+                </Field>
+                <p className={styles.helpTxt}>Driver access links an existing Employee and uses that Employee's current Driver branch.</p>
+              </> : <ScopeFields roles={roles} branches={branches} roleId={wiz.roleId} scope={wiz.scope} branchId={wiz.branchId} showRole={false} allowOwnDriverDataScope={false}
                 onRole={() => {}}
                 onScope={s => { dispatch({ type: 'WIZ_FIELD', field: 'scope', val: s }); if (s === 'AllCompanyBranches') dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: null }); }}
                 onBranch={b => dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: b })}
-              />
+              />}
+              {wiz.partialSuccess && <div className={styles.partialWarn}>The account remains staged. Correct the role, scope, or Employee selection and retry; the User will not be recreated.</div>}
               {wiz.error && <ErrMsg msg={wiz.error} />}
               <div className={styles.mf}>
                 <button type="button" className={styles.cancelBtn} onClick={() => dispatch({ type: 'WIZ_STEP', step: 2 })}>← Back</button>
@@ -1078,12 +1124,10 @@ function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onStep
           {/* Step 5: Review */}
           {wiz.step === 5 && wiz.createdUser && (
             <div className={styles.form}>
-              {wiz.partialSuccess && (
-                <div className={styles.partialWarn}>⚠️ Person was created but role assignment failed. You can assign a role from the detail panel.</div>
-              )}
               <div className={styles.reviewGrid}>
                 <span className={styles.fl}>Name</span><span>{wiz.createdUser.display_name}</span>
                 <span className={styles.fl}>Username</span><span>@{wiz.createdUser.username}</span>
+                <span className={styles.fl}>Account</span><span>{wiz.createdUser.is_staged ? 'Staged — role and scope required' : 'Provisioned'}</span>
                 <span className={styles.fl}>Can login</span><span>{wiz.createdUser.can_login ? 'Yes' : 'No'}</span>
                 <span className={styles.fl}>Role</span><span>{wiz.createdUser.company_role_name ?? '— not assigned —'}</span>
                 <span className={styles.fl}>Scope</span><span>{scopeLabel(wiz.createdUser.company_role_scope, wiz.createdUser.company_role_branch_name)}</span>
@@ -1091,7 +1135,7 @@ function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onStep
                 <span>{wiz.createdUser.extra_permission_codes.length > 0 ? `${wiz.createdUser.extra_permission_codes.length} permission(s)` : 'None'}</span>
               </div>
               {isDriver && (
-                <div className={styles.driverNext}>🚛 <strong>Driver created.</strong> Set up pay rates next from the person's detail panel.</div>
+                <div className={styles.driverNext}>🚛 <strong>Driver access provisioned.</strong></div>
               )}
               <div className={styles.mf}>
                 <button type="button" className={styles.primaryBtn} onClick={onFinish}>Done</button>
@@ -1163,20 +1207,23 @@ interface ScopeFieldsProps {
   scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
   branchId: number | null;
   showRole?: boolean;
+  allowOwnDriverDataScope?: boolean;
   onRole(id: number | null): void;
   onScope(s: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly'): void;
   onBranch(b: number | null): void;
 }
 
-function ScopeFields({ roles, branches, roleId, scope, branchId, showRole = true, onRole, onScope, onBranch }: ScopeFieldsProps) {
+function ScopeFields({ roles, branches, roleId, scope, branchId, showRole = true, allowOwnDriverDataScope = true, onRole, onScope, onBranch }: ScopeFieldsProps) {
   const isDriverRole = roles.find(r => r.company_role_id === roleId)?.role_code === 'DRIVER';
 
   // If current scope is AllCompanyBranches but driver role selected, reset to OwnDriverDataOnly.
   useEffect(() => {
     if (isDriverRole && scope === 'AllCompanyBranches') {
       onScope('OwnDriverDataOnly');
+    } else if (!allowOwnDriverDataScope && !isDriverRole && scope === 'OwnDriverDataOnly') {
+      onScope('AllCompanyBranches');
     }
-  }, [isDriverRole, scope, onScope]);
+  }, [allowOwnDriverDataScope, isDriverRole, scope, onScope]);
 
   return (
     <>
@@ -1194,7 +1241,9 @@ function ScopeFields({ roles, branches, roleId, scope, branchId, showRole = true
             <option value="AllCompanyBranches">All company branches — full company access</option>
           )}
           <option value="SpecificBranch">Specific branch — limited to one branch</option>
-          <option value="OwnDriverDataOnly">Own driver data only — driver's own records</option>
+          {(allowOwnDriverDataScope || isDriverRole) && (
+            <option value="OwnDriverDataOnly">Own driver data only — driver's own records</option>
+          )}
         </select>
       </Field>
       {isDriverRole && (

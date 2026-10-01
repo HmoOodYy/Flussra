@@ -49,6 +49,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.access_test_helpers import create_neutral_test_user
+
 _PERIOD_CODE_PREFIX = "P4CP4B-"
 PERIOD_START = "2199-02-03"
 PERIOD_END = "2199-02-09"
@@ -1340,18 +1342,14 @@ async def _owned_permission_principal(
                         "simulated failure after direct-SQL CompanyRolePermissions write committed"
                     )
 
-        resp = await session_client.post(
-            "/admin/users",
-            json={"username": marker, "display_name": marker, "password": password,
-                  "is_active": True, "can_login": True, "must_change_password": False},
-            headers=auth(admin_token),
+        user = await create_neutral_test_user(
+            session_client, admin_token, marker, password=password,
         )
-        assert resp.status_code == 201, f"Create user failed: {resp.text}"
         if _inject_failure_after_user_write:
             raise _DeliberateSetupFailure(
                 "simulated failure after User write committed, before user_id extracted"
             )
-        user_id = resp.json()["user_id"]
+        user_id = user["user_id"]
         own.user_id = user_id  # registered immediately -- before any further write
 
         assign_body: dict = {"company_role_id": role_id, "scope_type": scope_type}

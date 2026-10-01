@@ -11,6 +11,7 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll import current_hub
+from tests.access_test_helpers import create_neutral_test_user
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2096, 1, 1)
@@ -317,20 +318,9 @@ def _security_name(prefix: str) -> str:
 
 
 async def _create_user(client: httpx.AsyncClient, admin_token: str, username: str) -> dict:
-    response = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": username,
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=_auth(admin_token),
+    return await create_neutral_test_user(
+        client, admin_token, username, password="TestPass1234!",
     )
-    assert response.status_code == 201, response.text
-    return response.json()
 
 
 async def _login_as(client: httpx.AsyncClient, username: str) -> str:

@@ -9,7 +9,7 @@ Covers:
 """
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,6 +53,8 @@ class UserAdmin(BaseModel):
     """
     user_id: int
     company_id: int
+    employee_id: int | None = None
+    is_staged: bool
     username: str
     display_name: str
     email: str | None = None
@@ -82,15 +84,18 @@ class UserAdmin(BaseModel):
 
 
 class UserCreate(BaseModel):
-    """Payload to create a new user account."""
+    """Create either an explicitly staged account or a provisioned account."""
     username: str
     display_name: str
     password: str
     email: str | None = None
     phone: str | None = None
     is_active: bool = True
-    can_login: bool = True
+    can_login: bool = False
     must_change_password: bool = True
+    is_staged: bool = False
+    employee_id: int | None = None
+    role_assignment: "CompanyRoleAssignmentCreate | None" = None
 
     @field_validator("username")
     @classmethod
@@ -123,6 +128,8 @@ class UserUpdate(BaseModel):
     Username cannot be changed (stable system identifier).
     Cannot deactivate or remove login from your own account.
     """
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str | None = None
     email: str | None = None
     phone: str | None = None
@@ -149,6 +156,10 @@ class UserPasswordReset(BaseModel):
         if len(v) < 8:
             raise ValueError("new_password must be at least 8 characters")
         return v
+
+
+class UserEmployeeLink(BaseModel):
+    employee_id: int
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +311,14 @@ class CompanyRoleAssignmentCreate(BaseModel):
         if v not in _SCOPE_TYPES:
             raise ValueError(f"scope_type must be one of {sorted(_SCOPE_TYPES)}")
         return v
+
+
+class UserProvision(BaseModel):
+    role_assignment: CompanyRoleAssignmentCreate
+    can_login: bool = False
+
+
+UserCreate.model_rebuild()
 
 
 class CompanyRoleAssignmentDetail(BaseModel):

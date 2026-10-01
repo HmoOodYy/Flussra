@@ -20,6 +20,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
+from tests.access_test_helpers import create_neutral_test_user, create_provisioned_test_user
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -553,21 +555,11 @@ class TestDriverRoleHomeBranch:
     ):
         """Assigning DRIVER role with SpecificBranch → 200/201 + driver profile created."""
         # Create a fresh user to assign driver role to
-        create_resp = await session_client.post(
-            "/admin/users",
-            json={
-                "username":     "test_driver_profile_user",
-                "display_name": "Test Driver Profile",
-                "password":     "TestPass123!",
-                "company_role_id": None,
-                "scope_type":   "AllCompanyBranches",
-                "branch_id":    None,
-            },
-            headers=auth(auth_token),
+        create_resp = await create_neutral_test_user(
+            session_client, auth_token, "test_driver_profile_user",
+            password="TestPass123!", display_name="Test Driver Profile",
         )
-        if create_resp.status_code not in (200, 201):
-            pytest.skip(f"Could not create test user: {create_resp.text}")
-        new_user_id = create_resp.json()["user_id"]
+        new_user_id = create_resp["user_id"]
 
         # Get DRIVER role
         roles_resp = await session_client.get("/admin/company-roles", headers=auth(auth_token))
@@ -638,34 +630,10 @@ async def _create_user_with_role(
     password: str = "TestPass123!",
 ) -> str:
     """Create user, assign company role, return login token."""
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": username,
-            "password": password,
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=auth(admin_token),
+    await create_provisioned_test_user(
+        client, admin_token, username, role_id, scope_type=scope_type,
+        branch_id=branch_id, password=password,
     )
-    assert resp.status_code == 201, f"Create user failed: {resp.text}"
-    user_id = resp.json()["user_id"]
-
-    assign_body: dict = {
-        "company_role_id": role_id,
-        "scope_type": scope_type,
-    }
-    if branch_id is not None:
-        assign_body["branch_id"] = branch_id
-
-    assign_resp = await client.post(
-        f"/admin/users/{user_id}/company-role-assignments",
-        json=assign_body,
-        headers=auth(admin_token),
-    )
-    assert assign_resp.status_code in (200, 201), f"Assign role failed: {assign_resp.text}"
 
     login = await client.post("/auth/login", json={
         "username": username,
@@ -1826,20 +1794,10 @@ class TestOwnDriverDataOnlyRates:
             client, admin_token, f"ODARole_{username}",
             ["payrates.edit", "payrates.view"],
         )
-        resp = await client.post(
-            "/admin/users",
-            json={
-                "username":     username,
-                "display_name": username,
-                "password":     "TestPass123!",
-                "is_active":    True,
-                "can_login":    True,
-                "must_change_password": False,
-            },
-            headers=auth(admin_token),
+        user = await create_neutral_test_user(
+            client, admin_token, username, password="TestPass123!",
         )
-        assert resp.status_code == 201, f"Create user failed: {resp.text}"
-        user_id: int = resp.json()["user_id"]
+        user_id: int = user["user_id"]
 
         # Assign the payrates role with OwnDriverDataOnly scope
         assign_resp = await client.post(
@@ -2523,20 +2481,11 @@ class TestODAScopeDetection:
         )
 
         # Create user with ODA scope
-        user_resp = await session_client.post(
-            "/admin/users",
-            json={
-                "username": "scope_revoke_user1",
-                "display_name": "scope_revoke_user1",
-                "password": "TestPass123!",
-                "is_active": True,
-                "can_login": True,
-                "must_change_password": False,
-            },
-            headers=auth(auth_token),
+        user_resp = await create_neutral_test_user(
+            session_client, auth_token, "scope_revoke_user1",
+            password="TestPass123!",
         )
-        assert user_resp.status_code == 201
-        user_id = user_resp.json()["user_id"]
+        user_id = user_resp["user_id"]
 
         await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
@@ -2616,20 +2565,10 @@ class TestMatrixODAScope:
         Returns (token, own_driver_id).
         """
         # Step 1: create user
-        create_resp = await client.post(
-            "/admin/users",
-            json={
-                "username":     username,
-                "display_name": username,
-                "password":     "TestPass123!",
-                "is_active":    True,
-                "can_login":    True,
-                "must_change_password": False,
-            },
-            headers=auth(admin_token),
+        create_resp = await create_neutral_test_user(
+            client, admin_token, username, password="TestPass123!",
         )
-        assert create_resp.status_code == 201, f"Create user failed: {create_resp.text}"
-        user_id: int = create_resp.json()["user_id"]
+        user_id: int = create_resp["user_id"]
 
         # Step 2: assign DRIVER role (creates driver profile + employee link)
         roles_resp = await client.get("/admin/company-roles", headers=auth(admin_token))

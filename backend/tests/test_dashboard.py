@@ -33,6 +33,8 @@ from uuid import uuid4
 
 import httpx
 
+from tests.access_test_helpers import create_neutral_test_user
+
 _counter = itertools.count(500)
 
 
@@ -53,20 +55,10 @@ async def _login(client, username, password="TestPass1234!"):
 
 
 async def _create_user(client, admin_token, username):
-    r = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": username,
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=_hdr(admin_token),
+    user = await create_neutral_test_user(
+        client, admin_token, username, password="TestPass1234!",
     )
-    assert r.status_code == 201, f"Create user {username!r}: {r.text}"
-    return r.json()["user_id"]
+    return user["user_id"]
 
 
 async def _create_company_role(client, admin_token, role_name, perm_codes: list[str]) -> int:

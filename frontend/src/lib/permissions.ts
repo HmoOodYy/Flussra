@@ -267,6 +267,11 @@ export function canManageRoles(user: UserProfile): boolean {
   return _hasCompanyPermission(user, 'roles.view') || _hasCompanyAdminFallback(user);
 }
 
+/** Provisioning an existing staged account requires edit authority and visible role choices. */
+export function canProvisionPeopleAccount(user: UserProfile): boolean {
+  return canEditPeople(user) && canAssignPeopleRole(user) && canManageRoles(user);
+}
+
 /** Create a new company role: company-scoped roles.create, or company admin fallback. */
 export function canCreateRoles(user: UserProfile): boolean {
   return _hasCompanyPermission(user, 'roles.create') || _hasCompanyAdminFallback(user);

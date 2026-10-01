@@ -27,8 +27,10 @@ from app.admin.schemas import (
     RoleAssignmentCreate,
     UserAdmin,
     UserCreate,
+    UserEmployeeLink,
     UserPasswordReset,
     UserPermissionOverridesUpdate,
+    UserProvision,
     UserUpdate,
 )
 from app.dependencies import get_current_user, get_db
@@ -97,11 +99,11 @@ async def get_user(
     status_code=201,
     summary="Create a new user account",
     description=(
-        "Creates a new user for this company.  The username must be unique "
-        "within the company (case-insensitive).  Password is bcrypt-hashed "
-        "before storage.  No role assignments are created — use "
-        "`POST /admin/users/{id}/company-role-assignments` to grant access.\n\n"
-        "Requires: `users.create` OR `settings.manage` OR `setup.manage`."
+        "Creates a staged account with login disabled and no role assignments, "
+        "or atomically creates a provisioned account with an optional Employee "
+        "link and one CompanyRole/Scope assignment. Passwords are bcrypt-hashed.\n\n"
+        "Requires `users.create` (or admin fallbacks); provisioned creation also "
+        "requires `users.edit` or `roles.edit` (or admin fallbacks)."
     ),
     responses={
         403: {"description": "Insufficient scope"},
@@ -119,6 +121,23 @@ async def create_user(
         data=body,
         db=db,
     )
+
+
+@router.put("/users/{user_id}/employee-link", response_model=UserAdmin)
+async def link_user_employee(user_id: int, body: UserEmployeeLink, token: TokenDep, db: DbDep) -> UserAdmin:
+    return await service.link_user_employee(
+        user_id, int(token["cid"]), int(token["sub"]), body.employee_id, db,
+    )
+
+
+@router.delete("/users/{user_id}/employee-link", response_model=UserAdmin)
+async def unlink_user_employee(user_id: int, token: TokenDep, db: DbDep) -> UserAdmin:
+    return await service.unlink_user_employee(user_id, int(token["cid"]), int(token["sub"]), db)
+
+
+@router.post("/users/{user_id}/provision", response_model=UserAdmin)
+async def provision_user(user_id: int, body: UserProvision, token: TokenDep, db: DbDep) -> UserAdmin:
+    return await service.provision_user(user_id, int(token["cid"]), int(token["sub"]), body, db)
 
 
 @router.patch(

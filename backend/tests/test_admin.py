@@ -55,6 +55,8 @@ async def target_user_id(
     auth_token: str,
 ) -> int:
     """Create a test user that update/password/role tests operate on."""
+    company_roles = await session_client.get("/admin/company-roles", headers=auth(auth_token))
+    viewer_role_id = next(role["company_role_id"] for role in company_roles.json() if role["role_code"] == "PAYROLL_VIEWER_CO")
     resp = await session_client.post(
         "/admin/users",
         json={
@@ -62,6 +64,7 @@ async def target_user_id(
             "display_name": "Target User",
             "password":     "TestPass123!",
             "email":        "target@example.com",
+            "role_assignment": {"company_role_id": viewer_role_id, "scope_type": "AllCompanyBranches"},
         },
         headers=auth(auth_token),
     )
@@ -245,6 +248,8 @@ class TestCreateUser:
                 "username":     "newuser_minimal",
                 "display_name": "New Minimal User",
                 "password":     "Minimal123!",
+                "is_staged":    True,
+                "can_login":    False,
             },
             headers=auth(auth_token),
         )
@@ -253,7 +258,8 @@ class TestCreateUser:
         assert data["username"]            == "newuser_minimal"
         assert data["display_name"]        == "New Minimal User"
         assert data["is_active"]           is True
-        assert data["can_login"]           is True
+        assert data["can_login"]           is False
+        assert data["is_staged"]            is True
         assert data["must_change_password"] is True   # default
         assert data["email"]               is None
         assert data["role_assignments"]    == []
@@ -272,6 +278,7 @@ class TestCreateUser:
                 "is_active":            True,
                 "can_login":            True,
                 "must_change_password": False,
+                "role_assignment": {"company_role_id": next(r["company_role_id"] for r in (await client.get("/admin/company-roles", headers=auth(auth_token))).json() if r["role_code"] == "PAYROLL_VIEWER_CO"), "scope_type": "AllCompanyBranches"},
             },
             headers=auth(auth_token),
         )
@@ -291,6 +298,8 @@ class TestCreateUser:
                 "username":     "newuser_minimal",   # already created above
                 "display_name": "Dup User",
                 "password":     "Pass1234!",
+                "is_staged":    True,
+                "can_login":    False,
             },
             headers=auth(auth_token),
         )
@@ -598,7 +607,6 @@ class TestResetPassword:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        hq_branch_id: int,
     ):
         """
         After a password reset the user can log in with the new password.
@@ -606,8 +614,7 @@ class TestResetPassword:
         Uses a dedicated isolated user (not target_user_id) to avoid
         conflicting with TestRoleAssignments which also operates on target_user.
 
-        The login gate requires at least one active role assignment, so we
-        assign PAYROLL_VIEWER+SpecificBranch=HQ before testing the login.
+        The provisioned account is created with its CompanyRole assignment.
         """
         # Create a user dedicated to this test
         create_resp = await client.post(
@@ -616,23 +623,19 @@ class TestResetPassword:
                 "username":     "pw_reset_login_test",
                 "display_name": "PW Reset Login Test",
                 "password":     "InitialPass1!",
+                "can_login":    True,
+                "role_assignment": {
+                    "company_role_id": next(
+                        role["company_role_id"] for role in (await client.get("/admin/company-roles", headers=auth(auth_token))).json()
+                        if role["role_code"] == "PAYROLL_VIEWER_CO"
+                    ),
+                    "scope_type": "AllCompanyBranches",
+                },
             },
             headers=auth(auth_token),
         )
         assert create_resp.status_code == 201
         new_user_id = create_resp.json()["user_id"]
-
-        # Assign PAYROLL_VIEWER so the login gate passes
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        viewer_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_VIEWER"
-        )
-        role_resp = await client.post(
-            f"/admin/users/{new_user_id}/roles",
-            json={"role_id": viewer_id, "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
-            headers=auth(auth_token),
-        )
-        assert role_resp.status_code == 201
 
         # Reset the password
         new_pw = "AfterReset789!"
@@ -697,7 +700,7 @@ class TestRoleAssignments:
         )
         assert resp.status_code == 403
 
-    async def test_newly_created_user_has_no_roles(
+    async def test_target_user_has_provisioned_company_role(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -708,9 +711,9 @@ class TestRoleAssignments:
             headers=auth(auth_token),
         )
         assert resp.status_code == 200
-        # target_user has no assignments yet (or only those from prior tests)
-        # We can only assert it's a list
         assert isinstance(resp.json(), list)
+        user = await client.get(f"/admin/users/{target_user_id}", headers=auth(auth_token))
+        assert user.json()["company_role_code"] == "PAYROLL_VIEWER_CO"
 
     async def test_assign_all_company_branches_scope(
         self,
@@ -1102,6 +1105,8 @@ class TestAdminAudit:
                         "username":     unique_name,
                         "display_name": "Audit Rollback Test",
                         "password":     "RollbackPass123!",
+                        "is_staged":    True,
+                        "can_login":    False,
                     },
                     headers=auth(auth_token),
                 )
