@@ -394,7 +394,17 @@ def test_database_url(apply_schema):
 
 
 @pytest_asyncio.fixture(scope="session")
-async def test_app(test_database_url) -> FastAPI:
+async def test_engine(test_database_url):
+    """One async SQLAlchemy engine/pool shared for the entire test session."""
+    engine = create_async_engine(test_database_url, echo=False)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def test_app(test_engine) -> FastAPI:
     """
     Build a FastAPI test app that uses the isolated test database.
 
@@ -408,7 +418,6 @@ async def test_app(test_database_url) -> FastAPI:
 
     real_app = create_app()
 
-    test_engine = create_async_engine(test_database_url, echo=False)
 
     async def _override_get_db() -> AsyncGenerator[AsyncConnection, None]:
         async with test_engine.begin() as conn:
@@ -419,31 +428,24 @@ async def test_app(test_database_url) -> FastAPI:
     yield real_app
 
     real_app.dependency_overrides.clear()
-    await test_engine.dispose()
 
 
 @pytest_asyncio.fixture
-async def db_conn(test_database_url) -> AsyncGenerator[AsyncConnection, None]:
+async def db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
     """Function-scoped raw AsyncConnection for direct DB seeding (bypasses HTTP layer).
     Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-    engine = create_async_engine(test_database_url, echo=False)
-    async with engine.connect() as conn:
+    async with test_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         yield conn
-    await engine.dispose()
 
 
 @pytest_asyncio.fixture(scope="session")
-async def session_db_conn(test_database_url) -> AsyncGenerator[AsyncConnection, None]:
+async def session_db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
     """Session-scoped raw AsyncConnection for seeding in session-scoped tests.
     Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-    engine = create_async_engine(test_database_url, echo=False)
-    async with engine.connect() as conn:
+    async with test_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         yield conn
-    await engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -735,7 +737,7 @@ async def activate_paytest_system_items(
 
 
 @pytest_asyncio.fixture
-async def direct_db(test_database_url):
+async def direct_db(test_engine):
     """
     Function-scoped direct AsyncConnection for tests that need raw DB manipulation,
     e.g. deleting tier rows to test approval guards that cannot be reached via the API.
@@ -748,13 +750,11 @@ async def direct_db(test_database_url):
         async def test_foo(direct_db):
             await direct_db.execute(_text("DELETE FROM ... WHERE ..."), {"k": v})
     """
-    from sqlalchemy.ext.asyncio import create_async_engine
 
     # AUTOCOMMIT: each statement committed immediately — no BEGIN/COMMIT needed
-    engine = create_async_engine(test_database_url, echo=False, isolation_level="AUTOCOMMIT")
-    async with engine.connect() as conn:
+    async with test_engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
         yield conn
-    await engine.dispose()
 
 
 @pytest_asyncio.fixture(scope="session")

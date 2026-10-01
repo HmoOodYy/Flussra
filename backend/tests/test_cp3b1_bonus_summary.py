@@ -33,7 +33,10 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -212,52 +215,6 @@ async def _advance_to_approved(
         json={"decision": "Approved"},
     )
     assert decide.status_code == 200, f"Approval failed: {decide.text}"
-
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=_auth(token),
-    )
-    assert cr.status_code == 201, f"Create role failed: {cr.text}"
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=_auth(token),
-        )
-        assert pr.status_code == 200, f"Set permissions failed: {pr.text}"
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id=None,
-    password: str = "TestPass123!",
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password=password,
-    )
-
-    login = await client.post("/auth/login", json={
-        "username": username,
-        "password": password,
-        "company_code": "DEMO",
-    })
-    assert login.status_code == 200, f"Login failed: {login.text}"
-    return login.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -864,12 +821,12 @@ async def test_oda_user_denied(
         db_conn, cp3b1_branch_id, period_id, _roster(cp3b1_drivers, ["alpha"])
     )
 
-    role_id = await _create_role_with_perms(
+    role_id = await create_company_role_with_permissions(
         session_client, auth_token,
         f"CP3B1_ODA_Role_{_RUN_ID}",
         ["payroll.view", "payroll.entry"],
     )
-    oda_token = await _create_user_with_role(
+    oda_token = await create_user_with_role_token(
         session_client, auth_token,
         f"cp3b1_oda_user_{_RUN_ID}",
         role_id,

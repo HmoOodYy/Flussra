@@ -21,6 +21,7 @@ import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
 from tests.access_test_helpers import create_neutral_test_user, create_provisioned_test_user
+from tests.builders.workforce import create_driver_employee
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -342,8 +343,25 @@ class TestDriverProfile:
 # TestOvernightRate
 # ---------------------------------------------------------------------------
 
+@pytest_asyncio.fixture
+async def overnight_test_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+):
+    """Own a PAYTEST driver; retain it until disposable test DB teardown."""
+    marker = uuid4().hex[:12]
+    return await create_driver_employee(
+        session_client,
+        auth_token,
+        branch_id=paytest_branch_id,
+        full_name=f"Overnight test {marker}",
+        driver_code=f"OVNT-{marker}",
+    )
+
+
 class TestOvernightRate:
-    """Verify OVERNIGHT pay item state after migration 0022."""
+    """Legacy OVERNIGHT migration coverage until the compensation cutover."""
 
     @pytest.mark.asyncio
     async def test_overnight_rate_type_exists(
@@ -402,11 +420,10 @@ class TestOvernightRate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        overnight_test_driver_id: int,
     ):
         """A DriverRate for the OVERNIGHT rate type can be created and approved.
-        Uses paytest_driver_id (PAYTEST branch) because OVERNIGHT is activated there
-        by the activate_paytest_system_items fixture (Fix 8: branch validation).
+        The test-owned driver uses PAYTEST, where OVERNIGHT is activated.
         """
         rt_resp = await session_client.get("/payroll/rate-types", headers=auth(auth_token))
         overnight_rt = next(
@@ -418,7 +435,7 @@ class TestOvernightRate:
         create_resp = await session_client.post(
             "/payroll/rates",
             json={
-                "driver_id": paytest_driver_id,
+                "driver_id": overnight_test_driver_id,
                 "rate_type_id": overnight_rt["rate_type_id"],
                 "amount": "45.00",
                 "effective_from": _today_iso(),  # use today so branchpayitemconfig applies

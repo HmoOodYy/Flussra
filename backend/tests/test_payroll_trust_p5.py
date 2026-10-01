@@ -22,6 +22,8 @@ import pytest_asyncio
 import sqlalchemy.exc
 from sqlalchemy import text as _text
 
+from tests.builders.compensation import create_approved_rate
+
 # ---------------------------------------------------------------------------
 # Year slots -- distinct from Phase 3C (2043-2051) and each other
 # ---------------------------------------------------------------------------
@@ -71,32 +73,6 @@ async def _delete_driver(
     driver_id: int,
 ) -> None:
     await client.delete(f"/core/drivers/{driver_id}", headers=_auth(token))
-
-
-async def _create_and_approve_rate(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_id: int,
-    rate_type_id: int,
-    amount: str = "15.00",
-    effective_from: str = "2052-01-01",
-) -> int:
-    headers = _auth(token)
-    rc = await client.post(
-        "/payroll/rates",
-        json={
-            "driver_id":      driver_id,
-            "rate_type_id":   rate_type_id,
-            "amount":         amount,
-            "effective_from": effective_from,
-        },
-        headers=headers,
-    )
-    assert rc.status_code == 201, f"create rate: {rc.text}"
-    rate_id = rc.json()["driver_rate_id"]
-    ra = await client.post(f"/payroll/rates/{rate_id}/approve", headers=headers)
-    assert ra.status_code == 200, f"approve rate: {ra.text}"
-    return rate_id
 
 
 async def _make_period(
@@ -195,8 +171,12 @@ async def _lock_period_with_rate(
     """
     drv = await _create_driver(client, token, branch_id, suffix,
                                hire_date=start[:4] + "-01-01")
-    rate_id = await _create_and_approve_rate(
-        client, token, drv, rate_type_id, "15.00",
+    rate_id = await create_approved_rate(
+        client=client,
+        token=token,
+        driver_id=drv,
+        rate_type_id=rate_type_id,
+        amount="15.00",
         effective_from=start[:4] + "-01-01",
     )
     pid = await _make_period(db, branch_id, start, end)
@@ -331,8 +311,12 @@ async def test_p5_t2_void_rejects_finalized_used_superseded_rate(p5_env):
     p5_env["created_drivers"].append(drv)
 
     # Approve rate B for the same driver/rate type -> rate A becomes Superseded
-    rate_b_id = await _create_and_approve_rate(
-        c, tok, drv, rtid, amount="20.00",
+    rate_b_id = await create_approved_rate(
+        client=c,
+        token=tok,
+        driver_id=drv,
+        rate_type_id=rtid,
+        amount="20.00",
         effective_from=T2_START[:4] + "-06-01",
     )
 
@@ -384,8 +368,13 @@ async def test_p5_t3_void_allows_unused_rate(p5_env):
     p5_env["created_drivers"].append(drv)
 
     # Create + approve a rate, but do NOT finalize any payroll
-    rate_id = await _create_and_approve_rate(
-        c, tok, drv, rtid, amount="12.00", effective_from="2054-01-01",
+    rate_id = await create_approved_rate(
+        client=c,
+        token=tok,
+        driver_id=drv,
+        rate_type_id=rtid,
+        amount="12.00",
+        effective_from="2054-01-01",
     )
 
     # Void it -- must succeed
@@ -456,8 +445,13 @@ async def test_p5_t5_db_trigger_allows_direct_void_of_unused_rate(p5_env):
     p5_env["created_drivers"].append(drv)
 
     # Create + approve rate (no finalization)
-    rate_id = await _create_and_approve_rate(
-        c, tok, drv, rtid, amount="11.00", effective_from="2056-01-01",
+    rate_id = await create_approved_rate(
+        client=c,
+        token=tok,
+        driver_id=drv,
+        rate_type_id=rtid,
+        amount="11.00",
+        effective_from="2056-01-01",
     )
 
     # Direct DB void must succeed (no final line references this rate)

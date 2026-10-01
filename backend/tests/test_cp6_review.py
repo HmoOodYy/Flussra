@@ -24,7 +24,10 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -189,49 +192,6 @@ async def _advance_to_approved_via_review(
         json={"decision": "Approved"}, headers=auth(token),
     )
     assert dec.status_code == 200, f"Approve failed: {dec.text}"
-
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201, f"Create role: {cr.text}"
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=auth(token),
-        )
-        assert pr.status_code == 200, f"Set perms: {pr.text}"
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id: int | None = None,
-    password: str = "TestPass123!",
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password=password,
-    )
-    login = await client.post("/auth/login", json={
-        "username": username, "password": password, "company_code": "DEMO",
-    })
-    assert login.status_code == 200, f"Login: {login.text}"
-    return login.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -765,12 +725,12 @@ class TestReviewODASecurity:
         paytest_branch_id: int,
     ):
         """ODA (driver-role) user receives 403 on GET /review/items."""
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP6_ODA_Review_Role",
             ["payroll.view", "review.decide"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp6_oda_review_user",
             role_id,
@@ -801,12 +761,12 @@ class TestReviewODASecurity:
             session_client, auth_token, pid, paytest_driver_id
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP6_ODA_Decide_Role",
             ["payroll.view", "review.decide"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp6_oda_decide_user",
             role_id,
@@ -853,12 +813,12 @@ class TestReviewBranchScope:
         )
 
         # Create a user scoped ONLY to HQ (not PAYTEST)
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP6_HQ_Only_Role",
             ["payroll.view", "payroll.entry", "review.decide"],
         )
-        hq_only_token = await _create_user_with_role(
+        hq_only_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp6_hq_only_user",
             role_id,
@@ -914,12 +874,12 @@ class TestReviewBranchScope:
             session_client, auth_token, pid, paytest_driver_id
         )
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP6_PAYTEST_Reviewer_Role",
             ["payroll.view", "payroll.entry", "review.decide"],
         )
-        paytest_token = await _create_user_with_role(
+        paytest_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp6_paytest_reviewer",
             role_id,
@@ -1082,14 +1042,14 @@ class TestReviewPerBranchPermissionFilter:
         )
 
         # Create a role with payroll.view only on PAYTEST
-        view_role_id = await _create_role_with_perms(
+        view_role_id = await create_company_role_with_permissions(
             session_client, auth_token,
             "CP6_VIEW_PAYTEST_ONLY",
             ["payroll.view"],
         )
 
         # Create user with SpecificBranch=PAYTEST scope
-        tok = await _create_user_with_role(
+        tok = await create_user_with_role_token(
             session_client, auth_token,
             f"cp6_view_pt_{hq_pid}",
             view_role_id,

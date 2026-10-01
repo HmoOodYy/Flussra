@@ -9,6 +9,8 @@ from sqlalchemy import text as _sqla_text
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
+from tests.builders.compensation import create_approved_rate
+
 # ---------------------------------------------------------------------------
 # Year slots
 # ---------------------------------------------------------------------------
@@ -70,20 +72,6 @@ async def _delete_driver(client, token, driver_id):
     await client.delete(f"/core/drivers/{driver_id}", headers=_tok(token))
 
 
-async def _create_and_approve_rate(client, token, driver_id, rate_type_id,
-                                   amount="15.00", effective_from="2066-01-01"):
-    headers = _tok(token)
-    rc = await client.post("/payroll/rates",
-                           json={"driver_id": driver_id, "rate_type_id": rate_type_id,
-                                 "amount": amount, "effective_from": effective_from},
-                           headers=headers)
-    assert rc.status_code == 201, f"create rate: {rc.text}"
-    rid = rc.json()["driver_rate_id"]
-    ra = await client.post(f"/payroll/rates/{rid}/approve", headers=headers)
-    assert ra.status_code == 200, f"approve rate: {ra.text}"
-    return rid
-
-
 async def _open_period(db, branch_id, start, end):
     """Insert an Open period directly into DB.  Returns period_id."""
     row = (await db.execute(
@@ -142,9 +130,14 @@ async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
     drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T1Dup", hire_date="2066-01-01")
     try:
-        await _create_and_approve_rate(session_client, auth_token, drv,
-                                       paytest_rate_type_id,
-                                       effective_from="2066-01-01")
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=drv,
+            rate_type_id=paytest_rate_type_id,
+            amount="15.00",
+            effective_from="2066-01-01",
+        )
         pid = await _open_period(direct_db, trust_branch_id,
                                  T1_START, T1_END)
         await _advance_to_approved(session_client, auth_token, pid, drv, T1_WORK)
@@ -206,9 +199,14 @@ async def test_p7_t2_live_eligibility_drift_does_not_block_snapshot_finalization
     emp_id = emp_id_row.scalar_one()
 
     try:
-        await _create_and_approve_rate(session_client, auth_token, drv,
-                                       paytest_rate_type_id,
-                                       effective_from="2067-01-01")
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=drv,
+            rate_type_id=paytest_rate_type_id,
+            amount="15.00",
+            effective_from="2067-01-01",
+        )
         pid = await _open_period(direct_db, trust_branch_id,
                                  T2_START, T2_END)
 
@@ -347,9 +345,14 @@ async def test_p7_t5_valid_period_preview_and_finalize(
     drv = await _create_driver(session_client, auth_token, trust_branch_id,
                                "T5Valid", hire_date="2069-01-01")
     try:
-        await _create_and_approve_rate(session_client, auth_token, drv,
-                                       paytest_rate_type_id,
-                                       effective_from="2069-01-01")
+        await create_approved_rate(
+            client=session_client,
+            token=auth_token,
+            driver_id=drv,
+            rate_type_id=paytest_rate_type_id,
+            amount="15.00",
+            effective_from="2069-01-01",
+        )
         pid = await _open_period(direct_db, trust_branch_id,
                                  T5_START, T5_END)
 

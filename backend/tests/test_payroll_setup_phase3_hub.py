@@ -17,6 +17,7 @@ from app.payroll_setup.payroll_policy import (
     publish_version,
     set_default_setup,
 )
+from tests.builders.company import create_branch
 
 
 @pytest_asyncio.fixture
@@ -43,19 +44,6 @@ async def setup_hub_db(test_database_url):
                 await transaction.rollback()
     finally:
         await engine.dispose()
-
-
-async def _branch(db, suffix: str) -> int:
-    return int((await db.db.execute(text("""
-        INSERT INTO core.Branches
-            (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, :code, :name, 'Active', FALSE)
-        RETURNING BranchID
-    """), {
-        "cid": db.company_id,
-        "code": f"P3H_{db.marker}_{suffix}",
-        "name": f"Phase 3 hub {suffix}",
-    })).scalar_one())
 
 
 async def _published_setup(db) -> int:
@@ -103,10 +91,16 @@ async def test_readiness_uses_assignment_and_latest_non_cancelled_period_date(
     setup_id = await _published_setup(db)
     await set_default_setup(db.company_id, db.user_id, setup_id, db.db)
 
-    default_only_branch = await _branch(db, "DEFAULT")
+    default_only_branch = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"P3H_{db.marker}_DEFAULT", branch_name="Phase 3 hub DEFAULT",
+    )
     assert (await _entry(db, default_only_branch))["setup_status"] == "missing"
 
-    assigned_branch = await _branch(db, "ASSIGNED")
+    assigned_branch = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"P3H_{db.marker}_ASSIGNED", branch_name="Phase 3 hub ASSIGNED",
+    )
     await assign_setup(
         db.company_id, db.user_id, assigned_branch, setup_id, date(2090, 1, 1), db.db,
     )

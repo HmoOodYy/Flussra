@@ -33,7 +33,10 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,48 +109,6 @@ async def _force_status(direct_db, period_id: int, new_status: str) -> None:
     )
 
 
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    role_name: str,
-    perms: list[str],
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=_auth(admin_token),
-    )
-    assert cr.status_code == 201, f"Create role failed: {cr.text}"
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=_auth(admin_token),
-        )
-        assert pr.status_code == 200, f"Set perms failed: {pr.text}"
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id,
-        scope_type="AllCompanyBranches", password="TestPass123!",
-    )
-
-    login_resp = await client.post(
-        "/auth/login",
-        json={"username": username, "password": "TestPass123!", "company_code": "DEMO"},
-    )
-    assert login_resp.status_code == 200, f"Login failed: {login_resp.text}"
-    return login_resp.json()["access_token"]
-
-
 async def _get_review_item_status(direct_db, company_id: int, period_id: int) -> str | None:
     """Return the status of the most recent PeriodApproval item for this period."""
     result = await direct_db.execute(
@@ -215,10 +176,10 @@ class TestDraftCancelPermission:
         """payroll.view only → 403 on Draft cancellation (CP-0C gap was silent skip)."""
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "cp0c_view_only_role_2092", ["payroll.view"],
         )
-        view_token = await _create_user_with_role(
+        view_token = await create_user_with_role_token(
             session_client, auth_token, "cp0c_view_only_user_2092", role_id,
         )
 
@@ -248,10 +209,10 @@ class TestDraftCancelPermission:
         """payroll.entry only → 403 on Draft cancellation (finalize is required)."""
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "cp0c_entry_only_role_2092", ["payroll.entry"],
         )
-        entry_token = await _create_user_with_role(
+        entry_token = await create_user_with_role_token(
             session_client, auth_token, "cp0c_entry_only_user_2092", role_id,
         )
 
@@ -280,11 +241,11 @@ class TestDraftCancelPermission:
         """payroll.finalize → 200 on Draft cancellation (correct behavior)."""
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "cp0c_finalize_role_2092",
             ["payroll.view", "payroll.finalize"],
         )
-        finalize_token = await _create_user_with_role(
+        finalize_token = await create_user_with_role_token(
             session_client, auth_token, "cp0c_finalize_user_2092", role_id,
         )
 
@@ -336,10 +297,10 @@ class TestDraftCancelPermission:
         pid = await _create_draft_period(session_client, auth_token, paytest_branch_id, direct_db)
         await _force_status(direct_db, pid, "Open")
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "cp0c_open_view_role_2092", ["payroll.view"],
         )
-        view_token = await _create_user_with_role(
+        view_token = await create_user_with_role_token(
             session_client, auth_token, "cp0c_open_view_user_2092", role_id,
         )
 

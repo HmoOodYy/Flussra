@@ -35,6 +35,10 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.builders.company import create_branch
+from tests.builders.payroll import create_period_from_candidate, get_period_candidates
+from tests.builders.payroll_setup import create_published_setup_assignment
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -50,17 +54,14 @@ async def activate_paytest_system_items():
 @pytest_asyncio.fixture
 async def paytest_branch_id(direct_db) -> int:
     """Give each test an isolated branch authority timeline."""
-    row = (await direct_db.execute(
-        _text("""
-            INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
-            RETURNING branchid
-        """),
-        {"code": (code := f"CP2B_{uuid.uuid4().hex[:10]}"), "name": code},
-    )).mappings().first()
-    assert row is not None
-    return row["branchid"]
+    code = f"CP2B_{uuid.uuid4().hex[:10]}"
+    async with direct_db.engine.begin() as conn:
+        user_id = (await conn.execute(_text(
+            "SELECT UserID FROM sec.Users WHERE CompanyID = :cid AND Username = 'admin'"
+        ), {"cid": _COMPANY_ID})).scalar_one()
+        return await create_branch(
+            conn, _COMPANY_ID, user_id, branch_code=code, branch_name=code,
+        )
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -126,13 +127,6 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
     """Create current Setup/Published Version/Branch Assignment policy state."""
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from app.payroll_setup.payroll_policy import (
-        assign_setup,
-        create_draft,
-        create_setup,
-        publish_version,
-    )
-
     engine = create_async_engine(db.engine.url, echo=False)
     try:
         async with engine.connect() as conn:
@@ -145,23 +139,17 @@ async def _setup(db: AsyncConnection, branch_id: int, freq: str = "Week",
                 """), {"cid": _COMPANY_ID})).mappings().one()
                 company_id, user_id = int(tenant["companyid"]), int(tenant["userid"])
                 suffix = uuid.uuid4().hex[:12]
-                setup_id = await create_setup(
-                    company_id, user_id, f"CP2B_{suffix}", f"CP2B {suffix}", conn,
-                )
-                draft_id = await create_draft(
-                    company_id, user_id, setup_id, conn,
+                setup_id, version_id, assignment_id = await create_published_setup_assignment(
+                    conn,
+                    company_id,
+                    user_id,
+                    branch_id,
+                    setup_code=f"CP2B_{suffix}",
+                    setup_name=f"CP2B {suffix}",
                     payroll_frequency=freq,
                     anchor_start_date=datetime.date.fromisoformat(anchor),
                     custom_interval_days=interval,
                     normal_days_off_mask=mask,
-                )
-                version_id = await publish_version(
-                    company_id, user_id, setup_id, draft_id,
-                    datetime.date.fromisoformat(anchor), conn,
-                )
-                assignment_id = await assign_setup(
-                    company_id, user_id, branch_id, setup_id,
-                    datetime.date.fromisoformat(anchor), conn,
                 )
     finally:
         await engine.dispose()
@@ -196,26 +184,6 @@ async def _publish_future_version(db: AsyncConnection, setup_id: int,
                 )
     finally:
         await engine.dispose()
-
-
-async def _preview(client, token, branch_id: int, mode: str = "OPEN_CREATION") -> dict:
-    r = await client.get(
-        f"/payroll/branches/{branch_id}/period-candidates",
-        params={"mode": mode},
-        headers=_auth(token),
-    )
-    assert r.status_code == 200, f"preview failed: {r.text}"
-    return r.json()
-
-
-async def _create_period(client, token, branch_id: int, candidate_key: str) -> dict:
-    r = await client.post(
-        f"/payroll/branches/{branch_id}/period-creations",
-        json={"candidate_key": candidate_key},
-        headers=_auth(token),
-    )
-    assert r.status_code in (200, 201), f"create_period failed: {r.text}"
-    return r.json()
 
 
 async def _day_rows(db: AsyncConnection, period_id: int) -> list[dict]:
@@ -353,9 +321,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -372,12 +340,12 @@ class TestCp2bPeriodDays:
         """D04: Candidate-created Draft (Prepared) Week period also gets 7 day rows."""
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
-        open_preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
-        await _create_period(session_client, auth_token, paytest_branch_id,
+        open_preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
+        await create_period_from_candidate(session_client, auth_token, paytest_branch_id,
                              open_preview["selected"]["candidate_key"])
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "PREPARED_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="PREPARED_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
         assert result["status"] == "Draft"
 
@@ -396,9 +364,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Biweek", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -416,9 +384,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Month", "2095-03-01")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
         start = datetime.date.fromisoformat(result["start_date"])
         end = datetime.date.fromisoformat(result["end_date"])
@@ -442,14 +410,14 @@ class TestCp2bPeriodDays:
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         # Create Open via candidate
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
 
-        preview_draft = await _preview(
-            session_client, auth_token, paytest_branch_id, "PREPARED_CREATION",
+        preview_draft = await get_period_candidates(
+            session_client, auth_token, paytest_branch_id, mode="PREPARED_CREATION",
         )
-        result = await _create_period(
+        result = await create_period_from_candidate(
             session_client, auth_token, paytest_branch_id,
             preview_draft["selected"]["candidate_key"],
         )
@@ -469,9 +437,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-04-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
         start = datetime.date.fromisoformat(result["start_date"])
         end = datetime.date.fromisoformat(result["end_date"])
@@ -494,9 +462,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
         start = datetime.date.fromisoformat(result["start_date"])
 
@@ -536,9 +504,9 @@ class TestCp2bPeriodDays:
 
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07", mask=1)
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -563,9 +531,9 @@ class TestCp2bPeriodDays:
 
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07", mask=2)
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -590,9 +558,9 @@ class TestCp2bPeriodDays:
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
         # no mask → defaults to NULL
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -613,9 +581,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         period_authority = (await direct_db.execute(_text("""
@@ -642,9 +610,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -664,9 +632,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows = await _day_rows_simple(direct_db, period_id)
@@ -688,9 +656,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         rows_before = await _day_rows_simple(direct_db, period_id)
@@ -741,12 +709,12 @@ class TestCp2bPeriodDays:
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
         # Create Draft via PREPARED_CREATION — requires an Open first
-        preview_open = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
-        await _create_period(session_client, auth_token, paytest_branch_id,
+        preview_open = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
+        await create_period_from_candidate(session_client, auth_token, paytest_branch_id,
                              preview_open["selected"]["candidate_key"])
 
-        preview_draft = await _preview(session_client, auth_token, paytest_branch_id, "PREPARED_CREATION")
-        result = await _create_period(session_client, auth_token, paytest_branch_id,
+        preview_draft = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="PREPARED_CREATION")
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id,
                                       preview_draft["selected"]["candidate_key"])
         draft_id = result["payroll_period_id"]
         assert result["status"] == "Draft"
@@ -782,15 +750,15 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result1 = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result1 = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result1["payroll_period_id"]
         rows_before = await _day_rows_simple(direct_db, period_id)
         assert len(rows_before) == 7
 
         # Replay — same candidate key
-        result2 = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result2 = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         assert result2["result"] == "ALREADY_EXISTS"
         assert result2["payroll_period_id"] == period_id
 
@@ -811,9 +779,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         # Fetch the first existing row and workdate.
@@ -875,9 +843,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
         end_date = datetime.date.fromisoformat(result["end_date"])
 
@@ -914,8 +882,8 @@ class TestCp2bPeriodDays:
     ):
         """D21: save_day_grid returns 400 when work_date is in bounds but not in snapshot."""
         await _setup(direct_db, paytest_branch_id)
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
-        created = await _create_period(
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
+        created = await create_period_from_candidate(
             session_client, auth_token, paytest_branch_id,
             preview["selected"]["candidate_key"],
         )
@@ -952,9 +920,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07", mask=1)
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         # Find the actual Sunday in the period (dayofweek=0)
@@ -992,9 +960,9 @@ class TestCp2bPeriodDays:
         await _clean(direct_db, paytest_branch_id)
         await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
 
         # Verify at DB level: all day rows reference the exact parent authority.
@@ -1049,9 +1017,9 @@ class TestCp2bPeriodDays:
         assert driver_response.status_code == 201, driver_response.text
         driver_id = driver_response.json()["driver_id"]
 
-        preview = await _preview(session_client, auth_token, paytest_branch_id, "OPEN_CREATION")
+        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
         ck = preview["selected"]["candidate_key"]
-        result = await _create_period(session_client, auth_token, paytest_branch_id, ck)
+        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
         period_id = result["payroll_period_id"]
         end_date = datetime.date.fromisoformat(result["end_date"])
 

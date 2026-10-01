@@ -29,6 +29,7 @@ from app.payroll_setup.payroll_policy import (
     withdraw_assignment,
 )
 from app.payroll_setup.resolver import resolve_payroll_setup_version
+from tests.builders.company import create_branch
 
 
 @pytest_asyncio.fixture
@@ -48,16 +49,11 @@ async def payroll_setup_db(test_database_url):
                 """))).mappings().one()
                 company_id = int(tenant["companyid"])
                 user_id = int(tenant["userid"])
-                branch_id = (await conn.execute(text("""
-                    INSERT INTO core.Branches
-                        (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                    VALUES (:cid, :code, :name, 'Active', FALSE)
-                    RETURNING BranchID
-                """), {
-                    "cid": company_id,
-                    "code": f"P2_{marker}",
-                    "name": f"Phase 2 test branch {marker}",
-                })).scalar_one()
+                branch_id = await create_branch(
+                    conn, company_id, user_id,
+                    branch_code=f"P2_{marker}",
+                    branch_name=f"Phase 2 test branch {marker}",
+                )
                 yield SimpleNamespace(
                     db=conn, company_id=company_id, user_id=user_id,
                     branch_id=int(branch_id), marker=marker,
@@ -460,11 +456,10 @@ async def test_archive_rejects_open_ended_and_future_assignments(payroll_setup_d
         await archive_setup(db.company_id, db.user_id, setup_id, db.db)
     assert error.value.code == "SETUP_ASSIGNED"
 
-    future_branch = (await db.db.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName)
-        VALUES (:cid, :code, :name) RETURNING BranchID
-    """), {"cid": db.company_id, "code": f"P2_{db.marker}_F",
-           "name": f"Future branch {db.marker}"})).scalar_one()
+    future_branch = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"P2_{db.marker}_F", branch_name=f"Future branch {db.marker}",
+    )
     future_setup = await _new_setup(db, suffix="F")
     await _publish(db, future_setup, frequency="Week", anchor=date(2090, 2, 5))
     await assign_setup(db.company_id, db.user_id, future_branch,
@@ -610,11 +605,11 @@ async def test_shared_publication_is_atomic_when_one_branch_has_period_history(p
     setup_id = await _new_setup(db)
     anchor = date(2090, 1, 1)
     await _publish(db, setup_id, frequency="Week", anchor=anchor)
-    second_branch = (await db.db.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName)
-        VALUES (:cid, :code, :name) RETURNING BranchID
-    """), {"cid": db.company_id, "code": f"P2_{db.marker}_B",
-           "name": f"Phase 2 second branch {db.marker}"})).scalar_one()
+    second_branch = await create_branch(
+        db.db, db.company_id, db.user_id,
+        branch_code=f"P2_{db.marker}_B",
+        branch_name=f"Phase 2 second branch {db.marker}",
+    )
     await assign_setup(db.company_id, db.user_id, db.branch_id, setup_id, anchor, db.db)
     await assign_setup(db.company_id, db.user_id, second_branch, setup_id, anchor, db.db)
     await db.db.execute(text("""

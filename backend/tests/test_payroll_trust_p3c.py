@@ -28,6 +28,9 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.builders.compensation import create_approved_rate
+from tests.builders.workforce import create_driver_employee
+
 # ---------------------------------------------------------------------------
 # Year constants — one per test to avoid locked-period conflicts
 # ---------------------------------------------------------------------------
@@ -69,64 +72,6 @@ async def _make_period(
          "name": f"P3C {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
     )).mappings().first()
     return row["payrollperiodid"]
-
-
-async def _create_driver(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-    suffix: str,
-    hire_date: str = "2043-01-01",
-) -> int:
-    r = await client.post(
-        "/core/drivers",
-        json={
-            "branch_id":      branch_id,
-            "full_name":      f"P3C Test Driver {suffix}",
-            "preferred_name": f"P3C-{suffix}",
-            "driver_code":    f"P3CDRV-{suffix}",
-            "cdl_number":     f"CDL-P3C-{suffix}",
-            "email":          f"p3cdrv{suffix}@example.com",
-            "hire_date":      hire_date,
-        },
-        headers=auth(token),
-    )
-    assert r.status_code == 201, f"driver create: {r.text}"
-    return r.json()["driver_id"]
-
-
-async def _delete_driver(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_id: int,
-) -> None:
-    await client.delete(f"/core/drivers/{driver_id}", headers=auth(token))
-
-
-async def _create_and_approve_rate(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_id: int,
-    rate_type_id: int,
-    amount: str,
-    effective_from: str = "2043-01-01",
-) -> int:
-    headers = auth(token)
-    rc = await client.post(
-        "/payroll/rates",
-        json={
-            "driver_id":      driver_id,
-            "rate_type_id":   rate_type_id,
-            "amount":         amount,
-            "effective_from": effective_from,
-        },
-        headers=headers,
-    )
-    assert rc.status_code == 201, f"create rate: {rc.text}"
-    rate_id = rc.json()["driver_rate_id"]
-    ra = await client.post(f"/payroll/rates/{rate_id}/approve", headers=headers)
-    assert ra.status_code == 200, f"approve rate: {ra.text}"
-    return rate_id
 
 
 async def _advance_to_approved(
@@ -221,9 +166,23 @@ async def _lock_period(
     Returns (period_id, driver_id, final_line_id).
     """
     c, tok = client, token
-    drv = await _create_driver(c, tok, branch_id, suffix, hire_date=start[:4] + "-01-01")
-    await _create_and_approve_rate(c, tok, drv, rate_type_id, "15.00",
-                                   effective_from=start[:4] + "-01-01")
+    drv = await create_driver_employee(
+        c, tok, branch_id=branch_id,
+        full_name=f"P3C Test Driver {suffix}",
+        preferred_name=f"P3C-{suffix}",
+        driver_code=f"P3CDRV-{suffix}",
+        cdl_number=f"CDL-P3C-{suffix}",
+        email=f"p3cdrv{suffix}@example.com",
+        hire_date=start[:4] + "-01-01",
+    )
+    await create_approved_rate(
+        client=c,
+        token=tok,
+        driver_id=drv,
+        rate_type_id=rate_type_id,
+        amount="15.00",
+        effective_from=start[:4] + "-01-01",
+    )
     pid = await _make_period(db, branch_id, start=start, end=end)
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
@@ -256,7 +215,11 @@ async def p3c_env(
     paytest_rate_type_id: int,
     direct_db,
 ):
-    """Isolate immutable trust evidence on a fresh branch per test."""
+    """Isolate immutable trust evidence on a fresh branch per test.
+
+    Test-owned Employee/Driver records stay for disposable test DB teardown
+    because finalized evidence references them.
+    """
     code = f"P3C_{uuid4().hex[:12]}"
     branch_id = (await direct_db.execute(_text("""
         INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
@@ -281,13 +244,8 @@ async def p3c_env(
         "branch_id":       branch_id,
         "hourly_rtid":     paytest_rate_type_id,
         "db":              direct_db,
-        "created_drivers": [],
     }
     yield env
-
-    # Retain period history; driver deletion may be denied by finalized FKs.
-    for did in env["created_drivers"]:
-        await _delete_driver(session_client, auth_token, did)
 
 
 # ---------------------------------------------------------------------------
@@ -303,10 +261,9 @@ class TestT1_UpdateLockedLineBlocked:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        pid, drv, fid = await _lock_period(
+        pid, _driver_id, fid = await _lock_period(
             c, tok, bid, T1_START, T1_END, T1_WORK, rtid, "T1a", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         with pytest.raises(Exception) as exc_info:
             await db.execute(
@@ -335,10 +292,9 @@ class TestT2_DeleteLockedLineBlocked:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        pid, drv, fid = await _lock_period(
+        pid, _driver_id, fid = await _lock_period(
             c, tok, bid, T2_START, T2_END, T2_WORK, rtid, "T2a", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         with pytest.raises(Exception) as exc_info:
             await db.execute(
@@ -365,10 +321,9 @@ class TestT3_StatusRevertLockedBlocked:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        pid, drv, _fid = await _lock_period(
+        pid, _driver_id, _fid = await _lock_period(
             c, tok, bid, T3_START, T3_END, T3_WORK, rtid, "T3a", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         with pytest.raises(Exception) as exc_info:
             await db.execute(
@@ -397,10 +352,9 @@ class TestT4_LockedToArchivedAllowed:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        pid, drv, _fid = await _lock_period(
+        pid, _driver_id, _fid = await _lock_period(
             c, tok, bid, T4_START, T4_END, T4_WORK, rtid, "T4a", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         # This must NOT raise
         await db.execute(
@@ -431,10 +385,9 @@ class TestT5_ArchivedTerminal:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        pid, drv, _fid = await _lock_period(
+        pid, _driver_id, _fid = await _lock_period(
             c, tok, bid, T5_START, T5_END, T5_WORK, rtid, "T5a", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         # Advance to Archived first (this is allowed)
         await db.execute(
@@ -471,10 +424,20 @@ class TestT6_FinalizationStillWorks:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        drv = await _create_driver(c, tok, bid, "T6a", hire_date="2048-01-01")
-        p3c_env["created_drivers"].append(drv)
-        await _create_and_approve_rate(c, tok, drv, rtid, "18.00",
-                                       effective_from="2048-01-01")
+        drv = await create_driver_employee(
+            c, tok, branch_id=bid, full_name="P3C Test Driver T6a",
+            preferred_name="P3C-T6a", driver_code="P3CDRV-T6a",
+            cdl_number="CDL-P3C-T6a", email="p3cdrvT6a@example.com",
+            hire_date="2048-01-01",
+        )
+        await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=rtid,
+            amount="18.00",
+            effective_from="2048-01-01",
+        )
 
         pid = await _make_period(db, bid, start=T6_START, end=T6_END)
         r = await c.post(
@@ -509,10 +472,20 @@ class TestT7_LedgerReadWorks:
         db = p3c_env["db"]
         rtid = p3c_env["hourly_rtid"]
 
-        drv = await _create_driver(c, tok, bid, "T7a", hire_date="2049-01-01")
-        p3c_env["created_drivers"].append(drv)
-        await _create_and_approve_rate(c, tok, drv, rtid, "20.00",
-                                       effective_from="2049-01-01")
+        drv = await create_driver_employee(
+            c, tok, branch_id=bid, full_name="P3C Test Driver T7a",
+            preferred_name="P3C-T7a", driver_code="P3CDRV-T7a",
+            cdl_number="CDL-P3C-T7a", email="p3cdrvT7a@example.com",
+            hire_date="2049-01-01",
+        )
+        await create_approved_rate(
+            client=c,
+            token=tok,
+            driver_id=drv,
+            rate_type_id=rtid,
+            amount="20.00",
+            effective_from="2049-01-01",
+        )
 
         pid = await _make_period(db, bid, start=T7_START, end=T7_END)
         r = await c.post(
@@ -555,7 +528,6 @@ class TestT8_ServiceLayerLockedGuard:
         pid, drv, _fid = await _lock_period(
             c, tok, bid, T8A_START, T8A_END, T8A_WORK, rtid, "T8a", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         r = await c.post(
             f"/payroll/periods/{pid}/lines",
@@ -581,7 +553,6 @@ class TestT8_ServiceLayerLockedGuard:
         pid, drv, _fid = await _lock_period(
             c, tok, bid, T8B_START, T8B_END, T8B_WORK, rtid, "T8b", db
         )
-        p3c_env["created_drivers"].append(drv)
 
         # Find a draft line for this period
         row = (await db.execute(

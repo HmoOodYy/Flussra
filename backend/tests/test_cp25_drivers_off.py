@@ -24,7 +24,10 @@ import httpx
 import pytest
 from sqlalchemy import text as _text
 
-from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,52 +108,6 @@ async def _make_open_period(
     await _cancel_active_periods(client, token, branch_id)
     company_id = await _get_company_id(direct_db)
     return await _insert_open_period_direct(direct_db, company_id, branch_id, start, end)
-
-
-async def _create_role_with_perms(
-    client: httpx.AsyncClient,
-    token: str,
-    role_name: str,
-    perms: list,
-) -> int:
-    cr = await client.post(
-        "/admin/company-roles",
-        json={"role_name": role_name},
-        headers=auth(token),
-    )
-    assert cr.status_code == 201, f"Create role failed: {cr.text}"
-    role_id = cr.json()["company_role_id"]
-    if perms:
-        pr = await client.put(
-            f"/admin/company-roles/{role_id}/permissions",
-            json={"permission_codes": perms},
-            headers=auth(token),
-        )
-        assert pr.status_code == 200, f"Set permissions failed: {pr.text}"
-    return role_id
-
-
-async def _create_user_with_role(
-    client: httpx.AsyncClient,
-    admin_token: str,
-    username: str,
-    role_id: int,
-    scope_type: str = "AllCompanyBranches",
-    branch_id=None,
-    password: str = "TestPass123!",
-) -> str:
-    await create_provisioned_test_user(
-        client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password=password,
-    )
-
-    login = await client.post("/auth/login", json={
-        "username": username,
-        "password": password,
-        "company_code": "DEMO",
-    })
-    assert login.status_code == 200, f"Login failed: {login.text}"
-    return login.json()["access_token"]
 
 
 async def _get_company_id(direct_db) -> int:
@@ -500,11 +457,11 @@ class TestDriversOff:
         )
         pid = period["payroll_period_id"]
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "CP25_ODA_DriversOff_Role",
             ["payroll.view", "payroll.entry"],
         )
-        oda_token = await _create_user_with_role(
+        oda_token = await create_user_with_role_token(
             session_client, auth_token, "cp25_oda_driversoff_user", role_id,
             scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
         )
@@ -539,11 +496,11 @@ class TestDriversOff:
         )
         pid = period["payroll_period_id"]
 
-        role_id = await _create_role_with_perms(
+        role_id = await create_company_role_with_permissions(
             session_client, auth_token, "CP25_NoPerms_DriversOff_Role",
             [],
         )
-        no_perm_token = await _create_user_with_role(
+        no_perm_token = await create_user_with_role_token(
             session_client, auth_token, "cp25_noperm_driversoff_user", role_id,
             scope_type="AllCompanyBranches",
         )

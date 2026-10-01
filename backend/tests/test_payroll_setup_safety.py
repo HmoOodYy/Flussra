@@ -25,6 +25,7 @@ from app.payroll_setup.payroll_policy import (
     publish_version,
 )
 from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.company import create_branch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,16 +51,13 @@ async def _fresh_candidate_branch(
     try:
         async with engine.begin() as db:
             code = f"PSS_{uuid4().hex[:12]}"
-            branch_id = (await db.execute(_text("""
-                INSERT INTO core.branches
-                    (companyid, branchcode, branchname, status, isdefault)
-                VALUES (1, :code, :name, 'Active', FALSE)
-                RETURNING branchid
-            """), {"code": code, "name": f"PSS isolated {code}"})).scalar_one()
             user_id = (await db.execute(_text("""
                 SELECT userid FROM sec.users
                 WHERE companyid = 1 AND username = 'admin'
             """))).scalar_one()
+            branch_id = await create_branch(
+                db, 1, int(user_id), branch_code=code, branch_name=f"PSS isolated {code}",
+            )
             setup_id = await create_setup(1, user_id, code, "PSS cadence setup", db)
             draft_id = await create_draft(
                 1, user_id, setup_id, db,

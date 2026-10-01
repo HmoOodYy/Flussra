@@ -36,6 +36,7 @@ from sqlalchemy import text as _text
 from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import CdpiDirectCreateRequest
 from app.payroll.service import _create_period_pay_item_rows
+from tests.builders.workforce import create_driver_employee
 
 # ---------------------------------------------------------------------------
 # Year slot constants
@@ -71,19 +72,6 @@ async def _get_ids(db):
         _text("SELECT userid FROM sec.users WHERE username = 'admin'")
     )).scalar_one()
     return company_id, admin_id
-
-
-async def _create_driver(client, token, branch_id, suffix):
-    r = await client.post("/core/drivers", json={
-        "branch_id": branch_id,
-        "full_name": f"LG1 {suffix}",
-        "driver_code": f"LG1-{suffix[:8]}",
-        "cdl_number": f"CDL-LG1-{suffix[:6]}",
-        "email": f"lg1{suffix[:6].lower().replace('-','')}@example.com",
-        "hire_date": "2093-01-01",
-    }, headers=_tok(token))
-    assert r.status_code == 201, f"create_driver: {r.text}"
-    return r.json()["driver_id"]
 
 
 async def _delete_driver(client, token, driver_id):
@@ -221,7 +209,12 @@ async def test_lg1_cdpi_final_line_in_ledger(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG1A")
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="LG1 LG1A", driver_code="LG1-LG1A",
+            cdl_number="CDL-LG1-LG1A", email="lg1lg1a@example.com",
+            hire_date="2093-01-01",
+        )
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="20.00")
 
@@ -304,7 +297,12 @@ async def test_lg2_cdpi_final_line_source_snapshot(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG2A")
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="LG1 LG2A", driver_code="LG1-LG2A",
+            cdl_number="CDL-LG1-LG2A", email="lg1lg2a@example.com",
+            hire_date="2093-01-01",
+        )
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="15.00")
 
@@ -477,7 +475,12 @@ async def test_lg3_ledger_includes_cdpi_amount_with_standard_line(
             rt["rate_type_id"] for rt in r.json() if rt["rate_code"] == "HOURLY"
         )
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG3A")
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="LG1 LG3A", driver_code="LG1-LG3A",
+            cdl_number="CDL-LG1-LG3A", email="lg1lg3a@example.com",
+            hire_date="2093-01-01",
+        )
         hourly_rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, hourly_rt_id, amount="18.00")
         await _create_and_approve_rate(
@@ -587,7 +590,12 @@ async def test_lg4_finalized_period_blocks_cdpi_day_grid_edits(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG4A")
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="LG1 LG4A", driver_code="LG1-LG4A",
+            cdl_number="CDL-LG1-LG4A", email="lg1lg4a@example.com",
+            hire_date="2093-01-01",
+        )
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="10.00")
 
@@ -656,7 +664,12 @@ async def test_lg5_standard_hours_final_line_regression(
             rt["rate_type_id"] for rt in r.json() if rt["rate_code"] == "HOURLY"
         )
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG5A")
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="LG1 LG5A", driver_code="LG1-LG5A",
+            cdl_number="CDL-LG1-LG5A", email="lg1lg5a@example.com",
+            hire_date="2093-01-01",
+        )
         rate_id = await _create_and_approve_rate(
             session_client, auth_token, driver_id, hourly_rt_id, amount="22.00")
 
@@ -724,7 +737,12 @@ async def test_lg6_period_summary_final_gross_includes_cdpi(
             company_id=cid, branch_id=paytest_branch_id,
         )
 
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "LG6A")
+        driver_id = await create_driver_employee(
+            session_client, auth_token, branch_id=paytest_branch_id,
+            full_name="LG1 LG6A", driver_code="LG1-LG6A",
+            cdl_number="CDL-LG1-LG6A", email="lg1lg6a@example.com",
+            hire_date="2093-01-01",
+        )
         await _create_and_approve_rate(
             session_client, auth_token, driver_id, rate_type_id, amount="25.00")
 
