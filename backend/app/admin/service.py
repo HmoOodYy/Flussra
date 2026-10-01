@@ -40,10 +40,13 @@ from app.admin.schemas import (
     UserCreate,
     UserPasswordReset,
     UserPermissionOverridesUpdate,
+    UserProvision,
     UserUpdate,
 )
 from app.auth.security import hash_password
 from app.core.service import _check_any_permission, _check_branch_access
+from app.workforce.clock import company_today
+from app.workforce.effective import resolve_effective_driver_profile
 
 # ---------------------------------------------------------------------------
 # Audit reason map
@@ -53,6 +56,10 @@ _ADMIN_AUDIT_REASONS: dict[str, str] = {
     "USER_CREATED":                    "User account created",
     "USER_UPDATED":                    "User account updated",
     "USER_PASSWORD_RESET":             "User password reset by administrator",
+    "USER_EMPLOYEE_LINKED":             "User linked to Employee",
+    "USER_EMPLOYEE_UNLINKED":           "User unlinked from Employee",
+    "USER_PROVISIONED":                 "Staged User provisioned",
+    "USER_STAGED":                      "User staged after final role revocation",
     "ROLE_ASSIGNED":                   "Role assigned to user",
     "ROLE_REVOKED":                    "Role assignment revoked",
     "COMPANY_ROLE_ASSIGNED":           "Company role assigned to user",
@@ -203,6 +210,36 @@ async def _ensure_admin(
     service is the real gate).
     """
     await _ensure_any_perm(company_id, user_id, db, *_ADMIN_FALLBACKS)
+
+
+async def _ensure_disabled_owner_transfer_authority(
+    company_id: int, user_id: int, db: AsyncConnection,
+) -> None:
+    """Keep owner scope and admin permission checks for a disabled current owner."""
+    result = await db.execute(
+        text("""
+            SELECT 1
+            FROM sec.Users u
+            JOIN core.Companies c ON c.CompanyID = u.CompanyID
+            JOIN sec.UserBranchRoles ubr ON ubr.UserID = u.UserID AND ubr.CompanyID = u.CompanyID
+            JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
+            WHERE u.UserID=:uid AND u.CompanyID=:cid AND u.IsActive AND NOT u.IsStaged
+              AND c.Status='Active' AND NOT c.IsSuspended
+              AND ubr.IsActive AND ubr.ScopeType='AllCompanyBranches'
+              AND cr.RoleCode='COMPANY_OWNER'
+        """),
+        {"uid": user_id, "cid": company_id},
+    )
+    if result.first() is None:
+        raise HTTPException(status_code=403, detail="Only an active Company Owner can transfer ownership.")
+    for permission_code in _ADMIN_FALLBACKS:
+        permission = await db.execute(
+            text("SELECT sec.fn_UserHasPermission(:uid, :cid, NULL, :perm)"),
+            {"uid": user_id, "cid": company_id, "perm": permission_code},
+        )
+        if permission.scalar_one():
+            return
+    raise HTTPException(status_code=403, detail="Company Owner lacks the required ownership-transfer permission.")
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +495,8 @@ def _row_to_user(
     return UserAdmin(
         user_id=row["userid"],
         company_id=row["companyid"],
+        employee_id=row["employeeid"],
+        is_staged=row["isstaged"],
         username=row["username"],
         display_name=row["displayname"],
         email=row["email"],
@@ -494,7 +533,7 @@ async def _get_user_by_id_internal(
     result = await db.execute(
         text("""
             SELECT
-                u.userid, u.companyid, u.username, u.displayname,
+                u.userid, u.companyid, u.employeeid, u.isstaged, u.username, u.displayname,
                 u.email, u.phone, u.isactive, u.canlogin,
                 u.mustchangepassword, u.lastloginatutc,
                 u.createdatutc, u.updatedatutc
@@ -542,7 +581,7 @@ async def list_users(
     result = await db.execute(
         text(f"""
             SELECT
-                u.userid, u.companyid, u.username, u.displayname,
+                u.userid, u.companyid, u.employeeid, u.isstaged, u.username, u.displayname,
                 u.email, u.phone, u.isactive, u.canlogin,
                 u.mustchangepassword, u.lastloginatutc,
                 u.createdatutc, u.updatedatutc
@@ -587,6 +626,125 @@ async def get_user_by_id(
     return await _get_user_by_id_internal(target_user_id, company_id, db)
 
 
+async def _lock_employee_link_target(
+    company_id: int, employee_id: int, db: AsyncConnection,
+) -> None:
+    employee = await db.execute(
+        text("SELECT EmployeeID FROM core.Employees WHERE EmployeeID = :eid AND CompanyID = :cid FOR UPDATE"),
+        {"eid": employee_id, "cid": company_id},
+    )
+    if employee.first() is None:
+        raise HTTPException(status_code=422, detail="Employee not found for this company.")
+    linked = await db.execute(
+        text("SELECT UserID FROM sec.Users WHERE EmployeeID = :eid AND CompanyID = :cid LIMIT 1"),
+        {"eid": employee_id, "cid": company_id},
+    )
+    if linked.first() is not None:
+        raise HTTPException(status_code=409, detail="Employee is already linked to another User.")
+
+
+async def _validate_company_role_scope(
+    company_id: int, scope_type: str, branch_id: int | None, db: AsyncConnection,
+) -> None:
+    if scope_type == "AllCompanyBranches":
+        if branch_id is not None:
+            raise HTTPException(status_code=422, detail="branch_id must be null for AllCompanyBranches scope.")
+        return
+    if branch_id is None:
+        raise HTTPException(status_code=422, detail=f"branch_id is required for {scope_type} scope.")
+    branch = await db.execute(
+        text("SELECT 1 FROM core.Branches WHERE BranchID = :branch_id AND CompanyID = :company_id"),
+        {"branch_id": branch_id, "company_id": company_id},
+    )
+    if branch.first() is None:
+        raise HTTPException(status_code=422, detail="Branch not found for this company.")
+
+
+async def _validate_p2a_assignment(
+    company_id: int,
+    employee_id: int | None,
+    data: CompanyRoleAssignmentCreate,
+    db: AsyncConnection,
+):
+    result = await db.execute(
+        text("""
+            SELECT CompanyRoleID, RoleCode, RoleName, IsActive, IsArchived
+            FROM sec.CompanyRoles
+            WHERE CompanyRoleID = :role_id AND CompanyID = :company_id
+            FOR SHARE
+        """),
+        {"role_id": data.company_role_id, "company_id": company_id},
+    )
+    role = result.mappings().first()
+    if role is None or not role["isactive"] or role["isarchived"]:
+        raise HTTPException(status_code=422, detail="Active company role not found for this company.")
+    if role["rolecode"] == "COMPANY_OWNER":
+        raise HTTPException(status_code=422, detail="Company Owner can only be granted through ownership transfer.")
+
+    is_driver = role["rolecode"] == "DRIVER"
+    if data.scope_type == "OwnDriverDataOnly" and not is_driver:
+        raise HTTPException(status_code=422, detail="OwnDriverDataOnly scope is valid only for the DRIVER role.")
+    if is_driver:
+        if employee_id is None:
+            raise HTTPException(status_code=422, detail="DRIVER access requires an explicitly linked Employee.")
+        if data.scope_type != "OwnDriverDataOnly":
+            raise HTTPException(status_code=422, detail="DRIVER access requires OwnDriverDataOnly scope.")
+        if data.branch_id is None:
+            raise HTTPException(status_code=422, detail="DRIVER access requires its current Driver branch.")
+        employee = await db.execute(
+            text("SELECT EmployeeID FROM core.Employees WHERE EmployeeID = :employee_id AND CompanyID = :company_id FOR UPDATE"),
+            {"employee_id": employee_id, "company_id": company_id},
+        )
+        if employee.first() is None:
+            raise HTTPException(status_code=422, detail="Linked Employee not found for this company.")
+
+    await _validate_company_role_scope(company_id, data.scope_type, data.branch_id, db)
+
+    if is_driver:
+        business_date = await company_today(company_id, db)
+        current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
+        if current is None:
+            raise HTTPException(status_code=422, detail="DRIVER access requires a current effective Driver profile.")
+        if current["branchid"] != data.branch_id:
+            raise HTTPException(status_code=422, detail="DRIVER scope branch must match the current Driver profile.")
+    return role
+
+
+async def _insert_p2a_assignment(
+    user_id: int,
+    company_id: int,
+    caller_id: int,
+    data: CompanyRoleAssignmentCreate,
+    db: AsyncConnection,
+) -> int:
+    result = await db.execute(
+        text("""
+            INSERT INTO sec.UserBranchRoles
+                (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType,
+                 IsActive, GrantedByUserID, Notes)
+            VALUES (:user_id, :company_id, :branch_id, NULL, :role_id, :scope,
+                    TRUE, :caller_id, :notes)
+            RETURNING UserBranchRoleID
+        """),
+        {
+            "user_id": user_id, "company_id": company_id,
+            "branch_id": data.branch_id, "role_id": data.company_role_id,
+            "scope": data.scope_type, "caller_id": caller_id, "notes": data.notes,
+        },
+    )
+    return result.scalar_one()
+
+
+async def _write_user_lifecycle_audit(
+    db: AsyncConnection, *, company_id: int, caller_id: int, action: str,
+    user_id: int, old_value: dict | None = None, new_value: dict | None = None,
+) -> None:
+    await _write_admin_audit(
+        db, company_id=company_id, user_id=caller_id, action_code=action,
+        entity_name="Users", entity_id=str(user_id), old_value=old_value, new_value=new_value,
+    )
+
+
 async def create_user(
     company_id: int,
     caller_id: int,
@@ -595,55 +753,175 @@ async def create_user(
 ) -> UserAdmin:
     await _ensure_any_perm(company_id, caller_id, db, "users.create", *_ADMIN_FALLBACKS)
 
-    pw_hash = hash_password(data.password)
+    if data.is_staged:
+        if data.can_login or data.role_assignment is not None:
+            raise HTTPException(status_code=422, detail="Staged creation requires CanLogin=false and no role assignment.")
+    else:
+        await _ensure_any_perm(company_id, caller_id, db, "users.edit", "roles.edit", *_ADMIN_FALLBACKS)
+        if data.role_assignment is None:
+            raise HTTPException(status_code=422, detail="Provisioned User creation requires a CompanyRole/Scope assignment.")
+
+    if data.employee_id is not None:
+        await _lock_employee_link_target(company_id, data.employee_id, db)
+    if data.role_assignment is not None:
+        await _validate_p2a_assignment(company_id, data.employee_id, data.role_assignment, db)
 
     try:
-        result = await db.execute(
-            text("""
-                INSERT INTO sec.users
-                    (companyid, username, displayname, email, phone,
-                     passwordhash, isactive, canlogin, mustchangepassword)
-                VALUES
-                    (:cid, :username, :display_name, :email, :phone,
-                     :pw_hash, :is_active, :can_login, :must_change)
-                RETURNING userid
-            """),
-            {
-                "cid":          company_id,
-                "username":     data.username,
-                "display_name": data.display_name,
-                "email":        data.email,
-                "phone":        data.phone,
-                "pw_hash":      pw_hash,
-                "is_active":    data.is_active,
-                "can_login":    data.can_login,
-                "must_change":  data.must_change_password,
-            },
-        )
-        new_user_id: int = result.scalar_one()
+        async with db.begin_nested():
+            result = await db.execute(
+                text("""
+                    INSERT INTO sec.Users
+                        (CompanyID, EmployeeID, Username, DisplayName, Email, Phone,
+                         PasswordHash, IsActive, CanLogin, IsStaged, MustChangePassword)
+                    VALUES
+                        (:company_id, :employee_id, :username, :display_name, :email, :phone,
+                         :password_hash, :is_active, :can_login, :is_staged, :must_change)
+                    RETURNING UserID
+                """),
+                {
+                    "company_id": company_id, "employee_id": data.employee_id,
+                    "username": data.username, "display_name": data.display_name,
+                    "email": data.email, "phone": data.phone,
+                    "password_hash": hash_password(data.password),
+                    "is_active": data.is_active, "can_login": data.can_login,
+                    "is_staged": data.is_staged, "must_change": data.must_change_password,
+                },
+            )
+            new_user_id = result.scalar_one()
+            if data.role_assignment is not None:
+                await _insert_p2a_assignment(new_user_id, company_id, caller_id, data.role_assignment, db)
+            await _write_user_lifecycle_audit(
+                db, company_id=company_id, caller_id=caller_id, action="USER_CREATED",
+                user_id=new_user_id,
+                new_value={"username": data.username, "display_name": data.display_name,
+                           "is_staged": data.is_staged, "can_login": data.can_login,
+                           "employee_id": data.employee_id,
+                           "company_role_id": data.role_assignment.company_role_id if data.role_assignment else None},
+            )
     except SAIntegrityError as exc:
         msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
         if "ux_users_company_username" in msg:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Username '{data.username}' already exists for this company.",
-            )
-        raise HTTPException(
-            status_code=422,
-            detail="User could not be created — a uniqueness constraint was violated.",
-        )
-
-    await _write_admin_audit(
-        db,
-        company_id=company_id,
-        user_id=caller_id,
-        action_code="USER_CREATED",
-        entity_name="Users",
-        entity_id=str(new_user_id),
-        new_value={"username": data.username, "display_name": data.display_name},
-    )
+            raise HTTPException(status_code=422, detail=f"Username '{data.username}' already exists for this company.") from exc
+        if "employee" in msg and "users" in msg:
+            raise HTTPException(status_code=409, detail="Employee is already linked to another User or does not belong to this company.") from exc
+        raise HTTPException(status_code=422, detail="User could not be created because an integrity rule was violated.") from exc
 
     return await _get_user_by_id_internal(new_user_id, company_id, db)
+
+
+async def link_user_employee(
+    target_user_id: int, company_id: int, caller_id: int, employee_id: int, db: AsyncConnection,
+) -> UserAdmin:
+    await _ensure_any_perm(company_id, caller_id, db, "users.edit", *_ADMIN_FALLBACKS)
+    user_result = await db.execute(
+        text("SELECT EmployeeID FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    user = user_result.mappings().first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if user["employeeid"] == employee_id:
+        return await _get_user_by_id_internal(target_user_id, company_id, db)
+    if user["employeeid"] is not None:
+        raise HTTPException(status_code=409, detail="User is already linked to another Employee; unlink it first.")
+    try:
+        async with db.begin_nested():
+            await _lock_employee_link_target(company_id, employee_id, db)
+            await db.execute(
+                text("UPDATE sec.Users SET EmployeeID = :eid, UpdatedAtUtc = NOW() WHERE UserID = :uid AND CompanyID = :cid"),
+                {"eid": employee_id, "uid": target_user_id, "cid": company_id},
+            )
+            await _write_user_lifecycle_audit(
+                db, company_id=company_id, caller_id=caller_id, action="USER_EMPLOYEE_LINKED",
+                user_id=target_user_id, new_value={"employee_id": employee_id},
+            )
+    except SAIntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Employee is already linked to another User.") from exc
+    return await _get_user_by_id_internal(target_user_id, company_id, db)
+
+
+async def unlink_user_employee(
+    target_user_id: int, company_id: int, caller_id: int, db: AsyncConnection,
+) -> UserAdmin:
+    await _ensure_any_perm(company_id, caller_id, db, "users.edit", *_ADMIN_FALLBACKS)
+    result = await db.execute(
+        text("SELECT EmployeeID FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    user = result.mappings().first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    employee_id = user["employeeid"]
+    if employee_id is None:
+        return await _get_user_by_id_internal(target_user_id, company_id, db)
+    employee = await db.execute(
+        text("SELECT EmployeeID FROM core.Employees WHERE EmployeeID = :eid AND CompanyID = :cid FOR UPDATE"),
+        {"eid": employee_id, "cid": company_id},
+    )
+    if employee.first() is None:
+        raise HTTPException(status_code=409, detail="Linked Employee no longer belongs to this company.")
+    driver_role = await db.execute(
+        text("""
+            SELECT 1 FROM sec.UserBranchRoles ubr
+            LEFT JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
+            LEFT JOIN sec.Roles r ON r.RoleID = ubr.RoleID
+            WHERE ubr.UserID = :uid AND ubr.CompanyID = :cid AND ubr.IsActive
+              AND (cr.RoleCode = 'DRIVER' OR r.RoleCode = 'DRIVER')
+            LIMIT 1
+        """),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    if driver_role.first() is not None:
+        raise HTTPException(status_code=422, detail="Remove the active DRIVER role before unlinking the Employee.")
+    await db.execute(
+        text("UPDATE sec.Users SET EmployeeID = NULL, UpdatedAtUtc = NOW() WHERE UserID = :uid AND CompanyID = :cid"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    await _write_user_lifecycle_audit(
+        db, company_id=company_id, caller_id=caller_id, action="USER_EMPLOYEE_UNLINKED",
+        user_id=target_user_id, old_value={"employee_id": employee_id},
+    )
+    return await _get_user_by_id_internal(target_user_id, company_id, db)
+
+
+async def provision_user(
+    target_user_id: int, company_id: int, caller_id: int, data: UserProvision, db: AsyncConnection,
+) -> UserAdmin:
+    await _ensure_any_perm(company_id, caller_id, db, "users.edit", *_ADMIN_FALLBACKS)
+    result = await db.execute(
+        text("SELECT EmployeeID, IsStaged, CanLogin FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    user = result.mappings().first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not user["isstaged"]:
+        raise HTTPException(status_code=422, detail="Only explicitly staged Users can be provisioned.")
+    count = await db.execute(
+        text("SELECT COUNT(*) FROM sec.UserBranchRoles WHERE UserID = :uid AND CompanyID = :cid AND IsActive"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    if count.scalar_one():
+        raise HTTPException(status_code=409, detail="Staged User already has an active role assignment.")
+    await _validate_p2a_assignment(company_id, user["employeeid"], data.role_assignment, db)
+    try:
+        async with db.begin_nested():
+            assignment_id = await _insert_p2a_assignment(target_user_id, company_id, caller_id, data.role_assignment, db)
+            await db.execute(
+                text("UPDATE sec.Users SET IsStaged = FALSE, CanLogin = :can_login, UpdatedAtUtc = NOW() WHERE UserID = :uid AND CompanyID = :cid"),
+                {"can_login": data.can_login, "uid": target_user_id, "cid": company_id},
+            )
+            await _write_user_lifecycle_audit(
+                db, company_id=company_id, caller_id=caller_id, action="USER_PROVISIONED",
+                user_id=target_user_id,
+                old_value={"is_staged": True, "can_login": user["canlogin"]},
+                new_value={"is_staged": False, "can_login": data.can_login,
+                           "company_role_id": data.role_assignment.company_role_id,
+                           "assignment_id": assignment_id},
+            )
+    except SAIntegrityError as exc:
+        raise HTTPException(status_code=409, detail="The role assignment conflicts with an existing assignment.") from exc
+    return await _get_user_by_id_internal(target_user_id, company_id, db)
 
 
 async def update_user(
@@ -684,7 +962,7 @@ async def update_user(
     result = await db.execute(
         text("""
             SELECT userid, displayname, email, phone,
-                   isactive, canlogin, mustchangepassword
+                   isactive, canlogin, isstaged, mustchangepassword
             FROM  sec.users
             WHERE userid = :uid AND companyid = :cid
             FOR UPDATE
@@ -694,6 +972,16 @@ async def update_user(
     current = result.mappings().first()
     if current is None:
         raise HTTPException(status_code=404, detail="User not found.")
+
+    if data.can_login is True:
+        if current["isstaged"]:
+            raise HTTPException(status_code=422, detail="A staged User must be provisioned before login can be enabled.")
+        role_count = await db.execute(
+            text("SELECT COUNT(*) FROM sec.UserBranchRoles WHERE UserID = :uid AND CompanyID = :cid AND IsActive"),
+            {"uid": target_user_id, "cid": company_id},
+        )
+        if not role_count.scalar_one():
+            raise HTTPException(status_code=422, detail="Login cannot be enabled without an active role assignment.")
 
     # Self-protection: cannot strip your own access
     if target_user_id == caller_id:
@@ -847,11 +1135,14 @@ async def assign_role(
 
     # Confirm target user exists
     chk_user = await db.execute(
-        text("SELECT 1 FROM sec.users WHERE userid = :uid AND companyid = :cid"),
+        text("SELECT IsStaged FROM sec.users WHERE userid = :uid AND companyid = :cid FOR UPDATE"),
         {"uid": target_user_id, "cid": company_id},
     )
-    if not chk_user.fetchone():
+    user_row = chk_user.mappings().first()
+    if user_row is None:
         raise HTTPException(status_code=404, detail="User not found.")
+    if user_row["isstaged"]:
+        raise HTTPException(status_code=422, detail="Staged Users must receive a role through the provision operation.")
 
     # Confirm role exists
     role_result = await db.execute(
@@ -924,7 +1215,8 @@ async def assign_role(
     # (ux_UserBranchRoles_Active_AllCompany / ux_UserBranchRoles_Active_Branch)
     # in case a concurrent request slips through the soft-check above.
     try:
-        ins = await db.execute(
+        async with db.begin_nested():
+            ins = await db.execute(
             text("""
                 INSERT INTO sec.userbranchroles
                     (userid, companyid, branchid, roleid, scopetype,
@@ -943,7 +1235,7 @@ async def assign_role(
                 "grantor": caller_id,
                 "notes":   data.notes,
             },
-        )
+            )
     except SAIntegrityError:
         raise HTTPException(
             status_code=422,
@@ -983,6 +1275,15 @@ async def revoke_role(
     db: AsyncConnection,
 ) -> RoleAssignment:
     await _ensure_any_perm(company_id, caller_id, db, "users.edit", "roles.edit", *_ADMIN_FALLBACKS)
+
+    # Lock User before assignment rows so role lifecycle mutations serialize.
+    user_result = await db.execute(
+        text("SELECT CanLogin FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    locked_user = user_result.mappings().first()
+    if locked_user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
 
     # Fetch and lock the assignment
     result = await db.execute(
@@ -1033,6 +1334,14 @@ async def revoke_role(
             notes=row["notes"],
         )
 
+    active_count = await db.execute(
+        text("SELECT COUNT(*) FROM sec.UserBranchRoles WHERE UserID = :uid AND CompanyID = :cid AND IsActive"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    is_final = active_count.scalar_one() == 1
+    if is_final and locked_user["canlogin"]:
+        raise HTTPException(status_code=422, detail="Disable login before revoking the final active role.")
+
     await db.execute(
         text("""
             UPDATE sec.userbranchroles
@@ -1041,6 +1350,17 @@ async def revoke_role(
         """),
         {"aid": assignment_id},
     )
+
+    if is_final:
+        await db.execute(
+            text("UPDATE sec.Users SET IsStaged = TRUE, UpdatedAtUtc = NOW() WHERE UserID = :uid AND CompanyID = :cid"),
+            {"uid": target_user_id, "cid": company_id},
+        )
+        await _write_user_lifecycle_audit(
+            db, company_id=company_id, caller_id=caller_id, action="USER_STAGED",
+            user_id=target_user_id, old_value={"is_staged": False},
+            new_value={"is_staged": True, "reason": "final_role_revoked"},
+        )
 
     await _write_admin_audit(
         db,
@@ -1787,24 +2107,30 @@ async def assign_company_role(
 
     # Confirm target user exists
     chk_user = await db.execute(
-        text("SELECT 1 FROM sec.users WHERE userid = :uid AND companyid = :cid AND isactive = TRUE"),
+        text("SELECT IsStaged FROM sec.users WHERE userid = :uid AND companyid = :cid AND isactive = TRUE FOR UPDATE"),
         {"uid": target_user_id, "cid": company_id},
     )
-    if not chk_user.fetchone():
+    user_row = chk_user.mappings().first()
+    if user_row is None:
         raise HTTPException(status_code=404, detail="User not found or inactive.")
+    if user_row["isstaged"]:
+        raise HTTPException(status_code=422, detail="Staged Users must receive a role through the provision operation.")
 
     # Fetch company role — must belong to this company
     cr_result = await db.execute(
         text("""
-            SELECT companyroleid, rolecode, rolename, isprotected, isactive
+            SELECT companyroleid, rolecode, rolename, isprotected, isactive, isarchived
             FROM   sec.companyroles
             WHERE  companyroleid = :rid AND companyid = :cid
+            FOR SHARE
         """),
         {"rid": data.company_role_id, "cid": company_id},
     )
     cr_row = cr_result.mappings().first()
     if cr_row is None:
         raise HTTPException(status_code=422, detail="Company role not found for this company.")
+    if cr_row["isarchived"]:
+        raise HTTPException(status_code=422, detail="Cannot assign an archived company role.")
     if not cr_row["isactive"]:
         raise HTTPException(status_code=422, detail="Cannot assign an inactive company role.")
 
@@ -1817,6 +2143,9 @@ async def assign_company_role(
                 "Use POST /admin/company-owner/transfer to transfer ownership."
             ),
         )
+
+    if cr_row["rolecode"] == "DRIVER" and data.branch_id is not None:
+        await _check_any_permission(company_id, caller_id, data.branch_id, ["employees.manage"], db)
 
     # Driver role requires a home branch (must have a SpecificBranch or OwnDriverDataOnly scope).
     # AllCompanyBranches carries no branch_id — the driver would have no profile and pay rates
@@ -1831,25 +2160,7 @@ async def assign_company_role(
             ),
         )
 
-    # Validate scope / branch alignment
-    if data.scope_type == "AllCompanyBranches":
-        if data.branch_id is not None:
-            raise HTTPException(
-                status_code=422,
-                detail="branch_id must be null for AllCompanyBranches scope.",
-            )
-    else:
-        if data.branch_id is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"branch_id is required for {data.scope_type} scope.",
-            )
-        branch_chk = await db.execute(
-            text("SELECT 1 FROM core.branches WHERE branchid = :bid AND companyid = :cid"),
-            {"bid": data.branch_id, "cid": company_id},
-        )
-        if not branch_chk.fetchone():
-            raise HTTPException(status_code=422, detail="Branch not found for this company.")
+    await _validate_company_role_scope(company_id, data.scope_type, data.branch_id, db)
 
     # Revoke all existing active company-role assignments for this user
     await db.execute(
@@ -1866,7 +2177,8 @@ async def assign_company_role(
 
     # Insert new assignment (new path: roleid = NULL, companyroleId = role)
     try:
-        ins = await db.execute(
+        async with db.begin_nested():
+            ins = await db.execute(
             text("""
                 INSERT INTO sec.userbranchroles
                     (userid, companyid, branchid, roleid, companyroleId, scopetype,
@@ -1885,7 +2197,7 @@ async def assign_company_role(
                 "grantor": caller_id,
                 "notes":   data.notes,
             },
-        )
+            )
     except SAIntegrityError:
         raise HTTPException(status_code=422, detail="Role assignment could not be created.")
     new_assignment_id: int = ins.scalar_one()
@@ -1907,7 +2219,7 @@ async def assign_company_role(
     )
 
     # Auto-create driver profile when the assigned role is a driver role.
-    if "DRIVER" in cr_row["rolecode"].upper() and data.branch_id is not None:
+    if cr_row["rolecode"] == "DRIVER" and data.branch_id is not None:
         await ensure_driver_profile(
             db=db,
             user_id=target_user_id,
@@ -1931,6 +2243,14 @@ async def revoke_company_role_assignment(
     Company Owner assignments cannot be revoked here — use transfer endpoint.
     """
     await _ensure_any_perm(company_id, caller_id, db, "users.edit", "roles.edit", *_ADMIN_FALLBACKS)
+
+    user_result = await db.execute(
+        text("SELECT CanLogin FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    locked_user = user_result.mappings().first()
+    if locked_user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
 
     # Fetch and lock
     result = await db.execute(
@@ -1966,6 +2286,13 @@ async def revoke_company_role_assignment(
         )
 
     if row["isactive"]:
+        active_count = await db.execute(
+            text("SELECT COUNT(*) FROM sec.UserBranchRoles WHERE UserID = :uid AND CompanyID = :cid AND IsActive"),
+            {"uid": target_user_id, "cid": company_id},
+        )
+        is_final = active_count.scalar_one() == 1
+        if is_final and locked_user["canlogin"]:
+            raise HTTPException(status_code=422, detail="Disable login before revoking the final active role.")
         await db.execute(
             text("""
                 UPDATE sec.userbranchroles
@@ -1974,6 +2301,16 @@ async def revoke_company_role_assignment(
             """),
             {"aid": assignment_id},
         )
+        if is_final:
+            await db.execute(
+                text("UPDATE sec.Users SET IsStaged = TRUE, UpdatedAtUtc = NOW() WHERE UserID = :uid AND CompanyID = :cid"),
+                {"uid": target_user_id, "cid": company_id},
+            )
+            await _write_user_lifecycle_audit(
+                db, company_id=company_id, caller_id=caller_id, action="USER_STAGED",
+                user_id=target_user_id, old_value={"is_staged": False},
+                new_value={"is_staged": True, "reason": "final_role_revoked"},
+            )
         await _write_admin_audit(
             db,
             company_id=company_id,
@@ -2013,8 +2350,6 @@ async def transfer_company_owner(
         3. Revoke any existing company role for target, assign COMPANY_OWNER.
     - Audited as OWNER_TRANSFERRED.
     """
-    await _ensure_admin(company_id, caller_id, db)
-
     # Fetch COMPANY_OWNER company role for this company
     co_result = await db.execute(
         text("""
@@ -2027,6 +2362,20 @@ async def transfer_company_owner(
     if co_row is None:
         raise HTTPException(status_code=500, detail="COMPANY_OWNER role not found for this company.")
     owner_company_role_id: int = co_row["companyroleid"]
+
+    caller_user_result = await db.execute(
+        text("SELECT CanLogin, IsActive, IsStaged FROM sec.Users WHERE UserID = :caller AND CompanyID = :cid FOR UPDATE"),
+        {"caller": caller_id, "cid": company_id},
+    )
+    caller_user = caller_user_result.mappings().first()
+    if caller_user is None or not caller_user["isactive"]:
+        raise HTTPException(status_code=404, detail="Company Owner account not found.")
+    if caller_user["isstaged"]:
+        raise HTTPException(status_code=403, detail="A staged account cannot transfer company ownership.")
+    if caller_user["canlogin"]:
+        await _ensure_admin(company_id, caller_id, db)
+    else:
+        await _ensure_disabled_owner_transfer_authority(company_id, caller_id, db)
 
     # Verify caller is the current Company Owner
     caller_owner_result = await db.execute(
@@ -2078,9 +2427,10 @@ async def transfer_company_owner(
     if data.replacement_company_role_id is not None:
         repl_r = await db.execute(
             text("""
-                SELECT companyroleid, rolecode, rolename, isactive
+                SELECT companyroleid, rolecode, rolename, isactive, isarchived
                 FROM   sec.companyroles
                 WHERE  companyroleid = :rid AND companyid = :cid
+                FOR SHARE
             """),
             {"rid": data.replacement_company_role_id, "cid": company_id},
         )
@@ -2090,6 +2440,8 @@ async def transfer_company_owner(
                 status_code=422,
                 detail="Replacement company role not found for this company.",
             )
+        if repl_row["isarchived"]:
+            raise HTTPException(status_code=422, detail="Replacement company role is archived.")
         if not repl_row["isactive"]:
             raise HTTPException(status_code=422, detail="Replacement company role is inactive.")
         if repl_row["rolecode"] == "COMPANY_OWNER":
@@ -2097,7 +2449,17 @@ async def transfer_company_owner(
                 status_code=422,
                 detail="Cannot use Company Owner as the replacement role.",
             )
+        if repl_row["rolecode"] == "DRIVER":
+            raise HTTPException(status_code=422, detail="DRIVER cannot be used as an ownership replacement role.")
         replacement_role_name = repl_row["rolename"]
+
+    active_caller_roles = await db.execute(
+        text("SELECT COUNT(*) FROM sec.UserBranchRoles WHERE UserID = :caller AND CompanyID = :cid AND IsActive"),
+        {"caller": caller_id, "cid": company_id},
+    )
+    caller_has_final_role = active_caller_roles.scalar_one() == 1
+    if data.replacement_company_role_id is None and caller_has_final_role and caller_user["canlogin"]:
+        raise HTTPException(status_code=422, detail="Assign a replacement role before removing the final active role.")
 
     # ── Atomic transfer ──
 
@@ -2110,6 +2472,17 @@ async def transfer_company_owner(
         """),
         {"aid": caller_assignment_id},
     )
+
+    if data.replacement_company_role_id is None and caller_has_final_role:
+        await db.execute(
+            text("UPDATE sec.Users SET IsStaged = TRUE, UpdatedAtUtc = NOW() WHERE UserID = :uid AND CompanyID = :cid"),
+            {"uid": caller_id, "cid": company_id},
+        )
+        await _write_user_lifecycle_audit(
+            db, company_id=company_id, caller_id=caller_id, action="USER_STAGED",
+            user_id=caller_id, old_value={"is_staged": False},
+            new_value={"is_staged": True, "reason": "final_role_revoked"},
+        )
 
     # 2. If replacement role provided, assign it to the old owner (AllCompanyBranches)
     if data.replacement_company_role_id is not None:

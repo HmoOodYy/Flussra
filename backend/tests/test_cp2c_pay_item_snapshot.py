@@ -317,7 +317,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0073."""
+        """S03: Alembic migration chain is linear and head is 0074."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -329,7 +329,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0073" in lines[0], f"Expected head 0073, got: {lines[0]}"
+        assert "0074" in lines[0], f"Expected head 0074, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist

@@ -22,6 +22,7 @@ from app.payroll.service import (
     _LiveCalculationPacket,
     finalize_period,
 )
+from tests.access_test_helpers import create_neutral_test_user
 
 _SECURITY_COUNTER = itertools.count(1)
 _REPORT_PATHS = ("drivers", "period-work", "period-pay", "mixed")
@@ -327,12 +328,9 @@ async def _seed_legacy_snapshot(direct_db, branch_id: int, driver_id: int) -> tu
 
 
 async def _create_user(client: httpx.AsyncClient, admin_token: str, username: str) -> dict:
-    response = await client.post("/admin/users", json={
-        "username": username, "display_name": username, "password": "TestPass1234!",
-        "is_active": True, "can_login": True, "must_change_password": False,
-    }, headers=_auth(admin_token))
-    assert response.status_code == 201, response.text
-    return response.json()
+    return await create_neutral_test_user(
+        client, admin_token, username, password="TestPass1234!",
+    )
 
 
 async def _login(client: httpx.AsyncClient, username: str) -> str:

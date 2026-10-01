@@ -55,6 +55,7 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
                 u.passwordhash,
                 u.isactive,
                 u.canlogin,
+                u.isstaged,
                 u.mustchangepassword,
                 u.lockeduntilutc,
                 c.companyid,
@@ -83,6 +84,12 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials.",
+        )
+
+    if row["isstaged"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "account_staged", "message": "This account is staged and must be provisioned before login."},
         )
 
     if not row["canlogin"]:
@@ -399,14 +406,13 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
     """
     result = await db.execute(
         text("""
-            SELECT u.userid, u.username, u.displayname,
+            SELECT u.userid, u.username, u.displayname, u.isstaged, u.canlogin,
                    c.companyid, c.companyname
             FROM   sec.users u
             JOIN   core.companies c ON c.companyid = u.companyid
             WHERE  u.userid      = :user_id
               AND  u.companyid   = :company_id
               AND  u.isactive    = TRUE
-              AND  u.canlogin    = TRUE
               AND  c.issuspended = FALSE
               AND  c.status      = 'Active'
         """),
@@ -415,6 +421,18 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
     row = result.mappings().first()
 
     if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or no longer active.",
+        )
+
+    if row["isstaged"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "account_staged", "message": "This account is staged and must be provisioned before use."},
+        )
+
+    if not row["canlogin"]:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or no longer active.",

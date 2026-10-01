@@ -21,6 +21,8 @@ Also verifies:
 import httpx
 import pytest
 
+from tests.access_test_helpers import create_neutral_test_user
+
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_granular_auth.py)
 # ---------------------------------------------------------------------------
@@ -50,20 +52,10 @@ async def _create_user(
     username: str,
     display_name: str = "Catalog Test User",
 ) -> dict:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username,
-            "display_name": display_name,
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=_hdr(token),
+    return await create_neutral_test_user(
+        client, token, username, password="TestPass1234!",
+        display_name=display_name,
     )
-    assert resp.status_code == 201, f"Create user failed: {resp.text}"
-    return resp.json()
 
 
 async def _create_role_with_perms(

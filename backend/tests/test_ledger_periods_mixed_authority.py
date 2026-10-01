@@ -22,6 +22,8 @@ import httpx
 import pytest
 from sqlalchemy import text
 
+from tests.access_test_helpers import create_neutral_test_user
+
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
@@ -45,16 +47,10 @@ async def _create_role_with_perms(
 
 
 async def _create_user(client: httpx.AsyncClient, token: str, username: str) -> int:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username, "display_name": username, "password": "TestPass1234!",
-            "is_active": True, "can_login": True, "must_change_password": False,
-        },
-        headers=_auth(token),
+    user = await create_neutral_test_user(
+        client, token, username, password="TestPass1234!",
     )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["user_id"]
+    return user["user_id"]
 
 
 async def _assign_company_role(

@@ -33,6 +33,8 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
+from tests.access_test_helpers import create_provisioned_test_user
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -133,27 +135,10 @@ async def _create_user_with_role(
     username: str,
     role_id: int,
 ) -> str:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username":             username,
-            "display_name":         username,
-            "password":             "TestPass123!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=_auth(admin_token),
+    await create_provisioned_test_user(
+        client, admin_token, username, role_id,
+        scope_type="AllCompanyBranches", password="TestPass123!",
     )
-    assert resp.status_code == 201, f"Create user failed: {resp.text}"
-    user_id = resp.json()["user_id"]
-
-    assign_resp = await client.post(
-        f"/admin/users/{user_id}/company-role-assignments",
-        json={"company_role_id": role_id, "scope_type": "AllCompanyBranches"},
-        headers=_auth(admin_token),
-    )
-    assert assign_resp.status_code in (200, 201), f"Assign role failed: {assign_resp.text}"
 
     login_resp = await client.post(
         "/auth/login",

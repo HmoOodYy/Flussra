@@ -29,6 +29,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.access_test_helpers import create_provisioned_test_user
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -294,25 +296,10 @@ async def _create_user_with_role(
     scope_type: str = "AllCompanyBranches",
     branch_id=None,
 ) -> str:
-    resp = await client.post(
-        "/admin/users",
-        json={
-            "username": username, "display_name": username,
-            "password": "TestPass123!", "is_active": True,
-            "can_login": True, "must_change_password": False,
-        },
-        headers=auth(admin_token),
+    await create_provisioned_test_user(
+        client, admin_token, username, role_id, scope_type=scope_type,
+        branch_id=branch_id, password="TestPass123!",
     )
-    assert resp.status_code == 201, f"Create user failed: {resp.text}"
-    user_id = resp.json()["user_id"]
-    body: dict = {"company_role_id": role_id, "scope_type": scope_type}
-    if branch_id is not None:
-        body["branch_id"] = branch_id
-    assign = await client.post(
-        f"/admin/users/{user_id}/company-role-assignments",
-        json=body, headers=auth(admin_token),
-    )
-    assert assign.status_code in (200, 201)
     login = await client.post("/auth/login", json={
         "username": username, "password": "TestPass123!", "company_code": "DEMO",
     })

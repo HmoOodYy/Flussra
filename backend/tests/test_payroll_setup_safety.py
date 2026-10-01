@@ -24,6 +24,7 @@ from app.payroll_setup.payroll_policy import (
     create_setup,
     publish_version,
 )
+from tests.access_test_helpers import create_neutral_test_user
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -144,20 +145,10 @@ async def _make_driver_user_token(
     uname = f"drv_{_uid()}"
 
     # Create user
-    u = await client.post(
-        "/admin/users",
-        json={
-            "username": uname,
-            "display_name": uname,
-            "password": "TestPass1234!",
-            "is_active": True,
-            "can_login": True,
-            "must_change_password": False,
-        },
-        headers=_hdr(admin_token),
+    user = await create_neutral_test_user(
+        client, admin_token, uname, password="TestPass1234!",
     )
-    assert u.status_code == 201, f"User create failed: {u.text}"
-    user_id = u.json()["user_id"]
+    user_id = user["user_id"]
 
     # Get DRIVER companyrole id
     roles_resp = await client.get("/admin/company-roles", headers=_hdr(admin_token))

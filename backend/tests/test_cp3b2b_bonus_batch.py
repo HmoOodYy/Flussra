@@ -30,6 +30,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.access_test_helpers import create_provisioned_test_user
+
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -734,17 +736,10 @@ async def test_oda_user_denied(
         f"/admin/company-roles/{role_id}/permissions",
         json={"permission_codes": ["payroll.view", "payroll.entry"]}, headers=_auth(auth_token),
     )
-    uresp = await session_client.post(
-        "/admin/users",
-        json={"username": f"cp3b2b_oda_{_RUN_ID}", "display_name": "oda", "password": "TestPass123!",
-              "is_active": True, "can_login": True, "must_change_password": False},
-        headers=_auth(auth_token),
-    )
-    uid = uresp.json()["user_id"]
-    await session_client.post(
-        f"/admin/users/{uid}/company-role-assignments",
-        json={"company_role_id": role_id, "scope_type": "OwnDriverDataOnly", "branch_id": cp3b2b_branch_id},
-        headers=_auth(auth_token),
+    await create_provisioned_test_user(
+        session_client, auth_token, f"cp3b2b_oda_{_RUN_ID}", role_id,
+        scope_type="OwnDriverDataOnly", branch_id=cp3b2b_branch_id,
+        password="TestPass123!", display_name="oda",
     )
     login = await session_client.post("/auth/login", json={
         "username": f"cp3b2b_oda_{_RUN_ID}", "password": "TestPass123!", "company_code": "DEMO"})

@@ -48,6 +48,37 @@ def _rnd() -> str:
     return f"{random.randint(10000, 99999)}"
 
 
+async def _create_provisioned_user(
+    client: httpx.AsyncClient,
+    token: str,
+    username: str,
+    *,
+    employee_id: int | None = None,
+) -> dict:
+    roles = await client.get("/admin/company-roles", headers=auth(token))
+    assert roles.status_code == 200, roles.text
+    base_role = next(role for role in roles.json() if role["role_code"] == "PAYROLL_VIEWER_CO")
+    response = await client.post(
+        "/admin/users",
+        json={
+            "username": username,
+            "display_name": username,
+            "password": "TestPass1234!",
+            "is_active": True,
+            "can_login": True,
+            "must_change_password": False,
+            "employee_id": employee_id,
+            "role_assignment": {
+                "company_role_id": base_role["company_role_id"],
+                "scope_type": "AllCompanyBranches",
+            },
+        },
+        headers=auth(token),
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 async def _create_driver(
     client: httpx.AsyncClient,
     token: str,
@@ -164,20 +195,8 @@ async def oda_user_token(
 ) -> str:
     """Create a driver-role user and return their auth token."""
     uname = f"oda_wf_{_rnd()}"
-    r = await session_client.post(
-        "/admin/users",
-        json={
-            "username":             uname,
-            "display_name":         f"ODA WF {uname}",
-            "password":             "TestPass1234!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=auth(auth_token),
-    )
-    assert r.status_code == 201, r.text
-    uid = r.json()["user_id"]
+    user = await _create_provisioned_user(session_client, auth_token, uname)
+    uid = user["user_id"]
 
     r2 = await session_client.post(
         f"/admin/users/{uid}/company-role-assignments",
@@ -812,20 +831,8 @@ async def drivers_view_paytest_token(
 
     # Create user
     uname = f"drvview_{_rnd()}"
-    r3 = await session_client.post(
-        "/admin/users",
-        json={
-            "username":             uname,
-            "display_name":         f"DrvView {uname}",
-            "password":             "TestPass1234!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=auth(auth_token),
-    )
-    assert r3.status_code == 201, r3.text
-    uid = r3.json()["user_id"]
+    user = await _create_provisioned_user(session_client, auth_token, uname)
+    uid = user["user_id"]
 
     # Assign SpecificBranch PAYTEST with the new role
     r4 = await session_client.post(
@@ -964,26 +971,8 @@ async def test_get_user_driver_info_returns_active_after_transfer(
 
     # Create a user and link to the employee via direct_db
     uname = f"drv_usr_{sfx}"
-    r_u = await session_client.post(
-        "/admin/users",
-        json={
-            "username":             uname,
-            "display_name":         f"Driver User {sfx}",
-            "password":             "TestPass1234!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=auth(auth_token),
-    )
-    assert r_u.status_code == 201, r_u.text
-    uid = r_u.json()["user_id"]
-
-    # Link user → employee
-    await direct_db.execute(
-        _text("UPDATE sec.users SET employeeid = :eid WHERE userid = :uid"),
-        {"eid": emp_id, "uid": uid},
-    )
+    user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
+    uid = user["user_id"]
 
     # Complete a transfer for this driver
     r_t = await _create_transfer(
@@ -1039,25 +1028,8 @@ async def test_people_list_no_duplicate_after_transfer(
     emp_id = emp_r.scalar_one()
 
     uname = f"people_dup_{sfx}"
-    r_u = await session_client.post(
-        "/admin/users",
-        json={
-            "username":             uname,
-            "display_name":         f"PeopleDup {sfx}",
-            "password":             "TestPass1234!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=auth(auth_token),
-    )
-    assert r_u.status_code == 201
-    uid = r_u.json()["user_id"]
-
-    await direct_db.execute(
-        _text("UPDATE sec.users SET employeeid = :eid WHERE userid = :uid"),
-        {"eid": emp_id, "uid": uid},
-    )
+    user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
+    uid = user["user_id"]
 
     # Complete transfer
     r_t = await _create_transfer(
@@ -1101,6 +1073,7 @@ async def oda_driver_token_and_id(
     paytest_branch_id: int,
     hq_branch_id: int,
     driver_role_id: int,
+    direct_db,
 ) -> tuple[str, int]:
     """
     Create an ODA user WITH a driver profile.
@@ -1113,20 +1086,10 @@ async def oda_driver_token_and_id(
     )
 
     uname = f"oda_driver_{sfx}"
-    r_u = await session_client.post(
-        "/admin/users",
-        json={
-            "username":             uname,
-            "display_name":         f"ODA Driver {sfx}",
-            "password":             "TestPass1234!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=auth(auth_token),
-    )
-    assert r_u.status_code == 201, r_u.text
-    uid = r_u.json()["user_id"]
+    user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=(await direct_db.execute(
+        _text("SELECT employeeid FROM core.drivers WHERE driverid = :did"), {"did": drv_id},
+    )).scalar_one())
+    uid = user["user_id"]
 
     # Assign DRIVER role (ODA)
     r2 = await session_client.post(
@@ -1175,26 +1138,8 @@ async def oda_with_driver(
     emp_id = emp_r.scalar_one()
 
     uname = f"oda_lnk_{sfx}"
-    r_u = await session_client.post(
-        "/admin/users",
-        json={
-            "username":             uname,
-            "display_name":         f"ODA Linked {sfx}",
-            "password":             "TestPass1234!",
-            "is_active":            True,
-            "can_login":            True,
-            "must_change_password": False,
-        },
-        headers=auth(auth_token),
-    )
-    assert r_u.status_code == 201, r_u.text
-    uid = r_u.json()["user_id"]
-
-    # Link user to employee
-    await direct_db.execute(
-        _text("UPDATE sec.users SET employeeid = :eid WHERE userid = :uid"),
-        {"eid": emp_id, "uid": uid},
-    )
+    user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
+    uid = user["user_id"]
 
     # Assign DRIVER (ODA) role
     r2 = await session_client.post(

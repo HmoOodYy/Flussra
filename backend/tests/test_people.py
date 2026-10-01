@@ -34,6 +34,10 @@ async def _create_test_user(
     can_login: bool = True,
     is_active: bool = True,
 ) -> dict:
+    role = await client.post(
+        "/admin/company-roles", json={"role_name": f"Test Access {username}"}, headers=_hdr(token),
+    )
+    assert role.status_code == 201, role.text
     resp = await client.post(
         "/admin/users",
         json={
@@ -43,6 +47,7 @@ async def _create_test_user(
             "is_active":            is_active,
             "can_login":            can_login,
             "must_change_password": False,
+            "role_assignment": {"company_role_id": role.json()["company_role_id"], "scope_type": "AllCompanyBranches"},
         },
         headers=_hdr(token),
     )
@@ -110,9 +115,12 @@ class TestEnrichedUserList:
         self, client: httpx.AsyncClient, auth_token: str
     ):
         """Create a bare user with no company role — fields should be None."""
-        user = await _create_test_user(
-            client, auth_token, username="bare_user_enum", display_name="Bare Enum User"
-        )
+        response = await client.post("/admin/users", json={
+            "username": "bare_user_enum", "display_name": "Bare Enum User",
+            "password": "TestPass1234!", "is_staged": True, "can_login": False,
+        }, headers=_hdr(auth_token))
+        assert response.status_code == 201, response.text
+        user = response.json()
         resp = await client.get(f"/admin/users/{user['user_id']}", headers=_hdr(auth_token))
         assert resp.status_code == 200
         data = resp.json()
@@ -330,6 +338,13 @@ class TestRevokeCompanyRoleAssignment:
         assert create_resp.status_code == 201
         aid = create_resp.json()["assignment_id"]
 
+        disable = await client.patch(
+            f"/admin/users/{user['user_id']}",
+            json={"can_login": False},
+            headers=_hdr(auth_token),
+        )
+        assert disable.status_code == 200, disable.text
+
         del_resp = await client.delete(
             f"/admin/users/{user['user_id']}/company-role-assignments/{aid}",
             headers=_hdr(auth_token),
@@ -436,15 +451,8 @@ class TestOwnerTransfer:
         """
         Transfer ownership to a new user, verify, then transfer back to admin.
 
-        Notes on the session-level admin user state:
-        - In the conftest seed, admin has ONE userbranchroles row that stores
-          BOTH the legacy roleid (PAYROLL_ADMIN) AND the new companyroleId
-          (COMPANY_OWNER) together.
-        - When the transfer revokes admin's COMPANY_OWNER assignment it
-          revokes that single row, leaving admin with no active assignments
-          until the reverse transfer creates a new COMPANY_OWNER row for admin.
-        - Therefore we must NOT use auth_token to call admin endpoints
-          between the two transfers — we use the target user's token instead.
+        The previous owner receives a replacement role to preserve the
+        login-role invariant. Use the new owner's token until ownership returns.
         """
         # Create transfer target
         target = await _create_test_user(
@@ -456,6 +464,12 @@ class TestOwnerTransfer:
         )
         target_id = target["user_id"]
 
+        replacement = await client.post(
+            "/admin/company-roles", json={"role_name": "Owner Transfer Return"}, headers=_hdr(auth_token),
+        )
+        assert replacement.status_code == 201, replacement.text
+        replacement_role_id = replacement.json()["company_role_id"]
+
         # Find admin user id BEFORE the transfer
         users = await client.get("/admin/users", headers=_hdr(auth_token))
         admin = next(u for u in users.json() if u["username"] == "admin")
@@ -464,7 +478,8 @@ class TestOwnerTransfer:
         # Step 1: transfer from admin → target
         resp1 = await client.post(
             "/admin/company-owner/transfer",
-            json={"target_user_id": target_id, "confirmation": "TRANSFER"},
+            json={"target_user_id": target_id, "replacement_company_role_id": replacement_role_id,
+                  "confirmation": "TRANSFER"},
             headers=_hdr(auth_token),
         )
         assert resp1.status_code == 200
@@ -494,7 +509,8 @@ class TestOwnerTransfer:
         # Step 3: target transfers back to admin
         resp2 = await client.post(
             "/admin/company-owner/transfer",
-            json={"target_user_id": admin_id, "confirmation": "TRANSFER"},
+            json={"target_user_id": admin_id, "replacement_company_role_id": replacement_role_id,
+                  "confirmation": "TRANSFER"},
             headers=_hdr(target_token),
         )
         assert resp2.status_code == 200
@@ -593,7 +609,8 @@ class TestOwnerTransfer:
 
         resp2 = await client.post(
             "/admin/company-owner/transfer",
-            json={"target_user_id": admin_id, "confirmation": "TRANSFER"},
+            json={"target_user_id": admin_id, "replacement_company_role_id": replacement_role_id,
+                  "confirmation": "TRANSFER"},
             headers=_hdr(target_token),
         )
         assert resp2.status_code == 200

@@ -21,6 +21,8 @@ export interface RoleAssignment {
 export interface UserAdmin {
   user_id: number;
   company_id: number;
+  employee_id: number | null;
+  is_staged: boolean;
   username: string;
   display_name: string;
   email: string | null;
@@ -59,6 +61,14 @@ export interface UserCreate {
   is_active?: boolean;
   can_login?: boolean;
   must_change_password?: boolean;
+  is_staged?: boolean;
+  employee_id?: number | null;
+  role_assignment?: CompanyRoleAssignmentCreate | null;
+}
+
+export interface UserProvision {
+  role_assignment: CompanyRoleAssignmentCreate;
+  can_login?: boolean;
 }
 
 export interface UserUpdate {
