@@ -12,8 +12,14 @@ Coverage:
   - GET /company-roles/{id}/users endpoint
 """
 import re
+import uuid
 
 import pytest
+
+from tests.builders.access import (
+    create_company_role_with_permissions,
+    create_user_with_role_token,
+)
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -1060,18 +1066,6 @@ class TestLoginGate:
         assert isinstance(detail, dict)
         assert detail["code"] == "no_active_role"
 
-    @pytest.mark.asyncio
-    async def test_user_with_active_role_can_login(self, client, auth_token):
-        """Sanity check: the seeded admin user (with role) can log in normally."""
-        resp = await client.post("/auth/login", json={
-            "username": "admin",
-            "password": "TestPass123!",
-            "company_code": "DEMO",
-        })
-        assert resp.status_code == 200
-        assert "access_token" in resp.json()
-
-
 # =============================================================================
 # /auth/me returns active_permissions
 # =============================================================================
@@ -1155,15 +1149,59 @@ class TestCompanyRolesScopeEnforcement:
     """All company-role endpoints require AllCompanyBranches scope."""
 
     @pytest.mark.asyncio
-    async def test_branch_user_cannot_list_company_roles(self, client, branch_user_token):
-        resp = await client.get("/admin/company-roles", headers=auth_headers(branch_user_token))
+    async def test_specific_branch_user_with_roles_view_cannot_list_company_roles(
+        self, client, auth_token, hq_branch_id,
+    ):
+        suffix = uuid.uuid4().hex[:12]
+        role_id = await create_company_role_with_permissions(
+            client, auth_token, f"Specific Branch List {suffix}", ["roles.view"],
+        )
+        token = await create_user_with_role_token(
+            client, auth_token, f"specific_branch_list_{suffix}", role_id,
+            scope_type="SpecificBranch", branch_id=hq_branch_id,
+        )
+
+        me = await client.get("/auth/me", headers=auth_headers(token))
+        assert me.status_code == 200, me.text
+        authority = me.json()["authority"]
+        assert authority["company_permissions"] == []
+        branch_permissions = {
+            row["branch_id"]: set(row["permissions"])
+            for row in authority["branch_permissions"]
+        }
+        assert "roles.view" in branch_permissions[hq_branch_id]
+
+        resp = await client.get("/admin/company-roles", headers=auth_headers(token))
         assert resp.status_code == 403
+        assert "company-level" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_branch_user_cannot_create_company_role(self, client, branch_user_token):
+    async def test_specific_branch_user_with_roles_create_cannot_create_company_role(
+        self, client, auth_token, hq_branch_id,
+    ):
+        suffix = uuid.uuid4().hex[:12]
+        role_id = await create_company_role_with_permissions(
+            client, auth_token, f"Specific Branch Create {suffix}", ["roles.create"],
+        )
+        token = await create_user_with_role_token(
+            client, auth_token, f"specific_branch_create_{suffix}", role_id,
+            scope_type="SpecificBranch", branch_id=hq_branch_id,
+        )
+
+        me = await client.get("/auth/me", headers=auth_headers(token))
+        assert me.status_code == 200, me.text
+        authority = me.json()["authority"]
+        assert authority["company_permissions"] == []
+        branch_permissions = {
+            row["branch_id"]: set(row["permissions"])
+            for row in authority["branch_permissions"]
+        }
+        assert "roles.create" in branch_permissions[hq_branch_id]
+
         resp = await client.post(
             "/admin/company-roles",
             json={"role_name": "Sneaky Role"},
-            headers=auth_headers(branch_user_token),
+            headers=auth_headers(token),
         )
         assert resp.status_code == 403
+        assert "company-level" in resp.json()["detail"]

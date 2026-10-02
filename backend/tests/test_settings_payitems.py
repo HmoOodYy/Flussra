@@ -288,17 +288,30 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
     ):
         """
         Two PATCHes on the same day with the same effective_from (today) must
         UPDATE in place — not create two open rows (fix #2 versioning semantics).
         """
-        item = await _item_by_code(client, auth_token, paytest_branch_id, "OVERNIGHT")
+        branch_suffix = uuid4().hex[:8]
+        branch_resp = await client.post(
+            "/settings/branches",
+            json={
+                "branch_name": f"Same-day amend {branch_suffix}",
+                "branch_code": f"SDAMEND-{branch_suffix.upper()}",
+            },
+            headers=auth(auth_token),
+        )
+        assert branch_resp.status_code == 201, branch_resp.text
+        branch_id = branch_resp.json()["branch_id"]
+
+        item = await _item_by_code(client, auth_token, branch_id, "OVERNIGHT")
+        assert item["is_using_default"] is True
+        assert item["current_config"] is None
         iid = item["pay_item_id"]
 
         r1 = await client.patch(
-            f"/settings/branches/{paytest_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "v1"},
             headers=auth(auth_token),
         )
@@ -306,7 +319,7 @@ class TestUpdatePayItemConfig:
         config_id_1 = r1.json()["current_config"]["config_id"]
 
         r2 = await client.patch(
-            f"/settings/branches/{paytest_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{branch_id}/pay-items/{iid}",
             json={"is_active": False, "notes": "v2"},
             headers=auth(auth_token),
         )

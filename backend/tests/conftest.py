@@ -754,7 +754,12 @@ async def direct_db(test_engine):
     # AUTOCOMMIT: each statement committed immediately — no BEGIN/COMMIT needed
     async with test_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
-        yield conn
+        # Historical FinalLine setup uses a session-level GUC. Clear it before
+        # this pooled connection can authorize another test's direct INSERT.
+        try:
+            yield conn
+        finally:
+            await conn.exec_driver_sql("RESET app.allow_payroll_final_line_insert")
 
 
 @pytest_asyncio.fixture(scope="session")

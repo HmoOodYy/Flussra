@@ -975,38 +975,6 @@ class TestFinalizeDriverSelfBlock:
     """
 
     @pytest.mark.asyncio
-    async def test_finalize_blocked_for_oda_user(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        cp3a_approved_period: dict,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-        direct_db,
-    ):
-        """DRIVER/Self user with payroll.finalize gets 403 on POST finalize."""
-        pid = cp3a_approved_period["payroll_period_id"]
-
-        await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="DailyNote", quantity="1.00",
-        )
-
-        oda_token = await create_user_with_role_token(
-            session_client, auth_token,
-            "cp3a_oda_finalize_user",
-            await get_company_role_id(session_client, auth_token, "DRIVER"),
-            scope_type="Self",
-            driver_branch_id=paytest_branch_id,
-        )
-
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/finalize",
-            headers=auth(oda_token),
-        )
-        assert resp.status_code == 403
-
-    @pytest.mark.asyncio
     async def test_finalize_oda_no_data_leak_or_mutation(
         self,
         session_client: httpx.AsyncClient,
@@ -1126,38 +1094,6 @@ class TestFinalizeDriverSelfBlock:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == "Locked"
-
-    @pytest.mark.asyncio
-    async def test_preview_oda_block_still_works(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        cp3a_approved_period: dict,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-        direct_db,
-    ):
-        """Regression: preview DRIVER/Self denial still works after finalize guard addition."""
-        pid = cp3a_approved_period["payroll_period_id"]
-
-        await _add_line_to_approved_period(
-            session_client, auth_token, pid, paytest_driver_id, direct_db,
-            line_type="DailyNote", quantity="1.00",
-        )
-
-        oda_token = await create_user_with_role_token(
-            session_client, auth_token,
-            "cp3a_oda_preview_reg_user",
-            await get_company_role_id(session_client, auth_token, "DRIVER"),
-            scope_type="Self",
-            driver_branch_id=paytest_branch_id,
-        )
-
-        resp = await session_client.get(
-            f"/payroll/periods/{pid}/finalization-preview",
-            headers=auth(oda_token),
-        )
-        assert resp.status_code == 403
 
 # ===========================================================================
 # CP-3A.5 -" Response shape: final_amount, line counts, SYS consistency

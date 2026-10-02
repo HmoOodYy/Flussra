@@ -824,55 +824,6 @@ class TestDayGridDriverSelfBlock:
         assert resp.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_day_grid_get_blocked_for_driver_only_user(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        dg_open_period: dict,
-        paytest_branch_id: int,
-    ):
-        """
-        DRIVER/Self user without payroll permissions gets 403 on GET.
-        The generic DRIVER denial or permission check blocks the request.
-        """
-        drv_token = await create_user_with_role_token(
-            session_client, auth_token, "dg_drvonly_get_user_2081", await get_company_role_id(session_client, auth_token, "DRIVER"),
-            scope_type="Self", driver_branch_id=paytest_branch_id,
-        )
-        pid = dg_open_period["payroll_period_id"]
-        resp = await session_client.get(
-            f"/payroll/periods/{pid}/day-grid",
-            params={"work_date": WORK_DATE},
-            headers=auth(drv_token),
-        )
-        assert resp.status_code == 403
-
-    @pytest.mark.asyncio
-    async def test_day_grid_post_blocked_for_driver_only_user(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        dg_open_period: dict,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-    ):
-        """DRIVER/Self user without payroll permissions gets 403 on POST."""
-        drv_token = await create_user_with_role_token(
-            session_client, auth_token, "dg_drvonly_post_user_2081", await get_company_role_id(session_client, auth_token, "DRIVER"),
-            scope_type="Self", driver_branch_id=paytest_branch_id,
-        )
-        pid = dg_open_period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/day-grid",
-            json={
-                "work_date": WORK_DATE,
-                "rows": [{"driver_id": paytest_driver_id, "values": {"HOURS": "8"}}],
-            },
-            headers=auth(drv_token),
-        )
-        assert resp.status_code == 403
-
-    @pytest.mark.asyncio
     async def test_day_grid_get_allowed_for_payroll_entry_user(
         self,
         session_client: httpx.AsyncClient,

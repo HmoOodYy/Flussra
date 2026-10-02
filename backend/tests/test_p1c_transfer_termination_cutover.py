@@ -229,6 +229,7 @@ async def test_elapsed_future_termination_projection_uses_profile_effective_on_t
     paytest_branch_id: int,
     hq_branch_id: int,
     direct_db,
+    test_engine,
     company_list_reconciliation: bool,
 ):
     today = await company_today(direct_db)
@@ -265,8 +266,44 @@ async def test_elapsed_future_termination_projection_uses_profile_effective_on_t
     ), {"id": employee_id})).scalar_one() == paytest_branch_id
 
     if company_list_reconciliation:
-        changed = await sync_company_employee_branch_projections(1, reconcile_date, direct_db)
-        assert changed == 1
+        # Company 1 is shared across tests; roll back list-wide reconciliation so
+        # unrelated employees keep their pending branch projections.
+        async with test_engine.connect() as reconciliation_db:
+            transaction = await reconciliation_db.begin()
+            try:
+                before_rows = await reconciliation_db.execute(text(
+                    "SELECT EmployeeID, BranchID FROM core.Employees WHERE CompanyID = 1"
+                ))
+                before = {
+                    row["employeeid"]: row["branchid"]
+                    for row in before_rows.mappings().all()
+                }
+                changed = await sync_company_employee_branch_projections(
+                    1, reconcile_date, reconciliation_db,
+                )
+                after_rows = await reconciliation_db.execute(text(
+                    "SELECT EmployeeID, BranchID FROM core.Employees WHERE CompanyID = 1"
+                ))
+                after = {
+                    row["employeeid"]: row["branchid"]
+                    for row in after_rows.mappings().all()
+                }
+                changed_ids = {
+                    candidate_id
+                    for candidate_id, old_branch in before.items()
+                    if candidate_id in after and after[candidate_id] != old_branch
+                }
+                assert employee_id in changed_ids
+                assert changed == len(changed_ids)
+                assert after[employee_id] == hq_branch_id
+            finally:
+                await transaction.rollback()
+
+        # Persist only this test's employee after proving company-wide behavior.
+        old_branch, new_branch = await sync_employee_branch_projection(
+            1, employee_id, reconcile_date, direct_db,
+        )
+        assert (old_branch, new_branch) == (paytest_branch_id, hq_branch_id)
     else:
         old_branch, new_branch = await sync_employee_branch_projection(
             1, employee_id, reconcile_date, direct_db,
