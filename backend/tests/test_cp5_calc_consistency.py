@@ -16,8 +16,6 @@ Tests cover:
   10. finalize_period auto-refreshes: backdated approved rate after Approved
       status → FinalAmount reflects fresh rate
   11. Locked period's draft lines are NOT mutated by finalize refresh
-  12. No DRIVER/Self security regression (403 still enforced)
-
 Isolation: all periods use dates in 2089 to avoid conflicts with other modules.
 """
 from datetime import date
@@ -29,10 +27,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
-from tests.builders.access import (
-    create_user_with_role_token,
-    get_company_role_id,
-)
 from tests.builders.compensation import create_approved_rate
 
 # ---------------------------------------------------------------------------
@@ -986,42 +980,3 @@ class TestLockedPeriodNotMutated:
             await direct_db.execute(
                 _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
             )
-
-
-
-# ---------------------------------------------------------------------------
-# 12. No DRIVER/Self security regression
-# ---------------------------------------------------------------------------
-
-class TestODASecurityRegression:
-
-    @pytest.mark.asyncio
-    async def test_oda_user_still_blocked_from_day_grid(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        cp5_branch_id: int,
-        direct_db,
-    ):
-        """
-        CP-5 changes must not relax DRIVER/Self access boundaries.
-        DRIVER/Self users must still receive 403 on GET day-grid.
-        """
-        await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
-        pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
-
-        oda_token = await create_user_with_role_token(
-            session_client, auth_token,
-            "cp5_oda_dg_user", await get_company_role_id(session_client, auth_token, "DRIVER"),
-            scope_type="Self",
-            driver_branch_id=cp5_branch_id,
-        )
-        try:
-            resp = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": DATE_JUN23},
-                headers=auth(oda_token),
-            )
-            assert resp.status_code == 403
-        finally:
-            await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)

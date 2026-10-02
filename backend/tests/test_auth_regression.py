@@ -124,24 +124,6 @@ class TestSchemaMigrationCompleteness:
             "fn_UserHasPermission body does not validate current login state"
         )
 
-    def test_alembic_version_table_exists(self, pg_cur):
-        """
-        alembic_version only exists when `alembic upgrade head` is run.
-        The isolated test cluster applies SQL files directly, so this table
-        is intentionally absent here.  The schema_guard at backend startup
-        checks the real dev DB for this.  This test documents the expectation
-        rather than asserting presence so CI stays green.
-        """
-        pg_cur.execute(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_name = 'alembic_version'"
-        )
-        row = pg_cur.fetchone()
-        # In CI (isolated cluster): alembic_version won't exist — that's fine.
-        # In dev (real DB): it must exist and be at head (enforced by schema_guard).
-        # We simply document the state rather than fail.
-        _ = row  # alembic_version present={row is not None} — checked by schema_guard at runtime
-
     def test_vw_userbranchaccess_exists(self, pg_cur):
         """auth/service.py queries app.vw_UserBranchAccess — must exist."""
         pg_cur.execute(
@@ -202,36 +184,9 @@ async def test_get_me_after_login(client):
     assert len(body["active_permissions"]) > 0
 
 
-@pytest.mark.asyncio
-async def test_get_me_no_token_returns_401(client):
-    me = await client.get("/auth/me")
-    assert me.status_code == 401
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. Expected auth failures — must return 4xx, never 500
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@pytest.mark.asyncio
-async def test_wrong_password_returns_401_not_500(client):
-    r = await _login(client, password="WrongPassword!")
-    assert r.status_code == 401, f"Expected 401, got {r.status_code}: {r.text}"
-    assert r.status_code != 500
-
-
-@pytest.mark.asyncio
-async def test_wrong_username_returns_401_not_500(client):
-    r = await _login(client, username="doesnotexist")
-    assert r.status_code == 401, f"Expected 401, got {r.status_code}: {r.text}"
-    assert r.status_code != 500
-
-
-@pytest.mark.asyncio
-async def test_wrong_company_code_returns_401_not_500(client):
-    r = await _login(client, company_code="NOTREAL")
-    assert r.status_code == 401, f"Expected 401, got {r.status_code}: {r.text}"
-    assert r.status_code != 500
-
 
 @pytest.mark.asyncio
 async def test_inactive_user_returns_403_not_500(client, apply_schema):

@@ -349,14 +349,44 @@ class TestDriverProfile:
 async def overnight_test_driver_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
 ):
-    """Own a PAYTEST driver; retain it until disposable test DB teardown."""
+    """Own an OVERNIGHT-enabled branch and driver until disposable DB teardown."""
     marker = uuid4().hex[:12]
+    branch_resp = await session_client.post(
+        "/settings/branches",
+        json={
+            "branch_name": f"Overnight rate test {marker}",
+            "branch_code": f"OVNT-{marker.upper()}",
+            "status": "Active",
+            "is_default": False,
+        },
+        headers=auth(auth_token),
+    )
+    assert branch_resp.status_code == 201, branch_resp.text
+    branch_id = branch_resp.json()["branch_id"]
+
+    items_resp = await session_client.get(
+        f"/settings/branches/{branch_id}/pay-items",
+        headers=auth(auth_token),
+    )
+    assert items_resp.status_code == 200, items_resp.text
+    overnight_item = next(
+        (item for item in items_resp.json() if item["pay_item_code"] == "OVERNIGHT"),
+        None,
+    )
+    assert overnight_item is not None, "OVERNIGHT pay item not found on test branch"
+    activation_resp = await session_client.patch(
+        f"/settings/branches/{branch_id}/pay-items/{overnight_item['pay_item_id']}",
+        json={"is_active": True, "notes": "Enabled for overnight rate test"},
+        headers=auth(auth_token),
+    )
+    assert activation_resp.status_code == 200, activation_resp.text
+    assert activation_resp.json()["is_active"] is True
+
     return await create_driver_employee(
         session_client,
         auth_token,
-        branch_id=paytest_branch_id,
+        branch_id=branch_id,
         full_name=f"Overnight test {marker}",
         driver_code=f"OVNT-{marker}",
     )
@@ -425,7 +455,7 @@ class TestOvernightRate:
         overnight_test_driver_id: int,
     ):
         """A DriverRate for the OVERNIGHT rate type can be created and approved.
-        The test-owned driver uses PAYTEST, where OVERNIGHT is activated.
+        The test-owned branch has OVERNIGHT activated.
         """
         rt_resp = await session_client.get("/payroll/rate-types", headers=auth(auth_token))
         overnight_rt = next(
@@ -452,7 +482,7 @@ class TestOvernightRate:
             f"/payroll/rates/{rate['driver_rate_id']}/approve",
             headers=auth(auth_token),
         )
-        assert approve_resp.status_code == 200
+        assert approve_resp.status_code == 200, approve_resp.text
         assert approve_resp.json()["status"] == "Approved"
 
 

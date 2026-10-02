@@ -439,13 +439,27 @@ class TestDriverPatch:
         auth_token: str,
         created_driver_id: int,
     ):
-        resp = await client.patch(
-            f"/core/drivers/{created_driver_id}",
-            json={"driver_code": "Patched-TD1"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["driver_code"] == "Patched-TD1"
+        url = f"/core/drivers/{created_driver_id}"
+        before = await client.get(url, headers=auth(auth_token))
+        assert before.status_code == 200
+        original_driver_code = before.json()["driver_code"]
+
+        try:
+            resp = await client.patch(
+                url,
+                json={"driver_code": "Patched-TD1"},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["driver_code"] == "Patched-TD1"
+        finally:
+            restored = await client.patch(
+                url,
+                json={"driver_code": original_driver_code},
+                headers=auth(auth_token),
+            )
+            assert restored.status_code == 200
+            assert restored.json()["driver_code"] == original_driver_code
 
     async def test_patch_driver_updates_status(
         self,
@@ -453,22 +467,27 @@ class TestDriverPatch:
         auth_token: str,
         created_driver_id: int,
     ):
-        # Set to Inactive, then restore to Active so other tests aren't affected
-        resp = await client.patch(
-            f"/core/drivers/{created_driver_id}",
-            json={"driver_status": "Inactive"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["driver_status"] == "Inactive"
+        url = f"/core/drivers/{created_driver_id}"
+        before = await client.get(url, headers=auth(auth_token))
+        assert before.status_code == 200
+        original_driver_status = before.json()["driver_status"]
 
-        resp2 = await client.patch(
-            f"/core/drivers/{created_driver_id}",
-            json={"driver_status": "Active"},
-            headers=auth(auth_token),
-        )
-        assert resp2.status_code == 200
-        assert resp2.json()["driver_status"] == "Active"
+        try:
+            resp = await client.patch(
+                url,
+                json={"driver_status": "Inactive"},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200
+            assert resp.json()["driver_status"] == "Inactive"
+        finally:
+            restored = await client.patch(
+                url,
+                json={"driver_status": original_driver_status},
+                headers=auth(auth_token),
+            )
+            assert restored.status_code == 200
+            assert restored.json()["driver_status"] == original_driver_status
 
     async def test_patch_driver_invalid_status_returns_422(
         self,

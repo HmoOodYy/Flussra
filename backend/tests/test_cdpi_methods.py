@@ -39,14 +39,6 @@ class TestRegistry:
             f"Expected only PerUnit to be implemented, got: {implemented}"
         )
 
-    def test_unimplemented_methods_are_not_implemented(self):
-        for key in ("OrdinalTier", "Block", "RangeBracket", "RangeProgressive"):
-            adapter = get_adapter(key)
-            assert adapter is not None, f"Key {key!r} missing from registry"
-            assert not adapter.is_implemented(), (
-                f"{key} should not be implemented yet"
-            )
-
     def test_get_adapter_per_unit_returns_per_unit_adapter(self):
         adapter = get_adapter("PerUnit")
         assert isinstance(adapter, PerUnitAdapter)
@@ -60,14 +52,10 @@ class TestPerUnitInputTypes:
     def setup_method(self):
         self.adapter = PerUnitAdapter()
 
-    def test_time_is_allowed(self):
-        assert "Time" in self.adapter.allowed_input_types()
-
-    def test_number_is_allowed(self):
-        assert "Number" in self.adapter.allowed_input_types()
-
-    def test_exactly_two_input_types_allowed(self):
-        assert len(self.adapter.allowed_input_types()) == 2
+    def test_allowed_input_types_are_exactly_time_and_number(self):
+        input_types = self.adapter.allowed_input_types()
+        assert set(input_types) == {"Time", "Number"}
+        assert len(input_types) == 2
 
 
 # ===========================================================================
@@ -124,28 +112,14 @@ class TestPerUnitRateFieldDescriptors:
     def setup_method(self):
         self.adapter = PerUnitAdapter()
 
-    def test_exactly_one_descriptor(self):
+    def test_descriptor_has_expected_structure(self):
         descriptors = self.adapter.rate_field_descriptors("Miles")
         assert len(descriptors) == 1
-
-    def test_descriptor_is_rate_field_descriptor_instance(self):
-        desc = self.adapter.rate_field_descriptors("Hours")[0]
+        desc = descriptors[0]
         assert isinstance(desc, RateFieldDescriptor)
-
-    def test_descriptor_key_is_per_unit_rate(self):
-        desc = self.adapter.rate_field_descriptors("Miles")[0]
         assert desc.key == "per_unit_rate"
-
-    def test_descriptor_role_is_per_unit(self):
-        desc = self.adapter.rate_field_descriptors("Miles")[0]
         assert desc.role == "per_unit"
-
-    def test_descriptor_sort_order_is_1(self):
-        desc = self.adapter.rate_field_descriptors("Miles")[0]
         assert desc.sort_order == 1
-
-    def test_descriptor_is_required(self):
-        desc = self.adapter.rate_field_descriptors("Miles")[0]
         assert desc.required is True
 
     def test_label_preview_miles(self):

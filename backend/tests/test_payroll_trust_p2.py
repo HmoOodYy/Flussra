@@ -388,57 +388,140 @@ class TestDayGridEligibility:
 class TestUpdateDraftLineEligibility:
 
     @pytest.mark.asyncio
-    async def test_t7_update_blocks_edit_on_ineligible_stale_line(
+    async def test_t7_update_allows_edit_to_existing_source_after_retroactive_termination(
         self, p2_env, direct_db
     ):
-        """T7 — update_draft_line 422 when modifying quantity on a stale line
-        whose driver was later terminated before the line's work_date."""
+        """Existing same-date source remains manageable after eligibility drifts."""
         c, tok, bid = p2_env["client"], p2_env["token"], p2_env["branch_id"]
 
-        # Eligible driver at time of add
         driver_id = await _create_driver(c, tok, bid, "T7", hire_date="2034-01-01")
         p2_env["created_drivers"].append(driver_id)
 
         pid = await _make_open_period(p2_env["db"], bid)
-
-        # Add line while driver is still eligible
         add = await _add_line(c, tok, pid, driver_id)
         assert add.status_code == 201, add.text
         line_id = add.json()["draft_line_id"]
 
-        # Retroactively terminate driver before the work date via direct DB
-        # (bypass the service-level guard by writing directly)
-        await direct_db.execute(
-            _text("""
-                UPDATE core.employees e
-                SET    terminationdate = :td
-                FROM   core.drivers d
-                WHERE  d.employeeid = e.employeeid
-                  AND  d.driverid   = :did
-            """),
-            {"td": _date(2034, 5, 10), "did": driver_id},
-        )
+        try:
+            # Simulate eligibility drift after the same-date source was saved.
+            await direct_db.execute(
+                _text("""
+                    UPDATE core.employees e
+                    SET    terminationdate = :td
+                    FROM   core.drivers d
+                    WHERE  d.employeeid = e.employeeid
+                      AND  d.driverid   = :did
+                """),
+                {"td": _date(2034, 5, 10), "did": driver_id},
+            )
 
-        # Now try to edit the quantity — should be blocked
-        resp = await c.patch(
-            f"/payroll/periods/{pid}/lines/{line_id}",
-            headers=auth(tok),
-            json={"quantity": "2"},
-        )
-        assert resp.status_code == 422, resp.text
-        assert "eligible" in resp.text.lower()
+            resp = await c.patch(
+                f"/payroll/periods/{pid}/lines/{line_id}",
+                headers=auth(tok),
+                json={"quantity": "2"},
+            )
+            assert resp.status_code == 200, resp.text
 
-        # Restore termination date so driver delete works cleanly
-        await direct_db.execute(
-            _text("""
-                UPDATE core.employees e
-                SET    terminationdate = NULL
-                FROM   core.drivers d
-                WHERE  d.employeeid = e.employeeid
-                  AND  d.driverid   = :did
-            """),
-            {"did": driver_id},
+            stored = (await direct_db.execute(
+                _text("""
+                    SELECT quantity FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND draftlineid = :line_id
+                """),
+                {"pid": pid, "line_id": line_id},
+            )).scalar_one()
+            assert stored == 2
+        finally:
+            # Keep cleanup reliable if the PATCH or its assertion fails.
+            await direct_db.execute(
+                _text("""
+                    UPDATE core.employees e
+                    SET    terminationdate = NULL
+                    FROM   core.drivers d
+                    WHERE  d.employeeid = e.employeeid
+                      AND  d.driverid   = :did
+                """),
+                {"did": driver_id},
+            )
+
+    @pytest.mark.asyncio
+    async def test_t7_update_rejects_existing_source_without_snapshot_detail(
+        self, p2_env, direct_db
+    ):
+        """A marker with no driver detail fails closed before existing-source rescue."""
+        c, tok, bid = p2_env["client"], p2_env["token"], p2_env["branch_id"]
+
+        driver_id = await _create_driver(
+            c, tok, bid, "T7MissingSnapshot", hire_date="2034-01-01"
         )
+        p2_env["created_drivers"].append(driver_id)
+
+        pid = await _make_open_period(p2_env["db"], bid)
+        add = await _add_line(c, tok, pid, driver_id)
+        assert add.status_code == 201, add.text
+        line_id = add.json()["draft_line_id"]
+
+        try:
+            # Construct historical/incomplete snapshot state deliberately:
+            # the period marker exists, but this test-owned driver has no detail row.
+            await direct_db.execute(
+                _text("""
+                    UPDATE core.employees e
+                    SET    terminationdate = :td
+                    FROM   core.drivers d
+                    WHERE  d.employeeid = e.employeeid
+                      AND  d.driverid   = :did
+                """),
+                {"td": _date(2034, 5, 10), "did": driver_id},
+            )
+
+            company_id = (await direct_db.execute(
+                _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
+                {"bid": bid},
+            )).scalar_one()
+            marker_before = (await direct_db.execute(
+                _text("""
+                    SELECT 1 FROM payroll.payrollperiodeligibilitysnapshots
+                    WHERE payrollperiodid = :pid
+                """),
+                {"pid": pid},
+            )).first()
+            assert marker_before is None, "The test period must start without a snapshot marker"
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollperiodeligibilitysnapshots
+                        (payrollperiodid, companyid, branchid, snapshotsource)
+                    VALUES (:pid, :cid, :bid, 'Generated')
+                """),
+                {"pid": pid, "cid": company_id, "bid": bid},
+            )
+            detail = (await direct_db.execute(
+                _text("""
+                    SELECT 1 FROM payroll.payrollperioddrivereligibility
+                    WHERE payrollperiodid = :pid AND driverid = :did
+                """),
+                {"pid": pid, "did": driver_id},
+            )).first()
+            assert detail is None
+
+            resp = await c.patch(
+                f"/payroll/periods/{pid}/lines/{line_id}",
+                headers=auth(tok),
+                json={"quantity": "2"},
+            )
+            assert resp.status_code == 422, resp.text
+            assert "no eligibility snapshot" in resp.text.lower()
+        finally:
+            # The Employee mutation is test-only; restore it even on failure.
+            await direct_db.execute(
+                _text("""
+                    UPDATE core.employees e
+                    SET    terminationdate = NULL
+                    FROM   core.drivers d
+                    WHERE  d.employeeid = e.employeeid
+                      AND  d.driverid   = :did
+                """),
+                {"did": driver_id},
+            )
 
     @pytest.mark.asyncio
     async def test_t8_update_allows_void_on_ineligible_stale_line(
@@ -767,22 +850,3 @@ class TestNormalPathStillWorks:
             headers=auth(tok),
         )
         assert resp.status_code == 200, resp.text
-
-    @pytest.mark.asyncio
-    async def test_t15_full_regression_suite_unchanged(self):
-        """T15 — Structural guard: this test verifies the expected count of
-        other test modules hasn't regressed.  It cannot run the full suite
-        from inside pytest, so it asserts the key test files still exist."""
-        import pathlib
-        test_dir = pathlib.Path(__file__).parent
-        expected_files = [
-            "test_auth.py",
-            "test_core.py",
-            "test_entry.py",
-            "test_finalize.py",
-            "test_cp5_calc_consistency.py",
-            "test_cp6_review.py",
-            "test_payroll_trust_p1.py",
-        ]
-        for fname in expected_files:
-            assert (test_dir / fname).exists(), f"Test file missing: {fname}"
