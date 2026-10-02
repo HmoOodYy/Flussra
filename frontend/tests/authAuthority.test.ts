@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { hasAuthorityPermission, toUserProfile } from '../src/store/authStore.ts';
 import type { BranchAccess, PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
 import {
+  isDriverUser,
   canCreatePeriod,
   canEntryPayroll,
   canFinalizePayroll,
@@ -30,6 +31,7 @@ function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserIn
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -39,6 +41,15 @@ function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserIn
 function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
   return toUserProfile(makeUserInfoResponse(overrides));
 }
+
+test('Self is represented outside branches and exact DRIVER identity activates the generic UI ceiling', () => {
+  const user = makeUser({
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
+  });
+  assert.equal(user.branches.length, 0);
+  assert.equal(user.scope_type, 'Self');
+  assert.equal(isDriverUser(user), true);
+});
 
 // ── AllCompanyBranches: company-wide grant applies everywhere ─────────────────
 
@@ -253,7 +264,7 @@ test('canEditTransfers: settings.manage/setup.manage grants do not serve as a fa
 
 test('canEditTransfers: driver and ODA users are denied despite a matching branch grant', () => {
   assert.equal(canEditTransfers(scopedUser('drivers.edit', 10, { role_code: 'DRIVER' }), 10), false);
-  assert.equal(canEditTransfers(scopedUser('drivers.edit', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+  assert.equal(canEditTransfers(scopedUser('drivers.edit', 10, { scope: 'SpecificBranch', role_code: 'DRIVER' }), 10), false);
 });
 
 test('canEditPayRates: branch-scoped payrates.edit denies the wrong branch and authorizes its own', () => {
@@ -276,7 +287,7 @@ test('canEditPayRates: company-wide setup.manage authorizes any concrete branch'
 
 test('canEditPayRates: driver and ODA users are denied despite a matching branch grant', () => {
   assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { role_code: 'DRIVER' }), 10), false);
-  assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+  assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { scope: 'SpecificBranch', role_code: 'DRIVER' }), 10), false);
 });
 
 // ── canManageSettingsAdmin: canonical company-scoped setup.manage only ──────
@@ -326,7 +337,7 @@ test('canPreviewCalculation: company-wide grant authorizes any concrete branch',
 
 test('canPreviewCalculation: driver and ODA users are denied despite a matching branch grant', () => {
   assert.equal(canPreviewCalculation(scopedUser('payroll.view', 10, { role_code: 'DRIVER' }), 10), false);
-  assert.equal(canPreviewCalculation(scopedUser('payroll.view', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+  assert.equal(canPreviewCalculation(scopedUser('payroll.view', 10, { scope: 'SpecificBranch', role_code: 'DRIVER' }), 10), false);
 });
 
 test('canPreviewCalculation: unioned active_permissions alone no longer authorizes the helper', () => {
@@ -353,7 +364,7 @@ test('canViewPayrollReports: company-wide grant authorizes any concrete branch',
 
 test('canViewPayrollReports: driver and ODA users are denied despite a matching branch grant', () => {
   assert.equal(canViewPayrollReports(scopedUser('reports.view', 10, { role_code: 'DRIVER' }), 10), false);
-  assert.equal(canViewPayrollReports(scopedUser('reports.view', 10, { scope: 'OwnDriverDataOnly' }), 10), false);
+  assert.equal(canViewPayrollReports(scopedUser('reports.view', 10, { scope: 'SpecificBranch', role_code: 'DRIVER' }), 10), false);
 });
 
 test('canViewPayrollReports: unioned active_permissions alone no longer authorizes the helper', () => {

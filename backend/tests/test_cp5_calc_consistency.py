@@ -16,7 +16,7 @@ Tests cover:
   10. finalize_period auto-refreshes: backdated approved rate after Approved
       status → FinalAmount reflects fresh rate
   11. Locked period's draft lines are NOT mutated by finalize refresh
-  12. No Driver/ODA security regression (403 still enforced)
+  12. No DRIVER/Self security regression (403 still enforced)
 
 Isolation: all periods use dates in 2089 to avoid conflicts with other modules.
 """
@@ -30,8 +30,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import (
-    create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 from tests.builders.compensation import create_approved_rate
 
@@ -990,7 +990,7 @@ class TestLockedPeriodNotMutated:
 
 
 # ---------------------------------------------------------------------------
-# 12. No Driver/ODA security regression
+# 12. No DRIVER/Self security regression
 # ---------------------------------------------------------------------------
 
 class TestODASecurityRegression:
@@ -1004,21 +1004,17 @@ class TestODASecurityRegression:
         direct_db,
     ):
         """
-        CP-5 changes must not relax any ODA/Driver access boundaries.
-        ODA users must still receive 403 on GET day-grid.
+        CP-5 changes must not relax DRIVER/Self access boundaries.
+        DRIVER/Self users must still receive 403 on GET day-grid.
         """
         await _cancel_active_periods(session_client, auth_token, cp5_branch_id, db=direct_db)
         pid = await _open_period(session_client, auth_token, cp5_branch_id, db=direct_db)
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP5_ODA_DG_Role", ["payroll.view"],
-        )
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
-            "cp5_oda_dg_user", role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=cp5_branch_id,
+            "cp5_oda_dg_user", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=cp5_branch_id,
         )
         try:
             resp = await session_client.get(

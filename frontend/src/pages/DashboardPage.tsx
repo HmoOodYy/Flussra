@@ -20,7 +20,7 @@ import type {
 import type { Branch } from '../types/core';
 import styles from './DashboardPage.module.css';
 
-// ── Driver/ODA placeholder ─────────────────────────────────────────────────────
+// ── Driver/Self placeholder ────────────────────────────────────────────────────
 
 function DriverPlaceholder({ name }: { name: string }) {
   return (

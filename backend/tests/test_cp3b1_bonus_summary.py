@@ -13,7 +13,7 @@ Covers:
   - Sorting: nonzero totals first (descending), then name/code/id.
   - Status behavior: Draft rejected; Open/Returned editable; InReview/Approved/
     Cancelled read-only.
-  - Permissions: view-only capabilities false; ODA denied; branch isolation.
+  - Permissions: view-only capabilities false; DRIVER/Self denied; branch isolation.
   - No-marker periods: controlled 422, no live-roster fallback.
   - Existing GET /bonuses event list unchanged; /period-pay BONUS still blocked.
 
@@ -34,8 +34,8 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.builders.access import (
-    create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -804,11 +804,11 @@ async def test_view_only_user_reads_but_cannot_mutate(
 
 
 # ---------------------------------------------------------------------------
-# 12. ODA / driver denial
+# 12. DRIVER/Self denial
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_oda_user_denied(
+async def test_driver_self_user_denied(
     session_client: httpx.AsyncClient,
     auth_token: str,
     db_conn: AsyncConnection,
@@ -821,22 +821,17 @@ async def test_oda_user_denied(
         db_conn, cp3b1_branch_id, period_id, _roster(cp3b1_drivers, ["alpha"])
     )
 
-    role_id = await create_company_role_with_permissions(
-        session_client, auth_token,
-        f"CP3B1_ODA_Role_{_RUN_ID}",
-        ["payroll.view", "payroll.entry"],
-    )
     oda_token = await create_user_with_role_token(
         session_client, auth_token,
         f"cp3b1_oda_user_{_RUN_ID}",
-        role_id,
-        scope_type="OwnDriverDataOnly",
-        branch_id=cp3b1_branch_id,
+        await get_company_role_id(session_client, auth_token, "DRIVER"),
+        scope_type="Self",
+        driver_branch_id=cp3b1_branch_id,
     )
 
     r = await _get_summary(session_client, oda_token, period_id)
     assert r.status_code == 403, (
-        f"ODA user must be denied the bonus summary, got {r.status_code}: {r.text}"
+        f"DRIVER/Self user must be denied the bonus summary, got {r.status_code}: {r.text}"
     )
 
     await _cancel_period_db(db_conn, period_id)

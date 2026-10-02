@@ -5,7 +5,7 @@ Covers:
   TestPayRulesCRUD           — create, end, void pay rules (Fix 1)
   TestCopyRatesAllOrNothing  — invalid target branch mapping rejects whole copy (Fix 2)
   TestCopyRatesAdvanced      — advanced/tier/block rates rejected (Fix 3)
-  TestPayRulesODA            — ODA cannot access other driver's pay rules
+  TestPayRulesDriverSelf     — DRIVER/Self cannot access other driver's pay rules
 """
 from datetime import date
 
@@ -518,11 +518,11 @@ class TestPayRulesCurrentContract:
 
 
 # ===========================================================================
-# Fix 1 — ODA cannot access other driver's pay rules
+# Fix 1 — DRIVER/Self cannot access other driver's pay rules
 # ===========================================================================
 
-class TestPayRulesODA:
-    """ODA scope enforced on pay rules endpoints."""
+class TestPayRulesDriverSelf:
+    """DRIVER/Self accounts are denied generic pay rule endpoints."""
 
     @pytest.mark.asyncio
     async def test_oda_cannot_read_other_driver_pay_rules(
@@ -533,48 +533,42 @@ class TestPayRulesODA:
         paytest_driver_id: int,
     ):
         """
-        ODA user cannot read another driver's pay rules.
-
-        Strategy: create a linked Driver user with ODA payrates role,
-        then try to read paytest_driver_id's pay rules.
-        Reuses _create_oda_linked_driver_user from TestMatrixODAScope.
+        A linked DRIVER/Self user cannot read generic pay rules for any Driver.
         """
         import random
 
-        from tests.test_pay_rates import TestMatrixODAScope  # type: ignore[import]
+        from tests.test_pay_rates import TestDriverSelfRateMatrix  # type: ignore[import]
         username1 = f"oda_pr_read_{random.randint(10000, 99999)}"
-        oda_token, own_driver_id = await TestMatrixODAScope._create_oda_linked_driver_user(
+        driver_token, own_driver_id = await TestDriverSelfRateMatrix._create_driver_self_user(
             session_client, auth_token, username1, paytest_branch_id
         )
 
-        # Accessing OWN driver's rules is allowed
         own_resp = await session_client.get(
             f"/payroll/drivers/{own_driver_id}/pay-rules",
-            headers=auth(oda_token),
+            headers=auth(driver_token),
         )
-        assert own_resp.status_code == 200
+        assert own_resp.status_code == 403
 
-        # Accessing ANOTHER driver's rules is blocked
         other_resp = await session_client.get(
             f"/payroll/drivers/{paytest_driver_id}/pay-rules",
-            headers=auth(oda_token),
+            headers=auth(driver_token),
         )
         assert other_resp.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_oda_cannot_create_other_driver_pay_rule(
+    async def test_driver_self_cannot_create_other_driver_pay_rule(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
         paytest_driver_id: int,
     ):
-        """ODA user cannot create a pay rule for another driver."""
+        """DRIVER/Self user cannot create a generic pay rule."""
         import random
 
-        from tests.test_pay_rates import TestMatrixODAScope  # type: ignore[import]
+        from tests.test_pay_rates import TestDriverSelfRateMatrix  # type: ignore[import]
         username2 = f"oda_pr_write_{random.randint(10000, 99999)}"
-        oda_token, _own = await TestMatrixODAScope._create_oda_linked_driver_user(
+        driver_token, _own = await TestDriverSelfRateMatrix._create_driver_self_user(
             session_client, auth_token, username2, paytest_branch_id
         )
 
@@ -587,7 +581,7 @@ class TestPayRulesODA:
                 "effective_from": "2094-01-01",
                 "effective_to": "2094-12-31",
             },
-            headers=auth(oda_token),
+            headers=auth(driver_token),
         )
         assert resp.status_code == 403
 

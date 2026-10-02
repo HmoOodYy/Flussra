@@ -17,6 +17,8 @@ Design notes:
 """
 import httpx
 
+from tests.builders.workforce import create_driver_employee_record
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -79,6 +81,29 @@ async def _get_owner_company_role_id(
     raise AssertionError("COMPANY_OWNER company role not found")
 
 
+async def _link_test_driver_employee(
+    client: httpx.AsyncClient,
+    token: str,
+    user_id: int,
+    branch_id: int,
+    username: str,
+) -> int:
+    employee = await create_driver_employee_record(
+        client,
+        token,
+        branch_id=branch_id,
+        full_name=f"{username} Employee",
+        driver_code=f"T-{username[:24]}",
+    )
+    linked = await client.put(
+        f"/admin/users/{user_id}/employee-link",
+        json={"employee_id": employee["employee_id"]},
+        headers=_hdr(token),
+    )
+    assert linked.status_code == 200, linked.text
+    return employee["employee_id"]
+
+
 # ---------------------------------------------------------------------------
 # GET /admin/users — enriched response
 # ---------------------------------------------------------------------------
@@ -135,13 +160,14 @@ class TestEnrichedUserList:
 
 class TestAssignCompanyRole:
     async def test_assign_driver_role_all_branches_rejected(
-        self, client: httpx.AsyncClient, auth_token: str
+        self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
     ):
-        """DRIVER role with AllCompanyBranches scope must be rejected (no home branch)."""
+        """DRIVER requires Self scope after a current Employee is linked."""
         user = await _create_test_user(
             client, auth_token, username="test_assign_dr1", display_name="Assign Driver 1"
         )
         driver_role_id = await _get_driver_company_role_id(client, auth_token)
+        await _link_test_driver_employee(client, auth_token, user["user_id"], hq_branch_id, "test_assign_dr1")
 
         resp = await client.post(
             f"/admin/users/{user['user_id']}/company-role-assignments",
@@ -149,7 +175,7 @@ class TestAssignCompanyRole:
             headers=_hdr(auth_token),
         )
         assert resp.status_code == 422
-        assert "home branch" in resp.json()["detail"].lower()
+        assert "self" in resp.json()["detail"].lower()
 
     async def test_assign_specific_branch_scope(
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
@@ -158,20 +184,20 @@ class TestAssignCompanyRole:
             client, auth_token, username="test_assign_br1", display_name="Assign Branch 1"
         )
         driver_role_id = await _get_driver_company_role_id(client, auth_token)
+        await _link_test_driver_employee(client, auth_token, user["user_id"], hq_branch_id, "test_assign_br1")
 
         resp = await client.post(
             f"/admin/users/{user['user_id']}/company-role-assignments",
             json={
                 "company_role_id": driver_role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id": hq_branch_id,
+                "scope_type": "Self",
             },
             headers=_hdr(auth_token),
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["scope_type"] == "SpecificBranch"
-        assert data["branch_id"] == hq_branch_id
+        assert data["scope_type"] == "Self"
+        assert data["branch_id"] is None
 
     async def test_cannot_assign_company_owner(
         self, client: httpx.AsyncClient, auth_token: str
@@ -195,11 +221,14 @@ class TestAssignCompanyRole:
         user = await _create_test_user(
             client, auth_token, username="test_scope_br2", display_name="Scope Branch 2"
         )
-        driver_role_id = await _get_driver_company_role_id(client, auth_token)
+        role_resp = await client.post(
+            "/admin/company-roles", json={"role_name": "Missing Branch Scope Role"}, headers=_hdr(auth_token),
+        )
+        assert role_resp.status_code == 201, role_resp.text
 
         resp = await client.post(
             f"/admin/users/{user['user_id']}/company-role-assignments",
-            json={"company_role_id": driver_role_id, "scope_type": "SpecificBranch"},
+            json={"company_role_id": role_resp.json()["company_role_id"], "scope_type": "SpecificBranch"},
             headers=_hdr(auth_token),
         )
         assert resp.status_code == 422
@@ -212,6 +241,7 @@ class TestAssignCompanyRole:
             client, auth_token, username="test_scope_acb1", display_name="Scope ACB 1"
         )
         driver_role_id = await _get_driver_company_role_id(client, auth_token)
+        await _link_test_driver_employee(client, auth_token, user["user_id"], hq_branch_id, "test_scope_acb1")
 
         resp = await client.post(
             f"/admin/users/{user['user_id']}/company-role-assignments",
@@ -231,36 +261,30 @@ class TestAssignCompanyRole:
         user = await _create_test_user(
             client, auth_token, username="test_revoke_old", display_name="Revoke Old"
         )
-        driver_role_id = await _get_driver_company_role_id(client, auth_token)
-        driver_payload = {
-            "company_role_id": driver_role_id,
+        first_assignment_id = user["company_role_assignment_id"]
+        new_role = await client.post(
+            "/admin/company-roles", json={"role_name": "Reassignment Target Role"}, headers=_hdr(auth_token),
+        )
+        assert new_role.status_code == 201, new_role.text
+        new_role_id = new_role.json()["company_role_id"]
+        replacement = {
+            "company_role_id": new_role_id,
             "scope_type": "SpecificBranch",
             "branch_id": hq_branch_id,
         }
-
-        # Assign driver role
         r1 = await client.post(
             f"/admin/users/{user['user_id']}/company-role-assignments",
-            json=driver_payload,
+            json=replacement,
             headers=_hdr(auth_token),
         )
         assert r1.status_code == 201
-        first_assignment_id = r1.json()["assignment_id"]
-
-        # Re-assign DRIVER (new row should revoke the first)
-        r2 = await client.post(
-            f"/admin/users/{user['user_id']}/company-role-assignments",
-            json=driver_payload,
-            headers=_hdr(auth_token),
-        )
-        assert r2.status_code == 201
-        assert r2.json()["assignment_id"] != first_assignment_id
+        assert r1.json()["assignment_id"] != first_assignment_id
 
         # Verify enriched user now shows the new assignment
         user_resp = await client.get(
             f"/admin/users/{user['user_id']}", headers=_hdr(auth_token)
         )
-        assert user_resp.json()["company_role_assignment_id"] == r2.json()["assignment_id"]
+        assert user_resp.json()["company_role_assignment_id"] == r1.json()["assignment_id"]
 
     async def test_enriched_user_shows_assigned_role(
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
@@ -270,21 +294,22 @@ class TestAssignCompanyRole:
         )
         driver_role_id = await _get_driver_company_role_id(client, auth_token)
 
-        await client.post(
+        await _link_test_driver_employee(client, auth_token, user["user_id"], hq_branch_id, "test_enriched_dr")
+        assigned = await client.post(
             f"/admin/users/{user['user_id']}/company-role-assignments",
             json={
                 "company_role_id": driver_role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id": hq_branch_id,
+                "scope_type": "Self",
             },
             headers=_hdr(auth_token),
         )
+        assert assigned.status_code == 201, assigned.text
 
         resp = await client.get(f"/admin/users/{user['user_id']}", headers=_hdr(auth_token))
         assert resp.status_code == 200
         data = resp.json()
         assert data["company_role_code"] == "DRIVER"
-        assert data["company_role_scope"] == "SpecificBranch"
+        assert data["company_role_scope"] == "Self"
 
     async def test_assign_role_to_nonexistent_user_404(
         self, client: httpx.AsyncClient, auth_token: str
@@ -324,19 +349,7 @@ class TestRevokeCompanyRoleAssignment:
         user = await _create_test_user(
             client, auth_token, username="test_revoke_asgn", display_name="Revoke Assign"
         )
-        driver_role_id = await _get_driver_company_role_id(client, auth_token)
-
-        create_resp = await client.post(
-            f"/admin/users/{user['user_id']}/company-role-assignments",
-            json={
-                "company_role_id": driver_role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id": hq_branch_id,
-            },
-            headers=_hdr(auth_token),
-        )
-        assert create_resp.status_code == 201
-        aid = create_resp.json()["assignment_id"]
+        aid = user["company_role_assignment_id"]
 
         disable = await client.patch(
             f"/admin/users/{user['user_id']}",
@@ -782,19 +795,12 @@ class TestPermissionOverrides:
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
     ):
         """Extra permissions must appear in /auth/me active_permissions."""
-        # Create a user with Driver role (gets drivers.view from role)
-        # then add payroll.view as an extra override
+        # Create a non-DRIVER account with no role permissions, then add an override.
         user = await _create_test_user(
             client, auth_token, username="test_pov_authme", display_name="POV AuthMe",
             can_login=True, is_active=True,
         )
         uid = user["user_id"]
-        driver_role_id = await _get_driver_company_role_id(client, auth_token)
-        await client.post(
-            f"/admin/users/{uid}/company-role-assignments",
-            json={"company_role_id": driver_role_id, "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
-            headers=_hdr(auth_token),
-        )
         # Reset password so we can login
         await client.post(
             f"/admin/users/{uid}/reset-password",
@@ -814,24 +820,32 @@ class TestPermissionOverrides:
         })
         assert login_resp.status_code == 200
         login_data = login_resp.json()
-        # payroll.view should appear (extra override), drivers.view from role
+        # payroll.view should appear as the added override.
         assert "payroll.view" in login_data["user"]["active_permissions"]
-        assert "drivers.view" in login_data["user"]["active_permissions"]
+        assert "drivers.view" not in login_data["user"]["active_permissions"]
 
-    async def test_role_permission_codes_in_user_detail(
+    async def test_driver_generic_permissions_are_suppressed(
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
     ):
         user = await _create_test_user(
             client, auth_token, username="test_role_perm", display_name="Role Perm"
         )
         uid = user["user_id"]
-        driver_role_id = await _get_driver_company_role_id(client, auth_token)
-        await client.post(
+        await _link_test_driver_employee(client, auth_token, uid, hq_branch_id, "test_role_perm")
+        assigned = await client.post(
             f"/admin/users/{uid}/company-role-assignments",
-            json={"company_role_id": driver_role_id, "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
+            json={"company_role_id": await _get_driver_company_role_id(client, auth_token), "scope_type": "Self"},
             headers=_hdr(auth_token),
         )
-        resp = await client.get(f"/admin/users/{uid}", headers=_hdr(auth_token))
-        data = resp.json()
-        assert "role_permission_codes" in data
-        assert "drivers.view" in data["role_permission_codes"]  # DRIVER role has drivers.view
+        assert assigned.status_code == 201, assigned.text
+        login = await client.post("/auth/login", json={
+            "username": "test_role_perm",
+            "password": "TestPass1234!",
+            "company_code": "DEMO",
+        })
+        assert login.status_code == 200, login.text
+        assert login.json()["user"]["active_permissions"] == []
+        assert login.json()["user"]["authority"] == {
+            "company_permissions": [],
+            "branch_permissions": [],
+        }

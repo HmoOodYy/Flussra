@@ -49,6 +49,7 @@ function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserIn
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -197,10 +198,11 @@ test('canProvisionPeopleAccount requires users.edit and visible role choices', (
   assert.match(peoplePageSource, /if \(!userCanProvisionAccount\) \{\s*dispatch\(\{ type: 'WIZ_STEP', step: 5 \}\);/);
 });
 
-test('new wizard limits non-Driver scope choices while legacy role editing keeps its scope options', () => {
-  assert.match(peoplePageSource, /allowOwnDriverDataScope=\{false\}/);
-  assert.match(peoplePageSource, /\(allowOwnDriverDataScope \|\| isDriverRole\)/);
-  assert.match(peoplePageSource, /allowOwnDriverDataScope = true/);
+test('scope choices give DRIVER only Self and keep ordinary scopes for other roles', () => {
+  assert.match(peoplePageSource, /!isDriverRole && \(\s*<option value="AllCompanyBranches">/);
+  assert.match(peoplePageSource, /!isDriverRole && <option value="SpecificBranch">/);
+  assert.match(peoplePageSource, /isDriverRole && <option value="Self">Self — own current Driver identity<\/option>/);
+  assert.match(peoplePageSource, /DRIVER assignments use Self without a branch/);
 });
 
 test('ownership replacement options exclude Driver without removing it from normal role choices', () => {

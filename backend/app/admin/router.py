@@ -268,9 +268,9 @@ async def list_user_roles(
     summary="Assign a role to a user",
     description=(
         "Creates a new role assignment.  For `AllCompanyBranches` scope, "
-        "`branch_id` must be null.  For `SpecificBranch` or "
-        "`OwnDriverDataOnly` scope, `branch_id` is required and must belong "
-        "to this company.  A duplicate active assignment (same user + role + "
+        "`branch_id` must be null. For `SpecificBranch` scope, `branch_id` "
+        "is required and must belong to this company. `Self` scope requires "
+        "`branch_id` to be null. A duplicate active assignment (same user + role + "
         "scope + branch) is rejected with 422.\n\n"
         "Requires AllCompanyBranches scope and granular permissions (see endpoint summary)."
     ),

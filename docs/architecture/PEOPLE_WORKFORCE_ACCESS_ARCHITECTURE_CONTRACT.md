@@ -3,9 +3,10 @@
 **Status:** LOCKED — approved architecture boundary for the People / Workforce / Access refoundation  
 **Scope:** Flussra People, Employee, Driver, User, Role, Scope, Driver Transfer, and future Import boundaries  
 **Precondition:** Payroll Setup is closed and remains out of scope unless a concrete dependency is later proven  
-**Implementation details:** belong to the subsequent master plan, not to this contract  
+**Execution sequencing:** governed by the Unified Refoundation Execution Plan; unresolved implementation mechanisms remain for Lead design
 **Changes:** changing a locked architecture decision requires an explicit amendment to this contract  
-**Next artifact after this contract:** `PEOPLE_AND_ACCESS_REFOUNDATION_MASTER_PLAN.md`
+**Architecture amendment (2026-10-02):** The former DRIVER `OwnDriverDataOnly` branch-projection design is superseded by generic `Self` scope semantics (§6.3, §7). The old representation is transitional legacy state to migrate/retire in P2b.<br>
+**Next execution artifact:** `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md`; the older People master plan is a detailed reference only where consistent with this contract and the Unified Plan.
 
 ---
 
@@ -27,9 +28,9 @@ It defines:
 - what the future Import architecture may and may not create;
 - which current behaviours are explicitly retired.
 
-Implementation sequencing, migrations, endpoint design, UI component design, and test phasing belong in the later refoundation master plan.
+Execution sequencing is governed by the Unified Refoundation Execution Plan. Implementation design, migrations, endpoint and UI details, and test phasing must follow that plan and this contract.
 
-The contract owns semantics and invariants. Where it states that an invariant must hold, the master plan chooses the mechanism (database constraint, trigger, service rule, scheduled activation, or effective-date resolution) unless this contract explicitly requires database enforcement.
+The contract owns semantics and invariants. It does not select an implementation mechanism unless it explicitly requires one; the Lead records any remaining architectural mechanism decision before implementation.
 
 ---
 
@@ -61,7 +62,7 @@ Company
         └── Permission overrides
 ```
 
-Workforce and Access are related domains, but neither is allowed to silently create or mutate the other. The only defined cross-domain effect is the alignment of the DRIVER self-service branch projection when a Driver transfer becomes effective (§7.6, §8.5).
+Workforce and Access are related domains, but neither silently creates nor mutates the other. A linked DRIVER User derives self identity from the explicit User–Employee link and the Employee’s Driver profiles (§7.5). A Driver transfer or termination changes effective Workforce identity over time; it does not mutate an Access Self assignment or create Access branch membership (§7.6, §8.5).
 
 ### 2.1 Effective-date vocabulary
 
@@ -322,7 +323,7 @@ Rules:
 - linking never creates an Employee;
 - linking never infers identity from username, email, display name, `UserID`, or `EmployeeKey`.
 
-Link cardinality and same-company ownership are integrity invariants; the master plan chooses the exact constraints.
+Link cardinality and same-company ownership are integrity invariants; implementation design selects enforcement details without changing these semantics.
 
 Access-role assignment must not be the mechanism that creates this link implicitly.
 
@@ -335,6 +336,8 @@ A User may exist without an active Role/Scope assignment only as an explicitly *
 - login is disabled;
 - the staged state is explicitly represented, not inferred from a missing assignment;
 - it cannot authenticate or gain access by any path until it is provisioned.
+
+A valid provisioned Self-only assignment is authority independent of branch membership. Login and `/auth/me` must represent that authority without requiring or fabricating a branch-access row; the response shape is not fixed by this contract.
 
 ---
 
@@ -364,17 +367,26 @@ Assigning, changing, or removing an access role must never:
 - terminate or reactivate workforce records;
 - create, change, or remove a User↔Employee link.
 
-Removing or replacing the `DRIVER` role removes its `OwnDriverDataOnly` assignment and leaves the User↔Employee link and all workforce records unchanged.
+Removing or replacing the `DRIVER` role removes its `Self` assignment and leaves the User↔Employee link and all Workforce records unchanged.
 
 The current DRIVER-role workforce side effects are explicitly retired.
 
 ### 6.3 Role and Scope remain Access concerns
 
-Role, Scope, and permission overrides remain valid Access concepts.
+Role, Scope, and permission overrides remain Access concepts with separate meanings:
 
-Role and Scope form a single assignment and are never saved as separate operations.
+- **Role** identifies the assignment's capability set.
+- **Permission** identifies an action.
+- **Scope** identifies the resource set on which an allowed action may apply. The supported concepts are `AllCompanyBranches`, `SpecificBranch(branch_id)`, and `Self`.
+- **Identity/relationship resolution** proves whether a concrete resource belongs to `Self`.
 
-Their implementation may be preserved where it is already correct, but their authority must stop at the Access boundary.
+Role and Scope form one assignment and are never saved as separate operations. Their authority stops at the Access boundary.
+
+`Self` is not branch access and carries no `BranchID`. By itself, Self grants no branch-wide or generic operational/administrative authority. A Self-compatible permission or explicitly designed self-service operation may authorize only an own-resource action after the canonical Self relationship is proven.
+
+Permission overrides may widen the action set only within resource scope already established by valid Access authority. An override never creates company, branch, or Self scope; never bypasses ownership matching or the DRIVER capability ceiling; and cannot make an action valid for `Self` unless that action is explicitly Self-compatible. The contract fixes these semantics without prescribing override storage or foreign keys.
+
+`COMPANY_OWNER` remains a protected system role with dynamic permission-catalogue access only through a valid active company-wide owner assignment. A malformed branch-scoped or Self-scoped owner assignment does not grant unrestricted company authority.
 
 ---
 
@@ -406,27 +418,26 @@ This contract does not implement that future screen.
 ### 7.3 DRIVER is self-only
 
 ```text
-DRIVER  ⇔  OwnDriverDataOnly
+DRIVER  ⇔  Self
 ```
 
-- `OwnDriverDataOnly` scope is valid only with the `DRIVER` role.
-- `DRIVER` is valid only with `OwnDriverDataOnly` scope.
-- `DRIVER + SpecificBranch` and `DRIVER + AllCompanyBranches` are not valid configurations.
-- A DRIVER self-service account must not receive general branch-wide access merely because the Employee belongs to that branch.
+- For the current product, exact RoleCode `DRIVER` requires `Self`; `DRIVER + SpecificBranch` and `DRIVER + AllCompanyBranches` are invalid.
+- `DRIVER` is the only role currently supported with `Self`. This does not prohibit a future role from using `Self` after explicit policy/product design.
+- `Self` is generic and contains no Driver-specific meaning or branch identifier.
+- The legacy `OwnDriverDataOnly` assignment is transitional state to migrate/retire; it is not the target scope.
 - Driver-role identity is matched by exact role identity/code `DRIVER`, never by substring or name matching.
 
 ### 7.4 DRIVER assignment preconditions
 
-Assigning `DRIVER` requires that, at assignment time:
+Assigning or activating `DRIVER` requires that:
 
-1. the User is already explicitly linked to an Employee (§5.4);
-2. that Employee belongs to the User's company;
-3. that Employee has a current Driver profile;
-4. the `OwnDriverDataOnly` branch projection (§7.6) equals that current profile's branch.
+1. the User is explicitly linked to an Employee (§5.4);
+2. that Employee belongs to the User's company; and
+3. that Employee has a current Driver profile, resolved through the canonical P1 effective-profile authority.
 
-If any precondition is not satisfied, the assignment is rejected.
+A pending Driver profile is not current. A future Driver may be linked and kept staged, but `DRIVER` assignment is rejected until the profile becomes effective. For each current/date-sensitive Driver action, resolve the linked Employee's profile effective on that operation's defined date. Missing link, company mismatch, or no effective profile for a current action fails closed.
 
-Assigning `DRIVER` never creates, links, or modifies Employee or Driver records.
+Assigning `DRIVER` never creates, links, moves, or modifies Employee or Driver records.
 
 **Future Drivers.** A future Driver may be prepared before their Driver profile becomes effective. Before the profile's `EffectiveFrom` it is valid to have:
 
@@ -455,21 +466,17 @@ It is never derived from an Access-scope `BranchID`.
 
 A stale Access scope is never used to decide which Driver is "own".
 
-### 7.6 ODA branch projection
+### 7.6 Self scope is independent of branch access
 
-The current permission system stores a `BranchID` on the `OwnDriverDataOnly` assignment.
+The former `OwnDriverDataOnly` model stored a `BranchID` on the Access assignment and synchronized it with the current Driver branch. This Access-side branch projection is retired by this amendment and must be migrated/removed in P2b.
 
-Until the authorization architecture is deliberately changed:
+A `Self` assignment has `BranchID = NULL`. `Self` is not a fake branch membership, does not mean the User's current work branch, and grants no branch-wide access. Branch access views/functions must not fabricate branch membership for a Self assignment.
 
-- that `BranchID` is a synchronized authorization projection;
-- it is not the authority for Driver identity;
-- it must remain consistent with the linked Employee's current Driver profile.
+Self ownership is proven from the User's explicit Employee link and the relevant Employee-owned resource. For a current Driver operation, resolve the linked Employee's Driver profile effective on the operation's defined date. Historical Driver reads may include only profiles of that linked Employee and only where the endpoint's self-service contract permits history.
 
-If the linked Employee has no current Driver profile (for example after termination), the DRIVER assignment confers no current-profile self-service authorization; authorization fails closed.
+A missing link, company mismatch, or missing effective Driver profile for a current action fails closed. Transfer and termination do not update the Access Self assignment. `Employee.BranchID` remains a distinct Workforce projection under §3.5 and may still follow the effective Driver profile; this does not create Access branch authority.
 
-When the current Driver profile changes branch because a transfer becomes effective, the ODA branch projection must become consistent with the new current profile as part of that transfer / effective-transition operation.
-
-Unrelated administrative Access scopes never follow a workforce transfer (§8.6).
+Unrelated administrative branch scopes never follow a Workforce transfer (§8.6).
 
 ### 7.7 DRIVER capability boundary
 
@@ -484,6 +491,8 @@ A DRIVER User must never obtain general administrative or mutation authority ove
 - other Drivers' data.
 
 A DRIVER User must not be able to create, edit, approve, or void rates, payroll, or workforce records merely because the target belongs to themselves.
+
+A User may have multiple active Access assignment rows; the authorization boundary must not assume that the table physically permits only one. P2b does not add mixed DRIVER/admin product behavior, and unexpected mixed rows must not bypass the DRIVER Self capability ceiling. Any deliberate mixed-mode behavior requires separate product design.
 
 Future self-service commands (for example explicit request or acknowledgement workflows) are permitted only when separately designed as self-service operations. This contract does not design them.
 
@@ -533,9 +542,9 @@ Example — approved October 1, `EffectiveDate` November 1:
 - through October 31 the source profile remains the current Driver profile, and the source branch remains the Employee's current workforce branch;
 - from November 1 the destination profile is current, `Employee.BranchID` reflects the destination branch, and DRIVER self-service authorization follows the destination profile.
 
-Every consequence of "current" — the `Employee.BranchID` projection (§3.5), the ODA branch projection (§7.6), self-service current actions (§7.5), and current workforce views — follows the effective date, not the approval or completion timestamp.
+Every consequence of "current" — the `Employee.BranchID` Workforce projection (§3.5), self-service current actions (§7.5), and current Workforce views — follows the effective date, not the approval or completion timestamp. Self authorization follows the linked Employee and effective Driver profile; no Access branch projection is synchronized.
 
-The mechanism (delayed completion, effective-date resolution, scheduled activation, or another safe approach) is chosen by the master plan.
+The effective-profile resolver governs which profile is current by date. This contract fixes the required outcomes and does not select or reopen the implementation mechanism.
 
 ### 8.4 Driver Pay Rates on transfer
 
@@ -576,12 +585,7 @@ The master plan defines the UI wording, which rows are selectable, destination e
 
 ### 8.5 Linked DRIVER self-service User
 
-When the transferred Employee has a linked User whose Access Role is `DRIVER`, the transfer keeps that self-service access aligned with the Employee's current Driver profile:
-
-- own identity continues to be derived from the link (§7.5) and therefore needs no rewrite;
-- the ODA branch projection (§7.6) becomes consistent with the destination profile when the transfer becomes effective (§8.3).
-
-This is part of the defined transfer business operation, not a later role re-save.
+When the transferred Employee has a linked User whose Access Role is `DRIVER`, the User–Employee identity link remains unchanged. The Self assignment is not rewritten when the transfer is approved, completed, or becomes effective. Current Driver self authorization follows the linked Employee's effective profile on the operation's relevant date (§7.5); transfer never changes Access scope or creates branch membership.
 
 ### 8.6 Administrative roles remain independent
 
@@ -770,7 +774,7 @@ Every DRIVER self-service path must resolve own identity through the link (§7.5
 
 ### 12.2 No branch-roster leakage
 
-Generic workforce read endpoints must not turn `OwnDriverDataOnly` — or the `DRIVER` role's default permissions — into branch-wide workforce visibility.
+Generic Workforce read endpoints must not turn `Self` or the `DRIVER` role's permissions into branch-wide workforce visibility. Self-authorized reads must prove ownership through the canonical User–Employee relationship.
 
 ### 12.3 Same-company links
 
@@ -867,7 +871,7 @@ The following current behaviours are not part of the target architecture:
 13. Treating `/core/people` as sufficient Employee management when it is read-only.
 14. Allowing Driver self-service users general branch-roster visibility.
 15. Detecting the Driver role by substring matching of role codes.
-16. `OwnDriverDataOnly` scope assigned with a non-DRIVER role, or `DRIVER` assigned with a non-ODA scope.
+16. `DRIVER` assigned with `SpecificBranch` or `AllCompanyBranches`; granting `Self` to another current role without explicit policy; or treating legacy `OwnDriverDataOnly` as the target scope.
 17. Reactivating `Transferred` or `Terminated` Driver profiles through generic editing.
 18. Determining the current Driver profile from status alone, or treating a future-dated destination profile as current before the transfer `EffectiveDate`.
 19. Multiple User accounts linked to the same Employee.
@@ -932,18 +936,20 @@ At minimum the completed refoundation must prove:
 3. A User can exist without an Employee where allowed.
 4. A User can be explicitly linked to an existing same-company Employee, and link cardinality is 0..1 ↔ 0..1.
 5. Role assignment does not create, move, or link workforce records.
-6. `DRIVER` ⇔ `OwnDriverDataOnly`, and `DRIVER` assignment is rejected unless its preconditions (§7.4) hold.
+6. `DRIVER` ⇔ `Self` for the current product; Self has no Access BranchID; a current Driver action requires a linked same-company Employee and that Employee's effective Driver profile (§7.4–§7.6).
 7. Driver transfer preserves EmployeeID and Driver history.
-8. A future-dated transfer does not make the destination profile or branch current before its `EffectiveDate`.
+8. A future-dated transfer does not make the destination profile or Workforce branch current before its `EffectiveDate`; Access Self authority is not synchronized to a branch.
 9. Driver transfer cannot be reversed by later Role/Scope saving, and no Driver profile's branch can be updated.
 10. Historical rates/payroll remain on historical DriverIDs; destination rates exist only through the explicit copy choice.
 11. Generic People/Driver reads do not leak branch-roster data to Driver self-service users.
-12. A DRIVER User cannot create, edit, approve, or void rates, payroll, or workforce records, including their own.
+12. A DRIVER User cannot create, edit, approve, or void rates, payroll, or Workforce records, including their own; permission overrides cannot widen their resource scope or capability ceiling.
 13. Workforce and Access creation have the defined transaction boundaries and retry behaviour (§11), and no login-enabled User exists without Role/Scope authority.
-14. A pending Driver profile does not activate DRIVER self-service before it becomes effective.
-15. Terminating a Driver Employee closes the Employee and the current Driver profile in one operation without changing history.
-16. Workforce import can later be built without requiring User/login creation.
-17. Existing Payroll Setup authority remains untouched unless a concrete dependency is proven.
+14. A pending Driver profile does not activate current-profile DRIVER self-service before it becomes effective. A valid provisioned Self-only User can be represented by login and `/auth/me` without a fabricated branch-access row.
+15. Terminating a Driver Employee closes the Employee and the current Driver profile in one operation without changing history; Self authorization fails closed when no effective profile exists.
+16. A permission override may add an action only within the User's established resource scope and may not bypass Self ownership or the DRIVER ceiling.
+17. The protected `COMPANY_OWNER` dynamic-permission path requires a valid active company-wide owner assignment; malformed branch or Self scope is not company-wide authority.
+18. Workforce import can later be built without requiring User/login creation.
+19. Existing Payroll Setup authority remains untouched unless a concrete dependency is proven.
 
 ---
 

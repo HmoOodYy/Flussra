@@ -10,6 +10,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import is_driver_self_subject, require_non_driver_subject
 from app.core.schemas import (
     BranchSummary,
     DriverCreate,
@@ -98,6 +99,7 @@ async def _check_permission(
     user see data in this branch?" — this function answers "is the user
     allowed to perform this specific action?"
     """
+    await require_non_driver_subject(company_id, user_id, db)
     result = await db.execute(
         text("SELECT sec.fn_UserHasPermission(:uid, :cid, :bid, :perm)"),
         {
@@ -122,48 +124,8 @@ async def _require_not_driver_role(
     user_id: int,
     db: AsyncConnection,
 ) -> None:
-    """Raise HTTP 403 if the user holds any driver-role assignment.
-
-    Blocks any active assignment that meets at least one condition:
-      - scopetype = 'OwnDriverDataOnly'  (catches all ODA rows, including
-        legacy rows where CompanyRoleID IS NULL)
-      - company role has rolecode = 'DRIVER'
-      - legacy global role has rolecode = 'DRIVER'
-
-    Uses LEFT JOINs so rows where CompanyRoleID or RoleID is NULL are still
-    evaluated against the scopetype condition.  Fails closed: one matching
-    row is enough to block.
-
-    Call this at the top of every service function that touches operational
-    payroll data (Current Payroll, Review, Ledger) before any data is read.
-    """
-    result = await db.execute(
-        text("""
-            SELECT 1
-            FROM   sec.userbranchroles ubr
-            LEFT JOIN sec.companyroles cr ON cr.companyroleid = ubr.companyroleid
-            LEFT JOIN sec.roles        r  ON r.roleid         = ubr.roleid
-            WHERE  ubr.userid    = :uid
-              AND  ubr.companyid = :cid
-              AND  ubr.isactive  = TRUE
-              AND (
-                    ubr.scopetype = 'OwnDriverDataOnly'
-                 OR cr.rolecode  = 'DRIVER'
-                 OR r.rolecode   = 'DRIVER'
-              )
-            LIMIT 1
-        """),
-        {"uid": user_id, "cid": company_id},
-    )
-    if result.first() is not None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "This operational area is not accessible to driver-role users. "
-                "Driver pay data will be available through a future Driver Screen."
-            ),
-        )
-
+    """Compatibility wrapper for the Access-owned DRIVER capability ceiling."""
+    await require_non_driver_subject(company_id, user_id, db)
 
 async def _has_any_permission(
     company_id: int,
@@ -176,6 +138,8 @@ async def _has_any_permission(
 
     Unlike _check_any_permission this never raises — callers decide what to do.
     """
+    if await is_driver_self_subject(company_id, user_id, db):
+        return False
     for code in permission_codes:
         result = await db.execute(
             text("SELECT sec.fn_UserHasPermission(:uid, :cid, :bid, :perm)"),
@@ -200,6 +164,7 @@ async def _check_any_permission(
     Use this when an action is reachable via multiple roles
     (e.g. payrates.view OR payrates.edit OR settings.manage).
     """
+    await require_non_driver_subject(company_id, user_id, db)
     for code in permission_codes:
         result = await db.execute(
             text("SELECT sec.fn_UserHasPermission(:uid, :cid, :bid, :perm)"),

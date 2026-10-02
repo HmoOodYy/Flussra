@@ -61,6 +61,7 @@ function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [makeBranch()],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -133,11 +134,11 @@ test('payroll_setup helpers: DRIVER role denies all four helpers despite company
   assert.equal(canViewAnyBranchPayrollSchedule(user), false);
 });
 
-// ── E. OwnDriverDataOnly denies despite company-wide grant ──────────────────
+// ── E. Self denies generic setup access despite company-wide grant ──────────
 
-test('payroll_setup helpers: OwnDriverDataOnly scope denies all four helpers despite company-wide grant', () => {
+test('payroll_setup helpers: Self assignment denies all four helpers despite company-wide grant', () => {
   const user = makeUser({
-    branches: [makeBranch({ branch_id: 10, scope: 'OwnDriverDataOnly', role_code: 'DRIVER', role_name: 'Driver' })],
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
     authority: makeAuthority({ company_permissions: [...ALL_PAYROLL_SETUP_CODES] }),
   });
   assertAllPayrollSetupHelpers(user, false);

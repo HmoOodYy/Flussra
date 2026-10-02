@@ -45,26 +45,12 @@ function _hasCompanyAdminFallback(user: UserProfile): boolean {
 // ── Role / scope ──────────────────────────────────────────────────────────────
 
 /**
- * True when the user has any Driver or ODA assignment.
- *
- * Fails closed — any of the following marks the user as driver/ODA:
- *   • Any branch row with scope === 'OwnDriverDataOnly'
- *   • Any branch row with role_code === 'DRIVER'
- *   • top-level scope_type === 'OwnDriverDataOnly' (pure-ODA, all rows matched)
- *
- * This correctly handles:
- *   - Pure ODA accounts        (all branches have ODA scope)
- *   - Driver + SpecificBranch  (one branch has role_code DRIVER)
- *   - Mixed ODA + operational  (at least one ODA row present)
- *
- * Do NOT use scope_type === 'OwnDriverDataOnly' alone — that only fires
- * when every row is ODA and misses Driver+SpecificBranch.
+ * True when any exact DRIVER assignment is present. Self assignments and
+ * malformed DRIVER branch assignments both activate the UI capability ceiling.
  */
 export function isDriverUser(user: UserProfile): boolean {
-  if (user.scope_type === 'OwnDriverDataOnly') return true;
-  return user.branches.some(
-    (b) => b.scope === 'OwnDriverDataOnly' || b.role_code === 'DRIVER'
-  );
+  return user.self_assignments.some((a) => a.role_code === 'DRIVER') ||
+    user.branches.some((b) => b.role_code === 'DRIVER');
 }
 
 // ── Page-level visibility guards ──────────────────────────────────────────────
@@ -320,7 +306,7 @@ export function canViewDailyPayItems(user: UserProfile | null | undefined): bool
 
 /**
  * Company Payroll Setup policy permission: company scope only (AllCompanyBranches
- * via authority.company_permissions) and never for Driver/ODA users, including
+ * via authority.company_permissions) and never for DRIVER/Self users, including
  * mixed Driver + company-admin users — mirrors backend require_policy_permission
  * (company-wide access + _require_not_driver_role + permission at company scope).
  */
@@ -328,29 +314,29 @@ function _hasCompanyPolicyPermission(user: UserProfile, code: string): boolean {
   return !isDriverUser(user) && _hasCompanyPermission(user, code);
 }
 
-/** View Payroll Setups: company-wide payroll_setup.view, never Driver/ODA. */
+/** View Payroll Setups: company-wide payroll_setup.view, never DRIVER/Self. */
 export function canViewPayrollSetups(user: UserProfile): boolean {
   return _hasCompanyPolicyPermission(user, 'payroll_setup.view');
 }
 
-/** Manage Payroll Setups (Setup create/metadata/archive, Draft create/edit/discard): company-wide payroll_setup.manage, never Driver/ODA. */
+/** Manage Payroll Setups (Setup create/metadata/archive, Draft create/edit/discard): company-wide payroll_setup.manage, never DRIVER/Self. */
 export function canManagePayrollSetups(user: UserProfile): boolean {
   return _hasCompanyPolicyPermission(user, 'payroll_setup.manage');
 }
 
-/** Publish Payroll Setups: company-wide payroll_setup.publish, never Driver/ODA. */
+/** Publish Payroll Setups: company-wide payroll_setup.publish, never DRIVER/Self. */
 export function canPublishPayrollSetups(user: UserProfile): boolean {
   return _hasCompanyPolicyPermission(user, 'payroll_setup.publish');
 }
 
-/** Assign Payroll Setups to branches: company-wide payroll_setup.assign, never Driver/ODA. */
+/** Assign Payroll Setups to branches: company-wide payroll_setup.assign, never DRIVER/Self. */
 export function canAssignPayrollSetups(user: UserProfile): boolean {
   return _hasCompanyPolicyPermission(user, 'payroll_setup.assign');
 }
 
 /**
  * Branch read-only Payroll Schedule: exactly payroll.view for that branch (a
- * company-wide grant applies everywhere); never Driver/ODA. Deliberately NOT
+ * company-wide grant applies everywhere); never DRIVER/Self. Deliberately NOT
  * PAYROLL_READ — payroll.entry etc. must not grant schedule/history visibility.
  * Mirrors backend _branch_read_access.
  */
@@ -360,7 +346,7 @@ export function canViewBranchPayrollSchedule(user: UserProfile, branchId: number
 
 /**
  * Discovery for the Payroll Schedule page: payroll.view at company scope or on
- * at least one branch; never Driver/ODA.
+ * at least one branch; never DRIVER/Self.
  */
 export function canViewAnyBranchPayrollSchedule(user: UserProfile): boolean {
   return !isDriverUser(user) && hasAuthorityPermissionAnywhere(user.authority, 'payroll.view');

@@ -2,7 +2,7 @@
 
 Covers Week/Biweek/Month/Custom cadence and chaining, branch isolation,
 non-Cancelled chronology and Cancelled reuse, immutable Version publication
-boundaries, entry counts, and DRIVER/ODA and cross-branch access denial.
+boundaries, entry counts, and DRIVER/Self and cross-branch access denial.
 Tests use fresh setup-assigned branches; historical statuses needed for lower-
 level chronology cases are seeded without rewriting finalized history.
 """
@@ -24,7 +24,7 @@ from app.payroll_setup.payroll_policy import (
     create_setup,
     publish_version,
 )
-from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.builders.company import create_branch
 
 # ---------------------------------------------------------------------------
@@ -139,44 +139,17 @@ async def _make_driver_user_token(
     admin_token: str,
     branch_id: int,
 ) -> str:
-    """Create a user with DRIVER companyrole (ODA scope) and return its JWT."""
+    """Create a linked DRIVER/Self user through the shared Access builder."""
     uname = f"drv_{_uid()}"
-
-    # Create user
-    user = await create_neutral_test_user(
-        client, admin_token, uname, password="TestPass1234!",
+    return await create_user_with_role_token(
+        client,
+        admin_token,
+        uname,
+        await get_company_role_id(client, admin_token, "DRIVER"),
+        scope_type="Self",
+        driver_branch_id=branch_id,
+        password="TestPass1234!",
     )
-    user_id = user["user_id"]
-
-    # Get DRIVER companyrole id
-    roles_resp = await client.get("/admin/company-roles", headers=_hdr(admin_token))
-    assert roles_resp.status_code == 200
-    driver_role = next(
-        (r for r in roles_resp.json() if r["role_code"] == "DRIVER"), None
-    )
-    assert driver_role is not None, "DRIVER company role not found"
-    driver_role_id = driver_role["company_role_id"]
-
-    # Assign DRIVER role with ODA scope
-    ar = await client.post(
-        f"/admin/users/{user_id}/company-role-assignments",
-        json={
-            "company_role_id": driver_role_id,
-            "scope_type": "OwnDriverDataOnly",
-            "branch_id": branch_id,
-        },
-        headers=_hdr(admin_token),
-    )
-    assert ar.status_code == 201, f"Role assign failed: {ar.text}"
-
-    # Login
-    login = await client.post("/auth/login", json={
-        "username": uname,
-        "password": "TestPass1234!",
-        "company_code": "DEMO",
-    })
-    assert login.status_code == 200, f"Driver login failed: {login.text}"
-    return login.json()["access_token"]
 
 
 # ===========================================================================
@@ -1218,7 +1191,7 @@ class TestPeriodEntryCount:
 
 
 # ===========================================================================
-# I. Driver / ODA access denied
+# I. DRIVER/Self access denied
 # ===========================================================================
 
 class TestDriverOdaDenied:
@@ -1230,7 +1203,7 @@ class TestDriverOdaDenied:
         auth_token: str,
         test_database_url: str,
     ):
-        """DRIVER/ODA user gets 403 on current candidate preview."""
+        """DRIVER/Self user gets 403 on current candidate preview."""
         branch_id = await _fresh_candidate_branch(
             test_database_url, "Week", "2095-01-06",
         )
@@ -1251,7 +1224,7 @@ class TestDriverOdaDenied:
         auth_token: str,
         test_database_url: str,
     ):
-        """DRIVER/ODA user gets 403 on GET /payroll/periods/{id}/entry-count."""
+        """DRIVER/Self user gets 403 on GET /payroll/periods/{id}/entry-count."""
         branch_id = await _fresh_candidate_branch(
             test_database_url, "Week", "2095-02-03",
         )
@@ -1273,7 +1246,7 @@ class TestDriverOdaDenied:
         auth_token: str,
         test_database_url: str,
     ):
-        """DRIVER/ODA user gets 403 on candidate confirmation."""
+        """DRIVER/Self user gets 403 on candidate confirmation."""
         branch_id = await _fresh_candidate_branch(
             test_database_url, "Week", "2095-03-03",
         )

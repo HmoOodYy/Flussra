@@ -190,7 +190,7 @@ async def _actor(db, *, permissions: tuple[str, ...], scope: str,
         VALUES (:uid, :cid, :bid, :rid, :crid, :scope, TRUE)
     """), {
         "uid": user_id, "cid": company_id,
-        "bid": branch_id if scope in ("SpecificBranch", "OwnDriverDataOnly") else None,
+        "bid": branch_id if scope == "SpecificBranch" else None,
         "rid": role_id, "crid": company_role_id, "scope": scope,
     })
     return create_access_token(int(user_id), int(company_id))
@@ -262,20 +262,16 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
             db_conn, permissions=("branches.create", "payroll_setup.assign"),
             scope="SpecificBranch", branch_id=phase5_onboarding_db.branch_id,
         )
-        driver = await _actor(
+        driver_self = await _actor(
             db_conn, permissions=("branches.create", "payroll_setup.assign"),
-            scope="AllCompanyBranches", driver=True,
-        )
-        own_driver_data = await _actor(
-            db_conn, permissions=("branches.create", "payroll_setup.assign"),
-            scope="OwnDriverDataOnly", branch_id=phase5_onboarding_db.branch_id,
+            scope="Self", driver=True,
         )
         missing_assign = await client.post("/settings/branches", headers=_auth(create_only), json={
             "branch_name": "Phase5 denied dated " + marker[:8],
             "branch_code": "P5D" + marker[:6], "first_payroll_start_date": "2090-01-01",
         })
         assert missing_assign.status_code == 403
-        for token in (manager, assign_only, branch_scoped, driver, own_driver_data):
+        for token in (manager, assign_only, branch_scoped, driver_self):
             denied = await client.post("/settings/branches", headers=_auth(token), json={
                 "branch_name": "Phase5 denied " + uuid4().hex[:8],
                 "branch_code": "P5X" + uuid4().hex[:6],

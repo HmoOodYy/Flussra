@@ -14,11 +14,12 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import require_non_driver_subject
 from app.core.service import _check_any_permission
 from app.payroll.guards import (
     _check_driver_read_access,
     _check_not_in_finalized_period,
-    _check_own_driver_only,
+    _require_non_driver_rate_subject,
 )
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
 
@@ -233,6 +234,7 @@ async def create_driver_pay_rule(
       - If both MinimumPay and MaximumPay rules exist for the same period range,
         min <= max is checked at finalization time, not here.
     """
+    await _require_non_driver_rate_subject(company_id, user_id, db)
     drv_result = await db.execute(
         text("SELECT driverid, branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
         {"did": data.driver_id, "cid": company_id},
@@ -246,7 +248,6 @@ async def create_driver_pay_rule(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
-    await _check_own_driver_only(company_id, user_id, data.driver_id, db)
 
     # Service-level overlap check (belt-and-suspenders on top of DB EXCLUDE constraint).
     # Check for any Active or Ended rule for same driver+type whose date range overlaps.
@@ -343,7 +344,7 @@ async def get_driver_pay_rules(
     rule_type: str | None = None,
     rule_status: str | None = None,
 ) -> list[DriverPayRuleSummary]:
-    """Return all pay rules for a driver (branch-access + ODA checked)."""
+    """Return all pay rules for a driver after branch and DRIVER checks."""
     await _check_driver_read_access(driver_id, company_id, user_id, db)
 
     conditions = ["r.companyid = :cid", "r.driverid = :did"]
@@ -370,13 +371,13 @@ async def get_driver_pay_rule_by_id(
     user_id: int,
     db: AsyncConnection,
 ) -> DriverPayRuleSummary:
-    """Return a single pay rule (branch-access + ODA checked)."""
+    """Return a single pay rule after the generic DRIVER denial check."""
+    await require_non_driver_subject(company_id, user_id, db)
     rule = await _get_rule_by_id_internal(rule_id, company_id, db)
     await _check_any_permission(
         company_id, user_id, rule.branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
-    await _check_own_driver_only(company_id, user_id, rule.driver_id, db)
     return rule
 
 

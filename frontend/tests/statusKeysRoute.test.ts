@@ -39,6 +39,7 @@ function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [makeBranch()],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -107,9 +108,9 @@ test('canManageSettingsAdmin: DRIVER SpecificBranch user without company setup.m
   assert.equal(canManageSettingsAdmin(user), false);
 });
 
-test('canManageSettingsAdmin: OwnDriverDataOnly user with branch_permissions incl. setup.manage is denied', () => {
+test('canManageSettingsAdmin: DRIVER/Self user with branch_permissions incl. setup.manage is denied', () => {
   const user = makeUser({
-    branches: [makeBranch({ branch_id: 10, scope: 'OwnDriverDataOnly', role_code: 'DRIVER', role_name: 'Driver' })],
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
     authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['setup.manage'] }] }),
   });
   assert.equal(canManageSettingsAdmin(user), false);

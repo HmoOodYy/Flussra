@@ -10,12 +10,14 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import is_driver_self_subject
 from app.auth.schemas import (
     BranchAccess,
     BranchPermissions,
     LoginRequest,
     LoginResponse,
     PermissionAuthority,
+    SelfAssignment,
     UserInfo,
 )
 from app.auth.security import create_access_token, hash_password, verify_password
@@ -29,6 +31,37 @@ from app.auth.security import create_access_token, hash_password, verify_passwor
 # ---------------------------------------------------------------------------
 _DUMMY_HASH: str = hash_password("__sentinel_never_matches_any_real_password__")
 
+
+async def _load_self_assignments(
+    user_id: int, company_id: int, db: AsyncConnection
+) -> list[SelfAssignment]:
+    result = await db.execute(
+        text("""
+            SELECT DISTINCT cr.RoleCode, cr.RoleName
+            FROM sec.UserBranchRoles ubr
+            JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
+            WHERE ubr.UserID = :uid
+              AND ubr.CompanyID = :cid
+              AND ubr.IsActive
+              AND ubr.ScopeType = 'Self'
+              AND cr.RoleCode = 'DRIVER'
+            UNION
+            SELECT DISTINCT r.RoleCode, r.RoleName
+            FROM sec.UserBranchRoles ubr
+            JOIN sec.Roles r ON r.RoleID = ubr.RoleID
+            WHERE ubr.UserID = :uid
+              AND ubr.CompanyID = :cid
+              AND ubr.IsActive
+              AND ubr.ScopeType = 'Self'
+              AND r.RoleCode = 'DRIVER'
+            ORDER BY RoleCode
+        """),
+        {"uid": user_id, "cid": company_id},
+    )
+    return [
+        SelfAssignment(role_code=row["rolecode"], role_name=row["rolename"])
+        for row in result.mappings().all()
+    ]
 
 async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
     """
@@ -188,21 +221,15 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
         for b in branches_result.mappings().all()
     ]
 
-    # Fix 4 — completeness gate: role exists but view produces no accessible branches.
-    # (Normally impossible in production, but guards against edge cases like a branch
-    # being hard-deleted or a migration inconsistency.)
-    if not branches:
+    self_assignments = await _load_self_assignments(user_id, company_id, db)
+    if not branches and not self_assignments:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "no_active_access",
-                "message": (
-                    "Your account has an active role assignment but no accessible branches. "
-                    "Contact your company administrator."
-                ),
+                "message": "Your account has no accessible branch or Self authority.",
             },
         )
-
     # ------------------------------------------------------------------
     # 4b. Load active permissions (UNION of new + legacy paths)
     # ------------------------------------------------------------------
@@ -231,6 +258,7 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
             company_id=company_id,
             company_name=row["companyname"],
             branches=branches,
+            self_assignments=self_assignments,
             active_permissions=active_permissions,
             authority=authority,
         ),
@@ -252,6 +280,9 @@ async def _load_active_permissions(
     sec.Permissions dynamically — this ensures new permissions added to the
     catalogue are automatically available without re-seeding CompanyRolePermissions.
     """
+    if await is_driver_self_subject(company_id, user_id, db):
+        return []
+
     # Check if user has an active COMPANY_OWNER company role assignment
     owner_r = await db.execute(
         text("""
@@ -262,6 +293,8 @@ async def _load_active_permissions(
               AND  ubr.companyid = :cid
               AND  ubr.isactive  = TRUE
               AND  cr.rolecode   = 'COMPANY_OWNER'
+              AND  ubr.scopetype = 'AllCompanyBranches'
+              AND  ubr.branchid IS NULL
         """),
         {"uid": user_id, "cid": company_id},
     )
@@ -329,7 +362,7 @@ async def _load_permission_authority(
         AllCompanyBranches assignment; each catalogue code is tested with
         branch_id=NULL.
       - branch_permissions: one entry per distinct concrete branch backing
-        an active SpecificBranch/OwnDriverDataOnly assignment (tenant-scoped
+        an active SpecificBranch assignment (tenant-scoped
         via the companyid join to core.branches); each catalogue code is
         tested with that branch's id.
     """
@@ -341,6 +374,7 @@ async def _load_permission_authority(
               AND  companyid = :cid
               AND  isactive  = TRUE
               AND  scopetype = 'AllCompanyBranches'
+              AND  branchid IS NULL
             LIMIT 1
         """),
         {"uid": user_id, "cid": company_id},
@@ -366,7 +400,7 @@ async def _load_permission_authority(
             WHERE  ubr.userid    = :uid
               AND  ubr.companyid = :cid
               AND  ubr.isactive  = TRUE
-              AND  ubr.scopetype IN ('SpecificBranch', 'OwnDriverDataOnly')
+              AND  ubr.scopetype = 'SpecificBranch'
               AND  ubr.branchid IS NOT NULL
             ORDER BY ubr.branchid
         """),
@@ -457,19 +491,15 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
         for b in branches_result.mappings().all()
     ]
 
-    # Fix 6: Consistent with login — if access view returns no rows, deny.
-    if not branches:
+    self_assignments = await _load_self_assignments(user_id, company_id, db)
+    if not branches and not self_assignments:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "no_active_access",
-                "message": (
-                    "Your account has no accessible branches. "
-                    "Contact your company administrator."
-                ),
+                "message": "Your account has no accessible branch or Self authority.",
             },
         )
-
     active_permissions = await _load_active_permissions(user_id, company_id, db)
     authority = await _load_permission_authority(user_id, company_id, db)
 
@@ -480,6 +510,7 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
         company_id=row["companyid"],
         company_name=row["companyname"],
         branches=branches,
+        self_assignments=self_assignments,
         active_permissions=active_permissions,
         authority=authority,
     )

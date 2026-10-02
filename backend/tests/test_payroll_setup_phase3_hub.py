@@ -84,7 +84,6 @@ async def test_readiness_uses_assignment_and_latest_non_cancelled_period_date(
         return True
 
     monkeypatch.setattr(current_hub, "_require_not_driver_role", not_driver)
-    monkeypatch.setattr(current_hub, "_get_oda_own_driver_id", not_driver)
     monkeypatch.setattr(current_hub, "_check_branch_access", company_access)
     monkeypatch.setattr(current_hub, "_has_any_permission", has_permission)
 

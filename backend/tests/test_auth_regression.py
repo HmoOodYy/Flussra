@@ -97,10 +97,10 @@ class TestSchemaMigrationCompleteness:
         )
         assert pg_cur.fetchone(), f"Missing trigger: {trigger_name}"
 
-    def test_fn_userhaspermission_has_4_paths(self, pg_cur):
+    def test_fn_userhaspermission_v4_has_self_ceiling_and_scoped_overrides(self, pg_cur):
         """
-        Smoke-check that the installed fn_UserHasPermission is v3 (4-path version)
-        by verifying it references sec.userpermissionoverrides in its body.
+        Check the P2b evaluator keeps the override path while failing generic
+        evaluation closed for Self subjects and invalid login principals.
         """
         pg_cur.execute(
             "SELECT prosrc FROM pg_proc "
@@ -115,7 +115,13 @@ class TestSchemaMigrationCompleteness:
         )
         assert "company_owner" in body, (
             "fn_UserHasPermission body does not have COMPANY_OWNER path — "
-            "migration 0021 may not have been applied"
+            "the valid company-wide Owner path may be missing"
+        )
+        assert "scopeType".lower() in body and "self" in body, (
+            "fn_UserHasPermission body does not fail closed for Self subjects"
+        )
+        assert "canlogin" in body and "isstaged" in body, (
+            "fn_UserHasPermission body does not validate current login state"
         )
 
     def test_alembic_version_table_exists(self, pg_cur):
@@ -371,16 +377,15 @@ async def test_user_permission_overrides_appear_in_login(client, apply_schema):
         ON CONFLICT (companyid, username) DO NOTHING
     """, (pw,))
 
-    # Assign DRIVER role (minimal perms: drivers.view only)
+    # Use a non-DRIVER company-wide role so its override remains generic access.
     cur.execute("""
         INSERT INTO sec.userbranchroles
             (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-        SELECT u.userid, u.companyid, b.branchid, NULL,
-               cr.companyroleid, 'SpecificBranch', TRUE
+        SELECT u.userid, u.companyid, NULL, NULL,
+               cr.companyroleid, 'AllCompanyBranches', TRUE
         FROM sec.users u
         JOIN core.companies c ON c.companyid = u.companyid
-        JOIN core.branches b ON b.companyid = c.companyid AND b.branchcode = 'HQ'
-        JOIN sec.companyroles cr ON cr.companyid = c.companyid AND cr.rolecode = 'DRIVER'
+        JOIN sec.companyroles cr ON cr.companyid = c.companyid AND cr.rolecode = 'PAYROLL_VIEWER_CO'
         WHERE u.username = 'override_perm_user'
         ON CONFLICT DO NOTHING
     """)
@@ -388,7 +393,7 @@ async def test_user_permission_overrides_appear_in_login(client, apply_schema):
     # Add an extra override permission
     cur.execute("""
         INSERT INTO sec.userpermissionoverrides (userid, companyid, permissioncode, effect, isactive)
-        SELECT u.userid, u.companyid, 'payroll.view', 'ALLOW', TRUE
+        SELECT u.userid, u.companyid, 'drivers.view', 'ALLOW', TRUE
         FROM sec.users u WHERE u.username = 'override_perm_user'
         ON CONFLICT DO NOTHING
     """)
@@ -399,7 +404,7 @@ async def test_user_permission_overrides_appear_in_login(client, apply_schema):
     r = await _login(client, username="override_perm_user")
     assert r.status_code == 200, f"override_perm_user login failed: {r.text}"
     perms = r.json()["user"]["active_permissions"]
-    assert "payroll.view" in perms, (
-        f"UserPermissionOverride 'payroll.view' not in active_permissions: {perms}. "
+    assert "drivers.view" in perms, (
+        f"UserPermissionOverride 'drivers.view' not in active_permissions: {perms}. "
         f"Check _load_active_permissions UNION path in auth/service.py."
     )

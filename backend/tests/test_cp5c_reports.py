@@ -23,6 +23,7 @@ from app.payroll.service import (
     finalize_period,
 )
 from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 
 _SECURITY_COUNTER = itertools.count(1)
 _REPORT_PATHS = ("drivers", "period-work", "period-pay", "mixed")
@@ -366,18 +367,13 @@ async def _reports_role_token(
 async def _driver_role_token(
     client: httpx.AsyncClient, admin_token: str, branch_id: int, scope: str,
 ) -> str:
-    roles = await client.get("/admin/company-roles", headers=_auth(admin_token))
-    assert roles.status_code == 200, roles.text
-    driver_role_id = next(role["company_role_id"] for role in roles.json() if role["role_code"] == "DRIVER")
     suffix = next(_SECURITY_COUNTER)
     username = f"cp5c_driver_{suffix:04d}"
-    user = await _create_user(client, admin_token, username)
-    assignment = await client.post(
-        f"/admin/users/{user['user_id']}/company-role-assignments",
-        json={"company_role_id": driver_role_id, "scope_type": scope, "branch_id": branch_id}, headers=_auth(admin_token),
+    return await create_user_with_role_token(
+        client, admin_token, username,
+        await get_company_role_id(client, admin_token, "DRIVER"),
+        scope_type="Self", driver_branch_id=branch_id,
     )
-    assert assignment.status_code == 201, assignment.text
-    return await _login(client, username)
 
 
 def _period(status: str) -> dict:
@@ -575,7 +571,7 @@ async def test_driver_and_oda_roles_are_denied_at_report_routes(
     session_client, auth_token, paytest_branch_id, direct_db,
 ):
     period_id = await _insert_http_period(direct_db, paytest_branch_id, "Draft")
-    for scope in ("SpecificBranch", "OwnDriverDataOnly"):
+    for scope in ("Self",):
         token = await _driver_role_token(session_client, auth_token, paytest_branch_id, scope)
         response = await _report(session_client, token, period_id, "drivers")
         assert response.status_code == 403, response.text

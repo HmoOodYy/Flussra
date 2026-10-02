@@ -187,13 +187,13 @@ async def _approved_snapshot(db, packet: _LiveCalculationPacket | None = None) -
 def no_access_checks(monkeypatch):
     async def allowed(*_args, **_kwargs):
         return None
-    # Stage B4-19: _check_permission and _get_oda_own_driver_id are called
+    # P2b: finalization uses the generic DRIVER/Self denial and permission gates.
     # by finalize_period / get_finalization_preview, which now live in
     # app.payroll.finalization and resolve both as bare names through that
     # module's own globals — patching app.payroll.service no longer
     # intercepts them.
     monkeypatch.setattr(payroll_finalization, "_check_permission", allowed)
-    monkeypatch.setattr(payroll_finalization, "_get_oda_own_driver_id", allowed)
+    monkeypatch.setattr(payroll_finalization, "_require_not_driver_role", allowed)
 
 
 @pytest.mark.asyncio

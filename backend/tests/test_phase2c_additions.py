@@ -8,11 +8,13 @@ Covers:
   TestPayRulesSecurity     — pay rules now use payrates.view/edit
 """
 from datetime import date
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.workforce import create_driver_employee_record
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,19 +51,30 @@ async def _make_driver(
     branch_id: int,
     name_suffix: str = "",
 ) -> int:
-    import random
-    suffix = name_suffix or str(random.randint(1000, 9999))
-    resp = await client.post(
-        "/core/drivers",
-        json={
-            "branch_id": branch_id,
-            "full_name": f"Phase2C Driver {suffix}",
-            "driver_code": f"P2C-{suffix}",
-        },
+    suffix = name_suffix or uuid4().hex[:8]
+    record = await create_driver_employee_record(
+        client, token, branch_id=branch_id,
+        full_name=f"Phase2C Driver {suffix}",
+        driver_code=f"P2C-{suffix}-{uuid4().hex[:8]}",
+    )
+    return int(record["current_or_pending_driver"]["driver_id"])
+
+
+async def _link_driver_profile(
+    client: httpx.AsyncClient, token: str, user_id: int, branch_id: int, label: str,
+) -> int:
+    record = await create_driver_employee_record(
+        client, token, branch_id=branch_id,
+        full_name=f"Phase2C {label}",
+        driver_code=f"P2C-{uuid4().hex[:12]}",
+    )
+    response = await client.put(
+        f"/admin/users/{user_id}/employee-link",
+        json={"employee_id": record["employee_id"]},
         headers=auth(token),
     )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["driver_id"]
+    assert response.status_code == 200, response.text
+    return int(record["current_or_pending_driver"]["driver_id"])
 
 
 # ===========================================================================
@@ -70,8 +83,8 @@ async def _make_driver(
 
 class TestDriverBranchImmutability:
     """
-    Reassigning a DRIVER role cannot mutate the existing Driver profile's
-    immutable branch. Branch movement requires Driver Transfer.
+    DRIVER uses a Workforce-owned Self identity; legacy branch-scoped
+    assignments cannot mutate the linked Driver profile.
     """
 
     @pytest.mark.asyncio
@@ -82,9 +95,9 @@ class TestDriverBranchImmutability:
         paytest_branch_id: int,
     ):
         """
-        1. Create user + assign DRIVER role on branch 1 (HQ).
-        2. Verify driver profile → branch 1.
-        3. Attempt role reassignment to PAYTEST and require 422.
+        1. Create user and Workforce profile on branch 1 (HQ).
+        2. Link the Employee and assign DRIVER with Self scope.
+        3. Attempt a legacy branch-scoped assignment and require 422.
         4. Verify the existing DriverID and HQ branch remain unchanged.
         """
         import random
@@ -97,11 +110,13 @@ class TestDriverBranchImmutability:
 
         hq_branch_id = 1
 
-        # Assign to HQ
+        # Link a test-owned Workforce profile, then assign the valid DRIVER/Self role.
+        original_driver_id = await _link_driver_profile(
+            session_client, auth_token, user_id, hq_branch_id, "Branch Sync Test",
+        )
         r1 = await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
-            json={"company_role_id": driver_role_id,
-                  "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
+            json={"company_role_id": driver_role_id, "scope_type": "Self"},
             headers=auth(auth_token),
         )
         assert r1.status_code == 201, r1.text
@@ -111,10 +126,10 @@ class TestDriverBranchImmutability:
         assert info1.status_code == 200
         data1 = info1.json()
         assert data1["has_driver_profile"] is True
-        original_driver_id = data1["driver_id"]
+        assert data1["driver_id"] == original_driver_id
         assert data1["branch_id"] == hq_branch_id
 
-        # Reassign to PAYTEST branch
+        # Attempt the retired branch-scoped assignment shape.
         r2 = await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
             json={"company_role_id": driver_role_id,
@@ -122,7 +137,7 @@ class TestDriverBranchImmutability:
             headers=auth(auth_token),
         )
         assert r2.status_code == 422, r2.text
-        assert "transfer" in r2.text.lower()
+        assert "self scope" in r2.text.lower()
 
         # Verify the rejected role reassignment left the profile unchanged.
         info2 = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
@@ -197,16 +212,18 @@ class TestDriverBranchImmutability:
 
         hq_branch_id = 1
 
+        driver_id = await _link_driver_profile(
+            session_client, auth_token, user_id, hq_branch_id, "Matrix Branch Sync",
+        )
         initial_assignment = await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
-            json={"company_role_id": driver_role_id,
-                  "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
+            json={"company_role_id": driver_role_id, "scope_type": "Self"},
             headers=auth(auth_token),
         )
         assert initial_assignment.status_code == 201, initial_assignment.text
         info = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
         assert info.status_code == 200
-        driver_id = info.json()["driver_id"]
+        assert info.json()["driver_id"] == driver_id
         assert info.json()["branch_id"] == hq_branch_id
 
         # Reassignment is rejected and does not move the Driver profile.
@@ -217,7 +234,7 @@ class TestDriverBranchImmutability:
             headers=auth(auth_token),
         )
         assert reassignment.status_code == 422, reassignment.text
-        assert "transfer" in reassignment.text.lower()
+        assert "self scope" in reassignment.text.lower()
 
         info_after = await session_client.get(
             f"/admin/users/{user_id}/driver", headers=auth(auth_token)
@@ -483,7 +500,7 @@ class TestPayRulesSecurity:
     """
     Pay Rules now use payrates.view for reads and payrates.edit for writes
     (previously payroll.entry / setup.manage).
-    ODA scope check is also applied.
+    DRIVER/Self denial is also applied.
     """
 
     @pytest.mark.asyncio

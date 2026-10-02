@@ -17,7 +17,7 @@ Covered:
 - Final lines endpoint returns PayrollFinalLines data (final_line_id, final_amount)
 - Bonus (BONUS line_scope=Period) appears in final lines
 - SYS_MIN_TOPUP appears in final lines when minimum pay rule triggered
-- ODA/Driver users are blocked with 403 from final-lines endpoint
+- DRIVER/Self users are blocked with 403 from final-lines endpoint
 - Branch-scoped user cannot see another branch's final lines
 - AllCompanyBranches user can see finalized period in scope
 - Empty final lines for a non-finalized (Approved) period
@@ -34,6 +34,7 @@ from sqlalchemy import text as _sqla_text
 from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -648,17 +649,17 @@ class TestFinalLines:
 
 
 # ---------------------------------------------------------------------------
-# 3. Security — ODA / Driver block
+# 3. Security — DRIVER/Self block
 # ---------------------------------------------------------------------------
 
-class TestFinalLinesODABlock:
+class TestFinalLinesDriverSelfBlock:
     """
-    Driver-role (ODA) users must be blocked from GET /payroll/periods/{id}/final-lines
+    DRIVER/Self users must be blocked from GET /payroll/periods/{id}/final-lines
     with HTTP 403.  They must not receive any finalized payroll data.
     """
 
     @pytest.mark.asyncio
-    async def test_oda_user_blocked_from_final_lines(
+    async def test_driver_self_user_blocked_from_final_lines(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -666,18 +667,12 @@ class TestFinalLinesODABlock:
         paytest_branch_id: int,
         paytest_driver_id: int,
     ):
-        """ODA user gets 403 on GET final-lines."""
-        # Create a role with payroll.view + oda scope (OwnDriverDataOnly)
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "LGR_ODARole_2087",
-            ["payroll.view"],
-        )
+        """DRIVER/Self user gets 403 on GET final-lines."""
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
-            "lgr_oda_user_2087", role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            "lgr_oda_user_2087", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
         pid = locked_period_data["period_id"]
         resp = await session_client.get(
@@ -695,16 +690,11 @@ class TestFinalLinesODABlock:
         paytest_branch_id: int,
     ):
         """Driver-role user with no payroll permissions gets 403 on final-lines."""
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "LGR_DriverRole_2087",
-            [],  # no payroll permissions
-        )
         driver_token = await create_user_with_role_token(
             session_client, auth_token,
-            "lgr_driver_user_2087", role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            "lgr_driver_user_2087", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
         pid = locked_period_data["period_id"]
         resp = await session_client.get(

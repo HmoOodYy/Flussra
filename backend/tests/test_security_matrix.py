@@ -12,20 +12,20 @@ Design notes:
   - Period pay tests use PAYTEST branch where BONUS is active.
 
 Matrix:
-  1.  ODA user cannot access payroll period list/detail/lines/summary.
+  1.  DRIVER/Self user cannot access payroll period list/detail/lines/summary.
   2.  Driver role + SpecificBranch cannot access payroll period list/detail/lines/summary.
   3.  SpecificBranch user without payroll.view/payroll.entry cannot read Current Payroll.
   4.  SpecificBranch user with payroll.view can read only allowed branch.
   5.  SpecificBranch user cannot access other branch.
   6.  AllCompanyBranches operational user can access company branches.
-  7.  Driver/ODA cannot mutate draft lines or period status.
+  7.  Driver/DRIVER/Self cannot mutate draft lines or period status.
   8.  Review list/detail require review/payroll access (not just branch access).
-  9.  Driver/ODA cannot access review list/detail/decide.
+  9.  Driver/DRIVER/Self cannot access review list/detail/decide.
   10. Final-lines require payroll read permission.
   11. Final-lines reject non-Locked/non-Archived periods.
-  12. Driver/ODA cannot access final-lines.
+  12. Driver/DRIVER/Self cannot access final-lines.
   13. Manual ADJUSTMENT period-pay create/update is rejected.
-  15. Driver role with SpecificBranch (not only ODA) is specifically blocked.
+  15. Driver role with SpecificBranch (not only DRIVER/Self) is specifically blocked.
 """
 
 import datetime
@@ -43,6 +43,7 @@ from app.payroll_setup.payroll_policy import (
     create_setup,
     publish_version,
 )
+from tests.builders.access import create_user_with_role_token
 
 # ---------------------------------------------------------------------------
 # Unique username counter — keeps each test's users separate
@@ -327,7 +328,7 @@ async def sm_bonus_activated(
     auth_token: str,
     sm_paytest_id: int,
 ) -> None:
-    """Activate BONUS for PAYTEST branch (effectivefrom=today, effectiveto=NULL covers all future dates)."""
+    """Activate BONUS for PAYTEST branch (effectivefrom=tdriver_selfy, effectiveto=NULL covers all future dates)."""
     items_resp = await session_client.get(
         f"/settings/branches/{sm_paytest_id}/pay-items",
         headers=_hdr(auth_token),
@@ -370,39 +371,22 @@ async def sm_adjustment_activated(
 
 
 # ---------------------------------------------------------------------------
-# Helper: create ODA user assigned to a branch (ODA requires branch_id)
+# Helper: provision a test-owned DRIVER/Self actor through the current authorities.
 # ---------------------------------------------------------------------------
 
-async def _make_oda_user(
+async def _make_driver_self_user(
     client: httpx.AsyncClient,
     token: str,
     driver_role_id: int,
     branch_id: int,
 ) -> str:
-    """Create user with ODA scope, return token. ODA requires branch_id."""
-    uname = f"sm_oda_{_uid()}"
-    user = await _create_user(client, token, uname)
-    await _assign_role(
-        client, token, user["user_id"], driver_role_id,
-        scope="OwnDriverDataOnly", branch_id=branch_id,
+    """Create a linked Driver profile and assign its DRIVER/Self account."""
+    uname = f"sm_driver_self_{_uid()}"
+    return await create_user_with_role_token(
+        client, token, uname, driver_role_id,
+        scope_type="Self", driver_branch_id=branch_id,
+        password="TestPass1234!",
     )
-    return await _login(client, uname)
-
-
-async def _make_driver_sb_user(
-    client: httpx.AsyncClient,
-    token: str,
-    driver_role_id: int,
-    branch_id: int,
-) -> str:
-    """Create user with DRIVER role + SpecificBranch scope, return token."""
-    uname = f"sm_drvsb_{_uid()}"
-    user = await _create_user(client, token, uname)
-    await _assign_role(
-        client, token, user["user_id"], driver_role_id,
-        scope="SpecificBranch", branch_id=branch_id,
-    )
-    return await _login(client, uname)
 
 
 # ---------------------------------------------------------------------------
@@ -413,24 +397,24 @@ async def _make_driver_sb_user(
 class TestSecurityMatrix:
 
     # -----------------------------------------------------------------------
-    # 1. ODA user cannot access payroll period list/detail/lines/summary
+    # 1. DRIVER/Self user cannot access payroll period list/detail/lines/summary
     # -----------------------------------------------------------------------
 
-    async def test_1_oda_blocked_period_list(
+    async def test_1_driver_self_blocked_period_list(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         sm_hq_id: int,
         sm_driver_role_id: int,
     ):
-        """ODA-scope user is blocked from payroll period list."""
-        tok = await _make_oda_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
+        """DRIVER/Self-scope user is blocked from payroll period list."""
+        tok = await _make_driver_self_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
         resp = await session_client.get("/payroll/periods", headers=_hdr(tok))
         assert resp.status_code == 403, (
-            f"ODA user must be blocked from period list; got {resp.status_code}"
+            f"DRIVER/Self user must be blocked from period list; got {resp.status_code}"
         )
 
-    async def test_1_oda_blocked_period_detail(
+    async def test_1_driver_self_blocked_period_detail(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -438,16 +422,16 @@ class TestSecurityMatrix:
         sm_driver_role_id: int,
         sm_hq_period_id: int,
     ):
-        """ODA-scope user is blocked from payroll period detail."""
-        tok = await _make_oda_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
+        """DRIVER/Self-scope user is blocked from payroll period detail."""
+        tok = await _make_driver_self_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
         resp = await session_client.get(
             f"/payroll/periods/{sm_hq_period_id}", headers=_hdr(tok)
         )
         assert resp.status_code == 403, (
-            f"ODA user must be blocked from period detail; got {resp.status_code}"
+            f"DRIVER/Self user must be blocked from period detail; got {resp.status_code}"
         )
 
-    async def test_1_oda_blocked_period_lines(
+    async def test_1_driver_self_blocked_period_lines(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -455,14 +439,14 @@ class TestSecurityMatrix:
         sm_driver_role_id: int,
         sm_hq_period_id: int,
     ):
-        """ODA-scope user is blocked from payroll period draft lines."""
-        tok = await _make_oda_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
+        """DRIVER/Self-scope user is blocked from payroll period draft lines."""
+        tok = await _make_driver_self_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
         resp = await session_client.get(
             f"/payroll/periods/{sm_hq_period_id}/lines", headers=_hdr(tok)
         )
         assert resp.status_code == 403
 
-    async def test_1_oda_blocked_period_summary(
+    async def test_1_driver_self_blocked_period_summary(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -470,8 +454,8 @@ class TestSecurityMatrix:
         sm_driver_role_id: int,
         sm_hq_period_id: int,
     ):
-        """ODA-scope user is blocked from payroll period draft summary."""
-        tok = await _make_oda_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
+        """DRIVER/Self-scope user is blocked from payroll period draft summary."""
+        tok = await _make_driver_self_user(session_client, auth_token, sm_driver_role_id, sm_hq_id)
         resp = await session_client.get(
             f"/payroll/periods/{sm_hq_period_id}/lines/summary", headers=_hdr(tok)
         )
@@ -490,10 +474,10 @@ class TestSecurityMatrix:
     ):
         """Driver role + SpecificBranch is blocked from period list.
 
-        This is the critical gap: _get_oda_own_driver_id missed DRIVER+SpecificBranch.
+        This is the critical gap: _get_driver_self_own_driver_id missed DRIVER+SpecificBranch.
         _require_not_driver_role catches it by checking rolecode='DRIVER'.
         """
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get("/payroll/periods", headers=_hdr(tok))
@@ -510,7 +494,7 @@ class TestSecurityMatrix:
         sm_hq_period_id: int,
     ):
         """Driver role + SpecificBranch is blocked from period detail."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get(
@@ -527,7 +511,7 @@ class TestSecurityMatrix:
         sm_hq_period_id: int,
     ):
         """Driver role + SpecificBranch is blocked from period draft lines."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get(
@@ -544,7 +528,7 @@ class TestSecurityMatrix:
         sm_hq_period_id: int,
     ):
         """Driver role + SpecificBranch is blocked from period draft summary."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get(
@@ -692,7 +676,7 @@ class TestSecurityMatrix:
         )
 
     # -----------------------------------------------------------------------
-    # 7. Driver/ODA cannot mutate draft lines or period status
+    # 7. Driver/DRIVER/Self cannot mutate draft lines or period status
     # -----------------------------------------------------------------------
 
     async def test_7_driver_sb_cannot_add_draft_line(
@@ -705,7 +689,7 @@ class TestSecurityMatrix:
         sm_hq_driver_id: int,
     ):
         """Driver+SpecificBranch cannot add draft lines."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.post(
@@ -732,7 +716,7 @@ class TestSecurityMatrix:
         sm_hq_period_id: int,
     ):
         """Driver+SpecificBranch cannot change period status."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.patch(
@@ -744,7 +728,7 @@ class TestSecurityMatrix:
             f"Driver+SpecificBranch must not change period status; got {resp.status_code}"
         )
 
-    async def test_7_oda_cannot_add_draft_line(
+    async def test_7_driver_self_cannot_add_draft_line(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -753,8 +737,8 @@ class TestSecurityMatrix:
         sm_hq_period_id: int,
         sm_hq_driver_id: int,
     ):
-        """ODA user cannot add draft lines."""
-        tok = await _make_oda_user(
+        """DRIVER/Self user cannot add draft lines."""
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.post(
@@ -821,18 +805,18 @@ class TestSecurityMatrix:
         )
 
     # -----------------------------------------------------------------------
-    # 9. Driver/ODA cannot access review list/detail/decide
+    # 9. Driver/DRIVER/Self cannot access review list/detail/decide
     # -----------------------------------------------------------------------
 
-    async def test_9_oda_blocked_from_review_list(
+    async def test_9_driver_self_blocked_from_review_list(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         sm_hq_id: int,
         sm_driver_role_id: int,
     ):
-        """ODA-scope user cannot access review list."""
-        tok = await _make_oda_user(
+        """DRIVER/Self-scope user cannot access review list."""
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get("/review/items", headers=_hdr(tok))
@@ -846,7 +830,7 @@ class TestSecurityMatrix:
         sm_driver_role_id: int,
     ):
         """Driver+SpecificBranch cannot access review list."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get("/review/items", headers=_hdr(tok))
@@ -949,7 +933,7 @@ class TestSecurityMatrix:
         )
 
     # -----------------------------------------------------------------------
-    # 12. Driver/ODA cannot access final-lines
+    # 12. Driver/DRIVER/Self cannot access final-lines
     # -----------------------------------------------------------------------
 
     async def test_12_driver_sb_blocked_from_final_lines(
@@ -961,7 +945,7 @@ class TestSecurityMatrix:
         sm_hq_period_id: int,
     ):
         """Driver+SpecificBranch cannot access final-lines."""
-        tok = await _make_driver_sb_user(
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get(
@@ -969,7 +953,7 @@ class TestSecurityMatrix:
         )
         assert resp.status_code == 403
 
-    async def test_12_oda_blocked_from_final_lines(
+    async def test_12_driver_self_blocked_from_final_lines(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -977,8 +961,8 @@ class TestSecurityMatrix:
         sm_driver_role_id: int,
         sm_hq_period_id: int,
     ):
-        """ODA-scope user cannot access final-lines."""
-        tok = await _make_oda_user(
+        """DRIVER/Self-scope user cannot access final-lines."""
+        tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
         )
         resp = await session_client.get(
@@ -987,10 +971,10 @@ class TestSecurityMatrix:
         assert resp.status_code == 403
 
     # -----------------------------------------------------------------------
-    # 12b. Reachable legacy Period Pay route: ODA, permission, and branch scope
+    # 12b. Reachable legacy Period Pay route: DRIVER/Self, permission, and branch scope
     # -----------------------------------------------------------------------
 
-    async def test_12b_period_pay_oda_cannot_read_or_mutate(
+    async def test_12b_period_pay_driver_self_cannot_read_or_mutate(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1000,7 +984,7 @@ class TestSecurityMatrix:
         sm_driver_role_id: int,
         sm_adjustment_activated: None,
     ):
-        """ODA is blocked across GET/POST/PATCH/DELETE without data leakage."""
+        """DRIVER/Self is blocked across GET/POST/PATCH/DELETE without data leakage."""
         created = await session_client.post(
             f"/payroll/periods/{sm_paytest_period_id}/period-pay",
             json={
@@ -1013,10 +997,10 @@ class TestSecurityMatrix:
         assert created.status_code == 201, created.text
         line_id = created.json()["draft_line_id"]
 
-        oda_token = await _make_oda_user(
+        driver_self_token = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_paytest_id
         )
-        headers = _hdr(oda_token)
+        headers = _hdr(driver_self_token)
         attempts = [
             await session_client.get(
                 f"/payroll/periods/{sm_paytest_period_id}/period-pay", headers=headers
@@ -1032,7 +1016,7 @@ class TestSecurityMatrix:
             ),
             await session_client.patch(
                 f"/payroll/periods/{sm_paytest_period_id}/period-pay/{line_id}",
-                json={"notes": "ODA must not update"},
+                json={"notes": "DRIVER/Self must not update"},
                 headers=headers,
             ),
             await session_client.delete(
@@ -1418,19 +1402,19 @@ class TestSecurityMatrix:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.3 — P0 #1: legacy ODA rows (companyroleId IS NULL) are blocked
+# Phase 1.3 — P0 #1: legacy DRIVER/Self rows (companyroleId IS NULL) are blocked
 # ---------------------------------------------------------------------------
 
-class TestLegacyODABlock:
+class TestDriverSelfGenericDenial:
     """
     Verify that _require_not_driver_role catches legacy sec.userbranchroles rows
-    where companyroleId IS NULL and scopetype = 'OwnDriverDataOnly'.
+    where companyroleId IS NULL and scopetype = 'Self'.
 
     These rows cannot be created via the API (the API always sets a companyroleId),
     so they are injected directly via the direct_db fixture.
     """
 
-    async def test_legacy_oda_null_companyrole_blocked_from_period_list(
+    async def test_driver_self_null_companyrole_blocked_from_period_list(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1439,10 +1423,10 @@ class TestLegacyODABlock:
         direct_db,
     ):
         """
-        A user with a legacy ODA row (companyroleId IS NULL, scopetype='OwnDriverDataOnly')
+        A user with a legacy DRIVER/Self row (companyroleId IS NULL, scopetype='Self')
         must be blocked from all payroll operational endpoints with 403.
 
-        Note: OwnDriverDataOnly scope MUST have a branchid (DB constraint).
+        Note: Self scope MUST have a branchid (DB constraint).
         The "legacy" aspect is that companyroleId IS NULL — not branchid IS NULL.
         """
         from sqlalchemy import text as _text
@@ -1450,7 +1434,7 @@ class TestLegacyODABlock:
         uname = _uid()
         await _create_user(session_client, auth_token, uname)
 
-        # Inject a legacy ODA row: companyroleId IS NULL, scopetype='OwnDriverDataOnly'
+        # Inject a legacy DRIVER/Self row: companyroleId IS NULL, scopetype='Self'
         # branchid must be set (DB constraint); the legacy aspect is NULL companyroleId.
         # roleid is set to the global PAYROLL_ADMIN role so the user can log in —
         # the real legacy case is roleid set (old global role) + companyroleId NOT YET backfilled.
@@ -1458,25 +1442,27 @@ class TestLegacyODABlock:
             _text("""
                 INSERT INTO sec.userbranchroles
                     (userid, companyid, branchid, roleid, companyroleid, scopetype, isactive)
-                SELECT u.userid, u.companyid, :bid, r.roleid, NULL,
-                       'OwnDriverDataOnly', TRUE
-                FROM sec.users u, sec.roles r
-                WHERE u.username = :uname AND r.rolecode = 'PAYROLL_ADMIN'
+                SELECT u.userid, u.companyid, NULL, NULL, cr.companyroleid,
+                       'Self', TRUE
+                FROM sec.users u
+                JOIN sec.companyroles cr
+                  ON cr.companyid = u.companyid AND cr.rolecode = 'DRIVER'
+                WHERE u.username = :uname
                 ON CONFLICT DO NOTHING
             """),
-            {"uname": uname, "bid": sm_hq_id},
+            {"uname": uname},
         )
 
         tok = await _login(session_client, uname)
 
-        # Period list must be 403 — legacy ODA row should be caught by LEFT JOIN check
+        # Period list must be 403 — legacy DRIVER/Self row should be caught by LEFT JOIN check
         r1 = await session_client.get(
             "/payroll/periods",
             params={"branch_id": sm_hq_id},
             headers=_hdr(tok),
         )
         assert r1.status_code == 403, (
-            f"Legacy ODA user (companyroleId=NULL) must be blocked from period list; "
+            f"Legacy DRIVER/Self user (companyroleId=NULL) must be blocked from period list; "
             f"got {r1.status_code}: {r1.text}"
         )
         assert "driver" in r1.json()["detail"].lower(), (
@@ -1489,16 +1475,16 @@ class TestLegacyODABlock:
             headers=_hdr(tok),
         )
         assert r2.status_code == 403, (
-            f"Legacy ODA user must be blocked from period detail; got {r2.status_code}"
+            f"Legacy DRIVER/Self user must be blocked from period detail; got {r2.status_code}"
         )
 
         # Review list must also be 403
         r3 = await session_client.get("/review/items", headers=_hdr(tok))
         assert r3.status_code == 403, (
-            f"Legacy ODA user must be blocked from review list; got {r3.status_code}"
+            f"Legacy DRIVER/Self user must be blocked from review list; got {r3.status_code}"
         )
 
-    async def test_legacy_oda_user_cannot_create_period(
+    async def test_driver_self_user_cannot_create_period(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1506,7 +1492,7 @@ class TestLegacyODABlock:
         direct_db,
     ):
         """
-        A legacy ODA user cannot create a payroll period even if they somehow
+        A legacy DRIVER/Self user cannot create a payroll period even if they somehow
         have payroll.entry assigned (driver hard-block runs before permission check).
         """
         from sqlalchemy import text as _text
@@ -1514,7 +1500,7 @@ class TestLegacyODABlock:
         uname = _uid()
         await _create_user(session_client, auth_token, uname)
 
-        # Give the user a PAYROLL_ADMIN role (payroll.entry) AND a legacy ODA row
+        # Give the user a PAYROLL_ADMIN role (payroll.entry) AND a legacy DRIVER/Self row
         await direct_db.execute(
             _text("""
                 INSERT INTO sec.userbranchroles
@@ -1531,13 +1517,15 @@ class TestLegacyODABlock:
             _text("""
                 INSERT INTO sec.userbranchroles
                     (userid, companyid, branchid, roleid, companyroleid, scopetype, isactive)
-                SELECT u.userid, u.companyid, :bid, r.roleid, NULL,
-                       'OwnDriverDataOnly', TRUE
-                FROM sec.users u, sec.roles r
-                WHERE u.username = :uname AND r.rolecode = 'PAYROLL_ADMIN'
+                SELECT u.userid, u.companyid, NULL, NULL, cr.companyroleid,
+                       'Self', TRUE
+                FROM sec.users u
+                JOIN sec.companyroles cr
+                  ON cr.companyid = u.companyid AND cr.rolecode = 'DRIVER'
+                WHERE u.username = :uname
                 ON CONFLICT DO NOTHING
             """),
-            {"uname": uname, "bid": sm_hq_id},
+            {"uname": uname},
         )
 
         tok = await _login(session_client, uname)
@@ -1548,7 +1536,7 @@ class TestLegacyODABlock:
             headers=_hdr(tok),
         )
         assert r.status_code == 403, (
-            f"Legacy ODA user must be blocked from candidate creation even with payroll.entry; "
+            f"Legacy DRIVER/Self user must be blocked from candidate creation even with payroll.entry; "
             f"got {r.status_code}: {r.text}"
         )
         assert "driver" in r.json()["detail"].lower(), (
@@ -1563,7 +1551,7 @@ class TestLegacyODABlock:
         test_database_url: str,
     ):
         """
-        An operational role without ODA/DRIVER or Setup permissions can create
+        An operational role without DRIVER/Self/DRIVER or Setup permissions can create
         an Open period on its assigned branch through the candidate workflow.
         """
         uname = _uid()

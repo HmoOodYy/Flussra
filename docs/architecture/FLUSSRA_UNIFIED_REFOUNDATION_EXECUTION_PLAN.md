@@ -1,17 +1,19 @@
 # FLUSSRA UNIFIED REFOUNDATION EXECUTION PLAN
 
-**Status:** IMPLEMENTATION IN PROGRESS — Phase 1 is complete and merged; P2a is the next authorized work unit.  
-**Execution authority:** Continue one dependency-closed work unit from §6A at a time. P1a, P1b, and P1c are accepted and closed; the next unit is P2a — User–Employee link + staged provisioning.  
-**Repository baseline:** `main` at `3d786306b60374a85a03e42a688eb90ef26754b0` after merged PR #22 (`feat: cut over transfer and termination lifecycle authority`); migration-script head `0073`.  
+**Status:** IMPLEMENTATION IN PROGRESS — Phase 1 and P2a are closed/merged; P2b follows acceptance of this architecture amendment.<br>
+**Execution authority:** Continue one dependency-closed work unit from §6A at a time. P1a–P1c and P2a are accepted and closed; after this Self-scope architecture amendment is accepted, the next authorized unit is P2b — DRIVER / generic Self-scope security hardening + mechanically auditable endpoint authorization inventory.<br>
+**Repository baseline:** Current `main` / P2b baseline `652c06cd2f8c9b3bdd7c1ad498a7fb0b01c993fb` (HEAD equals `origin/main`); Test Hygiene PR #25 is merged; migration-script head `0074`.<br>
 **Original planning baseline (historical provenance):** authored against `docs/people-workforce-access-contract-lock` at `a38c9306c51f00957719c22a1508e7e84a32503c`, migration-script head `0071`. The §2 inventory and the phase *Why now* text describe that baseline, not current execution status.  
 **Phase 1 closure evidence:** P1a PR #19 (`6d3276e`, migration `0072`), P1b PR #20 (`3996089`, migration `0073`), P1c PR #22 (merge `3d78630`, implementation `bda65e2`, no migration).
+**P2a closure evidence:** PR #24 merged to `main` as `d7dc63a4e1ceb461e4e1fcbb2abe3c4fc449abea`; migration `0074`. P2a established an explicit optional same-company User–Employee link, staged login-disabled accounts, atomic provisioning and staged flow, staged/login lifecycle enforcement, exact DRIVER provisioning preconditions, final-role staging lifecycle, race-safe archived-role assignment protection, and minimal People wizard compatibility. P2a did not remove the legacy Access→Workforce role-assignment side effect (P2c) or complete the DRIVER/Self authorization hardening and route inventory (P2b).
+**Intervening maintenance:** Test Hygiene Phase 1 closed/merged via PR #25, adding shared backend test builders and improving fixture isolation/maintainability. It changed no production behavior or migrations and is not a refoundation phase.
 **Authority:** The locked [People / Workforce / Access contract](PEOPLE_WORKFORCE_ACCESS_ARCHITECTURE_CONTRACT.md) owns its domain rules. The [People master plan](PEOPLE_AND_ACCESS_REFOUNDATION_MASTER_PLAN.md) and [Compensation master plan](FLUSSRA_COMPENSATION_MODERNIZATION_MASTER_PLAN.md) retain their detailed product decisions. This document supersedes their separate execution orders. In particular, People-plan D6's proposed call to legacy `copy_driver_rates` is superseded by the target-assignment transfer copy required here. An implementation must reconcile any other genuine contract conflict before changing a locked decision.
 
 ## 1. Executive Verdict
 
 Keep Company/Branch, the now-canonical Payroll Setup/period creation authority, period days and eligibility principles, payroll review/finalization and immutable snapshot machinery, BonusEvent, DriverPayRule, StatusKey/DayEntryState, audit, locks, and sound authentication primitives. Rebuild the Workforce write and effective-profile boundary, Access provisioning/linking and DRIVER authorization boundary, and Compensation definition/assignment/value authority. Adapt existing payroll orchestration and historical read models to consume target identities. Delete obsolete People write side effects and legacy compensation routing only after target paths pass cutover gates.
 
-The two older execution orders would build a legacy DriverRate transfer-copy feature just before replacing DriverRates; the compensation order also assumes a pre-0071 period baseline. A unified sequence avoids that duplicate work, uses the one canonical period creator, and keeps each old authority live only until its successor is tested. **Eight phases** follow. **Phase 1 — Workforce authority and effective-date integrity is complete through P1a, P1b, and P1c and is merged to `main`. The next authorized implementation unit is P2a — User–Employee link + staged provisioning.** No later phase has started. The hardest remaining phases are **Phase 4** (period/runtime/evidence authority cutover) and **Phase 5** (status plus complete OrdinalTier). No application code is changed by this plan.
+The two older execution orders would build a legacy DriverRate transfer-copy feature just before replacing DriverRates; the compensation order also assumes a pre-0071 period baseline. A unified sequence avoids that duplicate work, uses the one canonical period creator, and keeps each old authority live only until its successor is tested. **Eight phases** follow. **Phase 1 (P1a–P1c) is closed and merged; P2a is closed and merged through PR #24; P2b is the next authorized work unit after acceptance of this architecture amendment, on the current `main` baseline.** The amended contract replaces the former `OwnDriverDataOnly` branch projection with generic `Self` scope. Test Hygiene Phase 1 is an intervening maintenance milestone, not a refoundation phase. No work unit after P2a has started. The hardest remaining phases are **Phase 4** (period/runtime/evidence authority cutover) and **Phase 5** (status plus complete OrdinalTier). No application code is changed by this plan.
 
 ## 2. Current-State Inventory
 
@@ -102,7 +104,7 @@ DriverID, rather than EmployeeID, remains the rate and payroll-history key. Each
 |---|---|---|
 | Payroll Setup | Published schedule versions, branch assignments and candidate boundary | Canonical period creator consumes resolved version/assignment; compensation cannot create a second period authority |
 | Workforce | Employee identity/status, Driver profile windows/immutable branch, effective profile resolver, termination | Access receives explicit link target and effective Driver identity; Payroll receives eligibility by DriverID/WorkDate |
-| Access | User credential/account state, explicit Employee link, role/scope/overrides, DRIVER self-only gate | Does not create/retype/move Workforce; ODA branch is derived from effective linked Driver, stored projection reconciled |
+| Access | User credential/account state, explicit Employee link, role/scope/overrides, DRIVER Self gate | Does not create/retype/move Workforce; Self has no Access BranchID and ownership follows the linked Employee/effective Driver profile |
 | Transfer | Approval workflow and source/destination Driver profile transition | Calls Compensation *only on explicit Yes* to copy target schedules; does not mutate source rates or pay rules |
 | Compensation | PayDefinition/RateDefinition/component/assignment/value governance, effective resolution and target copy | Resolves one complete assignment for `(DriverID, RateDefinitionID, WorkDate)`; supplies immutable descriptors to Payroll |
 | Payroll | Period lifecycle, work/status input, eligibility snapshot, calculation orchestration, approval, evidence and finalization | Uses frozen period definitions and Compensation resolver during live calculation; finalization only reads approved frozen packet |
@@ -117,7 +119,7 @@ P1 Workforce integrity + effective profile + corrected core transfer/termination
                      └──────→ P4 canonical period layout + PerUnit runtime/evidence cutover
                                   ├────→ P5 status direct path + OrdinalTier completion
                                   └────→ P6 target assignment copy on transfer
-P2 ─────────────────────────────────────→ P6 (ODA transition and security)
+P2 ─────────────────────────────────────→ P6 (Self authorization and security)
 P1/P2/P3/P4/P5/P6 ───────────────────────→ P7 final frontend contracts
 P7 + all backend cutovers ───────────────→ P8 legacy removal + clean DB/reseed/closure
 P8 ──────────────────────────────────────→ C2 Import gate opens
@@ -185,17 +187,19 @@ LARGE
 
 ### Phase 2 — Access account and DRIVER boundary
 
+**Execution status:** P2a is closed (PR #24); P2b is the next unit after this architecture amendment is accepted; P2c remains future work.
+
 #### Goal
 
 Separate login/account provisioning from Workforce identity without replacing sound authentication mechanics.
 
 #### Why now
 
-`assign_company_role` currently uses substring `DRIVER` and calls `ensure_driver_profile` (`admin/service.py:1824,1909-1916`), while roster and ODA checks can grant branch-wide visibility.
+`assign_company_role` currently uses substring `DRIVER` and calls `ensure_driver_profile` (`admin/service.py:1824,1909-1916`), while legacy ODA branch checks can grant branch-wide visibility. This is current-code context; P2b replaces ODA as the target authorization scope.
 
 #### Build
 
-Explicit same-company 0..1 User–Employee link/unlink, admin-created staged login-disabled User, transactional Role/Scope provisioning, enable/disable login and reset. Exact `DRIVER` + `OwnDriverDataOnly` validation; linked effective profile precondition; self-only permission ceiling including overrides; deny generic roster/payroll/rate/workforce operations. Derive own Driver via User→Employee→effective profile, and reconcile ODA branch projection on current transitions. Pending future Driver can remain linked but staged until effective.
+P2a established explicit same-company 0..1 User–Employee linking, staged/login-disabled accounts, and transactional provisioning. P2b migrates the current DRIVER authorization representation from legacy `OwnDriverDataOnly` to generic `Self`: exact `DRIVER` requires `Self`; a provisioned DRIVER assignment requires an explicit same-company Employee link and current effective Driver profile; pending-profile accounts remain staged until effective. Self has no Access BranchID and is not branch membership; current Driver ownership follows User→Employee→the canonical effective Driver profile on the operation's relevant date. Missing link, company mismatch, pending/no-current profile for a current action, or terminated/no-current identity fails closed. A Self-only authority must be representable by login and `/auth/me` without a fabricated branch-access row. P2b preserves the DRIVER self-service capability ceiling, prevents overrides from widening resource scope, keeps Company Owner's dynamic permission path limited to a valid active company-wide assignment, and does not add mixed DRIVER/administrative behavior. The exact implementation mechanism remains for the Lead's P2b design pass.
 
 #### Keep
 
@@ -203,19 +207,19 @@ Explicit same-company 0..1 User–Employee link/unlink, admin-created staged log
 
 #### Cut over
 
-Role assignment becomes Access-only. Login/current-user and SQL permission/view paths must fail closed for staged, unlinked, terminated or no-current-profile DRIVER users. Only non-DRIVER administrative scopes remain independent of transfer.
+P2b secures the DRIVER Self authorization boundary while the temporary legacy Access→Workforce role-assignment side effect remains. Login and `/auth/me` represent valid Self authority independently of branch membership and fail closed for staged, unlinked, cross-company, pending/no-current-profile or terminated identities when current Driver authority is required. Self never turns an action or permission into branch-wide, company-wide, or generic administrative authority. DRIVER remains denied generic payroll, rate, Workforce, and Access administration; explicitly designed Self-compatible own-resource operations remain possible. P2c removes the legacy role-assignment side effect and completes the Access-only role-assignment cutover.
 
 #### Delete
 
-`ensure_driver_profile`, `EMP-{UserID}` convention, implicit User.EmployeeID assignment and substring role detection. Legacy global role path only after usage/FK proof in P8.
+P2b retires OwnDriverDataOnly as the target representation and secures exact DRIVER/Self identity and resource access. P2b does not remove `ensure_driver_profile`, perform the broad Access-writer cleanup, redesign the People UI, or start Compensation work. P2c removes `ensure_driver_profile`, the `EMP-{UserID}` convention, implicit User.EmployeeID assignment, and remaining Access→Workforce mutations. The legacy global role path is removed only after usage/FK proof in P8.
 
 #### Database
 
-Unique User.EmployeeID and composite same-company FK; explicit staged state that forbids login; role/scope invariant enforcement. Protect link across deactivation, require explicit unlink before relink.
+Preserve unique User.EmployeeID and same-company integrity; staged state forbids login. Enforce the semantic scope rules: current DRIVER assignments use Self with no Access BranchID, while non-DRIVER roles do not gain Self without explicit policy. Overrides may add actions only inside established resource scope. Company Owner dynamic permissions require a valid active company-wide assignment. Exact enforcement/storage remains for the Lead design pass. Protect the link across deactivation and require explicit unlink before relink.
 
 #### Backend
 
-Access provisioning/link endpoints and audit; adapt `sec.fn_UserHasPermission`, `vw_UserBranchAccess`, `auth/service.py`, `payroll/guards.py`, core roster gates and permission grants. Login checks provisioned state, but hash/token algorithms stay.
+Access account/link/provisioning endpoints remain as established by P2a. P2b applies Self semantics across permission evaluation, branch-access projections, login/`/auth/me`, payroll guards, core roster gates and permission grants. Self must be evaluated as resource ownership and must not be emitted as branch membership. Login checks provisioned state; hash/token algorithms stay.
 
 #### Frontend
 
@@ -223,17 +227,21 @@ Minimal blocking/compatibility for wizard DRIVER actions. Final Workforce/Access
 
 #### Tests
 
-Independent Employee/User, same-company/cardinality, staged login denial, role swap without Workforce mutation, exact DRIVER role, ODA transfer/date/termination, admin rate denial even for own Driver, roster privacy and override bypass attempts.
+Independent Employee/User, same-company/cardinality, staged login denial, role changes without Workforce mutation, exact DRIVER/Self binding, effective-date identity across transfer and termination, Self-only login/`/auth/me` without branch membership, admin rate denial even for own Driver, roster privacy, scope-safe overrides, Company Owner malformed-scope denial, and mixed-authority bypass attempts.
 
-P2b adds a **mechanically enforced endpoint authorization inventory** over the application route table. At the post-P1 baseline every route except `/auth/login` authenticates through `get_current_user`, but permission, branch and ODA checks live inside individual services, so coverage is not auditable. Every registered route must carry an explicit, reviewable classification — at minimum whether DRIVER/`OwnDriverDataOnly` is denied or self-only-allowed, and which branch/permission policy applies — and an unclassified or newly added route fails the test suite. For each DRIVER-reachable route, negative tests prove another Driver's data, another branch's roster and generic mutation are refused. The mechanism (route dependency, policy metadata, central helper or inventory test) is chosen in P2b to fit the existing SQL permission/resolver architecture; it is not a new security framework.
+P2b adds a **mechanically enforced endpoint authorization inventory** over the current registered application route table, including the account, link and provision routes added in P2a. Every registered route must have explicit, reviewable classification of authentication, action/permission policy, resource-scope policy, Self denial/allowance and (where relevant) company/branch policy. A Self-allowed route identifies the canonical subject-resource relationship that proves ownership. An unclassified or newly added route fails the test suite. Negative authorization coverage for relevant Self/DRIVER routes proves denial of another Driver's data, branch roster leakage, generic administrative mutation, missing User.EmployeeID, company mismatch, no effective profile for current actions, pending profiles treated as current, terminated/no-current identity, and override-based resource expansion. The exact inventory mechanism is deferred to the Lead's P2b design pass; it must remain a small implementation of this contract, not a second authorization framework.
 
 #### Acceptance gate
 
-No Access write creates/moves/retypes Workforce; every DRIVER route is self-safe; staged or unprovisioned account cannot authenticate; admin role/scopes continue to work. No route is reachable without an inventory classification, and DRIVER self identity on every self-only route resolves through User→Employee→effective Driver profile (the P1 resolver), never stored ODA branch or Driver status.
+At P2b close, every registered route is classified; every DRIVER Self path is self-safe; staged, unlinked, mismatched-company, pending/no-current-profile and terminated identities fail closed as applicable; a valid Self-only account works without branch membership; overrides cannot widen resources; Company Owner dynamic permissions require valid company-wide scope; and mixed role rows cannot bypass the DRIVER ceiling. Self identity resolves through User→Employee→the canonical effective Driver profile, never a branch projection or Driver status alone. At P2c close, Access role/Scope writes no longer create or move Workforce records or implicitly link Users.
+
+#### P2b hard stops
+
+Stop and return for Lead review if Self cannot be enforced without fabricating branch access; the canonical linked-Employee/effective-profile relationship cannot be applied consistently; overrides cannot preserve the established resource set; registered routes cannot be classified completely; a required current Driver behavior needs authority beyond the locked self-service ceiling; or malformed Company Owner scope cannot be prevented from becoming company-wide authority. These are evidence gates, not permission to select a different scope model.
 
 #### Risks
 
-Auth decisions are spread between login views, SQL function, route services and UI hints; server-side tests must cover every path.
+Auth decisions are spread across login and `/auth/me`, SQL permission/view paths, route services and UI projections; server-side tests must cover every path.
 
 #### Size
 
@@ -610,8 +618,8 @@ These are review gates **inside** the eight macro phases, not more phases. Execu
 | **P1a COMPLETE** — DB invariants + company/effective-date resolver | §14 start condition | Status-only current Driver / weak constraints → resolver and integrity rules available; legacy write routes still live | `Employees`, `Drivers`, DB constraints/functions, eligibility helper | Same-company, immutable branch, overlap/concurrency, company date, old WorkDate | Resolver selects at most one DriverID/date; current writes cannot violate new DB invariants | Yes |
 | **P1b COMPLETE** — Workforce write authority | P1a | Combined `/core/drivers` write → explicit Employee/profile service; transfer stays on old completion temporarily | Workforce service/router, core reads, non-Driver/pending profile | Independent Employee, first/pending profile, key/branch/status, authorization | Every non-transfer Workforce mutation uses new owner; incompatible old write route disabled | Yes |
 | **P1c COMPLETE** — Transfer/termination cutover | P1b | Premature transfer branch mutation → effective transfer and atomic termination | Transfer service, projections, payroll eligibility, audit | Future/current transfer, pending termination, history/period eligibility, concurrent transition | Source/destination windows and Employee branch obey effective date; old completion path gone | Yes |
-| **P2a NEXT** — User–Employee link + staged provisioning | P1c | Implicit/optional loose link and role-less login edge → explicit same-company link/staged account lifecycle; DRIVER side effect held until P2c | `sec.Users`, Access service, login, reset | Cardinality/company, unlink-relink, staged login, enable/disable/reset | Account provisioned atomically and cannot authenticate while staged/unprovisioned | Yes |
-| P2b DRIVER/ODA authorization hardening | P2a | Stored branch/status-based own check → resolver-derived self-only authorization; legacy role writer restricted/fail-closed pending P2c | Permission function/view, login/me, guards, roster/rate/payroll routes | Exact role, override ceiling, no roster/admin authority, future transfer/termination, route-inventory completeness | No DRIVER path obtains other-driver or generic mutation authority; an unclassified route fails the suite | Yes |
+| **P2a COMPLETE — PR #24 / migration 0074** — User–Employee link + staged provisioning | P1c | Implicit/optional loose link and role-less login edge → explicit same-company link/staged account lifecycle; DRIVER side effect held until P2c | `sec.Users`, Access service, login, reset | Cardinality/company, unlink-relink, staged login, enable/disable/reset | Account provisioned atomically and cannot authenticate while staged/unprovisioned | Yes |
+| **P2b NEXT after architecture amendment review** — DRIVER/Self authorization hardening + route authorization inventory | P2a | Legacy ODA branch-like scope → generic Self resource scope; no Access BranchID; legacy role writer remains restricted/fail-closed pending P2c | Permission evaluation, branch-access projection, login/me, payroll guards, roster/rate/payroll routes | Exact DRIVER/Self binding, effective identity, scope-safe overrides, owner scope, mixed-authority ceiling, fail-closed identity, route completeness | No Self path grants branch/company access; no DRIVER path obtains another resource or generic administrative mutation authority; every route is classified | Yes |
 | P2c Remove Access→Workforce effects | P2b | Role save may create/move Workforce → Role/Scope write only | `admin/service.py`, legacy role path, People API compatibility | Assign/revoke/swap role leaves Employee/Driver/link unchanged | `ensure_driver_profile` and `EMP-{UserID}` role path removed; P2 security stays green | Yes |
 | P3a Company currency authority gate | P2c | Monetary writes without company currency → all reachable writers in P3 inventory fail closed without configured code | Company config, legacy rate/bonus/rule/period/draft/status writers, submit/review/finalize, evidence | Each inventoried route and indirect batch/copy path, old-history reads, immutable currency and concurrency | No new durable money without configured code; no configured-code change after durable state; currency minor-unit metadata available and payable-rounding decision gate opened (policy may remain open until P4c) | Yes |
 | P3b Target Compensation schema/invariants | P3a | Legacy rate tables operational → legacy remains operational; target schema dormant | PayDefinition/RateDefinition/component/assignment/value tables, FK/locks | Ownership, no overlap, complete set, structure/pending race, fresh upgrade | Target persistence cannot admit mixed/partial effective schedules | Yes |
@@ -639,7 +647,8 @@ The table names the *earliest safe* deletion. A cutover is accepted only with wo
 | Generic Driver create/patch and status-only helpers | Workforce profile service/effective resolver | P1 | P1 | P1/P8 column cleanup |
 | Premature transfer branch mutation | Effective profile transition/projection | P1 | P1 | P1 |
 | `EmployeeType` runtime/column | Effective Driver profile truth | P1 | P1 | P8 |
-| DRIVER substring matching, `ensure_driver_profile`, EMP-User key | Exact role + explicit link/provisioning | P2 | P2 | P2 |
+| DRIVER substring matching and ODA as target scope | Exact DRIVER identity + generic Self resource scope | P2b | P2b | P2b |
+| Temporary `ensure_driver_profile`, EMP-User key and implicit User.EmployeeID assignment | Explicit Access role assignment with separate link authority | P2c | P2c | P2c |
 | Legacy global Role path | CompanyRole assignment/permission path | P2 | P2 | P8 after proof |
 | Global/system PayItems operational authority | Company PayDefinition | P3 | P4 | P8 |
 | BranchPayItemConfig old FK/shape | Target branch definition config | P3 | P4 | P8 |
@@ -664,7 +673,7 @@ The table names the *earliest safe* deletion. A cutover is accepted only with wo
 4. **Period snapshots:** The existing candidate creator (`period_creation.py:753-1003`) remains sole authority. In its existing atomic period/day/layout/eligibility transaction it freezes operational company PayDefinitions and branch activation for the period. Prepared Draft eligibility remains provisional and Open frozen per existing lifecycle; compensation snapshot rules must use the same boundary without reopening Payroll Setup.
 5. **Evidence/finalization:** Live calculation resolves current applicable target assignments and freezes definition/method/version, RateDefinition, AssignmentID, full values/topology, WorkDate/input, currency and result. Submit/review binds a hash of the packet. Finalization projects only the approved packet, never live compensation tables (`finalization.py:158-314`). Finalized library/reports read frozen meaning.
 6. **Termination:** Workforce closes effective activity and handles pending profiles; Compensation assignments remain attached to original DriverID and are not rewritten. Access link remains, but DRIVER current-profile authorization fails closed. Locked/finalized payroll never changes.
-7. **Access/security:** `DRIVER ⇔ OwnDriverDataOnly`; exact role identity only. Self identity comes from User.EmployeeID→effective Driver profile, never stored ODA branch. No generic roster, payroll, rate, Workforce, role or permission mutation is allowed to DRIVER, even for own Driver or via override. Admin scopes do not follow employee transfer.
+7. **Access/security:** `DRIVER ⇔ Self` is the only currently supported Self binding. Self has no Access BranchID and never grants branch access. Current Driver identity comes from User.EmployeeID→Employee→the effective Driver profile for the operation date; history is limited to that Employee where explicitly allowed. Overrides may widen actions only within existing resource scope and cannot bypass Self ownership or the DRIVER capability ceiling. No generic roster, payroll, rate, Workforce, role or permission mutation is allowed to DRIVER, including against its own Driver. Mixed DRIVER/admin rows do not create mixed-mode authority. COMPANY_OWNER dynamic permissions require a valid active company-wide assignment. Workforce transfer changes Employee.BranchID according to its own authority and does not mutate Access Self scope.
 8. **DriverPayRule Minimum/Maximum:** DriverPayRule remains an independent payroll-rule domain. At the post-P1 baseline `MinimumPay`/`MaximumPay` are evaluated per DriverID per PayrollPeriod: the rule effective on the period start date is selected, the qualifying base is that period's daily + status + period-scoped pay (Bonus excluded and added after), and the full amount produces a period-scoped top-up or cap. That is the v1 meaning: an amount is scoped to one applicable PayrollPeriod. It is not a salary periodicity value, an annual/monthly/weekly amount, a year-to-date floor, a recoverable draw or a lifetime cap, and no generic periodicity/`Basis` field is added to DriverPayRule. Payroll Setup schedule/frequency changes never rewrite DriverPayRule amounts; any economic-impact notice is advisory and any amount change is an explicit DriverPayRule edit. Minimum greater than Maximum for the same period is a hard blocker, never silently clamped; a large legitimate top-up is valid arithmetic and is not altered. Transfer never copies or transforms DriverPayRules (§8.2). Partial-period application (hire, termination, transfer or destination start inside a period) is an open product decision (§12A) that must be resolved or explicitly deferred before the P4c target Min/Max contract is frozen. Annual/cumulative earnings guarantees, recoverable draws, annual settlement targets or category-specific yearly caps are distinct future product capabilities and must not be introduced through a DriverPayRule frequency field.
 9. **Financial authority layers:** For target periods, operational persistence owns source facts, backend calculation owns live derived money, and immutable submitted/final evidence owns frozen money. Stored draft amounts, live rate tables and client arithmetic never compete with those layers (P4b, P4c, P7c, P8). Internal calculation precision, payable rounding and display formatting are separate; the payable-rounding policy is a §12A decision that must be approved and implemented before P4c acceptance.
 10. **Finalized corrections:** Locked/Finalized payroll is never reopened, re-projected or rewritten. "Correction" never means editing a Locked/Finalized period. A future correction capability is a separate auditable record that references the original frozen evidence and settles through a separately approved payment process; carry-forward into a later regular payroll is a candidate, not a decision. Off-cycle and retro payroll are not part of this plan. P4c keeps the snapshot-identity seam that makes such a record additive (Phase 4 *P4c additional evidence obligations*).
@@ -677,7 +686,7 @@ The table names the *earliest safe* deletion. A cutover is accepted only with wo
 | bcrypt hash/verify | KEEP | `auth/security.py:16-33`; `admin/service.py:762-817` reuses it for reset |
 | Login credential/company checks | KEEP_AND_ADAPT | `auth/service.py:40-150` checks `CanLogin`, `IsActive`, company state, password and active role; add explicit staged/provisioned and DRIVER effective-profile fail-closed checks |
 | JWT issuance/verification | KEEP | `auth/security.py:40-77` creates signed expiring HS256 token; `dependencies.py:42-55` decodes it |
-| `/auth/me` and permission authority | KEEP_AND_ADAPT | `auth/service.py` reloads DB state and SQL permission/view results; align ODA effective branch and staged state |
+| `/auth/me` and permission authority | KEEP_AND_ADAPT | Reload current DB authority and staged state; represent Self independently from branch membership without fabricating a branch row |
 | Admin password reset | KEEP | `admin/service.py:762-817` locks row, resets hash/failure state and audits |
 | Public signup placeholder | KEEP | `frontend/src/App.tsx:108` routes to `SignupPage.tsx`, whose inputs and button are disabled; it is not an account creation endpoint. No public self-signup is added for this refoundation. |
 
@@ -700,7 +709,7 @@ Use §6A in order: one reviewable PR/work unit at a time, with its stated gate p
 - Target assignment completeness/non-overlap or effective Driver exclusivity cannot be enforced under the actual DB transaction/concurrency model; choose and prove a DB/service mechanism before cutover.
 - A custom status-column copy cannot be mapped safely; skip/report that column rather than guessing. This is an operation-level stop for that copy, not a plan-wide redesign.
 
-These are implementation discoveries to investigate at their phase. Phase 1 is complete; none is presently evidenced as an unresolved blocker to starting P2a.
+These are implementation discoveries to investigate at their phase. Phase 1 and P2a are closed; no listed unresolved blocker is presently evidenced. P2b implementation begins only after this Self-scope architecture amendment is accepted and the Lead locks the remaining mechanism decisions.
 
 ## 12A. Open Product Decisions and Deferred Capabilities
 
@@ -719,7 +728,7 @@ These are deliberately **not** decided by this plan. Each row states the latest 
 ## 13. Execution Order
 
 1. P1 Workforce authority and effective-date integrity; correct core transfer and termination. **COMPLETE (P1a–P1c, PR #22).**
-2. P2 Access account/link/provisioning and DRIVER self-only boundary.
+2. P2 Access account/link/provisioning and DRIVER self-only boundary (P2a closed; P2b next; P2c future).
 3. P3 company currency and dormant target Compensation definitions/assignments.
 4. P4 current canonical period PayDefinition snapshots, PerUnit calculation and immutable evidence cutover.
 5. P5 direct status compensation and complete OrdinalTier, including frozen evidence.
@@ -730,7 +739,7 @@ These are deliberately **not** decided by this plan. Each row states the latest 
 
 ## 14. Initial Start Condition — SATISFIED
 
-The original program start condition was satisfied before P1a began. Phase 1 has since completed through P1c and merged to `main`. Current execution proceeds by the §6A dependency gates; the next prerequisite is satisfied for P2a, which must start from the current merged `main` baseline and retain the one-work-unit-at-a-time rule.
+The original program start condition was satisfied before P1a began. Phase 1 closed through P1c and merged to `main`; P2a is closed and merged through PR #24 (`d7dc63a4e1ceb461e4e1fcbb2abe3c4fc449abea`, migration `0074`). Test Hygiene Phase 1 merged separately through PR #25 and did not change production behavior or migrations. Current execution proceeds by the §6A dependency gates; after this architecture amendment is accepted, P2b is the next authorized unit on baseline `652c06cd2f8c9b3bdd7c1ad498a7fb0b01c993fb`, with the one-work-unit-at-a-time rule.
 
 Original start condition (historical record): record acceptance of this unified order against both source plans and the locked contract; confirm the exact branch/HEAD and migration-script/actual DB heads; confirm a disposable development DB and reset procedure; identify every active caller of current-driver, legacy-rate and period-layout paths; select P1a with its acceptance tests as the first reviewable work unit. This hardening task does not implement it.
 

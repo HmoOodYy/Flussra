@@ -425,15 +425,8 @@ class TestCompanyOwnerUnique:
             client, auth_token, "COU ReplacementRole", ["users.view"]
         )
         target = await _create_user(client, auth_token, "cou_transfer_target")
-        driver_role_id_r = await client.get("/admin/company-roles", headers=_hdr(auth_token))
-        driver_role_id = next(
-            r["company_role_id"]
-            for r in driver_role_id_r.json()
-            if r["role_code"] == "DRIVER"
-        )
         await _assign_role(
-            client, auth_token, target["user_id"], driver_role_id,
-            scope="SpecificBranch", branch_id=hq_branch_id,
+            client, auth_token, target["user_id"], repl_role_id,
         )
 
         # Transfer ownership to target
@@ -475,11 +468,8 @@ class TestCompanyOwnerUnique:
             client, auth_token, "COU OneOwner Replacement", ["users.view"]
         )
         target = await _create_user(client, auth_token, "cou_one_owner_tgt")
-        dr_r = await client.get("/admin/company-roles", headers=_hdr(auth_token))
-        dr_id = next(r["company_role_id"] for r in dr_r.json() if r["role_code"] == "DRIVER")
         await _assign_role(
-            client, auth_token, target["user_id"], dr_id,
-            scope="SpecificBranch", branch_id=hq_branch_id,
+            client, auth_token, target["user_id"], replacement_role_id,
         )
 
         # Do a transfer and verify only one COMPANY_OWNER exists
@@ -915,25 +905,27 @@ class TestCompanyOwnerTriggerUpdate:
         self, client: httpx.AsyncClient, auth_token: str, pg_instance, hq_branch_id: int
     ):
         """
-        Updating a non-COMPANY_OWNER assignment (e.g. DRIVER role) should not
+        Updating a non-COMPANY_OWNER assignment should not
         be blocked by the trigger.
         """
         import psycopg2
 
         role_r = await client.get("/admin/company-roles", headers=_hdr(auth_token))
-        dr_id = next(r["company_role_id"] for r in role_r.json() if r["role_code"] == "DRIVER")
+        viewer_role_id = next(
+            r["company_role_id"] for r in role_r.json()
+            if r["role_code"] == "PAYROLL_VIEWER_CO"
+        )
 
         user = await _create_user(client, auth_token, "trigg_nonowner")
         await _assign_role(
-            client, auth_token, user["user_id"], dr_id,
-            scope="SpecificBranch", branch_id=hq_branch_id,
+            client, auth_token, user["user_id"], viewer_role_id,
         )
 
         conn = psycopg2.connect(client_encoding="utf-8", **pg_instance.dsn())
         conn.autocommit = False
         try:
             cur = conn.cursor()
-            # Update the DRIVER assignment notes — should succeed
+            # Update the non-owner assignment notes — should succeed
             cur.execute(
                 """
                 UPDATE sec.userbranchroles

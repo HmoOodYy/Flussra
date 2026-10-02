@@ -15,7 +15,7 @@ Tests:
       source stays effective until its end, Employee branch follows current profile.
   10. Completing a non-Approved request returns 422.
   11. Old payroll history is still attached to the OLD driver_id after completion.
-  12. ODA user (driver role) cannot create/approve/decide/complete/cancel transfers.
+  12. DRIVER/Self user cannot list/approve/decide/complete/cancel transfers.
   13. Second transfer request on a driver with active request returns 422.
   14. Cancel in-flight request → Cancelled.
   15. Cancel already-Cancelled request returns 422.
@@ -35,6 +35,9 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
+
+from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.builders.workforce import create_driver_employee_record
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,7 +179,7 @@ async def _cancel(
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="module")
+@pytest_asyncio.fixture
 async def driver_role_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
     resp = await session_client.get("/admin/company-roles", headers=auth(auth_token))
     assert resp.status_code == 200, resp.text
@@ -186,35 +189,24 @@ async def driver_role_id(session_client: httpx.AsyncClient, auth_token: str) -> 
     pytest.skip("DRIVER company role not found")
 
 
-@pytest_asyncio.fixture(scope="module")
-async def oda_user_token(
+@pytest_asyncio.fixture
+async def driver_self_user_token(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
     driver_role_id: int,
 ) -> str:
-    """Create a driver-role user and return their auth token."""
-    uname = f"oda_wf_{_rnd()}"
-    user = await _create_provisioned_user(session_client, auth_token, uname)
-    uid = user["user_id"]
-
-    r2 = await session_client.post(
-        f"/admin/users/{uid}/company-role-assignments",
-        json={
-            "company_role_id": driver_role_id,
-            "scope_type":      "OwnDriverDataOnly",
-            "branch_id":       paytest_branch_id,
-        },
-        headers=auth(auth_token),
+    """Create a test-owned linked DRIVER/Self account through shared builders."""
+    uname = f"driver_self_wf_{_rnd()}"
+    return await create_user_with_role_token(
+        session_client,
+        auth_token,
+        uname,
+        await get_company_role_id(session_client, auth_token, "DRIVER"),
+        scope_type="Self",
+        driver_branch_id=paytest_branch_id,
+        password="TestPass1234!",
     )
-    assert r2.status_code in (200, 201), r2.text
-
-    r3 = await session_client.post(
-        "/auth/login",
-        json={"username": uname, "password": "TestPass1234!", "company_code": "DEMO"},
-    )
-    assert r3.status_code == 200, r3.text
-    return r3.json()["access_token"]
 
 
 # ---------------------------------------------------------------------------
@@ -577,38 +569,37 @@ async def test_old_history_stays_on_old_driver(
 
 
 @pytest.mark.asyncio
-async def test_oda_user_cannot_create_transfer(
+async def test_driver_self_cannot_create_source_branch_transfer(
     session_client: httpx.AsyncClient,
-    oda_user_token: str,
+    driver_self_user_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
-    """Driver-role ODA users are blocked from all transfer endpoints."""
+    """A DRIVER/Self request must use initiated_by='Driver'."""
     r = await _create_transfer(
-        session_client, oda_user_token, 999999, hq_branch_id, "SourceBranch"
+        session_client, driver_self_user_token, 999999, hq_branch_id, "SourceBranch"
     )
-    # ODA + SourceBranch-initiated → 422 (must use initiated_by='Driver')
-    assert r.status_code in (403, 422)
+    assert r.status_code == 422
 
 
 @pytest.mark.asyncio
-async def test_oda_user_cannot_list_transfers(
+async def test_driver_self_cannot_list_transfers(
     session_client: httpx.AsyncClient,
-    oda_user_token: str,
+    driver_self_user_token: str,
 ):
     r = await session_client.get(
         "/driver-transfers",
-        headers=auth(oda_user_token),
+        headers=auth(driver_self_user_token),
     )
     assert r.status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_oda_user_cannot_approve_source(
+async def test_driver_self_cannot_approve_source(
     session_client: httpx.AsyncClient,
-    oda_user_token: str,
+    driver_self_user_token: str,
 ):
-    r = await _approve_source(session_client, oda_user_token, 1)
+    r = await _approve_source(session_client, driver_self_user_token, 1)
     assert r.status_code == 403
 
 
@@ -1017,15 +1008,16 @@ async def test_people_list_no_duplicate_after_transfer(
     the new driver_id, not duplicated.
     """
     sfx = _rnd()
-    drv_id = await _create_driver(
-        session_client, auth_token, paytest_branch_id, suffix=sfx
+    employee = await create_driver_employee_record(
+        session_client,
+        auth_token,
+        branch_id=paytest_branch_id,
+        full_name=f"Driver Self Transfer {sfx}",
+        driver_code=f"DST-{sfx}",
+        hire_date="2000-01-01",
     )
-
-    emp_r = await direct_db.execute(
-        _text("SELECT employeeid FROM core.drivers WHERE driverid = :did"),
-        {"did": drv_id},
-    )
-    emp_id = emp_r.scalar_one()
+    drv_id = employee["current_or_pending_driver"]["driver_id"]
+    emp_id = employee["employee_id"]
 
     uname = f"people_dup_{sfx}"
     user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
@@ -1063,58 +1055,11 @@ async def test_people_list_no_duplicate_after_transfer(
 
 
 # ---------------------------------------------------------------------------
-# P1 #3 — ODA / Driver-initiated transfer flow
+# P1 #3 — DRIVER/Self initiated transfer flow
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="module")
-async def oda_driver_token_and_id(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-    paytest_branch_id: int,
-    hq_branch_id: int,
-    driver_role_id: int,
-    direct_db,
-) -> tuple[str, int]:
-    """
-    Create an ODA user WITH a driver profile.
-    Returns (token, driver_id).
-    """
-    sfx = _rnd()
-    # Create driver profile
-    drv_id = await _create_driver(
-        session_client, auth_token, paytest_branch_id, suffix=sfx
-    )
-
-    uname = f"oda_driver_{sfx}"
-    user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=(await direct_db.execute(
-        _text("SELECT employeeid FROM core.drivers WHERE driverid = :did"), {"did": drv_id},
-    )).scalar_one())
-    uid = user["user_id"]
-
-    # Assign DRIVER role (ODA)
-    r2 = await session_client.post(
-        f"/admin/users/{uid}/company-role-assignments",
-        json={
-            "company_role_id": driver_role_id,
-            "scope_type":      "OwnDriverDataOnly",
-            "branch_id":       paytest_branch_id,
-        },
-        headers=auth(auth_token),
-    )
-    assert r2.status_code in (200, 201), r2.text
-
-    token_r = await session_client.post(
-        "/auth/login",
-        json={"username": uname, "password": "TestPass1234!", "company_code": "DEMO"},
-    )
-    assert token_r.status_code == 200
-    token = token_r.json()["access_token"]
-
-    return token, drv_id, uid
-
-
 @pytest_asyncio.fixture(scope="function")
-async def oda_with_driver(
+async def driver_self_with_driver(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -1123,7 +1068,7 @@ async def oda_with_driver(
     direct_db,
 ) -> tuple[str, int]:
     """
-    Returns (oda_token, driver_id) for an ODA user linked to a driver profile.
+    Returns (Self token, Driver ID) for a test-owned linked current Driver.
     The driver profile is created first; then the user is linked via employeeid.
     """
     sfx = _rnd()
@@ -1137,17 +1082,17 @@ async def oda_with_driver(
     )
     emp_id = emp_r.scalar_one()
 
-    uname = f"oda_lnk_{sfx}"
+    uname = f"driver_self_lnk_{sfx}"
     user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
     uid = user["user_id"]
 
-    # Assign DRIVER (ODA) role
+    # Assign exact DRIVER/Self; Self has no Access BranchID.
     r2 = await session_client.post(
         f"/admin/users/{uid}/company-role-assignments",
         json={
             "company_role_id": driver_role_id,
-            "scope_type":      "OwnDriverDataOnly",
-            "branch_id":       paytest_branch_id,
+            "scope_type":      "Self",
+            "branch_id":       None,
         },
         headers=auth(auth_token),
     )
@@ -1164,15 +1109,15 @@ async def oda_with_driver(
 
 
 @pytest.mark.asyncio
-async def test_oda_can_create_own_driver_initiated_transfer(
+async def test_driver_self_can_create_own_driver_initiated_transfer(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    oda_with_driver: tuple,
+    driver_self_with_driver: tuple,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
-    """ODA user can create a Driver-initiated transfer for their own driver_id."""
-    oda_token, drv_id = oda_with_driver
+    """DRIVER/Self can create a transfer for its own current Driver ID."""
+    oda_token, drv_id = driver_self_with_driver
 
     r = await _create_transfer(
         session_client, oda_token, drv_id, hq_branch_id, "Driver"
@@ -1185,15 +1130,15 @@ async def test_oda_can_create_own_driver_initiated_transfer(
 
 
 @pytest.mark.asyncio
-async def test_oda_cannot_create_transfer_for_other_driver(
+async def test_driver_self_cannot_create_transfer_for_other_driver(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    oda_with_driver: tuple,
+    driver_self_with_driver: tuple,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
-    """ODA user cannot create a transfer for a driver_id that is not their own."""
-    oda_token, _own_drv_id = oda_with_driver
+    """DRIVER/Self user cannot create a transfer for another driver's ID."""
+    oda_token, _own_drv_id = driver_self_with_driver
 
     # Create a different driver via admin
     other_drv = await _create_driver(
@@ -1207,61 +1152,59 @@ async def test_oda_cannot_create_transfer_for_other_driver(
 
 
 @pytest.mark.asyncio
-async def test_oda_cannot_create_source_branch_initiated(
+async def test_driver_self_cannot_create_source_branch_initiated(
     session_client: httpx.AsyncClient,
-    oda_with_driver: tuple,
+    driver_self_with_driver: tuple,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
-    """ODA user is blocked from creating a SourceBranch-initiated transfer."""
-    oda_token, drv_id = oda_with_driver
+    """DRIVER/Self user is blocked from creating a SourceBranch transfer."""
+    oda_token, drv_id = driver_self_with_driver
 
     r = await _create_transfer(
         session_client, oda_token, drv_id, hq_branch_id, "SourceBranch"
     )
-    # ODA + SourceBranch-initiated → 422 (must use initiated_by='Driver')
-    assert r.status_code in (403, 422), f"Expected 403 or 422, got {r.status_code}: {r.text}"
+    assert r.status_code == 422, f"Expected 422, got {r.status_code}: {r.text}"
 
 
 @pytest.mark.asyncio
-async def test_oda_cannot_approve_decide_complete_cancel(
+async def test_driver_self_cannot_approve_decide_complete_cancel(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    oda_user_token: str,
+    driver_self_user_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
-    """ODA user is blocked from all operational transfer management endpoints."""
-    # Use existing oda_user_token (no driver profile needed — blocked before lookup)
-    assert (await _approve_source(session_client, oda_user_token, 1)).status_code == 403
+    """DRIVER/Self is blocked from transfer lifecycle and management endpoints."""
+    assert (await _approve_source(session_client, driver_self_user_token, 1)).status_code == 403
     r2 = await session_client.post(
         "/driver-transfers/1/decide-target",
         json={"decision": "Approved"},
-        headers=auth(oda_user_token),
+        headers=auth(driver_self_user_token),
     )
     assert r2.status_code == 403
-    assert (await _complete(session_client, oda_user_token, 1)).status_code == 403
-    assert (await _cancel(session_client, oda_user_token, 1)).status_code == 403
+    assert (await _complete(session_client, driver_self_user_token, 1)).status_code == 403
+    assert (await _cancel(session_client, driver_self_user_token, 1)).status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_driver_initiated_flow_requires_source_then_target_approval(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    oda_with_driver: tuple,
+    driver_self_with_driver: tuple,
     paytest_branch_id: int,
     hq_branch_id: int,
 ):
     """
     Full driver-initiated flow:
-    1. ODA creates → PendingSourceApproval
+    1. DRIVER/Self creates → PendingSourceApproval
     2. Source manager approves → PendingTargetApproval
     3. Target manager approves → Approved
     4. Complete → Completed
     """
-    oda_token, drv_id = oda_with_driver
+    oda_token, drv_id = driver_self_with_driver
 
-    # 1. ODA creates
+    # 1. DRIVER/Self creates
     r1 = await _create_transfer(session_client, oda_token, drv_id, hq_branch_id, "Driver")
     if r1.status_code == 422 and "active transfer request" in r1.json().get("detail", "").lower():
         pytest.skip("Driver already has an active transfer from a previous test run")

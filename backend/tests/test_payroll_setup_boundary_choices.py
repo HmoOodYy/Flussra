@@ -528,7 +528,7 @@ async def _make_actor(db_conn, *, permissions: tuple[str, ...], scope: str,
         VALUES (:uid, :cid, :bid, :rid, :crid, :scope, TRUE)
     """), {
         "uid": user_id, "cid": company_id,
-        "bid": branch_id if scope in ("SpecificBranch", "OwnDriverDataOnly") else None,
+        "bid": branch_id if scope == "SpecificBranch" else None,
         "rid": role_id, "crid": company_role_id, "scope": scope,
     })
     return create_access_token(int(user_id), int(company_id))

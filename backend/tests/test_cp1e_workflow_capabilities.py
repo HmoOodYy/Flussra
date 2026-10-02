@@ -5,7 +5,7 @@ Product contracts verified:
   A. Slots: correct mapping of DB statuses to slot positions
   B. Capabilities: period-level workflow/permission gating (no data validation)
   C. Candidate capabilities: slot-matrix and permission gating
-  D. Permissions/security: driver block, ODA block, branch scoping, permission checks
+  D. Permissions/security: DRIVER/Self block, branch scoping, permission checks
   E. Alerts: correct alert codes and affected_action_codes
 
 Key correction: Returned backlog blocks can_submit_for_review only;
@@ -33,6 +33,7 @@ from app.payroll_setup.payroll_policy import (
     withdraw_assignment,
 )
 from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 
 # ---------------------------------------------------------------------------
 # Unique-username counter (avoids collisions between security tests)
@@ -343,23 +344,18 @@ async def _assign_role(
 
 
 async def _make_driver_user(client, admin_token: str, branch_id: int) -> str:
-    """Create SpecificBranch DRIVER-role user; return its JWT."""
+    """Create a test-owned linked DRIVER/Self user; return its JWT."""
     uname = _sec_uid()
-    driver_role_id = await _get_driver_role_id(client, admin_token)
-    user = await _create_user(client, admin_token, uname)
-    await _assign_role(client, admin_token, user["user_id"], driver_role_id,
-                       scope="SpecificBranch", branch_id=branch_id)
-    return await _login_as(client, uname)
+    driver_role_id = await get_company_role_id(client, admin_token, "DRIVER")
+    return await create_user_with_role_token(
+        client, admin_token, uname, driver_role_id,
+        scope_type="Self", driver_branch_id=branch_id,
+    )
 
 
 async def _make_oda_user(client, admin_token: str, branch_id: int) -> str:
-    """Create OwnDriverDataOnly user; return its JWT."""
-    uname = _sec_uid()
-    driver_role_id = await _get_driver_role_id(client, admin_token)
-    user = await _create_user(client, admin_token, uname)
-    await _assign_role(client, admin_token, user["user_id"], driver_role_id,
-                       scope="OwnDriverDataOnly", branch_id=branch_id)
-    return await _login_as(client, uname)
+    """Create a test-owned linked DRIVER/Self user; return its JWT."""
+    return await _make_driver_user(client, admin_token, branch_id)
 
 
 async def _get_workflow(
@@ -823,11 +819,11 @@ class TestPermissionsAndSecurity:
     async def test_d01b_oda_role_denied(
         self, session_client, auth_token, paytest_branch_id,
     ):
-        """D01b: OwnDriverDataOnly user → 403 from GET /payroll/current-workflow."""
+        """D01b: DRIVER/Self user → 403 from GET /payroll/current-workflow."""
         oda_token = await _make_oda_user(session_client, auth_token, paytest_branch_id)
         r = await _get_workflow(session_client, oda_token, paytest_branch_id)
         assert r.status_code == 403, (
-            f"ODA user must be denied workflow access; got {r.status_code}: {r.text}"
+            f"DRIVER/Self user must be denied workflow access; got {r.status_code}: {r.text}"
         )
 
     @pytest.mark.asyncio

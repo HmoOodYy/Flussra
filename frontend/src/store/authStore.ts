@@ -5,7 +5,7 @@ import { createContext, useContext } from 'react';
 export interface BranchAccess {
   branch_id: number | null;
   branch_name: string | null;
-  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope: 'AllCompanyBranches' | 'SpecificBranch';
   role_code: string;
   role_name: string;
 }
@@ -24,7 +24,7 @@ export interface BranchPermissions {
 export interface PermissionAuthority {
   /** Permissions effective at company scope; empty unless the user holds an active AllCompanyBranches assignment. */
   readonly company_permissions: readonly string[];
-  /** One entry per distinct concrete branch backing an active SpecificBranch/OwnDriverDataOnly assignment. */
+  /** One entry per distinct concrete branch backing an active SpecificBranch assignment. */
   readonly branch_permissions: readonly BranchPermissions[];
 }
 
@@ -35,9 +35,16 @@ export interface UserInfoResponse {
   company_id: number;
   company_name: string;
   branches: BranchAccess[];
+  self_assignments: SelfAssignment[];
   /** Distinct permission codes across all active role assignments. */
   active_permissions: string[];
   authority: PermissionAuthority;
+}
+
+export interface SelfAssignment {
+  role_code: string;
+  role_name: string;
+  scope: 'Self';
 }
 
 /**
@@ -82,22 +89,18 @@ export interface UserProfile {
   company_id: number;
   company_name: string;
   /**
-   * Coarse scope derived from branch rows.  Do NOT use this alone to detect
-   * driver/ODA users — a Driver+SpecificBranch assignment yields 'SpecificBranch'
-   * here.  Use isDriverUser() from permissions.ts instead, which inspects the
-   * raw `branches` array.
+   * Coarse scope derived from branch rows or Self assignments. Do NOT use this
+   * alone to detect DRIVER users; use isDriverUser() which checks exact roles.
    */
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branch_ids: number[];
   /** Display name of the primary role (first AllCompanyBranches branch, or first branch). */
   primary_role_name: string | null;
   /**
-   * Raw branch/role rows from /auth/me, preserved verbatim.
-   * Used by isDriverUser() to detect DRIVER role_code or ODA scope in any
-   * assignment — including mixed and Driver+SpecificBranch cases that
-   * scope_type alone cannot distinguish.
+   * Raw branch/role rows and resource-aware Self assignments from /auth/me.
    */
   branches: readonly BranchAccess[];
+  self_assignments: readonly SelfAssignment[];
   /** Backend-owned branch-aware permission authority; query with hasAuthorityPermission(). */
   readonly authority: PermissionAuthority;
 }
@@ -107,9 +110,7 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
   const hasAllBranches = info.branches.some(
     (b) => b.scope === 'AllCompanyBranches'
   );
-  const isDriverOnly =
-    info.branches.length > 0 &&
-    info.branches.every((b) => b.scope === 'OwnDriverDataOnly');
+  const hasSelfAssignment = info.self_assignments.some((a) => a.role_code === 'DRIVER');
 
   return {
     user_id:            info.user_id,
@@ -119,8 +120,8 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
     company_name:       info.company_name,
     scope_type:         hasAllBranches
       ? 'AllCompanyBranches'
-      : isDriverOnly
-        ? 'OwnDriverDataOnly'
+      : hasSelfAssignment
+        ? 'Self'
         : 'SpecificBranch',
     branch_ids:         info.branches
       .filter((b) => b.branch_id !== null)
@@ -131,6 +132,7 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
       null
     ),
     branches:           info.branches,
+    self_assignments:   info.self_assignments,
     authority:          info.authority,
   };
 }

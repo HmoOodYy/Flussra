@@ -6,7 +6,7 @@ GET /payroll/periods/{id}/calculation-preview
 Covers:
   - lifecycle guard (Open/Returned allowed, every other status denied);
   - permission contract (payroll.view/payroll.entry allowed, payroll.finalize-only
-    denied, ODA/driver-role denied, wrong-company/inaccessible-branch denied);
+    denied, DRIVER/Self denied, wrong-company/inaccessible-branch denied);
   - daily PerUnit parity with the existing production calculation path;
   - canonical live Status-derived pay, and exclusion of the stale persisted
     STATUS_PAYMENT/STATUS_PAY compatibility projection;
@@ -1162,12 +1162,12 @@ class _PermissionOwnership:
 
         runner = _CleanupRunner()
 
-        # 0. Unlink any ODA driver-profile pointer first so a nested driver/
+        # 0. Unlink any Employee pointer first so a nested Driver/
         #    employee ownership context (unwinds after this one, LIFO) is
         #    not blocked by fk_Users_Employee.
         if self.user_id is not None:
             await runner.execute(db, "UPDATE sec.users SET employeeid = NULL WHERE userid = :uid",
-                                  {"uid": self.user_id}, label="unlink ODA employee pointer")
+                                  {"uid": self.user_id}, label="unlink User Employee pointer")
 
         # 1. Permission overrides (always test-owned/per-user; never shared).
         # `set_user_permission_overrides` (app/admin/service.py) writes exactly
@@ -1352,6 +1352,14 @@ async def _owned_permission_principal(
         user_id = user["user_id"]
         own.user_id = user_id  # registered immediately -- before any further write
 
+        if employee_id is not None:
+            linked = await session_client.put(
+                f"/admin/users/{user_id}/employee-link",
+                json={"employee_id": employee_id},
+                headers=auth(admin_token),
+            )
+            assert linked.status_code == 200, f"Link Employee failed: {linked.text}"
+
         assign_body: dict = {"company_role_id": role_id, "scope_type": scope_type}
         if branch_id is not None:
             assign_body["branch_id"] = branch_id
@@ -1376,12 +1384,6 @@ async def _owned_permission_principal(
                 raise _DeliberateSetupFailure(
                     "simulated failure after UserPermissionOverrides write committed, before helper return"
                 )
-
-        if employee_id is not None:
-            await direct_db.execute(
-                _text("UPDATE sec.users SET employeeid = :eid WHERE userid = :uid"),
-                {"eid": employee_id, "uid": user_id},
-            )
 
         login = await session_client.post(
             "/auth/login", json={"username": marker, "password": password, "company_code": "DEMO"},
@@ -1677,31 +1679,36 @@ class TestPermissionAndScope:
                 assert r.status_code in (403, 404), r.text
 
     @pytest.mark.asyncio
-    async def test_oda_denial_direct_scope(
+    async def test_driver_self_denial_direct_scope(
         self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
     ):
         """
-        ODA (OwnDriverDataOnly) denial exercised through the ACTUAL route,
-        not a unit test of the guard helper: a principal with an
-        OwnDriverDataOnly-scoped assignment and otherwise-sufficient
-        payroll.view is still denied, and no financial data is exposed.
+        DRIVER/Self denial is exercised through the actual route, and no
+        financial data is exposed. Generic permission overrides are prohibited
+        for DRIVER/Self accounts by the current Access authority.
         """
+        driver_role_row = (await direct_db.execute(
+            _text("SELECT companyroleid FROM sec.companyroles WHERE companyid = 1 AND rolecode = 'DRIVER'"),
+        )).mappings().first()
+        if driver_role_row is None:
+            pytest.skip("No seeded 'DRIVER' company role present in this test environment")
         async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open") as pid:
             async with _owned_driver_and_employee(
-                session_client, auth_token, paytest_branch_id, direct_db, name="CP4B ODA Principal",
+                session_client, auth_token, paytest_branch_id, direct_db, name="CP4B Self Principal",
             ) as driver_id:
                 emp_row = (await direct_db.execute(
                     _text("SELECT employeeid FROM core.drivers WHERE driverid = :id"), {"id": driver_id},
                 )).mappings().first()
                 async with _owned_permission_principal(
-                    session_client, auth_token, direct_db, role_perms=["payroll.view"],
-                    scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+                    session_client, auth_token, direct_db,
+                    existing_company_role_id=driver_role_row["companyroleid"],
+                    scope_type="Self",
                     employee_id=emp_row["employeeid"],
                 ) as (token, _uid):
                     r = await session_client.get(f"/payroll/periods/{pid}/calculation-preview", headers=auth(token))
                     assert r.status_code == 403, r.text
                     body = r.json()
-                    assert "drivers" not in body, "no financial preview data may be exposed on ODA denial"
+                    assert "drivers" not in body, "no financial preview data may be exposed on DRIVER/Self denial"
                     assert "expected_pay" not in r.text
 
     @pytest.mark.asyncio
@@ -1710,8 +1717,8 @@ class TestPermissionAndScope:
     ):
         """
         Driver-role denial exercised through the real seeded 'DRIVER'
-        CompanyRole (not a synthetic role), assigned with OwnDriverDataOnly
-        scope -- the actual role-classification path a real driver-role user
+        CompanyRole (not a synthetic role), assigned with Self scope -- the
+        actual role-classification path a real driver-role user
         goes through. payroll.view is granted via a per-user permission
         override (never by editing the shared DRIVER role's own permission
         set, which would contaminate other tests/fixtures using that role).
@@ -1733,8 +1740,7 @@ class TestPermissionAndScope:
                 async with _owned_permission_principal(
                     session_client, auth_token, direct_db,
                     existing_company_role_id=driver_role_id,
-                    scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
-                    override_perms=["payroll.view"],
+                    scope_type="Self",
                     employee_id=emp_row["employeeid"],
                 ) as (token, _uid):
                     r = await session_client.get(f"/payroll/periods/{pid}/calculation-preview", headers=auth(token))

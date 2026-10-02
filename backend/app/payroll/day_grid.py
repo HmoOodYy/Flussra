@@ -25,7 +25,7 @@ Owns one REST resource end to end, GET and POST on
 Read and write are deliberately kept in one module rather than split: they
 serve the same REST resource, share the same DayGridResponse contract (the
 save path's return value IS the read path's output), and share the same
-private policy for the ODA role guard, period loading, WorkDate validation,
+private policy for the DRIVER role guard, period loading, WorkDate validation,
 canonical line-type vocabulary and snapshot-first daily-column discovery.
 Splitting them would add a day_grid_write -> day_grid_read edge that fires on
 every save without removing any real coupling.
@@ -66,6 +66,7 @@ from app.core.service import (
     _build_in_clause,
     _check_any_permission,
     _check_permission,
+    _require_not_driver_role,
 )
 from app.payroll import status_evidence
 from app.payroll.day_entry_state import (
@@ -84,7 +85,6 @@ from app.payroll.eligibility import (
     _lifecycle_eligible_driver_ids,
     _period_has_driver_eligibility_snapshot,
 )
-from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.line_audit import _write_line_audit
 from app.payroll.line_type_vocabulary import (
     _INFORMATIONAL_ONLY,
@@ -173,18 +173,7 @@ async def get_day_grid(
     - Status keys: active PayrollStatusKeys for the branch.
     - Rows: all eligible active drivers; populated with existing draft lines.
     """
-    # ── ODA / Driver-role guard ───────────────────────────────────────────── #
-    # Current Payroll is a manager/dispatcher screen, not a driver self-service
-    # screen.  OwnDriverDataOnly users are blocked unconditionally — they must
-    # not receive any payroll data (driver names, quantities, amounts, summary
-    # counts, etc.).  This is a belt-and-suspenders guard on top of the
-    # payroll.view / payroll.entry permission check below.
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="Current Payroll is not accessible to driver-role users.",
-        )
+    await _require_not_driver_role(company_id, user_id, db)
 
     # ── Load and access-check the period ─────────────────────────────────── #
     period = await get_period_by_id(company_id, user_id, period_id, db)
@@ -703,16 +692,7 @@ async def save_day_grid(
     All operations share the caller's transaction (no nested BEGIN).
     Returns the refreshed day-grid response.
     """
-    # ── ODA / Driver-role guard ───────────────────────────────────────────── #
-    # Same as get_day_grid: OwnDriverDataOnly users are unconditionally blocked
-    # from writing to the day grid.  They must not be able to modify any payroll
-    # data — not their own row, not anyone else's.
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="Current Payroll is not accessible to driver-role users.",
-        )
+    await _require_not_driver_role(company_id, user_id, db)
 
     # ── Load and access-check the period ─────────────────────────────────── #
     period = await get_period_by_id(company_id, user_id, period_id, db)

@@ -4,6 +4,8 @@ Pydantic schemas for the auth domain.
 These define the exact shape of every auth request body and response.
 FastAPI validates inputs against these schemas before any service code runs.
 """
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -31,9 +33,17 @@ class BranchAccess(BaseModel):
     """One branch (or company-wide scope) the user can access."""
     branch_id: int | None       # None for AllCompanyBranches scope
     branch_name: str | None     # None when branch_id is None
-    scope: str                  # AllCompanyBranches | SpecificBranch | OwnDriverDataOnly
+    scope: str                  # AllCompanyBranches | SpecificBranch
     role_code: str
     role_name: str
+
+
+class SelfAssignment(BaseModel):
+    """A resource-aware Self authority; it carries no branch identifier."""
+    role_code: str
+    role_name: str
+    scope: Literal["Self"] = "Self"
+
 
 
 class BranchPermissions(BaseModel):
@@ -60,7 +70,7 @@ class PermissionAuthority(BaseModel):
     branch_permissions: list[BranchPermissions] = []
     """
     One entry per distinct concrete branch backing an active SpecificBranch
-    or OwnDriverDataOnly assignment.  Each branch's permission list already
+    or SpecificBranch assignment.  Each branch's permission list already
     includes any company-wide grant (fn_UserHasPermission unions across all
     of the user's active assignments for that branch).
     """
@@ -74,6 +84,7 @@ class UserInfo(BaseModel):
     company_id: int
     company_name: str
     branches: list[BranchAccess]
+    self_assignments: list[SelfAssignment] = Field(default_factory=list)
     active_permissions: list[str] = Field(default=[], deprecated=True)
     """
     Distinct permission codes granted to this user across all active role

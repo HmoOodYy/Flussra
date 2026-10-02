@@ -314,7 +314,7 @@ async def add_period_pay_line(
     Insert a Period Pay line for a driver.
 
     Guards:
-      - ODA/Driver users are blocked unconditionally (Current Payroll is not
+      - DRIVER/Self users are blocked unconditionally (Current Payroll is not
         a driver self-service screen).
       - Period must be Open or InReview.
       - Driver must exist in this company and belong to the period's branch.
@@ -448,7 +448,7 @@ async def get_period_pay_lines(
     Return Period Pay lines for a period (WorkDate IS NULL lines only).
     Void lines are included (consistent with get_period_lines behavior).
 
-    ODA/Driver users are blocked unconditionally (P1 #2 security boundary).
+    DRIVER/Self users are blocked unconditionally (P1 #2 security boundary).
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)
@@ -634,7 +634,7 @@ async def void_period_pay_line(
 
     Idempotent: voiding an already-voided line succeeds without error.
     The period must be Open (CP-0A).
-    ODA/Driver users are blocked unconditionally (P1 #2 security boundary).
+    DRIVER/Self users are blocked unconditionally (P1 #2 security boundary).
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)

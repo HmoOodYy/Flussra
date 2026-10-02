@@ -65,7 +65,7 @@ async def get_final_lines(
 ) -> list[FinalLineSummary]:
     """Return locked final lines for a period (access-checked via period lookup).
 
-    Ledger is operational/admin only — Driver/ODA users are blocked.
+    Ledger is operational/admin only — DRIVER/Self users are blocked.
     Period must be Locked or Archived; draft data is never exposed via this path.
     """
     # ── Driver-role hard-block (Ledger is not the Driver Screen) ────────────── #

@@ -27,6 +27,7 @@ from sqlalchemy import text as _text
 from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -450,20 +451,16 @@ class TestDriversOff:
         paytest_branch_id: int,
         direct_db,
     ):
-        """ODA user → 403 on GET drivers-off endpoint."""
+        """DRIVER/Self user → 403 on GET drivers-off endpoint."""
         period = await _make_open_period(
             session_client, auth_token, paytest_branch_id,
             "2084-02-01", "2084-02-07", direct_db,
         )
         pid = period["payroll_period_id"]
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token, "CP25_ODA_DriversOff_Role",
-            ["payroll.view", "payroll.entry"],
-        )
         oda_token = await create_user_with_role_token(
-            session_client, auth_token, "cp25_oda_driversoff_user", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+            session_client, auth_token, "cp25_oda_driversoff_user", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
 
         resp = await session_client.get(

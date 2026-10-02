@@ -45,7 +45,8 @@ def _create_user_with_assignments(cur, username: str, assignments: list[tuple[st
     """
     Create (or reuse) a DEMO-company user (password TestPass123!) and attach one
     active sec.UserBranchRoles row per (branch_code, company_rolecode) pair.
-    branch_code=None -> AllCompanyBranches (company-wide); otherwise SpecificBranch.
+    Exact DRIVER assignments are Self with no branch; other roles use
+    AllCompanyBranches when branch_code=None and SpecificBranch otherwise.
     Uses the CompanyRoleID (new) path only — RoleID left NULL, same pattern as
     the existing override_perm_user fixture in test_auth_regression.py.
     """
@@ -60,6 +61,18 @@ def _create_user_with_assignments(cur, username: str, assignments: list[tuple[st
     """, (username, username, pw))
 
     for branch_code, rolecode in assignments:
+        if rolecode == "DRIVER":
+            cur.execute("""
+                INSERT INTO sec.userbranchroles
+                    (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
+                SELECT u.userid, u.companyid, NULL, NULL,
+                       cr.companyroleid, 'Self', TRUE
+                FROM sec.users u
+                JOIN core.companies c ON c.companyid = u.companyid
+                JOIN sec.companyroles cr ON cr.companyid = c.companyid AND cr.rolecode = 'DRIVER'
+                WHERE u.username = %s
+            """, (username,))
+            continue
         if branch_code is None:
             cur.execute("""
                 INSERT INTO sec.userbranchroles
@@ -133,14 +146,12 @@ async def test_specific_branch_only_denies_company_scope_and_scopes_branch_permi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @pytest.mark.asyncio
-async def test_mixed_all_company_and_specific_branch_authority(
+async def test_mixed_driver_self_and_specific_branch_stays_generic_fail_closed(
     client: httpx.AsyncClient, apply_schema,
 ):
     """
-    A company-wide DRIVER grant (drivers.view) plus a PAYTEST-only PAYROLL_VIEWER_CO
-    grant (payroll.view).  The company-wide permission must also appear in the
-    branch's own effective list (fn_UserHasPermission unions across all active
-    assignments for that user/branch pair).
+    A DRIVER/Self assignment plus a PAYTEST-only non-DRIVER assignment cannot
+    produce generic company or branch permissions for the mixed subject.
     """
     conn, cur = _pg_cursor(apply_schema)
     _create_user_with_assignments(
@@ -155,10 +166,23 @@ async def test_mixed_all_company_and_specific_branch_authority(
     assert r.status_code == 200, r.text
     authority = r.json()["user"]["authority"]
 
-    assert authority["company_permissions"] == ["drivers.view"]
-    assert authority["branch_permissions"] == [
-        {"branch_id": paytest_id, "permissions": ["drivers.view", "payroll.view"]}
+    assert r.json()["user"]["self_assignments"] == [
+        {"role_code": "DRIVER", "role_name": "Driver", "scope": "Self"}
     ]
+    assert r.json()["user"]["branches"] == [
+        {
+            "branch_id": paytest_id,
+            "branch_name": "Payroll Test Branch",
+            "scope": "SpecificBranch",
+            "role_code": "PAYROLL_VIEWER_CO",
+            "role_name": "Payroll Viewer (Test)",
+        }
+    ]
+    assert r.json()["user"]["active_permissions"] == []
+    assert authority == {
+        "company_permissions": [],
+        "branch_permissions": [{"branch_id": paytest_id, "permissions": []}],
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -172,7 +196,7 @@ async def test_multiple_specific_branch_assignments_each_scoped_independently(
     conn, cur = _pg_cursor(apply_schema)
     _create_user_with_assignments(
         cur, "authority_multibranch_user",
-        [("HQ", "PAYROLL_VIEWER_CO"), ("PAYTEST", "DRIVER")],
+        [("HQ", "PAYROLL_VIEWER_CO"), ("PAYTEST", "PAYROLL_VIEWER_CO")],
     )
     hq_id = _branch_id(cur, "HQ")
     paytest_id = _branch_id(cur, "PAYTEST")
@@ -186,7 +210,7 @@ async def test_multiple_specific_branch_assignments_each_scoped_independently(
     assert authority["company_permissions"] == []
     by_branch = {row["branch_id"]: row["permissions"] for row in authority["branch_permissions"]}
     assert by_branch[hq_id] == ["payroll.view"]
-    assert by_branch[paytest_id] == ["drivers.view"]
+    assert by_branch[paytest_id] == ["payroll.view"]
     assert [row["branch_id"] for row in authority["branch_permissions"]] == sorted([hq_id, paytest_id]), (
         "branch_permissions ordering must be deterministic (ascending branch_id)"
     )
@@ -203,7 +227,7 @@ async def test_overlapping_specific_branch_assignments_dedupe_to_one_entry(
     conn, cur = _pg_cursor(apply_schema)
     _create_user_with_assignments(
         cur, "authority_overlap_user",
-        [("HQ", "PAYROLL_VIEWER_CO"), ("HQ", "DRIVER")],
+        [("HQ", "PAYROLL_VIEWER_CO"), ("HQ", "PAYROLL_VIEWER_CO")],
     )
     hq_id = _branch_id(cur, "HQ")
     cur.close()
@@ -214,7 +238,7 @@ async def test_overlapping_specific_branch_assignments_dedupe_to_one_entry(
     authority = r.json()["user"]["authority"]
 
     assert authority["branch_permissions"] == [
-        {"branch_id": hq_id, "permissions": ["drivers.view", "payroll.view"]}
+        {"branch_id": hq_id, "permissions": ["payroll.view"]}
     ], "Two active assignments on the same branch must collapse into one entry"
 
 

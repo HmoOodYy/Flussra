@@ -4,7 +4,7 @@ All SQL is raw parameterised via sqlalchemy.text().
 All authorization is enforced before any write occurs.
 
 Transfer lifecycle:
-  create   → PendingSourceApproval   (when initiated_by='Driver' — by ODA user or manager)
+  create   → PendingSourceApproval   (when initiated_by='Driver' — by DRIVER/Self user or manager)
            → PendingTargetApproval   (when initiated_by='SourceBranch' — source
                                        approval is implicit)
   approve_source → PendingTargetApproval
@@ -15,8 +15,8 @@ Transfer lifecycle:
   cancel         → Cancelled
 
 P1 scope rules:
-  - ODA/driver users may ONLY call create (for their own driver, initiated_by='Driver').
-    All other endpoints are blocked for ODA users.
+  - DRIVER/Self users may call create only for their own effective Driver with initiated_by='Driver'.
+    All other transfer lifecycle endpoints are blocked for DRIVER/Self users.
   - Operational users need drivers.view to list/get.
   - Operational users need drivers.edit on the relevant branch for write operations.
   - list/get results are filtered to branches the caller can see.
@@ -36,6 +36,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import is_driver_self_subject, resolve_driver_self_profile
 from app.core.service import (
     _check_branch_access,
     _check_permission,
@@ -345,68 +346,6 @@ async def _get_driver_source_branch(
     return int(current["branchid"])
 
 
-async def _is_caller_oda(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> bool:
-    """Return True if the caller has OwnDriverDataOnly scope (is a driver-role user)."""
-    result = await db.execute(
-        text("""
-            SELECT 1
-            FROM   sec.userbranchroles ubr
-            LEFT JOIN sec.companyroles cr ON cr.companyroleid = ubr.companyroleid
-            LEFT JOIN sec.roles        r  ON r.roleid         = ubr.roleid
-            WHERE  ubr.userid    = :uid
-              AND  ubr.companyid = :cid
-              AND  ubr.isactive  = TRUE
-              AND (
-                    ubr.scopetype = 'OwnDriverDataOnly'
-                 OR cr.rolecode  = 'DRIVER'
-                 OR r.rolecode   = 'DRIVER'
-              )
-            LIMIT 1
-        """),
-        {"uid": user_id, "cid": company_id},
-    )
-    return result.first() is not None
-
-
-async def _get_oda_own_driver_id(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> int:
-    """
-    Return the caller's own active driver_id for an ODA user.
-    Raises 403 if no linked active driver profile exists.
-    """
-    result = await db.execute(
-        text("""
-            SELECT EmployeeID
-            FROM sec.Users
-            WHERE UserID = :uid AND CompanyID = :cid
-        """),
-        {"uid": user_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(
-            status_code=403,
-            detail="No active driver profile linked to your account.",
-        )
-    today = await company_today(company_id, db)
-    current = await resolve_effective_driver_profile(
-        company_id, row["employeeid"], today, db,
-    )
-    if current is None:
-        raise HTTPException(
-            status_code=403,
-            detail="No effective current Driver profile linked to your account.",
-        )
-    return int(current["driverid"])
-
-
 async def _get_accessible_branches_for_transfers(
     company_id: int,
     user_id: int,
@@ -420,7 +359,7 @@ async def _get_accessible_branches_for_transfers(
     - SpecificBranch scope → branch_ids = branches where caller has drivers.view
     - No qualifying permission → raises HTTP 403
 
-    This function is for OPERATIONAL users only.  ODA users are blocked before
+    This function is for OPERATIONAL users only.  DRIVER/Self users are blocked before
     this is called.
     """
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
@@ -462,7 +401,7 @@ async def create_driver_transfer_request(
 
     Two caller types are supported:
 
-    ODA / Driver-role users:
+    DRIVER/Self users:
       - May only initiate for their OWN active driver profile.
       - initiated_by must be 'Driver'.
       - Source-branch approval is still required (PendingSourceApproval).
@@ -473,18 +412,27 @@ async def create_driver_transfer_request(
       - initiated_by may be 'Driver' or 'SourceBranch'.
       - When 'SourceBranch', source approval is implicit (goes to PendingTargetApproval).
     """
-    caller_is_oda = await _is_caller_oda(company_id, user_id, db)
+    caller_is_driver_self = await is_driver_self_subject(company_id, user_id, db)
 
-    if caller_is_oda and data.initiated_by != "Driver":
+    if caller_is_driver_self and data.initiated_by != "Driver":
         raise HTTPException(
             status_code=422,
             detail="Driver-role users must set initiated_by='Driver'.",
         )
 
+    today = await company_today(company_id, db)
+    if caller_is_driver_self:
+        await resolve_driver_self_profile(
+            company_id,
+            user_id,
+            today,
+            db,
+            target_driver_id=data.driver_id,
+        )
+
     employee_id, _ = await _lock_employee_for_transfer_create(
         data.driver_id, company_id, db,
     )
-    today = await company_today(company_id, db)
     await sync_employee_branch_projection(
         company_id, employee_id, today, db,
     )
@@ -501,17 +449,9 @@ async def create_driver_transfer_request(
             status_code=422,
             detail="Transfer effective date must be after the source profile start date.",
         )
-    if caller_is_oda:
-        own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-        if data.driver_id != own_driver_id:
-            raise HTTPException(
-                status_code=403,
-                detail="You may only create a transfer request for your own driver profile.",
-            )
-
     source_branch_id = int(current["branchid"])
     await _assert_driver_belongs_to_branch(data.driver_id, source_branch_id, company_id, db)
-    if not caller_is_oda:
+    if not caller_is_driver_self:
         await _check_permission(company_id, user_id, source_branch_id, "drivers.edit", db)
 
     tgt_result = await db.execute(
@@ -553,9 +493,9 @@ async def create_driver_transfer_request(
             detail="A pending Driver profile already exists for this Employee.",
         )
 
-    # ODA users always get PendingSourceApproval.
+    # DRIVER/Self users always get PendingSourceApproval.
     # SourceBranch-initiated by operational users gets PendingTargetApproval.
-    if caller_is_oda or data.initiated_by == "Driver":
+    if caller_is_driver_self or data.initiated_by == "Driver":
         initial_status = "PendingSourceApproval"
         source_approved_by = None
         source_approved_at = None
@@ -912,7 +852,7 @@ async def cancel_driver_transfer(
     """
     Cancel an in-flight (non-terminal) transfer request.
     Requires drivers.edit on source or target branch.
-    ODA/driver users are blocked.
+    DRIVER/Self users are blocked.
     """
     await _require_not_driver_role(company_id, user_id, db)
 
@@ -974,7 +914,7 @@ async def list_transfer_requests(
     List transfer requests visible to the calling user.
 
     Scope rules:
-    - ODA users are blocked (they cannot list all transfer data).
+    - DRIVER/Self users are blocked (they cannot list all transfer data).
     - Caller must have drivers.view (or drivers.edit) on at least one branch.
     - Results are filtered to requests where source OR target branch is in the
       caller's allowed set.
@@ -1070,7 +1010,7 @@ async def get_transfer_request(
     Get a single transfer request by ID.
 
     Scope: caller must have drivers.view on either the source or target branch
-    (or AllCompanyBranches + drivers.view).  ODA users are blocked.
+    (or AllCompanyBranches + drivers.view).  DRIVER/Self users are blocked.
     """
     await _require_not_driver_role(company_id, user_id, db)
 

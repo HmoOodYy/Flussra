@@ -1,14 +1,13 @@
 """
 tests/test_driver_transfer.py — Driver branch immutability guard tests.
 
-Covers immutable Driver branch behavior:
-  - Driver branch reassignment returns 422 with or without payroll history
-  - Error message directs callers to Driver Transfer
-  - DriverID and original branch remain unchanged
+Protects the current DRIVER/Self boundary:
+  - legacy branch-scoped DRIVER assignments return 422
+  - the linked Workforce DriverID and branch remain unchanged
 
-The reassignment trigger is POST /admin/users/{id}/company-role-assignments
-with a DRIVER company role on a different branch. The immutable branch guard
-in ensure_driver_profile rejects the direct Workforce mutation.
+The current Access authority requires a linked Employee and Self scope for
+DRIVER assignments. Legacy branch-scoped requests are rejected before they
+can change the Workforce profile.
 """
 import random
 
@@ -16,7 +15,7 @@ import httpx
 import pytest
 from sqlalchemy import text as _text
 
-from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.access import create_provisioned_test_user
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -24,18 +23,6 @@ from tests.access_test_helpers import create_neutral_test_user
 
 def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
-
-
-async def _create_user(
-    client: httpx.AsyncClient,
-    token: str,
-    username: str,
-) -> int:
-    user = await create_neutral_test_user(
-        client, token, username, password="TestPass1234!",
-        display_name=f"Transfer Test {username}",
-    )
-    return user["user_id"]
 
 
 async def _get_driver_role_id(client: httpx.AsyncClient, token: str) -> int:
@@ -115,9 +102,11 @@ async def _make_fresh_driver(
     driver_role_id: int,
 ) -> tuple[int, int]:
     suffix = random.randint(100000, 999999)
-    user_id = await _create_user(client, token, f"xfr_{suffix}")
-    r = await _assign_driver_role(client, token, user_id, driver_role_id, branch_id)
-    assert r.status_code == 201, f"role assignment failed: {r.text}"
+    user = await create_provisioned_test_user(
+        client, token, f"xfr_{suffix}", driver_role_id,
+        scope_type="Self", driver_branch_id=branch_id,
+    )
+    user_id = int(user["user_id"])
     profile = await _get_driver_profile(client, token, user_id)
     assert profile["has_driver_profile"] is True
     return user_id, profile["driver_id"]
@@ -137,20 +126,20 @@ class TestDriverBranchReassignment:
         hq_branch_id: int,
         paytest_branch_id: int,
     ):
-        """A history-free Driver still cannot be directly reassigned."""
+        """A valid DRIVER/Self identity rejects a legacy branch assignment."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
         user_id, driver_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
 
-        # Role reassignment cannot move the Driver profile, even without history.
+        # DRIVER/Self cannot be changed to the retired branch-scoped shape.
         r = await _assign_driver_role(
             session_client, auth_token, user_id, driver_role_id, paytest_branch_id
         )
         assert r.status_code == 422, (
             f"Expected 422 for direct branch reassignment, got {r.status_code}: {r.text}"
         )
-        assert "transfer" in r.text.lower(), "Error should direct caller to Driver Transfer."
+        assert "self scope" in r.text.lower(), "Error should explain the DRIVER Self requirement."
 
         # Confirm the original profile remains authoritative.
         profile = await _get_driver_profile(session_client, auth_token, user_id)
@@ -197,8 +186,8 @@ class TestDriverBranchReassignment:
         assert r.status_code == 422, (
             f"Expected 422 when driver has DraftLines, got {r.status_code}: {r.text}"
         )
-        assert "payroll" in r.text.lower() or "transfer" in r.text.lower(), (
-            f"Error message should mention payroll history or transfer: {r.text}"
+        assert "self scope" in r.text.lower(), (
+            f"Error message should explain the DRIVER Self requirement: {r.text}"
         )
 
         # Branch must NOT have changed
@@ -372,6 +361,6 @@ class TestDriverBranchReassignment:
         )
         assert r.status_code == 422
         detail = r.json().get("detail", "")
-        assert "transfer" in detail.lower(), (
-            f"422 detail should mention 'Transfer': {detail}"
+        assert "self scope" in detail.lower(), (
+            f"422 detail should explain the DRIVER Self requirement: {detail}"
         )

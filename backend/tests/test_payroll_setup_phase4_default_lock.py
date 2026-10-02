@@ -212,6 +212,7 @@ async def test_default_change_company_lock_does_not_deadlock_with_publish_audit(
 async def _create_actor(db, *, permissions: tuple[str, ...], scope: str, driver=False) -> int:
     suffix = uuid4().hex[:10]
     role_code = "DRIVER" if driver else "P4C_" + suffix
+    assignment_scope = "Self" if driver else scope
     async with db.engine.begin() as conn:
         user_id = (await conn.execute(text("""
             INSERT INTO sec.Users (CompanyID, Username, DisplayName, IsActive, CanLogin)
@@ -240,8 +241,8 @@ async def _create_actor(db, *, permissions: tuple[str, ...], scope: str, driver=
             VALUES (:uid, :cid, :bid, :role_id, :company_role_id, :scope, TRUE)
         """), {
             "uid": user_id, "cid": db.company_id,
-            "bid": db.branch_id if scope == "SpecificBranch" else None,
-            "role_id": role_id, "company_role_id": company_role_id, "scope": scope,
+            "bid": db.branch_id if assignment_scope == "SpecificBranch" else None,
+            "role_id": role_id, "company_role_id": company_role_id, "scope": assignment_scope,
         })
     return int(user_id)
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Integration tests for CP-1 Day Grid endpoints:
 
   GET  /payroll/periods/{id}/day-grid?work_date=YYYY-MM-DD
@@ -19,6 +19,7 @@ from sqlalchemy import text as _text
 from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -763,13 +764,13 @@ class TestDayGridSave:
 
 
 # ---------------------------------------------------------------------------
-# 7. ODA / Driver-role access block
+# 7. DRIVER/Self access block
 # ---------------------------------------------------------------------------
 
-class TestDayGridODABlock:
+class TestDayGridDriverSelfBlock:
     """
-    OwnDriverDataOnly (driver-role) users must be blocked from all day-grid
-    endpoints with HTTP 403.  They must not receive any payroll data.
+    DRIVER/Self users must be blocked from all day-grid endpoints with HTTP
+    403. They must not receive any payroll data.
     """
 
     @pytest.mark.asyncio
@@ -780,14 +781,10 @@ class TestDayGridODABlock:
         dg_open_period: dict,
         paytest_branch_id: int,
     ):
-        """ODA user gets 403 on GET day-grid — no data leaked."""
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token, "DG_ODA_GetRole_2081",
-            ["payroll.view", "payroll.entry"],
-        )
+        """DRIVER/Self user gets 403 on GET day-grid — no data leaked."""
         oda_token = await create_user_with_role_token(
-            session_client, auth_token, "dg_oda_get_user_2081", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+            session_client, auth_token, "dg_oda_get_user_2081", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
         pid = dg_open_period["payroll_period_id"]
         resp = await session_client.get(
@@ -810,14 +807,10 @@ class TestDayGridODABlock:
         paytest_branch_id: int,
         paytest_driver_id: int,
     ):
-        """ODA user gets 403 on POST day-grid — no write permitted."""
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token, "DG_ODA_PostRole_2081",
-            ["payroll.entry"],
-        )
+        """DRIVER/Self user gets 403 on POST day-grid — no write permitted."""
         oda_token = await create_user_with_role_token(
-            session_client, auth_token, "dg_oda_post_user_2081", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+            session_client, auth_token, "dg_oda_post_user_2081", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
         pid = dg_open_period["payroll_period_id"]
         resp = await session_client.post(
@@ -839,16 +832,12 @@ class TestDayGridODABlock:
         paytest_branch_id: int,
     ):
         """
-        Driver-only user (ODA scope, no payroll permissions) gets 403 on GET.
-        The ODA guard fires before permission check; either one suffices.
+        DRIVER/Self user without payroll permissions gets 403 on GET.
+        The generic DRIVER denial or permission check blocks the request.
         """
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token, "DG_DrvOnly_GetRole_2081",
-            [],  # no payroll permissions at all
-        )
         drv_token = await create_user_with_role_token(
-            session_client, auth_token, "dg_drvonly_get_user_2081", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+            session_client, auth_token, "dg_drvonly_get_user_2081", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
         pid = dg_open_period["payroll_period_id"]
         resp = await session_client.get(
@@ -867,14 +856,10 @@ class TestDayGridODABlock:
         paytest_branch_id: int,
         paytest_driver_id: int,
     ):
-        """Driver-only user (ODA scope, no payroll permissions) gets 403 on POST."""
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token, "DG_DrvOnly_PostRole_2081",
-            [],  # no payroll permissions at all
-        )
+        """DRIVER/Self user without payroll permissions gets 403 on POST."""
         drv_token = await create_user_with_role_token(
-            session_client, auth_token, "dg_drvonly_post_user_2081", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+            session_client, auth_token, "dg_drvonly_post_user_2081", await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
         pid = dg_open_period["payroll_period_id"]
         resp = await session_client.post(
@@ -896,8 +881,8 @@ class TestDayGridODABlock:
         paytest_branch_id: int,
     ):
         """
-        Non-ODA user with payroll.entry and SpecificBranch scope gets 200 on GET.
-        Confirms the ODA guard does not block legitimate users.
+        Non-DRIVER user with payroll.entry and SpecificBranch scope gets 200.
+        Confirms the DRIVER denial does not block legitimate users.
         """
         role_id = await create_company_role_with_permissions(
             session_client, auth_token, "DG_Entry_GetRole_2081",

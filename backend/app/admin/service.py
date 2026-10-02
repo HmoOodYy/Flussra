@@ -21,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import require_non_driver_subject
 from app.admin.schemas import (
     CompanyRole,
     CompanyRoleAssignmentCreate,
@@ -226,20 +227,17 @@ async def _ensure_disabled_owner_transfer_authority(
             WHERE u.UserID=:uid AND u.CompanyID=:cid AND u.IsActive AND NOT u.IsStaged
               AND c.Status='Active' AND NOT c.IsSuspended
               AND ubr.IsActive AND ubr.ScopeType='AllCompanyBranches'
+              AND ubr.BranchID IS NULL
               AND cr.RoleCode='COMPANY_OWNER'
         """),
         {"uid": user_id, "cid": company_id},
     )
     if result.first() is None:
         raise HTTPException(status_code=403, detail="Only an active Company Owner can transfer ownership.")
-    for permission_code in _ADMIN_FALLBACKS:
-        permission = await db.execute(
-            text("SELECT sec.fn_UserHasPermission(:uid, :cid, NULL, :perm)"),
-            {"uid": user_id, "cid": company_id, "perm": permission_code},
-        )
-        if permission.scalar_one():
-            return
-    raise HTTPException(status_code=403, detail="Company Owner lacks the required ownership-transfer permission.")
+    # The explicit active company-wide Owner assignment is the service authority
+    # for this exceptional disabled-owner transfer path; generic permission
+    # evaluation intentionally rejects login-disabled principals.
+    return
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +423,7 @@ async def _fetch_extra_perms_for_users(
 async def _fetch_role_perms_for_roles(
     company_id: int,
     role_ids: set[int],
+    owner_authority_role_ids: set[int],
     db: AsyncConnection,
 ) -> dict[int, list[str]]:
     """
@@ -438,20 +437,9 @@ async def _fetch_role_perms_for_roles(
     if not role_ids:
         return {}
 
-    placeholders = ", ".join(f":rid{i}" for i in range(len(role_ids)))
-    params: dict = {**{f"rid{i}": rid for i, rid in enumerate(role_ids)}}
-
-    # Identify which role IDs are COMPANY_OWNER
-    owner_r = await db.execute(
-        text(f"""
-            SELECT companyroleid
-            FROM   sec.companyroles
-            WHERE  companyroleid IN ({placeholders})
-              AND  rolecode = 'COMPANY_OWNER'
-        """),
-        params,
-    )
-    owner_ids: set[int] = {row["companyroleid"] for row in owner_r.mappings().all()}
+    # Dynamic Owner permissions require an active AllCompanyBranches assignment
+    # with NULL BranchID; role identity alone does not establish that authority.
+    owner_ids = role_ids & owner_authority_role_ids
 
     out: dict[int, list[str]] = {}
 
@@ -553,7 +541,15 @@ async def _get_user_by_id_internal(
     extra_map = await _fetch_extra_perms_for_users(company_id, uid_list, db)
     cr_info = cr_map.get(target_user_id)
     role_ids_set = {cr_info["companyroleid"]} if cr_info else set()
-    role_perms_map = await _fetch_role_perms_for_roles(company_id, role_ids_set, db)
+    owner_role_ids = (
+        {cr_info["companyroleid"]}
+        if cr_info
+        and cr_info["company_role_code"] == "COMPANY_OWNER"
+        and cr_info["company_role_scope"] == "AllCompanyBranches"
+        and cr_info["company_role_branch_id"] is None
+        else set()
+    )
+    role_perms_map = await _fetch_role_perms_for_roles(company_id, role_ids_set, owner_role_ids, db)
     return _row_to_user(
         row,
         assignments_map.get(target_user_id, []),
@@ -602,7 +598,14 @@ async def list_users(
     extra_map = await _fetch_extra_perms_for_users(company_id, uid_list, db)
     # Batch role permissions for all distinct company_role_ids in this result set
     role_ids_set = {d["companyroleid"] for d in cr_map.values() if d}
-    role_perms_map = await _fetch_role_perms_for_roles(company_id, role_ids_set, db)
+    owner_role_ids = {
+        info["companyroleid"] for info in cr_map.values()
+        if info
+        and info["company_role_code"] == "COMPANY_OWNER"
+        and info["company_role_scope"] == "AllCompanyBranches"
+        and info["company_role_branch_id"] is None
+    }
+    role_perms_map = await _fetch_role_perms_for_roles(company_id, role_ids_set, owner_role_ids, db)
     return [
         _row_to_user(
             r,
@@ -646,12 +649,17 @@ async def _lock_employee_link_target(
 async def _validate_company_role_scope(
     company_id: int, scope_type: str, branch_id: int | None, db: AsyncConnection,
 ) -> None:
-    if scope_type == "AllCompanyBranches":
+    if scope_type in {"AllCompanyBranches", "Self"}:
         if branch_id is not None:
-            raise HTTPException(status_code=422, detail="branch_id must be null for AllCompanyBranches scope.")
+            raise HTTPException(
+                status_code=422,
+                detail=f"branch_id must be null for {scope_type} scope.",
+            )
         return
+    if scope_type != "SpecificBranch":
+        raise HTTPException(status_code=422, detail="Unsupported scope_type.")
     if branch_id is None:
-        raise HTTPException(status_code=422, detail=f"branch_id is required for {scope_type} scope.")
+        raise HTTPException(status_code=422, detail="branch_id is required for SpecificBranch scope.")
     branch = await db.execute(
         text("SELECT 1 FROM core.Branches WHERE BranchID = :branch_id AND CompanyID = :company_id"),
         {"branch_id": branch_id, "company_id": company_id},
@@ -682,33 +690,28 @@ async def _validate_p2a_assignment(
         raise HTTPException(status_code=422, detail="Company Owner can only be granted through ownership transfer.")
 
     is_driver = role["rolecode"] == "DRIVER"
-    if data.scope_type == "OwnDriverDataOnly" and not is_driver:
-        raise HTTPException(status_code=422, detail="OwnDriverDataOnly scope is valid only for the DRIVER role.")
     if is_driver:
         if employee_id is None:
             raise HTTPException(status_code=422, detail="DRIVER access requires an explicitly linked Employee.")
-        if data.scope_type != "OwnDriverDataOnly":
-            raise HTTPException(status_code=422, detail="DRIVER access requires OwnDriverDataOnly scope.")
-        if data.branch_id is None:
-            raise HTTPException(status_code=422, detail="DRIVER access requires its current Driver branch.")
+        if data.scope_type != "Self":
+            raise HTTPException(status_code=422, detail="DRIVER access requires Self scope.")
+        if data.branch_id is not None:
+            raise HTTPException(status_code=422, detail="branch_id must be null for Self scope.")
         employee = await db.execute(
             text("SELECT EmployeeID FROM core.Employees WHERE EmployeeID = :employee_id AND CompanyID = :company_id FOR UPDATE"),
             {"employee_id": employee_id, "company_id": company_id},
         )
         if employee.first() is None:
             raise HTTPException(status_code=422, detail="Linked Employee not found for this company.")
-
-    await _validate_company_role_scope(company_id, data.scope_type, data.branch_id, db)
-
-    if is_driver:
         business_date = await company_today(company_id, db)
         current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
         if current is None:
             raise HTTPException(status_code=422, detail="DRIVER access requires a current effective Driver profile.")
-        if current["branchid"] != data.branch_id:
-            raise HTTPException(status_code=422, detail="DRIVER scope branch must match the current Driver profile.")
+    else:
+        if data.scope_type == "Self":
+            raise HTTPException(status_code=422, detail="Self scope is currently valid only for the exact DRIVER role.")
+        await _validate_company_role_scope(company_id, data.scope_type, data.branch_id, db)
     return role
-
 
 async def _insert_p2a_assignment(
     user_id: int,
@@ -1152,6 +1155,10 @@ async def assign_role(
     role_row = role_result.mappings().first()
     if role_row is None:
         raise HTTPException(status_code=422, detail="Role not found.")
+    if data.scope_type == "Self":
+        raise HTTPException(status_code=422, detail="Self scope is available only through the company-role Access flow.")
+    if role_row["rolecode"] == "DRIVER":
+        raise HTTPException(status_code=422, detail="DRIVER must be assigned through the company-role Access flow.")
 
     # Validate scope / branch alignment
     if data.scope_type == "AllCompanyBranches":
@@ -1160,8 +1167,8 @@ async def assign_role(
                 status_code=422,
                 detail="branch_id must be null for AllCompanyBranches scope.",
             )
-    else:
-        # SpecificBranch or OwnDriverDataOnly — branch required
+    elif data.scope_type == "SpecificBranch":
+        # Branch-scoped legacy roles require a same-company branch.
         if data.branch_id is None:
             raise HTTPException(
                 status_code=422,
@@ -1176,6 +1183,9 @@ async def assign_role(
                 status_code=422,
                 detail="Branch not found for this company.",
             )
+
+    else:
+        raise HTTPException(status_code=422, detail="Unsupported scope_type.")
 
     # Prevent duplicate active assignment — branch_id NULL vs. specific handled separately
     # to avoid the SQLAlchemy text() parser tripping over :param::TYPE cast syntax.
@@ -1907,6 +1917,8 @@ async def set_company_role_permissions(
         )
 
     new_codes: set[str] = {c.strip() for c in data.permission_codes if c.strip()}
+    if role["rolecode"] == "DRIVER" and new_codes:
+        raise HTTPException(status_code=422, detail="The DRIVER role cannot receive generic permissions in P2b.")
 
     # Validate all provided codes exist in sec.Permissions
     if new_codes:
@@ -2107,7 +2119,7 @@ async def assign_company_role(
 
     # Confirm target user exists
     chk_user = await db.execute(
-        text("SELECT IsStaged FROM sec.users WHERE userid = :uid AND companyid = :cid AND isactive = TRUE FOR UPDATE"),
+        text("SELECT IsStaged, EmployeeID FROM sec.users WHERE userid = :uid AND companyid = :cid AND isactive = TRUE FOR UPDATE"),
         {"uid": target_user_id, "cid": company_id},
     )
     user_row = chk_user.mappings().first()
@@ -2144,24 +2156,23 @@ async def assign_company_role(
             ),
         )
 
-    if cr_row["rolecode"] == "DRIVER" and data.branch_id is not None:
-        await _check_any_permission(company_id, caller_id, data.branch_id, ["employees.manage"], db)
-
-    # Driver role requires a home branch (must have a SpecificBranch or OwnDriverDataOnly scope).
-    # AllCompanyBranches carries no branch_id — the driver would have no profile and pay rates
-    # would be impossible.  Reject clearly so the UI can guide the user.
-    if "DRIVER" in cr_row["rolecode"].upper() and data.scope_type == "AllCompanyBranches":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Driver access requires a home branch. "
-                "Please assign this role with SpecificBranch or OwnDriverDataOnly scope "
-                "and select the driver's home branch."
-            ),
+    cr_row = await _validate_p2a_assignment(
+        company_id, user_row["employeeid"], data, db
+    )
+    if cr_row["rolecode"] == "DRIVER":
+        active_overrides = await db.execute(
+            text("""
+                SELECT 1 FROM sec.UserPermissionOverrides
+                WHERE UserID = :uid AND CompanyID = :cid AND IsActive
+                LIMIT 1
+            """),
+            {"uid": target_user_id, "cid": company_id},
         )
-
-    await _validate_company_role_scope(company_id, data.scope_type, data.branch_id, db)
-
+        if active_overrides.first() is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="Clear active permission overrides before assigning DRIVER.",
+            )
     # Revoke all existing active company-role assignments for this user
     await db.execute(
         text("""
@@ -2218,7 +2229,8 @@ async def assign_company_role(
         },
     )
 
-    # Auto-create driver profile when the assigned role is a driver role.
+    # Transitional P2c hook. Valid DRIVER/Self has NULL BranchID, so this path
+    # is unreachable for a valid DRIVER assignment.
     if cr_row["rolecode"] == "DRIVER" and data.branch_id is not None:
         await ensure_driver_profile(
             db=db,
@@ -2387,6 +2399,8 @@ async def transfer_company_owner(
               AND  ubr.companyid     = :cid
               AND  ubr.companyroleId = :co_rid
               AND  ubr.isactive      = TRUE
+              AND  ubr.scopetype = 'AllCompanyBranches'
+              AND  ubr.branchid IS NULL
             FOR UPDATE OF ubr
         """),
         {"caller": caller_id, "cid": company_id, "co_rid": owner_company_role_id},
@@ -2646,6 +2660,8 @@ async def set_user_permission_overrides(
               AND  ubr.companyid = :cid
               AND  ubr.isactive  = TRUE
               AND  cr.rolecode   = 'COMPANY_OWNER'
+              AND  ubr.scopetype = 'AllCompanyBranches'
+              AND  ubr.branchid IS NULL
         """),
         {"uid": target_user_id, "cid": company_id},
     )
@@ -2659,6 +2675,20 @@ async def set_user_permission_overrides(
         )
 
     new_codes: set[str] = {c.strip() for c in data.permission_codes if c.strip()}
+    driver_subject = await db.execute(
+        text("""
+            SELECT EXISTS (
+                SELECT 1 FROM sec.UserBranchRoles ubr
+                LEFT JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
+                LEFT JOIN sec.Roles r ON r.RoleID = ubr.RoleID
+                WHERE ubr.UserID = :uid AND ubr.CompanyID = :cid AND ubr.IsActive
+                  AND (ubr.ScopeType = 'Self' OR cr.RoleCode = 'DRIVER' OR r.RoleCode = 'DRIVER')
+            )
+        """),
+        {"uid": target_user_id, "cid": company_id},
+    )
+    if new_codes and driver_subject.scalar_one():
+        raise HTTPException(status_code=422, detail="DRIVER Self accounts cannot receive generic permission overrides.")
 
     # Validate all codes exist
     if new_codes:
@@ -2830,35 +2860,19 @@ async def get_user_driver_info(
     Return driver profile info for a user (target: user_id).
 
     Security rules:
-      1. Caller must have one of: users.view, payrates.view, payrates.edit,
+      1. DRIVER/Self subjects are denied generic Driver administration.
+      2. Caller must have one of: users.view, payrates.view, payrates.edit,
          settings.manage, setup.manage.
-      2. If caller has OwnDriverDataOnly scope, they may only look up their own user_id.
       3. If caller has SpecificBranch scope, they may only see targets whose
          driver profile belongs to their allowed branch.
     """
+    await require_non_driver_subject(company_id, caller_user_id, db)
     # Rule 1 — permission gate
     await _check_any_permission(
         company_id, caller_user_id, None,
         ["users.view", "payrates.view", "payrates.edit", "settings.manage", "setup.manage"],
         db,
     )
-
-    # Rule 2 — OwnDriverDataOnly: caller may only look up themselves
-    scope_result = await db.execute(
-        text("""
-            SELECT scopetype FROM sec.userbranchroles
-            WHERE userid = :uid AND companyid = :cid AND isactive = TRUE
-            ORDER BY userbranchroleid DESC LIMIT 1
-        """),
-        {"uid": caller_user_id, "cid": company_id},
-    )
-    scope_row = scope_result.mappings().first()
-    if scope_row and scope_row["scopetype"] == "OwnDriverDataOnly":
-        if user_id != caller_user_id:
-            raise HTTPException(
-                status_code=403,
-                detail="You can only look up your own driver profile.",
-            )
 
     result = await db.execute(
         text("""

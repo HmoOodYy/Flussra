@@ -19,116 +19,15 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import require_non_driver_subject
 from app.core.service import _check_any_permission
 
-# ---------------------------------------------------------------------------
-# OwnDriverDataOnly scope guard — shared by all rate read/write endpoints
-# ---------------------------------------------------------------------------
 
-async def _get_oda_own_driver_id(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> int | None:
-    """
-    Returns the caller's own driver_id if and only if they have exactly one
-    active role assignment AND it has OwnDriverDataOnly scope.
-
-    Returns None (no ODA restriction) when:
-    - No active assignment exists.
-    - The single active assignment is SpecificBranch or AllCompanyBranches.
-    - Multiple active assignments all have non-ODA scope (unusual but safe).
-
-    Raises HTTP 403 (fail-closed) when multiple active assignments exist and
-    ANY of them has OwnDriverDataOnly scope — this indicates data corruption
-    that assign_company_role's revoke logic should have prevented.
-
-    Raises HTTP 403 if ODA scope is confirmed but the user has no linked
-    driver profile (Users.EmployeeID → Employees → Drivers).
-    """
-    scope_result = await db.execute(
-        text("""
-            SELECT scopetype, userbranchroleid
-            FROM   sec.userbranchroles
-            WHERE  userid    = :uid
-              AND  companyid = :cid
-              AND  isactive  = TRUE
-            ORDER  BY userbranchroleid DESC
-        """),
-        {"uid": user_id, "cid": company_id},
-    )
-    scope_rows = scope_result.mappings().all()
-
-    if not scope_rows:
-        return None  # No active assignment — no ODA restriction
-
-    if len(scope_rows) > 1:
-        # Multiple active assignments: fail-closed if any is ODA (bad data).
-        scope_types = {r["scopetype"] for r in scope_rows}
-        if "OwnDriverDataOnly" in scope_types:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Ambiguous role assignments: multiple active company-role assignments "
-                    "exist, including OwnDriverDataOnly scope. Access denied until "
-                    "assignments are resolved by an administrator."
-                ),
-            )
-        return None  # Multiple non-ODA assignments — no ODA restriction here
-
-    # Exactly one active assignment
-    if scope_rows[0]["scopetype"] != "OwnDriverDataOnly":
-        return None  # AllCompanyBranches or SpecificBranch — no ODA restriction
-
-    # ODA confirmed: resolve caller's linked driver profile
-    own_drv_result = await db.execute(
-        text("""
-            SELECT d.driverid
-            FROM   sec.users      u
-            JOIN   core.employees e ON e.employeeid = u.employeeid
-            JOIN   core.drivers   d ON d.employeeid = e.employeeid
-                                    AND d.companyid  = :cid
-                                    AND d.driverstatus NOT IN ('Transferred', 'Terminated')
-            WHERE  u.userid = :uid
-        """),
-        {"uid": user_id, "cid": company_id},
-    )
-    own_drv_row = own_drv_result.mappings().first()
-    if own_drv_row is None:
-        raise HTTPException(
-            status_code=403,
-            detail="OwnDriverDataOnly: no linked driver profile found for your account.",
-        )
-    return int(own_drv_row["driverid"])
-
-
-async def _check_own_driver_only(
-    company_id: int,
-    user_id: int,
-    target_driver_id: int,
-    db: AsyncConnection,
+async def _require_non_driver_rate_subject(
+    company_id: int, user_id: int, db: AsyncConnection,
 ) -> None:
-    """
-    If the caller's single active assignment has OwnDriverDataOnly scope,
-    verify that *target_driver_id* is their own linked driver.
-
-    Raises HTTP 403 if the scope is OwnDriverDataOnly and the target driver
-    does not match, if no linked driver profile exists, or if multiple active
-    assignments exist with conflicting ODA scope (fail-closed).
-
-    No-op for AllCompanyBranches and SpecificBranch scopes.
-
-    Call this AFTER the branch-access check so that scope type is already
-    known to be within the caller's company.
-    """
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is None:
-        return  # Not ODA — no restriction
-    if own_driver_id != target_driver_id:
-        raise HTTPException(
-            status_code=403,
-            detail="OwnDriverDataOnly: you may only access your own driver's rates.",
-        )
+    """Generic rate administration is unavailable to every DRIVER subject."""
+    await require_non_driver_subject(company_id, user_id, db)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +87,7 @@ async def _check_driver_read_access(
     Performs:
       1. Driver lookup — 404 if not in this company.
       2. Permission check with driver's branch_id — 403 if no payrates.* permission.
-      3. OwnDriverDataOnly scope check — 403 if ODA mismatch or ambiguous assignments.
+      3. DRIVER/Self ceiling — generic rate administration is denied.
 
     Returns the driver's branch_id on success.
 
@@ -197,6 +96,7 @@ async def _check_driver_read_access(
     to enforce branch scope (fn_UserHasPermission returns FALSE for
     SpecificBranch users on a different branch).
     """
+    await _require_non_driver_rate_subject(company_id, user_id, db)
     drv_result = await db.execute(
         text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
         {"did": driver_id, "cid": company_id},
@@ -209,5 +109,4 @@ async def _check_driver_read_access(
         company_id, user_id, branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
-    await _check_own_driver_only(company_id, user_id, driver_id, db)
     return branch_id

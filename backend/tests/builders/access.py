@@ -2,12 +2,29 @@
 
 import httpx
 
+from tests.builders.workforce import create_driver_employee_record
+
 
 def _require_status(response: httpx.Response, expected: int, operation: str) -> None:
     if response.status_code != expected:
         raise RuntimeError(
             f"{operation} expected HTTP {expected}, got {response.status_code}: {response.text}"
         )
+
+
+async def get_company_role_id(
+    client: httpx.AsyncClient, token: str, role_code: str,
+) -> int:
+    """Return the company-scoped role ID for an exact seeded role code."""
+    response = await client.get(
+        "/admin/company-roles",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    _require_status(response, 200, "List company roles")
+    role = next((item for item in response.json() if item["role_code"] == role_code), None)
+    if role is None:
+        raise LookupError(f"Company role {role_code!r} was not found")
+    return int(role["company_role_id"])
 
 
 async def create_company_role_with_permissions(
@@ -71,10 +88,12 @@ async def create_provisioned_test_user(
     *,
     scope_type: str = "AllCompanyBranches",
     branch_id: int | None = None,
+    driver_branch_id: int | None = None,
+    employee_id: int | None = None,
     password: str = "TestPass123!",
     display_name: str | None = None,
 ) -> dict:
-    """Provision a test account, preserving the current Driver/ODA setup path."""
+    """Provision test Access state, using a linked current Driver for Self users."""
     auth_headers = {"Authorization": f"Bearer {admin_token}"}
     roles_response = await client.get("/admin/company-roles", headers=auth_headers)
     _require_status(roles_response, 200, "List company roles")
@@ -86,9 +105,24 @@ async def create_provisioned_test_user(
     if requested_role is None:
         raise LookupError(f"Company role {role_id} was not found")
 
-    legacy_assignment = (
-        requested_role["role_code"] == "DRIVER" or scope_type == "OwnDriverDataOnly"
-    )
+    is_driver = requested_role["role_code"] == "DRIVER"
+    if scope_type not in {"AllCompanyBranches", "SpecificBranch", "Self"}:
+        raise ValueError("Unsupported current test assignment scope")
+    if is_driver and (scope_type != "Self" or branch_id is not None):
+        raise ValueError("DRIVER test accounts require Self scope and no assignment branch")
+    if scope_type == "Self" and not is_driver:
+        raise ValueError("Self scope is reserved for exact DRIVER test accounts")
+    if is_driver and employee_id is None:
+        if driver_branch_id is None:
+            raise ValueError("driver_branch_id is required to create a test-owned Driver profile")
+        employee = await create_driver_employee_record(
+            client, admin_token, branch_id=driver_branch_id,
+            full_name=f"{display_name or username} Employee",
+            driver_code=f"T-{username[:24]}",
+        )
+        employee_id = employee["employee_id"]
+
+    legacy_assignment = is_driver
     initial_role_id = role_id
     initial_scope = scope_type
     initial_branch_id = branch_id
@@ -116,6 +150,7 @@ async def create_provisioned_test_user(
             "is_active": True,
             "can_login": True,
             "must_change_password": False,
+            "employee_id": employee_id,
             "role_assignment": assignment,
         },
         headers=auth_headers,
@@ -148,6 +183,7 @@ async def create_user_with_role_token(
     role_id: int,
     scope_type: str = "AllCompanyBranches",
     branch_id: int | None = None,
+    driver_branch_id: int | None = None,
     password: str = "TestPass123!",
 ) -> str:
     """Provision a role-scoped test user and return its authenticated token."""
@@ -158,6 +194,7 @@ async def create_user_with_role_token(
         role_id,
         scope_type=scope_type,
         branch_id=branch_id,
+        driver_branch_id=driver_branch_id,
         password=password,
     )
     login = await client.post(

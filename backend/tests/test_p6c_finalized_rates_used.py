@@ -21,6 +21,7 @@ from app.payroll.service import (
     finalize_period,
 )
 from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -211,18 +212,19 @@ async def _scoped_permission_token(
 async def _ledger_token_with_driver_scope(
     client: httpx.AsyncClient, admin_token: str, branch_id: int, scope_type: str,
 ) -> str:
-    token, user_id = await _scoped_permission_token(
-        client, admin_token, branch_id, ["ledger.view"], return_user_id=True,
+    token = await create_user_with_role_token(
+        client, admin_token, f"p6c_self_{uuid4().hex[:12]}",
+        await get_company_role_id(client, admin_token, "DRIVER"),
+        scope_type="Self", driver_branch_id=branch_id,
     )
-    roles = await client.get("/admin/company-roles", headers=_auth(admin_token))
-    assert roles.status_code == 200, roles.text
-    driver_role_id = next(role["company_role_id"] for role in roles.json() if role["role_code"] == "DRIVER")
-    assignment = await client.post(
-        f"/admin/users/{user_id}/company-role-assignments",
-        json={"company_role_id": driver_role_id, "scope_type": scope_type, "branch_id": branch_id},
-        headers=_auth(admin_token),
+    user = await client.get("/auth/me", headers=_auth(token))
+    assert user.status_code == 200, user.text
+    override = await client.put(
+        f"/admin/users/{user.json()['user_id']}/permission-overrides",
+        headers=_auth(admin_token), json={"permission_codes": ["ledger.view"]},
     )
-    assert assignment.status_code == 201, assignment.text
+    assert override.status_code == 422, override.text
+    assert "cannot receive generic permission overrides" in override.json()["detail"]
     return token
 
 
@@ -300,7 +302,7 @@ async def test_rates_used_route_is_ledger_only_finalized_and_scope_protected(
     )
     assert foreign_branch.status_code == 403
     assert str(seed["period_id"]) not in foreign_branch.text
-    for scope_type in ("SpecificBranch", "OwnDriverDataOnly"):
+    for scope_type in ("Self",):
         driver_token = await _ledger_token_with_driver_scope(
             session_client, auth_token, paytest_branch_id, scope_type,
         )
