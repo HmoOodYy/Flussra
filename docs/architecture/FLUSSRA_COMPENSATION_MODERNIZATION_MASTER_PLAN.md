@@ -1,24 +1,21 @@
 # Flussra Compensation Architecture Modernization — Master Implementation Plan
 
-**Status:** APPROVED FOR IMPLEMENTATION — implementation intentionally deferred
-**Document role:** Authoritative planning handoff between architecture/forensics and implementation execution
+**Status:** APPROVED TARGET ARCHITECTURE — PRE-P3 amendment Lead-approved; merge pending
+**Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
-**Plan freeze baseline:** `main @ cd1a0596d6ccfb165c588899e423a989959f80d5`
-**Previous architecture-acceptance baseline:** `53e61b7bbe010f4f7d6f8fe687c25d2e3c951312`
-**Implementation state:** NOT STARTED
+**Current baseline:** `main @ 819fb9ae4a59b2c4835778c45e4f8bc49fdc0f45` (P2b PR #26 merged)
+**Execution state:** P2c is the next implementation work unit; P3 has not started
 
-> This document does **not** authorize immediate coding. It freezes the agreed target architecture and implementation dependency plan so work can resume later without repeating the investigation.
+> This document records the approved target architecture. This amendment is documentation-only and does not authorize P3 implementation. It must be reviewed and merged before P3 begins.
 
 ---
 
 ## 0. Resume Protocol — Read This First When Work Restarts
 
-Because implementation is intentionally postponed, the first step when work resumes is **not coding**.
-
-The implementation lead must first perform a short read-only drift review:
+P3 implementation remains deferred while P2c is pending and this amendment awaits review/merge. When Compensation work is later authorized, the implementation lead first performs a read-only drift review:
 
 1. Fetch current `main` and record the new SHA.
-2. Compare changes since `cd1a0596d6ccfb165c588899e423a989959f80d5`.
+2. Compare changes since the current approved baseline recorded above.
 3. Confirm that no newly merged work has changed:
    - PayDefinition / PayItem authority;
    - RateType / DriverRate authority;
@@ -33,7 +30,7 @@ The implementation lead must first perform a short read-only drift review:
 5. If material drift exists, update **only the affected phase/dependency**, not the entire architecture from scratch.
 6. Do not re-open frozen product decisions unless a real technical impossibility or new explicit product requirement exists.
 
-The latest merge at plan freeze (`cd1a0596`) adds Payroll Setup onboarding/readiness behavior. It is adjacent to this modernization and does not change the compensation target architecture.
+P2b merged through PR #26 as `819fb9ae4a59b2c4835778c45e4f8bc49fdc0f45`. P2c remains the next implementation work unit. This Compensation amendment changes target-architecture wording only and does not start P3.
 
 ---
 
@@ -132,16 +129,7 @@ However, future production historical integrity is mandatory.
 
 A PayDefinition represents measured work/business input that directly produces compensation.
 
-Examples:
-
-- Hours Worked
-- Miles Driven
-- Loads
-- Wait Time
-- Pallets
-- Silos
-- Overnight occurrences
-- custom company definitions such as Stops
+Examples only (not reserved identities or required definitions): `ITEM_ALPHA`, `ITEM_BETA`, Custom Units, Stops, Trips, Hours Worked, Miles Driven, Loads, Wait Time, Pallets, Silos, and Overnight occurrences. No code or display name has privileged runtime semantics.
 
 Not PayDefinitions:
 
@@ -170,7 +158,7 @@ per_unit_rate
 
 ## 2.4 OrdinalTier
 
-OrdinalTier is a mandatory first-production feature after PerUnit is proven.
+OrdinalTier is a first-production method alongside PerUnit. These are the only methods in the initial production scope; the target method boundary remains extensible for separately approved future product methods.
 
 Frozen semantics:
 
@@ -240,15 +228,13 @@ Target removals/replacements include:
 
 Every current consumer must have a target replacement before deletion.
 
-## 2.8 CDPI
+## 2.8 CDPI transition
 
-CDPI remains intentional.
+CDPI is transitional legacy product terminology and workflow architecture, not a permanent target compensation identity. Its useful request, approval/direct-create, creator/approver, audit, method/input proposal, branch applicability, and provenance semantics move into generic PayDefinition governance. The target has one PayDefinition model; the calculator does not branch on whether a definition originated in CDPI.
 
-Its role is configurable PayDefinition creation/governance.
+During transition, existing CDPI paths stop manufacturing legacy RateTypes and move to generic PayDefinition governance without dual-writing one request into two authorities. `CdpiDefinitions` or other legacy CDPI storage may remain temporarily only until equivalent generic provenance is implemented and verified.
 
-It must stop manufacturing legacy RateTypes.
-
-Method adapters evolve toward:
+Method-owned requirements include:
 
 ```text
 PerUnit
@@ -276,6 +262,8 @@ DayEntryState
 amount = HoursValue * rate
 ```
 
+This is the current first-production Status compensation policy, not a universal formula for every future paid status. Status remains a separate domain. Any future fixed amount or other status compensation policy requires explicit product architecture.
+
 Example:
 
 ```text
@@ -288,17 +276,13 @@ result = 200
 
 ## 2.10 Company currency
 
-First production:
+Current first-production/V1 product boundary:
 
 ```text
 ONE COMPANY = ONE CURRENCY
 ```
 
-Currency is explicit company configuration.
-
-No per-rate multi-currency.
-
-Historical evidence snapshots the CurrencyCode.
+Currency is explicit company configuration. No per-rate multi-currency is supported in V1. This is a product boundary, not a claim that multi-currency is impossible forever; any future support requires an explicit model for rate/payment currencies, FX source/date, rounding, reconciliation, and historical evidence. Historical evidence snapshots the CurrencyCode.
 
 ## 2.11 Structural immutability
 
@@ -319,6 +303,32 @@ to:
 changes the compensation contract, not merely a driver's rate.
 
 Full definition-versioning is deliberately deferred until a real future requirement exists.
+
+## 2.12 Domain invariants, V1 boundaries, and hard-coding limits
+
+### Permanent domain invariants
+
+The target preserves finalized-payroll immutability; Employee identity remains distinct from User identity; Status, BonusEvent, and DriverPayRule remain separate from PayDefinition; missing values are not zero; one effective DriverRateAssignment supplies one complete value set; historical evidence is not reconstructed from mutable current configuration; and finalization reads approved immutable evidence rather than live compensation state.
+
+### Current-product / V1 boundaries
+
+The following are strict current-product boundaries, not universal claims about every future product: exact `DRIVER` is the only currently supported binding to generic `Self`; one Company has one configured CurrencyCode; PerUnit and OrdinalTier are the first-production PayDefinition methods; Branch is the current operational applicability dimension; the approved Status compensation path is the V1 policy; DriverID remains the branch-bound historical payroll/compensation identity; and active DRIVER/Self authority retains the current generic capability ceiling, including denial of mixed DRIVER/administrative authority.
+
+`Self` is a generic resource scope, not branch membership, and has no BranchID. `DRIVER ⇔ Self` is the current product binding only. A future role may use Self only after its ownership and capability policy is explicitly designed. The current DRIVER denial remains authoritative unless a separate product/security decision changes it. Before final P7 Access UX is frozen, product/security design must revisit whether one person needs both Driver self-service and administrative responsibilities; separate accounts, explicit persona/session context, or another model remain undecided.
+
+Branch remains the current applicability dimension. Do not add Region, Department, Team, Project, Union, or a generic scope engine now. Future applicability expansion must be designed without cloning one configuration table per dimension.
+
+Company currency is one-per-company for V1. Future multi-currency requires explicit rate currency, payment currency, FX source/date, rounding, reconciliation, and historical-evidence rules.
+
+PerUnit and OrdinalTier are the only first-production methods. Legacy RangeBracket, RangeProgressive, Block, Fixed, Calculated, and EnteredAmount implementations may be removed from current runtime; that does not permanently prohibit a future product capability with similar business meaning. Future methods require explicit product approval and plug into method-owned structure, validation, calculation, and evidence boundaries.
+
+Status remains separate from PayDefinition. The current V1 status compensation policy uses `HoursValue × scalar rate`; this is not a universal formula for every future paid status. A fixed daily amount, percentage policy, or another StatusKeyPayRule would require separate product architecture and is not implemented here.
+
+DriverID remains intentional for current driver/fleet payroll. Generic payroll for arbitrary non-driver employees would require a separate architecture evolution; this plan does not introduce an abstract CompensationSubject. PayDefinition remains an approved compensation-producing operational/business input, not a generic bucket for Status, BonusEvent, DriverPayRule, finalized corrections, or unrelated adjustment/event domains. Other earning concepts—including recurring allowances, salary, commissions, per diem, shift premiums, or other earnings—require explicit future product/domain classification; the target does not claim every possible earning is quantity multiplied by a rate.
+
+### Forbidden accidental hardcoding
+
+No business PayDefinition code or display name may have privileged runtime semantics. Code, database, API, and UI behavior must not branch on names such as `HOURS`, `MILES`, or `LOADS`; ordinary role display names or substrings; presentation labels; generated technical identities; or CDPI origin. Resource ownership follows canonical IDs and relations, never labels or names. `Self` is never treated as a Branch. Protected system role codes such as `COMPANY_OWNER` and current-product `DRIVER` may have explicit, centrally defined semantics; ordinary custom role names do not drive authorization, display names never do, and adding a business role must not require scattered role-code conditionals. Stable versioned domain enums such as `PerUnit`, `OrdinalTier`, `AllCompanyBranches`, `SpecificBranch`, and `Self` remain valid. Extend behavior through explicit domain-owned policy/method boundaries, not name conditionals; this is a strong domain model, not a generic rules/plugin/formula engine.
 
 ---
 
@@ -351,7 +361,8 @@ unit
 CalculationMethod
 status
 origin/provenance
-branch applicability via BranchPayItemConfig
+generic governance and approval provenance
+branch applicability through the current Branch configuration authority (currently `BranchPayItemConfig`)
 ```
 
 The physical table may continue to be named `PayItems` during implementation, but its target meaning must be PayDefinition.
@@ -455,41 +466,21 @@ Rules:
 
 ---
 
-# 4. System Definition Strategy
+# 4. PayDefinition Creation and Optional Templates
 
-Current global system PayItems must not remain operational company-independent calculation authority.
+No business PayDefinition code or display name has privileged runtime semantics. A company is valid with zero PayDefinitions, and company creation/provisioning must not require a named business definition. No mandatory starter catalog, seed row, immutable system definition, special database identity, onboarding definition, schema dependency, migration assumption, runtime branch, API/UI behavior, or acceptance gate may be based on `HOURS`, `MILES`, `LOADS`, `WAIT_TIME`, `PALLETS`, `SILOS`, `OVERNIGHT`, or another business name/code.
 
-The seven starter concepts are:
-
-```text
-HOURS
-MILES
-LOADS
-WAIT_TIME
-PALLETS
-SILOS
-OVERNIGHT
-```
-
-Target strategy:
-
-1. Immutable **database starter catalog**.
-2. Provision company-owned operational PayDefinitions from it.
-3. Starter catalog is provisioning metadata only, never live compensation authority.
-
-This permits:
+If a future product-approved convenience offers suggested definitions such as Hours, Miles, Loads, or Stops, those are optional template content only:
 
 ```text
-Company A:
-LOADS -> PerUnit
-
-Company B:
-LOADS -> OrdinalTier
+optional template -> clone/create -> ordinary company-owned PayDefinition
 ```
 
-without abusing CDPI.
+After creation, the result has no privileged identity. Templates are not core architecture, required seed data, runtime/schema authority, special IDs/codes, fresh-database or company-validity requirements, or part of the P3/P4 core acceptance gate. This plan does not design a template subsystem.
 
-`BONUS`, `ADJUSTMENT`, `GUARANTEED_MINIMUM`, `SYS_MIN_TOPUP`, and `SYS_MAX_CAP` are not starter operational PayDefinitions.
+If payroll readiness later needs configured definitions for a particular workflow, its requirement must be generic and based on the workflow's configured capabilities. Do not invent a readiness requirement here or test for a named definition.
+
+Human examples may use arbitrary business names/codes such as `ITEM_ALPHA`, `ITEM_BETA`, Custom Units, Stops, or Trips. Tests must demonstrate that assignment and calculation behavior is independent of predefined business names.
 
 ---
 
@@ -537,9 +528,7 @@ The lock is set by whichever occurs first:
 - first payroll-period reference/snapshot containing the RateDefinition;
 - later authoritative evidence reference if somehow not already set.
 
-For CDPI, approval/direct creation sets the target RateDefinition lock immediately according to CDPI's existing governance rule.
-
-`CdpiDefinitions.LockedAtUtc` may temporarily remain as provenance only and must not remain a second edit-guard authority.
+Generic PayDefinition approval/direct-create governance sets the target RateDefinition lock according to its approved lifecycle. Legacy CDPI lock data may temporarily remain as provenance only; it must not become a second target edit-guard authority.
 
 Status-owned RateDefinitions use the same lock model.
 
@@ -569,29 +558,28 @@ At minimum durable state includes:
 
 ## 5.4 ProvisioningState is temporary scaffolding
 
-A temporary `ProvisioningState` may exist only to hide P4/P5A company definitions from the old runtime.
+A temporary `ProvisioningState` may exist only if needed to keep generic target definitions non-operational before authority cutover. It is not named-definition provisioning metadata and is not a required target lifecycle field.
 
 It is not product lifecycle state.
 
 It must:
 
 - never appear in API/UI contracts;
-- survive only through the provisioning transition;
+- survive only through the defined authority transition;
 - be dropped at the end of P5B after the company-only operational cutover is complete.
 
 ---
 
 # 6. Target Entity Graphs
 
-## A. PerUnit HOURS
+## A. PerUnit arbitrary definition
 
 ```text
 Company A
     CurrencyCode = USD
 
-Starter HOURS
-    -> Company A PayDefinition HOURS
-        CalculationMethod = PerUnit
+Company-owned PayDefinition ITEM_ALPHA
+    CalculationMethod = PerUnit
         -> RateDefinition (Scalar)
             -> RateComponentDefinition: per_unit_rate
 
@@ -602,10 +590,10 @@ John
 8 hours -> 8 * 25 = 200 USD
 ```
 
-## B. Custom PerUnit Stops
+## B. Generic-governed PerUnit definition
 
 ```text
-CDPI request/direct creation
+PayDefinitionRequest or approved direct creation
     Name = Stops
     InputType = WholeNumber
     Unit = Stop
@@ -618,10 +606,10 @@ John value = 7.50
 5 stops -> 37.50 company-currency units
 ```
 
-## C. OrdinalTier LOADS
+## C. OrdinalTier arbitrary definition
 
 ```text
-Company PayDefinition LOADS
+Company PayDefinition ITEM_BETA
     CalculationMethod = OrdinalTier
         -> RateDefinition
             component 1: ordinal 1
@@ -807,41 +795,28 @@ Cross-branch copying:
 
 ---
 
-# 10. CDPI Target Contract
+# 10. Generic PayDefinition Governance and CDPI Transition
 
-CDPI remains a governance/creation workflow.
+The target governance concepts are generic `PayDefinitionRequest`, `PayDefinitionApproval` / approval provenance, `PayDefinition`, definition provenance, and branch applicability. Request creation, approval, product-approved direct creation, creator/approver identity, request linkage, timestamps, method/input/unit proposal, audit/governance history, schema/version provenance, creation-mode provenance, structure-lock provenance, and historically required branch context must remain explainable.
 
-It must support:
+The final calculator, runtime, domain, API, and UI use one PayDefinition model and do not distinguish a “CDPI PayDefinition” from a normal PayDefinition. CDPI-specific identity is transitional legacy terminology, not a target identity.
 
-- name;
-- input type including WholeNumber;
+During transition, generic governance must preserve the currently approved behavior for:
+
+- proposed name and input type, including WholeNumber;
 - unit;
-- PerUnit or OrdinalTier;
-- method-specific structure;
+- approved calculation method and method-specific structure;
 - company ownership;
-- branch availability;
+- branch applicability;
 - governance/audit history.
 
-CDPI stops creating:
+The legacy CDPI runtime stops creating:
 
 - `CDPI_*` RateTypes;
 - PayItemRateTypeMap bridges;
 - old RateSlot/RateType triples.
 
-`CdpiDefinitions` remains during implementation as governance/provenance storage.
-
-It may only be retired in a separately reviewed cleanup after every durable semantic has an explicit target home, including:
-
-- origin;
-- creation mode;
-- schema version;
-- creator;
-- approval/creation provenance;
-- lock provenance;
-- request linkage where present;
-- direct-create provenance.
-
-`Origin='Custom'` alone is insufficient.
+`CdpiDefinitions` and related legacy CDPI storage may remain temporarily as transition/provenance storage only until equivalent generic PayDefinition governance/provenance is present and verified. Before retirement, the target must provide an explicit home for origin, request linkage, creator, approver, creation mode, approval/direct-create provenance, schema/method version, lock provenance, timestamps/audit meaning, and branch applicability/context where historically required. `Origin='Custom'` alone is insufficient. Do not guess historical backfills. Once equivalence is proven, retire CDPI-specific runtime terminology, APIs, UI, service identity, and obsolete schema in the appropriate cleanup phase; preserve historical migrations.
 
 ---
 
@@ -877,7 +852,7 @@ P1 Currency                P2 narrow dead-writer cleanup
                     +------> P3B Evidence-v2 schema
                     |
                     v
-               P4 Starter provisioning
+               P4 Generic definition governance/provenance readiness
                   non-runtime
                     |
                     v
@@ -885,7 +860,7 @@ P1 Currency                P2 narrow dead-writer cleanup
                   non-operational
                     |
                     v
-               P5B PayDefinition/CDPI/PerUnit
+               P5B Generic PayDefinition/PerUnit
                   operational cutover
                     |
                     v
@@ -912,7 +887,7 @@ P1 Currency                P2 narrow dead-writer cleanup
                     v
                P8D Docs/tests/final smoke
                     v
-               P9 Rebaseline eligibility review
+               P9 Rebaseline eligibility review (standalone Compensation-plan review; not a new refoundation macro phase)
 ```
 
 P6 and P7 may execute in either order once P5C is complete.
@@ -990,9 +965,11 @@ Add target schema alongside legacy model.
 Conceptually:
 
 - CalculationMethod;
-- Origin;
-- StarterKey;
-- temporary ProvisioningState.
+- company ownership and generic origin/provenance;
+- governance state needed by the approved lifecycle;
+- branch applicability through ordinary company definitions.
+
+No business-specific StarterKey or starter provisioning state is required. Any transitional field must have a named cutover purpose and removal point.
 
 Do **not** add authoritative PayItem structure-lock state.
 
@@ -1043,7 +1020,7 @@ Set canonical RateDefinition lock on:
 
 - first Approved assignment;
 - first authoritative payroll period reference;
-- CDPI approval/direct create according to governance.
+- generic PayDefinition approval/direct-create according to the approved governance lifecycle.
 
 **Authority:** legacy runtime only; target tables dormant.
 
@@ -1072,34 +1049,21 @@ Avoid naming collision with existing legacy `...UsedRateDefinitions`; use distin
 
 ---
 
-## P4 — Provision company-owned starter definitions, non-runtime
+## P4 — Generic PayDefinition governance/provenance readiness, non-operational
 
-Create immutable DB starter catalog.
+Establish the generic company-owned PayDefinition creation/governance and provenance path needed before operational cutover. This phase exists to complete the accepted generic lifecycle and durable provenance seam, not to provision named starter definitions. Standalone P4 does not create an additional Unified macro or work unit. Its non-operational governance and provenance obligations are satisfied through the corresponding dependency-closed Unified work units, primarily P3b/P3c before the P4a authority switch. This mapping does not authorize combining, skipping, or reordering Unified §6A work units.
 
-Create one idempotent database provisioning operation.
+The governance path preserves approved request creation, approval, product-approved direct creation, creator/approver identity, request linkage, method/input/unit proposal, creation mode, schema/method version, branch applicability, timestamps/audit meaning, and structure-lock provenance. Legacy CDPI workflow data may remain a temporary transition source until each required durable meaning has an explicit target home and migration/backfill behavior is proven without guessing. Do not dual-write one request into legacy and target authorities.
 
-Provision the seven company-owned starter PayDefinitions.
+A company with zero PayDefinitions remains valid. Optional future templates may create ordinary company-owned definitions, but no template/catalog/activation is required by this phase or the P3/P4 core acceptance gate.
 
-No new RateType or PayItemRateTypeMap bridge is created.
-
-Provisioned definitions remain hidden from current runtime via temporary ProvisioningState.
-
-They must not reach:
-
-- settings operational lists;
-- period snapshots;
-- day grid;
-- current rate matrix;
-- draft validation;
-- live calculation.
-
-**Authority:** legacy model remains sole operational authority.
+**Authority:** legacy compensation remains the sole operational authority until the P4a cutover described in the Unified Plan. Generic target governance may be tested while non-operational.
 
 ---
 
 ## P5A — Target PerUnit rate authoring, still non-operational
 
-Create scalar RateDefinition + `per_unit_rate` component for company starter definitions.
+Create scalar RateDefinition + `per_unit_rate` component for eligible company-owned PayDefinitions, regardless of code or display name.
 
 Implement target assignment lifecycle:
 
@@ -1121,17 +1085,17 @@ Approving a target assignment locks its RateDefinition structure.
 **Authority:**
 
 - legacy remains operational;
-- target authoring exists only for hidden/provisioned definitions and is not live payroll authority.
+- target authoring may create arbitrary company-owned definitions but is not live payroll authority before cutover.
 
 ---
 
-## P5B — Operational PayDefinition/CDPI/PerUnit cutover
+## P5B — Operational generic PayDefinition/PerUnit cutover
 
 This is the first major authority transition.
 
 ### Company PayDefinitions
 
-- ensure target RateDefinition exists for required custom CDPI PerUnit definitions;
+- ensure the target RateDefinition exists through generic PayDefinition governance for each operational definition requiring compensation;
 - repoint BranchPayItemConfig to company definitions;
 - make company definitions operational;
 - remove global PayItems from operational payroll authority;
@@ -1153,17 +1117,13 @@ It must never become long-term state.
 
 ### Input types
 
-Add WholeNumber to CDPI.
+Ensure generic PayDefinition governance supports WholeNumber input; transition the legacy request field without preserving a separate CDPI identity.
 
 WholeNumber/Integer definitions reject fractional quantities for any calculation method.
 
-### CDPI
+### Legacy CDPI transition
 
-PerUnit approval/direct create now creates target PayDefinition/RateDefinition directly.
-
-No generated RateType/map/slot bridge.
-
-`CdpiDefinitions` remains provenance only.
+The former CDPI request/approval/direct-create behavior now uses generic PayDefinition governance and creates the ordinary target PayDefinition/RateDefinition structure. No separate CDPI target identity or generated RateType/map/slot bridge remains. Required durable provenance has an explicit generic target home; legacy CDPI storage remains only until equivalent provenance is verified.
 
 ### Pay Rates
 
@@ -1291,13 +1251,11 @@ Unlocked PayDefinitions may change method/topology only if:
 
 Pending assignments must be explicitly discarded first.
 
-### CDPI
+### Generic definition governance
 
-Add proposed tier topology storage.
+Use the same PayDefinition request/approval/direct-create governance for OrdinalTier structure; do not add a CDPI-specific adapter identity.
 
-Implement OrdinalTier adapter.
-
-Remove unsupported RangeBracket/RangeProgressive/Block from active product method contract.
+Implement OrdinalTier method structure. Remove the legacy RangeBracket/RangeProgressive/Block implementations from current runtime when their replacement gates pass. Similar future product capabilities are not permanently prohibited; they require explicit approval and the target method-owned boundary.
 
 ### Runtime
 
@@ -1336,7 +1294,9 @@ Remove operational code/APIs for legacy RateType/DriverRate compensation.
 Expected cleanup includes:
 
 - legacy rate endpoints;
-- old advanced-method calculators;
+- CDPI-specific active runtime terminology, APIs/UI/service identity, and obsolete adapter logic after generic governance/provenance equivalence is proven;
+- any obsolete mandatory starter/provisioning scaffolding that remains after the generic authority transition;
+- legacy implementations for methods outside the first-production PerUnit/OrdinalTier scope;
 - PayItemRateTypeMap;
 - old PayItemRateSlots;
 - DriverRateTiers;
@@ -1412,7 +1372,7 @@ Before RateTypes drop, remove every child, including:
 2. delete obsolete global starter-era PayItem rows and fake/system output rows only after replacements are live;
 3. drop RateTypes only when its FK inventory is empty.
 
-`CdpiDefinitions` is explicitly excluded from automatic deletion.
+`CdpiDefinitions` is excluded from automatic deletion until equivalent generic PayDefinition provenance is proven for all required durable meaning and its retirement receives explicit review.
 
 ---
 
@@ -1438,7 +1398,7 @@ Static audit confirms no operational RateType mental model remains.
 
 ## P9 — Migration rebaseline eligibility review
 
-P9 does **not** perform the rebaseline.
+P9 is a standalone Compensation-plan eligibility review, not a new refoundation macro phase, and does **not** perform the rebaseline.
 
 It determines whether rebaseline is allowed.
 
@@ -1446,7 +1406,7 @@ Eligibility requires:
 
 1. target domain model frozen;
 2. fresh empty DB upgrades to target schema;
-3. starter provisioning works;
+3. generic PayDefinition creation/governance and required provenance work with arbitrary definitions; no starter content is required;
 4. company currency works;
 5. PerUnit end-to-end passes;
 6. OrdinalTier end-to-end passes;
@@ -1469,9 +1429,9 @@ Only then may a separate approved migration-history consolidation begin.
 
 | End of phase | PayDefinition discovery/config | Rate authoring | Live PerUnit | Status pay | OrdinalTier | Evidence/finalization |
 |---|---|---|---|---|---|---|
-| Baseline–P3 | Legacy/global + CDPI legacy runtime | Legacy RateType/DriverRate | Legacy | Legacy + projection | legacy dormant capability only | Legacy evidence; snapshot-only finalization |
-| P4 | Legacy operational; company starters hidden | Legacy | Legacy | Legacy | not offered | Legacy |
-| P5A | Legacy operational; company starters hidden | Legacy operational; target dormant authoring | Legacy | Legacy | not offered | Legacy |
+| Baseline–P3 | Legacy/global + transitional CDPI runtime | Legacy RateType/DriverRate | Legacy | Legacy + projection | legacy dormant capability only | Legacy evidence; snapshot-only finalization |
+| P4 | Legacy operational; generic target governance/provenance is non-operational | Legacy | Legacy | Legacy | not offered | Legacy |
+| P5A | Legacy operational; arbitrary company PayDefinitions available to target dormant authoring | Legacy operational; target dormant authoring | Legacy | Legacy | not offered | Legacy |
 | P5B | **Company PayDefinitions** | **Target for PayDefinitions; legacy only for status** | **Target** | Legacy + projection | not offered | target PayDefinition line evidence; status legacy structured evidence |
 | P5C | Company PayDefinitions | Target / legacy-status only | Target | Legacy + projection | not offered | **v2 for PayDefinitions/rules; legacy status only** |
 | P6A | Company PayDefinitions | **Target everywhere** | Target | **Target** + non-authoritative projection | maybe P7 | v2 everywhere |
@@ -1498,10 +1458,10 @@ There is no planned phase with two unintended authoritative models for the same 
 | old DriverRates | REPLACE |
 | DriverRateTiers | REMOVE after Ordinal target |
 | BlockSize / RoundingRule | REMOVE |
-| RangeBracket | REMOVE from product/runtime |
-| RangeProgressive | REMOVE from product/runtime |
-| Block | REMOVE from product/runtime |
-| Fixed / Calculated / None / EnteredAmount as generic PayDefinition methods | REMOVE |
+| Legacy RangeBracket implementation | REMOVE from current runtime after replacement; a similar future product capability is not permanently prohibited |
+| Legacy RangeProgressive implementation | REMOVE from current runtime after replacement; a similar future product capability is not permanently prohibited |
+| Legacy Block implementation | REMOVE from current runtime after replacement; a similar future product capability is not permanently prohibited |
+| Legacy Fixed / Calculated / None / EnteredAmount PayDefinition implementations | REMOVE from current runtime; future capabilities require explicit product design |
 | ADJUSTMENT PayItem | REMOVE |
 | generic Period Pay writes | REMOVE |
 | PeriodPayMatrix report | KEEP / re-key target identities |
@@ -1509,7 +1469,7 @@ There is no planned phase with two unintended authoritative models for the same 
 | GUARANTEED_MINIMUM authority | REMOVE; DriverPayRule remains |
 | SYS_MIN_TOPUP / SYS_MAX_CAP PayItem rows | REMOVE only after explicit rule-output evidence replacement |
 | STATUS_PAYMENT DraftLine projection | REMOVE after direct status path |
-| CdpiDefinitions | KEEP during modernization; separate provenance-retirement decision later |
+| CdpiDefinitions and related CDPI storage | TRANSITIONAL provenance only; retire after equivalent generic PayDefinition provenance is explicitly present and verified |
 | PayProfile-era tables | REMOVE only after zero-consumer proof |
 | PayrollRunBonuses predecessor | REMOVE only after zero-consumer/FK proof |
 | ProvisioningState | TEMPORARY; remove at end of P5B |
@@ -1579,7 +1539,7 @@ Keep business invariants; delete tests whose only purpose is preserving obsolete
 - approval/supersession;
 - company isolation;
 - branch applicability;
-- CDPI governance;
+- generic PayDefinition governance and durable provenance, including the transition from legacy CDPI;
 - exact OrdinalTier arithmetic;
 - tier topology validation;
 - atomic assignment resolution;
@@ -1613,7 +1573,7 @@ Keep business invariants; delete tests whose only purpose is preserving obsolete
 - concurrent Pending creation vs structure edit cannot both commit;
 - one canonical structure lock;
 - atomic tier assignment;
-- company A Loads PerUnit + company B Loads OrdinalTier simultaneously;
+- company A `ITEM_ALPHA` PerUnit + company B `ITEM_BETA` OrdinalTier simultaneously, proving behavior does not depend on a predefined business name;
 - WholeNumber PerUnit fractional rejection;
 - currency write gates;
 - company currency immutability;
@@ -1630,7 +1590,8 @@ The modernization is complete only when all applicable statements are objectivel
 ## PayDefinition / Rate architecture
 
 - every operational PayDefinition is company-owned;
-- starter catalog is provisioning-only;
+- a company is valid with zero PayDefinitions; no named starter or starter catalog is required; optional templates, if later approved, create ordinary company-owned definitions;
+- arbitrary definition names/codes do not affect calculation or assignment behavior;
 - RateDefinition is the semantic compensation requirement;
 - exactly one component abstraction exists;
 - DriverRateAssignment is the effective-dated unit;
@@ -1642,7 +1603,7 @@ The modernization is complete only when all applicable statements are objectivel
 ## Methods
 
 - only PerUnit and OrdinalTier are current PayDefinition methods;
-- unsupported legacy methods absent from current product/runtime.
+- legacy implementations outside the first-production method set are absent from current runtime; this does not prohibit separately approved future methods with similar semantics.
 
 ## PerUnit
 
@@ -1672,21 +1633,20 @@ The modernization is complete only when all applicable statements are objectivel
 - explicit discard removes Pending + values and audits them;
 - no automatic reinterpretation;
 - first Approved assignment or first period reference locks definition;
-- CDPI governed definitions lock according to CDPI approval rule.
+- governed definitions lock according to the generic approved PayDefinition lifecycle.
 
 ## Company-specific behavior
 
-- Company A Loads may be PerUnit;
-- Company B Loads may be OrdinalTier;
+- different companies may use arbitrary definitions with different methods;
 - no leakage between companies;
-- no CDPI workaround needed for starter method customization.
+- no name/code-specific path or starter customization mechanism is needed.
 
-## CDPI
+## Definition governance and legacy CDPI
 
-- PerUnit and OrdinalTier create target structures;
+- generic PayDefinition governance creates PerUnit and OrdinalTier structures;
 - no generated legacy RateTypes;
-- custom definitions use same runtime as starters;
-- provenance preserved.
+- all ordinary definitions use the same runtime regardless of origin;
+- required provenance is preserved generically before legacy CDPI storage retires.
 
 ## Status
 
@@ -1707,7 +1667,7 @@ The modernization is complete only when all applicable statements are objectivel
 
 ## Currency
 
-- company currency explicit;
+- company currency explicit for V1 (one currency per company); future multi-currency requires explicit architecture;
 - no new durable monetary writes without currency;
 - monetary rendering not hardcoded to `$`;
 - finalized evidence snapshots CurrencyCode;
@@ -1719,7 +1679,7 @@ The modernization is complete only when all applicable statements are objectivel
 - no PayItemRateTypeMap;
 - no legacy DriverRate authority;
 - no generated CPI_/CDPI_/SRC_/STATUS_PAY identities;
-- no unsupported advanced methods in runtime;
+- no legacy implementation outside the first-production method set remains in runtime;
 - no temporary ProvisioningState after P5B.
 
 ## Historical integrity
@@ -1772,7 +1732,7 @@ The implementation lead may **not** reinterpret:
 - BonusEvent outside PayDefinition;
 - DriverPayRule outside PayDefinition;
 - no generic Adjustment feature;
-- one company currency;
+- one company currency as a V1 product boundary;
 - RateType is not target architecture;
 - finalized history must not depend on live configuration.
 
@@ -1780,7 +1740,7 @@ The implementation lead may **not** reinterpret:
 
 # 20. Implementation Must Remain Deferred Until Explicitly Started
 
-This plan exists so the current work can be completed first.
+This plan is a target and dependency reference. Its phases are not authorized to begin merely because they are documented; P2c remains the next implementation work unit in the Unified Plan, and this amendment must be reviewed and merged before P3 begins.
 
 No implementation should begin merely because this document exists.
 
@@ -1799,6 +1759,6 @@ When the user later says to start the modernization:
 
 If P1–P8 are implemented correctly, Flussra must end with exactly this property:
 
-> Company-owned PayDefinitions and branch-owned StatusRateColumns own semantic RateDefinitions. Driver compensation resolves through one complete effective-dated DriverRateAssignment. PerUnit and OrdinalTier are the only first-production PayDefinition methods. Status, Bonus, and Pay Rules remain separate domains. Finalized payroll is explained by immutable target evidence. No operational workflow requires RateType, PayItemRateTypeMap, legacy DriverRate routing, generated compatibility rate identities, or unsupported legacy calculation methods.
+> Company-owned PayDefinitions and branch-owned StatusRateColumns own semantic RateDefinitions. Driver compensation resolves through one complete effective-dated DriverRateAssignment. PerUnit and OrdinalTier are the only first-production PayDefinition methods; arbitrary business codes/names carry no privileged meaning. Status, BonusEvent, and DriverPayRule remain separate domains. Finalized payroll is explained by immutable target evidence. No operational workflow requires RateType, PayItemRateTypeMap, legacy DriverRate routing, generated compatibility identities, or legacy implementations outside first-production scope. Future product capabilities remain subject to explicit domain design.
 
 That is the destination this plan authorizes.
