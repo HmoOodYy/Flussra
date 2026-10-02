@@ -82,11 +82,10 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_any_permission
+from app.core.service import _check_any_permission, _require_not_driver_role
 from app.payroll.calculation.per_unit import PER_UNIT_CALCULATION_VERSION
 from app.payroll.draft_line_calculation import _compute_calculated_amount
 from app.payroll.eligibility import _period_has_driver_eligibility_snapshot
-from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.immutable_evidence import capture_snapshot_used_rate_definitions
 from app.payroll.line_type_vocabulary import _LEGACY_TO_CANONICAL, _LineTypeInfo
 from app.payroll.period_read import get_period_by_id
@@ -1395,12 +1394,7 @@ async def get_calculation_preview(
         CalculationPreviewResponse,
     )
 
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="Current Payroll is not accessible to driver-role users.",
-        )
+    await _require_not_driver_role(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status not in ENTRY_ALLOWED_STATUSES:
         raise HTTPException(

@@ -368,7 +368,7 @@ async def get_review_items(
     Optionally filtered by branch_id and/or item status.
     Returns items ordered newest-first.
 
-    CP-6 security: OwnDriverDataOnly (driver-role) users cannot access the
+    CP-6 security: DRIVER/Self users cannot access the
     review queue.  Review items expose payroll period data that drivers must
     not see until finalization.
     """
@@ -444,7 +444,7 @@ async def get_review_item_by_id(
 ) -> ReviewItemDetail:
     """
     Fetch a single review item with its full payload and decision history.
-    Enforces branch access.  ODA users are blocked (CP-6 security).
+    Enforces branch access. DRIVER/Self users are blocked (CP-6 security).
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)

@@ -65,6 +65,7 @@ function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [makeBranch()],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,

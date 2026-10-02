@@ -7,7 +7,7 @@ payroll.period.create, payroll.finalize, review.decide, payrates.view,
 payrates.edit, payroll.approve_rate, setup.manage, settings.manage,
 drivers.view or drivers.edit).
 
-Driver / ODA users are blocked; the frontend shows DriverPlaceholder instead.
+DRIVER/Self users are blocked; the frontend shows DriverPlaceholder instead.
 
 Each section in the response is populated only when the user holds a
 qualifying permission — see service.py for the full gating logic.
@@ -43,13 +43,13 @@ DbDep    = Annotated[AsyncConnection, Depends(get_db)]
         "- AllCompanyBranches users see company-wide totals.\n"
         "- SpecificBranch users see only branches where they hold a qualifying "
         "permission for each section.\n\n"
-        "Returns 403 if the user is a driver/ODA role, or holds no dashboard "
+        "Returns 403 if the user has a DRIVER assignment, or holds no dashboard "
         "permissions at all."
     ),
     responses={
         200: {"description": "Dashboard snapshot returned"},
         401: {"description": "Missing or invalid token"},
-        403: {"description": "Driver/ODA user, or no dashboard permissions granted"},
+        403: {"description": "DRIVER user, or no dashboard permissions granted"},
     },
 )
 async def get_dashboard(

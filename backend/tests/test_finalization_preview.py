@@ -29,6 +29,7 @@ from sqlalchemy import text as _text
 from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 
 
@@ -816,7 +817,7 @@ class TestFinalizationPreview:
         paytest_driver_id: int,
         direct_db,
     ):
-        """ODA user ->' 403."""
+        """DRIVER/Self user gets 403."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
@@ -824,17 +825,12 @@ class TestFinalizationPreview:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP3A_ODA_Preview_Role",
-            ["payroll.view", "payroll.entry", "payroll.finalize"],
-        )
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_preview_user",
-            role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
 
         resp = await session_client.get(
@@ -969,12 +965,12 @@ class TestFinalizationPreview:
                 await session_client.delete(f"/payroll/rates/{mileage_rate_id}", headers=headers)
 
 # ===========================================================================
-# POST /finalize -" Driver/ODA security boundary
+# POST /finalize - DRIVER/Self security boundary
 # ===========================================================================
 
-class TestFinalizeODABlock:
+class TestFinalizeDriverSelfBlock:
     """
-    POST /payroll/periods/{id}/finalize must block Driver/OwnDriverDataOnly
+    POST /payroll/periods/{id}/finalize must block DRIVER/Self
     users before any data is read, mutated, or returned.
     """
 
@@ -988,7 +984,7 @@ class TestFinalizeODABlock:
         paytest_driver_id: int,
         direct_db,
     ):
-        """ODA user with payroll.finalize gets 403 on POST finalize."""
+        """DRIVER/Self user with payroll.finalize gets 403 on POST finalize."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
@@ -996,17 +992,12 @@ class TestFinalizeODABlock:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP3A_ODA_Finalize_Role",
-            ["payroll.view", "payroll.entry", "payroll.finalize"],
-        )
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_finalize_user",
-            role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
 
         resp = await session_client.post(
@@ -1025,7 +1016,7 @@ class TestFinalizeODABlock:
         paytest_driver_id: int,
         direct_db,
     ):
-        """ODA user gets 403 before any PayrollFinalLines are inserted and period stays Approved."""
+        """DRIVER/Self user gets 403 before final lines are inserted; period stays Approved."""
         pid = cp3a_approved_period["payroll_period_id"]
         headers = auth(auth_token)
 
@@ -1039,17 +1030,12 @@ class TestFinalizeODABlock:
             {"pid": pid},
         )).scalar_one()
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP3A_ODA_FinalLeak_Role",
-            ["payroll.view", "payroll.entry", "payroll.finalize"],
-        )
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_final_leak_user",
-            role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
 
         resp = await session_client.post(
@@ -1068,7 +1054,7 @@ class TestFinalizeODABlock:
             {"pid": pid},
         )).scalar_one()
         assert count_before == count_after, (
-            f"ODA block must not insert final lines. Before={count_before}, After={count_after}"
+            f"DRIVER/Self block must not insert final lines. Before={count_before}, After={count_after}"
         )
 
     @pytest.mark.asyncio
@@ -1151,7 +1137,7 @@ class TestFinalizeODABlock:
         paytest_driver_id: int,
         direct_db,
     ):
-        """Regression: preview ODA block still works after finalize guard addition."""
+        """Regression: preview DRIVER/Self denial still works after finalize guard addition."""
         pid = cp3a_approved_period["payroll_period_id"]
 
         await _add_line_to_approved_period(
@@ -1159,17 +1145,12 @@ class TestFinalizeODABlock:
             line_type="DailyNote", quantity="1.00",
         )
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP3A_ODA_PreviewReg_Role",
-            ["payroll.view", "payroll.entry", "payroll.finalize"],
-        )
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp3a_oda_preview_reg_user",
-            role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
 
         resp = await session_client.get(

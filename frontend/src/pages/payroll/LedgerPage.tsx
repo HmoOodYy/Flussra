@@ -5,7 +5,7 @@
  * Accessible from the sidebar. Each period card shows final aggregates from
  * vw_PayrollPeriodList and opens either the P6A library or legacy FinalLines.
  *
- * Security: Driver/ODA access is blocked by the backend. P6A and FinalLines
+ * Security: DRIVER/Self access is blocked by the backend. P6A and FinalLines
  * retain their distinct permission contracts; frontend gating is UI-only.
  */
 import { useEffect, useReducer, useState, useCallback, useRef } from 'react';

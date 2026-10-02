@@ -13,7 +13,7 @@ from pydantic import BaseModel
 class DriverTransferCreate(BaseModel):
     """Create a new transfer request.
 
-    Initiated by either a Driver (ODA user) or a SourceBranch manager.
+    Initiated by either a DRIVER/Self account or a SourceBranch manager.
     When a driver initiates, ``initiated_by`` must be 'Driver'.
     When a branch manager initiates on behalf, ``initiated_by`` must be
     'SourceBranch'.

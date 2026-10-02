@@ -242,7 +242,7 @@ async def change_period_status(
     summary="Resubmit a Returned period for review",
     description=(
         "Transitions a **Returned** period back to **InReview**.\n\n"
-        "Requires `payroll.entry` permission. Driver and ODA roles are blocked.\n\n"
+        "Requires `payroll.entry` permission. DRIVER/Self users are blocked.\n\n"
         "Reruns all Open→InReview submission guards (empty-period, NeedsManagerReview, "
         "zero-calc, duplicate-Pending) before creating a new Pending PeriodApproval "
         "review item. Clears `CurrentReturnReviewItemID` atomically.\n\n"
@@ -250,7 +250,7 @@ async def change_period_status(
         "Returns **409** if the period is no longer Returned at the write boundary."
     ),
     responses={
-        403: {"description": "No access to this period's branch, or driver/ODA role"},
+        403: {"description": "No access to this period's branch, or DRIVER/Self user"},
         404: {"description": "Period not found"},
         409: {"description": "Period is no longer Returned — concurrent transition"},
         422: {"description": "Period not Returned, or submission guard failed"},
@@ -452,7 +452,7 @@ async def finalize_period(
         "the period status is not changed."
     ),
     responses={
-        403: {"description": "ODA user, or no payroll.finalize permission"},
+        403: {"description": "DRIVER/Self user, or no payroll.finalize permission"},
         404: {"description": "Period not found"},
         422: {"description": "Period is not in Approved status"},
     },
@@ -481,7 +481,7 @@ async def get_finalization_preview(
         "Makes **no** DB mutations."
     ),
     responses={
-        403: {"description": "ODA/driver-role user, or no payroll.view/payroll.entry permission"},
+        403: {"description": "DRIVER/Self user, or no payroll.view/payroll.entry permission"},
         404: {"description": "Period not found"},
         422: {"description": "Period is not in Open or Returned status"},
     },
@@ -945,7 +945,7 @@ async def batch_save_driver_rates(
         "All counts use today's date as the reference point."
     ),
     responses={
-        403: {"description": "No access to this driver's branch or ODA mismatch"},
+        403: {"description": "DRIVER/Self user, or no access to this driver's branch"},
         404: {"description": "Driver not found"},
     },
 )
@@ -974,7 +974,7 @@ async def get_driver_rates_summary(
         "`DELETE /payroll/rates/{id}` to void a pending rate."
     ),
     responses={
-        403: {"description": "No access to this driver's branch or ODA mismatch"},
+        403: {"description": "DRIVER/Self user, or no access to this driver's branch"},
         404: {"description": "Driver not found"},
     },
 )
@@ -1002,7 +1002,7 @@ async def list_driver_rates_pending(
         "Defaults to 200 rows; paginate with `limit` and `offset`."
     ),
     responses={
-        403: {"description": "No access to this driver's branch or ODA mismatch"},
+        403: {"description": "DRIVER/Self user, or no access to this driver's branch"},
         404: {"description": "Driver not found"},
     },
 )
@@ -1037,7 +1037,7 @@ async def list_driver_rates_history(
     summary="Bulk status counts for all accessible drivers (left-panel badges)",
     description=(
         "Returns pending/future-approved counts for every driver the caller can access. "
-        "ODA users receive only their own driver. SpecificBranch users see only their branch. "
+        "DRIVER/Self users are denied this generic rate administration endpoint. SpecificBranch users see only their branch. "
         "missing_required_count is always null in bulk responses (use single-driver summary "
         "endpoint for the full count)."
     ),
@@ -1070,7 +1070,7 @@ async def get_bulk_driver_rates_summary(
     description=(
         "Copies current Approved rates from source_driver (as-of effective_from) to "
         "target_driver.  Requires payrates.edit on both driver branches.  "
-        "ODA users cannot use this endpoint.\n\n"
+        "DRIVER/Self users cannot use this endpoint.\n\n"
         "Rates become PendingApproval unless AllowSelfApproval=True, in which case "
         "they auto-approve and supersede existing rates.\n\n"
         "Only rates valid for the target driver's branch are copied; "
@@ -1078,7 +1078,7 @@ async def get_bulk_driver_rates_summary(
         "Set include_pay_rules=true to also copy Active MinimumPay/MaximumPay rules."
     ),
     responses={
-        403: {"description": "Insufficient permission, ODA user, or cross-company attempt"},
+        403: {"description": "DRIVER/Self user, insufficient permission, or cross-company attempt"},
         404: {"description": "Source or target driver not found"},
         422: {"description": "Backdating guard, overlapping pay rule, or validation failure"},
     },
@@ -1363,10 +1363,10 @@ async def void_bonus_event(
         "plus any driver who already has period-pay lines in this period. "
         "This is the stable source-of-truth for the Bonus driver dropdown — "
         "it does not change when the user navigates to a different day in the grid. "
-        "ODA/Driver users receive 403."
+        "DRIVER/Self users receive 403."
     ),
     responses={
-        403: {"description": "ODA/Driver user or no payroll.view/payroll.entry permission"},
+        403: {"description": "DRIVER/Self user or no payroll.view/payroll.entry permission"},
         404: {"description": "Period not found"},
     },
 )
@@ -1548,10 +1548,10 @@ async def void_driver_pay_rule(
         "Returns every DailyStatus line in the period whose status key has "
         "IsOffReason=TRUE.  Unlike the day-grid which shows only one day's "
         "off drivers, this endpoint spans the entire period. "
-        "ODA/Driver users receive 403."
+        "DRIVER/Self users receive 403."
     ),
     responses={
-        403: {"description": "ODA/Driver user or no payroll.view/payroll.entry permission"},
+        403: {"description": "DRIVER/Self user or no payroll.view/payroll.entry permission"},
         404: {"description": "Period not found"},
     },
 )
@@ -1585,7 +1585,7 @@ async def get_period_drivers_off(
     response_model=OffDriversSummaryResponse,
     summary="Get the distinct fully-off drivers for a payroll period",
     responses={
-        403: {"description": "ODA/Driver user or no payroll.view/payroll.entry permission"},
+        403: {"description": "DRIVER/Self user or no payroll.view/payroll.entry permission"},
         404: {"description": "Period not found"},
     },
 )
@@ -1608,7 +1608,7 @@ async def get_period_off_drivers_summary(
     summary="Get Off drivers for one payroll period work date",
     responses={
         400: {"description": "work_date outside period bounds or period day snapshot"},
-        403: {"description": "ODA/Driver user or no payroll.view/payroll.entry permission"},
+        403: {"description": "DRIVER/Self user or no payroll.view/payroll.entry permission"},
         404: {"description": "Period not found"},
     },
 )

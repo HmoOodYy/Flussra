@@ -7,7 +7,7 @@ Test matrix:
      2.  review.decide-only user can access dashboard and gets review_queue section.
      3.  payrates.view-only user can access dashboard and gets rates_health section.
      4.  setup.manage-only user can access dashboard and gets setup_health section.
-     5.  Driver/ODA user cannot access operational dashboard → 403.
+     5.  DRIVER/Self user cannot access operational dashboard → 403.
      6.  payroll.view SpecificBranch user can access dashboard.
 
   B. Section gating
@@ -34,6 +34,7 @@ from uuid import uuid4
 import httpx
 
 from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 
 _counter = itertools.count(500)
 
@@ -190,21 +191,12 @@ class TestDashboardAccess:
         auth_token: str,
         hq_branch_id: int,
     ):
-        """ODA driver user gets 403 from the operational dashboard."""
-        username = _u()
-        uid = await _create_user(session_client, auth_token, username)
-
-        # Find the DRIVER company role
-        cr_resp = await session_client.get("/admin/company-roles", headers=_hdr(auth_token))
-        assert cr_resp.status_code == 200
-        driver_cr = next((r for r in cr_resp.json() if r["role_code"] == "DRIVER"), None)
-        assert driver_cr, "DRIVER company role not found"
-
-        await _assign_company_role(
-            session_client, auth_token, uid,
-            driver_cr["company_role_id"], "OwnDriverDataOnly", hq_branch_id,
+        """DRIVER/Self user gets 403 from the operational dashboard."""
+        token = await create_user_with_role_token(
+            session_client, auth_token, _u(),
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=hq_branch_id,
         )
-        token = await _login(session_client, username)
 
         r = await session_client.get("/dashboard", headers=_hdr(token))
         assert r.status_code == 403, r.text

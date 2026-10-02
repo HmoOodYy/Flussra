@@ -9,7 +9,7 @@ Tests cover:
   5.  Approved period can then be finalized (existing finalize flow)
   6.  Post-submit live NeedsManagerReview drift does not replace the submitted snapshot
   7.  Return (EditRequested) works ->' period goes to Open
-  8.  Driver/ODA user is blocked from GET /review/items (403)
+  8.  DRIVER/Self user is blocked from GET /review/items (403)
   9.  Branch-scoped user cannot approve another branch's period (403)
   10. AllCompanyBranches user can review periods from any branch
   11. No NMR lines = no blocker (Approve proceeds)
@@ -27,6 +27,7 @@ from sqlalchemy import text as _text
 from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
+    get_company_role_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -712,7 +713,7 @@ class TestReviewReturn:
 
 
 # ---------------------------------------------------------------------------
-# 8. Driver/ODA security
+# 8. DRIVER/Self security
 # ---------------------------------------------------------------------------
 
 class TestReviewODASecurity:
@@ -724,18 +725,13 @@ class TestReviewODASecurity:
         auth_token: str,
         paytest_branch_id: int,
     ):
-        """ODA (driver-role) user receives 403 on GET /review/items."""
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP6_ODA_Review_Role",
-            ["payroll.view", "review.decide"],
-        )
+        """DRIVER/Self user receives 403 on GET /review/items."""
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp6_oda_review_user",
-            role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
 
         rv = await session_client.get(
@@ -755,23 +751,18 @@ class TestReviewODASecurity:
         paytest_driver_id: int,
         direct_db,
     ):
-        """ODA user cannot decide (approve/reject) a review item ->' 403 before data access."""
+        """DRIVER/Self user cannot decide a review item; 403 comes before data access."""
         pid = await _create_open_period(session_client, auth_token, cp6_clean, direct_db=direct_db)
         review_id = await _advance_to_inreview(
             session_client, auth_token, pid, paytest_driver_id
         )
 
-        role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP6_ODA_Decide_Role",
-            ["payroll.view", "review.decide"],
-        )
         oda_token = await create_user_with_role_token(
             session_client, auth_token,
             "cp6_oda_decide_user",
-            role_id,
-            scope_type="OwnDriverDataOnly",
-            branch_id=paytest_branch_id,
+            await get_company_role_id(session_client, auth_token, "DRIVER"),
+            scope_type="Self",
+            driver_branch_id=paytest_branch_id,
         )
 
         dec = await session_client.post(

@@ -40,8 +40,7 @@ from app.payroll.driver_pay_rules import _write_pay_rule_audit
 from app.payroll.guards import (
     _check_driver_read_access,
     _check_not_in_finalized_period,
-    _check_own_driver_only,
-    _get_oda_own_driver_id,
+    _require_non_driver_rate_subject,
 )
 from app.payroll.schemas import (
     BatchRateRequest,
@@ -888,40 +887,11 @@ async def get_rates(
     limit: int = 100,
     offset: int = 0,
 ) -> list[DriverRateSummary]:
-    # OwnDriverDataOnly: detect scope early so we can pass the correct branch_id
-    # to the permission check.  ODA users have permission scoped to a specific branch
-    # (fn_UserHasPermission returns FALSE with NULL branch_id for ODA users).
-    # Resolving own_driver_id first also lets us force the driver_id filter.
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-
-    if own_driver_id is not None:
-        # ODA user: look up own driver's branch for the permission check.
-        oda_drv_result = await db.execute(
-            text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-            {"did": own_driver_id, "cid": company_id},
-        )
-        oda_drv_row = oda_drv_result.mappings().first()
-        perm_branch_id: int | None = oda_drv_row["branchid"] if oda_drv_row else branch_id
-
-        # Permission gate using ODA driver's branch (so fn_UserHasPermission resolves correctly).
-        await _check_any_permission(
-            company_id, user_id, perm_branch_id,
-            ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-        )
-
-        # ODA enforcement: caller may only list their own driver's rates.
-        if driver_id is not None and driver_id != own_driver_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="OwnDriverDataOnly: you may only list your own driver's rates.",
-            )
-        driver_id = own_driver_id  # force filter to own driver
-    else:
-        # Non-ODA: standard permission gate (branch_id=None is acceptable for AllCompanyBranches).
-        await _check_any_permission(
-            company_id, user_id, branch_id,
-            ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-        )
+    await _require_non_driver_rate_subject(company_id, user_id, db)
+    await _check_any_permission(
+        company_id, user_id, branch_id,
+        ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
+    )
 
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
 
@@ -978,6 +948,7 @@ async def get_rate_by_id(
     user_id: int,
     db: AsyncConnection,
 ) -> DriverRateSummary:
+    await _require_non_driver_rate_subject(company_id, user_id, db)
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
     rate = await _get_rate_with_tiers(rate_id, company_id, db)
     if not can_see_all and rate.branch_id not in branch_ids:
@@ -990,8 +961,6 @@ async def get_rate_by_id(
         company_id, user_id, rate.branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
-    # OwnDriverDataOnly: caller may only read their own driver's rates
-    await _check_own_driver_only(company_id, user_id, rate.driver_id, db)
     return rate
 
 
@@ -1013,6 +982,9 @@ async def create_rate(
       - User must have access to the driver's branch.
       - rate_type_id must exist and be active.
     """
+    # Reject DRIVER/Self before resolving the target driver or branch.
+    await _require_non_driver_rate_subject(company_id, user_id, db)
+
     can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
 
     # Resolve driver â†’ branch
@@ -1036,9 +1008,6 @@ async def create_rate(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
-
-    # OwnDriverDataOnly: caller may only create rates for their own driver
-    await _check_own_driver_only(company_id, user_id, data.driver_id, db)
 
     # Validate rate type: existence, activity, and company scope (closes P0 cross-company leak).
     await _assert_rate_type_allowed_for_company(db, company_id, data.rate_type_id)
@@ -1232,8 +1201,8 @@ async def update_rate(
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
-    # OwnDriverDataOnly: caller may only edit their own driver's rates
-    await _check_own_driver_only(company_id, user_id, rate.driver_id, db)
+    # Generic rate administration is available only to non-DRIVER subjects.
+    await _require_non_driver_rate_subject(company_id, user_id, db)
 
     # Defensive cross-company scope guard: reject contaminated rows that reference
     # another company's RateType (e.g. created before P0 was closed).
@@ -1628,8 +1597,8 @@ async def approve_rate(
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
-    # Step 1.34 â€” OwnDriverDataOnly: caller may only approve their own driver's rates
-    await _check_own_driver_only(company_id, user_id, rate.driver_id, db)
+    # Step 1.34 — generic rate administration is denied to DRIVER subjects.
+    await _require_non_driver_rate_subject(company_id, user_id, db)
 
     # Step 1.36 â€” Defensive cross-company scope guard: reject contaminated rows
     # (e.g. created before P0 was closed) that reference another company's RateType.
@@ -1805,8 +1774,8 @@ async def void_rate(
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
-    # OwnDriverDataOnly: caller may only void their own driver's rates
-    await _check_own_driver_only(company_id, user_id, rate.driver_id, db)
+    # Generic rate administration is available only to non-DRIVER subjects.
+    await _require_non_driver_rate_subject(company_id, user_id, db)
 
     # Phase 12B â€” advisory lock for Approved / Superseded void path.
     #
@@ -1927,7 +1896,7 @@ async def resolve_rate_for_date(
     Security:
       - Requires payrates.view / payrates.edit / settings.manage / setup.manage.
       - Enforces branch-scope: caller must have access to the driver's branch.
-      - Enforces OwnDriverDataOnly: caller may only look up their own driver.
+      - Denies DRIVER/Self subjects from generic rate administration.
       - Cross-company lookup is impossible (company_id filter on driver lookup).
 
     Returns None (found=False) when the driver does not exist in this company or
@@ -1951,8 +1920,7 @@ async def resolve_rate_for_date(
 
     driver_branch_id: int = drv_lookup_row["branchid"]
 
-    # Step 2 â€” permission gate with the driver's branch so OwnDriverDataOnly users
-    # (whose permission is granted per-branch, not company-wide) can pass.
+    # Step 2 — generic permission gate on the driver's branch.
     await _check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
@@ -1966,8 +1934,8 @@ async def resolve_rate_for_date(
             detail="Access denied to this driver's branch.",
         )
 
-    # Step 4 â€” OwnDriverDataOnly: caller may only look up their own driver
-    await _check_own_driver_only(company_id, user_id, driver_id, db)
+    # Step 4 — DRIVER/Self accounts are denied generic rate lookup.
+    await _require_non_driver_rate_subject(company_id, user_id, db)
 
     result = await db.execute(
         text(f"""
@@ -2043,10 +2011,9 @@ async def get_driver_rate_matrix(
         db=db,
     )
 
-    # OwnDriverDataOnly scope â€” caller may only view their own driver's matrix.
-    # Uses the shared fail-closed helper (_check_own_driver_only â†’ _get_oda_own_driver_id)
+    # The matrix is generic rate administration and excludes DRIVER/Self accounts.
     # which rejects ambiguous overlapping active assignments rather than trusting latest row.
-    await _check_own_driver_only(company_id, user_id, driver_id, db)
+    await _require_non_driver_rate_subject(company_id, user_id, db)
 
     # Step 2 â€” active pay items for this branch.
     # Uses LEFT JOIN on BranchPayItemConfig so that system items with
@@ -2294,6 +2261,10 @@ async def batch_save_rates(
     supported.  Tiered (OrdinalTier, RangeBracket, RangeProgressive) and
     Block rates must be saved via individual endpoints.
     """
+    # A DRIVER/Self token must be rejected before branch or rate lookup so a
+    # generic payroll endpoint never treats Self as branch authority.
+    await _require_non_driver_rate_subject(company_id, user_id, db)
+
     # Step 1 â€” validate changes list: empty and duplicate rate_type_id entries.
     # Empty list is caught by the schema validator; double-check here.
     if not data.changes:
@@ -2333,9 +2304,6 @@ async def batch_save_rates(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
-
-    # Step 3.5 â€” OwnDriverDataOnly: caller may only batch-save their own driver's rates
-    await _check_own_driver_only(company_id, user_id, driver_id, db)
 
     # Step 4 â€” read AllowSelfApproval from company settings
     settings_result = await db.execute(
@@ -2790,7 +2758,7 @@ async def get_bulk_driver_rates_summary(
     Return DriverRatesSummary for every driver the caller can access.
 
     Security:
-      - ODA users: only own driver.
+      - DRIVER/Self users are denied generic rate administration.
       - SpecificBranch users: only drivers in their assigned branch(es).
       - AllCompanyBranches users: all company drivers (filtered by branch_id param).
 
@@ -2801,33 +2769,29 @@ async def get_bulk_driver_rates_summary(
     It is always None in bulk responses; callers may use the single-driver summary
     endpoint for the full count on a selected driver.
     """
-    # ODA: only own driver
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        accessible_driver_ids = [own_driver_id]
-    else:
-        await _check_any_permission(
-            company_id, user_id, branch_id,
-            ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-        )
-        can_see_all, allowed_branch_ids = await _check_branch_access(company_id, user_id, db)
-        drv_q_parts = ["companyid = :cid"]
-        drv_params: dict = {"cid": company_id}
-        if not can_see_all:
-            if not allowed_branch_ids:
-                return []
-            in_clause, extra = _build_in_clause(allowed_branch_ids, "bid")
-            drv_q_parts.append(f"branchid IN ({in_clause})")
-            drv_params.update(extra)
-        elif branch_id is not None:
-            drv_q_parts.append("branchid = :filter_bid")
-            drv_params["filter_bid"] = branch_id
-        where = " AND ".join(drv_q_parts)
-        drv_result = await db.execute(
-            text(f"SELECT driverid FROM core.drivers WHERE {where}"),
-            drv_params,
-        )
-        accessible_driver_ids = [r["driverid"] for r in drv_result.mappings().all()]
+    await _require_non_driver_rate_subject(company_id, user_id, db)
+    await _check_any_permission(
+        company_id, user_id, branch_id,
+        ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
+    )
+    can_see_all, allowed_branch_ids = await _check_branch_access(company_id, user_id, db)
+    drv_q_parts = ["companyid = :cid"]
+    drv_params: dict = {"cid": company_id}
+    if not can_see_all:
+        if not allowed_branch_ids:
+            return []
+        in_clause, extra = _build_in_clause(allowed_branch_ids, "bid")
+        drv_q_parts.append(f"branchid IN ({in_clause})")
+        drv_params.update(extra)
+    elif branch_id is not None:
+        drv_q_parts.append("branchid = :filter_bid")
+        drv_params["filter_bid"] = branch_id
+    where = " AND ".join(drv_q_parts)
+    drv_result = await db.execute(
+        text(f"SELECT driverid FROM core.drivers WHERE {where}"),
+        drv_params,
+    )
+    accessible_driver_ids = [r["driverid"] for r in drv_result.mappings().all()]
 
     if not accessible_driver_ids:
         return []
@@ -2885,7 +2849,7 @@ async def copy_driver_rates(
 
     Rules:
     - Caller must have payrates.edit on BOTH source and target driver branches.
-    - ODA users cannot use this endpoint.
+    - DRIVER/Self users cannot use this generic administration endpoint.
     - Same company only (enforced by driver lookup).
     - Only current Approved rates as-of data.effective_from are copied.
     - PendingApproval rates are never copied.
@@ -2898,13 +2862,7 @@ async def copy_driver_rates(
     - Rates with tiered/block structure: only flat amount is copied; tier details
       are not copied (this is safe â€” the new rate row is a simple Flat rate).
     """
-    # ODA users must not use copy-from
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="OwnDriverDataOnly users cannot use copy-rates-from.",
-        )
+    await _require_non_driver_rate_subject(company_id, user_id, db)
 
     # Verify both drivers exist in this company
     src_result = await db.execute(

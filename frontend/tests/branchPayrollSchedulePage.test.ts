@@ -42,6 +42,7 @@ function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [makeBranch()],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -122,7 +123,7 @@ test('C behavior: company payroll_setup.* grants (no payroll.view) do not grant 
   assert.equal(canViewBranchPayrollSchedule(user, 7), false);
 });
 
-// ── D/E: Driver and OwnDriverDataOnly deny despite payroll.view ─────────────
+// ── D/E: Driver and Self deny despite payroll.view ─────────────────────────
 
 test('D: Driver role user with payroll.view is denied both helpers', () => {
   const user = makeUser({
@@ -133,9 +134,9 @@ test('D: Driver role user with payroll.view is denied both helpers', () => {
   assert.equal(canViewBranchPayrollSchedule(user, 7), false);
 });
 
-test('E: OwnDriverDataOnly user with payroll.view is denied both helpers', () => {
+test('E: DRIVER/Self user with payroll.view is denied both helpers', () => {
   const user = makeUser({
-    branches: [makeBranch({ branch_id: 7, scope: 'OwnDriverDataOnly', role_code: 'DRIVER', role_name: 'Driver' })],
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
     authority: makeAuthority({ company_permissions: ['payroll.view'] }),
   });
   assert.equal(canViewAnyBranchPayrollSchedule(user), false);

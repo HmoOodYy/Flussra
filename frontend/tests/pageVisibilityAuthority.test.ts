@@ -79,6 +79,7 @@ function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [makeBranch()],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -138,9 +139,9 @@ test('page visibility: DRIVER assignments remain excluded from operational pages
   }
 });
 
-test('page visibility: OwnDriverDataOnly assignments remain excluded from operational pages', async (t) => {
+test('page visibility: Self assignments remain excluded from operational pages', async (t) => {
   const user = makeUser({
-    branches: [makeBranch({ scope: 'OwnDriverDataOnly', role_code: 'DRIVER', role_name: 'Driver' })],
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
     authority: makeAuthority({
       branch_permissions: [{ branch_id: 10, permissions: DISCOVERY_PERMISSIONS }],
     }),

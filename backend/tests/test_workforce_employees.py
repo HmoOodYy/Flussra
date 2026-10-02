@@ -562,7 +562,7 @@ async def test_hire_date_guard_protects_final_line_dates(
 
 
 @pytest.mark.asyncio
-async def test_driver_role_workforce_failure_rolls_back_access_assignment(
+async def test_driver_role_requires_employee_link_before_assignment(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     tag = suffix()
@@ -605,7 +605,8 @@ async def test_driver_role_workforce_failure_rolls_back_access_assignment(
               "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
         headers=auth(caller_token),
     )
-    assert response.status_code == 403
+    assert response.status_code == 422
+    assert "explicitly linked employee" in response.text.lower()
     after = (await direct_db.execute(text("""
         SELECT COUNT(*) FROM sec.UserBranchRoles WHERE UserID = :user_id AND IsActive
     """), {"user_id": target_id})).scalar_one()
@@ -617,7 +618,7 @@ async def test_driver_role_workforce_failure_rolls_back_access_assignment(
 
 
 @pytest.mark.asyncio
-async def test_admin_driver_hook_uses_workforce_key_and_links_user(
+async def test_admin_driver_assignment_uses_explicit_workforce_profile(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     tag = suffix()
@@ -626,11 +627,21 @@ async def test_admin_driver_hook_uses_workforce_key_and_links_user(
     )
     assert created.status_code in {200, 201}, created.text
     user_id = created.json()["user_id"]
+    employee = await create_employee(
+        client, auth_token, hq_branch_id,
+        driver_profile={"driver_code": f"P1B-{tag}"},
+    )
+    linked = await client.put(
+        f"/admin/users/{user_id}/employee-link",
+        json={"employee_id": employee["employee_id"]},
+        headers=auth(auth_token),
+    )
+    assert linked.status_code == 200, linked.text
     roles = await client.get("/admin/company-roles", headers=auth(auth_token))
     driver_role = next(role for role in roles.json() if role["role_code"] == "DRIVER")
     assigned = await client.post(
         f"/admin/users/{user_id}/company-role-assignments",
-        json={"company_role_id": driver_role["company_role_id"], "scope_type": "SpecificBranch", "branch_id": hq_branch_id},
+        json={"company_role_id": driver_role["company_role_id"], "scope_type": "Self"},
         headers=auth(auth_token),
     )
     assert assigned.status_code in {200, 201}, assigned.text

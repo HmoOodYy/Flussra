@@ -9,7 +9,7 @@ Covers (grouped A–H per the CP-3B2b spec):
   B. Period-level BonusDataRevision: exactly-once bump, stale → 409, failure paths inert.
   C. Idempotency: same key+payload replay (200), key+different payload/revision → 409.
   D. Validation / all-or-nothing rollback.
-  E. Lifecycle (Draft/InReview/Approved/… blocked) and permissions (ODA, view-only).
+  E. Lifecycle (Draft/InReview/Approved/… blocked) and permissions (DRIVER/Self, view-only).
   F. Audit correlation + audit-failure rollback.
   G. DB ownership hardening (migration 0060 trigger + constraints).
   H. Regression (/period-pay BONUS still blocked; no DraftLine BONUS rows).
@@ -31,6 +31,7 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.access_test_helpers import create_provisioned_test_user
+from tests.builders.access import get_company_role_id
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -723,29 +724,20 @@ async def test_non_editable_statuses_blocked(
 
 
 @pytest.mark.asyncio
-async def test_oda_user_denied(
+async def test_driver_self_user_denied(
     session_client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
-    # Create an ODA user scoped to the branch.
-    cr = await session_client.post(
-        "/admin/company-roles", json={"role_name": f"CP3B2B_ODA_{_RUN_ID}"}, headers=_auth(auth_token),
-    )
-    role_id = cr.json()["company_role_id"]
-    await session_client.put(
-        f"/admin/company-roles/{role_id}/permissions",
-        json={"permission_codes": ["payroll.view", "payroll.entry"]}, headers=_auth(auth_token),
-    )
     await create_provisioned_test_user(
-        session_client, auth_token, f"cp3b2b_oda_{_RUN_ID}", role_id,
-        scope_type="OwnDriverDataOnly", branch_id=cp3b2b_branch_id,
-        password="TestPass123!", display_name="oda",
+        session_client, auth_token, f"cp3b2b_self_{_RUN_ID}", await get_company_role_id(session_client, auth_token, "DRIVER"),
+        scope_type="Self", driver_branch_id=cp3b2b_branch_id,
+        password="TestPass123!", display_name="driver self",
     )
     login = await session_client.post("/auth/login", json={
-        "username": f"cp3b2b_oda_{_RUN_ID}", "password": "TestPass123!", "company_code": "DEMO"})
-    oda_token = login.json()["access_token"]
+        "username": f"cp3b2b_self_{_RUN_ID}", "password": "TestPass123!", "company_code": "DEMO"})
+    driver_self_token = login.json()["access_token"]
 
-    r = await _batch(session_client, oda_token, period_id, _key(), 0, [
+    r = await _batch(session_client, driver_self_token, period_id, _key(), 0, [
         {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 403, r.text

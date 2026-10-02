@@ -77,7 +77,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
-from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_calculation import (
     _build_live_calculation_packet,
@@ -816,10 +815,10 @@ async def resubmit_period(
     POST /payroll/periods/{period_id}/resubmissions
 
     Resubmit a Returned period for review.  Requires payroll.entry permission.
-    Driver/ODA roles are blocked.
+    DRIVER/Self subjects are blocked.
 
     Steps:
-      1. Driver/ODA guard.
+      1. DRIVER/Self guard.
       2. Load the period (access + permission check).
       3. Acquire FOR UPDATE lock; verify status is still Returned.
       4. Run all Open→InReview submission guards (refresh, empty, NMR, zero-calc,
@@ -833,14 +832,8 @@ async def resubmit_period(
     # CP-4D: must precede every resubmission database helper.
     await _set_submit_transaction_isolation(db)
 
-    # ── Step 1: driver/ODA guard ─────────────────────────────────────────── #
+    # ── Step 1: DRIVER/Self guard ────────────────────────────────────────── #
     await _require_not_driver_role(company_id, user_id, db)
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="Payroll resubmission is not accessible to driver-role users.",
-        )
 
     # ── Step 2: load period (access check) ───────────────────────────────── #
     existing = await get_period_by_id(company_id, user_id, period_id, db)

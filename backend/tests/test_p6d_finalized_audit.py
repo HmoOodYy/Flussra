@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from app.payroll.service import _create_period_pay_item_rows, finalize_period
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.test_p6a_finalized_library import (
     _auth,
     _scoped_permission_token,
@@ -353,27 +354,25 @@ async def test_finalized_audit_denies_driver_oda_and_foreign_branch_without_leak
     period_id, _, _, _ = await _seed_finalized_period(
         direct_db, test_database_url, paytest_branch_id,
     )
-    driver_token, driver_user_id = await _scoped_permission_token(
-        session_client, auth_token, paytest_branch_id,
-        ["ledger.view", "ledger.audit.view"], return_user_id=True,
+    driver_token = await create_user_with_role_token(
+        session_client, auth_token, f"p6d_self_{uuid4().hex[:12]}",
+        await get_company_role_id(session_client, auth_token, "DRIVER"),
+        scope_type="Self", driver_branch_id=paytest_branch_id,
     )
-    roles = await session_client.get("/admin/company-roles", headers=_auth(auth_token))
-    assert roles.status_code == 200, roles.text
-    driver_role_id = next(
-        role["company_role_id"] for role in roles.json() if role["role_code"] == "DRIVER"
+    driver = await session_client.get("/auth/me", headers=_auth(driver_token))
+    assert driver.status_code == 200, driver.text
+    override = await session_client.put(
+        f"/admin/users/{driver.json()['user_id']}/permission-overrides",
+        headers=_auth(auth_token),
+        json={"permission_codes": ["ledger.view", "ledger.audit.view"]},
     )
-    for scope_type in ("SpecificBranch", "OwnDriverDataOnly"):
-        assignment = await session_client.post(
-            f"/admin/users/{driver_user_id}/company-role-assignments",
-            json={"company_role_id": driver_role_id, "scope_type": scope_type, "branch_id": paytest_branch_id},
-            headers=_auth(auth_token),
-        )
-        assert assignment.status_code == 201, assignment.text
-        denied = await session_client.get(
-            f"/payroll/finalized/{period_id}/audit", headers=_auth(driver_token),
-        )
-        assert denied.status_code == 403, denied.text
-        assert str(period_id) not in denied.text
+    assert override.status_code == 422, override.text
+    assert "cannot receive generic permission overrides" in override.json()["detail"]
+    denied = await session_client.get(
+        f"/payroll/finalized/{period_id}/audit", headers=_auth(driver_token),
+    )
+    assert denied.status_code == 403, denied.text
+    assert str(period_id) not in denied.text
 
     other_branch_token = await _scoped_permission_token(
         session_client, auth_token, hq_branch_id, ["ledger.view", "ledger.audit.view"],

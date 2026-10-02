@@ -611,7 +611,7 @@ async def get_drivers_off(
     -- never live PayrollStatusKeys, never legacy DailyStatus DraftLines.
     Returns (entries, {state, reason_code}) instead of (entries, None).
 
-    ODA/Driver users are blocked unconditionally.
+    DRIVER/Self users are blocked unconditionally.
     payroll.view OR payroll.entry permission is required.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #

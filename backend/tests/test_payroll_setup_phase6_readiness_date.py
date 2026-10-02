@@ -198,16 +198,16 @@ async def _actor(db, *, permissions: tuple[str, ...], scope: str,
         VALUES (:uid, :cid, :bid, :rid, :crid, :scope, TRUE)
     """), {
         "uid": user_id, "cid": company_id,
-        "bid": branch_id if scope in ("SpecificBranch", "OwnDriverDataOnly") else None,
+        "bid": branch_id if scope == "SpecificBranch" else None,
         "rid": role_id, "crid": company_role_id, "scope": scope,
     })
     return create_access_token(int(user_id), int(company_id))
 
 
-async def _mixed_driver_actor(db, *, branch_id: int, permissions: tuple[str, ...]) -> str:
+async def _mixed_driver_actor(db, *, permissions: tuple[str, ...]) -> str:
     """Build one user holding TWO active grants: an AllCompanyBranches
     administrative role (with the given permissions, e.g. payroll.view) AND
-    a second OwnDriverDataOnly DRIVER-role grant scoped to branch_id.
+    a second DRIVER/Self-role grant with no branch assignment.
 
     Reuses a single sec.Users row for both sec.UserBranchRoles rows, to
     exercise the fail-closed contract: any active driver-shaped grant must
@@ -266,9 +266,9 @@ async def _mixed_driver_actor(db, *, branch_id: int, permissions: tuple[str, ...
     await db.execute(text("""
         INSERT INTO sec.UserBranchRoles
             (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-        VALUES (:uid, :cid, :bid, :rid, :crid, 'OwnDriverDataOnly', TRUE)
+        VALUES (:uid, :cid, NULL, :rid, :crid, 'Self', TRUE)
     """), {
-        "uid": user_id, "cid": company_id, "bid": branch_id,
+        "uid": user_id, "cid": company_id,
         "rid": driver_role_id, "crid": driver_company_role_id,
     })
 
@@ -476,19 +476,14 @@ async def test_c_cancelled_period_does_not_advance_evaluated_date(
 async def test_d_driver_caller_never_sees_reason_or_date(
     phase6_ready_db, phase6_ready_conn,
 ):
-    """Driver / OwnDriverDataOnly callers must never see readiness reason or date,
+    """DRIVER/Self callers must never see readiness reason or date,
     even when they genuinely hold payroll.view — isolating the driver gate from
     a merely-missing-permission explanation.
 
-    Observed behavior: GET /settings/branches/{id} returns 200 for a driver
-    scoped to that branch (branch access is granted via the OwnDriverDataOnly
-    row), but _attach_readiness_reasons short-circuits on
-    _require_not_driver_role before setting either field, so both come back
-    null. GET /settings/branches (list) behaves the same way for every row
-    it returns to that caller. This holds even for a user who ALSO holds a
-    genuine AllCompanyBranches payroll.view grant alongside an active
-    OwnDriverDataOnly/DRIVER grant (fail-closed: one matching driver-shaped
-    row is enough to block) — verified against a positive-control user who
+    A pure Self assignment has no branch access and branch reads are denied.
+    A mixed company-wide + DRIVER/Self principal can read branches through
+    the company-wide assignment, but generic payroll readiness is withheld.
+    This is verified against a positive-control user who
     holds the same payroll.view grant with no driver row at all.
     """
     fixture = phase6_ready_db
@@ -504,30 +499,23 @@ async def test_d_driver_caller_never_sees_reason_or_date(
     )
     assert assigned.status_code == 201, assigned.text
 
-    # (a) Pure OwnDriverDataOnly driver actor, now genuinely holding
-    # payroll.view (granted onto the DRIVER company role by _actor).
+    # (a) Pure DRIVER/Self actor with payroll.view on the role.
     driver_token = await _actor(
-        db, permissions=("payroll.view",), scope="OwnDriverDataOnly",
-        branch_id=branch_id, driver=True,
+        db, permissions=("payroll.view",), scope="Self", driver=True,
     )
 
     single = await client.get(f"/settings/branches/{branch_id}", headers=_auth(driver_token))
-    assert single.status_code == 200, single.text
-    assert single.json()["schedule_readiness_reason"] is None
-    assert single.json()["schedule_readiness_date"] is None
+    assert single.status_code == 403, single.text
+    assert "branch" in single.json()["detail"].lower()
 
     listing = await client.get("/settings/branches", headers=_auth(driver_token))
-    assert listing.status_code == 200, listing.text
-    assert len(listing.json()) >= 1
-    for row in listing.json():
-        assert row["schedule_readiness_reason"] is None
-        assert row["schedule_readiness_date"] is None
+    assert listing.status_code == 403, listing.text
+    assert "branch" in listing.json()["detail"].lower()
 
-    # (b) Mixed actor: a genuine AllCompanyBranches payroll.view grant PLUS a
-    # second active OwnDriverDataOnly/DRIVER grant on the same branch. The
-    # driver-shaped row must still hide both fields.
+    # (b) Mixed actor: a genuine AllCompanyBranches payroll.view grant plus
+    # a separate DRIVER/Self assignment. Generic readiness remains withheld.
     mixed_token = await _mixed_driver_actor(
-        db, branch_id=branch_id, permissions=("payroll.view",),
+        db, permissions=("payroll.view",),
     )
     mixed = await client.get(f"/settings/branches/{branch_id}", headers=_auth(mixed_token))
     assert mixed.status_code == 200, mixed.text

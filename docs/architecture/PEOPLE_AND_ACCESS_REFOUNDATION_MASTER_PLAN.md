@@ -5,9 +5,11 @@
 **Locked contract commit:** `a38c9306c51f00957719c22a1508e7e84a32503c` (`docs: lock people workforce access architecture`)  
 **Baseline commit:** `e15d3477c135647ed45e7fba9470f6acc80bf52a` (`main`, equal to `origin/main`)  
 **Migration head at planning time:** `0071` (`0071_retire_legacy_payroll_schedule_authority`)  
-**Current execution position:** Planning complete; no phase started. Next action: Phase 1.
+**Planning position (historical):** This plan was prepared before Phase 1. Current execution status and sequencing are maintained in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md`.
 
-The locked contract owns the architecture. This plan owns sequencing and mechanisms. Where the contract delegates a decision to "the master plan", this document makes it (see §2). Any conflict between this plan and the contract is resolved in favour of the contract; changing a contract rule requires a contract amendment, not a plan edit.
+**Supersession note (2026-10-02):** The Unified Plan controls current execution sequencing. The amended `PEOPLE_WORKFORCE_ACCESS_ARCHITECTURE_CONTRACT.md` controls DRIVER authorization semantics. Any earlier `OwnDriverDataOnly` branch-projection instruction in this older plan is superseded by generic `Self` scope: no Access BranchID, no branch-membership projection, and ownership through the explicit User–Employee relationship and canonical effective Driver profile. References below to the old scope are retained only as historical implementation/planning evidence or legacy behavior being retired.
+
+The locked contract owns semantics. This older plan is a detailed design reference only where it does not conflict with the contract or Unified Plan. It does not select a mechanism that the Lead has left open.
 
 ---
 
@@ -16,12 +18,12 @@ The locked contract owns the architecture. This plan owns sequencing and mechani
 - **Phases:** 9.
 - **Sizes:** SMALL — none. MEDIUM — Phases 1, 4, 6, 7, 9. LARGE — Phases 2, 3, 5, 8.
 - **Hardest phases:**
-  1. **Phase 5 — Effective-dated transfer & projection sync.** Changes when "current" flips, makes the effective-date resolver the runtime authority for every current-profile consumer, derives the ODA branch inside `fn_UserHasPermission` / `vw_UserBranchAccess`, and adds the daily projection reconciliation.
+  1. **Phase 5 — Effective-dated transfer & Workforce projection sync.** Changes when "current" flips and makes the effective-date resolver the runtime authority for current-profile consumers. `Employee.BranchID` remains a Workforce projection; Driver Self authorization follows the linked Employee/effective-profile relationship and has no Access branch projection.
   2. **Phase 3 — Access decoupling & provisioning.** Removes the DRIVER-role workforce side effects that many existing tests and fixtures rely on, adds link/staged/provisioning semantics, and must replace the old wizard's backend contract in the same PR.
   3. **Phase 8 — Employee-centered People & Access frontend.** Replaces the 1,256-line User-centered `PeoplePage.tsx` with an Employee-centered workforce view plus a separate Access view.
 - **Relative complexity:** comparable to the Payroll Setup refoundation in phase count, but lower in payroll-formula risk and higher in security and cross-module surface (admin, core, transfer, rates guards, frontend). The main risk is regression in authorization and transfer timing, not calculation.
 - **C2 Import:** remains blocked until the Completion Condition at the end of this document is met.
-- **Implementation begins with:** Phase 1 — Workforce integrity foundation & effective-date resolver.
+- **Original plan began with:** Phase 1 — Workforce integrity foundation & effective-date resolver. Current execution is governed by the Unified Plan.
 
 ---
 
@@ -71,22 +73,9 @@ The chosen mechanism has three parts:
 
    Python wrappers live in `backend/app/workforce/{clock,effective}.py` and call these functions. Every runtime "current profile" decision uses them.
 
-2. **Resolver-backed ODA authorization (option B).** Chosen from the call graph, not for aesthetics. Authorization is not centralized in a FastAPI dependency: `get_current_user` only decodes the JWT (`backend/app/dependencies.py:42-54`, no DB access), and branch/permission checks run inside endpoint service bodies through `sec.fn_UserHasPermission` (called from `admin/service.py:_ensure_any_perm`, `core/service.py:_check_permission/_check_any_permission/_has_any_permission`, payroll, rates, transfer, Payroll Setup security and SQL-side permission queries) and through `app.vw_UserBranchAccess` (`core/service.py:_check_branch_access`, `auth/service.py` login and `me`). Guaranteeing "projection-before-authorization" (option A) would require every current and future router plus the login path to carry an ordering dependency; one missing wiring would reopen a stale window. Option B removes the dependency on the stored value instead. Phase 5 replaces every security-relevant reader of the ODA row branch with a derived branch:
-   - new `sec.fn_OdaEffectiveBranch(p_UserID, p_CompanyID) RETURNS INTEGER` (STABLE): `Users.EmployeeID` → `core.fn_EffectiveDriverProfile(EmployeeID, core.fn_CompanyToday(CompanyID))` → that profile's `BranchID`; NULL when there is no link or no current profile;
-   - `sec.fn_UserHasPermission` (current body `migrations/sql/0021_fn_user_has_permission_v3.sql`): in both the company-role and legacy-role paths the branch predicate becomes
-     `ubr.scopetype = 'AllCompanyBranches' OR (ubr.scopetype = 'SpecificBranch' AND ubr.branchid = p_BranchID) OR (ubr.scopetype = 'OwnDriverDataOnly' AND sec.fn_OdaEffectiveBranch(ubr.userid, ubr.companyid) = p_BranchID)`.
-     The owner path and the override path are unchanged; overrides for DRIVER users are forbidden from Phase 4;
-   - `app.vw_UserBranchAccess` (current definition `migrations/sql/0016_userbranch_companyrole.sql`) is dropped and recreated so that for `OwnDriverDataOnly` rows `BranchID` (and the joined branch columns) come from `sec.fn_OdaEffectiveBranch`; with no current profile the row yields a NULL branch, which `_check_branch_access` already ignores (no branch access, fail closed);
-   - `auth/service.py` authority branch list (`~356-365`) and `payroll/immutable_evidence.py:53` use `sec.fn_OdaEffectiveBranch` for ODA rows.
+2. **Self authorization is resource-scoped, not branch-derived (amended architecture).** The former ODA design derived a branch from the linked Driver and treated Self like branch access; that design is superseded. Current authorization checks are distributed through SQL permission evaluation, branch-access projections, endpoint services, login and `/auth/me`. P2b must apply the generic Self semantics in the amended contract: a valid Self assignment has no Access BranchID; ownership is proven from User.EmployeeID → Employee → the relevant Employee-owned resource, using the canonical effective Driver profile for current/date-sensitive Driver actions. Missing link, company mismatch, or no effective profile for a current action fails closed. A branch-access function/view must not fabricate branch membership for Self, and login/`/auth/me` must be able to represent valid Self authority without a branch-access row. Permission overrides may add actions only within already-established resource scope; they cannot make an action Self-compatible or bypass the DRIVER ceiling. Company Owner dynamic permissions require a valid active company-wide owner assignment. The exact authorization/storage mechanism remains for the Lead's P2b design pass.
 
-   After Phase 5 no authorization or branch-scoping decision reads the stored ODA `BranchID`. Branch-scoped roster reads for Driver Employees likewise scope by the resolver-derived current (or else pending) profile branch, never by the stored `Employee.BranchID`.
-
-3. **Stored projections reconciled for consistency, not security.** `Employee.BranchID` (Driver Employees) and the DRIVER user's ODA `UserBranchRoles.BranchID` remain stored projections (contract §3.5, §7.6) maintained by one idempotent, set-based `sync_workforce_projections(company_id, as_of)`:
-   - called inside any workforce operation whose effect is already current (completion of a transfer whose `EffectiveDate ≤ today`, termination, first-profile creation);
-   - called by a request-gated daily reconciliation: a dependency attached in `backend/app/main.py` to authenticated routers, and a direct call in the login and `me` service paths, checks `core.WorkforceProjectionSync.SyncedThroughDate < core.fn_CompanyToday(company)` and, if stale, runs the sync in its own short transaction under a per-company advisory lock;
-   - exposed as an operator script `backend/scripts/sync_workforce_projections.py`.
-
-   Because authorization derives the ODA branch (part 2), a stale projection can at worst display an outdated branch until reconciliation; it can never authorize the wrong branch.
+3. **Workforce branch projection remains separate.** `Employee.BranchID` for Driver Employees remains a Workforce projection of the current (or pending, where defined) profile under contract §3.5. Transfer/effective-transition operations and any established Workforce reconciliation maintain this projection. No Access Self assignment or Access BranchID is synchronized on transfer or termination. The former ODA branch projection is legacy state to migrate/retire, not a projection maintained for display or authorization.
 
 ### D2. Permissions
 
@@ -159,12 +148,13 @@ A single `/people` page with three tabs: **Workforce** (Employee-centered, defau
 | `Users.EmployeeID` 0..1 per Employee | **DB** partial unique index on `EmployeeID WHERE EmployeeID IS NOT NULL` | Contract §5.4 | 3 |
 | User↔Employee same company | **DB** composite FK `Users(EmployeeID, CompanyID)` → Employees + `CHECK (EmployeeID IS NULL OR CompanyID IS NOT NULL)` (sysadmin users may have NULL company, `0001:1161-1163`) | Tenant integrity | 3 |
 | Staged ⇒ login disabled | **DB** CHECK | D5 | 3 |
-| `DRIVER ⇔ OwnDriverDataOnly` | **DB** trigger on `sec.UserBranchRoles` (pattern of `0020` owner trigger) covering company-role and legacy role rows + service errors | Every assignment path, including legacy `/admin/users/{id}/roles` | 3 |
-| DRIVER preconditions (linked Employee with current profile, branch match) | **Service** | Time-dependent (current date); not expressible as a constraint | 3 |
+| `DRIVER ⇔ Self`; Self has no Access BranchID | Semantic assignment invariant; exact enforcement is deferred to the Lead's P2b design pass | Current DRIVER is the only supported Self binding; branch scopes are invalid for DRIVER | P2b |
+| DRIVER current identity (explicit same-company link and effective profile for current action) | Canonical User–Employee relationship and P1 effective-profile authority; no branch match | Time-dependent identity; missing/mismatched/no-current identity fails closed | P2b |
 | Login-enabled ⇒ active Role/Scope | **Service** + existing login gate (`auth/service.py:127-150`) as backstop | Cross-table, state-dependent | 3 |
-| DRIVER effective permissions self-service-safe | **Service** (role-permission and override writes rejected) + migration removes `drivers.view` from DRIVER | Permission catalog is data | 4 |
-| ODA authorization uses the current profile branch | **DB function**: `sec.fn_UserHasPermission` and `app.vw_UserBranchAccess` derive the ODA branch via `sec.fn_OdaEffectiveBranch` (D1 part 2) | A stale stored value must never authorize | 5 |
-| `Employee.BranchID` = current profile branch; stored ODA branch = current profile branch | **Service** (reconciliation, D1 part 3); not security-relevant | Date-dependent projection kept for display/import consumers | 5 |
+| COMPANY_OWNER dynamic permission catalogue | Valid active company-wide owner assignment required; malformed branch or Self scope grants no company-wide authority | Protected system role remains; scope validity is required | P2b |
+| Self-compatible actions and DRIVER capability ceiling; overrides cannot widen resource scope | Semantic authorization invariant; exact implementation is for Lead design | Generic administrative actions remain invalid under Self | P2b |
+| Self ownership is evaluated independently of branch access | Semantic authorization invariant; exact implementation is for Lead design | Self must not fabricate branch membership; use linked subject/resource identity | P2b |
+| `Employee.BranchID` = current profile branch | Workforce service/projection authority (D1 part 3) | Date-dependent Workforce projection; no Access Self projection | 1 / 5 |
 | One pending destination per Employee / no new transfer while one is pending | **Service** + existing active-request guard | Workflow rule | 5 |
 
 No constraint is added for dormant `import.*` tables.
@@ -298,6 +288,8 @@ LARGE — new domain package, two migrations' worth of catalog/constraint work, 
 
 ## Phase 3 — Access decoupling & provisioning
 
+**Status/reference:** This is the original P2a design record; P2a completed in PR #24 with migration `0074`. The implemented OwnDriverDataOnly representation is transitional legacy state. The amended contract and Unified Plan govern the P2b Self migration; the details below must not be treated as the target authorization model.
+
 ### Goal
 Access can no longer touch Workforce; Users link explicitly to Employees; Access accounts are created atomically or explicitly staged.
 
@@ -309,10 +301,10 @@ Needs Employees (Phase 2). Must precede DRIVER hardening (Phase 4) and transfer 
 - `admin/service.py`:
   - delete `ensure_driver_profile`, `_driver_has_payroll_history` and the call in `assign_company_role`;
   - exact role-code comparison (`rolecode == 'DRIVER'`);
-  - DRIVER preconditions (linked Employee, same company, current profile via resolver, scope ODA, branch = current profile branch); ODA rejected for non-DRIVER roles;
+  - Historical P2a implementation preconditions used the linked same-company Employee, resolver-backed current profile, and legacy ODA branch scope; ODA was rejected for non-DRIVER roles. P2b replaces that representation with Self and removes the branch match; see the amended contract;
   - reject archived roles (`isarchived`) in `assign_company_role`;
   - reject `DRIVER` as `replacement_company_role_id` in owner transfer (it is assigned with `AllCompanyBranches`);
-  - legacy `POST /admin/users/{id}/roles`: reject `OwnDriverDataOnly` scope (backstopped by the trigger);
+  - The legacy role endpoint retains its P2a compatibility behavior pending P2b scope migration and P2c writer cleanup; it must not become an alternate route for branch/company authority under Self.
   - `PUT /admin/users/{id}/employee-link` and `DELETE /admin/users/{id}/employee-link` (explicit target; unlink rejected while the User holds DRIVER; relink requires prior unlink);
   - `POST /admin/users` = Create Access Account: User + optional `employee_id` + required `company_role_assignment` in one transaction, or `staged: true` (no assignment, `CanLogin=false`);
   - `POST /admin/users/{id}/provision`: assignment + clear `IsStaged` + optional enable login, one transaction;
@@ -321,7 +313,7 @@ Needs Employees (Phase 2). Must precede DRIVER hardening (Phase 4) and transfer 
 - `_fetch_driver_ids_for_users` / `get_user_driver_info` use the resolver (current profile) instead of status.
 
 ### Out of scope
-DRIVER permission allowlist and roster blocking (Phase 4); full People UI (Phase 8).
+Historically out of scope for P2a; DRIVER Self-compatible actions, capability ceiling and roster blocking now belong to P2b. Full People UI remains later work (Phase 8).
 
 ### Database
 Migration `0074`. Reset dev DB if existing demo links violate uniqueness/company FK.
@@ -332,12 +324,12 @@ Migration `0074`. Reset dev DB if existing demo links violate uniqueness/company
 ### Frontend
 Minimum to keep the app coherent with the new backend contract:
 - `PeoplePage.tsx`: replace the 5-step `WizardModal` with a single-submit **Create access account** modal (user fields + role/scope, or "staged"); remove step-by-step persistence, `partialSuccess`, and the DRIVER "pay rates next" hint.
-- `ScopeFields`: DRIVER offers only ODA; ODA offered only with DRIVER; branch fixed to the linked Employee's current profile branch.
+- The P2a UI represented DRIVER with legacy ODA. P2b updates the Access representation to generic Self with no branch, without redesigning the People UI.
 - Link/unlink action on the User detail.
 - `frontend/src/types/admin.ts` updates.
 
 ### Legacy behavior retired
-DRIVER role creating Employee/Driver; implicit linking; `EMP-{UserID}` keys; substring role detection; wizard partial persistence and back/resubmit duplicate Users; ODA with non-DRIVER roles; DRIVER with non-ODA scope; archived-role assignment.
+DRIVER role creating Employee/Driver; implicit linking; `EMP-{UserID}` keys; substring role detection; wizard partial persistence and back/resubmit duplicate Users; legacy ODA as target authority; DRIVER with branch scope; archived-role assignment.
 
 ### Tests required
 New `backend/tests/test_access_provisioning.py`: scenario 3 (existing Driver Employee gets a DRIVER User; no new Employee/Driver rows); scenario 4 (admin User without Employee); scenario 5 (staged User linked to a future Driver; cannot log in; DRIVER assignment rejected while profile pending); scenario 11 (DRIVER → other role leaves Workforce unchanged); scenario 12 (deactivation leaves Workforce unchanged); scenario 18 (retry of Create Access Account with same username → 422, no second User; atomic rollback when assignment invalid); cardinality/company FK tests; trigger tests for both assignment paths; stale role save cannot move branches. Update `test_people.py` (Driver scope rules), `test_driver_transfer.py` (reassignment tests become "role save never touches workforce").
@@ -361,51 +353,32 @@ LARGE — removes the central coupling, adds three Access operations, touches ma
 
 ## Phase 4 — DRIVER self-service security boundary
 
+**Current authority:** This older phase maps to P2b only where consistent with the amended locked contract and Unified Plan. The earlier ODA branch-based mechanism is superseded.
+
 ### Goal
-DRIVER users are self-only in identity, data and capability; no roster leakage; fail closed without a current profile.
 
-### Why now
-Requires the link-only identity (Phase 3). Must precede transfer projection sync (Phase 5), whose self-service alignment assumes resolver-based ODA identity.
+Enforce generic `Self` resource scope for the current DRIVER role. Self is not branch access; DRIVER is the only currently supported Self binding, and future bindings require explicit policy.
 
-### In scope
-- Migration `0075`: remove all permissions from every company's `DRIVER` role (currently `drivers.view`, `0016:90-93`).
-- Service: `set_company_role_permissions` rejects any code for `DRIVER` (self-service allowlist is empty until self-service commands are designed); `set_user_permission_overrides` rejected for Users holding DRIVER; assigning DRIVER to a User with active overrides rejected.
-- One ODA identity helper in `backend/app/workforce/effective.py` (link → resolver at company today) replacing both `payroll/guards.py:_get_oda_own_driver_id` and `transfer/service.py:_get_oda_own_driver_id`; no current profile → 403.
-- Roster endpoints block DRIVER/ODA via `_require_not_driver_role` and require permission: `/core/people`, `/core/drivers`, `/core/drivers/{id}`, `/workforce/*`, `/admin/users/{id}/driver`.
-- Rates and pay-rule mutation endpoints (create, update, batch save, approve, void, copy, pay-rule writes) reject DRIVER users explicitly (defence in depth over `_check_own_driver_only`).
-- Existing ODA self-service transfer request (`initiated_by='Driver'`) retained, now resolving own profile via the helper.
+### Semantic requirements
+
+- DRIVER requires Self; `SpecificBranch` and `AllCompanyBranches` are invalid for DRIVER. Self has no Access BranchID and grants no branch/company-wide or generic operational/administrative authority. Explicitly designed own-resource operations remain possible after canonical ownership is proven.
+- Current Driver identity derives from the explicit same-company User.EmployeeID link and the canonical effective Driver profile for the operation's relevant date. History is available only for that linked Employee where the endpoint contract allows it. Missing link, company mismatch, pending/no-current profile for a current action, or terminated/no-current identity fails closed.
+- A valid provisioned Self-only account must be representable through login and `/auth/me` without a fabricated branch-access row. Transfer/termination do not mutate an Access Self assignment.
+- Permission overrides may expand actions only within the established resource set; they do not create scope, make generic actions Self-compatible, bypass ownership checks, or exceed the DRIVER capability ceiling. Mixed DRIVER/administrative rows must not create a privilege bypass. The system must not assume only one assignment row can exist, and P2b does not define mixed-mode product behavior.
+- COMPANY_OWNER's dynamic permission shortcut requires a valid active company-wide owner assignment. Malformed branch-scoped or Self-scoped owner rows are not company-wide authority.
+- Every registered application route has explicit reviewable classification for authentication, action/permission, resource scope, Self denial/allowance, ownership relation when Self is allowed, and relevant company/branch policy. A new or unclassified route fails automated tests.
+
+### Negative authorization evidence
+
+For relevant Self/DRIVER routes, tests prove denial of another Driver's data, branch-roster leakage, generic administrative mutation, missing User.EmployeeID, company mismatch, no effective profile for a current action, a pending profile treated as current, terminated/no-current identity, and override-based resource expansion. Company Owner malformed-scope and mixed-authority bypass cases are also covered.
+
+### Mechanism boundary
+
+This plan does not select the SQL, API, policy, route-inventory, or override-storage mechanism. The Lead locks those remaining architectural choices in a separate P2b design pass before application implementation. No new general authorization framework or mixed-role UX is authorized here.
 
 ### Out of scope
-Driver portal; new self-service permissions.
 
-### Database
-Migration `0075` (permission data only).
-
-### Backend
-`backend/app/admin/service.py`, `backend/app/payroll/guards.py`, `backend/app/transfer/service.py`, `backend/app/core/service.py`, `backend/app/workforce/*`, `backend/app/payroll/rates.py` and `driver_pay_rules.py` (mutation guards).
-
-### Frontend
-`frontend/src/lib/permissions.ts`: confirm `isDriverUser` gates People/Pay Rates visibility; no new UI.
-
-### Legacy behavior retired
-DRIVER role default `drivers.view`; scope-only ODA detection that let DRIVER+SpecificBranch escape; roster reads by branch access alone.
-
-### Tests required
-Extend `backend/tests/test_security_matrix.py`: scenario 15 (DRIVER cannot list `/core/people`, `/core/drivers`, `/workforce/employees`, or read another driver); scenario 16 (DRIVER with a granted/override payrates permission attempt rejected at write time; role-permission and override writes for DRIVER rejected); scenario 14 prerequisite (no current profile → ODA helper 403); own-driver transfer request still works.
-
-### Validation commands
-`pytest tests/test_security_matrix.py tests/test_pay_rates.py tests/test_driver_transfer_workflow.py tests/test_company_roles.py tests/test_core.py -q`; ruff; alembic upgrade.
-
-### Acceptance gate
-- DRIVER role has zero permissions in every company and cannot be granted any.
-- Every roster endpoint returns 403 for DRIVER users.
-- Every rate/pay-rule mutation returns 403 for DRIVER users even with permissions present.
-
-### Risks
-Hidden reliance on DRIVER `drivers.view` (dashboard/transfer reads); duplicated ODA helpers drifting.
-
-### Expected size
-MEDIUM — mostly guards and one data migration, but security-critical and broad in endpoints touched.
+Removing `ensure_driver_profile` or the remaining Access→Workforce mutations (P2c); People UI redesign; Compensation work; and specific future Driver self-service commands.
 
 ---
 
@@ -415,31 +388,26 @@ MEDIUM — mostly guards and one data migration, but security-critical and broad
 Transfers never make the destination current early; every "current" consumer resolves by date; projections follow the effective date via D1.
 
 ### Why now
-Needs the resolver (1), link-only identity (3) and ODA helper (4). Rate copy (6) and termination (7) extend the transfer/pending model built here.
+Needs the resolver (1), link-only identity (3) and the Self authorization semantics established before this transfer work. Rate copy (6) and termination (7) extend the transfer/pending model built here.
 
 ### In scope
-- Migration `0076`:
-  - `core.WorkforceProjectionSync(CompanyID PK, SyncedThroughDate DATE NOT NULL)`;
-  - `sec.fn_OdaEffectiveBranch(p_UserID, p_CompanyID)`;
-  - `CREATE OR REPLACE sec.fn_UserHasPermission` with the ODA branch predicate from D1 part 2 in both role paths (owner and override paths unchanged);
-  - drop/recreate `app.vw_UserBranchAccess` with the derived ODA branch (D1 part 2).
-- Python readers of the ODA row branch switched to the derived branch: `auth/service.py` authority branch list (`~356-365`), `payroll/immutable_evidence.py:53`. Display-only admin reads (`admin/service.py:238, 301, 997, 1070, 1683, 1733`) are unchanged.
+- Migration `0076` may add `core.WorkforceProjectionSync(CompanyID PK, SyncedThroughDate DATE NOT NULL)` for the Workforce `Employee.BranchID` projection. No ODA branch resolver or Access Self-to-branch projection is part of this transfer phase.
 - Branch-scoped workforce reads (`/core/people`, `/core/drivers`, `/workforce/employees`) scope Driver Employees by the resolver-derived current (else pending) profile branch, not by stored `Employee.BranchID`.
-- `backend/app/workforce/projections.py`: `sync_workforce_projections(company_id, as_of)` (set-based: Driver Employees' `BranchID` ← current profile branch; DRIVER users' ODA row `BranchID` ← current profile branch; no-op where no current profile), advisory-locked per company. Correctness of authorization does not depend on it (D1 part 3).
+- Workforce projection reconciliation maintains Driver Employees' `Employee.BranchID` from the effective profile as required by the contract. It never updates an Access Self assignment or creates Access branch membership.
 - Request-gated daily reconciliation dependency attached to every authenticated router through `include_router(..., dependencies=[...])` in `backend/app/main.py` (and to the auth `me`/login paths), so no Payroll Setup file changes; operator script `backend/scripts/sync_workforce_projections.py`.
 - Transfer completion rework (`transfer/service.py`):
   - `SELECT … FOR UPDATE` on the request and the source profile;
   - source must be the Employee's current profile and `EffectiveDate > source.EffectiveFrom`; reject if the Employee already has a pending profile;
   - create destination (`EffectiveFrom = EffectiveDate`, lineage), close source (single UPDATE), complete request;
-  - **do not** touch `Employee.BranchID` or ODA rows unless `EffectiveDate ≤ company_today`, in which case call the sync in-transaction.
+  - **do not** change Access Self scope or create Access branch membership. The Employee's Workforce `BranchID` projection follows its existing effective-date authority.
 - New transfer requests rejected while a completed transfer's destination is pending; source-branch resolution (`_get_driver_source_branch`, `_assert_driver_belongs_to_branch`) uses the resolver.
 - All remaining status-based current lookups switched to the resolver: `core/service.py` people/driver reads, admin driver lookups, dashboard counts that mean "current drivers".
 
 ### Out of scope
-Rate copy; termination; changes to payroll eligibility queries (already window-based); any change to `fn_UserHasPermission` beyond the ODA branch predicate.
+Rate copy; termination; changes to payroll eligibility queries (already window-based); Self authorization implementation (owned by P2b).
 
 ### Database
-Migration `0076` (projection-sync table, `sec.fn_OdaEffectiveBranch`, `sec.fn_UserHasPermission` ODA predicate, `app.vw_UserBranchAccess` recreation).
+Migration `0076` (if required for the Workforce projection-sync table only; no Access ODA function or Self branch projection).
 
 ### Backend
 `migrations/sql/0076_*.sql`, `backend/app/transfer/service.py`, `backend/app/workforce/{projections,effective}.py`, `backend/app/dependencies.py` (reconciliation dependency), `backend/app/main.py` (router wiring), `backend/app/auth/service.py`, `backend/app/payroll/immutable_evidence.py`, `backend/app/core/service.py`, `backend/app/admin/service.py`, `backend/app/dashboard/service.py`, `backend/scripts/sync_workforce_projections.py`.
@@ -451,23 +419,22 @@ Migration `0076` (projection-sync table, `sec.fn_OdaEffectiveBranch`, `sec.fn_Us
 Immediate `Employee.BranchID` move at completion; status-based "current"; completion without row locks.
 
 ### Tests required
-New `backend/tests/test_transfer_effective_dating.py` (sync called with explicit `as_of`): scenario 9 (future transfer: `Employee.BranchID`, ODA branch, resolver, `/core/people` unchanged before date, changed on date); scenario 7 (A→B no copy); scenario 10 (source rates/lines/snapshots unchanged); scenario 17 (admin user linked to transferred Employee keeps its scope); scenario 6 transfer half (DRIVER self-service follows destination on date); concurrency (two completions → one succeeds); pending-destination blocks new transfer; retroactive completion (`EffectiveDate ≤ today`) syncs immediately; reconciliation idempotence. Stale-projection authorization tests: with the stored ODA `BranchID` deliberately left at the old branch (sync not run), `fn_UserHasPermission(user, company, old_branch, code)` is false and the derived current branch is used; `vw_UserBranchAccess` and the `me` authority list report the derived branch; with no current profile the ODA row grants no branch and no branch permission; `SpecificBranch` and `AllCompanyBranches` results are unchanged for non-ODA users (regression). Existing `test_driver_transfer_workflow.py` effective-date tests must pass unchanged.
+New `backend/tests/test_transfer_effective_dating.py` (Workforce sync uses explicit `as_of`): scenario 9 verifies `Employee.BranchID`, the effective-profile resolver, and `/core/people` remain on the source before the effective date and follow the destination on that date; scenario 7 verifies A→B no copy; scenario 10 verifies source rates/lines/snapshots stay unchanged; scenario 17 verifies an admin user's explicit branch scope does not follow an Employee transfer; transfer Self identity follows the linked Employee's effective Driver profile on the relevant date without changing Access assignment or producing a branch row. Also cover concurrency (two completions → one succeeds), pending-destination blocking, retroactive completion, and Workforce projection reconciliation idempotence. Existing transfer workflow effective-date tests must pass unchanged.
 
 ### Validation commands
 `pytest tests/test_transfer_effective_dating.py tests/test_driver_transfer_workflow.py tests/test_cp2e_eligibility_snapshot.py tests/test_day_grid.py tests/test_security_matrix.py tests/test_dashboard.py -q`; ruff; alembic upgrade; `npm run build`.
 
 ### Acceptance gate
 - No runtime query decides "current" by status alone (grep for `NOT IN ('Transferred'` outside payroll eligibility returns nothing).
-- No security-relevant code reads the stored ODA `BranchID` (only the display-only admin reads listed above remain).
-- A stale projection is proven unable to authorize the old branch.
+- Self authorization remains independent of Access branch membership; branch-access views do not fabricate membership for Self. Effective Driver identity follows the linked Employee and operation date.
 - Future-dated transfer leaves all current views on the source until the effective date.
 - Payroll eligibility and day-grid tests unchanged and green.
 
 ### Risks
-Per-call cost of `sec.fn_OdaEffectiveBranch` inside `fn_UserHasPermission` (evaluated only for ODA rows; verify with the security matrix and a permission-heavy endpoint); view recreation must keep column names/types for existing readers; request-gated sync adds a write in its own transaction and must be lock-safe; dashboard or report counts that silently changed meaning; company-timezone edge at midnight.
+The Workforce projection reconciliation adds a write in its own transaction and must be lock-safe; dashboard/report counts may change meaning; company-timezone edges remain. Self authorization does not depend on Workforce branch-projection synchronization.
 
 ### Expected size
-LARGE — central runtime semantics change, the ODA authorization predicate change, and a new cross-cutting reconciliation dependency.
+LARGE — effective-date and Workforce projection semantics across current-profile consumers, with no Access Self projection.
 
 ---
 
@@ -515,7 +482,7 @@ New `backend/tests/test_transfer_rate_copy.py`: scenario 7 (no copy → zero des
 - Copy is all-or-nothing within completion.
 
 ### Risks
-The engine performs its own permission checks and ODA rejection; the completion flow must surface its 403/422 unchanged so the user can retry with `copy_rates=false`. Preview and engine validation must stay in sync (the preview is advisory; the engine is authoritative).
+The engine performs its own permission checks and rejects Driver self-service users from rate-copy administration; the completion flow must surface its 403/422 unchanged so the user can retry with `copy_rates=false`. Preview and engine validation must stay in sync (the preview is advisory; the engine is authoritative).
 
 ### Expected size
 MEDIUM — reuses the existing engine unchanged; main work is the completion integration, preview and UI choice.
@@ -539,7 +506,7 @@ Needs pending-profile and transfer semantics (Phase 5) to close pending profiles
   - projections synced if D ≤ today;
   - audit row.
 - Guards: reject if D is before the profile's `EffectiveFrom`; reject if any locked/finalized payroll evidence for the Employee's profiles is dated after D (termination may not cut off paid days); reject for non-Driver Employees in this endpoint only if they have no profile (plain Employee termination uses the same endpoint without profile steps).
-- Access untouched; DRIVER users of the Employee fail closed via the Phase 4 helper.
+- Access records and Self scope are untouched; after termination a current-profile Driver action fails closed when the linked Employee has no effective profile.
 
 ### Out of scope
 Rehire; Driver → non-Driver transition; changes to eligibility snapshots.
@@ -761,8 +728,8 @@ One PR per phase. No phases are combined: each is either security-critical or la
 | PR-1 | Phase 1 | Constraint correctness vs. existing history; trigger escape hatch scope; resolver semantics | Phase 1 list + transfer workflow | **Yes** |
 | PR-2 | Phase 2 | Workforce/Access separation; audit; permission gates; HireDate guard | Phase 2 list | Recommended |
 | PR-3 | Phase 3 | No residual workforce side effects; DRIVER preconditions; staged/provision atomicity; trigger coverage of legacy path | Phase 3 list + security matrix | **Yes** |
-| PR-4 | Phase 4 | Self-only identity; roster blocking completeness; mutation guards on every rate/pay-rule write | Security matrix + rates | **Yes** |
-| PR-5 | Phase 5 | "Current" semantics everywhere; ODA-derived authorization (stale projection cannot authorize); reconciliation safety (locks, transactions, timezone); completion concurrency | Phase 5 list + eligibility/day-grid + security matrix | **Yes** |
+| PR-4 | Phase 4 / P2b | Generic Self identity; resource-scope ceiling; route inventory completeness; override and Company Owner scope safety | Security matrix + focused authorization routes | **Yes** |
+| PR-5 | Phase 5 | "Current" semantics and Workforce `Employee.BranchID` projection; transfer does not rewrite Access Self scope; reconciliation safety (locks, transactions, timezone); completion concurrency | Phase 5 list + eligibility/day-grid + transfer identity tests | **Yes** |
 | PR-6 | Phase 6 | Copy-not-move; atomicity; `copy_driver_rates` used unchanged | Phase 6 list + `test_pay_rates.py` | Recommended |
 | PR-7 | Phase 7 | Atomic close; history untouched; finalized guard; pending/transfer handling | Phase 7 list + eligibility | **Yes** |
 | PR-8 | Phase 8 | No partial persistence; permission-based visibility; contract §10 compliance | Frontend tests + browser smoke | Recommended |
@@ -778,16 +745,17 @@ Stop implementation and revisit the plan (or, if a locked rule is at stake, prop
 
 - **H1.** The non-overlap exclusion or historical-profile trigger rejects rows that existing payroll, snapshot, or transfer code legitimately writes (for example a transfer path that needs to rewrite a closed window), i.e. an invariant conflicts with real history-writing behaviour.
 - **H2.** Resolver-based "current" disagrees with payroll eligibility (`payroll/eligibility.py`) for transferred or terminated profiles on any date, meaning the chosen mechanism cannot preserve source eligibility.
-- **H3.** Deriving the ODA branch inside `sec.fn_UserHasPermission` / `app.vw_UserBranchAccess` (D1 part 2) proves unworkable — e.g. unacceptable permission-check cost on hot paths, or a dependent object that cannot tolerate the recreated view — so that authorization would again depend on the stored projection being fresh. (Projection staleness itself is not a stop condition; it is display-only by design.)
-- **H4.** `fn_UserHasPermission` or login branch resolution cannot remain correct with a projected ODA branch (for example multiple active ODA rows are required), meaning DRIVER self-service cannot be made self-only without changing the authorization architecture.
-- **H5.** Removing all DRIVER permissions breaks a required existing self-service behaviour (login, own transfer request) that cannot be preserved without introducing new permission codes — a product decision is then needed.
-- **H6.** Removed. The rate-copy engine's behaviour for a pending destination was resolved from the repository (D6): it is supported without engine changes.
-- **H7.** Terminating on date D cannot keep pre-termination eligibility intact or cannot prevent post-D work entry without modifying eligibility snapshot semantics for open periods.
-- **H8.** The composite `Users(EmployeeID, CompanyID)` FK or the staged-account rule conflicts with system/sysadmin accounts in a way that requires changing a contract rule.
+- **H3.** Self cannot be represented or enforced without creating fake branch membership, or the canonical User–Employee/effective-profile subject relationship cannot be applied consistently.
+- **H4.** Permission overrides cannot preserve the established resource set, a registered-route inventory cannot be made mechanically complete, or a current Driver behavior demonstrably requires authority beyond the locked self-service ceiling. Return for Lead review; do not widen scope silently.
+- **H5.** A malformed COMPANY_OWNER assignment cannot be prevented from turning the dynamic permission shortcut into unrestricted company authority.
+- **H6.** The DRIVER self-service capability policy or required current behavior is contradictory and cannot be represented within Self without a new product decision.
+- **H7.** Removed. The rate-copy engine's behaviour for a pending destination was resolved from the repository (D6): it is supported without engine changes.
+- **H8.** Terminating on date D cannot keep pre-termination eligibility intact or cannot prevent post-D work entry without modifying eligibility snapshot semantics for open periods.
+- **H9.** The composite `Users(EmployeeID, CompanyID)` FK or the staged-account rule conflicts with system/sysadmin accounts in a way that requires changing a contract rule.
 
 ---
 
-# Execution Order
+# Original Execution Order (historical; current sequencing is in the Unified Plan)
 
 1. Phase 1 — Workforce integrity foundation & effective-date resolver
 2. Phase 2 — Employee & Driver workforce write authority
@@ -799,9 +767,9 @@ Stop implementation and revisit the plan (or, if a locked rule is at stake, prop
 8. Phase 8 — Employee-centered People & Access frontend
 9. Phase 9 — Legacy cleanup, clean reset/reseed, closure validation
 
-# Start Condition
+# Original Phase 1 Start Condition (historical)
 
-Phase 1 may start when all of the following are true:
+These were the preconditions recorded for the original plan before Phase 1 began:
 
 - the locked contract (`a38c9306c51f00957719c22a1508e7e84a32503c`) and this master plan are merged into `main`;
 - `main` equals `origin/main` and the worktree is clean;

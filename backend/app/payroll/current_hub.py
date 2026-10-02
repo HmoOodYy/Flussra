@@ -18,7 +18,6 @@ from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
     _period_has_driver_eligibility_snapshot,
 )
-from app.payroll.guards import _get_oda_own_driver_id
 from app.payroll.period_creation import _check_slot_matrix
 from app.payroll.schemas import (
     BranchWorkflowCapabilities,
@@ -647,14 +646,8 @@ async def get_current_workflow(
     branch_id: int | None,
     db: AsyncConnection,
 ) -> CurrentWorkflowResponse:
-    # Security: block driver and ODA roles
+    # Security: deny generic workflow access to any DRIVER subject.
     await _require_not_driver_role(company_id, user_id, db)
-    own_driver_id = await _get_oda_own_driver_id(company_id, user_id, db)
-    if own_driver_id is not None:
-        raise HTTPException(
-            status_code=403,
-            detail="Current workflow is not accessible to driver-role users.",
-        )
 
     can_see_all, allowed_branch_ids = await _check_branch_access(company_id, user_id, db)
 

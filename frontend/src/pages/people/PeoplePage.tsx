@@ -82,7 +82,7 @@ function scopeLabel(scope: string | null, branchName: string | null): string {
   if (!scope) return '—';
   if (scope === 'AllCompanyBranches') return 'All branches';
   if (scope === 'SpecificBranch') return branchName ? branchName : 'Specific branch';
-  if (scope === 'OwnDriverDataOnly') return 'Own data only';
+  if (scope === 'Self') return 'Self';
   return scope;
 }
 
@@ -145,7 +145,7 @@ interface WizState {
   roleId: number | null;
   employeeId: number | null;
   employeeOptions: PersonSummary[];
-  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branchId: number | null;
   extraCodes: Set<string>;
 }
@@ -162,7 +162,7 @@ interface ResetState {
 interface ChangeRoleState {
   open: boolean; loading: boolean; error: string | null;
   roleId: number | null;
-  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branchId: number | null;
 }
 
@@ -431,10 +431,10 @@ export function PeoplePage() {
     if (!wiz.createdUser) return;
     const selectedRole = st.roles.find(role => role.company_role_id === wiz.roleId);
     if (selectedRole?.role_code === 'DRIVER' && !wiz.employeeId) { dispatch({ type: 'WIZ_ERROR', err: 'Select an existing current Driver Employee.' }); return; }
-    if (wiz.scope !== 'AllCompanyBranches' && !wiz.branchId) { dispatch({ type: 'WIZ_ERROR', err: 'Please select a branch.' }); return; }
+    if (wiz.scope === 'SpecificBranch' && !wiz.branchId) { dispatch({ type: 'WIZ_ERROR', err: 'Please select a branch.' }); return; }
     dispatch({ type: 'WIZ_LOADING', val: true });
     try {
-      const body: CompanyRoleAssignmentCreate = { company_role_id: wiz.roleId, scope_type: wiz.scope, branch_id: wiz.scope === 'AllCompanyBranches' ? null : wiz.branchId };
+      const body: CompanyRoleAssignmentCreate = { company_role_id: wiz.roleId, scope_type: wiz.scope, branch_id: wiz.scope === 'SpecificBranch' ? wiz.branchId : null };
       if (selectedRole?.role_code === 'DRIVER') {
         await apiClient.put(`/admin/users/${wiz.createdUser.user_id}/employee-link`, { employee_id: wiz.employeeId });
       }
@@ -526,10 +526,10 @@ export function PeoplePage() {
   const submitChangeRole = useCallback(async (e: FormEvent) => {
     e.preventDefault();
     if (!selected || !st.changeRole.roleId) { dispatch({ type: 'CR_ERROR', err: 'Please select a role.' }); return; }
-    if (st.changeRole.scope !== 'AllCompanyBranches' && !st.changeRole.branchId) { dispatch({ type: 'CR_ERROR', err: 'Please select a branch.' }); return; }
+    if (st.changeRole.scope === 'SpecificBranch' && !st.changeRole.branchId) { dispatch({ type: 'CR_ERROR', err: 'Please select a branch.' }); return; }
     dispatch({ type: 'CR_LOADING', val: true });
     try {
-      const body: CompanyRoleAssignmentCreate = { company_role_id: st.changeRole.roleId, scope_type: st.changeRole.scope, branch_id: st.changeRole.scope === 'AllCompanyBranches' ? null : st.changeRole.branchId };
+      const body: CompanyRoleAssignmentCreate = { company_role_id: st.changeRole.roleId, scope_type: st.changeRole.scope, branch_id: st.changeRole.scope === 'SpecificBranch' ? st.changeRole.branchId : null };
       await apiClient.post(`/admin/users/${selected.user_id}/company-role-assignments`, body);
       await refreshUser(selected.user_id);
       dispatch({ type: 'CR_CLOSE' });
@@ -1081,15 +1081,15 @@ function WizardModal({ wiz, roles, branches, allPerms, dispatch, onStep1, onSele
                   <select className={styles.inp} value={wiz.employeeId ?? ''} onChange={e => {
                     const employee = wiz.employeeOptions.find(item => item.employee_id === Number(e.target.value));
                     dispatch({ type: 'WIZ_FIELD', field: 'employeeId', val: employee?.employee_id ?? null });
-                    dispatch({ type: 'WIZ_FIELD', field: 'scope', val: 'OwnDriverDataOnly' });
-                    dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: employee?.branch_id ?? null });
+                    dispatch({ type: 'WIZ_FIELD', field: 'scope', val: 'Self' });
+                    dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: null });
                   }}>
                     <option value="">Select an Employee</option>
                     {wiz.employeeOptions.map(employee => <option key={employee.employee_id} value={employee.employee_id}>{employee.full_name} · {employee.branch_name}</option>)}
                   </select>
                 </Field>
-                <p className={styles.helpTxt}>Driver access links an existing Employee and uses that Employee's current Driver branch.</p>
-              </> : <ScopeFields roles={roles} branches={branches} roleId={wiz.roleId} scope={wiz.scope} branchId={wiz.branchId} showRole={false} allowOwnDriverDataScope={false}
+                <p className={styles.helpTxt}>DRIVER Self access links an existing Employee to the Employee's current effective Driver profile.</p>
+              </> : <ScopeFields roles={roles} branches={branches} roleId={wiz.roleId} scope={wiz.scope} branchId={wiz.branchId} showRole={false}
                 onRole={() => {}}
                 onScope={s => { dispatch({ type: 'WIZ_FIELD', field: 'scope', val: s }); if (s === 'AllCompanyBranches') dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: null }); }}
                 onBranch={b => dispatch({ type: 'WIZ_FIELD', field: 'branchId', val: b })}
@@ -1204,26 +1204,25 @@ function PermissionPicker({ allPerms, rolePerms, extraPerms, onToggle }: Permiss
 interface ScopeFieldsProps {
   roles: CompanyRole[]; branches: Branch[];
   roleId: number | null;
-  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branchId: number | null;
   showRole?: boolean;
-  allowOwnDriverDataScope?: boolean;
   onRole(id: number | null): void;
-  onScope(s: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly'): void;
+  onScope(s: 'AllCompanyBranches' | 'SpecificBranch' | 'Self'): void;
   onBranch(b: number | null): void;
 }
 
-function ScopeFields({ roles, branches, roleId, scope, branchId, showRole = true, allowOwnDriverDataScope = true, onRole, onScope, onBranch }: ScopeFieldsProps) {
+function ScopeFields({ roles, branches, roleId, scope, branchId, showRole = true, onRole, onScope, onBranch }: ScopeFieldsProps) {
   const isDriverRole = roles.find(r => r.company_role_id === roleId)?.role_code === 'DRIVER';
 
-  // If current scope is AllCompanyBranches but driver role selected, reset to OwnDriverDataOnly.
+  // DRIVER assignments use Self without a branch; other roles use company or branch scope.
   useEffect(() => {
-    if (isDriverRole && scope === 'AllCompanyBranches') {
-      onScope('OwnDriverDataOnly');
-    } else if (!allowOwnDriverDataScope && !isDriverRole && scope === 'OwnDriverDataOnly') {
+    if (isDriverRole && scope !== 'Self') {
+      onScope('Self');
+    } else if (!isDriverRole && scope === 'Self') {
       onScope('AllCompanyBranches');
     }
-  }, [allowOwnDriverDataScope, isDriverRole, scope, onScope]);
+  }, [isDriverRole, scope, onScope]);
 
   return (
     <>
@@ -1240,27 +1239,22 @@ function ScopeFields({ roles, branches, roleId, scope, branchId, showRole = true
           {!isDriverRole && (
             <option value="AllCompanyBranches">All company branches — full company access</option>
           )}
-          <option value="SpecificBranch">Specific branch — limited to one branch</option>
-          {(allowOwnDriverDataScope || isDriverRole) && (
-            <option value="OwnDriverDataOnly">Own driver data only — driver's own records</option>
-          )}
+          {!isDriverRole && <option value="SpecificBranch">Specific branch — limited to one branch</option>}
+          {isDriverRole && <option value="Self">Self — own current Driver identity</option>}
         </select>
       </Field>
       {isDriverRole && (
         <p className={styles.helpTxt}>
-          🚛 Drivers need a home branch for payroll and pay rates. AllCompanyBranches scope is not available for driver roles.
+          🚛 Self carries no branch access. Generic payroll, rate, and administration actions remain unavailable to DRIVER accounts.
         </p>
       )}
-      {(scope === 'SpecificBranch' || scope === 'OwnDriverDataOnly') && (
-        <Field label={scope === 'OwnDriverDataOnly' ? 'Home Branch (required) *' : 'Branch *'}>
+      {scope === 'SpecificBranch' && (
+        <Field label="Branch *">
           <select className={styles.inp} value={branchId ?? ''} onChange={e => onBranch(e.target.value ? parseInt(e.target.value) : null)} required>
             <option value="">— Select a branch —</option>
             {branches.map(b => <option key={b.branch_id} value={b.branch_id}>{b.branch_name}</option>)}
           </select>
         </Field>
-      )}
-      {scope === 'OwnDriverDataOnly' && !isDriverRole && (
-        <p className={styles.helpTxt}>This scope restricts the person to seeing only their own driver records. A home branch is required for system routing.</p>
       )}
     </>
   );

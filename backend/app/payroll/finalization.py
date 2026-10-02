@@ -65,8 +65,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_permission
-from app.payroll.guards import _get_oda_own_driver_id
+from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodSummary
@@ -313,8 +312,7 @@ async def _project_approved_snapshot_final_lines(
 
 async def finalize_period(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> PeriodSummary:
     """Project the exact approved immutable packet into FinalLines and lock the period."""
-    if await _get_oda_own_driver_id(company_id, user_id, db) is not None:
-        raise HTTPException(status_code=403, detail="Current Payroll is not accessible to driver-role users.")
+    await _require_not_driver_role(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
@@ -369,8 +367,7 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
         FinalizationPreviewResponse,
         FinalizationPreviewSysAdjustment,
     )
-    if await _get_oda_own_driver_id(company_id, user_id, db) is not None:
-        raise HTTPException(status_code=403, detail="Current Payroll is not accessible to driver-role users.")
+    await _require_not_driver_role(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Finalization preview requires an Approved period. Current status: '{period.status}'.")

@@ -55,6 +55,7 @@ function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [makeBranch()],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,
@@ -597,9 +598,9 @@ test('U. Driver role_code with company branches.create + payroll_setup.assign ->
   assert.equal(caps.canOnboard, false);
 });
 
-test('U. OwnDriverDataOnly with company branches.create + payroll_setup.assign -> canCreate false, canOnboard false', () => {
+test('U. DRIVER/Self with company branches.create + payroll_setup.assign -> canCreate false, canOnboard false', () => {
   const user = makeUser({
-    branches: [makeBranch({ branch_id: 10, scope: 'OwnDriverDataOnly', role_code: 'DRIVER', role_name: 'Driver' })],
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
     authority: makeAuthority({ company_permissions: ['branches.create', 'payroll_setup.assign'] }),
   });
   const caps = companyBranchesCapabilities(user);

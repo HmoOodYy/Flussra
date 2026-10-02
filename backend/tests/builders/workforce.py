@@ -3,7 +3,7 @@
 import httpx
 
 
-async def create_driver_employee(
+async def create_driver_employee_record(
     client: httpx.AsyncClient,
     token: str,
     *,
@@ -14,7 +14,7 @@ async def create_driver_employee(
     preferred_name: str | None = None,
     cdl_number: str | None = None,
     email: str | None = None,
-) -> int:
+) -> dict:
     """Create an employee and its first Driver profile through Workforce."""
     payload = {
         "branch_id": branch_id,
@@ -37,4 +37,25 @@ async def create_driver_employee(
         headers={"Authorization": f"Bearer {token}"},
     )
     response.raise_for_status()
-    return response.json()["current_or_pending_driver"]["driver_id"]
+    return response.json()
+
+
+async def create_driver_employee(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    branch_id: int,
+    full_name: str,
+    driver_code: str,
+    hire_date: str | None = None,
+    preferred_name: str | None = None,
+    cdl_number: str | None = None,
+    email: str | None = None,
+) -> int:
+    """Create an employee and return its initial Driver ID through Workforce."""
+    result = await create_driver_employee_record(
+        client, token, branch_id=branch_id, full_name=full_name,
+        driver_code=driver_code, hire_date=hire_date,
+        preferred_name=preferred_name, cdl_number=cdl_number, email=email,
+    )
+    return result["current_or_pending_driver"]["driver_id"]

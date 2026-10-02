@@ -460,7 +460,7 @@ class TestAddLine:
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
-        assert "branch" in resp.json()["detail"].lower()
+        assert "not eligible for this work date" in resp.json()["detail"].lower()
 
     async def test_404_for_unknown_period(
         self,

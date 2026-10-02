@@ -20,8 +20,10 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
+from app.auth.security import create_access_token
 from tests.access_test_helpers import create_neutral_test_user, create_provisioned_test_user
-from tests.builders.workforce import create_driver_employee
+from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.builders.workforce import create_driver_employee, create_driver_employee_record
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -524,15 +526,16 @@ class TestRateMatrixAuthorization:
 # ---------------------------------------------------------------------------
 
 class TestDriverRoleHomeBranch:
-    """Driver role assignment must include a home branch."""
+    """A DRIVER role assignment must use the current Self access scope."""
 
     @pytest.mark.asyncio
-    async def test_driver_role_requires_home_branch_not_allcompany(
+    async def test_driver_role_rejects_allcompany_scope(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
+        hq_branch_id: int,
     ):
-        """Assigning DRIVER role with AllCompanyBranches scope → 422."""
+        """Assigning DRIVER role with AllCompanyBranches scope → 422 Self-scope validation."""
         # Get the DRIVER company role id
         roles_resp = await session_client.get(
             "/admin/company-roles",
@@ -546,13 +549,25 @@ class TestDriverRoleHomeBranch:
         if driver_role is None:
             pytest.skip("DRIVER company role not found in seed data")
 
-        # Get the admin user id
-        me_resp = await session_client.get("/auth/me", headers=auth(auth_token))
-        user_id = me_resp.json()["user_id"]
+        user = await create_neutral_test_user(
+            session_client, auth_token, "driver_allcompany_rejected_user",
+            password="TestPass123!",
+        )
+        employee = await create_driver_employee_record(
+            session_client, auth_token, branch_id=hq_branch_id,
+            full_name="Rejected AllCompany Driver",
+            driver_code=f"DRV-{uuid4().hex[:10]}",
+        )
+        link = await session_client.put(
+            f"/admin/users/{user['user_id']}/employee-link",
+            json={"employee_id": employee["employee_id"]},
+            headers=auth(auth_token),
+        )
+        assert link.status_code == 200, link.text
 
         # Attempt to assign DRIVER with AllCompanyBranches — must be rejected
         resp = await session_client.post(
-            f"/admin/users/{user_id}/company-role-assignments",
+            f"/admin/users/{user['user_id']}/company-role-assignments",
             json={
                 "company_role_id": driver_role["company_role_id"],
                 "scope_type": "AllCompanyBranches",
@@ -561,22 +576,34 @@ class TestDriverRoleHomeBranch:
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
-        assert "home branch" in resp.json()["detail"].lower()
+        assert resp.json()["detail"] == "DRIVER access requires Self scope."
 
     @pytest.mark.asyncio
-    async def test_driver_role_with_specific_branch_creates_profile(
+    async def test_driver_role_with_self_scope_uses_linked_workforce_profile(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         hq_branch_id: int,
     ):
-        """Assigning DRIVER role with SpecificBranch → 200/201 + driver profile created."""
-        # Create a fresh user to assign driver role to
-        create_resp = await create_neutral_test_user(
+        """Assigning DRIVER/Self uses the linked Employee's existing Driver profile."""
+        # Create a fresh Employee/Driver through Workforce and link it before
+        # exercising DRIVER assignment validation.
+        user = await create_neutral_test_user(
             session_client, auth_token, "test_driver_profile_user",
             password="TestPass123!", display_name="Test Driver Profile",
         )
-        new_user_id = create_resp["user_id"]
+        employee = await create_driver_employee_record(
+            session_client, auth_token, branch_id=hq_branch_id,
+            full_name="Test Driver Profile",
+            driver_code=f"DRV-{uuid4().hex[:10]}",
+        )
+        link = await session_client.put(
+            f"/admin/users/{user['user_id']}/employee-link",
+            json={"employee_id": employee["employee_id"]},
+            headers=auth(auth_token),
+        )
+        assert link.status_code == 200, link.text
+        new_user_id = user["user_id"]
 
         # Get DRIVER role
         roles_resp = await session_client.get("/admin/company-roles", headers=auth(auth_token))
@@ -586,13 +613,13 @@ class TestDriverRoleHomeBranch:
         if driver_role is None:
             pytest.skip("DRIVER company role not found")
 
-        # Assign DRIVER with SpecificBranch
+        # Assign DRIVER with current Self scope. The branch belongs to the
+        # Workforce profile and is not duplicated onto the Access assignment.
         assign_resp = await session_client.post(
             f"/admin/users/{new_user_id}/company-role-assignments",
             json={
                 "company_role_id": driver_role["company_role_id"],
-                "scope_type": "SpecificBranch",
-                "branch_id": hq_branch_id,
+                "scope_type": "Self",
             },
             headers=auth(auth_token),
         )
@@ -644,12 +671,15 @@ async def _create_user_with_role(
     role_id: int,
     scope_type: str = "AllCompanyBranches",
     branch_id=None,
+    driver_branch_id=None,
     password: str = "TestPass123!",
 ) -> str:
     """Create user, assign company role, return login token."""
+    if scope_type == "Self":
+        role_id = await get_company_role_id(client, admin_token, "DRIVER")
     await create_provisioned_test_user(
         client, admin_token, username, role_id, scope_type=scope_type,
-        branch_id=branch_id, password=password,
+        branch_id=branch_id, driver_branch_id=driver_branch_id, password=password,
     )
 
     login = await client.post("/auth/login", json={
@@ -1699,7 +1729,7 @@ class TestBackdatingGuard:
 class TestLookupSecurity:
     """
     GET /payroll/rates/lookup must require payrates.view / payrates.edit.
-    OwnDriverDataOnly callers may only look up their own driver.
+    DRIVER/Self callers are denied generic rate lookups.
     Cross-company lookup must be impossible.
     """
 
@@ -1785,57 +1815,34 @@ class TestLookupSecurity:
 
 
 # ---------------------------------------------------------------------------
-# TestOwnDriverDataOnlyRates  (P1 — OwnDriverDataOnly scope enforcement)
+# DRIVER/Self generic rate denial
 # ---------------------------------------------------------------------------
 
-class TestOwnDriverDataOnlyRates:
+class TestDriverSelfRates:
     """
-    OwnDriverDataOnly users may only access/modify their own driver's rates.
-    They must not be able to reach another driver's rates even if branch
-    access would otherwise allow it.
+    DRIVER/Self users are denied generic rate access, including access to
+    their own Driver's rates.
     """
 
     @staticmethod
-    async def _setup_oda_user(
+    async def _setup_driver_self_user(
         client: httpx.AsyncClient,
         admin_token: str,
         username: str,
         hq_branch_id: int,
     ) -> tuple[str, int]:
-        """
-        Create a user with OwnDriverDataOnly scope + payrates.edit permission.
-        Returns (token, user_id).  The user has NO linked driver (no employeeid link),
-        so _check_own_driver_only will treat every driver as "not their own".
-        """
-        role_id = await _create_role_with_perms(
-            client, admin_token, f"ODARole_{username}",
-            ["payrates.edit", "payrates.view"],
+        """Create a test-owned linked DRIVER/Self account through shared builders."""
+        token = await create_user_with_role_token(
+            client, admin_token, username,
+            await get_company_role_id(client, admin_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=hq_branch_id,
         )
-        user = await create_neutral_test_user(
-            client, admin_token, username, password="TestPass123!",
-        )
-        user_id: int = user["user_id"]
-
-        # Assign the payrates role with OwnDriverDataOnly scope
-        assign_resp = await client.post(
-            f"/admin/users/{user_id}/company-role-assignments",
-            json={
-                "company_role_id": role_id,
-                "scope_type":      "OwnDriverDataOnly",
-                "branch_id":       hq_branch_id,
-            },
-            headers=auth(admin_token),
-        )
-        assert assign_resp.status_code in (200, 201), f"Assign role failed: {assign_resp.text}"
-
-        login = await client.post("/auth/login", json={
-            "username": username, "password": "TestPass123!", "company_code": "DEMO",
-        })
-        assert login.status_code == 200
-        return login.json()["access_token"], user_id
+        me = await client.get("/auth/me", headers=auth(token))
+        assert me.status_code == 200, me.text
+        return token, int(me.json()["user_id"])
 
     @pytest.mark.asyncio
-    async def test_oda_cannot_batch_save_another_driver(
+    async def test_driver_self_cannot_batch_save_another_driver(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1843,22 +1850,14 @@ class TestOwnDriverDataOnlyRates:
         paytest_branch_id: int,
     ):
         """
-        OwnDriverDataOnly user (no linked driver) on PAYTEST branch → 403 on batch
-        for paytest_driver_id (same branch).  Branch check passes; OwnDriverDataOnly
-        check fires because user has no linked driver.
+        A valid, linked DRIVER/Self user cannot use the generic batch endpoint.
         """
         grp = await _get_matrix_group(session_client, auth_token, paytest_driver_id, "HOURLY")
         if grp is None:
             pytest.skip("HOURLY not in matrix for paytest_driver_id")
 
-        # Create ODA user on PAYTEST branch (no linked driver)
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ODABatchTestRole",
-            ["payrates.edit", "payrates.view"],
-        )
-        token = await _create_user_with_role(
-            session_client, auth_token, "oda_batch_test_user2", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        token, _ = await self._setup_driver_self_user(
+            session_client, auth_token, "driver_self_batch_user2", paytest_branch_id,
         )
 
         resp = await session_client.post(
@@ -1874,30 +1873,24 @@ class TestOwnDriverDataOnlyRates:
             headers=auth(token),
         )
         assert resp.status_code == 403
-        assert "OwnDriverDataOnly" in resp.json()["detail"] or "own" in resp.json()["detail"].lower()
+        assert "DRIVER Self" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_oda_cannot_create_rate_for_another_driver(
+    async def test_driver_self_cannot_create_rate_for_another_driver(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """OwnDriverDataOnly user on PAYTEST branch (no linked driver) → 403 on POST /payroll/rates."""
+        """A linked DRIVER/Self user cannot create generic DriverRates."""
         rt_resp = await session_client.get("/payroll/rate-types", headers=auth(auth_token))
         hourly = next((r for r in rt_resp.json() if r["rate_code"] == "HOURLY"), None)
         if hourly is None:
             pytest.skip("HOURLY rate type not found")
 
-        # ODA user on PAYTEST branch, no linked driver
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ODACreateRateRole",
-            ["payrates.edit", "payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "oda_create_rate_user2", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        driver_self_token, _ = await self._setup_driver_self_user(
+            session_client, auth_token, "driver_self_create_rate_user2", paytest_branch_id,
         )
 
         resp = await session_client.post(
@@ -1908,13 +1901,13 @@ class TestOwnDriverDataOnlyRates:
                 "amount": "20.00",
                 "effective_from": "2086-01-01",
             },
-            headers=auth(oda_token),
+            headers=auth(driver_self_token),
         )
         assert resp.status_code == 403
-        assert "OwnDriverDataOnly" in resp.json()["detail"] or "own" in resp.json()["detail"].lower()
+        assert "DRIVER Self" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_oda_cannot_lookup_another_driver_rate(
+    async def test_driver_self_cannot_lookup_another_driver_rate(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -1922,14 +1915,9 @@ class TestOwnDriverDataOnlyRates:
         paytest_rate_type_id: int,
         paytest_branch_id: int,
     ):
-        """OwnDriverDataOnly user on PAYTEST branch (no linked driver) → 403 on lookup."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ODALookupRole",
-            ["payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "oda_lookup_test_user2", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        """A linked DRIVER/Self user cannot use the generic rate lookup."""
+        driver_self_token, _ = await self._setup_driver_self_user(
+            session_client, auth_token, "driver_self_lookup_user2", paytest_branch_id,
         )
 
         resp = await session_client.get(
@@ -1939,10 +1927,10 @@ class TestOwnDriverDataOnlyRates:
                 "rate_type_id": paytest_rate_type_id,
                 "work_date":    _today_iso(),
             },
-            headers=auth(oda_token),
+            headers=auth(driver_self_token),
         )
         assert resp.status_code == 403
-        assert "OwnDriverDataOnly" in resp.json()["detail"] or "own" in resp.json()["detail"].lower()
+        assert "DRIVER Self" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -2077,70 +2065,48 @@ class TestBatchRollback:
 
 
 # ---------------------------------------------------------------------------
-# TestODAListDetail  (P1 — ODA on list/detail endpoints)
+# DRIVER/Self rate list/detail denial
 # ---------------------------------------------------------------------------
 
-class TestODAListDetail:
+class TestDriverSelfRateListDetail:
     """
-    OwnDriverDataOnly users must NOT be able to read another driver's rates
+    DRIVER/Self users must NOT be able to read generic DriverRate resources
     through GET /payroll/rates (list) or GET /payroll/rates/{rate_id} (detail).
-
-    Tests use an ODA user with no linked driver profile so that every
-    target driver is "not their own" — this ensures the 403 fires correctly.
     """
 
     @pytest.mark.asyncio
-    async def test_oda_cannot_list_rates_for_another_driver(
+    async def test_driver_self_cannot_list_rates_for_another_driver(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """ODA user (no linked driver) → 403 when listing rates with driver_id of another driver."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ODAListRole1",
-            ["payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "oda_list_test_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        """A valid linked DRIVER/Self user receives generic rate denial."""
+        driver_self_token, _ = await TestDriverSelfRates._setup_driver_self_user(
+            session_client, auth_token, "driver_self_list_test_user1", paytest_branch_id,
         )
 
         resp = await session_client.get(
             "/payroll/rates",
             params={"driver_id": paytest_driver_id},
-            headers=auth(oda_token),
+            headers=auth(driver_self_token),
         )
         assert resp.status_code == 403, resp.text
         detail = resp.json()["detail"].lower()
-        # ODA protection fires: either "own driver" message or "no linked driver profile"
-        assert (
-            "own" in detail
-            or "owndriverdata" in detail.replace(" ", "")
-            or "linked" in detail
-        ), f"Expected ODA 403 but got: {resp.json()['detail']}"
+        assert "driver self" in detail
 
     @pytest.mark.asyncio
-    async def test_oda_list_without_driver_id_gets_empty_not_all(
+    async def test_driver_self_list_without_driver_id_is_denied(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """
-        ODA user with no linked driver → list without driver_id param.
-        The query is forced to own driver (none exists) → returns empty list, not all rates.
-        Must NOT leak another driver's rates.
-        """
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ODAListRole2",
-            ["payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "oda_list_test_user2", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        """The generic list route remains denied when no target Driver is supplied."""
+        driver_self_token, _ = await TestDriverSelfRates._setup_driver_self_user(
+            session_client, auth_token, "driver_self_no_filter_user2", paytest_branch_id,
         )
 
         # Admin creates a rate for paytest_driver so there IS data to potentially leak
@@ -2156,27 +2122,25 @@ class TestODAListDetail:
             headers=auth(auth_token),
         )
 
-        # ODA user lists rates with NO driver_id param — should be scoped to own driver
-        # Since ODA user has no linked driver profile, this returns 403 (no profile found).
+        # The guard runs before list shaping, even when no Driver filter is supplied.
         resp = await session_client.get(
             "/payroll/rates",
-            headers=auth(oda_token),
+            headers=auth(driver_self_token),
         )
-        # With no linked driver: _get_oda_own_driver_id raises 403 (no driver profile)
         assert resp.status_code == 403, (
-            f"ODA user with no linked driver must not receive all rates. "
+            f"DRIVER/Self user must not receive generic rates. "
             f"Got {resp.status_code}: {resp.text}"
         )
 
     @pytest.mark.asyncio
-    async def test_oda_cannot_get_rate_by_id_for_another_driver(
+    async def test_driver_self_cannot_get_rate_by_id_for_another_driver(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """ODA user (no linked driver) → 403 when reading a specific rate belonging to another driver."""
+        """A valid linked DRIVER/Self user cannot use generic rate detail."""
         # Create a rate for paytest_driver
         grp = await _get_matrix_group(session_client, auth_token, paytest_driver_id, "MILEAGE")
         if grp is None:
@@ -2192,36 +2156,26 @@ class TestODAListDetail:
         assert batch_resp.status_code == 200, batch_resp.text
         rate_id = batch_resp.json()["rates"][0]["driver_rate_id"]
 
-        # ODA user on same branch tries to read that specific rate
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ODADetailRole1",
-            ["payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "oda_detail_test_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        driver_self_token, _ = await TestDriverSelfRates._setup_driver_self_user(
+            session_client, auth_token, "driver_self_detail_test_user1", paytest_branch_id,
         )
 
         resp = await session_client.get(
             f"/payroll/rates/{rate_id}",
-            headers=auth(oda_token),
+            headers=auth(driver_self_token),
         )
         assert resp.status_code == 403, resp.text
         detail = resp.json()["detail"].lower()
-        assert (
-            "own" in detail
-            or "owndriverdata" in detail.replace(" ", "")
-            or "linked" in detail
-        ), f"Expected ODA 403 but got: {resp.json()['detail']}"
+        assert "driver self" in detail
 
     @pytest.mark.asyncio
-    async def test_non_oda_user_can_still_list_and_get_rates(
+    async def test_non_driver_user_can_still_list_and_get_rates(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
     ):
-        """Non-ODA user with payrates.view on AllCompanyBranches can list and read rates normally."""
+        """A non-DRIVER user with payrates.view can list and read rates normally."""
         role_id = await _create_role_with_perms(
             session_client, auth_token, "NonODAViewRole1",
             ["payrates.view"],
@@ -2342,58 +2296,46 @@ class TestBatchRateTypeActive:
 
 
 # ---------------------------------------------------------------------------
-# TestODAScopeDetection  (P1 — scope detection with overlapping assignments)
+# TestDriverSelfScopeDetection  (P2b — Self ceiling with overlapping assignments)
 # ---------------------------------------------------------------------------
 
-class TestODAScopeDetection:
+class TestDriverSelfScopeDetection:
     """
-    _get_oda_own_driver_id must fail-closed when multiple active assignments
-    exist and any of them is OwnDriverDataOnly.
-
-    Normal cases (single assignment) must continue to work correctly.
+    Generic DriverRate routes deny DRIVER/Self independently of branch grants.
     """
 
     @pytest.mark.asyncio
-    async def test_single_oda_assignment_enforces_oda(
+    async def test_single_driver_self_assignment_denies_generic_rates(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """Single ODA assignment → _check_own_driver_only enforces own-driver-only (403 on another driver)."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ScopeTestODARole1",
-            ["payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "scope_test_oda_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        """A valid linked DRIVER/Self assignment is denied from generic rates."""
+        token, _ = await TestDriverSelfRates._setup_driver_self_user(
+            session_client, auth_token, "scope_test_driver_self_user1",
+            paytest_branch_id,
         )
 
         resp = await session_client.get(
             "/payroll/rates",
             params={"driver_id": paytest_driver_id},
-            headers=auth(oda_token),
+            headers=auth(token),
         )
         assert resp.status_code == 403
         detail = resp.json()["detail"].lower()
-        # Accept "own driver", "OwnDriverDataOnly", or "no linked driver" messages
-        assert (
-            "own" in detail
-            or "owndriverdata" in detail.replace(" ", "")
-            or "linked" in detail
-        ), f"Unexpected ODA error: {resp.json()['detail']}"
+        assert "driver self" in detail
 
     @pytest.mark.asyncio
-    async def test_single_specific_branch_assignment_is_not_oda(
+    async def test_non_driver_specific_branch_assignment_remains_usable(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """Single SpecificBranch assignment → no ODA restriction → can list another driver's rates."""
+        """A non-DRIVER SpecificBranch assignment can read rates on that branch."""
         role_id = await _create_role_with_perms(
             session_client, auth_token, "ScopeTestSBRole1",
             ["payrates.view"],
@@ -2410,11 +2352,11 @@ class TestODAScopeDetection:
         )
         # SpecificBranch user on PAYTEST branch can see PAYTEST driver rates
         assert resp.status_code == 200, (
-            f"SpecificBranch user must not be blocked as ODA. Got {resp.status_code}: {resp.text}"
+            f"SpecificBranch user must remain branch-scoped. Got {resp.status_code}: {resp.text}"
         )
 
     @pytest.mark.asyncio
-    async def test_overlapping_oda_and_specific_branch_fails_closed(
+    async def test_overlapping_legacy_branch_grant_does_not_widen_driver_self(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -2423,24 +2365,20 @@ class TestODAScopeDetection:
         direct_db,
     ):
         """
-        Artificially inject a second active assignment with a different scope alongside
-        an existing ODA assignment → fail-closed 403 with 'Ambiguous' message.
+        Inject historical overlapping assignment state beside DRIVER/Self.
+        The centralized DRIVER/Self denial must remain effective.
 
         This simulates DB corruption that assign_company_role should prevent.
         """
         from sqlalchemy import text as _text
 
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "ScopeConflictODARole1",
-            ["payrates.view"],
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "scope_conflict_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        driver_self_token, _ = await TestDriverSelfRates._setup_driver_self_user(
+            session_client, auth_token, "scope_conflict_driver_self_user1",
+            paytest_branch_id,
         )
 
         # Get user_id from token by calling /auth/me or /admin/users
-        me_resp = await session_client.get("/auth/me", headers=auth(oda_token))
+        me_resp = await session_client.get("/auth/me", headers=auth(driver_self_token))
         if me_resp.status_code != 200:
             pytest.skip("Cannot resolve user_id from token — /auth/me not available")
         user_id = me_resp.json()["user_id"]
@@ -2464,15 +2402,12 @@ class TestODAScopeDetection:
             resp = await session_client.get(
                 "/payroll/rates",
                 params={"driver_id": paytest_driver_id},
-                headers=auth(oda_token),
+                headers=auth(driver_self_token),
             )
             assert resp.status_code == 403, (
-                f"Overlapping ODA+SpecificBranch must fail-closed. Got {resp.status_code}: {resp.text}"
+                f"Overlapping legacy branch grant must not widen DRIVER/Self. Got {resp.status_code}: {resp.text}"
             )
-            detail = resp.json()["detail"].lower()
-            assert (
-                "ambiguous" in detail or "conflicting" in detail or "multiple" in detail
-            ), f"Expected ambiguity message, got: {resp.json()['detail']}"
+            assert "driver self" in resp.json()["detail"].lower()
         finally:
             # Clean up the injected bad row by PK to avoid removing legitimate rows
             await direct_db.execute(
@@ -2497,7 +2432,7 @@ class TestODAScopeDetection:
             ["payrates.view"],
         )
 
-        # Create user with ODA scope
+        # Create user with a current branch-scoped Access assignment.
         user_resp = await create_neutral_test_user(
             session_client, auth_token, "scope_revoke_user1",
             password="TestPass123!",
@@ -2506,11 +2441,11 @@ class TestODAScopeDetection:
 
         await session_client.post(
             f"/admin/users/{user_id}/company-role-assignments",
-            json={"company_role_id": role_id, "scope_type": "OwnDriverDataOnly", "branch_id": paytest_branch_id},
+            json={"company_role_id": role_id, "scope_type": "SpecificBranch", "branch_id": paytest_branch_id},
             headers=auth(auth_token),
         )
 
-        # Reassign to SpecificBranch (should revoke ODA)
+        # Replace the prior assignment; only the new active assignment remains.
         role_id2 = await _create_role_with_perms(
             session_client, auth_token, "ScopeRevokeRole2",
             ["payrates.view"],
@@ -2522,14 +2457,14 @@ class TestODAScopeDetection:
         )
         assert reassign_resp.status_code in (200, 201), reassign_resp.text
 
-        # Login and verify the new token works as SpecificBranch (no ODA)
+        # Login and verify the new token works as SpecificBranch.
         login = await session_client.post("/auth/login", json={
             "username": "scope_revoke_user1", "password": "TestPass123!", "company_code": "DEMO",
         })
         assert login.status_code == 200
         new_token = login.json()["access_token"]
 
-        # Can list rates without ODA restriction (SpecificBranch).
+        # SpecificBranch remains a valid scope for non-DRIVER users.
         # SpecificBranch users need branch_id in the query for fn_UserHasPermission to pass.
         resp = await session_client.get(
             "/payroll/rates",
@@ -2537,77 +2472,40 @@ class TestODAScopeDetection:
             headers=auth(new_token),
         )
         assert resp.status_code == 200, (
-            f"After reassignment to SpecificBranch, ODA should be revoked. "
+            f"After reassignment to SpecificBranch, the branch-scoped role should work. "
             f"Got {resp.status_code}: {resp.text}"
         )
 
 
 # ---------------------------------------------------------------------------
-# TestMatrixODAScope  (P1 — get_driver_rate_matrix ODA fix)
+# TestDriverSelfRateMatrix  (P2b — generic rate matrix denial)
 # ---------------------------------------------------------------------------
 
-class TestMatrixODAScope:
+class TestDriverSelfRateMatrix:
     """
-    get_driver_rate_matrix must use _check_own_driver_only (fail-closed) instead
-    of the old inline 'ORDER BY userbranchroleid DESC LIMIT 1' logic.
-
-    Covers:
-    - ODA user WITH linked driver can access own matrix (true linked-driver scenario)
-    - ODA user WITH linked driver cannot access another driver's matrix
-    - ODA user with no linked driver profile fails closed on matrix (403)
-    - Overlapping active assignments (ODA + SpecificBranch) fail closed on matrix (403)
-    - SpecificBranch user can access allowed-branch driver matrix
-    - AllCompanyBranches user can access any driver matrix
-    - Cross-company driver is blocked (404 — driver not in this company)
+    DRIVER/Self is denied from generic rate matrix endpoints even when the
+    target is its linked Driver. Non-driver branch and company scopes remain usable.
     """
 
     @staticmethod
-    async def _create_oda_linked_driver_user(
+    async def _create_driver_self_user(
         client: httpx.AsyncClient,
         admin_token: str,
         username: str,
         paytest_branch_id: int,
     ) -> tuple[str, int]:
         """
-        Create a user with a real linked driver profile + ODA scope + payrates.view.
-
-        Steps:
-          1. Create the user account.
-          2. Assign the DRIVER company role on PAYTEST branch.
-             This calls ensure_driver_profile → links Users.EmployeeID → Employees → Drivers.
-          3. Record the created driver_id.
-          4. Assign a payrates.view role with OwnDriverDataOnly scope on PAYTEST branch.
-             assign_company_role revokes the DRIVER assignment but the driver profile link persists.
-
+        Create a linked DRIVER/Self account through the canonical builders.
         Returns (token, own_driver_id).
         """
-        # Step 1: create user
-        create_resp = await create_neutral_test_user(
-            client, admin_token, username, password="TestPass123!",
+        token = await create_user_with_role_token(
+            client, admin_token, username,
+            await get_company_role_id(client, admin_token, "DRIVER"),
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
-        user_id: int = create_resp["user_id"]
-
-        # Step 2: assign DRIVER role (creates driver profile + employee link)
-        roles_resp = await client.get("/admin/company-roles", headers=auth(admin_token))
-        driver_role = next(
-            (r for r in roles_resp.json() if r.get("role_code") == "DRIVER"), None
-        )
-        if driver_role is None:
-            pytest.skip("DRIVER company role not found — seed data may be missing")
-        assign_driver_resp = await client.post(
-            f"/admin/users/{user_id}/company-role-assignments",
-            json={
-                "company_role_id": driver_role["company_role_id"],
-                "scope_type":      "SpecificBranch",
-                "branch_id":       paytest_branch_id,
-            },
-            headers=auth(admin_token),
-        )
-        assert assign_driver_resp.status_code in (200, 201), (
-            f"Assign DRIVER role failed: {assign_driver_resp.text}"
-        )
-
-        # Step 3: get the created driver_id via /admin/users/{id}/driver
+        me = await client.get("/auth/me", headers=auth(token))
+        assert me.status_code == 200, me.text
+        user_id = me.json()["user_id"]
         drv_resp = await client.get(
             f"/admin/users/{user_id}/driver",
             headers=auth(admin_token),
@@ -2619,46 +2517,23 @@ class TestMatrixODAScope:
         )
         own_driver_id: int = drv_data["driver_id"]
 
-        # Step 4: assign payrates.view ODA role (revokes DRIVER, keeps driver link)
-        oda_role_id = await _create_role_with_perms(
-            client, admin_token, f"MatrixODARole_{username}",
-            ["payrates.view", "payrates.edit"],
-        )
-        assign_oda_resp = await client.post(
-            f"/admin/users/{user_id}/company-role-assignments",
-            json={
-                "company_role_id": oda_role_id,
-                "scope_type":      "OwnDriverDataOnly",
-                "branch_id":       paytest_branch_id,
-            },
-            headers=auth(admin_token),
-        )
-        assert assign_oda_resp.status_code in (200, 201), (
-            f"Assign ODA role failed: {assign_oda_resp.text}"
-        )
-
-        login = await client.post("/auth/login", json={
-            "username": username, "password": "TestPass123!", "company_code": "DEMO",
-        })
-        assert login.status_code == 200, f"Login failed: {login.text}"
-        return login.json()["access_token"], own_driver_id
+        return token, own_driver_id
 
     # -------------------------------------------------------------------------
-    # Test 1 — ODA user WITH linked driver can load own matrix
+    # Test 1 — DRIVER/Self cannot use even its own generic matrix
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_oda_linked_driver_can_access_own_matrix(
+    async def test_driver_self_cannot_access_own_matrix(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
     ):
         """
-        ODA user with real driver profile link can load their own rate matrix.
-        This is the true linked-driver ODA scenario (not the 'no profile' path).
+        A valid linked DRIVER/Self account still cannot use generic rate surfaces.
         """
-        token, own_driver_id = await self._create_oda_linked_driver_user(
+        token, own_driver_id = await self._create_driver_self_user(
             session_client, auth_token, "matrix_oda_linked_user1", paytest_branch_id,
         )
 
@@ -2667,17 +2542,15 @@ class TestMatrixODAScope:
             params={"as_of": _today_iso()},
             headers=auth(token),
         )
-        assert resp.status_code == 200, (
-            f"ODA user must be able to access own driver matrix. Got {resp.status_code}: {resp.text}"
-        )
-        assert resp.json()["driver_id"] == own_driver_id
+        assert resp.status_code == 403, resp.text
+        assert "driver self" in resp.json()["detail"].lower()
 
     # -------------------------------------------------------------------------
-    # Test 2 — ODA user WITH linked driver cannot load another driver's matrix
+    # Test 2 — DRIVER/Self cannot use another Driver's generic matrix
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_oda_linked_driver_cannot_access_other_matrix(
+    async def test_driver_self_cannot_access_other_matrix(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -2685,11 +2558,9 @@ class TestMatrixODAScope:
         paytest_branch_id: int,
     ):
         """
-        ODA user with real driver profile link → 403 on another driver's matrix.
-        Must NOT use the 'no linked driver profile' fallback — the deny must come
-        from the driver-id mismatch branch of _check_own_driver_only.
+        A linked DRIVER/Self account is denied before generic target scoping.
         """
-        token, own_driver_id = await self._create_oda_linked_driver_user(
+        token, own_driver_id = await self._create_driver_self_user(
             session_client, auth_token, "matrix_oda_linked_user2", paytest_branch_id,
         )
         # own_driver_id ≠ paytest_driver_id (paytest_driver_id was created in conftest)
@@ -2703,55 +2574,68 @@ class TestMatrixODAScope:
             headers=auth(token),
         )
         assert resp.status_code == 403, (
-            f"ODA user must be denied another driver's matrix. Got {resp.status_code}: {resp.text}"
+            f"DRIVER/Self user must be denied another driver's matrix. Got {resp.status_code}: {resp.text}"
         )
         detail = resp.json()["detail"].lower()
-        assert (
-            "own" in detail
-            or "owndriverdata" in detail.replace(" ", "")
-        ), f"Unexpected 403 detail: {resp.json()['detail']}"
+        assert "driver self" in detail
 
     # -------------------------------------------------------------------------
-    # Test 3 — ODA user with no linked driver profile fails closed
+    # Test 3 — legacy unlinked Self state fails closed
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_oda_no_linked_driver_fails_closed_on_matrix(
+    async def test_unlinked_driver_self_fails_closed_on_generic_routes(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_driver_id: int,
         paytest_branch_id: int,
+        direct_db,
     ):
-        """ODA user with no employee/driver link → 403 'no linked driver profile'."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "MatrixODANoLinkRole1",
-            ["payrates.view", "payrates.edit"],
-        )
-        token = await _create_user_with_role(
-            session_client, auth_token, "matrix_oda_nolink_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
-        )
+        """A Self assignment without its required employee link remains fail-closed.
 
-        resp = await session_client.get(
+        This intentionally seeds an unlinked historical/invalid state directly:
+        current Access provisioning requires an explicitly linked Employee.
+        """
+        user = await create_neutral_test_user(
+            session_client, auth_token, f"unlinked_self_{uuid4().hex[:10]}",
+            password="TestPass123!",
+        )
+        driver_role_id = await get_company_role_id(session_client, auth_token, "DRIVER")
+        await direct_db.execute(_sqla_text("""
+            INSERT INTO sec.UserBranchRoles
+                (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
+            VALUES (:uid, :cid, NULL, NULL, :role_id, 'Self', TRUE)
+        """), {
+            "uid": user["user_id"], "cid": user["company_id"], "role_id": driver_role_id,
+        })
+        token = create_access_token(int(user["user_id"]), int(user["company_id"]))
+
+        matrix = await session_client.get(
             f"/payroll/drivers/{paytest_driver_id}/rate-matrix",
-            params={"as_of": _today_iso()},
+            params={"as_of": _today_iso()}, headers=auth(token),
+        )
+        assert matrix.status_code == 403, matrix.text
+        assert "driver self" in matrix.json()["detail"].lower()
+
+        transfer = await session_client.post(
+            "/driver-transfers",
+            json={
+                "driver_id": paytest_driver_id,
+                "target_branch_id": paytest_branch_id,
+                "effective_date": "2099-01-01",
+                "initiated_by": "Driver",
+            },
             headers=auth(token),
         )
-        assert resp.status_code == 403, resp.text
-        detail = resp.json()["detail"].lower()
-        assert (
-            "linked" in detail
-            or "own" in detail
-            or "owndriverdata" in detail.replace(" ", "")
-        ), f"Unexpected 403 detail: {resp.json()['detail']}"
+        assert transfer.status_code == 403, transfer.text
 
     # -------------------------------------------------------------------------
-    # Test 4 — Overlapping ODA + SpecificBranch → fail closed on matrix
+    # Test 4 — an overlapping legacy branch grant cannot widen DRIVER/Self
     # -------------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_overlapping_assignments_fail_closed_on_matrix(
+    async def test_overlapping_legacy_branch_grant_does_not_widen_driver_self_matrix(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -2760,8 +2644,8 @@ class TestMatrixODAScope:
         direct_db,
     ):
         """
-        Two active assignments (ODA + SpecificBranch) → fail-closed 403 on matrix.
-        Simulates concurrent/bad data that assign_company_role should have prevented.
+        This direct SQL setup preserves an adversarial historical overlap to
+        prove a generic SpecificBranch row cannot widen a DRIVER/Self subject.
         """
         from sqlalchemy import text as _text
 
@@ -2771,7 +2655,7 @@ class TestMatrixODAScope:
         )
         token = await _create_user_with_role(
             session_client, auth_token, "matrix_oda_conflict_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+            scope_type="Self", driver_branch_id=paytest_branch_id,
         )
 
         # Resolve user_id
@@ -2801,13 +2685,10 @@ class TestMatrixODAScope:
                 headers=auth(token),
             )
             assert resp.status_code == 403, (
-                f"Overlapping ODA+SpecificBranch must fail-closed on matrix. "
+                f"Overlapping DRIVER/Self + SpecificBranch must fail-closed on matrix. "
                 f"Got {resp.status_code}: {resp.text}"
             )
-            detail = resp.json()["detail"].lower()
-            assert (
-                "ambiguous" in detail or "conflicting" in detail or "multiple" in detail
-            ), f"Expected ambiguity message, got: {resp.json()['detail']}"
+            assert "driver self" in resp.json()["detail"].lower()
         finally:
             await direct_db.execute(
                 _text("DELETE FROM sec.userbranchroles WHERE userbranchroleid = :ubrid"),
@@ -2826,7 +2707,7 @@ class TestMatrixODAScope:
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """SpecificBranch user on PAYTEST branch → 200 on PAYTEST driver matrix. Not treated as ODA."""
+        """SpecificBranch user on PAYTEST branch → 200 on PAYTEST driver matrix."""
         role_id = await _create_role_with_perms(
             session_client, auth_token, "MatrixSBRole1",
             ["payrates.view"],
@@ -2915,7 +2796,7 @@ class TestPhase2B:
     Tests:
     1.  pending requires payrates.view/edit
     2.  pending returns only PendingApproval rows for the driver
-    3.  pending blocks ODA user for another driver
+    3.  pending blocks DRIVER/Self user for another driver
     4.  history requires permission
     5.  history returns Approved, PendingApproval, Superseded, Voided rows
     6.  history blocks cross-company/nonexistent driver (404)
@@ -3009,7 +2890,7 @@ class TestPhase2B:
         # Cleanup: void the rate
         await session_client.delete(f"/payroll/rates/{rate_id}", headers=auth(auth_token))
 
-    # ── Test 3: pending blocks ODA user for another driver ────────────────────
+    # ── Test 3: pending blocks DRIVER/Self user for another driver ────────────
 
     @pytest.mark.asyncio
     async def test_pending_blocks_oda_user_for_another_driver(
@@ -3019,17 +2900,13 @@ class TestPhase2B:
         paytest_driver_id: int,
         paytest_branch_id: int,
     ):
-        """ODA user with no linked driver → 403 on pending for another driver."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, "P2BODARole1", ["payrates.view"]
-        )
-        oda_token = await _create_user_with_role(
-            session_client, auth_token, "p2b_oda_pending_user1", role_id,
-            scope_type="OwnDriverDataOnly", branch_id=paytest_branch_id,
+        """A valid linked DRIVER/Self user cannot use generic pending-rate reads."""
+        driver_self_token, _ = await TestDriverSelfRates._setup_driver_self_user(
+            session_client, auth_token, "p2b_driver_self_pending_user1", paytest_branch_id,
         )
         resp = await session_client.get(
             f"/payroll/drivers/{paytest_driver_id}/rates/pending",
-            headers=auth(oda_token),
+            headers=auth(driver_self_token),
         )
         assert resp.status_code == 403
 

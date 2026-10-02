@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # Constants
 # ---------------------------------------------------------------------------
 
-_SCOPE_TYPES = {"AllCompanyBranches", "SpecificBranch", "OwnDriverDataOnly"}
+_SCOPE_TYPES = {"AllCompanyBranches", "SpecificBranch", "Self"}
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ class RoleAssignment(BaseModel):
     role_id: int
     role_code: str
     role_name: str
-    scope_type: str            # AllCompanyBranches | SpecificBranch | OwnDriverDataOnly
+    scope_type: str            # AllCompanyBranches | SpecificBranch | Self
     branch_id: int | None
     branch_name: str | None
     is_active: bool
@@ -170,7 +170,7 @@ class RoleAssignmentCreate(BaseModel):
     """Payload to assign a role to a user."""
     role_id: int
     scope_type: str
-    branch_id: int | None = None   # required for SpecificBranch / OwnDriverDataOnly
+    branch_id: int | None = None   # required only for SpecificBranch
     notes: str | None = None
 
     @field_validator("scope_type")

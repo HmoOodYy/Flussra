@@ -2,7 +2,7 @@
 Dashboard service — read-only aggregation queries for GET /dashboard.
 
 Permission model (Dashboard D1):
-  - Driver / ODA users are blocked (calls _require_not_driver_role).
+  - DRIVER/Self users are blocked (calls _require_not_driver_role).
   - Any non-driver user with at least one relevant permission on at least one
     accessible branch may call GET /dashboard.
   - The response is divided into sections. Each section is included only when
@@ -85,7 +85,7 @@ async def get_dashboard_summary(
 ) -> DashboardResponse:
     """Compute and return a permission-aware dashboard snapshot."""
 
-    # 1. Block driver / ODA accounts from the operational dashboard.
+    # 1. Block DRIVER accounts from the operational dashboard.
     await _require_not_driver_role(company_id, user_id, db)
 
     # 2. Resolve base branch scope.

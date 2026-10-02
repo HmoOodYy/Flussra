@@ -616,7 +616,7 @@ async def get_period_eligible_drivers(
          so existing bonuses stay voidable even if the driver was later
          terminated.
 
-    ODA/Driver users are blocked unconditionally (same boundary as day-grid).
+    DRIVER/Self users are blocked unconditionally (same boundary as day-grid).
     payroll.view OR payroll.entry permission is required.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #

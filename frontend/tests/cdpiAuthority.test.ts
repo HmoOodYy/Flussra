@@ -38,6 +38,7 @@ function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserIn
     company_id: 1,
     company_name: 'Demo Logistics',
     branches: [],
+    self_assignments: [],
     active_permissions: [],
     authority: makeAuthority(),
     ...overrides,

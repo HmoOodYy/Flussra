@@ -6,7 +6,7 @@ export interface RoleAssignment {
   role_id: number;
   role_code: string;
   role_name: string;
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branch_id: number | null;
   branch_name: string | null;
   is_active: boolean;
@@ -40,7 +40,7 @@ export interface UserAdmin {
   company_role_id: number | null;
   company_role_code: string | null;
   company_role_name: string | null;
-  company_role_scope: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly' | null;
+  company_role_scope: 'AllCompanyBranches' | 'SpecificBranch' | 'Self' | null;
   company_role_branch_id: number | null;
   company_role_branch_name: string | null;
   // ── Driver profile ──
@@ -128,7 +128,7 @@ export interface CompanyRolePermissions {
 
 export interface CompanyRoleAssignmentCreate {
   company_role_id: number;
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branch_id?: number | null;
   notes?: string | null;
 }
@@ -164,7 +164,7 @@ export interface CompanyRoleUser {
   username: string;
   display_name: string;
   email: string | null;
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'OwnDriverDataOnly';
+  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
   branch_id: number | null;
   branch_name: string | null;
   is_active: boolean;

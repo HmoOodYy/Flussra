@@ -247,13 +247,13 @@ async def test_create_modes_and_driver_boundary_are_access_only(client, auth_tok
     counts_before = (await db_conn.execute(text("SELECT (SELECT COUNT(*) FROM core.Employees), (SELECT COUNT(*) FROM core.Drivers)"))).one()
 
     staged = await staged_user(client, auth_token, employee_id=future["employee_id"])
-    pending = await provision(client, auth_token, staged["user_id"], driver_role, scope="OwnDriverDataOnly", branch_id=1)
+    pending = await provision(client, auth_token, staged["user_id"], driver_role, scope="Self")
     assert pending.status_code == 422
     still_staged = await client.get(f"/admin/users/{staged['user_id']}", headers=auth(auth_token))
     assert still_staged.json()["is_staged"] is True and not still_staged.json()["role_assignments"]
 
     staged_current = await staged_user(client, auth_token, employee_id=current["employee_id"])
-    accepted = await provision(client, auth_token, staged_current["user_id"], driver_role, scope="OwnDriverDataOnly", branch_id=1)
+    accepted = await provision(client, auth_token, staged_current["user_id"], driver_role, scope="Self")
     assert accepted.status_code == 200, accepted.text
     driver_unlink = await client.delete(f"/admin/users/{staged_current['user_id']}/employee-link", headers=auth(auth_token))
     assert driver_unlink.status_code == 422
@@ -272,8 +272,8 @@ async def test_create_modes_and_driver_boundary_are_access_only(client, auth_tok
     assert linked.status_code == 409
 
     non_driver = await staged_user(client, auth_token)
-    oda = await provision(client, auth_token, non_driver["user_id"], role_id, scope="OwnDriverDataOnly", branch_id=1)
-    assert oda.status_code == 422
+    invalid_self = await provision(client, auth_token, non_driver["user_id"], role_id, scope="Self")
+    assert invalid_self.status_code == 422
     specific_driver = await staged_user(client, auth_token, employee_id=specific_employee["employee_id"])
     bad_scope = await provision(client, auth_token, specific_driver["user_id"], driver_role, scope="SpecificBranch", branch_id=1)
     assert bad_scope.status_code == 422

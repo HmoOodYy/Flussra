@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll import current_hub
 from tests.access_test_helpers import create_neutral_test_user
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2096, 1, 1)
@@ -361,16 +362,11 @@ async def _driver_token(
     scope: str,
 ) -> str:
     username = _security_name(scope.lower())
-    user = await _create_user(client, admin_token, username)
-    await _assign_role(
-        client,
-        admin_token,
-        user["user_id"],
-        await _driver_role_id(client, admin_token),
-        scope,
-        branch_id,
+    return await create_user_with_role_token(
+        client, admin_token, username,
+        await get_company_role_id(client, admin_token, "DRIVER"),
+        scope_type="Self", driver_branch_id=branch_id,
     )
-    return await _login_as(client, username)
 
 
 async def _branch_view_token(
@@ -701,7 +697,7 @@ class TestCurrentPayrollHub:
     async def test_driver_and_oda_users_cannot_read_hub(
         self, session_client, auth_token, paytest_branch_id,
     ):
-        for scope in ("SpecificBranch", "OwnDriverDataOnly"):
+        for scope in ("Self",):
             token = await _driver_token(session_client, auth_token, paytest_branch_id, scope)
             response = await _hub(session_client, token, paytest_branch_id)
             assert response.status_code == 403, response.text

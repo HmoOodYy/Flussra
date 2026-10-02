@@ -295,7 +295,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0074."""
+        """D02: Migration chain is linear and head is 0075."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -307,7 +307,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0074" in lines[0], f"Expected head 0074, got: {lines[0]}"
+        assert "0075" in lines[0], f"Expected head 0075, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows

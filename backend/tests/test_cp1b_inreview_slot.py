@@ -252,8 +252,8 @@ class TestMigration:
             f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
             f"{result.stdout}\n{result.stderr}"
         )
-        assert "0074" in lines[0], (
-            f"Expected head 0074, got: {lines[0]}\n{result.stderr}"
+        assert "0075" in lines[0], (
+            f"Expected head 0075, got: {lines[0]}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio

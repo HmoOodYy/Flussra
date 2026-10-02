@@ -60,7 +60,7 @@ async def _make_actor(db_conn, *, permissions: tuple[str, ...], scope: str,
         VALUES (:uid, :cid, :bid, :rid, :crid, :scope, TRUE)
     """), {
         "uid": user_id, "cid": company_id,
-        "bid": branch_id if scope in ("SpecificBranch", "OwnDriverDataOnly") else None,
+        "bid": branch_id if scope == "SpecificBranch" else None,
         "rid": role_id, "crid": company_role_id, "scope": scope,
     })
     return create_access_token(int(user_id), int(company_id))
@@ -217,7 +217,7 @@ async def test_default_permission_gates_manage_assign_scope_and_driver(client, a
     )
     driver = await _make_actor(
         db_conn, permissions=("payroll_setup.assign",),
-        scope="AllCompanyBranches", driver=True,
+        scope="Self", driver=True,
     )
     for token, value in ((manage, sid), (manage, None), (scoped_assign, sid), (driver, sid)):
         response = await client.put(
@@ -732,7 +732,7 @@ async def test_assignment_reassignment_withdrawal_branch_history_and_effective(
         denied = await getattr(client, method)(path, headers=_auth(branch_viewer), **kwargs)
         assert denied.status_code == 403, denied.text
     driver = await _make_actor(
-        db_conn, permissions=("payroll.view",), scope="AllCompanyBranches", driver=True,
+        db_conn, permissions=("payroll.view",), scope="Self", driver=True,
     )
     denied_driver = await client.get(
         f"/payroll-setup/branches/{branch_id}/effective",
@@ -743,12 +743,11 @@ async def test_assignment_reassignment_withdrawal_branch_history_and_effective(
         f"/payroll-setup/branches/{other_branch}/history", headers=_auth(branch_viewer),
     )
     assert denied_other.status_code == 403, denied_other.text
-    oda = await _make_actor(
-        db_conn, permissions=("payroll.view",), scope="OwnDriverDataOnly",
-        branch_id=branch_id,
+    driver_self = await _make_actor(
+        db_conn, permissions=("payroll.view",), scope="Self", driver=True,
     )
     denied_oda = await client.get(
-        f"/payroll-setup/branches/{branch_id}/history", headers=_auth(oda),
+        f"/payroll-setup/branches/{branch_id}/history", headers=_auth(driver_self),
     )
     assert denied_oda.status_code == 403, denied_oda.text
 
