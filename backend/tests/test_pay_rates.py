@@ -4,7 +4,7 @@ tests/test_pay_rates.py — Phase 1: Pay Rates feature
 Covers:
   TestDriverRateMatrix        — rate matrix endpoint shape and correctness
   TestDriverRates             — CRUD + permission guards
-  TestDriverProfile           — ensure_driver_profile + GET /admin/users/{id}/driver
+  TestDriverProfile           — GET /admin/users/{id}/driver read behavior
   TestOvernightRate           — OVERNIGHT migration correctness
   TestRateWritePermissions    — payrates.edit required for write ops (Fix 1)
   TestRateReadPermissions     — payrates.view required for read ops (Fix 2)
@@ -286,7 +286,7 @@ class TestDriverRates:
 # ---------------------------------------------------------------------------
 
 class TestDriverProfile:
-    """GET /admin/users/{id}/driver and ensure_driver_profile."""
+    """Read-only Driver profile information for an Access user."""
 
     @pytest.mark.asyncio
     async def test_admin_user_has_no_driver_profile_initially(

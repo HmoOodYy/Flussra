@@ -155,7 +155,7 @@ class TestDriverBranchImmutability:
         auth_token: str,
     ):
         """
-        Assigning a non-Driver company role must not trigger ensure_driver_profile.
+        Assigning a non-Driver company role must not create or mutate Workforce records.
 
         Strategy: create a custom company role (not DRIVER), assign it to a new user,
         then verify the user has no driver profile.

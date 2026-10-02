@@ -2229,16 +2229,6 @@ async def assign_company_role(
         },
     )
 
-    # Transitional P2c hook. Valid DRIVER/Self has NULL BranchID, so this path
-    # is unreachable for a valid DRIVER assignment.
-    if cr_row["rolecode"] == "DRIVER" and data.branch_id is not None:
-        await ensure_driver_profile(
-            db=db,
-            user_id=target_user_id,
-            company_id=company_id,
-            branch_id=data.branch_id,
-            actor_user_id=caller_id,
-        )
 
     return await _fetch_company_role_assignment(new_assignment_id, target_user_id, company_id, db)
 
@@ -2761,93 +2751,6 @@ async def set_user_permission_overrides(
     )
 
     return sorted(new_codes)
-
-
-# ===========================================================================
-# Driver profile auto-linking (Phase 1)
-# ===========================================================================
-
-async def ensure_driver_profile(
-    db: AsyncConnection,
-    user_id: int,
-    company_id: int,
-    branch_id: int | None,
-    actor_user_id: int,
-) -> dict:
-    """Temporary Access hook delegating all Employee/Profile writes to Workforce."""
-    from app.workforce.schemas import DriverProfileCreate
-    from app.workforce.service import (
-        create_driver_employee,
-        create_first_driver_profile,
-        find_employee_driver_profile,
-    )
-
-    user_result = await db.execute(
-        text("""
-            SELECT UserID, DisplayName, EmployeeID
-            FROM sec.Users
-            WHERE UserID = :user_id AND CompanyID = :company_id
-            FOR UPDATE
-        """),
-        {"user_id": user_id, "company_id": company_id},
-    )
-    user = user_result.mappings().first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found.")
-    if branch_id is None:
-        raise HTTPException(status_code=422, detail="Driver access requires a home branch.")
-
-    employee_id = user["employeeid"]
-    if employee_id is not None:
-        employee_result = await db.execute(
-            text("""
-                SELECT EmployeeID, BranchID
-                FROM core.Employees
-                WHERE EmployeeID = :employee_id AND CompanyID = :company_id
-            """),
-            {"employee_id": employee_id, "company_id": company_id},
-        )
-        employee = employee_result.mappings().first()
-        if employee is None:
-            raise HTTPException(status_code=422, detail="Linked Employee does not belong to this company.")
-        profile = await find_employee_driver_profile(company_id, employee_id, db)
-        if profile is not None:
-            if profile["branchid"] != branch_id:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Driver profile branch differs from the requested branch; use Driver Transfer.",
-                )
-            return {"employee_id": employee_id, "driver_id": profile["driverid"], "created": False}
-
-        detail = await create_first_driver_profile(
-            company_id,
-            actor_user_id,
-            employee_id,
-            DriverProfileCreate(driver_code=f"DRV-{employee_id:05d}"),
-            db,
-            requested_branch_id=branch_id,
-        )
-        profile = detail.current_or_pending_driver
-        if profile is None:
-            raise HTTPException(status_code=500, detail="Workforce profile creation returned no profile.")
-        return {"employee_id": employee_id, "driver_id": profile.driver_id, "created": True}
-
-    detail = await create_driver_employee(
-        company_id,
-        actor_user_id,
-        branch_id=branch_id,
-        full_name=user["displayname"] or f"User {user_id}",
-        driver_code=f"DRV-{user_id:05d}",
-        db=db,
-    )
-    profile = detail.current_or_pending_driver
-    if profile is None:
-        raise HTTPException(status_code=500, detail="Workforce creation returned no Driver profile.")
-    await db.execute(
-        text("UPDATE sec.Users SET EmployeeID = :employee_id WHERE UserID = :user_id AND CompanyID = :company_id"),
-        {"employee_id": detail.employee_id, "user_id": user_id, "company_id": company_id},
-    )
-    return {"employee_id": detail.employee_id, "driver_id": profile.driver_id, "created": True}
 
 
 async def get_user_driver_info(
