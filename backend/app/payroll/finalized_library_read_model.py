@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import frozen_currency
 from app.core.service import (
     _build_in_clause,
     _check_branch_access,
@@ -30,6 +31,93 @@ def _unavailable(code: str, message: str) -> HTTPException:
 
 def _availability(state: str, reason_code: str | None = None) -> dict[str, str | None]:
     return {"state": state, "reason_code": reason_code}
+
+
+async def _approved_currency(period: dict[str, Any], db: AsyncConnection):
+    """Resolve finalized denomination from the exact approved snapshot."""
+    final_rows = (await db.execute(text("""
+        SELECT DISTINCT currencycode, currencyminorunitdigits
+        FROM payroll.payrollfinallines
+        WHERE companyid = :cid AND branchid = :bid AND payrollperiodid = :pid
+    """), {"cid": period["companyid"], "bid": period["branchid"],
+           "pid": period["payrollperiodid"]})).mappings().all()
+    if len(final_rows) > 1:
+        raise _unavailable("SNAPSHOT_CURRENCY_MISMATCH", "FinalLines contain inconsistent frozen currency.")
+    if final_rows:
+        return frozen_currency(final_rows[0]["currencycode"], final_rows[0]["currencyminorunitdigits"])
+    rows = (await db.execute(text("""
+        SELECT s.currencycode, s.currencyminorunitdigits
+        FROM review.managerreviewitems ri
+        JOIN payroll.payrollcalculationsnapshots s
+          ON s.payrollcalculationsnapshotid = ri.payrollcalculationsnapshotid
+         AND s.companyid = ri.companyid AND s.branchid = ri.branchid
+         AND s.payrollperiodid = :pid
+        WHERE ri.companyid = :cid AND ri.branchid = :bid
+          AND ri.entityschema = 'payroll' AND ri.entityname = 'PayrollPeriods'
+          AND ri.entityid = :entity_id AND ri.requesttype = 'PeriodApproval'
+          AND ri.status = 'Approved'
+    """), {"cid": period["companyid"], "bid": period["branchid"],
+           "pid": period["payrollperiodid"], "entity_id": str(period["payrollperiodid"])})).mappings().all()
+    if len(rows) != 1:
+        raise _unavailable("SNAPSHOT_CURRENCY_REQUIRED", "Approved snapshot currency is unavailable.")
+    return frozen_currency(rows[0]["currencycode"], rows[0]["currencyminorunitdigits"])
+
+
+async def _approved_currencies(periods: list[dict[str, Any]], db: AsyncConnection) -> dict[int, Any]:
+    """Resolve a page of finalized currencies with constant query count."""
+    if not periods:
+        return {}
+    period_ids = [int(period["period_id"]) for period in periods]
+    period_clause, period_params = _build_in_clause(period_ids, "currency_period")
+    final_rows = (await db.execute(text(f"""
+        SELECT payrollperiodid AS period_id,
+               COUNT(*) AS row_count,
+               COUNT(DISTINCT (currencycode, currencyminorunitdigits)) AS pair_count,
+               MIN(currencycode) AS currency_code,
+               MIN(currencyminorunitdigits) AS minor_unit_digits
+        FROM payroll.payrollfinallines
+        WHERE companyid = :company_id AND payrollperiodid IN ({period_clause})
+        GROUP BY payrollperiodid
+    """), {"company_id": periods[0]["company_id"], **period_params})).mappings().all()
+    by_final_period = {int(row["period_id"]): row for row in final_rows}
+
+    missing_ids = [period_id for period_id in period_ids if period_id not in by_final_period]
+    approved_by_period: dict[int, Any] = {}
+    if missing_ids:
+        missing_clause, missing_params = _build_in_clause(missing_ids, "approved_currency_period")
+        approved_rows = (await db.execute(text(f"""
+            SELECT s.payrollperiodid AS period_id,
+                   COUNT(*) AS row_count,
+                   COUNT(DISTINCT (s.currencycode, s.currencyminorunitdigits)) AS pair_count,
+                   MIN(s.currencycode) AS currency_code,
+                   MIN(s.currencyminorunitdigits) AS minor_unit_digits
+            FROM review.managerreviewitems ri
+            JOIN payroll.payrollcalculationsnapshots s
+              ON s.payrollcalculationsnapshotid = ri.payrollcalculationsnapshotid
+             AND s.companyid = ri.companyid AND s.branchid = ri.branchid
+            WHERE ri.companyid = :company_id
+              AND ri.entityschema = 'payroll' AND ri.entityname = 'PayrollPeriods'
+              AND ri.entityid = s.payrollperiodid::text
+              AND s.payrollperiodid IN ({missing_clause})
+              AND ri.requesttype = 'PeriodApproval' AND ri.status = 'Approved'
+            GROUP BY s.payrollperiodid
+        """), {"company_id": periods[0]["company_id"], **missing_params})).mappings().all()
+        approved_by_period = {int(row["period_id"]): row for row in approved_rows}
+
+    resolved: dict[int, Any] = {}
+    for period in periods:
+        period_id = int(period["period_id"])
+        row = by_final_period.get(period_id)
+        if row is not None:
+            if int(row["pair_count"]) != 1:
+                raise _unavailable("SNAPSHOT_CURRENCY_MISMATCH", "FinalLines contain inconsistent frozen currency.")
+            resolved[period_id] = frozen_currency(row["currency_code"], row["minor_unit_digits"])
+            continue
+        row = approved_by_period.get(period_id)
+        if row is None or int(row["row_count"]) != 1 or int(row["pair_count"]) != 1:
+            raise _unavailable("SNAPSHOT_CURRENCY_REQUIRED", "Approved snapshot currency is unavailable.")
+        resolved[period_id] = frozen_currency(row["currency_code"], row["minor_unit_digits"])
+    return resolved
 
 
 async def list_finalized_periods(
@@ -122,7 +210,16 @@ async def list_finalized_periods(
         ORDER BY p.startdate DESC, b.branchname, p.payrollperiodid DESC
         LIMIT :limit OFFSET :offset
     """), params)
-    return [dict(row) for row in result.mappings().all()]
+    items = [dict(row) for row in result.mappings().all()]
+    currencies = await _approved_currencies([
+        {"period_id": item["period_id"], "company_id": company_id}
+        for item in items
+    ], db)
+    for item in items:
+        currency = currencies[int(item["period_id"])]
+        item["currency_code"] = currency.code
+        item["currency_minor_unit_digits"] = currency.minor_unit_digits
+    return items
 
 
 async def _period_context(
@@ -149,7 +246,11 @@ async def _period_context(
             "FINALIZED_LIBRARY_UNAVAILABLE",
             "Finalized payroll information is available only for Locked or Archived periods.",
         )
-    return dict(row)
+    result = dict(row)
+    currency = await _approved_currency(result, db)
+    result["currency_code"] = currency.code
+    result["currency_minor_unit_digits"] = currency.minor_unit_digits
+    return result
 
 
 async def _financial_summary(period: dict[str, Any], db: AsyncConnection) -> dict[str, Any]:
@@ -197,7 +298,7 @@ async def _originating_snapshot(
         return None, _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
     snapshot = (await db.execute(text("""
         SELECT payrollcalculationsnapshotid, revisionnumber, snapshothash, sourceconfighash,
-               reportevidenceversion, reportevidencehash
+               currencycode, currencyminorunitdigits, reportevidenceversion, reportevidencehash
         FROM payroll.payrollcalculationsnapshots
         WHERE payrollcalculationsnapshotid = :snapshot_id
           AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
@@ -562,6 +663,7 @@ async def build_overview(
     return {
         "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
         "period_name": period["periodname"], "period_status": period["status"],
+        "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
         "company_id": int(period["companyid"]), "branch_id": int(period["branchid"]),
         "branch_name": period["branchname"], "finalized_at_utc": period["lockedatutc"],
         "finalized_by_user_id": period["lockedbyuserid"], "financial_summary": financial_summary,
@@ -675,6 +777,7 @@ async def build_finalized_report(
         "metadata": {
             "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
             "period_name": period["periodname"], "period_status": period["status"],
+        "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
             "branch_id": int(period["branchid"]), "report_type": report_type,
             "financials_available": True,
             "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
@@ -889,6 +992,7 @@ async def build_finalized_off_drivers(
         "metadata": {
             "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
             "period_name": period["periodname"], "period_status": period["status"],
+        "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
             "branch_id": int(period["branchid"]),
             "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
             "revision_number": None if snapshot is None else int(snapshot["revisionnumber"]),
@@ -924,6 +1028,7 @@ async def build_finalized_rates_used(
         "metadata": {
             "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
             "period_name": period["periodname"], "period_status": period["status"],
+        "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
             "branch_id": int(period["branchid"]),
             "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
             "revision_number": None if snapshot is None else int(snapshot["revisionnumber"]),
@@ -1105,6 +1210,7 @@ async def build_finalized_audit(
     metadata = {
         "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
         "period_name": period["periodname"], "period_status": period["status"],
+        "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
         "branch_id": int(period["branchid"]),
         "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
         "revision_number": None if snapshot is None else int(snapshot["revisionnumber"]),

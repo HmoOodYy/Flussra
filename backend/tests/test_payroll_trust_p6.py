@@ -326,9 +326,9 @@ async def test_p6_a_direct_insert_blocked_without_guc(p6_env):
             _text("""
                 INSERT INTO payroll.payrollfinallines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype)
+                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                 VALUES
-                    (:cid, :bid, -1, -1, 'HOURS', 1, 100, 'DirectTest')
+                    (:cid, :bid, -1, -1, 'HOURS', 1, 100, 'DirectTest', 'USD', 2)
             """),
             {"cid": cid, "bid": bid},
         )
@@ -444,9 +444,9 @@ async def test_p6_c_direct_insert_into_locked_period_blocked(p6_env):
             _text("""
                 INSERT INTO payroll.payrollfinallines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype)
+                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                 VALUES
-                    (:cid, :bid, :pid, :did, 'HOURS', 1, 999.99, 'FakeInsert')
+                    (:cid, :bid, :pid, :did, 'HOURS', 1, 999.99, 'FakeInsert', 'USD', 2)
             """),
             {"cid": cid, "bid": bid, "pid": pid, "did": drv},
         )

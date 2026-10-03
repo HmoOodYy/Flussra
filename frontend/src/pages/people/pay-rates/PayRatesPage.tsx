@@ -11,6 +11,7 @@ import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
 import { canEditPayRates, canManageSettingsAdmin } from '../../../lib/permissions';
+import { formatMoney, formatRate } from '../../../lib/money';
 import type { DriverSummary, Branch } from '../../../types/core';
 import styles from './PayRatesPage.module.css';
 
@@ -127,9 +128,8 @@ function apiError(err: unknown): string {
   return 'An unexpected error occurred.';
 }
 
-function fmtAmount(amount: string, unitName: string): string {
-  const n = parseFloat(amount);
-  return `$${n.toFixed(4)}/${unitName}`;
+function fmtAmount(amount: string, unitName: string, code: string | null, digits: number | null): string {
+  return `${formatRate(amount, code, digits)}/${unitName}`;
 }
 
 function today(): string {
@@ -936,7 +936,7 @@ export function PayRatesPage() {
                                         }
                                       />
                                     ) : g.current_rate ? (
-                                      fmtAmount(g.current_rate.amount, g.unit_name)
+                                      fmtAmount(g.current_rate.amount, g.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)
                                     ) : (
                                       <span className={styles.missingText}>No rate set</span>
                                     )}
@@ -1061,11 +1061,11 @@ export function PayRatesPage() {
                                 </td>
                                 <td>
                                   {currentAmount
-                                    ? fmtAmount(currentAmount, r.unit_name)
+                                    ? fmtAmount(currentAmount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)
                                     : <span className={styles.missingText}>No current rate</span>}
                                 </td>
                                 <td>
-                                  <strong>{fmtAmount(r.amount, r.unit_name)}</strong>
+                                  <strong>{fmtAmount(r.amount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)}</strong>
                                 </td>
                                 <td>{r.effective_from}</td>
                                 {canEditMatrix && (
@@ -1128,7 +1128,7 @@ export function PayRatesPage() {
                                   <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.notes}</div>
                                 )}
                               </td>
-                              <td>${parseFloat(r.amount).toFixed(4)}/{r.unit_name}</td>
+                              <td>{fmtAmount(r.amount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)}</td>
                               <td>
                                 {r.effective_from}
                                 {r.effective_to ? ` – ${r.effective_to}` : ''}
@@ -1245,7 +1245,7 @@ export function PayRatesPage() {
                               {active && !isEndForm && (
                                 <div className={styles.payRuleRow}>
                                   <span className={styles.payRuleAmount}>
-                                    ${parseFloat(active.amount).toFixed(2)}<span className={styles.payRuleUnit}>/period</span>
+                                    {formatMoney(active.amount, user?.currency_code, user?.currency_minor_unit_digits)}<span className={styles.payRuleUnit}>/period</span>
                                   </span>
                                   <span className={styles.payRuleMeta}>
                                     From {active.effective_from}
@@ -1262,7 +1262,7 @@ export function PayRatesPage() {
                                 <div className={styles.payRuleForm}>
                                   <div className={styles.payRuleFormRow}>
                                     <div className={styles.payRuleFormGroup}>
-                                      <label className={styles.formLabel}>Amount ($/period)</label>
+                                      <label className={styles.formLabel}>Amount per period</label>
                                       <input
                                         className={styles.editInput}
                                         type="number"
@@ -1323,7 +1323,7 @@ export function PayRatesPage() {
                                 <div className={styles.payRuleForm}>
                                   <p className={styles.payRuleFormDesc}>
                                     Ending this rule will close it at the date you specify.
-                                    The current amount is <strong>${parseFloat(active.amount).toFixed(2)}</strong>.
+                                    The current amount is <strong>{formatMoney(active.amount, user?.currency_code, user?.currency_minor_unit_digits)}</strong>.
                                     Historical finalized periods that relied on this rule will not be affected.
                                   </p>
                                   <div className={styles.payRuleFormRow}>
@@ -1381,7 +1381,7 @@ export function PayRatesPage() {
                                     <tbody>
                                       {[...ended, ...voided].map(r => (
                                         <tr key={r.driver_pay_rule_id}>
-                                          <td>${parseFloat(r.amount).toFixed(2)}</td>
+                                          <td>{formatMoney(r.amount, user?.currency_code, user?.currency_minor_unit_digits)}</td>
                                           <td>{r.effective_from}{r.effective_to ? ` – ${r.effective_to}` : ''}</td>
                                           <td>
                                             <span className={r.status === 'Ended' ? styles.badgeSuperseded : styles.badgeVoided}>
@@ -1493,6 +1493,7 @@ export function PayRatesPage() {
  * Used in the Current Rates tab when futureCount > 0.
  */
 function FutureApprovedPanel({ driverId }: { driverId: number }) {
+  const { user } = useAuth();
   const [rows, setRows] = useState<DriverRateRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -1523,7 +1524,7 @@ function FutureApprovedPanel({ driverId }: { driverId: number }) {
         {rows.map((r) => (
           <tr key={r.driver_rate_id}>
             <td><strong>{r.rate_name}</strong></td>
-            <td>${parseFloat(r.amount).toFixed(4)}/{r.unit_name}</td>
+            <td>{fmtAmount(r.amount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)}</td>
             <td>{r.effective_from}</td>
           </tr>
         ))}

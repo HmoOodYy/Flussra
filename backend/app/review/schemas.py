@@ -103,6 +103,8 @@ class ReviewPayrollSnapshotLine(BaseModel):
 
 
 class ReviewPayrollSnapshot(BaseModel):
+    currency_code: str
+    currency_minor_unit_digits: int
     review_item_id: int
     payroll_period_id: int
     revision_number: int

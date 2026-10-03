@@ -65,6 +65,11 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import (
+    frozen_currency,
+    lock_and_get_company_currency,
+    require_matching_snapshot_currency,
+)
 from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
@@ -187,7 +192,8 @@ async def _load_approved_snapshot_packet(
         )
     snapshot = (await db.execute(text("""
         SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-               revisionnumber, snapshothash, totalexpectedpay, createdatutc
+               revisionnumber, snapshothash, totalexpectedpay, createdatutc,
+               currencycode, currencyminorunitdigits
         FROM payroll.payrollcalculationsnapshots
         WHERE payrollcalculationsnapshotid = :snapshot_id
           AND companyid = :cid AND branchid = :bid
@@ -262,6 +268,8 @@ def _snapshot_line_provenance(packet: dict[str, Any], line: Any) -> str:
         "payroll_calculation_snapshot_id": int(snapshot["payrollcalculationsnapshotid"]),
         "revision_number": int(snapshot["revisionnumber"]),
         "snapshot_hash": snapshot["snapshothash"],
+        "currency_code": snapshot["currencycode"],
+        "currency_minor_unit_digits": snapshot["currencyminorunitdigits"],
         "snapshot_line_id": int(line["payrollcalculationsnapshotlineid"]),
         "source_type": line["sourcetype"], "source_id": line["sourceid"],
         "source_evidence": line["sourceevidencejsonb"] or {},
@@ -287,14 +295,16 @@ async def _project_approved_snapshot_final_lines(
                  driverid, workdate, linetype, linescope, quantity, rateamount,
                  finalamount, sourcetype, sourceid, approvedbyuserid, approvedatutc,
                  lockedatutc, notes, payitemid, ratebehavior, ratetypeid,
-                 driverrateid, resolvedrateamount, sourcesnapshot)
+                 driverrateid, resolvedrateamount, sourcesnapshot,
+                 currencycode, currencyminorunitdigits)
             VALUES
                 (:cid, :bid, :period_id, :draft_line_id, :bonus_event_id,
                  :driver_id, :work_date, :line_type, :line_scope, :quantity,
                  :rate_amount, :final_amount, :source_type, :source_id,
                  :approved_by, NOW(), NOW(), :notes, :pay_item_id,
                  :rate_behavior, :rate_type_id, :driver_rate_id,
-                 :resolved_rate_amount, CAST(:source_snapshot AS jsonb))
+                 :resolved_rate_amount, CAST(:source_snapshot AS jsonb),
+                 :currency_code, :currency_minor)
         """), {
             "cid": company_id, "bid": branch_id, "period_id": period_id,
             "draft_line_id": _snapshot_line_draft_line_id(line),
@@ -307,6 +317,8 @@ async def _project_approved_snapshot_final_lines(
             "rate_behavior": rate_behavior, "rate_type_id": line["ratetypeid"],
             "driver_rate_id": line["driverrateid"], "resolved_rate_amount": line["resolvedrateamount"],
             "source_snapshot": _snapshot_line_provenance(packet, line),
+            "currency_code": packet["snapshot"]["currencycode"],
+            "currency_minor": packet["snapshot"]["currencyminorunitdigits"],
         })
 
 
@@ -317,6 +329,7 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
     await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
+    currency = await lock_and_get_company_currency(company_id, db)
     await _acquire_branch_workflow_lock(company_id, period.branch_id, db)
     locked = (await db.execute(text("""
         SELECT payrollperiodid FROM payroll.payrollperiods
@@ -326,6 +339,7 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if locked is None:
         raise HTTPException(status_code=422, detail="Period could not be claimed for finalization — its status may have changed concurrently.")
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db, lock_review_item=True)
+    require_matching_snapshot_currency(currency, packet["snapshot"]["currencycode"], packet["snapshot"]["currencyminorunitdigits"])
     _reconcile_approved_snapshot_packet(packet)
     claimed = await db.execute(text("""
         UPDATE payroll.payrollperiods SET status = 'Locked', lockedbyuserid = :locker, lockedatutc = NOW()
@@ -374,6 +388,7 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
     await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db)
     _reconcile_approved_snapshot_packet(packet)
+    currency = frozen_currency(packet['snapshot']['currencycode'], packet['snapshot']['currencyminorunitdigits'])
     total_rows = {int(row["payrollcalculationdrivertotalid"]): row for row in packet["totals"]}
     lines, adjustments, bonuses = [], [], []
     for row in packet["lines"]:
@@ -402,6 +417,7 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
     ) for row in packet["totals"]]
     non_bonus_non_system = [line for line in packet["lines"] if line["sourcetype"] not in {"BonusEvent", "System"}]
     return FinalizationPreviewResponse(
+        currency_code=currency.code, currency_minor_unit_digits=currency.minor_unit_digits,
         period_id=period_id, period_name=period.period_name, period_status=period.status, branch_id=period.branch_id, branch_name=period.branch_name,
         can_finalize=True, blockers=[], warnings=[], driver_totals=driver_totals, sys_adjustments=adjustments, lines=lines, bonus_events=bonuses, bonus_event_count=len(bonuses),
         total_final_gross=Decimal(str(packet["snapshot"]["totalexpectedpay"])), draft_line_count=len(non_bonus_non_system), sys_adjustment_count=len(adjustments), final_line_count_estimate=len(packet["lines"]), driver_count=len(driver_totals),

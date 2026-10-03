@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 CURRENT_PAYROLL_CALCULATION_VERSION = "current-payroll-v1"
-CURRENT_REPORT_EVIDENCE_VERSION = 1
+CURRENT_REPORT_EVIDENCE_VERSION = 2
 
 _DRIVER_TOTAL_FIELDS = (
     "DriverID",
@@ -114,6 +114,8 @@ _BONUS_EVIDENCE_FIELDS = (
     "PayrollBonusEventID",
     "DriverID",
     "Amount",
+    "CurrencyCodeSnapshot",
+    "CurrencyMinorUnitDigitsSnapshot",
     "Reason",
     "Notes",
     "DataRevision",

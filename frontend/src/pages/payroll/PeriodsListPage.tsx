@@ -3,6 +3,7 @@ import apiClient from '../../lib/apiClient';
 import { getCurrentPayrollHub, resubmitPeriod, submitPeriod, cancelPeriod } from '../../lib/payrollApi';
 import { getReviewItem } from '../../lib/reviewApi';
 import { useAuth } from '../../store/authStore';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports, canPreviewCalculation } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
 import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary, PeriodWorkflowCapabilities, WorkflowAlert } from '../../types/payroll';
@@ -428,6 +429,7 @@ function WorkflowSlot({
   period: CurrentPayrollHubPeriodSlot | null;
   emptyMessage: string;
 }) {
+  const { user } = useAuth();
   return (
     <div className={styles.workflowSlot}>
       <span className={styles.workflowSlotLabel}>{title}</span>
@@ -445,7 +447,7 @@ function WorkflowSlot({
           </div>
           {period.financials_available && period.financial_summary ? (
             <div className={styles.workflowFinancials}>
-              <span>Expected pay <strong>{formatMoney(period.financial_summary.total_expected_pay)}</strong></span>
+              <span>Expected pay <strong>{formatMoney(period.financial_summary.total_expected_pay, user?.currency_code, user?.currency_minor_unit_digits)}</strong></span>
               {period.financial_summary.has_blockers && (
                 <span className={styles.workflowAlert}>Calculation blocked</span>
               )}
@@ -461,11 +463,8 @@ function WorkflowSlot({
   );
 }
 
-function formatMoney(value: string): string {
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
-    : value;
+function formatMoney(value: string, code?: string | null, digits?: number | null): string {
+  return formatCurrencyMoney(value, code, digits);
 }
 
 // Maps a backend alert severity to its visual treatment. Severity values

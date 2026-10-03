@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.company_currency import CompanyCurrency
 from app.payroll import report_read_model
 from app.payroll.reporting import ReportAuthorityKind
 from app.payroll.service import (
@@ -247,7 +248,7 @@ async def _seed_submitted_snapshot(
             needs_manager_review=False, blockers=[], lines=lines,
         )], total_expected_pay=Decimal("16") + bonus_total + minimum_adjustment + maximum_adjustment,
     )
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=1, user_id=1, packet=packet, db=direct_db, context="Submit",
     )
     review_id = (await direct_db.execute(text("""
@@ -295,8 +296,8 @@ async def _seed_legacy_snapshot(direct_db, branch_id: int, driver_id: int) -> tu
     snapshot_id = (await direct_db.execute(text("""
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
-        VALUES (1, :branch_id, :period_id, 1, 'legacy-cp5c', :source_hash, :snapshot_hash, 1, 16.0000)
+             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
+        VALUES (1, :branch_id, :period_id, 1, 'legacy-cp5c', :source_hash, :snapshot_hash, 1, 16.0000, 'USD', 2)
         RETURNING payrollcalculationsnapshotid
     """), {"branch_id": branch_id, "period_id": period_id,
            "source_hash": "0" * 64, "snapshot_hash": "1" * 64})).scalar_one()
@@ -419,6 +420,7 @@ async def test_prepared_reports_are_operational_only_without_live_financial_buil
     monkeypatch.setattr(report_read_model, "_pay_item_columns", _columns)
     monkeypatch.setattr(report_read_model, "_operational_rows", _operational)
     monkeypatch.setattr(report_read_model, "_financial_packet", financial)
+    monkeypatch.setattr(report_read_model, "get_company_currency", lambda *_: _async(None))
 
     drivers = await report_read_model.build_report(
         report_type="drivers", period_id=9, company_id=1, user_id=1, db=None,
@@ -438,6 +440,7 @@ async def test_frozen_report_uses_the_rp1_selected_snapshot_and_immutable_eviden
     authority = SimpleNamespace(
         authority_kind=ReportAuthorityKind.APPROVED_SNAPSHOT,
         snapshot_id=88, snapshot_hash="a" * 64, revision_number=3,
+        currency_code="USD", currency_minor_unit_digits=2,
     )
     totals = {7: {"daily_pay": Decimal("16"), "status_pay": Decimal("0"),
                   "period_pay": Decimal("0"), "minimum_adjustment": Decimal("0"),
@@ -816,7 +819,7 @@ async def test_zero_evidence_snapshot_is_available_and_empty_over_http(
     assert payload["metadata"]["authority_kind"] == "SUBMITTED_SNAPSHOT"
     assert payload["metadata"]["snapshot_id"] == snapshot_id
     assert payload["metadata"]["report_evidence_available"] is True
-    assert payload["metadata"]["report_evidence_version"] == 1
+    assert payload["metadata"]["report_evidence_version"] == 2
     assert payload["metadata"]["report_evidence_hash"]
     assert payload["drivers"][0]["work"]["status_entries"] == []
     assert payload["drivers"][0]["bonus_events"] == []
@@ -1295,12 +1298,12 @@ async def test_locked_and_archived_status_lines_classified_separately_from_pay_i
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollfinallines
             (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc)
+             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES
             (1, :branch_id, :period_id, :driver_id, '2097-01-01', 'HOURS', 'Daily',
-             :hours_id, 2, 20.0000, 'DraftLine', 1, NOW(), NOW()),
+             :hours_id, 2, 20.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2),
             (1, :branch_id, :period_id, :driver_id, '2097-01-02', 'STATUS_PAY', 'Daily',
-             NULL, 1, 5.0000, 'StatusEntryState', 1, NOW(), NOW())
+             NULL, 1, 5.0000, 'StatusEntryState', 1, NOW(), NOW(), 'USD', 2)
     """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": driver_id, "hours_id": hours_id})
     await direct_db.commit()
     for name in ("drivers", "period-pay", "mixed"):

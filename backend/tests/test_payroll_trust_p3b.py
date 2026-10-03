@@ -636,12 +636,12 @@ class TestH_PreMigrationRowsTolerated:
                     (companyid, branchid, payrollperiodid, draftlineid, driverid,
                      workdate, linetype, linescope, quantity, rateamount, finalamount,
                      sourcetype, approvedbyuserid, approvedatutc, lockedatutc, notes,
-                     payitemid, ratetypeid, driverrateid, resolvedrateamount, ratebehavior)
+                     payitemid, ratetypeid, driverrateid, resolvedrateamount, ratebehavior, CurrencyCode, CurrencyMinorUnitDigits)
                 VALUES
                     (:cid, :bid, :pid, NULL, :did,
                      :wdate, 'HOURS', 'Daily', 1, NULL, 18.0000,
                      'Manual', 1, NOW(), NOW(), 'pre-migration synthetic row',
-                     NULL, NULL, NULL, NULL, NULL)
+                     NULL, NULL, NULL, NULL, NULL, 'USD', 2)
             """),
             {"cid": cid, "bid": br, "pid": pid, "did": drv,
              "wdate": _date.fromisoformat(H_WORK)},

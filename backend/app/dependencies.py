@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator
 
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.auth.security import decode_token
 
@@ -20,6 +20,13 @@ _bearer = HTTPBearer()
 # ---------------------------------------------------------------------------
 # Database connection dependency
 # ---------------------------------------------------------------------------
+
+def get_engine(request: Request) -> AsyncEngine:
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        raise RuntimeError("Database engine is not available outside the application lifespan.")
+    return engine
+
 
 async def get_db(request: Request) -> AsyncGenerator[AsyncConnection, None]:
     """

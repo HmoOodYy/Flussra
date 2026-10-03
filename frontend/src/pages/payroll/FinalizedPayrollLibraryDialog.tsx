@@ -15,6 +15,7 @@ import type {
 import { buildPeriodPayTable } from './periodPayTable';
 import { PeriodPayMatrix } from './PeriodPayMatrix';
 import styles from './FinalizedPayrollLibraryDialog.module.css';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
 const REPORT_TABS: readonly { view: FinalizedReportView; label: string }[] = [
   { view: 'drivers', label: 'Drivers' },
@@ -46,12 +47,9 @@ function errorDetail(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function formatMoney(value: unknown): string {
+function formatMoney(value: unknown, code?: string | null, digits?: number | null): string {
   if (value == null) return 'Unavailable';
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
-    : String(value);
+  return formatCurrencyMoney(typeof value === 'number' || typeof value === 'string' ? value : String(value), code, digits);
 }
 
 function formatValue(value: unknown): string {
@@ -106,10 +104,14 @@ function Dictionary({
   title,
   values,
   money = false,
+  code,
+  digits,
 }: {
   title: string;
   values: Record<string, string> | null;
   money?: boolean;
+  code?: string | null;
+  digits?: number | null;
 }) {
   if (values == null) {
     return <div className={styles.dictionary}><h4>{title}</h4><StateMessage>Unavailable from finalized history.</StateMessage></div>;
@@ -121,7 +123,7 @@ function Dictionary({
       {entries.length === 0 ? <StateMessage>No values are available.</StateMessage> : (
         <dl>
           {entries.map(([key, value]) => (
-            <div key={key}><dt>{key}</dt><dd>{money ? formatMoney(value) : formatValue(value)}</dd></div>
+            <div key={key}><dt>{key}</dt><dd>{money ? formatMoney(value, code, digits) : formatValue(value)}</dd></div>
           ))}
         </dl>
       )}
@@ -165,11 +167,15 @@ function RecordTable({
   columns,
   emptyText,
   moneyKeys = [],
+  code,
+  digits,
 }: {
   rows: Record<string, unknown>[];
   columns: readonly { key: string; label: string }[];
   emptyText: string;
   moneyKeys?: readonly string[];
+  code?: string | null;
+  digits?: number | null;
 }) {
   if (rows.length === 0) return <StateMessage>{emptyText}</StateMessage>;
   return (
@@ -182,7 +188,7 @@ function RecordTable({
               {columns.map((column) => {
                 const value = row[column.key];
                 const isMoney = moneyKeys.includes(column.key);
-                return <td key={column.key} className={isMoney ? styles.numeric : undefined}>{isMoney ? formatMoney(value) : formatValue(value)}</td>;
+                return <td key={column.key} className={isMoney ? styles.numeric : undefined}>{isMoney ? formatMoney(value, code, digits) : formatValue(value)}</td>;
               })}
             </tr>
           ))}
@@ -197,11 +203,15 @@ function DriverReport({
   showWork,
   showPay,
   evidenceMessage,
+  code,
+  digits,
 }: {
   driver: ReportDriver;
   showWork: boolean;
   showPay: boolean;
   evidenceMessage: string;
+  code: string;
+  digits: number;
 }) {
   return (
     <article className={styles.driverCard}>
@@ -232,10 +242,10 @@ function DriverReport({
                   ['Maximum adjustment', driver.pay.maximum_adjustment],
                   ['Bonus total', driver.pay.bonus_total],
                   ['Total pay', driver.pay.total_pay],
-                ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{formatMoney(value)}</dd></div>)}
+                ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{formatMoney(value, code, digits)}</dd></div>)}
               </dl>
               <h5>Financial lines</h5>
-              <RecordTable rows={driver.pay.financial_lines} columns={FINANCIAL_COLUMNS} moneyKeys={['resolved_rate_amount', 'calculated_amount']} emptyText="No financial lines are available." />
+              <RecordTable rows={driver.pay.financial_lines} columns={FINANCIAL_COLUMNS} moneyKeys={['resolved_rate_amount', 'calculated_amount']} code={code} digits={digits} emptyText="No financial lines are available." />
             </>
           )}
         </section>
@@ -243,18 +253,19 @@ function DriverReport({
       {showPay && (
         <section className={styles.subsection}>
           <h4>Bonus evidence</h4>
-          <RecordTable rows={driver.bonus_events} columns={BONUS_COLUMNS} moneyKeys={['amount']} emptyText={evidenceMessage} />
+          <RecordTable rows={driver.bonus_events} columns={BONUS_COLUMNS} moneyKeys={['amount']} code={code} digits={digits} emptyText={evidenceMessage} />
         </section>
       )}
     </article>
   );
 }
 
-function periodPayCell(value: string | null): string {
-  return value == null ? '—' : formatMoney(value);
+function periodPayCell(value: string | null, code: string, digits: number): string {
+  return value == null ? '—' : formatMoney(value, code, digits);
 }
 
 function ReportBody({ report, view }: { report: FinalizedCalculationReportResponse; view: FinalizedReportView }) {
+  const { currency_code: code, currency_minor_unit_digits: digits } = report.metadata;
   const showWork = view === 'drivers' || view === 'period-work' || view === 'mixed';
   const showPay = view === 'drivers' || view === 'period-pay' || view === 'mixed';
   const evidenceMessage = availabilityMessage(
@@ -280,7 +291,7 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
           <h3>Period Pay</h3>
           <PeriodPayMatrix
             table={buildPeriodPayTable(report.pay_item_columns, report.drivers, report.pay_item_totals, report.pay_totals)}
-            formatCell={periodPayCell}
+            formatCell={(value) => periodPayCell(value, code, digits)}
             emptyState={<StateMessage>No driver records are available.</StateMessage>}
           />
         </section>
@@ -288,7 +299,7 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
         <>
           <section className={styles.totals}>
             {showWork && <Dictionary title="Work totals" values={report.work_totals} />}
-            {showPay && <Dictionary title="Pay totals" values={report.pay_totals} money />}
+            {showPay && <Dictionary title="Pay totals" values={report.pay_totals} money code={code} digits={digits} />}
           </section>
           {report.columns.length > 0 && (
             <section className={styles.columns}>
@@ -300,7 +311,7 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
             <h3>Drivers</h3>
             {report.drivers.length === 0 ? <StateMessage>No driver records are available.</StateMessage> : (
               <div className={styles.driverList}>
-                {report.drivers.map((driver) => <DriverReport key={driver.driver_id} driver={driver} showWork={showWork} showPay={showPay} evidenceMessage={evidenceMessage} />)}
+                {report.drivers.map((driver) => <DriverReport key={driver.driver_id} driver={driver} showWork={showWork} showPay={showPay} evidenceMessage={evidenceMessage} code={code} digits={digits} />)}
               </div>
             )}
           </section>
@@ -446,7 +457,7 @@ function RateDefinitionTable({ response }: { response: FinalizedRatesUsedRespons
             const payItem = definition.pay_item_label || definition.pay_item_code || (definition.pay_item_id == null ? 'Not provided' : `PayItem #${definition.pay_item_id}`);
             const rateType = definition.rate_type_name || definition.rate_type_code;
             const rateDetails = [rateType, definition.unit_name, definition.rate_behavior, definition.rate_status].filter(Boolean).join(' · ');
-            const ruleDetails = [definition.rule_type, definition.rule_amount == null ? null : `Amount ${formatMoney(definition.rule_amount)}`, definition.block_size == null ? null : `Block ${definition.block_size}`, definition.rounding_rule, definition.rule_status].filter(Boolean).join(' · ');
+            const ruleDetails = [definition.rule_type, definition.rule_amount == null ? null : `Amount ${formatMoney(definition.rule_amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}`, definition.block_size == null ? null : `Block ${definition.block_size}`, definition.rounding_rule, definition.rule_status].filter(Boolean).join(' · ');
             const effective = definition.effective_from || definition.effective_to
               ? `${definition.effective_from ?? 'Open'} to ${definition.effective_to ?? 'Open'}`
               : 'Not provided';
@@ -455,7 +466,7 @@ function RateDefinitionTable({ response }: { response: FinalizedRatesUsedRespons
                 <td>{driver}<small>{definition.driver_code ?? `ID ${definition.driver_id}`}</small></td>
                 <td>{payItem}<small>{definition.pay_item_id == null ? 'ID not provided' : `ID ${definition.pay_item_id}`}</small></td>
                 <td>{rateDefinitionLabel(definition)}<small>{definition.source_type}</small></td>
-                <td>{definition.rate_amount == null ? 'Not provided' : formatMoney(definition.rate_amount)}<small>{rateDetails || 'Details not provided'}</small></td>
+                <td>{definition.rate_amount == null ? 'Not provided' : formatMoney(definition.rate_amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}<small>{rateDetails || 'Details not provided'}</small></td>
                 <td>{ruleDetails || 'Not provided'}</td>
                 <td>{effective}</td>
                 <td className={styles.numeric}>{definition.line_use_count}<small>{definition.snapshot_line_ids.length === 0 ? 'No line references' : `${definition.snapshot_line_ids.length} snapshot line${definition.snapshot_line_ids.length === 1 ? '' : 's'}`}</small></td>
@@ -478,7 +489,7 @@ function BonusEvidenceTable({ response }: { response: FinalizedRatesUsedResponse
           {response.bonus_events.map((event) => (
             <tr key={event.bonus_event_id}>
               <td>{event.driver_name || `Driver #${event.driver_id}`}<small>{event.driver_code ?? `ID ${event.driver_id}`}</small></td>
-              <td className={styles.numeric}>{formatMoney(event.amount)}</td>
+              <td className={styles.numeric}>{formatMoney(event.amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}</td>
               <td>{event.reason ?? 'Not provided'}</td>
               <td>{event.notes ?? 'Not provided'}</td>
               <td className={styles.numeric}>{event.data_revision}</td>
@@ -789,7 +800,7 @@ function OverviewBody({ overview }: { overview: FinalizedOverviewResponse }) {
         <span className={styles.finalizedPill}>{overview.period_status}</span>
       </div>
       <div className={styles.kpiGrid}>
-        <div><strong>{formatMoney(summary.total_pay)}</strong><span>Total pay</span></div>
+        <div><strong>{formatMoney(summary.total_pay, overview.currency_code, overview.currency_minor_unit_digits)}</strong><span>Total pay</span></div>
         <div><strong>{summary.driver_count}</strong><span>Drivers</span></div>
         <div><strong>{summary.final_line_count}</strong><span>Final lines</span></div>
         <div><strong>{overview.finalized_at_utc ? new Date(overview.finalized_at_utc).toLocaleString() : 'Not provided'}</strong><span>Finalized</span></div>

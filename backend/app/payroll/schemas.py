@@ -245,6 +245,8 @@ class DraftLineUpdate(BaseModel):
 class FinalLineSummary(BaseModel):
     """One locked payroll line as written to PayrollFinalLines."""
     final_line_id: int
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     branch_id: int
     driver_id: int
@@ -1239,6 +1241,8 @@ class FinalizationPreviewDriverTotal(BaseModel):
 
 class FinalizationPreviewResponse(BaseModel):
     """Full read-only preview of what finalize_period would do."""
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     period_name: str
     period_status: str
@@ -1312,6 +1316,8 @@ class CalculationPreviewResponse(BaseModel):
     period, calculated live from current effective source/config. Never a
     submitted snapshot (see CP-4C+ for the future immutable-snapshot read).
     """
+    currency_code: str | None
+    currency_minor_unit_digits: int | None
     payroll_period_id: int
     company_id: int
     branch_id: int
@@ -1527,6 +1533,8 @@ class CurrentPayrollHubResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ReportMetadata(BaseModel):
+    currency_code: str | None
+    currency_minor_unit_digits: int | None
     period_id: int
     period_code: str
     period_name: str
@@ -1640,6 +1648,8 @@ class FinalizedSnapshotProvenance(BaseModel):
 class FinalizedPeriodListItem(BaseModel):
     """Minimal navigation item for the ledger-owned finalized-period list."""
 
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     period_code: str
     period_name: str
@@ -1654,6 +1664,8 @@ class FinalizedPeriodListItem(BaseModel):
 
 
 class FinalizedOverviewResponse(BaseModel):
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     period_code: str
     period_name: str
@@ -1670,6 +1682,8 @@ class FinalizedOverviewResponse(BaseModel):
 
 
 class FinalizedReportMetadata(BaseModel):
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     period_code: str
     period_name: str
@@ -1779,6 +1793,8 @@ class FinalizedBonusEventEvidence(BaseModel):
 
 
 class FinalizedRatesUsedMetadata(BaseModel):
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     period_code: str
     period_name: str
@@ -1853,6 +1869,8 @@ class FinalizedAuditRevisionGroup(BaseModel):
 
 
 class FinalizedAuditMetadata(BaseModel):
+    currency_code: str
+    currency_minor_unit_digits: int
     period_id: int
     period_code: str
     period_name: str

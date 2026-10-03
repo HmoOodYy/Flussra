@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import CompanyCurrency
+
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, default=str, separators=(",", ":"), sort_keys=True)
@@ -164,6 +166,7 @@ async def capture_snapshot_used_rate_definitions(
     branch_id: int,
     period_id: int,
     snapshot_line_rows: Iterable[dict[str, Any]],
+    currency: CompanyCurrency,
     db: AsyncConnection,
 ) -> dict[int, int]:
     """Persist only the rate/rule definitions actually referenced by snapshot lines.
@@ -274,6 +277,8 @@ async def capture_snapshot_used_rate_definitions(
                 "EffectiveTo": rule["effectiveto"],
                 "RuleStatus": rule["status"],
             }
+        descriptor["CurrencyCodeSnapshot"] = currency.code
+        descriptor["CurrencyMinorUnitDigitsSnapshot"] = currency.minor_unit_digits
         fingerprint = _definition_fingerprint(descriptor)
         definition_id = definition_ids.get(fingerprint)
         if definition_id is None:
@@ -286,14 +291,16 @@ async def capture_snapshot_used_rate_definitions(
                      unitnamesnapshot, rateamountsnapshot, effectivefromsnapshot,
                      effectivetosnapshot, ratestatussnapshot, blocksizesnapshot,
                      roundingrulesnapshot, ruletypesnapshot, ruleamountsnapshot,
-                     rulestatussnapshot)
+                     rulestatussnapshot, currencycodesnapshot,
+                     currencyminorunitdigitssnapshot)
                 VALUES
                     (:snapshot_id, :company_id, :branch_id, :period_id,
                      :driver_id, :fingerprint, :evidence_kind, :source_type,
                      :pay_item_id, :rate_type_id, :driver_rate_id, :driver_pay_rule_id,
                      :rate_behavior, :rate_type_code, :rate_type_name, :unit_name,
                      :rate_amount, :effective_from, :effective_to, :rate_status,
-                     :block_size, :rounding_rule, :rule_type, :rule_amount, :rule_status)
+                     :block_size, :rounding_rule, :rule_type, :rule_amount, :rule_status,
+                     :currency_code, :currency_minor)
                 RETURNING payrollcalculationsnapshotusedratedefinitionid
             """), {
                 "snapshot_id": snapshot_id,
@@ -321,6 +328,8 @@ async def capture_snapshot_used_rate_definitions(
                 "rule_type": descriptor.get("RuleType"),
                 "rule_amount": descriptor.get("RuleAmount"),
                 "rule_status": descriptor.get("RuleStatus"),
+                "currency_code": currency.code,
+                "currency_minor": currency.minor_unit_digits,
             })
             definition_id = int(result.scalar_one())
             definition_ids[fingerprint] = definition_id

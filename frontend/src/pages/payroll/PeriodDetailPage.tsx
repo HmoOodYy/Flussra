@@ -385,7 +385,9 @@ export function PeriodDetailPage() {
         </div>
         <div className={styles.summaryItem}>
           <span className={styles.summaryLabel}>Gross:</span>
-          <span className={styles.summaryValue}>{formatGrossTotal(summary.gross_total)}</span>
+          <span className={styles.summaryValue}>{summary.financials_available
+            ? formatGrossTotal(summary.gross_total, user?.currency_code, user?.currency_minor_unit_digits)
+            : 'Not available'}</span>
         </div>
         {summary.needs_attention > 0 && (
           <div className={styles.summaryItem}>

@@ -138,8 +138,8 @@ _TEST_PASSWORD_HASH = "$2b$12$placeholderreplacedbyconftest"
 # (%(name)s) only appears in the one statement that actually uses it.
 _SEED_STMTS = [
     """
-    INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, timezonename)
-    VALUES ('DEMO', 'Demo Logistics', 'Demo Logistics Ltd', 'Active', FALSE, 'Africa/Cairo')
+    INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, timezonename, currencycode)
+    VALUES ('DEMO', 'Demo Logistics', 'Demo Logistics Ltd', 'Active', FALSE, 'Africa/Cairo', 'USD')
     """,
     """
     INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
@@ -417,7 +417,7 @@ async def test_app(test_engine) -> FastAPI:
     from app.main import create_app
 
     real_app = create_app()
-
+    real_app.state.engine = test_engine
 
     async def _override_get_db() -> AsyncGenerator[AsyncConnection, None]:
         async with test_engine.begin() as conn:

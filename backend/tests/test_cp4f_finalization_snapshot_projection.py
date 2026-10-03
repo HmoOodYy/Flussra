@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.payroll.finalization as payroll_finalization
 import app.payroll.service as payroll_service
+from app.company_currency import CompanyCurrency
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
@@ -166,8 +167,11 @@ async def _period_for_capture(db):
     )
 
 
-async def _approved_snapshot(db, packet: _LiveCalculationPacket | None = None) -> tuple[int, int]:
-    snapshot_id = await _capture_calculation_snapshot(
+async def _approved_snapshot(
+    db, packet: _LiveCalculationPacket | None = None,
+    currency: CompanyCurrency = CompanyCurrency("USD", 2),
+) -> tuple[int, int]:
+    snapshot_id = await _capture_calculation_snapshot(currency=currency,
         period=await _period_for_capture(db), company_id=db.company_id, user_id=db.user_id,
         packet=_packet(db) if packet is None else packet, db=db.conn, context="Submit",
     )
@@ -202,20 +206,66 @@ async def test_finalize_projects_exact_approved_snapshot_and_audits_provenance(c
     result = await finalize_period(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
     assert result.status == "Locked"
     final = (await cp4f_db.conn.execute(text("""
-        SELECT draftlineid, finalamount, sourcetype, sourceid, sourcesnapshot
+        SELECT draftlineid, finalamount, sourcetype, sourceid, sourcesnapshot,
+               currencycode, currencyminorunitdigits
         FROM payroll.payrollfinallines WHERE payrollperiodid = :period_id
     """), {"period_id": cp4f_db.period_id})).mappings().one()
     assert final["draftlineid"] == cp4f_db.line_id
     assert final["finalamount"] == Decimal("25.0000")
     assert final["sourcetype"] == "DraftLine"
+    assert (final["currencycode"], final["currencyminorunitdigits"]) == ("USD", 2)
     provenance = final["sourcesnapshot"]
     assert provenance["payroll_calculation_snapshot_id"] == snapshot_id
+    assert (provenance["currency_code"], provenance["currency_minor_unit_digits"]) == ("USD", 2)
     audit = (await cp4f_db.conn.execute(text("""
         SELECT newvaluejson FROM audit.auditlog
         WHERE actioncode = 'PAYROLL_FINALIZED' AND entityid = :period_id
         ORDER BY auditid DESC LIMIT 1
     """), {"period_id": str(cp4f_db.period_id)})).scalar_one()
     assert json.loads(audit)["approved_review_item_id"] == review_id
+
+
+@pytest.mark.asyncio
+async def test_finalization_fails_closed_on_frozen_currency_mismatch(cp4f_db, no_access_checks):
+    await _approved_snapshot(cp4f_db, currency=CompanyCurrency("KWD", 3))
+    with pytest.raises(HTTPException, match="SNAPSHOT_CURRENCY_MISMATCH"):
+        await finalize_period(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
+    assert (await cp4f_db.conn.execute(text(
+        "SELECT status FROM payroll.payrollperiods WHERE payrollperiodid=:id"
+    ), {"id": cp4f_db.period_id})).scalar_one() == "Approved"
+    assert (await cp4f_db.conn.execute(text(
+        "SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid=:id"
+    ), {"id": cp4f_db.period_id})).scalar_one() == 0
+
+
+@pytest.mark.asyncio
+async def test_finalization_never_repairs_missing_frozen_currency_from_company(
+    cp4f_db, no_access_checks, monkeypatch,
+):
+    await _approved_snapshot(cp4f_db)
+    original_loader = payroll_finalization._load_approved_snapshot_packet
+
+    async def missing_currency(**kwargs):
+        packet = await original_loader(**kwargs)
+        packet["snapshot"] = {
+            **dict(packet["snapshot"]),
+            "currencycode": None,
+            "currencyminorunitdigits": None,
+        }
+        return packet
+
+    monkeypatch.setattr(payroll_finalization, "_load_approved_snapshot_packet", missing_currency)
+    with pytest.raises(HTTPException, match="SNAPSHOT_CURRENCY_REQUIRED"):
+        await finalize_period(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
+    assert (await cp4f_db.conn.execute(text(
+        "SELECT status FROM payroll.payrollperiods WHERE payrollperiodid=:id"
+    ), {"id": cp4f_db.period_id})).scalar_one() == "Approved"
+    assert (await cp4f_db.conn.execute(text(
+        "SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid=:id"
+    ), {"id": cp4f_db.period_id})).scalar_one() == 0
+    assert (await cp4f_db.conn.execute(text(
+        "SELECT currencycode FROM core.companies WHERE companyid=:cid"
+    ), {"cid": cp4f_db.company_id})).scalar_one() == "USD"
 
 
 @pytest.mark.asyncio
@@ -309,7 +359,7 @@ async def test_finalization_refuses_duplicate_approved_review_authority(cp4f_db,
 
 @pytest.mark.asyncio
 async def test_finalization_rejects_review_item_linked_to_a_snapshot_for_another_period(cp4f_db, no_access_checks):
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_capture(cp4f_db), company_id=cp4f_db.company_id,
         user_id=cp4f_db.user_id, packet=_packet(cp4f_db), db=cp4f_db.conn, context="Submit",
     )

@@ -30,6 +30,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import (
+    company_has_durable_monetary_state,
+    currency_error,
+    lock_and_get_company_currency,
+)
 from app.core.service import (
     _build_in_clause,
     _check_branch_access,
@@ -70,6 +75,7 @@ from app.settings.schemas import (
     StatusKeyUpdate,
     StatusRateColumn,
     StatusRateColumnCreate,
+    SupportedCurrency,
 )
 
 if TYPE_CHECKING:
@@ -466,11 +472,17 @@ async def get_company_profile(
                 c.timezonename,
                 c.notes,
                 c.allowselfapproval,
+                c.currencycode,
+                sc.currencyname,
+                sc.minorunitdigits AS currency_minor_unit_digits,
+                core.fn_company_has_durable_monetary_state(c.companyid) AS has_monetary_state,
                 c.createdatutc,
                 c.updatedatutc,
                 b.branchid   AS default_branch_id,
                 b.branchname AS default_branch_name
             FROM  core.companies c
+            LEFT  JOIN core.supportedcurrencies sc
+                   ON sc.currencycode = c.currencycode
             LEFT  JOIN core.branches b
                    ON  b.companyid = c.companyid
                    AND b.isdefault = TRUE
@@ -487,6 +499,13 @@ async def get_company_profile(
             detail="Company not found.",
         )
 
+    if row["currencycode"] is None and row["has_monetary_state"]:
+        raise currency_error(
+            "COMPANY_CURRENCY_INVARIANT_VIOLATION",
+            "Unconfigured Company has durable monetary state; reset/reseed is required.",
+            409,
+        )
+
     return CompanyProfile(
         company_id=row["companyid"],
         company_code=row["companycode"],
@@ -497,6 +516,10 @@ async def get_company_profile(
         timezone_name=row["timezonename"],
         notes=row.get("notes"),
         allow_self_approval=bool(row.get("allowselfapproval", True)),
+        currency_code=row["currencycode"],
+        currency_name=row["currencyname"],
+        currency_minor_unit_digits=row["currency_minor_unit_digits"],
+        currency_change_locked=bool(row["currencycode"] and row["has_monetary_state"]),
         default_branch_id=row.get("default_branch_id"),
         default_branch_name=row.get("default_branch_name"),
         created_at_utc=row["createdatutc"],
@@ -518,8 +541,37 @@ async def update_company_profile(
     """
     await _ensure_company_admin(company_id, user_id, db)
 
-    # Read current values for the audit snapshot.
+    # Serialize with all monetary writers before reading currency and state.
+    await lock_and_get_company_currency(company_id, db, required=False)
     current = await get_company_profile(company_id, user_id, db)
+    currency_changed = "currency_code" in data.model_fields_set
+    new_currency = current.currency_code
+    if currency_changed:
+        if data.currency_code is None:
+            raise currency_error(
+                "COMPANY_CURRENCY_REQUIRED", "Company currency cannot be cleared."
+            )
+        new_currency = data.currency_code
+        supported = (await db.execute(
+            text("SELECT 1 FROM core.supportedcurrencies WHERE currencycode = :code"),
+            {"code": new_currency},
+        )).scalar_one_or_none()
+        if supported is None:
+            raise currency_error(
+                "UNSUPPORTED_CURRENCY_CODE",
+                f"Currency code '{new_currency}' is not supported.",
+            )
+        if new_currency != current.currency_code:
+            if await company_has_durable_monetary_state(company_id, db):
+                raise currency_error(
+                    "COMPANY_CURRENCY_CHANGE_BLOCKED",
+                    "Company currency is locked after the first monetary write.",
+                    409,
+                )
+            await db.execute(
+                text("UPDATE core.companies SET currencycode = :code WHERE companyid = :cid"),
+                {"cid": company_id, "code": new_currency},
+            )
 
     # Preserve existing values when none are supplied in the patch.
     new_tz             = data.timezone_name      if data.timezone_name      is not None else current.timezone_name
@@ -560,6 +612,7 @@ async def update_company_profile(
             "timezone_name":      current.timezone_name,
             "notes":              current.notes,
             "allow_self_approval": current.allow_self_approval,
+            "currency_code": current.currency_code,
         },
         new_value={
             "company_name":       data.company_name,
@@ -567,10 +620,30 @@ async def update_company_profile(
             "timezone_name":      new_tz,
             "notes":              data.notes,
             "allow_self_approval": new_self_approval,
+            "currency_code": new_currency,
         },
     )
 
     return await get_company_profile(company_id, user_id, db)
+
+
+async def list_supported_currencies(
+    company_id: int, user_id: int, db: AsyncConnection
+) -> list[SupportedCurrency]:
+    await _ensure_company_admin(company_id, user_id, db)
+    rows = (await db.execute(text("""
+        SELECT currencycode, currencyname, numericcode, minorunitdigits
+        FROM core.supportedcurrencies ORDER BY currencycode
+    """))).mappings().all()
+    return [
+        SupportedCurrency(
+            currency_code=row["currencycode"],
+            currency_name=row["currencyname"],
+            numeric_code=row["numericcode"].strip(),
+            minor_unit_digits=row["minorunitdigits"],
+        )
+        for row in rows
+    ]
 
 
 async def get_branches(

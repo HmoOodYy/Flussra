@@ -10,10 +10,10 @@ test('formatGrossTotal: null gross_total (Draft/Prepared, CP-2F) -> neutral unav
   assert.ok(!result.includes('0.00'));
 });
 
-test('formatGrossTotal: authoritative gross_total (Open/Returned/Locked) -> renders as currency', () => {
-  assert.equal(formatGrossTotal('1234.56'), '$1234.56');
+test('formatGrossTotal: authoritative gross_total uses the configured company currency', () => {
+  assert.equal(formatGrossTotal('1234.56', 'USD', 2), '$1,234.56');
 });
 
 test('formatGrossTotal: authoritative zero gross_total is a real backend value, not manufactured, and still renders', () => {
-  assert.equal(formatGrossTotal('0.00'), '$0.00');
+  assert.equal(formatGrossTotal('0.00', 'USD', 2), '$0.00');
 });

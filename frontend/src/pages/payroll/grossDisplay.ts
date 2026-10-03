@@ -9,6 +9,8 @@
  * text to show for a value the backend already resolved.
  */
 
+import { formatMoney } from '../../lib/money.ts';
+
 export const GROSS_UNAVAILABLE_MESSAGE = 'Not available';
 
 /**
@@ -17,6 +19,6 @@ export const GROSS_UNAVAILABLE_MESSAGE = 'Not available';
  * current status (Draft) — show a neutral unavailable message instead of a
  * fabricated "$null" or a manufactured "$0.00".
  */
-export function formatGrossTotal(grossTotal: string | null): string {
-  return grossTotal == null ? GROSS_UNAVAILABLE_MESSAGE : `$${grossTotal}`;
+export function formatGrossTotal(grossTotal: string | null, currencyCode?: string | null, minorDigits?: number | null): string {
+  return grossTotal == null ? GROSS_UNAVAILABLE_MESSAGE : formatMoney(grossTotal, currencyCode, minorDigits);
 }

@@ -590,8 +590,8 @@ async def test_termination_rejects_dated_finalized_work_after_date_without_mutat
     ))
     final_line_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollFinalLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType, SourceType, FinalAmount)
-        VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100)
+            (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType, SourceType, FinalAmount, CurrencyCode, CurrencyMinorUnitDigits)
+        VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100, 'USD', 2)
         RETURNING FinalLineID
     """), {
         "branch_id": paytest_branch_id, "period_id": period_id,

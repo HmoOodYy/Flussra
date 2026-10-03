@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.payroll.period_lifecycle as period_lifecycle
 import app.payroll.service as payroll_service
+from app.company_currency import CompanyCurrency
 from app.payroll.schemas import PeriodStatusChange
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
@@ -361,7 +362,7 @@ async def test_workflow_actions_capture_frozen_participants_at_authoritative_tra
 async def test_snapshot_used_rate_rule_evidence_is_used_only_frozen_and_revision_isolated(
     foundation_db,
 ):
-    first_snapshot_id = await _capture_calculation_snapshot(
+    first_snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_snapshot(foundation_db),
         company_id=foundation_db.company_id,
         user_id=foundation_db.user_id,
@@ -400,7 +401,7 @@ async def test_snapshot_used_rate_rule_evidence_is_used_only_frozen_and_revision
         UPDATE payroll.driverrates SET amount = 12.0000
         WHERE driverrateid = :driver_rate_id
     """), {"driver_rate_id": foundation_db.driver_rate_id})
-    second_snapshot_id = await _capture_calculation_snapshot(
+    second_snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_snapshot(foundation_db),
         company_id=foundation_db.company_id,
         user_id=foundation_db.user_id,
@@ -447,7 +448,7 @@ async def test_evidence_schema_seeds_permissions_and_rejects_cross_snapshot_line
         "payroll.payrollcalculationsnapshotusedratedefinitions",
     )
 
-    first_snapshot_id = await _capture_calculation_snapshot(
+    first_snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_snapshot(foundation_db),
         company_id=foundation_db.company_id,
         user_id=foundation_db.user_id,
@@ -455,7 +456,7 @@ async def test_evidence_schema_seeds_permissions_and_rejects_cross_snapshot_line
         db=foundation_db.conn,
         context="Submit",
     )
-    second_snapshot_id = await _capture_calculation_snapshot(
+    second_snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_snapshot(foundation_db),
         company_id=foundation_db.company_id,
         user_id=foundation_db.user_id,

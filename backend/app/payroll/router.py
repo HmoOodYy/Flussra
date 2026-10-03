@@ -9,9 +9,10 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from app.dependencies import get_current_user, get_db
+from app.db.transaction_retry import run_retryable_transaction
+from app.dependencies import get_current_user, get_db, get_engine
 from app.payroll import (
     bonus,
     current_hub,
@@ -93,6 +94,7 @@ router = APIRouter()
 
 TokenDep = Annotated[dict, Depends(get_current_user)]
 DbDep    = Annotated[AsyncConnection, Depends(get_db)]
+EngineDep = Annotated[AsyncEngine, Depends(get_engine)]
 
 
 # ---------------------------------------------------------------------------
@@ -224,15 +226,21 @@ async def change_period_status(
     period_id: int,
     body: PeriodStatusChange,
     token: TokenDep,
-    db: DbDep,
+    engine: EngineDep,
 ) -> PeriodSummary:
-    return await period_lifecycle.change_period_status(
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        period_id=period_id,
-        change=body,
-        db=db,
-    )
+    async def operation(db: AsyncConnection) -> PeriodSummary:
+        return await period_lifecycle.change_period_status(
+            company_id=int(token["cid"]),
+            user_id=int(token["sub"]),
+            period_id=period_id,
+            change=body,
+            db=db,
+        )
+
+    if body.status == "InReview":
+        return await run_retryable_transaction(engine, operation, operation_name="submit")
+    async with engine.begin() as db:
+        return await operation(db)
 
 
 @router.post(
@@ -259,14 +267,17 @@ async def change_period_status(
 async def resubmit_period(
     period_id: int,
     token: TokenDep,
-    db: DbDep,
+    engine: EngineDep,
 ) -> PeriodSummary:
-    return await period_lifecycle.resubmit_period(
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        period_id=period_id,
-        db=db,
-    )
+    async def operation(db: AsyncConnection) -> PeriodSummary:
+        return await period_lifecycle.resubmit_period(
+            company_id=int(token["cid"]),
+            user_id=int(token["sub"]),
+            period_id=period_id,
+            db=db,
+        )
+
+    return await run_retryable_transaction(engine, operation, operation_name="resubmit")
 
 
 # ---------------------------------------------------------------------------

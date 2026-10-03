@@ -63,12 +63,9 @@ from app.payroll.period_creation import (
     _create_period_pay_item_rows,  # noqa: F401
 )
 
-# Compatibility for test_cp4d_submit_snapshot_capture.py (also calls
-# _is_retryable_transaction_failure / _set_submit_transaction_isolation
-# directly as pure-logic helpers), test_cp5c_frozen_report_evidence.py, and
-# test_phase6_immutable_evidence.py.
+# Compatibility for test_cp4d_submit_snapshot_capture.py,
+# test_cp5c_frozen_report_evidence.py, and test_phase6_immutable_evidence.py.
 from app.payroll.period_lifecycle import (
-    _is_retryable_transaction_failure,  # noqa: F401
     _set_submit_transaction_isolation,  # noqa: F401
     change_period_status,  # noqa: F401
     resubmit_period,  # noqa: F401

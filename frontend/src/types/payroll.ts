@@ -404,6 +404,8 @@ export interface SelectedDayOffDriversResponse {
 // ---------------------------------------------------------------------------
 
 export interface FinalLineSummary {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   final_line_id: number;
   period_id: number;
   branch_id: number;
@@ -473,6 +475,8 @@ export interface FinalizationPreviewDriverTotal {
 }
 
 export interface FinalizationPreviewResponse {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   period_id: number;
   period_name: string;
   period_status: string;
@@ -499,6 +503,8 @@ export interface FinalizationPreviewResponse {
 export type CalculationReportView = 'drivers' | 'period-work' | 'period-pay' | 'mixed';
 
 export interface ReportMetadata {
+  currency_code: string | null;
+  currency_minor_unit_digits: number | null;
   period_id: number;
   period_code: string;
   period_name: string;
@@ -600,6 +606,8 @@ export interface FinalizedSnapshotProvenance {
 }
 
 export interface FinalizedPeriodListItem {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   period_id: number;
   period_code: string;
   period_name: string;
@@ -614,6 +622,8 @@ export interface FinalizedPeriodListItem {
 }
 
 export interface FinalizedOverviewResponse {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   period_id: number;
   period_code: string;
   period_name: string;
@@ -630,6 +640,8 @@ export interface FinalizedOverviewResponse {
 }
 
 export interface FinalizedReportMetadata {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   period_id: number;
   period_code: string;
   period_name: string;
@@ -749,6 +761,8 @@ export interface FinalizedBonusEventEvidence {
 }
 
 export interface FinalizedRatesUsedMetadata {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   period_id: number;
   period_code: string;
   period_name: string;
@@ -819,6 +833,8 @@ export interface FinalizedAuditRevisionGroup {
 }
 
 export interface FinalizedAuditMetadata {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   period_id: number;
   period_code: string;
   period_name: string;
@@ -882,6 +898,8 @@ export interface CalculationPreviewDriver {
 }
 
 export interface CalculationPreviewResponse {
+  currency_code: string | null;
+  currency_minor_unit_digits: number | null;
   payroll_period_id: number;
   company_id: number;
   branch_id: number;

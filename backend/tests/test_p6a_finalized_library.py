@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.company_currency import CompanyCurrency
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
@@ -137,7 +138,7 @@ async def _seed_finalized_period(
             blockers=[], lines=[line],
         )],
     )
-    snapshot_id = int(await _capture_calculation_snapshot(
+    snapshot_id = int(await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=1, user_id=1, packet=packet, db=direct_db, context="Submit",
     ))
     review_id = int((await direct_db.execute(text("""
@@ -534,9 +535,9 @@ async def test_legacy_final_lines_keep_money_but_report_evidence_is_unavailable(
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollfinallines
             (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc)
+             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES (1, :branch_id, :period_id, :driver_id, '2077-01-01', 'HOURS', 'Daily',
-                :pay_item_id, 1, 12.0000, 'DraftLine', 1, NOW(), NOW())
+                :pay_item_id, 1, 12.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2)
     """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id,
            "pay_item_id": hours_pay_item_id})
     overview = await session_client.get(f"/payroll/finalized/{period_id}/overview", headers=_auth(auth_token))
@@ -562,6 +563,9 @@ async def test_finalized_period_discovery_returns_only_minimal_locked_archived_i
     test_database_url: str,
 ):
     period_id, _, _, _ = await _seed_finalized_period(
+        direct_db, test_database_url, paytest_branch_id,
+    )
+    second_period_id, _, _, _ = await _seed_finalized_period(
         direct_db, test_database_url, paytest_branch_id,
     )
     await direct_db.execute(text("""
@@ -594,13 +598,16 @@ async def test_finalized_period_discovery_returns_only_minimal_locked_archived_i
     assert response.status_code == 200, response.text
     items = response.json()
     target = next(item for item in items if item["period_id"] == period_id)
+    second_target = next(item for item in items if item["period_id"] == second_period_id)
     assert target["period_status"] == "Archived"
+    assert (target["currency_code"], target["currency_minor_unit_digits"]) == ("USD", 2)
+    assert (second_target["currency_code"], second_target["currency_minor_unit_digits"]) == ("USD", 2)
     assert {item["period_status"] for item in items} <= {"Locked", "Archived"}
     assert not any(item["period_id"] in non_finalized_ids for item in items)
     assert set(target) == {
         "period_id", "period_code", "period_name", "period_status", "period_type",
         "branch_id", "branch_name", "start_date", "end_date", "pay_date",
-        "finalized_at_utc",
+        "finalized_at_utc", "currency_code", "currency_minor_unit_digits",
     }
 
     locked_only = await session_client.get(

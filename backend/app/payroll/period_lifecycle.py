@@ -2,11 +2,9 @@
 Period Lifecycle — the payroll domain's single owner of:
 
   A. Status transition permission mapping (_TRANSITION_PERMISSIONS)
-  B. Retryable-transaction error translation
-     (_is_retryable_transaction_failure, _translate_submit_transaction_failures)
-  C. Period-status audit writing (_PERIOD_AUDIT_REASONS, _write_period_status_audit)
-  D. Submit transaction-isolation setup (_set_submit_transaction_isolation)
-  E. InReview slot protection (_is_inreview_slot_violation,
+  B. Period-status audit writing (_PERIOD_AUDIT_REASONS, _write_period_status_audit)
+  C. Submit transaction-isolation setup (_set_submit_transaction_isolation)
+  D. InReview slot protection (_is_inreview_slot_violation,
      _check_inreview_slot_available)
   F. Submit orchestration (change_period_status)
   G. Resubmission orchestration (resubmit_period)
@@ -23,11 +21,12 @@ never imports app.payroll.service.
 
 This module owns period status transition policy, submit/resubmit
 orchestration, InReview slot protection, submit transaction-isolation
-behavior, retryable-transaction error translation, and period-status audit
-writing. It does NOT own Calculation, Calculation snapshot capture, Status
-Payment implementation, Finalization, Period creation, Day Grid, Draft
-mutation, Review approval behavior, or Drivers Off — those stay with their
-existing owners and are consumed here only through imports.
+behavior, and period-status audit writing. Whole-transaction retry policy
+and SQLSTATE translation are owned by app.db.transaction_retry. It does NOT
+own Calculation, Calculation snapshot capture, Status Payment implementation,
+Finalization, Period creation, Day Grid, Draft mutation, Review approval
+behavior, or Drivers Off — those stay with their existing owners and are
+consumed here only through imports.
 
 The architecture direction is one-way:
 
@@ -65,15 +64,14 @@ friendly pre-check only, not a replacement for that race protection.
 from __future__ import annotations
 
 import json
-from functools import wraps
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import lock_and_get_company_currency
 from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
@@ -111,21 +109,6 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     ("Locked",   "Archived"):   "payroll.finalize",
 }
 
-
-def _translate_submit_transaction_failures(func):
-    """Map retryable PostgreSQL submit/resubmit transaction failures to 409."""
-    @wraps(func)
-    async def wrapped(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except DBAPIError as exc:
-            if _is_retryable_transaction_failure(exc):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Payroll changed concurrently. Refresh and retry the submission.",
-                ) from exc
-            raise
-    return wrapped
 
 _PERIOD_AUDIT_REASONS: dict[str, str] = {
     "PERIOD_STATUS_CHANGED": "Payroll period status changed",
@@ -181,7 +164,6 @@ async def _write_period_status_audit(
 # Status change
 # ---------------------------------------------------------------------------
 
-@_translate_submit_transaction_failures
 async def change_period_status(
     company_id: int,
     user_id: int,
@@ -225,6 +207,7 @@ async def change_period_status(
     # fails — or if the audit write raises — everything rolls back atomically.
     # The period never reaches InReview without a corresponding review item existing.
     if existing.status == "Open" and change.status == "InReview":
+        currency = await lock_and_get_company_currency(company_id, db)
         # CP-1D: Acquire branch advisory lock before touching any workflow rows.
         # Same lock used by period creation (CP-1C) and resubmission — ensures all
         # per-branch workflow mutations are fully serialized.
@@ -331,6 +314,7 @@ async def change_period_status(
             branch_id=existing.branch_id,
             user_id=user_id,
             db=db,
+            currency=currency,
         )
 
         # Auto-refresh: re-compute calculatedamount + needsmanagerreview for all
@@ -343,6 +327,7 @@ async def change_period_status(
             company_id=company_id,
             period_start_date=existing.start_date,
             db=db,
+            currency=currency,
         )
 
         # Guard 1: empty period — refuse to submit a period with no payroll data.
@@ -474,6 +459,7 @@ async def change_period_status(
             user_id=user_id,
             packet=packet,
             db=db,
+            currency=currency,
             context="Submit",
         )
         await capture_workflow_action_evidence(
@@ -682,6 +668,7 @@ async def change_period_status(
                 branch_id=existing.branch_id,
                 user_id=user_id,
                 db=db,
+                currency=currency,
             )
             # CP-2F: refresh daily calculations for Draft-era source lines now that
             # the period is Open and approved rates can be looked up.
@@ -693,6 +680,7 @@ async def change_period_status(
                 company_id=company_id,
                 period_start_date=_draft_period_summary.start_date,
                 db=db,
+                currency=currency,
             )
     else:
         # CP-0B: All non-Open→InReview transitions use an expected-status predicate
@@ -804,7 +792,6 @@ async def _check_inreview_slot_available(
 # CP-1A: Resubmission
 # ===========================================================================
 
-@_translate_submit_transaction_failures
 async def resubmit_period(
     company_id: int,
     user_id: int,
@@ -851,6 +838,7 @@ async def resubmit_period(
 
     # Permission gate: resubmission requires payroll.entry.
     await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
+    currency = await lock_and_get_company_currency(company_id, db)
 
     # ── Step 3: acquire branch advisory lock, then period row lock ───────── #
     # CP-1D: branch lock must come first (same order as submit and creation) to
@@ -890,6 +878,7 @@ async def resubmit_period(
         branch_id=existing.branch_id,
         user_id=user_id,
         db=db,
+        currency=currency,
     )
 
     # Refresh draft calculations so the guards see current rates.
@@ -898,6 +887,7 @@ async def resubmit_period(
         company_id=company_id,
         period_start_date=existing.start_date,
         db=db,
+        currency=currency,
     )
 
     # Guard 1: empty period.
@@ -1024,6 +1014,7 @@ async def resubmit_period(
         user_id=user_id,
         packet=packet,
         db=db,
+        currency=currency,
         context="Resubmit",
     )
     await capture_workflow_action_evidence(
@@ -1151,11 +1142,6 @@ async def resubmit_period(
     )
 
     return await get_period_by_id(company_id, user_id, period_id, db)
-
-
-def _is_retryable_transaction_failure(exc: DBAPIError) -> bool:
-    """PostgreSQL transaction failures which are safe for the client to retry."""
-    return getattr(exc.orig, "sqlstate", None) in {"40001", "40P01"}
 
 
 async def _set_submit_transaction_isolation(db: AsyncConnection) -> None:

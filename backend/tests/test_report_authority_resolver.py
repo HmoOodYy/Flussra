@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.company_currency import CompanyCurrency
 from app.payroll.reporting import (
     ReportAuthorityKind,
     resolve_report_financial_authority,
@@ -132,7 +133,7 @@ async def _snapshot(db, period_id: int, amount: Decimal) -> int:
         payroll_period_id=period_id, company_id=db.company_id, branch_id=db.branch_id,
         status="Open", blockers=[], warnings=[], drivers=[total], total_expected_pay=amount,
     )
-    return await _capture_calculation_snapshot(
+    return await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=SimpleNamespace(
             payroll_period_id=period["payrollperiodid"], branch_id=period["branchid"],
             period_code=period["periodcode"], period_type=period["periodtype"],

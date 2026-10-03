@@ -34,6 +34,8 @@ export interface UserInfoResponse {
   display_name: string;
   company_id: number;
   company_name: string;
+  currency_code: string | null;
+  currency_minor_unit_digits: number | null;
   branches: BranchAccess[];
   self_assignments: SelfAssignment[];
   /** Distinct permission codes across all active role assignments. */
@@ -88,6 +90,8 @@ export interface UserProfile {
   display_name: string;
   company_id: number;
   company_name: string;
+  currency_code: string | null;
+  currency_minor_unit_digits: number | null;
   /**
    * Coarse scope derived from branch rows or Self assignments. Do NOT use this
    * alone to detect DRIVER users; use isDriverUser() which checks exact roles.
@@ -118,6 +122,8 @@ export function toUserProfile(info: UserInfoResponse): UserProfile {
     display_name:       info.display_name,
     company_id:         info.company_id,
     company_name:       info.company_name,
+    currency_code:      info.currency_code,
+    currency_minor_unit_digits: info.currency_minor_unit_digits,
     scope_type:         hasAllBranches
       ? 'AllCompanyBranches'
       : hasSelfAssignment

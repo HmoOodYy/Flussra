@@ -12,15 +12,15 @@ import { useEffect, useState } from 'react';
 import { getFinalLines } from '../../lib/payrollApi';
 import type { FinalLineSummary, PeriodSummary } from '../../types/payroll';
 import styles from './FinalSummaryDialog.module.css';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function fmt(v: string | number | null | undefined): string {
+function fmt(v: string | number | null | undefined, code?: string | null, digits?: number | null): string {
   if (v == null) return '-';
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
+  return formatCurrencyMoney(v, code, digits);
 }
 
 function fmtQty(v: string | null | undefined): string {
@@ -116,7 +116,7 @@ function Section({
   );
 }
 
-function DriverTotalsTable({ rows }: { rows: DriverTotal[] }) {
+function DriverTotalsTable({ rows, code, digits }: { rows: DriverTotal[]; code: string; digits: number }) {
   if (rows.length === 0) return <div className={styles.emptyMsg}>No driver totals.</div>;
   return (
     <table className={styles.table}>
@@ -134,14 +134,14 @@ function DriverTotalsTable({ rows }: { rows: DriverTotal[] }) {
         {rows.map((r) => (
           <tr key={r.driver_id}>
             <td className={styles.nameCell}>{r.driver_name}</td>
-            <td className={styles.numCol}>{fmt(r.daily_pay)}</td>
-            <td className={styles.numCol}>{fmt(r.period_pay)}</td>
+            <td className={styles.numCol}>{fmt(r.daily_pay, code, digits)}</td>
+            <td className={styles.numCol}>{fmt(r.period_pay, code, digits)}</td>
             <td className={`${styles.numCol} ${r.sys_adjustment !== 0 ? styles.adjCell : ''}`}>
               {r.sys_adjustment !== 0
-                ? `${r.sys_adjustment >= 0 ? '+' : ''}$${Math.abs(r.sys_adjustment).toFixed(2)}`
+                ? `${r.sys_adjustment >= 0 ? '+' : '-'}${formatCurrencyMoney(Math.abs(r.sys_adjustment), code, digits)}`
                 : '-'}
             </td>
-            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay)}</td>
+            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay, code, digits)}</td>
             <td className={styles.numCol}>{r.line_count}</td>
           </tr>
         ))}
@@ -172,7 +172,7 @@ function SysAdjTable({ lines }: { lines: FinalLineSummary[] }) {
                 {l.line_type === 'SYS_MIN_TOPUP' ? 'Min Top-Up' : 'Max Cap'}
               </span>
             </td>
-            <td className={`${styles.numCol} ${styles.adjCell}`}>{fmt(l.final_amount)}</td>
+            <td className={`${styles.numCol} ${styles.adjCell}`}>{fmt(l.final_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
             <td>{l.notes ?? '-'}</td>
           </tr>
         ))}
@@ -199,7 +199,7 @@ function PeriodPayTable({ lines }: { lines: FinalLineSummary[] }) {
           <tr key={l.final_line_id}>
             <td className={styles.nameCell}>{l.driver_name}</td>
             <td>{lineLabel(l)}</td>
-            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount)}</td>
+            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
             <td>{l.notes ?? '-'}</td>
           </tr>
         ))}
@@ -237,8 +237,8 @@ function LineDetailsTable({ lines }: { lines: FinalLineSummary[] }) {
               )}
             </td>
             <td className={styles.numCol}>{fmtQty(l.quantity)}</td>
-            <td className={styles.numCol}>{fmt(l.resolved_rate_amount ?? l.rate_amount)}</td>
-            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount)}</td>
+            <td className={styles.numCol}>{fmt(l.resolved_rate_amount ?? l.rate_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
+            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
           </tr>
         ))}
       </tbody>
@@ -352,7 +352,7 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
               {/* ── KPIs ─────────────────────────────────────────── */}
               <div className={styles.kpiRow}>
                 <KpiCard label="Drivers Paid" value={String(period.final_driver_count)} />
-                <KpiCard label="Final Gross" value={fmt(period.final_gross)} />
+                <KpiCard label="Final Gross" value={fmt(period.final_gross, lines[0].currency_code, lines[0].currency_minor_unit_digits)} />
                 <KpiCard label="Total Lines" value={String(period.final_lines)} />
                 {sysCount > 0 && (
                   <KpiCard label="Sys Adjustments" value={String(sysCount)} />
@@ -364,7 +364,7 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
 
               {/* ── Driver Totals ─────────────────────────────── */}
               <Section title="Driver Totals" badge={driverTotals.length}>
-                <DriverTotalsTable rows={driverTotals} />
+                <DriverTotalsTable rows={driverTotals} code={lines[0].currency_code} digits={lines[0].currency_minor_unit_digits} />
               </Section>
 
               {/* ── Period Pay / Bonus ───────────────────────── */}

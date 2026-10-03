@@ -46,6 +46,10 @@ class CompanyProfile(BaseModel):
     default_branch_id: int | None = None
     default_branch_name: str | None = None
     allow_self_approval: bool = True
+    currency_code: str | None = None
+    currency_name: str | None = None
+    currency_minor_unit_digits: int | None = None
+    currency_change_locked: bool = False
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
 
@@ -62,6 +66,12 @@ class CompanyUpdate(BaseModel):
     timezone_name: str | None = None
     notes: str | None = None
     allow_self_approval: bool | None = None
+    currency_code: str | None = None
+
+    @field_validator("currency_code")
+    @classmethod
+    def normalize_currency_code(cls, value: str | None) -> str | None:
+        return value.strip().upper() if value is not None else None
 
     @field_validator("company_name")
     @classmethod
@@ -69,6 +79,13 @@ class CompanyUpdate(BaseModel):
         if not v.strip():
             raise ValueError("company_name must not be blank")
         return v.strip()
+
+
+class SupportedCurrency(BaseModel):
+    currency_code: str
+    currency_name: str
+    numeric_code: str
+    minor_unit_digits: int
 
 
 # ---------------------------------------------------------------------------

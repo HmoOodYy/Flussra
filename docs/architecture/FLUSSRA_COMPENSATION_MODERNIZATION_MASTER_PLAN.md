@@ -1,18 +1,18 @@
 # Flussra Compensation Architecture Modernization — Master Implementation Plan
 
-**Status:** APPROVED TARGET ARCHITECTURE — PRE-P3 amendment Lead-approved; merge pending
+**Status:** APPROVED TARGET ARCHITECTURE — P3a implementation under Lead review
 **Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
-**Current baseline:** `main @ 819fb9ae4a59b2c4835778c45e4f8bc49fdc0f45` (P2b PR #26 merged)
-**Execution state:** P2c is the next implementation work unit; P3 has not started
+**Current baseline:** Investigated `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`; P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`; Test Hygiene PR #29 merged afterward
+**Execution state:** P2c and Phase 2 are closed; P3a is implemented and under Lead review; P3b has not started; P3a branch migration head is `0076`
 
-> This document records the approved target architecture. This amendment is documentation-only and does not authorize P3 implementation. It must be reviewed and merged before P3 begins.
+> This document records the approved target architecture. P3a is the current implementation unit and is under Lead review; P3b has not started.
 
 ---
 
 ## 0. Resume Protocol — Read This First When Work Restarts
 
-P3 implementation remains deferred while P2c is pending and this amendment awaits review/merge. When Compensation work is later authorized, the implementation lead first performs a read-only drift review:
+P3a is the current implementation unit and is under Lead review. Before work resumes after review, the implementation lead performs a read-only drift review:
 
 1. Fetch current `main` and record the new SHA.
 2. Compare changes since the current approved baseline recorded above.
@@ -30,7 +30,7 @@ P3 implementation remains deferred while P2c is pending and this amendment await
 5. If material drift exists, update **only the affected phase/dependency**, not the entire architecture from scratch.
 6. Do not re-open frozen product decisions unless a real technical impossibility or new explicit product requirement exists.
 
-P2b merged through PR #26 as `819fb9ae4a59b2c4835778c45e4f8bc49fdc0f45`. P2c remains the next implementation work unit. This Compensation amendment changes target-architecture wording only and does not start P3.
+P2c merged through PR #28 as `af00a22915f93810d123aadea18c3a73da1360aa`; Test Hygiene PR #29 merged afterward. The investigated main baseline is `f671a2ee61e9d31b0804af95eaff9973978a94af`; pre-P3a migration head was `0075`, and P3a branch head is `0076`. P3a is under Lead review; P3b has not started.
 
 ---
 
@@ -1740,7 +1740,7 @@ The implementation lead may **not** reinterpret:
 
 # 20. Implementation Must Remain Deferred Until Explicitly Started
 
-This plan is a target and dependency reference. Its phases are not authorized to begin merely because they are documented; P2c remains the next implementation work unit in the Unified Plan, and this amendment must be reviewed and merged before P3 begins.
+This plan is a target and dependency reference. P2c and Phase 2 are closed. P3a is implemented and under Lead review; P3b has not started. Later phases remain subject to their stated dependencies and review gates.
 
 No implementation should begin merely because this document exists.
 

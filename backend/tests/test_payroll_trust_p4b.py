@@ -182,8 +182,8 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     # ── Create Company B ─────────────────────────────────────────────────────
     b_row = (await direct_db.execute(_text("""
         INSERT INTO core.companies
-            (companycode, companyname, legalname, status, issuspended, timezonename)
-        VALUES ('COMP_B_P4B', 'Company B P4B', 'Company B P4B Ltd', 'Active', FALSE, 'UTC')
+            (companycode, companyname, legalname, status, issuspended, timezonename, currencycode)
+        VALUES ('COMP_B_P4B', 'Company B P4B', 'Company B P4B Ltd', 'Active', FALSE, 'UTC', 'USD')
         RETURNING companyid
     """))).mappings().first()
     cid_b = b_row["companyid"]

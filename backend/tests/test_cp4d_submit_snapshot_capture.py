@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 import app.payroll.period_calculation as period_calculation
 import app.payroll.period_lifecycle as period_lifecycle
 import app.payroll.service as payroll_service
+from app.company_currency import CompanyCurrency
+from app.db.transaction_retry import is_retryable_transaction_failure
 from app.payroll.schemas import PeriodStatusChange
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
@@ -472,12 +474,13 @@ async def test_submit_valid_zero_creates_snapshot_and_linked_review_item(cp4d_db
 @pytest.mark.asyncio
 async def test_capture_persists_hash_reconciling_driver_total_and_line(cp4d_db):
     period = await _period(cp4d_db)
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=_packet(cp4d_db), db=cp4d_db.conn, context="Submit",
     )
     header = (await cp4d_db.conn.execute(text("""
-        SELECT sourceconfighash, snapshothash, totalexpectedpay
+        SELECT sourceconfighash, snapshothash, totalexpectedpay,
+               currencycode, currencyminorunitdigits
         FROM payroll.payrollcalculationsnapshots WHERE payrollcalculationsnapshotid = :id
     """), {"id": snapshot_id})).mappings().one()
     total = (await cp4d_db.conn.execute(text("""
@@ -490,14 +493,62 @@ async def test_capture_persists_hash_reconciling_driver_total_and_line(cp4d_db):
           ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
         WHERE dt.payrollcalculationsnapshotid = :id
     """), {"id": snapshot_id})).scalar_one()
+    used_rate = (await cp4d_db.conn.execute(text("""
+        SELECT currencycodesnapshot, currencyminorunitdigitssnapshot
+        FROM payroll.payrollcalculationsnapshotusedratedefinitions
+        WHERE payrollcalculationsnapshotid = :id
+    """), {"id": snapshot_id})).mappings().one()
     assert header["sourceconfighash"] != header["snapshothash"]
+    assert (header["currencycode"], header["currencyminorunitdigits"]) == ("USD", 2)
+    assert (used_rate["currencycodesnapshot"], used_rate["currencyminorunitdigitssnapshot"]) == ("USD", 2)
     assert header["totalexpectedpay"] == total == amount == Decimal("25.0000")
+
+
+@pytest.mark.asyncio
+async def test_source_config_v2_hash_includes_frozen_company_currency(cp4d_db, monkeypatch):
+    from app.payroll import period_calculation
+
+    captured_payloads = []
+    original_hash = period_calculation.calculate_source_config_hash
+
+    def observe_source_config(payload):
+        captured_payloads.append(payload)
+        return original_hash(payload)
+
+    monkeypatch.setattr(period_calculation, "calculate_source_config_hash", observe_source_config)
+    period = await _period(cp4d_db)
+    packet = _packet(cp4d_db)
+    usd_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
+        period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
+        packet=packet, db=cp4d_db.conn, context="Submit",
+    )
+    kwd_id = await _capture_calculation_snapshot(currency=CompanyCurrency("KWD", 3),
+        period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
+        packet=packet, db=cp4d_db.conn, context="Resubmit",
+    )
+    rows = (await cp4d_db.conn.execute(text("""
+        SELECT sourceconfighash, currencycode, currencyminorunitdigits
+        FROM payroll.payrollcalculationsnapshots
+        WHERE payrollcalculationsnapshotid IN (:usd_id, :kwd_id)
+        ORDER BY payrollcalculationsnapshotid
+    """), {"usd_id": usd_id, "kwd_id": kwd_id})).mappings().all()
+    assert [payload["PacketContract"] for payload in captured_payloads] == [
+        "cp4d-source-config-v2", "cp4d-source-config-v2",
+    ]
+    assert [payload["CompanyCurrency"] for payload in captured_payloads] == [
+        {"CurrencyCode": "USD", "CurrencyMinorUnitDigits": 2},
+        {"CurrencyCode": "KWD", "CurrencyMinorUnitDigits": 3},
+    ]
+    assert [(row["currencycode"], row["currencyminorunitdigits"]) for row in rows] == [
+        ("USD", 2), ("KWD", 3),
+    ]
+    assert rows[0]["sourceconfighash"] != rows[1]["sourceconfighash"]
 
 
 @pytest.mark.asyncio
 async def test_persisted_snapshot_rows_reconstruct_the_stored_hash(cp4d_db):
     period = await _period(cp4d_db)
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=_packet(cp4d_db), db=cp4d_db.conn, context="Submit",
     )
@@ -521,7 +572,7 @@ async def test_persisted_snapshot_rows_reconstruct_the_stored_hash(cp4d_db):
 @pytest.mark.asyncio
 async def test_capture_preserves_source_evidence_and_audits_snapshot(cp4d_db):
     period = await _period(cp4d_db)
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=_packet(cp4d_db), db=cp4d_db.conn, context="Submit",
     )
@@ -567,7 +618,7 @@ async def test_capture_freezes_legacy_fallback_amount_without_changing_preview_s
         drivers=[replace(original.drivers[0], lines=[fallback_line])],
     )
 
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=fallback_packet, db=cp4d_db.conn, context="Submit",
     )
@@ -585,11 +636,11 @@ async def test_capture_freezes_legacy_fallback_amount_without_changing_preview_s
 async def test_capture_allocates_per_period_revisions_without_surrogate_hash_input(cp4d_db):
     period = await _period(cp4d_db)
     packet = _packet(cp4d_db)
-    first = await _capture_calculation_snapshot(
+    first = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=packet, db=cp4d_db.conn, context="Submit",
     )
-    second = await _capture_calculation_snapshot(
+    second = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=packet, db=cp4d_db.conn, context="Resubmit",
     )
@@ -612,7 +663,7 @@ async def test_capture_failure_after_header_insert_rolls_back_all_snapshot_rows(
 
     with pytest.raises((HTTPException, IntegrityError)):
         async with cp4d_db.conn.begin_nested():
-            await _capture_calculation_snapshot(
+            await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
                 period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
                 packet=invalid_packet, db=cp4d_db.conn, context="Submit",
             )
@@ -637,7 +688,7 @@ async def test_blocked_packet_creates_no_snapshot(cp4d_db):
         **{**_packet(cp4d_db).__dict__, "blockers": ["missing approved rate"]}
     )
     with pytest.raises(Exception, match="incomplete calculation packet"):
-        await _capture_calculation_snapshot(
+        await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
             period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
             packet=blocked, db=cp4d_db.conn, context="Submit",
         )
@@ -655,7 +706,7 @@ async def test_unresolved_packet_line_creates_no_snapshot(cp4d_db):
     unresolved_driver = replace(original.drivers[0], lines=[unresolved_line])
     unresolved = replace(original, drivers=[unresolved_driver])
     with pytest.raises(Exception, match="authoritative calculation line is unresolved"):
-        await _capture_calculation_snapshot(
+        await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
             period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
             packet=unresolved, db=cp4d_db.conn, context="Submit",
         )
@@ -788,7 +839,7 @@ async def test_legacy_returned_period_captures_its_first_snapshot_without_backfi
 @pytest.mark.asyncio
 async def test_capture_persists_daily_status_period_bonus_and_system_evidence(cp4d_db):
     period = await _period(cp4d_db)
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=_semantic_packet(cp4d_db), db=cp4d_db.conn, context="Submit",
     )
@@ -825,7 +876,7 @@ async def test_capture_persists_daily_status_period_bonus_and_system_evidence(cp
 async def test_source_config_and_snapshot_hash_change_when_captured_evidence_changes(cp4d_db):
     period = await _period(cp4d_db)
     original = _semantic_packet(cp4d_db)
-    first = await _capture_calculation_snapshot(
+    first = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=original, db=cp4d_db.conn, context="Submit",
     )
@@ -834,7 +885,7 @@ async def test_source_config_and_snapshot_hash_change_when_captured_evidence_cha
         source_evidence={**original.drivers[0].lines[0].source_evidence, "EffectiveRateDate": date(2088, 1, 2)},
     )
     changed = replace(original, drivers=[replace(original.drivers[0], lines=[changed_daily, *original.drivers[0].lines[1:]])])
-    second = await _capture_calculation_snapshot(
+    second = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=changed, db=cp4d_db.conn, context="Resubmit",
     )
@@ -851,7 +902,7 @@ async def test_source_config_and_snapshot_hash_change_when_captured_evidence_cha
 @pytest.mark.asyncio
 async def test_snapshot_rows_reject_update_and_delete_without_trigger_bypass(cp4d_db):
     period = await _period(cp4d_db)
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=cp4d_db.company_id, user_id=cp4d_db.user_id,
         packet=_packet(cp4d_db), db=cp4d_db.conn, context="Submit",
     )
@@ -1022,12 +1073,12 @@ async def test_submit_duplicate_pending_review_guard_leaves_no_snapshot(cp4d_db,
 
 @pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
 def test_only_serialization_and_deadlock_sqlstates_are_retryable(sqlstate):
-    assert payroll_service._is_retryable_transaction_failure(SimpleNamespace(orig=SimpleNamespace(sqlstate=sqlstate)))
+    assert is_retryable_transaction_failure(SimpleNamespace(orig=SimpleNamespace(sqlstate=sqlstate)))
 
 
 @pytest.mark.parametrize("sqlstate", [None, "23505", "XX000"])
 def test_unrelated_database_sqlstates_are_not_retryable(sqlstate):
-    assert not payroll_service._is_retryable_transaction_failure(SimpleNamespace(orig=SimpleNamespace(sqlstate=sqlstate)))
+    assert not is_retryable_transaction_failure(SimpleNamespace(orig=SimpleNamespace(sqlstate=sqlstate)))
 
 
 @pytest.mark.asyncio
