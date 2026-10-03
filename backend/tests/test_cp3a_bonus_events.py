@@ -255,15 +255,19 @@ async def test_create_bonus_event(
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "150.00", "reason": "Great job"},
+        json={"driver_id": cp3a_driver_id, "amount": "150.1234", "reason": "Great job"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 201, r.text
     data = r.json()
-    assert data["amount"] == "150.00"
+    assert Decimal(str(data["amount"])) == Decimal("150.1234")
     assert data["status"] == "Active"
     assert data["driver_id"] == cp3a_driver_id
     assert data["data_revision"] == 1
+    stored_amount = (await db_conn.execute(_text("""
+        SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :event_id
+    """), {"event_id": data["bonus_event_id"]})).scalar_one()
+    assert Decimal(str(stored_amount)) == Decimal("150.1234")
 
     await _cancel_period_db(db_conn, period_id)
 
@@ -318,12 +322,12 @@ async def test_update_bonus_event_amount(
 
     r2 = await client.patch(
         f"/payroll/periods/{period_id}/bonuses/{event_id}",
-        json={"amount": "250.00"},
+        json={"amount": "250.1234"},
         headers=_auth(auth_token),
     )
     assert r2.status_code == 200, r2.text
     updated = r2.json()
-    assert updated["amount"] == "250.00"
+    assert Decimal(str(updated["amount"])) == Decimal("250.1234")
     assert updated["data_revision"] == 2
 
     await _cancel_period_db(db_conn, period_id)
@@ -386,6 +390,59 @@ async def test_zero_amount_rejected(
     )
     assert r.status_code == 422, r.text
 
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_single_create_rejects_more_than_four_decimals(
+    client: httpx.AsyncClient,
+    auth_token: str,
+    db_conn: AsyncConnection,
+    cp3a_branch_id: int,
+    cp3a_driver_id: int,
+) -> None:
+    start, end = _week()
+    period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
+    response = await client.post(
+        f"/payroll/periods/{period_id}/bonuses",
+        json={"driver_id": cp3a_driver_id, "amount": "1.23456"},
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 422, response.text
+    count = (await db_conn.execute(_text("""
+        SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid
+    """), {"pid": period_id})).scalar_one()
+    assert count == 0
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_single_update_rejects_more_than_four_decimals(
+    client: httpx.AsyncClient,
+    auth_token: str,
+    db_conn: AsyncConnection,
+    cp3a_branch_id: int,
+    cp3a_driver_id: int,
+) -> None:
+    start, end = _week()
+    period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
+    created = await client.post(
+        f"/payroll/periods/{period_id}/bonuses",
+        json={"driver_id": cp3a_driver_id, "amount": "1.00"},
+        headers=_auth(auth_token),
+    )
+    assert created.status_code == 201, created.text
+    event_id = created.json()["bonus_event_id"]
+    updated = await client.patch(
+        f"/payroll/periods/{period_id}/bonuses/{event_id}",
+        json={"amount": "1.23456"},
+        headers=_auth(auth_token),
+    )
+    assert updated.status_code == 422, updated.text
+    stored = (await db_conn.execute(_text("""
+        SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :event_id
+    """), {"event_id": event_id})).scalar_one()
+    assert Decimal(str(stored)) == Decimal("1.00")
     await _cancel_period_db(db_conn, period_id)
 
 
@@ -620,11 +677,12 @@ async def test_finalization_includes_bonus_events(
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "300.00", "reason": "Excellence"},
+        json={"driver_id": cp3a_driver_id, "amount": "300.1234", "reason": "Excellence"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 201, r.text
     bonus_event_id = r.json()["bonus_event_id"]
+    assert Decimal(str(r.json()["amount"])) == Decimal("300.1234")
 
     await _advance_to_approved(client, auth_token, period_id, cp3a_driver_id)
 
@@ -646,7 +704,26 @@ async def test_finalization_includes_bonus_events(
     )).mappings().first()
     assert fl_row is not None, "No BONUS FinalLine found after finalization"
     assert fl_row["bonuseventid"] == bonus_event_id
-    assert float(fl_row["finalamount"]) == 300.00
+    assert Decimal(str(fl_row["finalamount"])) == Decimal("300.1234")
+
+    evidence = (await db_conn.execute(
+        _text("""
+            SELECT s.totalexpectedpay, dt.bonustotal, b.amount
+            FROM payroll.payrollcalculationsnapshots s
+            JOIN payroll.payrollcalculationdrivertotals dt
+              ON dt.payrollcalculationsnapshotid = s.payrollcalculationsnapshotid
+             AND dt.driverid = :driver_id
+            JOIN payroll.payrollcalculationsnapshotbonusevents b
+              ON b.payrollcalculationsnapshotid = s.payrollcalculationsnapshotid
+             AND b.payrollbonuseventid = :event_id
+            WHERE s.payrollperiodid = :period_id
+        """),
+        {"period_id": period_id, "driver_id": cp3a_driver_id, "event_id": bonus_event_id},
+    )).mappings().first()
+    assert evidence is not None
+    assert Decimal(str(evidence["amount"])) == Decimal("300.1234")
+    assert Decimal(str(evidence["bonustotal"])) == Decimal("300.1234")
+    assert Decimal(str(evidence["totalexpectedpay"])) == Decimal("300.1234")
 
     await _cancel_period_db(db_conn, period_id)
 

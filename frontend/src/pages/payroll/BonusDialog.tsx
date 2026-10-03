@@ -338,9 +338,9 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                             <input
                               className={styles.formInput}
                               type="number"
-                              step="0.01"
-                              min="0.01"
-                              placeholder="0.00"
+                              step="0.0001"
+                              min="0.0001"
+                              placeholder="0.0000"
                               value={row.amount}
                               onChange={(e) => updateAddRow(row.rowId, 'amount', e.target.value)}
                               required

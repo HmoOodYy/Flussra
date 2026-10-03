@@ -601,20 +601,42 @@ def _bonus_batch_canonical_payload(
     items: list["BonusBatchItem"],
 ) -> dict:
     """Build the canonical request payload used both for hashing and durable
-    storage.  Item order is preserved (significant); amounts are fixed
-    two-decimal strings so numerically-equal inputs hash identically."""
+    storage.  Item order is preserved (significant); amounts use four-decimal
+    strings so numerically-equal source values hash identically."""
     return {
-        "version": 1,
+        "version": 2,
         "expected_bonus_data_revision": expected_bonus_data_revision,
         "items": [
             {
                 "driver_id": it.driver_id,
-                "amount":    f"{it.amount:.2f}",
+                "amount":    f"{it.amount:.4f}",
                 "reason":    it.reason,
                 "notes":     it.notes,
             }
             for it in items
         ],
+    }
+
+
+def _bonus_batch_legacy_v1_payload(
+    expected_bonus_data_revision: int,
+    items: list["BonusBatchItem"],
+) -> dict | None:
+    """Recreate v1's two-decimal payload only for exact two-decimal inputs."""
+    legacy_items = []
+    for item in items:
+        if item.amount != item.amount.quantize(Decimal("0.01")):
+            return None
+        legacy_items.append({
+            "driver_id": item.driver_id,
+            "amount": f"{item.amount:.2f}",
+            "reason": item.reason,
+            "notes": item.notes,
+        })
+    return {
+        "version": 1,
+        "expected_bonus_data_revision": expected_bonus_data_revision,
+        "items": legacy_items,
     }
 
 
@@ -699,7 +721,7 @@ async def apply_bonus_batch(
         text("""
             SELECT payrollbonusbatchrequestid, requesthash, batchcorrelationid,
                    idempotencykey, expectedbonusdatarevision, resultbonusdatarevision,
-                   createdeventids, createdeventcount
+                   createdeventids, createdeventcount, requestpayloadjson
             FROM   payroll.payrollbonusbatchrequests
             WHERE  companyid       = :cid
               AND  branchid        = :bid
@@ -710,7 +732,26 @@ async def apply_bonus_batch(
     )).mappings().first()
 
     if existing is not None:
-        if existing["requesthash"] != request_hash:
+        stored_payload = existing["requestpayloadjson"]
+        if isinstance(stored_payload, str):
+            try:
+                stored_payload = json.loads(stored_payload)
+            except json.JSONDecodeError:
+                stored_payload = None
+        stored_version = stored_payload.get("version") if isinstance(stored_payload, dict) else None
+        if type(stored_version) is int and stored_version == 1:
+            replay_payload = _bonus_batch_legacy_v1_payload(
+                data.expected_bonus_data_revision, data.items
+            )
+            replay_hash = _bonus_batch_request_hash(replay_payload) if replay_payload else None
+        elif type(stored_version) is int and stored_version == 2:
+            replay_hash = request_hash
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored bonus batch payload version is unsupported.",
+            )
+        if existing["requesthash"] != replay_hash:
             raise HTTPException(
                 status_code=409,
                 detail=(

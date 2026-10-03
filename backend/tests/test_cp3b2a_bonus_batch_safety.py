@@ -32,6 +32,7 @@ Run from backend/:
 import datetime
 import itertools
 import uuid
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -612,7 +613,7 @@ async def test_patch_with_correct_revision_succeeds(
         headers=_auth(auth_token),
     )
     assert r.status_code == 200, r.text
-    assert r.json()["amount"] == "60.00"
+    assert Decimal(str(r.json()["amount"])) == Decimal("60.00")
     assert r.json()["data_revision"] == 2
 
     await _cancel_period_db(db_conn, period_id)

@@ -20,7 +20,9 @@ Run from backend/:
     python -B -m pytest tests/test_cp3b2b_bonus_batch.py -v -p no:cacheprovider
 """
 import datetime
+import hashlib
 import itertools
+import json
 import uuid
 from decimal import Decimal
 
@@ -538,6 +540,116 @@ async def test_sequential_same_key_yields_one_apply_one_replay(
 # ===========================================================================
 
 @pytest.mark.asyncio
+async def test_four_decimal_batch_is_stored_and_replayed_exactly(
+    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
+) -> None:
+    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
+    key = _key()
+    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "12.3456"}]
+    first = await _batch(client, auth_token, period_id, key, 0, items)
+    assert first.status_code == 201, first.text
+    assert Decimal(str(first.json()["events"][0]["amount"])) == Decimal("12.3456")
+    stored = (await db_conn.execute(_text("""
+        SELECT amount FROM payroll.payrollbonusevents
+        WHERE payrollbonuseventid = :event_id
+    """), {"event_id": first.json()["created_event_ids"][0]})).scalar_one()
+    assert Decimal(str(stored)) == Decimal("12.3456")
+
+    replay = await _batch(client, auth_token, period_id, key, 0, items)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True
+    assert Decimal(str(replay.json()["events"][0]["amount"])) == Decimal("12.3456")
+
+    conflict = await _batch(client, auth_token, period_id, key, 0, [
+        {"driver_id": cp3b2b_drivers["alpha"], "amount": "12.3457"},
+    ])
+    assert conflict.status_code == 409, conflict.text
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_exact_replay_does_not_require_currency_lookup(
+    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers, monkeypatch,
+) -> None:
+    from app.payroll import bonus
+
+    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
+    key = _key()
+    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
+    applied = await _batch(client, auth_token, period_id, key, 0, items)
+    assert applied.status_code == 201, applied.text
+
+    async def reject_currency_lookup(*args, **kwargs):
+        raise AssertionError("An exact read-only replay must not require Company currency.")
+
+    monkeypatch.setattr(bonus, "lock_and_get_company_currency", reject_currency_lookup)
+    replay = await _batch(client, auth_token, period_id, key, 0, items)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_legacy_v1_replay_requires_exact_two_decimal_amount(
+    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
+) -> None:
+    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
+    key = _key()
+    item = {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}
+    applied = await _batch(client, auth_token, period_id, key, 0, [item])
+    assert applied.status_code == 201, applied.text
+
+    v1_payload = {
+        "version": 1,
+        "expected_bonus_data_revision": 0,
+        "items": [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": None, "notes": None}],
+    }
+    canonical = json.dumps(v1_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    await db_conn.execute(_text("""
+        UPDATE payroll.payrollbonusbatchrequests
+        SET requestpayloadjson = CAST(:payload AS JSONB), requesthash = :request_hash
+        WHERE payrollperiodid = :period_id AND idempotencykey = :key
+    """), {
+        "payload": json.dumps(v1_payload), "request_hash": request_hash,
+        "period_id": period_id, "key": key,
+    })
+    await db_conn.commit()
+
+    replay = await _batch(client, auth_token, period_id, key, 0, [item])
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["replayed"] is True
+    fractional = await _batch(client, auth_token, period_id, key, 0, [
+        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.001"},
+    ])
+    assert fractional.status_code == 409, fractional.text
+    assert await _count_events(db_conn, period_id) == 1
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_unknown_stored_batch_payload_version_fails_closed(
+    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
+) -> None:
+    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
+    key = _key()
+    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
+    applied = await _batch(client, auth_token, period_id, key, 0, items)
+    assert applied.status_code == 201, applied.text
+    await db_conn.execute(_text("""
+        UPDATE payroll.payrollbonusbatchrequests
+        SET requestpayloadjson = jsonb_set(requestpayloadjson, '{version}', '3'::jsonb)
+        WHERE payrollperiodid = :period_id AND idempotencykey = :key
+    """), {"period_id": period_id, "key": key})
+    await db_conn.commit()
+
+    replay = await _batch(client, auth_token, period_id, key, 0, items)
+    assert replay.status_code == 409, replay.text
+    assert await _count_events(db_conn, period_id) == 1
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
 async def test_empty_items_rejected(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
@@ -584,12 +696,12 @@ async def test_negative_amount_rejected(
 
 
 @pytest.mark.asyncio
-async def test_too_many_decimals_rejected(
+async def test_more_than_four_decimals_rejected(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.005"},
+        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00005"},
     ])
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -601,7 +713,7 @@ async def test_amount_out_of_numeric_range_rejected(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10000000000000000.00"},
+        {"driver_id": cp3b2b_drivers["alpha"], "amount": "100000000000000.00"},
     ])
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
