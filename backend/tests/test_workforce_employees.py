@@ -547,9 +547,9 @@ async def test_hire_date_guard_protects_final_line_dates(
         await direct_db.execute(text("""
             INSERT INTO payroll.PayrollFinalLines
                 (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType,
-                 Quantity, FinalAmount, SourceType, LineScope)
+                 Quantity, FinalAmount, SourceType, LineScope, CurrencyCode, CurrencyMinorUnitDigits)
             VALUES (1, :branch_id, :period_id, :driver_id, DATE '2018-06-01',
-                    :line_type, 1, 1, 'Manual', 'Daily')
+                    :line_type, 1, 1, 'Manual', 'Daily', 'USD', 2)
         """), {"branch_id": hq_branch_id, "period_id": created_period_id,
                "driver_id": driver_id, "line_type": f"P1B-{suffix()}"})
     finally:

@@ -45,6 +45,7 @@ from typing import Any, NamedTuple
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import CompanyCurrency
 from app.payroll.eligibility import (
     _driver_has_existing_daily_source_on_date,
     _is_snapshot_row_eligible_for_workdate,
@@ -108,6 +109,7 @@ async def _sync_status_payment_for_entry_state(
     status_key_id: "int | None",
     user_id: int,
     db: AsyncConnection,
+    currency: CompanyCurrency | None,
 ) -> None:
     """
     Create, update, or void the STATUS_PAYMENT draft line for a driver/day.
@@ -198,6 +200,16 @@ async def _sync_status_payment_for_entry_state(
                     "UPDATE payroll.payrolldraftlines SET status = 'Void' "
                     "WHERE draftlineid = :lid"
                 ),
+                {"lid": existing["draftlineid"]},
+            )
+        return
+
+    # Without currency, preserve the nonmonetary status and clear any stale
+    # monetary projection. The caller has already locked Company first.
+    if currency is None:
+        if existing:
+            await db.execute(
+                text("UPDATE payroll.payrolldraftlines SET status = 'Void' WHERE draftlineid = :lid"),
                 {"lid": existing["draftlineid"]},
             )
         return
@@ -447,6 +459,7 @@ async def _refresh_status_payment_lines(
     branch_id: int,
     user_id: int,
     db: AsyncConnection,
+    currency: CompanyCurrency,
 ) -> int:
     """
     Re-sync all STATUS_PAYMENT draft lines for a period from PPDES state.
@@ -539,6 +552,7 @@ async def _refresh_status_payment_lines(
             status_key_id=row["statuskeyid"],
             user_id=user_id,
             db=db,
+            currency=currency,
         )
 
     return len(rows)

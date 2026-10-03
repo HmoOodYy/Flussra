@@ -52,6 +52,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import (
+    frozen_currency,
+    lock_and_get_company_currency,
+    require_matching_snapshot_currency,
+)
 from app.core.service import (
     _build_in_clause,
     _check_any_permission,
@@ -305,7 +310,7 @@ async def _load_period_approval_context(
     snapshot_result = await db.execute(
         text("""
             SELECT payrollcalculationsnapshotid, payrollperiodid, revisionnumber,
-                   createdatutc, totalexpectedpay, snapshothash
+                   createdatutc, totalexpectedpay, snapshothash, currencycode, currencyminorunitdigits
             FROM payroll.payrollcalculationsnapshots
             WHERE payrollcalculationsnapshotid = :snapshot_id
               AND companyid = :company_id
@@ -546,6 +551,7 @@ async def get_review_item_payroll_snapshot(
     )
     snapshot = context["snapshot"]
     assert snapshot is not None
+    currency = frozen_currency(snapshot["currencycode"], snapshot["currencyminorunitdigits"])
     snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
 
     total_result = await db.execute(
@@ -608,6 +614,7 @@ async def get_review_item_payroll_snapshot(
         for row in line_result.mappings().all()
     ]
     return ReviewPayrollSnapshot(
+        currency_code=currency.code, currency_minor_unit_digits=currency.minor_unit_digits,
         review_item_id=review_item_id,
         payroll_period_id=context["period_id"],
         revision_number=snapshot["revisionnumber"],
@@ -792,6 +799,10 @@ async def decide_review_item(
     # Comments skip the branch lock below but still require review.decide.
     await _check_permission(company_id, user_id, _pre_branch_id, "review.decide", db)
 
+    approval_currency = None
+    if _pre_row.get("requesttype") == "PeriodApproval" and data.decision == "Approved":
+        approval_currency = await lock_and_get_company_currency(company_id, db)
+
     # Step 4: Branch advisory lock for PeriodApproval substantive decisions.
     # Comments do not mutate payroll slots; they skip the branch lock.
     if _pre_row.get("requesttype") == "PeriodApproval" and data.decision != "Comment":
@@ -912,6 +923,10 @@ async def decide_review_item(
                 detail="Period is no longer in InReview status. The review decision was not recorded.",
             )
         snapshot = period_context["snapshot"]
+        if data.decision == "Approved":
+            require_matching_snapshot_currency(
+                approval_currency, snapshot["currencycode"], snapshot["currencyminorunitdigits"]
+            )
         if snapshot is not None:
             snapshot_audit_identity = {
                 "payroll_period_id": period_context["period_id"],

@@ -15,6 +15,7 @@ import type {
   ReviewPayrollSnapshotLine,
 } from '../types/review';
 import styles from './ReviewDetailDialog.module.css';
+import { formatMoney as formatCurrencyMoney } from '../lib/money';
 
 interface Props {
   item: ReviewItemSummary;
@@ -24,12 +25,9 @@ interface Props {
 
 type ActionState = 'idle' | 'approving' | 'returning';
 
-function formatMoney(value: string | null | undefined): string {
+function formatMoney(value: string | null | undefined, currencyCode?: string | null, minorDigits?: number | null): string {
   if (value == null) return 'Not resolved';
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
-    : value;
+  return formatCurrencyMoney(value, currencyCode, minorDigits);
 }
 
 function formatQuantity(value: string | null): string {
@@ -220,7 +218,7 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                 </div>
                 <div>
                   <span className={styles.identityLabel}>Expected payroll</span>
-                  <strong>{formatMoney(snapshot.total_expected_pay)}</strong>
+                  <strong>{formatMoney(snapshot.total_expected_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</strong>
                 </div>
               </section>
 
@@ -247,13 +245,13 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                         {snapshot.driver_totals.map((driver) => (
                           <tr key={driver.driver_id}>
                             <td>{driver.driver_name_snapshot ?? driver.driver_code_snapshot ?? `Driver ${driver.driver_id}`}</td>
-                            <td className={styles.right}>{formatMoney(driver.daily_pay)}</td>
-                            <td className={styles.right}>{formatMoney(driver.status_pay)}</td>
-                            <td className={styles.right}>{formatMoney(driver.period_pay)}</td>
-                            <td className={styles.right}>{formatMoney(driver.minimum_adjustment)}</td>
-                            <td className={styles.right}>{formatMoney(driver.maximum_adjustment)}</td>
-                            <td className={styles.right}>{formatMoney(driver.bonus_total)}</td>
-                            <td className={`${styles.right} ${styles.expectedPay}`}>{formatMoney(driver.expected_pay)}</td>
+                            <td className={styles.right}>{formatMoney(driver.daily_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={styles.right}>{formatMoney(driver.status_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={styles.right}>{formatMoney(driver.period_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={styles.right}>{formatMoney(driver.minimum_adjustment, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={styles.right}>{formatMoney(driver.maximum_adjustment, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={styles.right}>{formatMoney(driver.bonus_total, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={`${styles.right} ${styles.expectedPay}`}>{formatMoney(driver.expected_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -288,8 +286,8 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                             <td>{lineLabel(line)}</td>
                             <td>{formatDate(line.work_date)}</td>
                             <td className={styles.right}>{formatQuantity(line.quantity)}</td>
-                            <td className={styles.right}>{line.resolved_rate_amount == null ? '-' : formatMoney(line.resolved_rate_amount)}</td>
-                            <td className={styles.right}>{formatMoney(line.calculated_amount)}</td>
+                            <td className={styles.right}>{line.resolved_rate_amount == null ? '-' : formatMoney(line.resolved_rate_amount, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                            <td className={styles.right}>{formatMoney(line.calculated_amount, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                           </tr>
                         ))}
                       </tbody>

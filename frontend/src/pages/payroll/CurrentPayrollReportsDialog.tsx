@@ -8,6 +8,7 @@ import type {
 import { buildPeriodPayTable } from './periodPayTable';
 import { PeriodPayMatrix } from './PeriodPayMatrix';
 import styles from './CurrentPayrollReportsDialog.module.css';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
 const REPORT_TABS: readonly { view: CalculationReportView; label: string }[] = [
   { view: 'drivers', label: 'Drivers' },
@@ -30,12 +31,9 @@ function errorStatus(error: unknown): number | undefined {
   return (error as { response?: { status?: number } })?.response?.status;
 }
 
-function formatMoney(value: string | null | undefined): string {
+function formatMoney(value: string | null | undefined, code?: string | null, digits?: number | null): string {
   if (value == null) return 'Unavailable';
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
-    : value;
+  return formatCurrencyMoney(value, code, digits);
 }
 
 function formatQuantity(value: unknown): string {
@@ -70,10 +68,14 @@ function EmptyReport({ children }: { children: string }) {
 function RecordTable({
   rows,
   columns,
+  code = null,
+  digits = null,
   emptyMessage = 'No entries are currently available.',
 }: {
   rows: Record<string, unknown>[];
   columns: readonly { key: string; label: string; quantity?: boolean; money?: boolean }[];
+  code?: string | null;
+  digits?: number | null;
   emptyMessage?: string;
 }) {
   if (rows.length === 0) return <EmptyReport>{emptyMessage}</EmptyReport>;
@@ -89,7 +91,7 @@ function RecordTable({
               {columns.map((column) => (
                 <td key={column.key} className={column.quantity ? styles.numeric : undefined}>
                   {column.money
-                    ? formatMoney(rowValue(row, column.key) as string | null | undefined)
+                    ? formatMoney(rowValue(row, column.key) as string | null | undefined, code, digits)
                     : column.quantity
                       ? formatQuantity(rowValue(row, column.key))
                       : formatValue(rowValue(row, column.key))}
@@ -155,10 +157,14 @@ function Dictionary({
   title,
   values,
   money,
+  code,
+  digits,
 }: {
   title: string;
   values: Record<string, string> | null;
   money: boolean;
+  code: string | null;
+  digits: number | null;
 }) {
   if (values == null) return <div className={styles.dictionary}><h4>{title}</h4><EmptyReport>Unavailable from the backend.</EmptyReport></div>;
   const entries = Object.entries(values);
@@ -170,7 +176,7 @@ function Dictionary({
           {entries.map(([key, value]) => (
           <div key={key}>
               <dt>{key}</dt>
-              <dd>{money ? formatMoney(value) : value}</dd>
+              <dd>{money ? formatMoney(value, code, digits) : value}</dd>
             </div>
           ))}
         </dl>
@@ -196,7 +202,7 @@ function WorkSection({ driver, evidenceAvailable }: { driver: ReportDriver; evid
   );
 }
 
-function PaySection({ driver }: { driver: ReportDriver }) {
+function PaySection({ driver, code, digits }: { driver: ReportDriver; code: string | null; digits: number | null }) {
   if (driver.pay == null) {
     return <section className={styles.subsection}><h4>Pay</h4><EmptyReport>Financial details are unavailable from the backend.</EmptyReport></section>;
   }
@@ -214,21 +220,22 @@ function PaySection({ driver }: { driver: ReportDriver }) {
     <section className={styles.subsection}>
       <h4>Pay</h4>
       <dl className={styles.payGrid}>
-        {fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{formatMoney(value)}</dd></div>)}
+        {fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{formatMoney(value, code, digits)}</dd></div>)}
       </dl>
       <h5>Financial lines</h5>
-      <RecordTable rows={pay.financial_lines} columns={FINANCIAL_LINE_COLUMNS} />
+      <RecordTable rows={pay.financial_lines} columns={FINANCIAL_LINE_COLUMNS} code={code} digits={digits} />
     </section>
   );
 }
 
-function BonusSection({ driver, evidenceAvailable }: { driver: ReportDriver; evidenceAvailable: boolean }) {
+function BonusSection({ driver, evidenceAvailable, code, digits }: { driver: ReportDriver; evidenceAvailable: boolean; code: string | null; digits: number | null }) {
   return (
     <section className={styles.subsection}>
       <h4>Bonus events</h4>
       <RecordTable
         rows={driver.bonus_events}
         columns={BONUS_COLUMNS}
+        code={code} digits={digits}
         emptyMessage={evidenceAvailable ? 'No Bonus events were captured.' : 'Bonus history is unavailable from this report authority.'}
       />
     </section>
@@ -240,11 +247,15 @@ function DriverCard({
   showWork,
   showPay,
   evidenceAvailable,
+  code,
+  digits,
 }: {
   driver: ReportDriver;
   showWork: boolean;
   showPay: boolean;
   evidenceAvailable: boolean;
+  code: string | null;
+  digits: number | null;
 }) {
   return (
     <article className={styles.driverCard}>
@@ -256,19 +267,21 @@ function DriverCard({
         <span className={styles.driverId}>Driver ID {driver.driver_id}</span>
       </div>
       {showWork && <WorkSection driver={driver} evidenceAvailable={evidenceAvailable} />}
-      {showPay && <PaySection driver={driver} />}
-      {showPay && <BonusSection driver={driver} evidenceAvailable={evidenceAvailable} />}
+      {showPay && <PaySection driver={driver} code={code} digits={digits} />}
+      {showPay && <BonusSection driver={driver} evidenceAvailable={evidenceAvailable} code={code} digits={digits} />}
     </article>
   );
 }
 
-function periodPayCell(value: string | null): string {
-  return value == null ? '—' : formatMoney(value);
+function periodPayCell(value: string | null, code: string | null, digits: number | null): string {
+  return value == null ? '—' : formatMoney(value, code, digits);
 }
 
 function ReportBody({ report, view }: { report: CalculationReportResponse; view: CalculationReportView }) {
   const showWork = view === 'drivers' || view === 'period-work' || view === 'mixed';
   const showPay = view === 'drivers' || view === 'period-pay' || view === 'mixed';
+  const code = report.metadata.currency_code;
+  const digits = report.metadata.currency_minor_unit_digits;
   return (
     <>
       <div className={styles.metadataGrid}>
@@ -289,15 +302,15 @@ function ReportBody({ report, view }: { report: CalculationReportResponse; view:
           <h3>Period Pay</h3>
           <PeriodPayMatrix
             table={buildPeriodPayTable(report.pay_item_columns, report.drivers, report.pay_item_totals, report.pay_totals)}
-            formatCell={periodPayCell}
+            formatCell={(value) => periodPayCell(value, code, digits)}
             emptyState={<EmptyReport>No driver records are currently available.</EmptyReport>}
           />
         </section>
       ) : (
         <>
           <section className={styles.totals}>
-            <Dictionary title="Work totals" values={report.work_totals} money={false} />
-            {(view === 'drivers' || view === 'mixed') && <Dictionary title="Pay totals" values={report.pay_totals} money />}
+            <Dictionary title="Work totals" values={report.work_totals} money={false} code={code} digits={digits} />
+            {(view === 'drivers' || view === 'mixed') && <Dictionary title="Pay totals" values={report.pay_totals} money code={code} digits={digits} />}
           </section>
 
           {report.columns.length > 0 && (
@@ -318,6 +331,7 @@ function ReportBody({ report, view }: { report: CalculationReportResponse; view:
                     showWork={showWork}
                     showPay={showPay}
                     evidenceAvailable={report.metadata.report_evidence_available}
+                    code={code} digits={digits}
                   />
                 ))}
               </div>

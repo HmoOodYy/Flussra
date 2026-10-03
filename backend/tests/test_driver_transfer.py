@@ -220,9 +220,9 @@ class TestDriverBranchReassignment:
             _text("""
                 INSERT INTO payroll.payrollfinallines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype)
+                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                 VALUES
-                    (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 100, 'TransferTest')
+                    (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 100, 'TransferTest', 'USD', 2)
             """),
             {
                 "cid": company_id,

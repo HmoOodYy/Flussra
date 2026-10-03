@@ -6,13 +6,11 @@ import type {
   CalculationPreviewResponse,
 } from '../../types/payroll';
 import styles from './CalculationPreviewDialog.module.css';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
-function formatMoney(value: string | null | undefined): string {
+function formatMoney(value: string | null | undefined, code: string | null, digits: number | null): string {
   if (value == null) return 'Not resolved';
-  const numeric = Number(value);
-  return Number.isFinite(numeric)
-    ? new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(numeric)
-    : value;
+  return formatCurrencyMoney(value, code, digits);
 }
 
 function formatQuantity(value: string | null): string {
@@ -52,7 +50,7 @@ function NoticeList({ title, values, tone }: { title: string; values: string[]; 
   );
 }
 
-function DriverTotals({ drivers }: { drivers: CalculationPreviewDriver[] }) {
+function DriverTotals({ drivers, code, digits }: { drivers: CalculationPreviewDriver[]; code: string | null; digits: number | null }) {
   if (drivers.length === 0) return <p className={styles.empty}>No driver totals are currently available.</p>;
   return (
     <div className={styles.tableWrap}>
@@ -74,13 +72,13 @@ function DriverTotals({ drivers }: { drivers: CalculationPreviewDriver[] }) {
           {drivers.map((driver) => (
             <tr key={driver.driver_id} className={driver.needs_manager_review ? styles.reviewRow : undefined}>
               <td>{driver.driver_name ?? `Driver #${driver.driver_id}`}</td>
-              <td className={styles.numeric}>{formatMoney(driver.daily_pay)}</td>
-              <td className={styles.numeric}>{formatMoney(driver.status_pay)}</td>
-              <td className={styles.numeric}>{formatMoney(driver.period_pay)}</td>
-              <td className={styles.numeric}>{formatMoney(driver.minimum_adjustment)}</td>
-              <td className={styles.numeric}>{formatMoney(driver.maximum_adjustment)}</td>
-              <td className={styles.numeric}>{formatMoney(driver.bonus_total)}</td>
-              <td className={`${styles.numeric} ${styles.expectedPay}`}>{formatMoney(driver.expected_pay)}</td>
+              <td className={styles.numeric}>{formatMoney(driver.daily_pay, code, digits)}</td>
+              <td className={styles.numeric}>{formatMoney(driver.status_pay, code, digits)}</td>
+              <td className={styles.numeric}>{formatMoney(driver.period_pay, code, digits)}</td>
+              <td className={styles.numeric}>{formatMoney(driver.minimum_adjustment, code, digits)}</td>
+              <td className={styles.numeric}>{formatMoney(driver.maximum_adjustment, code, digits)}</td>
+              <td className={styles.numeric}>{formatMoney(driver.bonus_total, code, digits)}</td>
+              <td className={`${styles.numeric} ${styles.expectedPay}`}>{formatMoney(driver.expected_pay, code, digits)}</td>
               <td>{driver.blockers.length > 0 ? driver.blockers.join(' ') : driver.needs_manager_review ? 'Needs review' : '-'}</td>
             </tr>
           ))}
@@ -90,7 +88,7 @@ function DriverTotals({ drivers }: { drivers: CalculationPreviewDriver[] }) {
   );
 }
 
-function FinancialLines({ drivers }: { drivers: CalculationPreviewDriver[] }) {
+function FinancialLines({ drivers, code, digits }: { drivers: CalculationPreviewDriver[]; code: string | null; digits: number | null }) {
   const rows = drivers.flatMap((driver) => driver.lines.map((line, index) => ({ driver, line, index })));
   if (rows.length === 0) return <p className={styles.empty}>No financial lines are currently available.</p>;
   return (
@@ -116,8 +114,8 @@ function FinancialLines({ drivers }: { drivers: CalculationPreviewDriver[] }) {
               <td>{lineLabel(line)}</td>
               <td>{line.work_date ?? '-'}</td>
               <td className={styles.numeric}>{formatQuantity(line.quantity)}</td>
-              <td className={styles.numeric}>{line.resolved_rate == null ? '-' : formatMoney(line.resolved_rate)}</td>
-              <td className={styles.numeric}>{formatMoney(line.calculated_amount)}</td>
+              <td className={styles.numeric}>{line.resolved_rate == null ? '-' : formatMoney(line.resolved_rate, code, digits)}</td>
+              <td className={styles.numeric}>{formatMoney(line.calculated_amount, code, digits)}</td>
               <td>{line.blocker_reason ?? (line.needs_manager_review ? 'Needs review' : '-')}</td>
             </tr>
           ))}
@@ -226,7 +224,7 @@ export function CalculationPreviewDialog({
               <div className={styles.summary}>
                 <div>
                   <span>Expected Payroll</span>
-                  <strong>{preview.financials_available ? formatMoney(preview.total_expected_pay) : 'Unavailable'}</strong>
+                  <strong>{preview.financials_available ? formatMoney(preview.total_expected_pay, preview.currency_code, preview.currency_minor_unit_digits) : 'Unavailable'}</strong>
                 </div>
                 <div>
                   <span>Period State</span>
@@ -250,13 +248,13 @@ export function CalculationPreviewDialog({
 
               <section className={styles.section}>
                 <h3>Driver Totals</h3>
-                <DriverTotals drivers={preview.drivers} />
+                <DriverTotals drivers={preview.drivers} code={preview.currency_code} digits={preview.currency_minor_unit_digits} />
               </section>
 
               <section className={styles.section}>
                 <h3>Financial Lines</h3>
                 <p className={styles.sectionHint}>Lines are resolved live by the backend. A missing calculated amount is shown as unresolved rather than derived in this view.</p>
-                <FinancialLines drivers={preview.drivers} />
+                <FinancialLines drivers={preview.drivers} code={preview.currency_code} digits={preview.currency_minor_unit_digits} />
               </section>
             </>
           )}

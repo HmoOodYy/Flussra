@@ -118,6 +118,37 @@ _PT_TRIGGERS = [
     ("trg_guard_driverratetier_used_mutation",     "payroll", "driverratetiers",    "Phase 11 (0040)"),
 ]
 
+# P3a (0076) Company-wide monetary denomination authority.
+_P3A_COLUMNS = [
+    ("core", "supportedcurrencies", "currencycode"),
+    ("core", "supportedcurrencies", "minorunitdigits"),
+    ("core", "supportedcurrencies", "numericcode"),
+    ("core", "companies", "currencycode"),
+    ("payroll", "payrollcalculationsnapshots", "currencycode"),
+    ("payroll", "payrollcalculationsnapshots", "currencyminorunitdigits"),
+    ("payroll", "payrollcalculationsnapshotusedratedefinitions", "currencycodesnapshot"),
+    ("payroll", "payrollcalculationsnapshotusedratedefinitions", "currencyminorunitdigitssnapshot"),
+    ("payroll", "payrollcalculationsnapshotbonusevents", "currencycodesnapshot"),
+    ("payroll", "payrollcalculationsnapshotbonusevents", "currencyminorunitdigitssnapshot"),
+    ("payroll", "payrollfinallines", "currencycode"),
+    ("payroll", "payrollfinallines", "currencyminorunitdigits"),
+]
+_P3A_CONSTRAINTS = [
+    ("core", "companies", "fk_companies_currency", "f"),
+    ("core", "supportedcurrencies", "ck_supportedcurrencies_minorunitdigits", "c"),
+    ("core", "supportedcurrencies", "ck_supportedcurrencies_code", "c"),
+    ("core", "supportedcurrencies", "ck_supportedcurrencies_numeric", "c"),
+    ("payroll", "payrollcalculationsnapshots", "fk_calculationsnapshots_currency", "f"),
+    ("payroll", "payrollcalculationsnapshots", "ck_calculationsnapshots_currencyminor", "c"),
+    ("payroll", "payrollcalculationsnapshotusedratedefinitions", "fk_usedratedefinitions_currency", "f"),
+    ("payroll", "payrollcalculationsnapshotusedratedefinitions", "ck_usedratedefinitions_currencyminor", "c"),
+    ("payroll", "payrollcalculationsnapshotbonusevents", "fk_bonuseventevidence_currency", "f"),
+    ("payroll", "payrollcalculationsnapshotbonusevents", "ck_bonuseventevidence_currencyminor", "c"),
+    ("payroll", "payrollfinallines", "fk_finallines_currency", "f"),
+    ("payroll", "payrollfinallines", "ck_finallines_currencyminor", "c"),
+]
+
+
 # Alembic migrations directory — relative to this file's location
 # backend/app/db/schema_guard.py -> ../../../../migrations/versions/
 _VERSIONS_DIR = (
@@ -275,6 +306,26 @@ def _check_payroll_trust(cur) -> list[str]:
                 f"trigger {trig_name} on {tbl_schema}.{tbl_name} ({phase}). "
                 f"Run migrations or re-enable the trigger."
             )
+
+    # P3a presence and shape are always required, including in production.
+    for schema, table, column in _P3A_COLUMNS:
+        if not _column_exists(cur, schema, table, column):
+            errors.append(f"Missing P3a currency column {schema}.{table}.{column}. Run migrations.")
+    for schema, table, name, kind in _P3A_CONSTRAINTS:
+        cur.execute("""
+            SELECT 1 FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+            WHERE ns.nspname = %s AND rel.relname = %s
+              AND con.conname = %s AND con.contype = %s AND con.convalidated
+        """, (schema, table, name, kind))
+        if cur.fetchone() is None:
+            errors.append(f"Missing or unvalidated P3a currency constraint {schema}.{table}.{name}.")
+    for name in ("fn_company_has_durable_monetary_state", "fn_guard_company_currency_change"):
+        if not _function_exists(cur, "core", name):
+            errors.append(f"Missing P3a currency function core.{name}().")
+    if not _trigger_exists_and_enabled(cur, "trg_companies_currencychange", "core", "companies"):
+        errors.append("Missing or disabled P3a Company currency-change trigger.")
 
     return errors
 

@@ -94,10 +94,13 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
                 c.companyid,
                 c.companycode,
                 c.companyname,
+                c.currencycode,
+                sc.minorunitdigits AS currency_minor_unit_digits,
                 c.issuspended,
                 c.status AS companystatus
             FROM   sec.users u
             JOIN   core.companies c ON c.companyid = u.companyid
+            LEFT JOIN core.supportedcurrencies sc ON sc.currencycode = c.currencycode
             WHERE  LOWER(u.username)    = LOWER(:username)
               AND  LOWER(c.companycode) = LOWER(:company_code)
         """),
@@ -257,6 +260,8 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
             display_name=row["displayname"],
             company_id=company_id,
             company_name=row["companyname"],
+            currency_code=row["currencycode"],
+            currency_minor_unit_digits=row["currency_minor_unit_digits"],
             branches=branches,
             self_assignments=self_assignments,
             active_permissions=active_permissions,
@@ -441,9 +446,11 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
     result = await db.execute(
         text("""
             SELECT u.userid, u.username, u.displayname, u.isstaged, u.canlogin,
-                   c.companyid, c.companyname
+                   c.companyid, c.companyname, c.currencycode,
+                   sc.minorunitdigits AS currency_minor_unit_digits
             FROM   sec.users u
             JOIN   core.companies c ON c.companyid = u.companyid
+            LEFT JOIN core.supportedcurrencies sc ON sc.currencycode = c.currencycode
             WHERE  u.userid      = :user_id
               AND  u.companyid   = :company_id
               AND  u.isactive    = TRUE
@@ -509,6 +516,8 @@ async def get_me(user_id: int, company_id: int, db: AsyncConnection) -> UserInfo
         display_name=row["displayname"],
         company_id=row["companyid"],
         company_name=row["companyname"],
+        currency_code=row["currencycode"],
+        currency_minor_unit_digits=row["currency_minor_unit_digits"],
         branches=branches,
         self_assignments=self_assignments,
         active_permissions=active_permissions,

@@ -1246,8 +1246,8 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrollcalculationsnapshots
                         (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-                         sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
-                    VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0)
+                         sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0, 'USD', 2)
                     RETURNING payrollcalculationsnapshotid
                 """),
                 {
@@ -1266,9 +1266,9 @@ class TestCp2dCanonicalEntryState:
                     INSERT INTO payroll.payrollfinallines
                         (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, sourcesnapshot)
+                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB))
+                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                 """),
                 {
                     "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
@@ -1329,9 +1329,9 @@ class TestCp2dCanonicalEntryState:
                     INSERT INTO payroll.payrollcalculationsnapshots
                         (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
                          sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
-                         reportevidenceversion, reportevidencehash)
+                         reportevidenceversion, reportevidencehash, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0,
-                            1, :evidence_hash)
+                            1, :evidence_hash, 'USD', 2)
                     RETURNING payrollcalculationsnapshotid
                 """),
                 {
@@ -1351,9 +1351,9 @@ class TestCp2dCanonicalEntryState:
                     INSERT INTO payroll.payrollfinallines
                         (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, sourcesnapshot)
+                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB))
+                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                 """),
                 {
                     "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
@@ -1419,9 +1419,9 @@ class TestCp2dCanonicalEntryState:
                     INSERT INTO payroll.payrollfinallines
                         (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc)
+                         approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW())
+                            'DraftLine', 1, NOW(), NOW(), 'USD', 2)
                 """),
                 {
                     "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,

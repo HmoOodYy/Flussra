@@ -142,10 +142,10 @@ async def _insert_snapshot(
     return (await db.conn.execute(text("""
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
+             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES
             (:company_id, :branch_id, :period_id, :revision, :version,
-             :source_hash, :snapshot_hash, :user_id, :total)
+             :source_hash, :snapshot_hash, :user_id, :total, 'USD', 2)
         RETURNING payrollcalculationsnapshotid
     """), {
         "company_id": db.company_id,
@@ -308,9 +308,9 @@ async def test_snapshot_revision_must_be_positive(snapshot_db, revision):
     error = await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
+             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES (:company_id, :branch_id, :period_id, :revision, :version,
-                :source_hash, :snapshot_hash, :user_id, 0)
+                :source_hash, :snapshot_hash, :user_id, 0, 'USD', 2)
     """), {
         "company_id": snapshot_db.company_id,
         "branch_id": snapshot_db.branch_id,
@@ -331,9 +331,9 @@ async def test_snapshot_revisions_are_unique_per_period_and_incrementable(snapsh
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
+             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES (:company_id, :branch_id, :period_id, 1, :version,
-                :source_hash, :snapshot_hash, :user_id, 0)
+                :source_hash, :snapshot_hash, :user_id, 0, 'USD', 2)
     """), {
         "company_id": snapshot_db.company_id,
         "branch_id": snapshot_db.branch_id,
@@ -351,9 +351,9 @@ async def test_snapshot_hash_columns_require_lowercase_sha256_hex(snapshot_db, h
     error = await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
+             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES (:company_id, :branch_id, :period_id, 1, :version,
-                :source_hash, :snapshot_hash, :user_id, 0)
+                :source_hash, :snapshot_hash, :user_id, 0, 'USD', 2)
     """), {
         "company_id": snapshot_db.company_id,
         "branch_id": snapshot_db.branch_id,

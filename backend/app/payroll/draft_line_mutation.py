@@ -45,6 +45,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import currency_error, lock_and_get_company_currency
 from app.core.service import _check_permission
 from app.payroll.day_entry_state import (
     _resolve_status_key_id,
@@ -402,6 +403,13 @@ async def add_draft_line(
     # Permission gate: adding payroll entries requires payroll.entry
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
+    currency = await lock_and_get_company_currency(company_id, db, required=False)
+    if data.rate_amount is not None and currency is None:
+        raise currency_error(
+            "COMPANY_CURRENCY_REQUIRED",
+            "Configure Company currency before writing a rate amount.",
+        )
+
     # Daily lines require a work_date: the eligibility check, duplicate guard,
     # and rate lookups all depend on it.
     if data.work_date is None:
@@ -467,7 +475,7 @@ async def add_draft_line(
 
     # CP-2F: Draft (Prepared) periods store NULL financial fields — no calculation,
     # no rate lookup, no NeedsManagerReview.  Calculations are applied at Draft→Open.
-    if period.status == "Draft":
+    if period.status == "Draft" or currency is None:
         calc_amount = None
         needs_review = False
         # rate_amount was already rejected above; force NULL at INSERT level as defence-in-depth.
@@ -668,6 +676,13 @@ async def update_draft_line(
     # Permission gate: editing payroll entries requires payroll.entry
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
+    currency = await lock_and_get_company_currency(company_id, db, required=False)
+    if data.rate_amount is not None and currency is None:
+        raise currency_error(
+            "COMPANY_CURRENCY_REQUIRED",
+            "Configure Company currency before writing a rate amount.",
+        )
+
     line = await _get_line_by_id(draft_line_id, company_id, db)
     if line.period_id != period_id:
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
@@ -776,6 +791,10 @@ async def update_draft_line(
         fields["needsmanagerreview"] = False
 
     # M13b: re-compute calculatedamount when quantity or rate_amount changes.
+    elif currency is None and (data.quantity is not None or data.rate_amount is not None):
+        fields["calculatedamount"] = None
+        fields["rateamount"] = None
+        fields["needsmanagerreview"] = False
     elif data.quantity is not None or data.rate_amount is not None:
         new_qty  = data.quantity    if data.quantity    is not None else line.quantity
         new_rate = data.rate_amount if data.rate_amount is not None else line.rate_amount

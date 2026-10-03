@@ -42,6 +42,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import lock_and_get_company_currency
 from app.core.service import (
     _check_any_permission,
     _check_permission,
@@ -291,6 +292,7 @@ async def create_bonus_event(
         company_id, period.branch_id, period_id, data.driver_id, db
     )
 
+    await lock_and_get_company_currency(company_id, db)
     await _lock_period_for_mutation(period_id, company_id, db)
 
     insert_result = await db.execute(
@@ -422,6 +424,8 @@ async def update_bonus_event(
         # No-op update — return current state unchanged.
         return event
 
+    if data.amount is not None:
+        await lock_and_get_company_currency(company_id, db)
     await _lock_period_for_mutation(period_id, company_id, db)
 
     # CP-3B2a: atomic predicate. Always scoped by period/company/branch AND
@@ -660,6 +664,19 @@ async def apply_bonus_batch(
     branch_id = period.branch_id
     payload = _bonus_batch_canonical_payload(data.expected_bonus_data_revision, data.items)
     request_hash = _bonus_batch_request_hash(payload)
+
+    # Exact replay is read-only. Detect it before taking the Company lock;
+    # fresh requests recheck after acquiring Company and Period locks.
+    preexisting = (await db.execute(text("""
+        SELECT 1 FROM payroll.payrollbonusbatchrequests
+        WHERE companyid = :cid AND branchid = :bid
+          AND payrollperiodid = :pid AND idempotencykey = :key
+    """), {
+        "cid": company_id, "bid": branch_id, "pid": period_id,
+        "key": data.idempotency_key,
+    })).scalar_one_or_none()
+    if preexisting is None:
+        await lock_and_get_company_currency(company_id, db)
 
     # ── Lock the period row (does NOT enforce editability — replay must work on
     #    a now-locked/archived period). All idempotency and write decisions

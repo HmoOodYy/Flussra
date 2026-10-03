@@ -83,6 +83,8 @@ class UserInfo(BaseModel):
     display_name: str
     company_id: int
     company_name: str
+    currency_code: str | None = None
+    currency_minor_unit_digits: int | None = None
     branches: list[BranchAccess]
     self_assignments: list[SelfAssignment] = Field(default_factory=list)
     active_permissions: list[str] = Field(default=[], deprecated=True)

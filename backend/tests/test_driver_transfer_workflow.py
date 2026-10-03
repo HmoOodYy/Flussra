@@ -1303,10 +1303,10 @@ async def test_completion_preserves_final_lines_on_old_driver(
         _text("""
             INSERT INTO payroll.payrollfinallines
                 (payrollperiodid, companyid, branchid, driverid,
-                 linetype, sourcetype, finalamount)
+                 linetype, sourcetype, finalamount, CurrencyCode, CurrencyMinorUnitDigits)
             VALUES
                 (:pid, :cid, :bid, :did,
-                 'FinalHistTest', 'Manual', 100.00)
+                 'FinalHistTest', 'Manual', 100.00, 'USD', 2)
         """),
         {"pid": period_id, "cid": company_id, "bid": paytest_branch_id, "did": drv_id},
     )

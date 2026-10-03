@@ -652,8 +652,8 @@ class TestDriverPayRulesArchivedProtection:
             text("""
                 INSERT INTO payroll.payrollfinallines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype)
-                VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual')
+                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
             """),
             {"cid": company_id, "bid": paytest_branch_id,
              "pid": arch_pid, "did": paytest_driver_id},
@@ -737,8 +737,8 @@ class TestDriverPayRulesArchivedProtection:
             text("""
                 INSERT INTO payroll.payrollfinallines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype)
-                VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual')
+                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
             """),
             {"cid": company_id, "bid": paytest_branch_id,
              "pid": arch_pid, "did": paytest_driver_id},

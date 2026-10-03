@@ -12,6 +12,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.company_currency import CompanyCurrency
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
@@ -153,7 +154,7 @@ async def _seed_finalized_rates_period(
             expected_pay=total, needs_manager_review=False, blockers=[], lines=lines,
         )],
     )
-    snapshot_id = int(await _capture_calculation_snapshot(
+    snapshot_id = int(await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=1, user_id=1, packet=packet, db=direct_db, context="Submit",
     ))
     await direct_db.execute(text("""

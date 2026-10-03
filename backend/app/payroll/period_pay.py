@@ -39,6 +39,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import lock_and_get_company_currency
 from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
 from app.payroll.line_audit import _write_line_audit
@@ -368,6 +369,7 @@ async def add_period_pay_line(
     # CP-0A: Lock custom PayItem catalog row before period lock (same order as the
     # physical-delete path) to prevent the first-reference orphan race.
     # CP-2C: pass period_id so snapshot-authorised items bypass live status check.
+    await lock_and_get_company_currency(company_id, db)
     await _lock_pay_item_for_source_write(canonical_period_lt, company_id, db, period_id=period_id)
     # CP-0A: Recheck period status under a row-level lock before writing.
     await _lock_period_for_mutation(period_id, company_id, db)
@@ -582,6 +584,8 @@ async def update_period_pay_line(
     # CP-0A: Lock custom PayItem catalog row before period lock to prevent the
     # zero-to-meaningful race on period-pay lines (same lock ordering as deletion).
     # CP-2C: pass period_id so snapshot-authorised items bypass live status check.
+    if data.amount is not None:
+        await lock_and_get_company_currency(company_id, db)
     await _lock_pay_item_for_source_write(canonical_period_pay_lt, company_id, db,
                                           period_id=period_id)
     # CP-0A: Recheck period status under a row-level lock before writing.

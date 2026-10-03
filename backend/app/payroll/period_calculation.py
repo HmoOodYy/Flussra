@@ -82,6 +82,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import CompanyCurrency, get_company_currency
 from app.core.service import _check_any_permission, _require_not_driver_role
 from app.payroll.calculation.per_unit import PER_UNIT_CALCULATION_VERSION
 from app.payroll.draft_line_calculation import _compute_calculated_amount
@@ -116,6 +117,7 @@ async def _refresh_draft_calculations(
     company_id: int,
     period_start_date: date,
     db: AsyncConnection,
+    currency: CompanyCurrency,
 ) -> int:
     """
     Automatically re-compute calculatedamount + needsmanagerreview for every
@@ -1408,7 +1410,10 @@ async def get_calculation_preview(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
     )
     packet = await _build_live_calculation_packet(period, company_id, db)
+    currency = await get_company_currency(company_id, db)
     return CalculationPreviewResponse(
+        currency_code=None if currency is None else currency.code,
+        currency_minor_unit_digits=None if currency is None else currency.minor_unit_digits,
         payroll_period_id=packet.payroll_period_id,
         company_id=packet.company_id,
         branch_id=packet.branch_id,
@@ -1508,6 +1513,7 @@ async def _capture_calculation_snapshot(
     packet: _LiveCalculationPacket,
     db: AsyncConnection,
     context: str,
+    currency: CompanyCurrency,
 ) -> int:
     """Persist one complete immutable CP-4D submission packet.
 
@@ -1534,6 +1540,14 @@ async def _capture_calculation_snapshot(
         company_id=company_id,
         db=db,
     )
+    bonus_events = [
+        {
+            **event,
+            "CurrencyCodeSnapshot": currency.code,
+            "CurrencyMinorUnitDigitsSnapshot": currency.minor_unit_digits,
+        }
+        for event in bonus_events
+    ]
     snapshot_bonus_lines = sorted(
         (
             line.bonus_event_id,
@@ -1577,7 +1591,11 @@ async def _capture_calculation_snapshot(
     )).mappings().all()
 
     source_config_payload = {
-        "PacketContract": "cp4d-source-config-v1",
+        "PacketContract": "cp4d-source-config-v2",
+        "CompanyCurrency": {
+            "CurrencyCode": currency.code,
+            "CurrencyMinorUnitDigits": currency.minor_unit_digits,
+        },
         "PayrollPeriod": {
             "PayrollPeriodID": period.payroll_period_id,
             "CompanyID": company_id,
@@ -1635,10 +1653,12 @@ async def _capture_calculation_snapshot(
                 (companyid, branchid, payrollperiodid, revisionnumber,
                  calculationversion, sourceconfighash, snapshothash,
                  reportevidenceversion, reportevidencehash,
+                 currencycode, currencyminorunitdigits,
                  createdbyuserid, totalexpectedpay)
             VALUES
                 (:cid, :bid, :pid, :revision, :version, :source_hash,
                  :snapshot_hash, :report_evidence_version, :report_evidence_hash,
+                 :currency_code, :currency_minor,
                  :uid, :total)
             RETURNING payrollcalculationsnapshotid
         """),
@@ -1652,6 +1672,8 @@ async def _capture_calculation_snapshot(
             "snapshot_hash": snapshot_hash,
             "report_evidence_version": CURRENT_REPORT_EVIDENCE_VERSION,
             "report_evidence_hash": report_evidence_hash,
+            "currency_code": currency.code,
+            "currency_minor": currency.minor_unit_digits,
             "uid": user_id,
             "total": packet.total_expected_pay,
         },
@@ -1668,6 +1690,7 @@ async def _capture_calculation_snapshot(
         branch_id=period.branch_id,
         period_id=period.payroll_period_id,
         snapshot_line_rows=snapshot_lines,
+        currency=currency,
         db=db,
     )
     snapshot_line_ordinal = 0
@@ -1772,11 +1795,13 @@ async def _capture_calculation_snapshot(
                     (payrollcalculationsnapshotid, companyid, branchid,
                      payrollperiodid, payrollbonuseventid, driverid, amount,
                      reason, notes, datarevision, createdbyuserid,
-                     creatordisplaynamesnapshot, createdatutc)
+                     creatordisplaynamesnapshot, createdatutc,
+                     currencycodesnapshot, currencyminorunitdigitssnapshot)
                 VALUES
                     (:snapshot_id, :cid, :bid, :pid, :bonus_event_id, :driver_id,
                      :amount, :reason, :notes, :data_revision, :created_by_user_id,
-                     :creator_display_name, :created_at)
+                     :creator_display_name, :created_at,
+                     :currency_code, :currency_minor)
             """),
             {
                 "snapshot_id": snapshot_id,
@@ -1792,6 +1817,8 @@ async def _capture_calculation_snapshot(
                 "created_by_user_id": event["CreatedByUserID"],
                 "creator_display_name": event["CreatorDisplayNameSnapshot"],
                 "created_at": event["CreatedAtUtc"],
+                "currency_code": currency.code,
+                "currency_minor": currency.minor_unit_digits,
             },
         )
 

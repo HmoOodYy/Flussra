@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.payroll.period_lifecycle as period_lifecycle
+from app.company_currency import CompanyCurrency
 from app.payroll.schemas import PeriodStatusChange
 from app.payroll.service import (
     _build_live_calculation_packet,
@@ -262,6 +263,7 @@ async def _evidence_rows(db: SimpleNamespace, snapshot_id: int) -> tuple[dict, d
     """), {"snapshot_id": snapshot_id})).mappings().one()
     bonus_row = (await db.conn.execute(text("""
         SELECT payrollbonuseventid, driverid, amount, reason, notes, datarevision,
+               currencycodesnapshot, currencyminorunitdigitssnapshot,
                createdbyuserid, creatordisplaynamesnapshot, createdatutc
         FROM payroll.payrollcalculationsnapshotbonusevents
         WHERE payrollcalculationsnapshotid = :snapshot_id
@@ -292,6 +294,8 @@ async def test_submit_captures_versioned_status_and_bonus_evidence(evidence_db):
     assert bonus_row["reason"] == "On-time"
     assert bonus_row["notes"] == "Initial note"
     assert bonus_row["datarevision"] == 7
+    assert (bonus_row["currencycodesnapshot"], bonus_row["currencyminorunitdigitssnapshot"]) == ("USD", 2)
+    assert header["reportevidenceversion"] == 2
     assert bonus_row["createdbyuserid"] == evidence_db.user_id
     assert bonus_row["creatordisplaynamesnapshot"] == "Admin User"
 
@@ -392,7 +396,7 @@ async def test_zero_evidence_uses_versioned_hash_marker(evidence_db):
     await evidence_db.conn.execute(text(
         "DELETE FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid"
     ), {"pid": evidence_db.period_id})
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period(evidence_db), company_id=evidence_db.company_id,
         user_id=evidence_db.user_id, packet=_direct_packet(evidence_db, include_bonus=False),
         db=evidence_db.conn, context="Submit",
@@ -450,7 +454,7 @@ def test_report_evidence_hash_is_order_independent_and_content_sensitive():
 
 @pytest.mark.asyncio
 async def test_evidence_rows_are_immutable_and_scope_bound(evidence_db):
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period(evidence_db), company_id=evidence_db.company_id,
         user_id=evidence_db.user_id, packet=_direct_packet(evidence_db),
         db=evidence_db.conn, context="Submit",
@@ -510,7 +514,7 @@ async def test_repeatable_read_keeps_packet_and_evidence_on_one_source_view(evid
                         WHERE payrollbonuseventid = :bonus_event_id
                     """), {"bonus_event_id": evidence_db.bonus_event_id})
 
-                snapshot_id = await _capture_calculation_snapshot(
+                snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
                     period=period, company_id=evidence_db.company_id,
                     user_id=evidence_db.user_id, packet=packet, db=snapshot_conn,
                     context="Submit",
@@ -535,8 +539,8 @@ async def test_legacy_snapshot_marker_remains_explicitly_nullable(evidence_db):
     legacy_id = int((await evidence_db.conn.execute(text("""
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay)
-        VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, :uid, 0)
+             sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
+        VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, :uid, 0, 'USD', 2)
         RETURNING payrollcalculationsnapshotid
     """), {
         "cid": evidence_db.company_id, "bid": evidence_db.branch_id,

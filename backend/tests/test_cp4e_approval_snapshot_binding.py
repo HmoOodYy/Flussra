@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import app.payroll.period_calculation as period_calculation
 import app.payroll.period_lifecycle as period_lifecycle
 import app.payroll.service as payroll_service
+from app.company_currency import CompanyCurrency
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
@@ -144,11 +145,14 @@ async def _period_for_capture(db, period_id: int):
     )
 
 
-async def _submitted_review(db, *, period_id: int | None = None, snapshot_id: int | None = None) -> tuple[int, int]:
+async def _submitted_review(
+    db, *, period_id: int | None = None, snapshot_id: int | None = None,
+    currency: CompanyCurrency = CompanyCurrency("USD", 2),
+) -> tuple[int, int]:
     period_id = db.period_id if period_id is None else period_id
     if snapshot_id is None:
         period = await _period_for_capture(db, period_id)
-        snapshot_id = await _capture_calculation_snapshot(
+        snapshot_id = await _capture_calculation_snapshot(currency=currency,
             period=period, company_id=db.company_id, user_id=db.user_id,
             packet=_packet(db), db=db.conn, context="Submit",
         )
@@ -201,6 +205,36 @@ async def test_snapshot_linked_pending_approval_keeps_exact_snapshot_and_creates
     audit_value = json.loads(audit)
     assert audit_value["payroll_calculation_snapshot_id"] == snapshot_id
     assert audit_value["revision_number"] == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_fails_closed_when_frozen_currency_mismatches_company(cp4e_db):
+    review_id, _ = await _submitted_review(cp4e_db, currency=CompanyCurrency("KWD", 3))
+    with pytest.raises(HTTPException, match="SNAPSHOT_CURRENCY_MISMATCH"):
+        await decide_review_item(
+            review_id, cp4e_db.company_id, cp4e_db.user_id,
+            ReviewDecide(decision="Approved"), cp4e_db.conn,
+        )
+    assert (await cp4e_db.conn.execute(text(
+        "SELECT status FROM review.managerreviewitems WHERE reviewitemid=:id"
+    ), {"id": review_id})).scalar_one() == "Pending"
+    assert (await cp4e_db.conn.execute(text(
+        "SELECT currencycode FROM core.companies WHERE companyid=:cid"
+    ), {"cid": cp4e_db.company_id})).scalar_one() == "USD"
+
+
+@pytest.mark.asyncio
+async def test_edit_requested_remains_nonmonetary_with_frozen_currency_mismatch(cp4e_db):
+    review_id, _ = await _submitted_review(cp4e_db, currency=CompanyCurrency("KWD", 3))
+    result = await decide_review_item(
+        review_id, cp4e_db.company_id, cp4e_db.user_id,
+        ReviewDecide(decision="EditRequested", decision_reason="Correct the submitted packet"),
+        cp4e_db.conn,
+    )
+    assert result.status == "EditRequested"
+    assert (await cp4e_db.conn.execute(text(
+        "SELECT status FROM payroll.payrollperiods WHERE payrollperiodid=:id"
+    ), {"id": cp4e_db.period_id})).scalar_one() == "Returned"
 
 
 @pytest.mark.asyncio
@@ -258,7 +292,7 @@ async def test_snapshot_read_cannot_cross_company_review_item_scope(cp4e_db):
 
 @pytest.mark.asyncio
 async def test_same_tenant_wrong_period_snapshot_link_fails_closed(cp4e_db):
-    snapshot_id = await _capture_calculation_snapshot(
+    snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_capture(cp4e_db, cp4e_db.period_id),
         company_id=cp4e_db.company_id, user_id=cp4e_db.user_id,
         packet=_packet(cp4e_db), db=cp4e_db.conn, context="Submit",
@@ -345,7 +379,7 @@ async def test_historical_returned_item_cannot_approve_newer_pending_packet(cp4e
         SET status = 'InReview', currentreturnreviewitemid = NULL
         WHERE payrollperiodid = :period_id
     """), {"period_id": cp4e_db.period_id})
-    new_snapshot_id = await _capture_calculation_snapshot(
+    new_snapshot_id = await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=await _period_for_capture(cp4e_db, cp4e_db.period_id), company_id=cp4e_db.company_id,
         user_id=cp4e_db.user_id, packet=_packet(cp4e_db), db=cp4e_db.conn, context="Resubmit",
     )

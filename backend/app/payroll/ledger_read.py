@@ -48,7 +48,8 @@ _FINAL_SELECT = """
         fl.driverrateid,
         fl.resolvedrateamount,
         fl.ratebehavior,
-        fl.sourcesnapshot
+        fl.sourcesnapshot,
+        fl.currencycode, fl.currencyminorunitdigits
     FROM   payroll.payrollfinallines fl
     JOIN   core.drivers              d  ON d.driverid   = fl.driverid
     JOIN   core.employees            e  ON e.employeeid = d.employeeid
@@ -115,6 +116,8 @@ async def get_final_lines(
     )
     return [
         FinalLineSummary(
+            currency_code=r["currencycode"],
+            currency_minor_unit_digits=r["currencyminorunitdigits"],
             final_line_id=r["finallineid"],
             period_id=r["payrollperiodid"],
             branch_id=r["branchid"],

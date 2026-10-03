@@ -22,22 +22,22 @@ import type {
 } from '../../types/payroll';
 import { finalizedLedgerPath } from './finalizedNavigation';
 import styles from './FinalizationPreviewDialog.module.css';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function fmt(v: string | null | undefined): string {
+function fmt(v: string | null | undefined, code: string, digits: number): string {
   if (v == null) return '-';
-  const n = Number(v);
-  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
+  return formatCurrencyMoney(v, code, digits);
 }
 
-function fmtAdj(v: string): string {
+function fmtAdj(v: string, code: string, digits: number): string {
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
-  const abs = Math.abs(n).toFixed(2);
-  return n >= 0 ? `+$${abs}` : `-$${abs}`;
+  const abs = formatCurrencyMoney(Math.abs(n), code, digits);
+  return n >= 0 ? `+${abs}` : `-${abs}`;
 }
 
 function fmtQty(v: string | null | undefined): string {
@@ -117,7 +117,7 @@ function BlockersWarnings({ blockers, warnings }: { blockers: string[]; warnings
   );
 }
 
-function DriverTotalsTable({ rows }: { rows: FinalizationPreviewDriverTotal[] }) {
+function DriverTotalsTable({ rows, code, digits }: { rows: FinalizationPreviewDriverTotal[]; code: string; digits: number }) {
   if (rows.length === 0) return <div className={styles.emptyMsg}>No driver totals.</div>;
   return (
     <table className={styles.table}>
@@ -137,14 +137,14 @@ function DriverTotalsTable({ rows }: { rows: FinalizationPreviewDriverTotal[] })
         {rows.map((r) => (
           <tr key={r.driver_id}>
             <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
-            <td className={styles.numCol}>{fmt(r.daily_pay)}</td>
-            <td className={styles.numCol}>{fmt(r.status_pay)}</td>
-            <td className={styles.numCol}>{fmt(r.period_pay)}</td>
+            <td className={styles.numCol}>{fmt(r.daily_pay, code, digits)}</td>
+            <td className={styles.numCol}>{fmt(r.status_pay, code, digits)}</td>
+            <td className={styles.numCol}>{fmt(r.period_pay, code, digits)}</td>
             <td className={`${styles.numCol} ${hasNonZero(r.sys_adjustment) ? styles.adjCell : ''}`}>
-              {hasNonZero(r.sys_adjustment) ? fmtAdj(r.sys_adjustment) : '-'}
+              {hasNonZero(r.sys_adjustment) ? fmtAdj(r.sys_adjustment, code, digits) : '-'}
             </td>
-            <td className={styles.numCol}>{fmt(r.bonus_total)}</td>
-            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay)}</td>
+            <td className={styles.numCol}>{fmt(r.bonus_total, code, digits)}</td>
+            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay, code, digits)}</td>
             <td className={styles.numCol}>{r.line_count}</td>
           </tr>
         ))}
@@ -153,7 +153,7 @@ function DriverTotalsTable({ rows }: { rows: FinalizationPreviewDriverTotal[] })
   );
 }
 
-function SysAdjustmentsTable({ rows }: { rows: FinalizationPreviewSysAdjustment[] }) {
+function SysAdjustmentsTable({ rows, code, digits }: { rows: FinalizationPreviewSysAdjustment[]; code: string; digits: number }) {
   if (rows.length === 0) return <div className={styles.emptyMsg}>No system adjustments for this period.</div>;
   return (
     <table className={styles.table}>
@@ -175,9 +175,9 @@ function SysAdjustmentsTable({ rows }: { rows: FinalizationPreviewSysAdjustment[
                 {r.adjustment_type === 'SYS_MIN_TOPUP' ? 'Min Top-Up' : 'Max Cap'}
               </span>
             </td>
-            <td className={styles.numCol}>{fmt(r.gross_before)}</td>
-            <td className={`${styles.numCol} ${styles.adjCell}`}>{fmtAdj(r.adjustment_amount)}</td>
-            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay)}</td>
+            <td className={styles.numCol}>{fmt(r.gross_before, code, digits)}</td>
+            <td className={`${styles.numCol} ${styles.adjCell}`}>{fmtAdj(r.adjustment_amount, code, digits)}</td>
+            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_pay, code, digits)}</td>
           </tr>
         ))}
       </tbody>
@@ -185,7 +185,7 @@ function SysAdjustmentsTable({ rows }: { rows: FinalizationPreviewSysAdjustment[
   );
 }
 
-function LineDetailsTable({ rows }: { rows: FinalizationPreviewLine[] }) {
+function LineDetailsTable({ rows, code, digits }: { rows: FinalizationPreviewLine[]; code: string; digits: number }) {
   if (rows.length === 0) return <div className={styles.emptyMsg}>No approved financial lines.</div>;
   return (
     <table className={styles.table}>
@@ -209,9 +209,9 @@ function LineDetailsTable({ rows }: { rows: FinalizationPreviewLine[] }) {
             <td>{lineLabel(r)}</td>
             <td>{r.line_scope}</td>
             <td className={styles.numCol}>{fmtQty(r.quantity)}</td>
-            <td className={styles.numCol}>{fmt(r.rate_amount)}</td>
-            <td className={styles.numCol}>{fmt(r.calculated_amount)}</td>
-            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_amount)}</td>
+            <td className={styles.numCol}>{fmt(r.rate_amount, code, digits)}</td>
+            <td className={styles.numCol}>{fmt(r.calculated_amount, code, digits)}</td>
+            <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_amount, code, digits)}</td>
           </tr>
         ))}
       </tbody>
@@ -269,7 +269,7 @@ function ConfirmFinalize({ preview, onConfirm, onCancel, finalizing }: ConfirmFi
         <ul className={styles.confirmList}>
           <li>Project <strong>{preview.final_line_count_estimate}</strong> approved financial lines into locked history</li>
           <li>Lock the period — no further edits</li>
-          <li>Total gross: <strong>{fmt(preview.total_final_gross)}</strong></li>
+          <li>Total gross: <strong>{fmt(preview.total_final_gross, preview.currency_code, preview.currency_minor_unit_digits)}</strong></li>
           <li>Drivers paid: <strong>{preview.driver_count}</strong></li>
         </ul>
         <p className={styles.confirmWarning}>This action cannot be undone.</p>
@@ -440,7 +440,7 @@ export function FinalizationPreviewDialog({
               {/* ── KPIs ─────────────────────────────────────────── */}
               <div className={styles.kpiRow}>
                 <KpiCard label="Drivers Paid" value={String(preview.driver_count)} />
-                <KpiCard label="Approved Total" value={fmt(preview.total_final_gross)} />
+                <KpiCard label="Approved Total" value={fmt(preview.total_final_gross, preview.currency_code, preview.currency_minor_unit_digits)} />
                 <KpiCard label="Bonus Events" value={String(preview.bonus_event_count)} />
                 <KpiCard label="Final Lines" value={String(preview.final_line_count_estimate)} />
               </div>
@@ -453,7 +453,7 @@ export function FinalizationPreviewDialog({
                 title="Driver Totals"
                 badge={preview.driver_totals.length}
               >
-                <DriverTotalsTable rows={preview.driver_totals} />
+                <DriverTotalsTable rows={preview.driver_totals} code={preview.currency_code} digits={preview.currency_minor_unit_digits} />
               </Section>
 
               {/* ── System Adjustments ───────────────────────── */}
@@ -462,7 +462,7 @@ export function FinalizationPreviewDialog({
                 badge={preview.sys_adjustment_count}
                 defaultOpen={preview.sys_adjustment_count > 0}
               >
-                <SysAdjustmentsTable rows={preview.sys_adjustments} />
+                <SysAdjustmentsTable rows={preview.sys_adjustments} code={preview.currency_code} digits={preview.currency_minor_unit_digits} />
               </Section>
 
               {/* ── Line Details ─────────────────────────────── */}
@@ -471,7 +471,7 @@ export function FinalizationPreviewDialog({
                 badge={preview.final_line_count_estimate}
                 defaultOpen={false}
               >
-                <LineDetailsTable rows={preview.lines} />
+                <LineDetailsTable rows={preview.lines} code={preview.currency_code} digits={preview.currency_minor_unit_digits} />
               </Section>
 
               {/* ── Finalize error ───────────────────────────── */}

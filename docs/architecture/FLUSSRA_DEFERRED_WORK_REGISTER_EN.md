@@ -114,11 +114,17 @@ If an issue is officially moved to a different work unit:
 
 **Pre-P3 Compensation Architecture Amendment:** merged.
 
-**P2c:** Lead-approved; publication pending.
+**P2c:** CLOSED / merged (PR #28; merge `af00a22915f93810d123aadea18c3a73da1360aa`).
 
-**P3:** Not started.
+**P3a:** Implemented and under Lead review.
 
-**Migration-script head:** `0075`.
+**P3b:** Not started.
+
+**Current investigated main:** `f671a2ee61e9d31b0804af95eaff9973978a94af`.
+
+**Test Hygiene:** PR #29 merged after P2c.
+
+**Pre-P3a migration head:** `0075`; P3a branch head: `0076`.
 
 **Important rule:** Anything below marked `NOT YET` remains intentional architectural/product debt until the entry itself is updated to `YES`.
 
@@ -586,7 +592,7 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
 
 **Current State:**  
-P1a/P1b must not drift into rates refoundation.
+P3a Company currency authority is implemented and under Lead review. The user-reported full backend run was 4 failed, 3312 passed, 3 skipped in 1143.67s; all four failures were stale pre-P3a Alembic-head assertions. Those assertions were corrected and all four focused reruns passed; the full suite was not rerun after correction. Broader Compensation refoundation remains unresolved through P3b–P6.
 
 **Issue Resolved?:** NOT YET
 

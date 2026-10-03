@@ -62,6 +62,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import lock_and_get_company_currency
 from app.core.service import (
     _build_in_clause,
     _check_any_permission,
@@ -718,6 +719,7 @@ async def save_day_grid(
     # ── Permission: payroll.entry ─────────────────────────────────────────── #
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
+    currency = await lock_and_get_company_currency(company_id, db, required=False)
     branch_id = period.branch_id
 
     # ── Load active Daily columns for this branch/date ───────────────────── #
@@ -1171,6 +1173,7 @@ async def save_day_grid(
             status_key_id=key_row["statuskeyid"] if key_row else None,
             user_id=user_id,
             db=db,
+            currency=currency,
         )
 
     # Return the refreshed grid

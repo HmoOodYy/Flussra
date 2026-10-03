@@ -12,6 +12,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.company_currency import CompanyCurrency
 from app.payroll.service import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
@@ -350,7 +351,7 @@ async def _seed_finalized_off_period(
             blockers=[], lines=lines,
         )],
     )
-    snapshot_id = int(await _capture_calculation_snapshot(
+    snapshot_id = int(await _capture_calculation_snapshot(currency=CompanyCurrency("USD", 2),
         period=period, company_id=1, user_id=1, packet=packet, db=direct_db, context="Submit",
     ))
     review_id = int((await direct_db.execute(text("""
@@ -487,9 +488,9 @@ async def test_finalized_off_drivers_distinguish_zero_evidence_from_snapshot_una
     await direct_db.execute(text("""
         INSERT INTO payroll.payrollfinallines
             (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc)
+             quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
         VALUES (1, :branch_id, :period_id, :driver_id, '2076-01-01', 'HOURS', 'Daily', 1,
-                12.0000, 'DraftLine', 1, NOW(), NOW())
+                12.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2)
     """), {
             "branch_id": paytest_branch_id, "period_id": snapshot_unavailable_period_id,
         "driver_id": paytest_driver_id,

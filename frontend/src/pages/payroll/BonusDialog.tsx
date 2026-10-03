@@ -12,16 +12,12 @@ import {
 } from '../../lib/payrollApi';
 import type { BonusBatchItem, BonusSummary } from '../../types/payroll';
 import styles from './BonusDialog.module.css';
+import { useAuth } from '../../store/authStore';
+import { formatMoney } from '../../lib/money';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function fmtAmount(v: string | null | undefined): string {
-  if (v == null) return '—';
-  const n = parseFloat(v);
-  return isNaN(n) ? String(v) : `$${n.toFixed(2)}`;
-}
 
 function getErrorDetail(error: unknown, fallback: string): string {
   const detail =
@@ -67,6 +63,8 @@ interface BonusDialogProps {
 // ---------------------------------------------------------------------------
 
 export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps) {
+  const { user } = useAuth();
+  const fmtAmount = (v: string | null | undefined) => formatMoney(v, user?.currency_code, user?.currency_minor_unit_digits);
   const [summary, setSummary] = useState<BonusSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -336,7 +334,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                           </label>
 
                           <label className={styles.formLabel}>
-                            Amount ($)
+                            Amount
                             <input
                               className={styles.formInput}
                               type="number"

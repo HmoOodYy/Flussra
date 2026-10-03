@@ -419,10 +419,10 @@ class TestFinalLinePeriodIntegrity:
                 _text("""
                     INSERT INTO payroll.payrollfinallines
                         (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, finalamount, sourcetype)
+                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES
                         (:cid, :bad_branch, :period_id, :driver_id,
-                         'REGULAR', 1, 100, 'Test')
+                         'REGULAR', 1, 100, 'Test', 'USD', 2)
                 """),
                 {
                     "cid": company_id,
@@ -451,10 +451,10 @@ class TestFinalLinePeriodIntegrity:
                 _text("""
                     INSERT INTO payroll.payrollfinallines
                         (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, finalamount, sourcetype)
+                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES
                         (:bad_cid, :branch_id, :period_id, :driver_id,
-                         'REGULAR', 1, 100, 'Test')
+                         'REGULAR', 1, 100, 'Test', 'USD', 2)
                 """),
                 {
                     "bad_cid": 99999,
@@ -493,10 +493,10 @@ class TestFinalLineDriverIntegrity:
                 _text("""
                     INSERT INTO payroll.payrollfinallines
                         (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, finalamount, sourcetype)
+                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                     VALUES
                         (:cid, :hq_branch, :period_id, :driver_id,
-                         'REGULAR', 1, 100, 'Test')
+                         'REGULAR', 1, 100, 'Test', 'USD', 2)
                 """),
                 {
                     "cid": company_id,

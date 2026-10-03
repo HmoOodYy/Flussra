@@ -69,6 +69,8 @@ export interface ReviewPayrollSnapshotLine {
 }
 
 export interface ReviewPayrollSnapshot {
+  currency_code: string;
+  currency_minor_unit_digits: number;
   review_item_id: number;
   payroll_period_id: number;
   revision_number: number;

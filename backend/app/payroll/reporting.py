@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import frozen_currency
+
 
 class ReportAuthorityKind(StrEnum):
     SOURCE_ONLY = "SOURCE_ONLY"
@@ -31,6 +33,8 @@ class ReportFinancialAuthority:
     revision_number: int | None = None
     snapshot_hash: str | None = None
     captured_at_utc: datetime | None = None
+    currency_code: str | None = None
+    currency_minor_unit_digits: int | None = None
 
 
 def _authority_error(code: str, message: str) -> HTTPException:
@@ -85,7 +89,7 @@ async def _resolve_review_snapshot_authority(
 
     snapshot = (await db.execute(text("""
         SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-               revisionnumber, snapshothash, createdatutc
+               revisionnumber, snapshothash, createdatutc, currencycode, currencyminorunitdigits
         FROM payroll.payrollcalculationsnapshots
         WHERE payrollcalculationsnapshotid = :snapshot_id
     """), {"snapshot_id": snapshot_id})).mappings().first()
@@ -104,6 +108,7 @@ async def _resolve_review_snapshot_authority(
             "the PeriodApproval review item snapshot does not belong to the resolved period scope.",
         )
 
+    currency = frozen_currency(snapshot['currencycode'], snapshot['currencyminorunitdigits'])
     return ReportFinancialAuthority(
         period_id=period_id,
         company_id=company_id,
@@ -115,6 +120,7 @@ async def _resolve_review_snapshot_authority(
         revision_number=int(snapshot["revisionnumber"]),
         snapshot_hash=str(snapshot["snapshothash"]),
         captured_at_utc=snapshot["createdatutc"],
+        currency_code=currency.code, currency_minor_unit_digits=currency.minor_unit_digits,
     )
 
 

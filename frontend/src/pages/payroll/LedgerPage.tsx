@@ -23,16 +23,12 @@ import {
 import { discoverLedgerPeriods, type LedgerDiscoveryDeps, type LedgerDiscoveryPeriod } from './ledgerDiscovery';
 import { resolvePreselectedPeriodId } from './finalizedNavigation';
 import styles from './LedgerPage.module.css';
+import { formatMoney as formatCurrencyMoney } from '../../lib/money';
+import { useAuth } from '../../store/authStore';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function fmt(v: string | null | undefined): string {
-  if (v == null) return '-';
-  const n = Number(v);
-  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
-}
 
 function libraryContextForPeriod(finalized: FinalizedPeriodListItem): FinalizedPayrollLibraryPeriodContext {
   return {
@@ -100,10 +96,13 @@ interface LedgerCardProps {
 }
 
 function LedgerCard({ period: p, onOpenLibrary, onViewSummary }: LedgerCardProps) {
+  const { user } = useAuth();
   // Finalized is the display authority when a period has both records — this
   // matches the presentation a ledger.view user saw before merged discovery.
   const status = p.finalized ? p.finalized.period_status : p.operational ? p.operational.status : null;
   const primary = p.finalized ?? p.operational;
+  const displayCurrencyCode = p.finalized ? p.finalized.currency_code : user?.currency_code;
+  const displayMinorUnitDigits = p.finalized ? p.finalized.currency_minor_unit_digits : user?.currency_minor_unit_digits;
   if (status == null || primary == null) return null;
 
   return (
@@ -138,7 +137,7 @@ function LedgerCard({ period: p, onOpenLibrary, onViewSummary }: LedgerCardProps
           <div className={styles.cardStats}>
             <span className={styles.statChip}>
               <span className={styles.statLabel}>Final Gross</span>
-              <span className={styles.statValue}>{fmt(p.operational.final_gross)}</span>
+              <span className={styles.statValue}>{formatCurrencyMoney(p.operational.final_gross, displayCurrencyCode, displayMinorUnitDigits)}</span>
             </span>
             <span className={styles.statChip}>
               <span className={styles.statLabel}>Drivers</span>

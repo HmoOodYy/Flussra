@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
 import { useAuth } from '../../../store/authStore';
-import type { CompanyProfile, CompanyUpdate, BranchAdmin } from '../../../types/settings';
+import type { CompanyProfile, CompanyUpdate, BranchAdmin, SupportedCurrency } from '../../../types/settings';
 import { CompanyStatusBadge, BranchStatusBadge } from '../../../components/StatusBadge';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import { EmptyState, ErrorState, ReadOnlyBanner } from '../../../components/ui';
@@ -81,7 +81,7 @@ function toForm(b: BranchAdmin): BranchForm {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function CompanyBranchesPage() {
-  const { user } = useAuth();
+  const { user, setUser } = useAuth();
   const navigate = useNavigate();
   const caps = companyBranchesCapabilities(user);
   const notice = accessNotice(caps);
@@ -90,6 +90,8 @@ export function CompanyBranchesPage() {
   const [company, setCompany]             = useState<CompanyProfile | null>(null);
   const [companyLoading, setCompanyLoading] = useState(true);
   const [companyError, setCompanyError]   = useState('');
+  const [currencies, setCurrencies] = useState<SupportedCurrency[]>([]);
+  const [currencyLoadError, setCurrencyLoadError] = useState('');
   const [editingCompany, setEditingCompany] = useState(false);
   const [coForm, setCoForm]               = useState<CompanyUpdate>({ company_name: '' });
   const [savingCo, setSavingCo]           = useState(false);
@@ -207,6 +209,9 @@ export function CompanyBranchesPage() {
     apiClient.get<CompanyProfile>('/settings/company')
       .then(({ data }) => { setCompany(data); setCompanyLoading(false); })
       .catch((e) => { setCompanyError(apiError(e)); setCompanyLoading(false); });
+    apiClient.get<SupportedCurrency[]>('/settings/currencies')
+      .then(({ data }) => setCurrencies(data))
+      .catch((e) => setCurrencyLoadError(apiError(e)));
   }, []);
 
   // ── Load branches ─────────────────────────────────────────────────────────
@@ -246,7 +251,8 @@ export function CompanyBranchesPage() {
   function startEditCo() {
     if (!company) return;
     setCoForm({ company_name: company.company_name, legal_name: company.legal_name,
-      timezone_name: company.timezone_name, notes: company.notes, allow_self_approval: company.allow_self_approval });
+      timezone_name: company.timezone_name, notes: company.notes, allow_self_approval: company.allow_self_approval,
+      ...(company.currency_code ? { currency_code: company.currency_code } : {}) });
     setCoSaveErr('');
     setEditingCompany(true);
   }
@@ -262,6 +268,11 @@ export function CompanyBranchesPage() {
     try {
       const { data } = await apiClient.patch<CompanyProfile>('/settings/company', coForm);
       setCompany(data); setEditingCompany(false);
+      if (user) setUser({
+        ...user,
+        currency_code: data.currency_code,
+        currency_minor_unit_digits: data.currency_minor_unit_digits,
+      });
       setSuccessInfo({ title: 'Company Updated!', sub: 'Your company details have been saved.' });
     } catch (e) { setCoSaveErr(apiError(e)); }
     finally { setSavingCo(false); }
@@ -459,6 +470,7 @@ export function CompanyBranchesPage() {
             <MetaItem label="Timezone"        value={company.timezone_name} />
             <MetaItem label="Default Branch"  value={company.default_branch_name ?? '—'} />
             <MetaItem label="Self-Approval"   value={company.allow_self_approval ? 'Allowed' : 'Disabled'} />
+            <MetaItem label="Company Currency" value={company.currency_code ? `${company.currency_code}${company.currency_name ? ` · ${company.currency_name}` : ''}` : 'Required before payroll money can be entered'} wide />
             <MetaItem label="Created"         value={fmtDate(company.created_at_utc)} />
             <MetaItem label="Last Updated"    value={fmtDate(company.updated_at_utc)} />
             {company.notes && (
@@ -495,6 +507,29 @@ export function CompanyBranchesPage() {
                   <input className={styles.input} value={coForm.timezone_name ?? ''}
                     onChange={(e) => setCoForm((f) => ({ ...f, timezone_name: e.target.value || null }))}
                     disabled={savingCo} placeholder="e.g. Africa/Cairo" maxLength={80} />
+                </div>
+                <div className={styles.formGroupFull}>
+                  <label className={styles.label}>Company Currency <span className={styles.required}>*</span></label>
+                  {company.currency_change_locked ? (
+                    <>
+                      <input className={styles.input} value={company.currency_code ?? ''} disabled />
+                      <p className={styles.fieldHelp}>Currency is locked because this company has recorded monetary payroll history.</p>
+                    </>
+                  ) : (
+                    <>
+                      <select className={styles.input}
+                        value={coForm.currency_code ?? company.currency_code ?? ''}
+                        onChange={(e) => setCoForm((f) => ({ ...f, currency_code: e.target.value }))}
+                        disabled={savingCo || currencies.length === 0}>
+                        <option value="">{currencies.length ? 'Select a currency' : 'Loading currencies…'}</option>
+                        {currencies.map((currency) => <option key={currency.currency_code} value={currency.currency_code}>
+                          {currency.currency_code} — {currency.currency_name}
+                        </option>)}
+                      </select>
+                      {currencyLoadError && <p className={styles.fieldHelp}>{currencyLoadError}</p>}
+                      {!company.currency_code && <p className={styles.fieldHelp}>Choose the company currency before entering payroll amounts.</p>}
+                    </>
+                  )}
                 </div>
                 <div className={styles.formGroupFull}>
                   <label className={styles.label}>Notes</label>

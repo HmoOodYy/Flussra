@@ -44,6 +44,7 @@ from app.settings.schemas import (
     StatusKeyUpdate,
     StatusRateColumn,
     StatusRateColumnCreate,
+    SupportedCurrency,
 )
 
 router = APIRouter()
@@ -55,6 +56,16 @@ DbDep    = Annotated[AsyncConnection, Depends(get_db)]
 # ---------------------------------------------------------------------------
 # Company profile
 # ---------------------------------------------------------------------------
+
+@router.get("/currencies", response_model=list[SupportedCurrency])
+async def list_supported_currencies(token: TokenDep, db: DbDep) -> list[SupportedCurrency]:
+    return await service.list_supported_currencies(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+    )
+
+
 
 @router.get(
     "/company",

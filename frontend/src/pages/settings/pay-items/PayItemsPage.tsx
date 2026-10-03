@@ -84,7 +84,7 @@ const STEP2_TIME: Step2SectionConfig = {
       value:          'PerUnit',
       label:          'Same hourly rate',
       popoverExpl:    'Every entered hour is paid using the same hourly rate.',
-      popoverExample: '1.5 hours × $20 per hour = $30',
+      popoverExample: '1.5 hours × 20 currency units per hour = 30 currency units',
     },
   ],
 };
@@ -97,7 +97,7 @@ const STEP2_NUMBER: Step2SectionConfig = {
       value:          'PerUnit',
       label:          'Same rate for every unit',
       popoverExpl:    'Every entered unit is paid using the same rate.',
-      popoverExample: '5 units × $20 = $100',
+      popoverExample: '5 units × 20 currency units = 100 currency units',
     },
   ],
 };

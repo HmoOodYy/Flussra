@@ -184,6 +184,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'POST /settings/cdpi/requests/{request_id}/copy': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.cdpi.guards.require_cdpi_branch_edit', 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /settings/cdpi/requests/{request_id}/decide': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.cdpi.guards.require_cdpi_company_edit', 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /settings/cdpi/requests/{request_id}/submit': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.cdpi.guards.require_cdpi_branch_edit', 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /settings/currencies': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('setup.manage',), None, 'COMPANY', 'DENY', None, None),
     'GET /settings/company': RouteAuthorization('AUTHENTICATED', 'NONE', (), 'app.core.service._check_branch_access', 'COMPANY', 'DENY', None, 'Any active company assignment permits reading the company profile.'),
     'PATCH /settings/company': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('setup.manage',), None, 'COMPANY', 'DENY', None, None),
     'GET /settings/pay-item-requests': RouteAuthorization('AUTHENTICATED', 'NONE', (), 'app.core.service._check_branch_access', 'BRANCH', 'DENY', None, 'Branch visibility is authorized by the central branch-access check.'),

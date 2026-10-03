@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_currency import frozen_currency, get_company_currency
 from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
 from app.payroll import period_calculation, status_evidence
 from app.payroll.period_pay_item_snapshot import _period_has_pay_item_snapshot
@@ -24,6 +25,23 @@ from app.payroll.schemas import PeriodSummary
 
 def _unavailable(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=422, detail=f"{code}: {message}")
+
+
+async def _final_lines_currency(company_id: int, period_id: int, db: AsyncConnection):
+    """Use one coherent immutable FinalLines denomination or fail closed."""
+    row = (await db.execute(text("""
+        SELECT COUNT(*) AS row_count,
+               COUNT(DISTINCT (currencycode, currencyminorunitdigits)) AS pair_count,
+               MIN(currencycode) AS currency_code,
+               MIN(currencyminorunitdigits) AS minor_unit_digits
+        FROM payroll.payrollfinallines
+        WHERE companyid = :cid AND payrollperiodid = :pid
+    """), {"cid": company_id, "pid": period_id})).mappings().one()
+    if int(row["row_count"]) == 0:
+        raise _unavailable("SNAPSHOT_CURRENCY_REQUIRED", "Finalized currency evidence is unavailable.")
+    if int(row["pair_count"]) != 1:
+        raise _unavailable("SNAPSHOT_CURRENCY_MISMATCH", "FinalLines contain inconsistent frozen currency.")
+    return frozen_currency(row["currency_code"], row["minor_unit_digits"])
 
 
 async def _period_context(
@@ -487,7 +505,15 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         {"pay_item_id": cid, "amount": pay_item_total_map.get(cid, Decimal("0"))}
         for cid in pay_item_column_ids
     ]
-    metadata = {"period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"], "period_name": period["periodname"],
+    if authority.authority_kind in {ReportAuthorityKind.SUBMITTED_SNAPSHOT, ReportAuthorityKind.APPROVED_SNAPSHOT}:
+        currency = frozen_currency(authority.currency_code, authority.currency_minor_unit_digits)
+    elif authority.authority_kind is ReportAuthorityKind.FINAL_LINES:
+        currency = await _final_lines_currency(company_id, period_id, db)
+    else:
+        currency = await get_company_currency(company_id, db)
+    metadata = {"currency_code": None if currency is None else currency.code,
+                "currency_minor_unit_digits": None if currency is None else currency.minor_unit_digits,
+                "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"], "period_name": period["periodname"],
                 "period_status": period["status"], "branch_id": int(period["branchid"]), "report_type": report_type,
                 "authority_kind": authority.authority_kind, "financials_available": financials_available,
                 "unavailable_reason": None if financials_available else "SOURCE_ONLY_PERIOD",
