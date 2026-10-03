@@ -57,15 +57,3 @@ migrations/__pycache__/
 .omo/
 .playwright-mcp/
 .codegraph
-
-# Claude Code editor settings — ignore runtime/session/cache files everywhere
-**/.claude/*
-**/.claude/**
-
-# Allow only the two root-level project skill files
-!.claude/
-!.claude/skills/
-!.claude/skills/flussra-ui-product-designer/
-!.claude/skills/flussra-ui-product-designer/SKILL.md
-!.claude/skills/flussra-ui-implementation-guard/
-!.claude/skills/flussra-ui-implementation-guard/SKILL.md

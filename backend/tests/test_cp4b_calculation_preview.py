@@ -63,7 +63,7 @@ class _DeliberateSetupFailure(Exception):
     test and `_inject_failure_after_*` fault-injection hook below -- never
     referenced by production code. Raised strictly AFTER a persistent write
     has committed but BEFORE the normal code path would extract its ID from
-    the response/row, to reproduce the exact unsafe window Codex flagged."""
+    the response/row, to reproduce the exact unsafe regression window."""
 
 
 def auth(token: str) -> dict:
@@ -88,7 +88,7 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Independent cleanup runner (Codex P1 fix).
+# Independent cleanup runner (P1 fix).
 #
 # Every ownership helper's `finally` block previously ran its DELETE
 # statements as bare sequential `await db.execute(...)` calls: the first
@@ -973,7 +973,7 @@ async def _owned_bonus_event(
 
 
 # ---------------------------------------------------------------------------
-# DriverPayRule ownership (Codex P1 fix) -- replaces the previous inline
+# DriverPayRule ownership (P1 fix) -- replaces the previous inline
 # create/void/delete sequence duplicated in both the minimum- and maximum-
 # pay tests. `DriverPayRules` writes a real AuditLog row via
 # `_write_pay_rule_audit` (entity_name='DriverPayRules', entity_id=
@@ -1102,7 +1102,7 @@ async def _get_full_db_snapshot(direct_db, period_id: int, driver_ids: list | No
 
 
 # ---------------------------------------------------------------------------
-# Permission-fixture ownership (Codex P1-A/P1-B fix, this pass)
+# Permission-fixture ownership (P1-A/P1-B fix, this pass)
 #
 # `_PermissionOwnership` is entered BEFORE any write. Every field is
 # registered the moment its ID is known, or recovered by exact marker/
@@ -1758,7 +1758,7 @@ class TestPermissionAndScope:
 
 
 # ---------------------------------------------------------------------------
-# 2b. Real pre-parse permission-acquisition failure proof (Codex P1-A fix)
+# 2b. Real pre-parse permission-acquisition failure proof (P1-A fix)
 #
 # Each parametrized case injects failure strictly AFTER a persistent write
 # commits but BEFORE the normal code path extracts its ID -- the exact
@@ -2072,7 +2072,7 @@ class TestCanonicalLiveStatus:
         self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
     ):
         """
-        Codex P2 fix: a line whose SourceID merely STARTS WITH the
+        P2 fix: a line whose SourceID merely STARTS WITH the
         'STATUS_PAYMENT:' text but has a different SourceType (not 'System')
         and does not match the exact three-integer-segment identity format
         is NOT the persisted Status compatibility projection, and must not
@@ -2539,7 +2539,7 @@ class TestDriverUnion:
 
 
 # ---------------------------------------------------------------------------
-# 6b. Structural blockers (Codex P1-A/P1-C fix) -- CP-4B must surface the
+# 6b. Structural blockers (P1-A/P1-C fix) -- CP-4B must surface the
 # same structural findings `_validate_period_can_finalize` reports for
 # finalization-preview: duplicate active Daily lines, driver eligibility
 # violations (Daily and Period-pay), contaminated/foreign RateType
@@ -2694,7 +2694,7 @@ class TestStructuralBlockers:
                     )
 
 # ---------------------------------------------------------------------------
-# 6c. Payroll fixture acquisition-failure regression matrix (Codex P1-B fix)
+# 6c. Payroll fixture acquisition-failure regression matrix (P1-B fix)
 #
 # Six required resources, each with its own focused failure-after-write
 # test: driver, DriverRate, payroll period, DraftLine, bonus event, and
@@ -2863,7 +2863,7 @@ class TestPayrollAcquisitionFailure:
 
 
 # ---------------------------------------------------------------------------
-# 6d. Shared-schema safety (Codex P1-C fix)
+# 6d. Shared-schema safety (P1-C fix)
 #
 # `_shared_daily_index_lifetime_guard` is a module-scoped, autouse fixture:
 # its setup runs once BEFORE the first test in this module and its teardown
@@ -2922,7 +2922,7 @@ def _assert_index_state_valid(state: dict) -> None:
 @pytest_asyncio.fixture(scope="module", autouse=True)
 async def _shared_daily_index_lifetime_guard(test_database_url):
     """
-    Module-lifetime guard (Codex P1 fix): captures the required shared
+    Module-lifetime guard (P1 fix): captures the required shared
     Daily-line uniqueness index's exact catalog state before the first test
     in this module runs, and asserts exact equality (same OID, same
     definition, same flags) after the last test finishes. Never recreates
@@ -2984,7 +2984,7 @@ class TestSharedSchemaSafety:
 
 
 # ---------------------------------------------------------------------------
-# 6e. PeriodCode UUID-retention safety (Codex P3 fix)
+# 6e. PeriodCode UUID-retention safety (P3 fix)
 # ---------------------------------------------------------------------------
 
 class TestPeriodCodeSafety:
@@ -3013,7 +3013,7 @@ class TestPeriodCodeSafety:
 
 
 # ---------------------------------------------------------------------------
-# 6f. Independent-cleanup regression proof (Codex P1 fix)
+# 6f. Independent-cleanup regression proof (P1 fix)
 #
 # Proves `_CleanupRunner` itself: one cleanup operation deliberately fails
 # (via a test-local injected callback, never by corrupting shared schema or

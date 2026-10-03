@@ -935,12 +935,12 @@ class TestM13bFinalizationUsesCalc:
 
 
 # ---------------------------------------------------------------------------
-# TestM13bCodexFixes — targeted tests for the 8 Codex-reported issues
+# TestM13bRegressionFixes — targeted tests for the 8 review-reported issues
 # ---------------------------------------------------------------------------
 
-class TestM13bCodexFixes:
+class TestM13bRegressionFixes:
     """
-    Focused regression tests for the 8 issues reported by Codex review.
+    Focused regression tests for the 8 issues reported by review.
 
     Issue 1 — Period system items blocked from daily entry
     Issue 2 — System fast-path respects BranchPayItemConfig

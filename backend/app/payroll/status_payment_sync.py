@@ -52,7 +52,7 @@ from app.payroll.eligibility import (
     _period_has_driver_eligibility_snapshot,
 )
 
-# CP-4B fix (Codex P2): exact identity predicate for the persisted Status-
+# CP-4B fix (P2): exact identity predicate for the persisted Status-
 # payment compatibility projection DraftLine written by
 # `_sync_status_payment_for_entry_state`. LineType cannot be hardcoded here
 # (it is the mapped RateType's RateCode, which is data-driven per company/

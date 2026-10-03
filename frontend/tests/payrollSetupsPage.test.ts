@@ -501,7 +501,7 @@ test('Raw version/setup/assignment/draft id fragments ("Version #", "Assignment 
   }
 });
 
-// ── U. Opus-review-style fixes, re-targeted at their new home (PublishPanel.tsx) ──
+// ── U. review fixes, re-targeted at their new home (PublishPanel.tsx) ──
 
 test('PublishPanel.tsx: changing the date always resets replacesVersionId to null', () => {
   const startIdx = publishPanelSource.indexOf('function handleDateChange');

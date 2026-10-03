@@ -1,5 +1,5 @@
 """
-Tests for Codex P0/P1 backend blocker fixes.
+Tests for P0/P1 backend blocker fixes.
 
 Covers:
   P0  - Direct PeriodApproval review item creation blocked

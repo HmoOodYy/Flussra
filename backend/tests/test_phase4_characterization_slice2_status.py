@@ -853,7 +853,7 @@ async def _owned_driver_pay_rule(
     effective_to: str,
 ):
     """
-    Exception-safe DriverPayRule lifecycle (P1 fix — Codex FAIL verdict:
+    Exception-safe DriverPayRule lifecycle (P1 fix — FAIL verdict:
     ownership must begin before response parsing, not depend on it).
 
     Ownership evidence does NOT rely solely on `resp.json()["driver_pay_rule_id"]`
@@ -1280,7 +1280,7 @@ class TestDailyStatusProjectionNotSourceOfTruth:
         paytest_branch_id: int, direct_db,
     ):
         """
-        P1 write-side proof (Codex fix-forward): confirmed by reading
+        P1 write-side proof (fix-forward): confirmed by reading
         `save_day_grid` (service.py ~13255-13353) that a StatusKey
         replacement UPDATES the existing DailyStatus DraftLine IN PLACE
         (same DraftLineID, `notes` column rewritten to the new status code)
@@ -1766,7 +1766,7 @@ class TestPreviewFinalizationDivergence:
 
                 # Capture the exact Status source identity BEFORE finalization
                 # -- this is the strong selector used to locate the final line
-                # later, not driver+amount (Codex P2 strengthening note).
+                # later, not driver+amount (P2 strengthening note).
                 entry_state = await _get_entry_state_row(direct_db, pid, driver_id, work_date)
                 assert entry_state is not None
                 entry_state_id = entry_state["payrollperioddriverdayentrystateid"]

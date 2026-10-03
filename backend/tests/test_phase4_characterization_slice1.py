@@ -1122,7 +1122,7 @@ class TestDirectManualBoundary:
 
 class TestLegacyManualFallbackCharacterization:
     """
-    This is the Codex-discovered P1 characterization gate.
+    This is the P1 characterization gate discovered during review.
 
     There is no LIVE, currently-creatable path that produces a PerUnit Daily
     line with CalculatedAmount=NULL and a non-NULL RateAmount: Phase 4C
