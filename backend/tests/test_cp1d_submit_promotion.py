@@ -611,7 +611,7 @@ class TestReturnedBacklog:
     ):
         """T6: Returned.EndDate == Open.StartDate — fail closed as WORKFLOW_SLOT_CONFLICT.
 
-        Codex P1 fix: CP-1D is fail-closed for ALL Returned presence.
+        P1 fix: CP-1D is fail-closed for ALL Returned presence.
         - Returned.EndDate < Open.StartDate → RETURNED_BACKLOG_BLOCKS_SUBMIT
         - Returned.EndDate >= Open.StartDate → WORKFLOW_SLOT_CONFLICT (chronologically anomalous)
         Both block submission; no Returned state allows a forward submit.

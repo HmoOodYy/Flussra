@@ -7,7 +7,7 @@
 #
 # Why this script exists
 # ─────────────────────
-# Every time Claude (or any developer) adds an Alembic migration the dev DB
+# Every time a developer adds an Alembic migration the dev DB
 # needs `alembic upgrade head` before the backend will serve requests without
 # 500 errors.  Forgetting that step is the #1 cause of recurring login 500s.
 # Running this script instead of `uvicorn` directly eliminates that risk.

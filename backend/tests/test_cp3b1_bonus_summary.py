@@ -972,7 +972,7 @@ async def test_cross_branch_contaminated_event_excluded(
     but a WRONG BranchID must not contribute to the driver's total, event
     list, or the top-level aggregates.
 
-    This is the exact scenario Codex P1 Fix 1 flagged: aggregation filtered
+    This is the exact P1 regression scenario: aggregation filtered
     by PeriodID + CompanyID only, missing BranchID. The read-side BranchID
     filter added for that fix is exercised here directly (bypassing the ORM
     layer with a raw UPDATE) as a defense-in-depth check.

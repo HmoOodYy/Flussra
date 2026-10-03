@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => ({
 
     // Dev-only proxy: forwards /api/* requests from the browser to the
     // backend running on localhost:8000.  The browser (including the
-    // Claude preview sandbox) only ever talks to the Vite dev server on
+    // preview sandbox) only ever talks to the Vite dev server on
     // the same origin — Vite relays the request server-side to 127.0.0.1,
     // which it can always reach because it runs on the host machine.
     // This has zero effect on auth logic, tokens, permissions, or route

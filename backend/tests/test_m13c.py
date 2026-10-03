@@ -1282,7 +1282,7 @@ class TestCustomItemBehaviorValidation:
 
 
 # ===========================================================================
-# TestM13cSafetyFixes — Codex review issues fixed
+# TestM13cSafetyFixes — review issues fixed
 # ===========================================================================
 
 class TestM13cSafetyFixes:

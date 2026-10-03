@@ -4,7 +4,7 @@ the first request can return a 500.
 
 Problem it solves
 -----------------
-When Claude (or any developer) adds a new Alembic migration but doesn't run
+When a developer adds a new Alembic migration but doesn't run
 `alembic upgrade head`, the backend starts fine but the first login hits a
 missing table/function and returns an opaque 500.  This module makes that
 failure loud and immediate — the process exits with a clear message before

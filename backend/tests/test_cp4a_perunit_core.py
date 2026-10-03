@@ -605,7 +605,7 @@ def _generate_unique_period_code(branch_id: int, suffix: str = "") -> str:
     company/branch, can never collide.
 
     `PeriodCode` is `VARCHAR(80)` (migrations/sql/0001_initial_schema.sql,
-    `payroll.PayrollPeriods.PeriodCode`). P1 fix (Codex fix-forward, fourth
+    `payroll.PayrollPeriods.PeriodCode`). P1 fix (fix-forward, fourth
     pass): the UUID token is reserved FIRST and never truncated -- only the
     human-readable `prefix+branch_id+suffix` portion is truncated to
     whatever space remains. The previous version built the complete string
@@ -683,7 +683,7 @@ async def _owned_period_scenario(
     (P1-B fix: an earlier version assigned `pid = await _open_period(...)`
     OUTSIDE any try/finally).
 
-    P1 fix (Codex third pass): the PeriodCode is now always
+    P1 fix (third pass): the PeriodCode is now always
     `_generate_unique_period_code(...)` -- a random `uuid4` token generated
     before the INSERT -- so uniqueness never depends on the caller-supplied
     `suffix` alone; two concurrent/parallel/repeated invocations, even with
@@ -844,7 +844,7 @@ class TestProductionCallerPerUnit:
 
 class TestScenarioOwnershipRegression:
     """
-    P1 regression proofs (Codex fix-forward, second pass):
+    P1 regression proofs (fix-forward, second pass):
 
       A. `_owned_driver`'s cleanup ownership begins the instant the
          driver/employee are persisted -- before the rate or period exist --
@@ -1037,7 +1037,7 @@ class TestScenarioOwnershipRegression:
 
 class TestPeriodCodeUniquenessAndTenantSafety:
     """
-    P1 regression proofs (Codex fix-forward, third pass): `PeriodCode`
+    P1 regression proofs (fix-forward, third pass): `PeriodCode`
     uniqueness must never depend on a caller-supplied `suffix` alone, and
     the recovery lookup must be scoped by the exact
     `(CompanyID, BranchID, PeriodCode)` tuple, never `PeriodCode` alone.
@@ -1184,7 +1184,7 @@ class TestPeriodCodeUniquenessAndTenantSafety:
 
 class TestPeriodCodeUuidRetention:
     """
-    P1 regression proofs (Codex fix-forward, fourth pass): a sufficiently
+    P1 regression proofs (fix-forward, fourth pass): a sufficiently
     long `suffix` must never truncate the UUID recovery token.
     `_generate_unique_period_code` reserves the complete `uuid4().hex` token
     (32 chars) plus a separator FIRST, then truncates only the
@@ -1193,7 +1193,7 @@ class TestPeriodCodeUuidRetention:
     """
 
     def test_long_identical_suffix_still_produces_distinct_codes(self):
-        """(A) Codex's exact repro case: two calls with the SAME branch and
+        """(A) the exact regression repro case: two calls with the SAME branch and
         the SAME 200-character suffix must not collide."""
         long_suffix = "X" * 200
         first = _generate_unique_period_code(branch_id=2, suffix=long_suffix)

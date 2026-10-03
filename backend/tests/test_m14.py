@@ -1136,7 +1136,7 @@ class TestPeriodPaySafetyGuards:
 
 
 # ===========================================================================
-# TestM14SafetyFixes  (Codex review round 2)
+# TestM14SafetyFixes  (review round 2)
 # ===========================================================================
 
 class TestM14SafetyFixes:

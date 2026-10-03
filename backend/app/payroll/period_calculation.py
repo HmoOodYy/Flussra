@@ -937,7 +937,7 @@ async def _build_live_calculation_packet(
     blockers: list[str] = []
     warnings: list[str] = []
 
-    # ── CP-4B fix (Codex P1): shared structural blockers (duplicate active
+    # ── CP-4B fix (P1): shared structural blockers (duplicate active
     # Daily lines, driver eligibility violations, contaminated/foreign
     # RateType references, unresolvable rate mapping) — the SAME read-only
     # checks enforced by finalize_period / get_finalization_preview. These
