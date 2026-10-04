@@ -537,7 +537,7 @@ class BonusEventCreate(BaseModel):
     @field_validator("amount")
     @classmethod
     def amount_valid(cls, v: Decimal) -> Decimal:
-        return _validate_positive_numeric_18_4(v)
+        return _validate_positive_numeric_18_4(v, amount_label="Bonus amount")
 
 
 class BonusEventUpdate(BaseModel):
@@ -552,7 +552,7 @@ class BonusEventUpdate(BaseModel):
     def amount_valid(cls, v: Decimal | None) -> Decimal | None:
         if v is None:
             return None
-        return _validate_positive_numeric_18_4(v)
+        return _validate_positive_numeric_18_4(v, amount_label="Bonus amount")
 
 
 class BonusEventPreviewEntry(BaseModel):
@@ -631,19 +631,17 @@ class BonusSummaryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 # NUMERIC(18,4) supports fourteen integer digits and four fractional digits.
-_BONUS_AMOUNT_MAX_EXCLUSIVE = Decimal("10") ** 14
+_NUMERIC_18_4_MAX_EXCLUSIVE = Decimal("10") ** 14
 
 
-def _validate_positive_numeric_18_4(v: Decimal) -> Decimal:
-    """Shared Bonus amount contract: positive, finite, and exactly representable
-    by NUMERIC(18,4), without silently rounding.
-    """
+def _validate_positive_numeric_18_4(v: Decimal, *, amount_label: str) -> Decimal:
+    """Validate a positive monetary amount exactly representable by NUMERIC(18,4)."""
     if not v.is_finite():
-        raise ValueError("Bonus amount must be a finite number.")
+        raise ValueError(f"{amount_label} must be a finite number.")
     if v <= 0:
-        raise ValueError("Bonus amount must be positive (> 0).")
-    if abs(v) >= _BONUS_AMOUNT_MAX_EXCLUSIVE:
-        raise ValueError("Bonus amount exceeds the maximum allowed (NUMERIC(18,4)).")
+        raise ValueError(f"{amount_label} must be positive (> 0).")
+    if abs(v) >= _NUMERIC_18_4_MAX_EXCLUSIVE:
+        raise ValueError(f"{amount_label} exceeds the maximum allowed (NUMERIC(18,4)).")
 
     digits = list(v.as_tuple().digits)
     exponent = v.as_tuple().exponent
@@ -651,7 +649,9 @@ def _validate_positive_numeric_18_4(v: Decimal) -> Decimal:
         digits.pop()
         exponent += 1
     if exponent < -4:
-        raise ValueError("Bonus amount may have at most four decimal places (NUMERIC(18,4)).")
+        raise ValueError(
+            f"{amount_label} may have at most four decimal places (NUMERIC(18,4))."
+        )
     return v
 
 
@@ -665,7 +665,7 @@ class BonusBatchItem(BaseModel):
     @field_validator("amount")
     @classmethod
     def amount_valid(cls, v: Decimal) -> Decimal:
-        return _validate_positive_numeric_18_4(v)
+        return _validate_positive_numeric_18_4(v, amount_label="Bonus amount")
 
 
 class BonusBatchCreate(BaseModel):
@@ -835,9 +835,7 @@ class DriverPayRuleCreate(BaseModel):
     @field_validator("amount")
     @classmethod
     def amount_positive(cls, v: Decimal) -> Decimal:
-        if v <= 0:
-            raise ValueError("amount must be > 0 (use End or Void to stop a rule)")
-        return v
+        return _validate_positive_numeric_18_4(v, amount_label="Driver pay rule amount")
 
     @model_validator(mode="after")
     def effective_to_after_from(self) -> "DriverPayRuleCreate":

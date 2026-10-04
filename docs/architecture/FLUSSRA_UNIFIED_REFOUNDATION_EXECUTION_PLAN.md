@@ -1,8 +1,8 @@
 # FLUSSRA UNIFIED REFOUNDATION EXECUTION PLAN
 
 **Status:** G0.1 IMPLEMENTED — READY FOR LEAD REVIEW; Phase 1 and Phase 2 (P2a–P2c) and P3a are closed/merged; G0 remains active.<br>
-**Execution authority:** G0.1 — Monetary Precision Contract Closure — is the current work unit. This branch implements G0.1 and ends READY FOR LEAD REVIEW; it does not close G0. G0.2–G0.6 are not implemented by this branch. P3b has not started and remains after G0.
-**Repository baseline:** G0.1 started from `main` at `ddab66b7b14c8ddf2b986cc71df01a5fbe6bd663`, with migration head `0076`; this branch introduces migration `0077`.
+**Execution authority:** G0.1 — Monetary Precision Contract Closure — is the current work unit. This branch implements G0.1 and ends READY FOR LEAD REVIEW; it does not close G0. G0.2–G0.6 are not implemented by this branch. P3b has not started and remains after G0.<br>
+**Repository baseline:** G0.1 started from `main` at `ddab66b7b14c8ddf2b986cc71df01a5fbe6bd663`, with migration head `0076`; this branch introduces migration `0077`.<br>
 **Compensation status:** P2c and P3a are closed. G0 is active; G0.1 is implemented and ready for Lead review at the end of this branch. P3b remains after G0 and has not started.<br>
 **P3a validation:** Full backend run reported by the user: 4 failed, 3312 passed, 3 skipped in 1143.67s. All four failures were stale pre-P3a Alembic-head assertions; they were corrected and the four focused reruns passed. The full suite was not rerun after correction.<br>
 **Original planning baseline (historical provenance):** authored against `docs/people-workforce-access-contract-lock` at `a38c9306c51f00957719c22a1508e7e84a32503c`, migration-script head `0071`. The §2 inventory and the phase *Why now* text describe that baseline, not current execution status.  
