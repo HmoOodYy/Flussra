@@ -548,13 +548,13 @@ class TestPayRulesSecurity:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """Admin can create a pay rule (payrates.edit via settings.manage)."""
         resp = await session_client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_id": paytest_driver_id,
+                "driver_id": owned_driver_id,
                 "rule_type": "MinimumPay",
                 "amount": "150.00",
                 "effective_from": "2086-01-01",
@@ -568,10 +568,11 @@ class TestPayRulesSecurity:
         assert data["status"] == "Active"
 
         # Cleanup
-        await session_client.post(
+        cleanup = await session_client.post(
             f"/payroll/driver-pay-rules/{data['driver_pay_rule_id']}/void",
             headers=auth(auth_token),
         )
+        assert cleanup.status_code == 200, f"Owned admin DriverPayRule cleanup failed: {cleanup.text}"
 
     @pytest.mark.asyncio
     async def test_create_pay_rule_no_perm_403(

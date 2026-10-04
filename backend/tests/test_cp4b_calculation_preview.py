@@ -50,6 +50,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.access_test_helpers import create_neutral_test_user
+from tests.ownership import CleanupRunner, delete_driver_and_residue, delete_period_and_children
 
 _PERIOD_CODE_PREFIX = "P4CP4B-"
 PERIOD_START = "2199-02-03"
@@ -93,7 +94,7 @@ async def paytest_branch_id(session_db_conn) -> int:
 # Every ownership helper's `finally` block previously ran its DELETE
 # statements as bare sequential `await db.execute(...)` calls: the first
 # exception (e.g. an unexpected FK violation) aborted every remaining,
-# otherwise-independent cleanup step. `_CleanupRunner` attempts each
+# otherwise-independent cleanup step. `CleanupRunner` attempts each
 # registered operation, records (never silently swallows) any failure, and
 # always continues with the rest. All collected failures are raised
 # together at the end via the real, repository-compatible builtin
@@ -102,32 +103,6 @@ async def paytest_branch_id(session_db_conn) -> int:
 # (zero-error) path never manufactures a new exception that could mask an
 # original exception already propagating through the same `finally`.
 # ---------------------------------------------------------------------------
-
-class _CleanupRunner:
-    def __init__(self):
-        self._errors: list[BaseException] = []
-
-    async def execute(self, db, sql: str, params: dict, *, label: str) -> None:
-        """Attempt one DELETE/UPDATE cleanup statement; record failure and continue."""
-        try:
-            await db.execute(_text(sql), params)
-        except Exception as exc:  # noqa: BLE001 -- recorded, never dropped
-            exc.add_note(f"cleanup step failed: {label}")
-            self._errors.append(exc)
-
-    async def check(self, fn, *, label: str) -> None:
-        """Attempt one arbitrary async callable (typically a residue
-        assertion); record failure and continue with remaining checks."""
-        try:
-            await fn()
-        except Exception as exc:  # noqa: BLE001 -- recorded, never dropped
-            exc.add_note(f"cleanup assertion failed: {label}")
-            self._errors.append(exc)
-
-    def raise_if_any(self) -> None:
-        if self._errors:
-            raise ExceptionGroup(f"{len(self._errors)} cleanup step(s) failed", self._errors)
-
 
 # ---------------------------------------------------------------------------
 # PeriodCode generation -- P1-C/P3 fix.
@@ -219,115 +194,6 @@ async def _cancel_active_periods(client: httpx.AsyncClient, token: str, branch_i
             )
 
 
-async def _delete_period_and_children(db, period_id: int) -> None:
-    """
-    Deletes an un-evidenced test period, or cancels it when P6D evidence exists.
-
-    The current product deliberately retains periods after source mutations have
-    created immutable audit evidence.  Cancellation releases the branch's
-    mutable workflow slot without weakening that retention boundary.
-
-    `add_draft_line`/`add_period_pay_line`/bonus-event creation each write a
-    real AuditLog row (`_write_line_audit`, entity_name='PayrollDraftLines'
-    or 'PayrollBonusEvents') immediately after insert -- this captures the
-    exact DraftLineIDs/BonusEventIDs for this period BEFORE the rows
-    themselves are deleted, deletes their matching audit rows by exact
-    EntityID (never a broad company/branch/time-window delete), then
-    asserts zero residue for every row and audit type this period could
-    have produced.
-    """
-    has_p6d_evidence = (await db.execute(
-        _text("""
-            SELECT EXISTS (
-                SELECT 1 FROM payroll.payrollperiodauditevidencecoverage
-                WHERE payrollperiodid = :pid
-            ) OR EXISTS (
-                SELECT 1 FROM payroll.payrollcalculationsnapshots
-                WHERE payrollperiodid = :pid
-            ) OR EXISTS (
-                SELECT 1 FROM payroll.payrollperiodworkflowactionevidence
-                WHERE payrollperiodid = :pid
-            ) AS present
-        """), {"pid": period_id},
-    )).scalar_one()
-    if has_p6d_evidence:
-        await db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )
-        await db.commit()
-        return
-
-    draft_line_ids = [
-        r["draftlineid"] for r in (await db.execute(
-            _text("SELECT draftlineid FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )).mappings().all()
-    ]
-    bonus_event_ids = [
-        r["payrollbonuseventid"] for r in (await db.execute(
-            _text("SELECT payrollbonuseventid FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )).mappings().all()
-    ]
-    draft_line_id_strs = [str(i) for i in draft_line_ids] or [""]
-    bonus_event_id_strs = [str(i) for i in bonus_event_ids] or [""]
-
-    runner = _CleanupRunner()
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid",
-        {"eid": str(period_id)}, label="delete PayrollPeriods audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)",
-        {"ids": draft_line_id_strs}, label="delete PayrollDraftLines audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollBonusEvents' AND entityid = ANY(:ids)",
-        {"ids": bonus_event_id_strs}, label="delete PayrollBonusEvents audit")
-    await runner.execute(db,
-        "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE payrollperiodid = :pid",
-        {"pid": period_id}, label="delete PPDES rows")
-    await runner.execute(db,
-        "DELETE FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid",
-        {"pid": period_id}, label="delete PayrollBonusEvents rows")
-    await runner.execute(db,
-        "DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid",
-        {"pid": period_id}, label="delete PayrollFinalLines rows")
-    await runner.execute(db,
-        "DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid",
-        {"pid": period_id}, label="delete PayrollDraftLines rows")
-    await runner.execute(db,
-        "DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid",
-        {"pid": period_id}, label="delete PayrollPeriods row")
-
-    async def _residue():
-        residue = (await db.execute(
-            _text("""
-                SELECT
-                    (SELECT COUNT(*) FROM payroll.payrollperiods WHERE payrollperiodid = :pid) AS periods,
-                    (SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid) AS draftlines,
-                    (SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid = :pid) AS finallines,
-                    (SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid) AS bonusevents,
-                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE payrollperiodid = :pid) AS ppdes,
-                    (SELECT COUNT(*) FROM audit.auditlog
-                        WHERE entityname = 'PayrollPeriods' AND entityid = :eid) AS period_audit,
-                    (SELECT COUNT(*) FROM audit.auditlog
-                        WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:dlids)) AS draftline_audit,
-                    (SELECT COUNT(*) FROM audit.auditlog
-                        WHERE entityname = 'PayrollBonusEvents' AND entityid = ANY(:beids)) AS bonus_audit
-            """),
-            {"pid": period_id, "eid": str(period_id),
-             "dlids": draft_line_id_strs, "beids": bonus_event_id_strs},
-        )).mappings().first()
-        assert (
-            residue["periods"] == 0 and residue["draftlines"] == 0 and residue["finallines"] == 0
-            and residue["bonusevents"] == 0 and residue["ppdes"] == 0
-            and residue["period_audit"] == 0 and residue["draftline_audit"] == 0 and residue["bonus_audit"] == 0
-        ), f"Residue check failed for period {period_id}: {dict(residue)}"
-
-    await runner.check(_residue, label=f"period {period_id} residue assertion")
-    runner.raise_if_any()
-
-
 @contextlib.asynccontextmanager
 async def _owned_period(
     session_client, auth_token, branch_id, direct_db, *, status="Open", suffix="",
@@ -394,7 +260,7 @@ async def _owned_period(
         # A failed restoration then skipped every remaining period cleanup step.
         # Keep the pointer-clear before deleting the review item, but make every
         # independently useful operation run through one cleanup ledger.
-        runner = _CleanupRunner()
+        runner = CleanupRunner()
 
         async def _recover_period():
             nonlocal pid
@@ -440,11 +306,11 @@ async def _owned_period(
                     label="delete Returned ManagerReviewItem",
                 )
 
-            # `_delete_period_and_children` has its own dependency-ordered
+            # `delete_period_and_children` has its own dependency-ordered
             # cleanup runner. Treat it as one outer independent operation so
             # a review-item cleanup failure cannot prevent its full sweep.
             await runner.check(
-                lambda: _delete_period_and_children(direct_db, pid),
+                lambda: delete_period_and_children(direct_db, pid),
                 label="delete owned PayrollPeriod and children",
             )
 
@@ -472,74 +338,6 @@ async def _returned_period_residue(direct_db, period_id: int, review_item_id: in
 # ---------------------------------------------------------------------------
 # Driver / employee ownership
 # ---------------------------------------------------------------------------
-
-async def _delete_driver_and_residue(db, driver_id: int, employee_id: int | None) -> None:
-    """
-    Hard-deletes exactly the test-owned driver/employee pair and every
-    dependent row scoped to this exact driverid -- idempotent, since each
-    DELETE is a no-op when nothing matches. `core.drivers`/`core.employees`
-    creation writes NO AuditLog row (confirmed by reading app/core/service.py
-    -- no `entityname` literal for 'Drivers'/'Employees' exists anywhere in
-    that module); the audit deletes below for those two entities are
-    therefore defensive no-ops, kept so the residue assertion still covers
-    the (currently always-zero) audit case explicitly rather than silently
-    assuming it.
-
-    This context unwinds BEFORE its enclosing `_owned_period` (LIFO nesting)
-    and must delete this driver's DraftLines/BonusEvents here to satisfy
-    fk_DraftLines_Driver/fk_BonusEvents_Driver before the driver row itself
-    can be deleted -- which means `_delete_period_and_children`'s own later
-    capture-then-delete audit sweep will find these rows already gone. This
-    function therefore captures and deletes their exact PayrollDraftLines/
-    PayrollBonusEvents audit rows itself, BEFORE removing the rows, so no
-    audit entry is ever orphaned regardless of unwind order.
-    """
-    draft_line_ids = [
-        r["draftlineid"] for r in (await db.execute(
-            _text("SELECT draftlineid FROM payroll.payrolldraftlines WHERE driverid = :id"), {"id": driver_id},
-        )).mappings().all()
-    ]
-    bonus_event_ids = [
-        r["payrollbonuseventid"] for r in (await db.execute(
-            _text("SELECT payrollbonuseventid FROM payroll.payrollbonusevents WHERE driverid = :id"), {"id": driver_id},
-        )).mappings().all()
-    ]
-    pay_rule_ids = [
-        r["driverpayruleid"] for r in (await db.execute(
-            _text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverid = :id"), {"id": driver_id},
-        )).mappings().all()
-    ]
-    draft_line_id_strs = [str(i) for i in draft_line_ids] or [""]
-    bonus_event_id_strs = [str(i) for i in bonus_event_ids] or [""]
-    pay_rule_id_strs = [str(i) for i in pay_rule_ids] or [""]
-
-    runner = _CleanupRunner()
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)",
-        {"ids": draft_line_id_strs}, label="delete driver-scoped PayrollDraftLines audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollBonusEvents' AND entityid = ANY(:ids)",
-        {"ids": bonus_event_id_strs}, label="delete driver-scoped PayrollBonusEvents audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)",
-        {"ids": pay_rule_id_strs}, label="delete driver-scoped DriverPayRules audit")
-    await runner.execute(db, "DELETE FROM payroll.payrollfinallines WHERE driverid = :id", {"id": driver_id}, label="delete FinalLines")
-    await runner.execute(db, "DELETE FROM payroll.payrolldraftlines WHERE driverid = :id", {"id": driver_id}, label="delete DraftLines")
-    await runner.execute(db, "DELETE FROM payroll.payrollbonusevents WHERE driverid = :id", {"id": driver_id}, label="delete BonusEvents")
-    await runner.execute(db, "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE driverid = :id", {"id": driver_id}, label="delete PPDES")
-    await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverid = :id", {"id": driver_id}, label="delete DriverRates")
-    await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverid = :id", {"id": driver_id}, label="delete DriverPayRules")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid", {"eid": str(driver_id)},
-        label="delete Drivers audit")
-    await runner.execute(db, "DELETE FROM core.drivers WHERE driverid = :id", {"id": driver_id}, label="delete Driver row")
-    if employee_id is not None:
-        await runner.execute(db,
-            "DELETE FROM audit.auditlog WHERE entityname = 'Employees' AND entityid = :eid", {"eid": str(employee_id)},
-            label="delete Employees audit")
-        await runner.execute(db, "DELETE FROM core.employees WHERE employeeid = :id", {"id": employee_id}, label="delete Employee row")
-    runner.raise_if_any()
-
 
 @contextlib.asynccontextmanager
 async def _owned_driver_and_employee(
@@ -586,7 +384,7 @@ async def _owned_driver_and_employee(
                 driver_id = row["driverid"]
                 employee_id = row["employeeid"]
         if driver_id is not None:
-            await _delete_driver_and_residue(direct_db, driver_id, employee_id)
+            await delete_driver_and_residue(direct_db, driver_id, employee_id)
             residue = (await direct_db.execute(
                 _text("""
                     SELECT
@@ -678,7 +476,7 @@ async def _owned_driver_rate(
             if row is not None:
                 rate_id = row["driverrateid"]
         if rate_id is not None:
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
             await runner.execute(direct_db,
                 "DELETE FROM audit.auditlog WHERE entityname = 'DriverRates' AND entityid = :eid",
                 {"eid": str(rate_id)}, label="delete DriverRates audit")
@@ -762,7 +560,7 @@ async def _status_rate_column(
             if row is not None:
                 src_col_id = row["statusratecolumnid"]
         if src_col_id is not None:
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
             await runner.execute(direct_db,
                 "DELETE FROM payroll.statusratecolumns WHERE statusratecolumnid = :id", {"id": src_col_id},
                 label="delete StatusRateColumn row")
@@ -817,7 +615,7 @@ async def _owned_status_key(
             # unwound yet -- any PPDES rows still referencing this StatusKeyID
             # must be cleared first, or the DELETE below violates the RESTRICT
             # FK fk_PPDES_StatusKey.
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
             await runner.execute(direct_db,
                 "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE statuskeyid = :id",
                 {"id": status_key_id}, label="delete referencing PPDES rows")
@@ -849,7 +647,7 @@ async def _save_day_grid_status(session_client, auth_token, period_id, driver_id
 # DraftLine / BonusEvent ownership -- used by the acquisition-failure
 # regression matrix. Rows created inline elsewhere in this file (e.g. the
 # business-logic tests below) remain covered by `_owned_period`'s own
-# comprehensive, exact-ID audit + row cleanup (see `_delete_period_and_children`
+# comprehensive, exact-ID audit + row cleanup (see `delete_period_and_children`
 # above) -- one owner covering every DraftLine/BonusEvent a period's scenario
 # produces, rather than a separate wrapper at every call site.
 # ---------------------------------------------------------------------------
@@ -891,7 +689,7 @@ async def _owned_draft_line(
             if row is not None:
                 draft_line_id = row["draftlineid"]
         if draft_line_id is not None:
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
             await runner.execute(direct_db,
                 "DELETE FROM audit.auditlog WHERE entityname = 'PayrollDraftLines' AND entityid = :eid",
                 {"eid": str(draft_line_id)}, label="delete PayrollDraftLines audit")
@@ -947,7 +745,7 @@ async def _owned_bonus_event(
             if row is not None:
                 bonus_id = row["payrollbonuseventid"]
         if bonus_id is not None:
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
             await runner.execute(direct_db,
                 "DELETE FROM audit.auditlog WHERE entityname = 'PayrollBonusEvents' AND entityid = :eid",
                 {"eid": str(bonus_id)}, label="delete PayrollBonusEvents audit")
@@ -1016,7 +814,7 @@ async def _owned_driver_pay_rule(
             if row is not None:
                 rule_id = row["driverpayruleid"]
         if rule_id is not None:
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
             await runner.execute(direct_db,
                 "DELETE FROM audit.auditlog WHERE entityname = 'DriverPayRules' AND entityid = :eid",
                 {"eid": str(rule_id)}, label="delete DriverPayRules audit")
@@ -1160,7 +958,7 @@ class _PermissionOwnership:
             if row is not None:
                 self.assignment_id = row["userbranchroleid"]
 
-        runner = _CleanupRunner()
+        runner = CleanupRunner()
 
         # 0. Unlink any Employee pointer first so a nested Driver/
         #    employee ownership context (unwinds after this one, LIFO) is
@@ -3015,7 +2813,7 @@ class TestPeriodCodeSafety:
 # ---------------------------------------------------------------------------
 # 6f. Independent-cleanup regression proof (P1 fix)
 #
-# Proves `_CleanupRunner` itself: one cleanup operation deliberately fails
+# Proves `CleanupRunner` itself: one cleanup operation deliberately fails
 # (via a test-local injected callback, never by corrupting shared schema or
 # real SQL) while other, independent cleanup operations still run and
 # succeed, the failure is surfaced (not swallowed), and -- separately --
@@ -3031,7 +2829,7 @@ async def _owned_cleanup_runner_roles(
     *,
     _inject_failure_after_role_write: str | None = None,
 ):
-    """Own the CompanyRoles used to exercise `_CleanupRunner` itself.
+    """Own the CompanyRoles used to exercise `CleanupRunner` itself.
 
     The three role names are predeclared before the first POST. If an admin
     create request commits but its response is never parsed, teardown recovers
@@ -3069,7 +2867,7 @@ async def _owned_cleanup_runner_roles(
                 if row:
                     role_ids[key] = row[0]["companyroleid"]
 
-        runner = _CleanupRunner()
+        runner = CleanupRunner()
         for key, role_id in role_ids.items():
             if role_id is None:
                 continue
@@ -3123,7 +2921,7 @@ class TestIndependentCleanupRegression:
             pass
 
         async with _owned_cleanup_runner_roles(session_client, auth_token, direct_db) as (role_ids, _role_names):
-            runner = _CleanupRunner()
+            runner = CleanupRunner()
 
             async def _fail_step():
                 raise _InjectedCleanupFailure("deliberate cleanup failure for owned role B")
@@ -3177,7 +2975,7 @@ class TestIndependentCleanupRegression:
     async def test_original_and_cleanup_failures_both_remain_visible(self):
         """
         Proves Python's standard exception-chaining semantics, which every
-        `_CleanupRunner`-based `finally` block in this file relies on:
+        `CleanupRunner`-based `finally` block in this file relies on:
         raising a new ExceptionGroup from a `finally` block while an
         original exception is already propagating attaches the original as
         `__context__` instead of discarding it -- the original failure is
@@ -3189,7 +2987,7 @@ class TestIndependentCleanupRegression:
         class _InjectedCleanupFailure(Exception):
             pass
 
-        runner = _CleanupRunner()
+        runner = CleanupRunner()
 
         async def _fail_cleanup():
             raise _InjectedCleanupFailure("deliberate cleanup failure")
