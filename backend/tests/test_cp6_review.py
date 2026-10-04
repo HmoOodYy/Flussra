@@ -29,6 +29,7 @@ from tests.builders.access import (
     create_user_with_role_token,
     get_company_role_id,
 )
+from tests.ownership import delete_period_and_children, delete_user_access_state
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -86,19 +87,147 @@ async def _cancel_active_periods(
     client: httpx.AsyncClient, token: str, branch_id: int,
 ) -> None:
     headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
+    # InReview and Approved are protected workflow states. Callers that own
+    # those periods must use exact-ID test teardown, not a forbidden API move.
+    for s in ("Draft", "Open"):
         resp = await client.get(
             "/payroll/periods",
             params={"branch_id": branch_id, "status": s},
             headers=headers,
         )
-        if resp.status_code == 200:
-            for p in resp.json():
-                await client.patch(
-                    f"/payroll/periods/{p['payroll_period_id']}/status",
-                    json={"status": "Cancelled"},
-                    headers=headers,
-                )
+        assert resp.status_code == 200, f"List {s} periods for cleanup failed: {resp.text}"
+        for p in resp.json():
+            cancelled = await client.patch(
+                f"/payroll/periods/{p['payroll_period_id']}/status",
+                json={"status": "Cancelled"},
+                headers=headers,
+            )
+            assert cancelled.status_code == 200, (
+                f"Cancel period {p['payroll_period_id']} failed: {cancelled.text}"
+            )
+
+
+@pytest_asyncio.fixture
+async def cp6_owned_branch_pair(direct_db):
+    branch_ids = []
+    try:
+        for label in ("permitted", "unpermitted"):
+            token = uuid4().hex
+            branch_id = (await direct_db.execute(
+                _text("""
+                    INSERT INTO core.branches
+                        (companyid, branchcode, branchname, status, isdefault)
+                    VALUES (1, :code, :name, 'Active', FALSE)
+                    RETURNING branchid
+                """), {"code": f"CP6_{token[:12]}", "name": f"CP6 {label} {token[:8]}"},
+            )).scalar_one()
+            branch_ids.append(int(branch_id))
+        yield tuple(branch_ids)
+    finally:
+        if branch_ids:
+            residue = (await direct_db.execute(
+                _text("""
+                    SELECT
+                        (SELECT COUNT(*) FROM payroll.payrollperiods WHERE branchid = ANY(:bids)) AS periods,
+                        (SELECT COUNT(*) FROM core.drivers WHERE branchid = ANY(:bids)) AS drivers,
+                        (SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE branchid = ANY(:bids)) AS item_config,
+                        (SELECT COUNT(*) FROM sec.userbranchroles WHERE branchid = ANY(:bids)) AS user_roles,
+                        (SELECT COUNT(*) FROM review.managerreviewitems WHERE branchid = ANY(:bids)) AS review_items
+                """), {"bids": branch_ids},
+            )).mappings().one()
+            assert all(value == 0 for value in residue.values()), (
+                f"CP6 owned branches retained business state: {dict(residue)}"
+            )
+            await direct_db.execute(
+                _text("DELETE FROM core.branches WHERE branchid = ANY(:bids)"), {"bids": branch_ids},
+            )
+            remaining = (await direct_db.execute(
+                _text("SELECT COUNT(*) FROM core.branches WHERE branchid = ANY(:bids)"),
+                {"bids": branch_ids},
+            )).scalar_one()
+            assert remaining == 0, f"CP6 branch cleanup left {remaining} owned Branch row(s)"
+
+
+async def _create_owned_cp6_review_scenario(direct_db, branch_id: int, label: str) -> tuple[int, int]:
+    company_id = (await direct_db.execute(
+        _text("SELECT companyid FROM core.branches WHERE branchid = :bid"), {"bid": branch_id},
+    )).scalar_one()
+    marker = uuid4().hex
+    period_id = (await direct_db.execute(
+        _text("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (:cid, :bid, 'InReview', :code, :name, 'Week', '2095-07-07', '2095-07-13')
+            RETURNING payrollperiodid
+        """), {
+            "cid": company_id, "bid": branch_id, "code": f"CP6-{marker[:16]}",
+            "name": f"CP6 {label} review {marker[:8]}",
+        },
+    )).scalar_one()
+    review_item_id = (await direct_db.execute(
+        _text("""
+            INSERT INTO review.managerreviewitems
+                (companyid, branchid, requesttype, entityschema, entityname,
+                 entityid, title, status, priority)
+            VALUES (:cid, :bid, 'PeriodApproval', 'payroll', 'PayrollPeriods',
+                    :eid, :title, 'Pending', 'Normal')
+            RETURNING reviewitemid
+        """), {
+            "cid": company_id, "bid": branch_id, "eid": str(period_id),
+            "title": f"CP6 {label} review scenario",
+        },
+    )).scalar_one()
+    return int(period_id), int(review_item_id)
+
+
+async def _delete_owned_cp6_period(direct_db, period_id: int, review_item_id: int) -> None:
+    decisions = (await direct_db.execute(
+        _text("SELECT COUNT(*) FROM review.managerreviewdecisions WHERE reviewitemid = :rid"),
+        {"rid": review_item_id},
+    )).scalar_one()
+    assert decisions == 0, f"Owned CP6 review item {review_item_id} unexpectedly has decisions"
+    await direct_db.execute(
+        _text("DELETE FROM review.managerreviewitems WHERE reviewitemid = :rid"),
+        {"rid": review_item_id},
+    )
+    await delete_period_and_children(direct_db, period_id)
+    residue = (await direct_db.execute(
+        _text("""
+            SELECT
+                (SELECT COUNT(*) FROM payroll.payrollperiods WHERE payrollperiodid = :pid) AS periods,
+                (SELECT COUNT(*) FROM review.managerreviewitems WHERE reviewitemid = :rid) AS review_items,
+                (SELECT COUNT(*) FROM payroll.payrollperiodworkflowactionevidence
+                 WHERE payrollperiodid = :pid) AS workflow_evidence
+        """), {"pid": period_id, "rid": review_item_id},
+    )).mappings().one()
+    assert all(value == 0 for value in residue.values()), (
+        f"CP6 owned period cleanup left residue for {period_id}: {dict(residue)}"
+    )
+
+
+async def _delete_owned_cp6_user(direct_db, username: str) -> None:
+    rows = (await direct_db.execute(
+        _text("""
+            SELECT userid AS user_id FROM sec.users WHERE username = :username
+            UNION
+            SELECT entityid::integer AS user_id FROM audit.auditlog
+            WHERE entityname = 'Users'
+              AND newvaluejson::jsonb ->> 'username' = :username
+        """), {"username": username},
+    )).all()
+    user_ids = {int(row[0]) for row in rows}
+    assert len(user_ids) <= 1, f"CP6 username {username!r} resolved to multiple owned User IDs"
+    if not user_ids:
+        return
+
+    user_id = user_ids.pop()
+    await delete_user_access_state(direct_db, user_id)
+    remaining = (await direct_db.execute(
+        _text("""
+            SELECT COUNT(*) FROM sec.users WHERE userid = :uid OR username = :username
+        """), {"uid": user_id, "username": username},
+    )).scalar_one()
+    assert remaining == 0, f"CP6 owned User {user_id} remains after cleanup"
 
 
 async def _create_open_period(
@@ -235,6 +364,7 @@ async def hq_driver_id(
 
 async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
     """Cancel Locked/Archived/InReview/Returned/Approved periods bypassing blocked PATCH paths."""
+    # Legacy branch-scoped cleanup for older CP6 period scenarios.
     # InReview and Approved: PATCH to Cancelled is blocked in CP-1A, use direct DB.
     await direct_db.execute(
         _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
@@ -274,7 +404,7 @@ async def cp6_clean(
     paytest_branch_id: int,
     direct_db,
 ):
-    """Cancel any leftover active periods, yield branch_id, clean up after."""
+    """Run the legacy period cleanup around this module's scenarios."""
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
     await _force_cancel_locked_periods(direct_db, paytest_branch_id)
     yield paytest_branch_id
@@ -940,10 +1070,9 @@ class TestReviewNoManualAdjustment:
 
 class TestReviewPerBranchPermissionFilter:
     """
-    A user with payroll.view permission on PAYTEST (Branch A) only must NOT see
-    review items for HQ (Branch B).  The permitted_branches filter in
-    get_review_items must scope the DB query to only the branches the user
-    actually has permission on, not all accessible branches.
+    A user with payroll.view permission on one owned Branch must not see
+    pending review items for a different owned Branch. The permitted_branches
+    filter must scope the query to the user's authorized branches.
     """
 
     @pytest.mark.asyncio
@@ -951,121 +1080,46 @@ class TestReviewPerBranchPermissionFilter:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-        hq_branch_id: int,
+        cp6_owned_branch_pair: tuple[int, int],
         direct_db,
     ):
-        """
-        User has payroll.view on PAYTEST (SpecificBranch scope) only.
-        HQ has an InReview period; PAYTEST has an InReview period.
-        The user must see the PAYTEST review item and must NOT see the HQ item.
-        """
-        # Create an InReview period on HQ (Branch B, no permission for this user)
-        # Use direct status patch ->' no need to add lines since HQ may not have
-        # DailyNote activated; we only need the review item to exist.
-        await _cancel_active_periods(session_client, auth_token, hq_branch_id)
-        # InReview->Cancelled is blocked by CP-1A; force-cancel any stale InReview
-        # periods on HQ directly so the slot is free for the new submission.
-        await direct_db.execute(
-            _text('''
-                UPDATE payroll.payrollperiods
-                SET    status = 'Cancelled', currentreturnreviewitemid = NULL
-                WHERE  branchid = :bid AND status = 'InReview'
-            '''),
-            {'bid': hq_branch_id},
-        )
-        await direct_db.commit()
-        hq_pid = await _create_open_period(
-            session_client, auth_token, hq_branch_id,
-            "2095-07-07", "2095-07-13",
-            direct_db=direct_db,
-        )
-        # Add a canonical informational DailyNote line through the current
-        # period-entry route.  A legacy DailyStatus-only row is deliberately
-        # rejected by current submission validation.
-        hq_driver_resp = await session_client.get(
-            "/core/drivers",
-            params={"branch_id": hq_branch_id},
-            headers=auth(auth_token),
-        )
-        assert hq_driver_resp.status_code == 200
-        hq_drivers = hq_driver_resp.json()
-        if not hq_drivers:
-            new_d = await session_client.post(
-                "/core/drivers",
-                json={"branch_id": hq_branch_id, "full_name": "CP6 HQ Temp", "driver_code": "CP6HQT"},
-                headers=auth(auth_token),
+        """A user scoped to one owned Branch sees its item and not the other."""
+        permitted_branch_id, unpermitted_branch_id = cp6_owned_branch_pair
+        scenarios: list[tuple[int, int]] = []
+        owned_username: str | None = None
+        try:
+            scenarios.append(await _create_owned_cp6_review_scenario(
+                direct_db, unpermitted_branch_id, "unpermitted",
+            ))
+            scenarios.append(await _create_owned_cp6_review_scenario(
+                direct_db, permitted_branch_id, "permitted",
+            ))
+            unpermitted_pid, _ = scenarios[0]
+
+            view_role_id = await get_company_role_id(
+                session_client, auth_token, "PAYROLL_VIEWER_CO",
             )
-            assert new_d.status_code == 201, f"Create HQ driver: {new_d.text}"
-            hq_driver_for_line = new_d.json()["driver_id"]
-        else:
-            hq_driver_for_line = hq_drivers[0]["driver_id"]
+            owned_username = f"cp6_view_{unpermitted_pid}"
+            token = await create_user_with_role_token(
+                session_client, auth_token, owned_username,
+                view_role_id,
+                scope_type="SpecificBranch",
+                branch_id=permitted_branch_id,
+            )
 
-        hq_line = await session_client.post(
-            f"/payroll/periods/{hq_pid}/lines",
-            json={
-                "driver_id": hq_driver_for_line,
-                "work_date": "2095-07-08",
-                "line_type": "DailyNote",
-                "quantity": 1,
-                "notes": "HQ review isolation",
-            },
-            headers=auth(auth_token),
-        )
-        assert hq_line.status_code == 201, f"HQ line create failed: {hq_line.text}"
-        hq_inreview = await session_client.patch(
-            f"/payroll/periods/{hq_pid}/status",
-            json={"status": "InReview"},
-            headers=auth(auth_token),
-        )
-        assert hq_inreview.status_code == 200, f"HQ period to InReview failed: {hq_inreview.text}"
-
-        # Create an InReview period on PAYTEST (Branch A, permitted)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-        pt_pid = await _create_open_period(
-            session_client, auth_token, paytest_branch_id,
-            "2095-07-07", "2095-07-13",
-            direct_db=direct_db,
-        )
-        await _advance_to_inreview(
-            session_client, auth_token, pt_pid, paytest_driver_id, "2095-07-08"
-        )
-
-        # Create a role with payroll.view only on PAYTEST
-        view_role_id = await create_company_role_with_permissions(
-            session_client, auth_token,
-            "CP6_VIEW_PAYTEST_ONLY",
-            ["payroll.view"],
-        )
-
-        # Create user with SpecificBranch=PAYTEST scope
-        tok = await create_user_with_role_token(
-            session_client, auth_token,
-            f"cp6_view_pt_{hq_pid}",
-            view_role_id,
-            scope_type="SpecificBranch",
-            branch_id=paytest_branch_id,
-        )
-
-        # GET /review/items ->' must return only PAYTEST items, not HQ items
-        rv = await session_client.get("/review/items", headers=auth(tok))
-        assert rv.status_code == 200, f"Permitted user must be able to list review items: {rv.text}"
-
-        item_branch_ids = {i["branch_id"] for i in rv.json()}
-
-        # Primary assertion: HQ items must NOT leak to a PAYTEST-only user
-        assert hq_branch_id not in item_branch_ids, (
-            f"User with permission on PAYTEST only must not see HQ review items; "
-            f"got branch_ids={item_branch_ids}"
-        )
-
-        # Secondary assertion: PAYTEST items must be visible (test setup created one)
-        assert paytest_branch_id in item_branch_ids, (
-            f"User with permission on PAYTEST must see PAYTEST review items; "
-            f"got branch_ids={item_branch_ids}"
-        )
-
-        # Cleanup
-        await _cancel_active_periods(session_client, auth_token, hq_branch_id)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+            response = await session_client.get("/review/items", headers=auth(token))
+            assert response.status_code == 200, (
+                f"Permitted user must be able to list review items: {response.text}"
+            )
+            item_branch_ids = {item["branch_id"] for item in response.json()}
+            assert unpermitted_branch_id not in item_branch_ids, (
+                f"Unpermitted branch review items leaked: got branch_ids={item_branch_ids}"
+            )
+            assert permitted_branch_id in item_branch_ids, (
+                f"Permitted branch review items were missing: got branch_ids={item_branch_ids}"
+            )
+        finally:
+            if owned_username is not None:
+                await _delete_owned_cp6_user(direct_db, owned_username)
+            for period_id, review_item_id in reversed(scenarios):
+                await _delete_owned_cp6_period(direct_db, period_id, review_item_id)

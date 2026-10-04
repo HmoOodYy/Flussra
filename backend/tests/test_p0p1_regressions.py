@@ -12,6 +12,8 @@ Covers:
   P1  - Period-pay mutations write audit entries (+ rollback on audit failure)
 """
 
+from uuid import uuid4
+
 import httpx
 import psycopg2
 import pytest
@@ -168,25 +170,26 @@ class TestPeriodApprovalWritebackValidation:
         client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
-        hq_branch_id: int,
+        owned_branch_id: int,
         direct_db,
     ):
         """
-        A PeriodApproval item created for PAYTEST branch but linked to an HQ period
+        A PeriodApproval item created for PAYTEST branch but linked to a period on
+        this test-owned second branch
         must be rejected by decide_review_item (branch mismatch).
 
-        Strategy: directly insert an HQ period in InReview status (no real
-        review item created), then insert a single forged PeriodApproval item
+        Strategy: directly insert a second-branch period in InReview status
+        (no real review item created), then insert a forged PeriodApproval item
         on PAYTEST branch pointing to it.  The unique index only fires on
         duplicate (companyid, entityid) pending items; this is the only one.
         """
         result = await direct_db.execute(
             text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-            {"bid": hq_branch_id},
+            {"bid": owned_branch_id},
         )
         company_id = result.scalar_one()
 
-        # Insert an HQ period directly in InReview status (bypasses review-item creation)
+        # Insert an owned second-branch period directly in InReview (no real review item).
         p_result = await direct_db.execute(
             text("""
                 INSERT INTO payroll.payrollperiods
@@ -196,11 +199,11 @@ class TestPeriodApprovalWritebackValidation:
                         'Week', '2029-01-07', '2029-01-13', 'InReview')
                 RETURNING payrollperiodid
             """),
-            {"cid": company_id, "bid": hq_branch_id},
+            {"cid": company_id, "bid": owned_branch_id},
         )
         hq_pid = p_result.scalar_one()
 
-        # Insert a forged PeriodApproval item on PAYTEST branch pointing to HQ period
+        # Insert a forged PeriodApproval item on PAYTEST pointing to the owned period.
         result = await direct_db.execute(
             text("""
                 INSERT INTO review.managerreviewitems
@@ -284,6 +287,7 @@ class TestPeriodApprovalWritebackValidation:
         direct_db,
     ):
         """PeriodApproval item with wrong entityschema/entityname is blocked."""
+        entity_id = f"bad-metadata-{uuid4().hex}"
         result = await direct_db.execute(
             text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
             {"bid": paytest_branch_id},
@@ -296,11 +300,11 @@ class TestPeriodApprovalWritebackValidation:
                     (companyid, branchid, requestedbyuserid, requesttype,
                      entityschema, entityname, entityid, title, status, priority)
                 VALUES (:cid, :bid, 1, 'PeriodApproval',
-                        'wrong_schema', 'WrongTable', '1',
+                        'wrong_schema', 'WrongTable', :eid,
                         'Bad metadata item', 'Pending', 'Normal')
                 RETURNING reviewitemid
             """),
-            {"cid": company_id, "bid": paytest_branch_id},
+            {"cid": company_id, "bid": paytest_branch_id, "eid": entity_id},
         )
         bad_id = result.scalar_one()
 
@@ -603,7 +607,7 @@ class TestDriverPayRulesArchivedProtection:
         auth_token: str,
         direct_db,
         paytest_branch_id: int,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """
         Voiding a pay rule must be blocked if an Archived period (not just Locked)
@@ -619,7 +623,7 @@ class TestDriverPayRulesArchivedProtection:
         rule_resp = await client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_id":      paytest_driver_id,
+                "driver_id":      owned_driver_id,
                 "rule_type":      "MinimumPay",
                 "amount":         "100.00",
                 "effective_from": "2022-01-01",
@@ -656,7 +660,7 @@ class TestDriverPayRulesArchivedProtection:
                 VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
             """),
             {"cid": company_id, "bid": paytest_branch_id,
-             "pid": arch_pid, "did": paytest_driver_id},
+             "pid": arch_pid, "did": owned_driver_id},
         )
 
         try:
@@ -672,20 +676,24 @@ class TestDriverPayRulesArchivedProtection:
             await direct_db.execute(text(
                 "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
             ))
-            await direct_db.execute(
-                text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-                {"pid": arch_pid},
-            )
-            await direct_db.execute(text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
+            try:
+                await direct_db.execute(
+                    text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
+                    {"pid": arch_pid},
+                )
+            finally:
+                await direct_db.execute(text(
+                    "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
+                ))
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},
             )
             # Void the rule for cleanup (now safe, period deleted)
-            await client.post(f"/payroll/driver-pay-rules/{rule_id}/void",
-                              headers=_auth(auth_token))
+            cleanup = await client.post(
+                f"/payroll/driver-pay-rules/{rule_id}/void", headers=_auth(auth_token),
+            )
+            assert cleanup.status_code == 200, f"Owned DriverPayRule cleanup failed: {cleanup.text}"
 
     async def test_end_blocked_by_archived_period(
         self,
@@ -693,7 +701,7 @@ class TestDriverPayRulesArchivedProtection:
         auth_token: str,
         direct_db,
         paytest_branch_id: int,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """Ending a rule before an Archived period's start_date must be blocked."""
         result = await direct_db.execute(
@@ -705,7 +713,7 @@ class TestDriverPayRulesArchivedProtection:
         rule_resp = await client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_id":      paytest_driver_id,
+                "driver_id":      owned_driver_id,
                 "rule_type":      "MaximumPay",
                 "amount":         "500.00",
                 "effective_from": "2022-01-01",
@@ -741,7 +749,7 @@ class TestDriverPayRulesArchivedProtection:
                 VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
             """),
             {"cid": company_id, "bid": paytest_branch_id,
-             "pid": arch_pid, "did": paytest_driver_id},
+             "pid": arch_pid, "did": owned_driver_id},
         )
 
         try:
@@ -756,19 +764,23 @@ class TestDriverPayRulesArchivedProtection:
             await direct_db.execute(text(
                 "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
             ))
-            await direct_db.execute(
-                text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-                {"pid": arch_pid},
-            )
-            await direct_db.execute(text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
+            try:
+                await direct_db.execute(
+                    text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
+                    {"pid": arch_pid},
+                )
+            finally:
+                await direct_db.execute(text(
+                    "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
+                ))
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},
             )
-            await client.post(f"/payroll/driver-pay-rules/{rule_id}/void",
-                              headers=_auth(auth_token))
+            cleanup = await client.post(
+                f"/payroll/driver-pay-rules/{rule_id}/void", headers=_auth(auth_token),
+            )
+            assert cleanup.status_code == 200, f"Owned DriverPayRule cleanup failed: {cleanup.text}"
 
 
 # ---------------------------------------------------------------------------

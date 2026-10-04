@@ -72,16 +72,16 @@ class TestPayRulesCRUD:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """POST /payroll/driver-pay-rules creates an Active MinimumPay rule."""
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "200.00", "2088-01-01", "2088-12-31",
         )
         # Verify in list
         list_resp = await session_client.get(
-            f"/payroll/drivers/{paytest_driver_id}/pay-rules",
+            f"/payroll/drivers/{owned_driver_id}/pay-rules",
             headers=auth(auth_token),
         )
         assert list_resp.status_code == 200
@@ -93,20 +93,21 @@ class TestPayRulesCRUD:
         assert float(rule["amount"]) == 200.00
 
         # Cleanup
-        await session_client.post(
+        cleanup = await session_client.post(
             f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
         )
+        assert cleanup.status_code == 200, f"Owned MinimumPay cleanup failed: {cleanup.text}"
 
     @pytest.mark.asyncio
     async def test_create_maximum_pay(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """POST /payroll/driver-pay-rules creates an Active MaximumPay rule."""
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MaximumPay", "1500.00", "2089-01-01", "2089-12-31",
         )
         get_resp = await session_client.get(
@@ -117,20 +118,21 @@ class TestPayRulesCRUD:
         assert data["rule_type"] == "MaximumPay"
         assert data["status"] == "Active"
 
-        await session_client.post(
+        cleanup = await session_client.post(
             f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
         )
+        assert cleanup.status_code == 200, f"Owned MaximumPay cleanup failed: {cleanup.text}"
 
     @pytest.mark.asyncio
     async def test_end_minimum_pay(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """POST /payroll/driver-pay-rules/{id}/end closes an Active rule."""
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "180.00", "2090-01-01",
         )
         end_resp = await session_client.post(
@@ -148,11 +150,11 @@ class TestPayRulesCRUD:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """POST /payroll/driver-pay-rules/{id}/end closes an Active MaximumPay rule."""
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MaximumPay", "2000.00", "2091-01-01",
         )
         end_resp = await session_client.post(
@@ -168,11 +170,11 @@ class TestPayRulesCRUD:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """POST /payroll/driver-pay-rules/{id}/void voids an Active rule."""
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "90.00", "2092-01-01", "2092-12-31",
         )
         void_resp = await session_client.post(
@@ -186,11 +188,11 @@ class TestPayRulesCRUD:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         """branch_user (no payrates.edit) cannot end a pay rule."""
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MaximumPay", "3000.00", "2093-01-01", "2093-12-31",
         )
         try:
@@ -208,9 +210,10 @@ class TestPayRulesCRUD:
             )
             assert end_resp.status_code == 403
         finally:
-            await session_client.post(
+            cleanup = await session_client.post(
                 f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
             )
+            assert cleanup.status_code == 200, f"Owned pay-rule cleanup failed: {cleanup.text}"
 
 
 class TestPayRulesCurrentContract:
@@ -272,17 +275,17 @@ class TestPayRulesCurrentContract:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         first = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "500.00", "2201-01-01", "2201-01-31",
         )
         try:
             overlap = await session_client.post(
                 "/payroll/driver-pay-rules",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_id": owned_driver_id,
                     "rule_type": "MinimumPay",
                     "amount": "600.00",
                     "effective_from": "2201-01-15",
@@ -295,7 +298,7 @@ class TestPayRulesCurrentContract:
             contiguous = await session_client.post(
                 "/payroll/driver-pay-rules",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_id": owned_driver_id,
                     "rule_type": "MinimumPay",
                     "amount": "600.00",
                     "effective_from": "2201-02-01",
@@ -309,7 +312,7 @@ class TestPayRulesCurrentContract:
             ended_create = await session_client.post(
                 "/payroll/driver-pay-rules",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_id": owned_driver_id,
                     "rule_type": "MinimumPay",
                     "amount": "700.00",
                     "effective_from": "2201-03-01",
@@ -327,7 +330,7 @@ class TestPayRulesCurrentContract:
             ended_overlap = await session_client.post(
                 "/payroll/driver-pay-rules",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_id": owned_driver_id,
                     "rule_type": "MinimumPay",
                     "amount": "800.00",
                     "effective_from": "2201-03-10",
@@ -337,32 +340,35 @@ class TestPayRulesCurrentContract:
             )
             assert ended_overlap.status_code == 422, ended_overlap.text
         finally:
-            await session_client.post(
+            cleanup = await session_client.post(
                 f"/payroll/driver-pay-rules/{first}/void", headers=auth(auth_token)
             )
+            assert cleanup.status_code == 200, f"Owned first rule cleanup failed: {cleanup.text}"
             if "second" in locals():
-                await session_client.post(
+                cleanup = await session_client.post(
                     f"/payroll/driver-pay-rules/{second}/void", headers=auth(auth_token)
                 )
+                assert cleanup.status_code == 200, f"Owned second rule cleanup failed: {cleanup.text}"
             if "ended" in locals():
-                await session_client.post(
+                cleanup = await session_client.post(
                     f"/payroll/driver-pay-rules/{ended}/void", headers=auth(auth_token)
                 )
+                assert cleanup.status_code == 200, f"Owned ended rule cleanup failed: {cleanup.text}"
 
     @pytest.mark.asyncio
     async def test_list_filter_get_404_and_notes_only_update(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "450.00", "2202-01-01", "2202-01-31",
         )
         try:
             filtered = await session_client.get(
-                f"/payroll/drivers/{paytest_driver_id}/pay-rules",
+                f"/payroll/drivers/{owned_driver_id}/pay-rules",
                 params={"rule_type": "MinimumPay", "status": "Active"},
                 headers=auth(auth_token),
             )
@@ -385,9 +391,10 @@ class TestPayRulesCurrentContract:
             assert patched.json()["amount"] == before["amount"]
             assert patched.json()["effective_from"] == before["effective_from"]
         finally:
-            await session_client.post(
+            cleanup = await session_client.post(
                 f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
             )
+            assert cleanup.status_code == 200, f"Owned listed rule cleanup failed: {cleanup.text}"
 
         missing = await session_client.get(
             "/payroll/driver-pay-rules/999999", headers=auth(auth_token)
@@ -399,10 +406,10 @@ class TestPayRulesCurrentContract:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
     ):
         rule_id = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MaximumPay", "2200.00", "2203-01-01", "2203-01-31",
         )
         ended = await session_client.post(
@@ -440,14 +447,14 @@ class TestPayRulesCurrentContract:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        owned_driver_id: int,
         direct_db,
         monkeypatch,
     ):
         """Create/end/void/notes writes never commit without their audit row."""
         create_marker = "audit-failure-create"
         create_payload = {
-            "driver_id": paytest_driver_id,
+            "driver_id": owned_driver_id,
             "rule_type": "MinimumPay",
             "amount": "100.00",
             "effective_from": "2210-01-01",
@@ -455,15 +462,15 @@ class TestPayRulesCurrentContract:
             "notes": create_marker,
         }
         first = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "200.00", "2210-02-01", "2210-02-28",
         )
         second = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MaximumPay", "3000.00", "2210-03-01", "2210-03-31",
         )
         third = await _create_pay_rule(
-            session_client, auth_token, paytest_driver_id,
+            session_client, auth_token, owned_driver_id,
             "MinimumPay", "250.00", "2210-04-01", "2210-04-30",
         )
 
@@ -481,7 +488,7 @@ class TestPayRulesCurrentContract:
             _text(
                 "SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did AND notes = :notes"
             ),
-            {"did": paytest_driver_id, "notes": create_marker},
+            {"did": owned_driver_id, "notes": create_marker},
         )).scalar_one()
         assert created_residue == 0
 
@@ -512,8 +519,11 @@ class TestPayRulesCurrentContract:
 
         monkeypatch.undo()
         for rule_id in (first, second, third):
-            await session_client.post(
+            cleanup = await session_client.post(
                 f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
+            )
+            assert cleanup.status_code == 200, (
+                f"Owned audit-failure rule cleanup failed for {rule_id}: {cleanup.text}"
             )
 
 
@@ -1294,7 +1304,7 @@ class TestPayRulesFinalizedGuard:
         session_client: httpx.AsyncClient,
         auth_token: str,
         paytest_branch_id: int,
-        paytest_driver_id: int,
+        owned_driver_id: int,
         direct_db,
     ):
         """Pay rule with effective_from outside any finalized period succeeds."""
@@ -1315,7 +1325,7 @@ class TestPayRulesFinalizedGuard:
             resp = await session_client.post(
                 "/payroll/driver-pay-rules",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_id": owned_driver_id,
                     "rule_type": "MinimumPay",
                     "amount": "150.00",
                     "effective_from": "2072-02-01",
@@ -1327,9 +1337,10 @@ class TestPayRulesFinalizedGuard:
                 f"Expected 201 for pay rule outside finalized period, got {resp.status_code}: {resp.text}"
             )
             rule_id = resp.json()["driver_pay_rule_id"]
-            await session_client.post(
+            cleanup = await session_client.post(
                 f"/payroll/driver-pay-rules/{rule_id}/void", headers=auth(auth_token)
             )
+            assert cleanup.status_code == 200, f"Owned finalized-guard rule cleanup failed: {cleanup.text}"
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),

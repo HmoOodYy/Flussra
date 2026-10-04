@@ -16,6 +16,7 @@ import subprocess
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import psycopg2
@@ -588,6 +589,123 @@ async def paytest_driver_id(
     )
     assert resp.status_code == 201, f"PAYTEST driver seed failed: {resp.text}"
     return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture
+async def owned_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    direct_db,
+) -> int:
+    """Create and remove a test-owned Driver used by isolated rule scenarios."""
+    from sqlalchemy import text
+
+    marker = uuid4().hex
+    created = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": f"Owned rule scenario {marker}",
+            "driver_code": f"OWN-{marker[:10]}",
+        },
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+    assert created.status_code == 201, f"Owned Driver create failed: {created.text}"
+    body = created.json()
+    driver_id = body["driver_id"]
+    employee_id = body["employee_id"]
+    try:
+        yield driver_id
+    finally:
+        dependents = (await direct_db.execute(
+            text("""
+                SELECT
+                    (SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverid = :did) AS final_lines,
+                    (SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE driverid = :did) AS draft_lines,
+                    (SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE driverid = :did) AS bonuses,
+                    (SELECT COUNT(*) FROM payroll.driverrates WHERE driverid = :did) AS rates,
+                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE driverid = :did) AS day_state
+            """), {"did": driver_id},
+        )).mappings().one()
+        assert all(value == 0 for value in dependents.values()), (
+            f"Owned Driver {driver_id} has unexpected non-rule dependents: {dict(dependents)}"
+        )
+        rule_ids = [row[0] for row in (await direct_db.execute(
+            text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverid = :did"),
+            {"did": driver_id},
+        )).all()]
+        rule_id_strings = [str(rule_id) for rule_id in rule_ids] or [""]
+        await direct_db.execute(
+            text("DELETE FROM audit.auditlog WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)"),
+            {"ids": rule_id_strings},
+        )
+        await direct_db.execute(
+            text("DELETE FROM payroll.driverpayrules WHERE driverid = :did"), {"did": driver_id},
+        )
+        await direct_db.execute(
+            text("DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid"),
+            {"eid": str(driver_id)},
+        )
+        await direct_db.execute(text("DELETE FROM core.drivers WHERE driverid = :did"), {"did": driver_id})
+        await direct_db.execute(
+            text("DELETE FROM audit.auditlog WHERE entityname = 'Employees' AND entityid = :eid"),
+            {"eid": str(employee_id)},
+        )
+        await direct_db.execute(
+            text("DELETE FROM core.employees WHERE employeeid = :eid"), {"eid": employee_id},
+        )
+        residue = (await direct_db.execute(
+            text("""
+                SELECT
+                    (SELECT COUNT(*) FROM core.drivers WHERE driverid = :did) AS drivers,
+                    (SELECT COUNT(*) FROM core.employees WHERE employeeid = :eid) AS employees,
+                    (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did) AS rules,
+                    (SELECT COUNT(*) FROM audit.auditlog
+                     WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)) AS rule_audit
+            """), {"did": driver_id, "eid": employee_id, "ids": rule_id_strings},
+        )).mappings().one()
+        assert all(value == 0 for value in residue.values()), (
+            f"Owned Driver cleanup left residue for {driver_id}: {dict(residue)}"
+        )
+
+
+@pytest_asyncio.fixture
+async def owned_branch_id(direct_db) -> int:
+    """Create a function-owned branch and require its business graph to be removed."""
+    from sqlalchemy import text
+
+    marker = uuid4().hex
+    branch_id = (await direct_db.execute(
+        text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"OWN-{marker[:12]}", "name": f"Owned test branch {marker[:8]}"},
+    )).scalar_one()
+    try:
+        yield int(branch_id)
+    finally:
+        residue = (await direct_db.execute(
+            text("""
+                SELECT
+                    (SELECT COUNT(*) FROM payroll.payrollperiods WHERE branchid = :bid) AS periods,
+                    (SELECT COUNT(*) FROM core.drivers WHERE branchid = :bid) AS drivers,
+                    (SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE branchid = :bid) AS item_config,
+                    (SELECT COUNT(*) FROM sec.userbranchroles WHERE branchid = :bid) AS user_roles
+            """), {"bid": branch_id},
+        )).mappings().one()
+        assert all(value == 0 for value in residue.values()), (
+            f"Owned branch {branch_id} retained business state: {dict(residue)}"
+        )
+        await direct_db.execute(
+            text("DELETE FROM core.branches WHERE branchid = :bid"), {"bid": branch_id},
+        )
+        remaining = (await direct_db.execute(
+            text("SELECT COUNT(*) FROM core.branches WHERE branchid = :bid"), {"bid": branch_id},
+        )).scalar_one()
+        assert remaining == 0, f"Owned branch {branch_id} cleanup left {remaining} row(s)"
 
 
 @pytest_asyncio.fixture(scope="session")

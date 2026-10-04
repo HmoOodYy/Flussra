@@ -39,26 +39,50 @@ async def _cancel_active_periods(
 ) -> None:
     from sqlalchemy import text as _sqla_text
     headers = auth(token)
-    # Force-cancel InReview/Approved directly in DB (CP-1A blocks those HTTP transitions)
-    if db is not None:
+    if db is None:
+        raise AssertionError("M14 period cleanup requires direct_db ownership checks")
+    period_prefix = f"M14-{branch_id}-%"
+    protected_periods = (await db.execute(
+        _sqla_text("""
+            SELECT payrollperiodid FROM payroll.payrollperiods
+            WHERE branchid = :bid AND periodcode LIKE :prefix
+              AND status IN ('InReview', 'Approved')
+        """), {"bid": branch_id, "prefix": period_prefix},
+    )).scalars().all()
+    for period_id in protected_periods:
+        review_ids = (await db.execute(
+            _sqla_text("""
+                SELECT reviewitemid FROM review.managerreviewitems
+                WHERE branchid = :bid AND entityschema = 'payroll'
+                  AND entityname = 'PayrollPeriods' AND entityid = :eid
+            """), {"bid": branch_id, "eid": str(period_id)},
+        )).scalars().all()
         await db.execute(
-            _sqla_text(
-                "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-                "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"
-            ),
-            {"bid": branch_id},
+            _sqla_text("""
+                UPDATE review.managerreviewitems SET status = 'Cancelled'
+                WHERE reviewitemid = ANY(:ids) AND status = 'Pending'
+            """),
+            {"ids": review_ids or [-1]},
         )
-    for s in ("Draft", "Open", "InReview", "Approved"):
+        await db.execute(
+            _sqla_text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )
+    for s in ("Draft", "Open"):
         resp = await client.get(
             "/payroll/periods", params={"branch_id": branch_id, "status": s},
             headers=headers,
         )
-        if resp.status_code != 200:
-            continue
+        assert resp.status_code == 200, f"List M14 {s} periods for cleanup failed: {resp.text}"
         for p in resp.json():
-            await client.patch(
+            if not p.get("period_code", "").startswith(f"M14-{branch_id}-"):
+                continue
+            cancelled = await client.patch(
                 f"/payroll/periods/{p['payroll_period_id']}/status",
                 json={"status": "Cancelled"}, headers=headers,
+            )
+            assert cancelled.status_code == 200, (
+                f"Cancel owned M14 period {p['payroll_period_id']} failed: {cancelled.text}"
             )
 
 
@@ -190,6 +214,44 @@ async def _activate_system_period_item(
 # ---------------------------------------------------------------------------
 # Session fixtures
 # ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Give M14 a module-owned branch so workflow slots stay out of PAYTEST."""
+    from sqlalchemy import text as _sqla_text
+
+    marker = uuid.uuid4().hex
+    branch_id = (await session_db_conn.execute(
+        _sqla_text("""
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault)
+            VALUES (1, :code, :name, 'Active', FALSE)
+            RETURNING branchid
+        """), {"code": f"M14_{marker[:12]}", "name": f"M14 owned branch {marker[:8]}"},
+    )).scalar_one()
+    return int(branch_id)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Use one M14-owned Driver; finalization history never reaches global PAYTEST."""
+    marker = uuid.uuid4().hex
+    created = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": f"M14 owned driver {marker}",
+            "driver_code": f"M14D-{marker[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert created.status_code == 201, f"M14 Driver create failed: {created.text}"
+    return int(created.json()["driver_id"])
+
 
 @pytest_asyncio.fixture(scope="session")
 async def m14_bonus_activated(
