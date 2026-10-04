@@ -24,6 +24,25 @@ test('rate formatting retains precision and uses the frozen response currency', 
   assert.notEqual(formatRate(packet.rate, authCurrency, 2), formatRate(packet.rate, packet.currency_code, packet.currency_minor_unit_digits));
 });
 
+test('Bonus and DriverPayRule amount inputs accept four-decimal source precision', () => {
+  const bonusSource = readFileSync(resolve(import.meta.dirname, '../src/pages/payroll/BonusDialog.tsx'), 'utf8');
+  const bonusAmountInput = bonusSource.match(/Amount\s*<input([\s\S]*?)value=\{row\.amount\}/)?.[1];
+  assert.ok(bonusAmountInput, 'Bonus amount input should exist');
+  assert.match(bonusAmountInput, /step="0\.0001"/);
+  assert.match(bonusAmountInput, /min="0\.0001"/);
+  assert.match(bonusAmountInput, /placeholder="0\.0000"/);
+  assert.doesNotMatch(bonusAmountInput, /step="0\.01"|min="0\.01"/);
+  assert.match(bonusSource, /formatMoney\(v, user\?\.currency_code, user\?\.currency_minor_unit_digits\)/);
+
+  const payRatesSource = readFileSync(resolve(import.meta.dirname, '../src/pages/people/pay-rates/PayRatesPage.tsx'), 'utf8');
+  const driverPayRuleAmountInput = payRatesSource.match(/type="number"([\s\S]*?)value=\{ruleForm\.amount\}/)?.[1];
+  assert.ok(driverPayRuleAmountInput, 'DriverPayRule amount input should exist');
+  assert.match(driverPayRuleAmountInput, /step="0\.0001"/);
+  assert.match(driverPayRuleAmountInput, /min="0\.0001"/);
+  assert.match(driverPayRuleAmountInput, /placeholder="e\.g\. 150\.0000"/);
+  assert.doesNotMatch(driverPayRuleAmountInput, /step="0\.01"|min="0\.01"/);
+});
+
 test('company currency settings use the server catalog and update auth currency after a successful save', () => {
   const source = readFileSync(resolve(import.meta.dirname, '../src/pages/settings/company-branches/CompanyBranchesPage.tsx'), 'utf8');
   assert.match(source, /get<SupportedCurrency\[]>\('\/settings\/currencies'\)/);

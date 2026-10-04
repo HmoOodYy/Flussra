@@ -924,7 +924,7 @@ async def test_event_list_endpoint_unchanged(
     assert len(items) == 1
     event = items[0]
     assert event["bonus_event_id"] > 0
-    assert event["amount"] == "40.00"
+    assert Decimal(str(event["amount"])) == Decimal("40.00")
     assert "capabilities" not in event, "Event list shape must not gain summary fields"
     assert "total_bonus" not in event
 

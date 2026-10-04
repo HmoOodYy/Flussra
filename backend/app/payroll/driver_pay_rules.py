@@ -297,7 +297,7 @@ async def create_driver_pay_rule(
             VALUES
                 (:cid, :bid, :did, :rtype, :amount,
                  :eff_from, :eff_to, 'Active', :creator, :notes)
-            RETURNING driverpayruleid
+            RETURNING driverpayruleid, amount
         """),
         {
             "cid":      company_id,
@@ -311,7 +311,9 @@ async def create_driver_pay_rule(
             "notes":    data.notes,
         },
     )
-    rule_id: int = insert_result.scalar_one()
+    inserted_rule = insert_result.mappings().one()
+    rule_id: int = inserted_rule["driverpayruleid"]
+    persisted_amount = inserted_rule["amount"]
 
     await _write_pay_rule_audit(
         db,
@@ -323,7 +325,7 @@ async def create_driver_pay_rule(
         new_value={
             "driver_id":      data.driver_id,
             "rule_type":      data.rule_type,
-            "amount":         str(data.amount),
+            "amount":         str(persisted_amount),
             "effective_from": str(data.effective_from),
             "effective_to":   str(data.effective_to) if data.effective_to else None,
             "status":         "Active",

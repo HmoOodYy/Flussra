@@ -1266,9 +1266,9 @@ export function PayRatesPage() {
                                       <input
                                         className={styles.editInput}
                                         type="number"
-                                        step="0.01"
-                                        min="0.01"
-                                        placeholder="e.g. 150.00"
+                                        step="0.0001"
+                                        min="0.0001"
+                                        placeholder="e.g. 150.0000"
                                         value={ruleForm.amount}
                                         onChange={e => setRuleForm(f => f ? { ...f, amount: e.target.value } : f)}
                                       />
