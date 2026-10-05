@@ -67,7 +67,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import (
     frozen_currency,
-    lock_and_get_company_currency,
+    lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
 from app.core.service import _check_permission, _require_not_driver_role
@@ -329,7 +329,7 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
     await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
-    currency = await lock_and_get_company_currency(company_id, db)
+    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await _acquire_branch_workflow_lock(company_id, period.branch_id, db)
     locked = (await db.execute(text("""
         SELECT payrollperiodid FROM payroll.payrollperiods

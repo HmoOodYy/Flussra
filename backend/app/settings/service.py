@@ -30,10 +30,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_concurrency import lock_company_for_mutation
 from app.company_currency import (
     company_has_durable_monetary_state,
     currency_error,
-    lock_and_get_company_currency,
 )
 from app.core.service import (
     _build_in_clause,
@@ -541,8 +541,10 @@ async def update_company_profile(
     """
     await _ensure_company_admin(company_id, user_id, db)
 
-    # Serialize with all monetary writers before reading currency and state.
-    await lock_and_get_company_currency(company_id, db, required=False)
+    # Company mutation takes the conflicting row lock first. It must never take
+    # the shared monetary guard and then upgrade: two such transactions would
+    # each hold SHARE and deadlock on the UPDATE.
+    await lock_company_for_mutation(company_id, db)
     current = await get_company_profile(company_id, user_id, db)
     currency_changed = "currency_code" in data.model_fields_set
     new_currency = current.currency_code

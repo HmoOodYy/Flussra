@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.policy import require_non_driver_subject
-from app.company_currency import lock_and_get_company_currency
+from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.core.service import _check_any_permission
 from app.payroll.guards import (
     _check_driver_read_access,
@@ -288,7 +288,7 @@ async def create_driver_pay_rule(
         company_id, driver_branch_id, data.effective_from, db, label="pay rule"
     )
 
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.driverpayrules
@@ -439,7 +439,7 @@ async def end_driver_pay_rule(
             ),
         )
 
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await db.execute(
         text("""
             UPDATE payroll.driverpayrules

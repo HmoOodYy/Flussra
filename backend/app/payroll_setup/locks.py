@@ -9,15 +9,16 @@ from collections.abc import Iterable
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.company_concurrency import lock_company_for_mutation
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 
 
 async def lock_company(company_id: int, db: AsyncConnection) -> None:
-    """Serialize default changes without blocking FK KEY SHARE on Company."""
-    await db.execute(
-        text("SELECT companyid FROM core.companies WHERE companyid = :cid FOR NO KEY UPDATE"),
-        {"cid": company_id},
-    )
+    """Serialize default-Setup changes through the Company mutation lock.
+
+    Company monetary/currency concurrency is owned by app.company_concurrency.
+    """
+    await lock_company_for_mutation(company_id, db)
 
 
 async def lock_setups(

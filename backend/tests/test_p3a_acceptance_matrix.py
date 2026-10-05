@@ -267,7 +267,7 @@ async def test_unauthorized_rate_request_cannot_probe_company_currency(monkeypat
         raise HTTPException(status_code=422, detail={"code": "COMPANY_CURRENCY_REQUIRED"})
 
     monkeypatch.setattr(rates_service, "_require_non_driver_rate_subject", deny_driver_subject)
-    monkeypatch.setattr(rates_service, "lock_and_get_company_currency", currency_probe)
+    monkeypatch.setattr(rates_service, "lock_and_get_company_currency_for_monetary_write", currency_probe)
     request = DriverRateCreate(
         driver_id=1, rate_type_id=1, amount=10, effective_from=date(2099, 1, 1),
     )

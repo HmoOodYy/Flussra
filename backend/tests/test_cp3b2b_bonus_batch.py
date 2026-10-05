@@ -573,7 +573,7 @@ async def test_exact_replay_does_not_require_currency_lookup(
     async def reject_currency_lookup(*args, **kwargs):
         raise AssertionError("An exact read-only replay must not require Company currency.")
 
-    monkeypatch.setattr(bonus, "lock_and_get_company_currency", reject_currency_lookup)
+    monkeypatch.setattr(bonus, "lock_and_get_company_currency_for_monetary_write", reject_currency_lookup)
     replay = await _batch(client, auth_token, period_id, key, 0, items)
     assert replay.status_code == 200, replay.text
     assert replay.json()["replayed"] is True

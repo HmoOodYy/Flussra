@@ -4050,3 +4050,309 @@ class TestDayGridCDPI:
         assert drv_row is not None
         assert "HOURS" in drv_row["values"]
         assert drv_row["values"]["HOURS"]["quantity"] == "8.0000"
+
+
+# ===========================================================================
+# G0.3 — Status usage limits serialize on the Period lock; generic DraftLine
+# endpoints no longer write DailyStatus
+# ===========================================================================
+
+G03_PERIOD_START = "2081-04-01"
+G03_PERIOD_END   = "2081-04-30"
+
+
+@pytest_asyncio.fixture
+async def g03_period(dg_clean: int, direct_db) -> dict:
+    return await _insert_open_period(
+        direct_db, dg_clean, G03_PERIOD_START, G03_PERIOD_END, "Custom", "DG-G03"
+    )
+
+
+async def _active_status_count(direct_db, period_id: int, code: str) -> int:
+    return int((await direct_db.execute(
+        _text("""
+            SELECT COUNT(*) FROM payroll.payrolldraftlines
+            WHERE payrollperiodid = :pid AND linetype = 'DailyStatus'
+              AND status != 'Void' AND notes = :code
+        """),
+        {"pid": period_id, "code": code},
+    )).scalar_one())
+
+
+async def _wait_for_period_lock_waiter(direct_db) -> None:
+    """Poll until some backend is waiting on the Period FOR UPDATE row lock."""
+    import asyncio
+
+    async def poll():
+        while True:
+            waiting = (await direct_db.execute(_text("""
+                SELECT COUNT(*) FROM pg_stat_activity
+                WHERE wait_event_type = 'Lock'
+                  AND query ILIKE '%payroll.payrollperiods%for update%'
+            """))).scalar_one()
+            if waiting:
+                return
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(poll(), timeout=10)
+
+
+class TestG03StatusLimitSerialization:
+
+    @pytest.mark.asyncio
+    async def test_save_locks_payitem_then_period_then_checks_status_limit(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        g03_period: dict,
+        paytest_driver_id: int,
+        paytest_branch_id: int,
+        direct_db,
+        monkeypatch,
+    ):
+        from app.payroll import day_grid as day_grid_mod
+
+        events: list[str] = []
+
+        def recording(name: str, real):
+            async def wrapper(*args, **kwargs):
+                events.append(name)
+                return await real(*args, **kwargs)
+            return wrapper
+
+        for attr, name in (
+            ("_lock_pay_item_for_source_write", "payitem"),
+            ("_lock_period_for_mutation", "period"),
+            ("_enforce_status_key_limits", "status_limit"),
+        ):
+            monkeypatch.setattr(day_grid_mod, attr, recording(name, getattr(day_grid_mod, attr)))
+
+        sk = await _insert_status_key_with_limits(
+            direct_db, paytest_branch_id, "G03_ORDER", per_period=5,
+        )
+        pid = g03_period["payroll_period_id"]
+        try:
+            resp = await session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                json={"work_date": "2081-04-06", "rows": [{
+                    "driver_id": paytest_driver_id,
+                    "values": {"HOURS": "4"}, "status_key": sk["key_code"],
+                }]},
+                headers=auth(auth_token),
+            )
+            assert resp.status_code == 200, resp.text
+            assert events == ["payitem", "period", "status_limit"]
+        finally:
+            await _void_status_lines(direct_db, pid, sk["key_code"])
+            await _delete_status_key(direct_db, sk["status_key_id"])
+
+    @pytest.mark.asyncio
+    async def test_concurrent_status_saves_cannot_exceed_per_period_limit(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        g03_period: dict,
+        paytest_driver_id: int,
+        paytest_branch_id: int,
+        direct_db,
+        monkeypatch,
+    ):
+        import asyncio
+
+        from app.payroll import day_grid as day_grid_mod
+
+        a_checked = asyncio.Event()
+        release_a = asyncio.Event()
+        calls = {"n": 0}
+        real_enforce = day_grid_mod._enforce_status_key_limits
+
+        async def gated(**kwargs):
+            calls["n"] += 1
+            first = calls["n"] == 1
+            await real_enforce(**kwargs)
+            if first:
+                # A has passed the limit check and holds the Period lock.
+                a_checked.set()
+                await asyncio.wait_for(release_a.wait(), 15)
+
+        monkeypatch.setattr(day_grid_mod, "_enforce_status_key_limits", gated)
+
+        sk = await _insert_status_key_with_limits(
+            direct_db, paytest_branch_id, "G03_LIMIT1", per_period=1,
+        )
+        pid = g03_period["payroll_period_id"]
+
+        def save(work_date: str):
+            return session_client.post(
+                f"/payroll/periods/{pid}/day-grid",
+                json={"work_date": work_date, "rows": [{
+                    "driver_id": paytest_driver_id, "values": {}, "status_key": sk["key_code"],
+                }]},
+                headers=auth(auth_token),
+            )
+
+        tasks: list[asyncio.Task] = []
+        try:
+            first = asyncio.create_task(save("2081-04-07"))
+            tasks.append(first)
+            await asyncio.wait_for(a_checked.wait(), 10)
+
+            second = asyncio.create_task(save("2081-04-08"))
+            tasks.append(second)
+            # B must be parked on A's Period lock, not past it with stale capacity.
+            await _wait_for_period_lock_waiter(direct_db)
+            assert not second.done()
+
+            release_a.set()
+            r_first, r_second = await asyncio.wait_for(asyncio.gather(first, second), 20)
+
+            assert r_first.status_code == 200, r_first.text
+            assert r_second.status_code == 422, r_second.text
+            assert "period limit" in r_second.json()["detail"].lower()
+            assert await _active_status_count(direct_db, pid, sk["key_code"]) == 1
+        finally:
+            release_a.set()
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await _void_status_lines(direct_db, pid, sk["key_code"])
+            await _delete_status_key(direct_db, sk["status_key_id"])
+
+
+class TestG03GenericDraftLineDailyStatusRetired:
+
+    @staticmethod
+    async def _day_grid_status(client, token, pid, driver_id, code, work_date):
+        resp = await client.post(
+            f"/payroll/periods/{pid}/day-grid",
+            json={"work_date": work_date, "rows": [{
+                "driver_id": driver_id, "values": {}, "status_key": code,
+            }]},
+            headers=auth(token),
+        )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    async def test_generic_post_patch_delete_reject_dailystatus(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        g03_period: dict,
+        paytest_driver_id: int,
+        paytest_branch_id: int,
+        direct_db,
+    ):
+        pid = g03_period["payroll_period_id"]
+        sk = await _insert_status_key_with_limits(direct_db, paytest_branch_id, "G03_GENERIC")
+        try:
+            post = await session_client.post(
+                f"/payroll/periods/{pid}/lines",
+                json={"driver_id": paytest_driver_id, "work_date": "2081-04-09",
+                      "line_type": "DailyStatus", "quantity": "0", "notes": sk["key_code"]},
+                headers=auth(auth_token),
+            )
+            assert post.status_code == 422, post.text
+            assert "Day Grid" in post.json()["detail"]
+            assert await _active_status_count(direct_db, pid, sk["key_code"]) == 0
+
+            await self._day_grid_status(
+                session_client, auth_token, pid, paytest_driver_id, sk["key_code"], "2081-04-10",
+            )
+            line_id = (await direct_db.execute(
+                _text("""
+                    SELECT draftlineid FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND linetype = 'DailyStatus' AND status != 'Void'
+                """), {"pid": pid},
+            )).scalar_one()
+
+            patch = await session_client.patch(
+                f"/payroll/periods/{pid}/lines/{line_id}",
+                json={"notes": "SOMETHING_ELSE"}, headers=auth(auth_token),
+            )
+            assert patch.status_code == 422, patch.text
+            assert "Day Grid" in patch.json()["detail"]
+
+            delete = await session_client.delete(
+                f"/payroll/periods/{pid}/lines/{line_id}", headers=auth(auth_token),
+            )
+            assert delete.status_code == 422, delete.text
+            assert "Day Grid" in delete.json()["detail"]
+
+            row = (await direct_db.execute(
+                _text("SELECT notes, status FROM payroll.payrolldraftlines WHERE draftlineid = :l"),
+                {"l": line_id},
+            )).mappings().one()
+            assert (row["notes"], row["status"]) == (sk["key_code"], "Active")
+        finally:
+            await _void_status_lines(direct_db, pid, sk["key_code"])
+            await _delete_status_key(direct_db, sk["status_key_id"])
+
+    @pytest.mark.asyncio
+    async def test_prepared_period_day_grid_status_still_works(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        g03_period: dict,
+        paytest_driver_id: int,
+        paytest_branch_id: int,
+        direct_db,
+    ):
+        pid = g03_period["payroll_period_id"]
+        await direct_db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Draft' WHERE payrollperiodid = :pid"),
+            {"pid": pid},
+        )
+        sk = await _insert_status_key_with_limits(direct_db, paytest_branch_id, "G03_PREPARED")
+        try:
+            await self._day_grid_status(
+                session_client, auth_token, pid, paytest_driver_id, sk["key_code"], "2081-04-11",
+            )
+            assert await _active_status_count(direct_db, pid, sk["key_code"]) == 1
+        finally:
+            await _void_status_lines(direct_db, pid, sk["key_code"])
+            await _delete_status_key(direct_db, sk["status_key_id"])
+
+    @pytest.mark.asyncio
+    async def test_generic_pay_item_and_daily_note_mutation_unchanged(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        g03_period: dict,
+        paytest_driver_id: int,
+    ):
+        pid = g03_period["payroll_period_id"]
+        headers = auth(auth_token)
+
+        added = await session_client.post(
+            f"/payroll/periods/{pid}/lines",
+            json={"driver_id": paytest_driver_id, "work_date": "2081-04-12",
+                  "line_type": "HOURS", "quantity": "3"},
+            headers=headers,
+        )
+        assert added.status_code == 201, added.text
+        hours_id = added.json()["draft_line_id"]
+        updated = await session_client.patch(
+            f"/payroll/periods/{pid}/lines/{hours_id}", json={"quantity": "5"}, headers=headers,
+        )
+        assert updated.status_code == 200, updated.text
+        assert (await session_client.delete(
+            f"/payroll/periods/{pid}/lines/{hours_id}", headers=headers,
+        )).status_code == 204
+
+        note = await session_client.post(
+            f"/payroll/periods/{pid}/lines",
+            json={"driver_id": paytest_driver_id, "work_date": "2081-04-13",
+                  "line_type": "DailyNote", "quantity": "0", "notes": "first"},
+            headers=headers,
+        )
+        assert note.status_code == 201, note.text
+        note_id = note.json()["draft_line_id"]
+        edited = await session_client.patch(
+            f"/payroll/periods/{pid}/lines/{note_id}", json={"notes": "second"}, headers=headers,
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["notes"] == "second"
+        assert (await session_client.delete(
+            f"/payroll/periods/{pid}/lines/{note_id}", headers=headers,
+        )).status_code == 204

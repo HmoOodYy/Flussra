@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.company_currency import lock_and_get_company_currency
+from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.core.service import _build_in_clause, _check_any_permission, _check_branch_access
 from app.payroll.driver_pay_rules import _write_pay_rule_audit
 from app.payroll.guards import (
@@ -1113,7 +1113,7 @@ async def create_rate(
                 f"block_size / rounding_rule are not applicable to '{rate_behavior}' items.",
             )
 
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.driverrates
@@ -1266,7 +1266,7 @@ async def update_rate(
         data.block_size is not None,
         data.rounding_rule is not None,
     )):
-        await lock_and_get_company_currency(company_id, db)
+        await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
     fields_updated = False
     if fields:
@@ -1661,7 +1661,7 @@ async def approve_rate(
     # the guard decision is already stale â€” the approval would proceed against a now-
     # finalized period.  By checking under the lock the guard always sees a consistent
     # view of period status.
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
         {"cid": company_id, "bid": rate.branch_id},
@@ -2319,7 +2319,7 @@ async def batch_save_rates(
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
     # Step 4 â€” read AllowSelfApproval from company settings
     settings_result = await db.execute(
@@ -3054,7 +3054,7 @@ async def copy_driver_rates(
     # guard decisions stale.
     # The lock is a no-op when allow_self_approval=False (PendingApproval only,
     # no rate-state change that could affect finalization).
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     if allow_self_approval:
         await db.execute(
             text("SELECT pg_advisory_xact_lock(:cid, :bid)"),

@@ -62,7 +62,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.company_currency import lock_and_get_company_currency
+from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.core.service import (
     _build_in_clause,
     _check_any_permission,
@@ -719,7 +719,7 @@ async def save_day_grid(
     # ── Permission: payroll.entry ─────────────────────────────────────────── #
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    currency = await lock_and_get_company_currency(company_id, db, required=False)
+    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     branch_id = period.branch_id
 
     # ── Load active Daily columns for this branch/date ───────────────────── #
@@ -826,33 +826,6 @@ async def save_day_grid(
 
         parsed_rows.append((save_row, driver_id, parsed_values, validated_status_key, key_row))
 
-    # ── Phase 1b: status key usage limit enforcement ──────────────────── #
-    # All existence/active checks passed. Now enforce configured usage limits
-    # batch-wide so that intra-batch writes that would collectively exceed a
-    # limit are caught before any DB write happens (all-or-nothing atomicity).
-    all_batch_pairs: list[tuple] = [(r.driver_id, work_date) for r in data.rows]
-    batch_by_code: dict[str, list[int]] = {}
-    for _, drv_id, _, vsk, _ in parsed_rows:
-        if vsk:
-            batch_by_code.setdefault(vsk, []).append(drv_id)
-
-    for status_code, batch_driver_ids in batch_by_code.items():
-        code_key_row = next(
-            krow
-            for _, _, _, vsk, krow in parsed_rows
-            if vsk == status_code and krow is not None
-        )
-        await _enforce_status_key_limits(
-            status_code=status_code,
-            key_row=code_key_row,
-            period_id=period_id,
-            company_id=company_id,
-            work_date=work_date,
-            batch_driver_ids=batch_driver_ids,
-            all_batch_pairs=all_batch_pairs,
-            db=db,
-        )
-
     # ── Phase 2: execute DB writes (all validations passed) ──────────────── #
     # CP-0A lock ordering: pre-lock ALL distinct custom PayItems in the batch in
     # sorted (deterministic) order BEFORE acquiring the Period lock.
@@ -876,6 +849,41 @@ async def save_day_grid(
     all_canonical_codes.discard("DailyNote")
     for code in sorted(all_canonical_codes):
         await _lock_pay_item_for_source_write(code, company_id, db, period_id=period.payroll_period_id)
+
+    # Period source-mutation lock (also rechecks the Period is still editable).
+    # It is taken after the PayItem locks and before the Status limit check, so
+    # the count-then-write below is serialized per Period and no longer relies
+    # on any Company-level lock.
+    await _lock_period_for_mutation(period_id, company_id, db)
+
+    # ── Status key usage limit enforcement (under the Period lock) ─────── #
+    # All existence/active checks passed. Enforce configured usage limits
+    # batch-wide so that intra-batch writes that would collectively exceed a
+    # limit are caught before any DB write happens (all-or-nothing atomicity).
+    # The counts must be read only after the Period lock is held, so a
+    # concurrent Status save for this Period has already committed or waits.
+    all_batch_pairs: list[tuple] = [(r.driver_id, work_date) for r in data.rows]
+    batch_by_code: dict[str, list[int]] = {}
+    for _, drv_id, _, vsk, _ in parsed_rows:
+        if vsk:
+            batch_by_code.setdefault(vsk, []).append(drv_id)
+
+    for status_code, batch_driver_ids in batch_by_code.items():
+        code_key_row = next(
+            krow
+            for _, _, _, vsk, krow in parsed_rows
+            if vsk == status_code and krow is not None
+        )
+        await _enforce_status_key_limits(
+            status_code=status_code,
+            key_row=code_key_row,
+            period_id=period_id,
+            company_id=company_id,
+            work_date=work_date,
+            batch_driver_ids=batch_driver_ids,
+            all_batch_pairs=all_batch_pairs,
+            db=db,
+        )
 
     for save_row, driver_id, parsed_values, validated_status_key, key_row in parsed_rows:
 
@@ -949,14 +957,6 @@ async def save_day_grid(
                     data=DraftLineUpdate(quantity=effective_qty),
                     db=db,
                 )
-
-        # ── Period lock for DailyStatus / DailyNote writes ───────────────── #
-        # CP-0A: If this row had no pay-item writes (empty parsed_values or all
-        # zeroes/voids), add_draft_line was never called so the period lock has
-        # not been acquired yet.  Lock now before any DML.  If the period lock
-        # was already acquired by a preceding add_draft_line call this is a
-        # no-op (same transaction already holds the lock).
-        await _lock_period_for_mutation(period_id, company_id, db)
 
         # ── DailyStatus upsert ────────────────────────────────────────────── #
         # P1 #4: write audit via _write_line_audit for all DailyStatus mutations

@@ -1651,7 +1651,7 @@ class TestCp2dCanonicalEntryState:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_e12_add_draft_line_writes_canonical_status(
+    async def test_e12_generic_add_dailystatus_is_retired(
         self,
         session_client,
         auth_token: str,
@@ -1659,7 +1659,8 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E12: Adding a DailyStatus DraftLine via direct API also writes canonical row."""
+        """E12 (G0.3): the generic DraftLine POST no longer writes DailyStatus.
+        Neither a DraftLine nor a canonical row is created."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e12")
         code = _sk_code("E12KEY", start)
@@ -1680,12 +1681,18 @@ class TestCp2dCanonicalEntryState:
                     "notes": code,
                 },
             )
-            assert r.status_code in (200, 201), f"add_draft_line failed: {r.text}"
+            assert r.status_code == 422, r.text
+            assert "Day Grid" in r.json()["detail"]
 
-            rows = await _canonical_rows(direct_db, pid)
-            ces = [row for row in rows if row["driverid"] == ces_driver_id]
-            assert len(ces) == 1, "Canonical row must be created by add_draft_line"
-            assert ces[0]["statuskeyid"] == sk_id
+            dl_count = (await direct_db.execute(
+                _text("""
+                    SELECT COUNT(*) FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND driverid = :did AND linetype = 'DailyStatus'
+                """),
+                {"pid": pid, "did": ces_driver_id},
+            )).scalar()
+            assert dl_count == 0
+            assert not await _canonical_rows(direct_db, pid)
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id:
@@ -2001,7 +2008,7 @@ class TestCp2dCanonicalEntryState:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_e19_direct_update_dailystatus_invalid_code_rejected(
+    async def test_e19_generic_update_dailystatus_is_retired(
         self,
         session_client,
         auth_token: str,
@@ -2009,7 +2016,7 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E19: update_draft_line changing DailyStatus to invalid code → 422.
+        """E19 (G0.3): the generic DraftLine PATCH no longer mutates DailyStatus.
         Existing DraftLine and canonical row must remain unchanged."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e19")
@@ -2022,18 +2029,20 @@ class TestCp2dCanonicalEntryState:
 
             # Add a valid DailyStatus line first
             add_r = await session_client.post(
-                f"/payroll/periods/{pid}/lines",
-                headers=headers,
-                json={
-                    "driver_id": ces_driver_id,
-                    "work_date": wdate,
-                    "line_type": "DailyStatus",
-                    "quantity": "0",
-                    "notes": code,
-                },
+                f"/payroll/periods/{pid}/day-grid", headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                                 "status_key": code}]},
             )
-            assert add_r.status_code in (200, 201), f"add failed: {add_r.text}"
-            line_id = add_r.json()["draft_line_id"]
+            assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
+            line_id = (await direct_db.execute(
+                _text("""
+                    SELECT draftlineid FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND driverid = :did
+                      AND linetype = 'DailyStatus' AND status != 'Void'
+                """),
+                {"pid": pid, "did": ces_driver_id},
+            )).scalar_one()
 
             # Canonical row must exist with the correct statuskeyid
             rows_before = await _canonical_rows(direct_db, pid)
@@ -2048,6 +2057,7 @@ class TestCp2dCanonicalEntryState:
                 json={"notes": "NONEXISTENT_E19"},
             )
             assert upd_r.status_code == 422, f"Expected 422 for invalid update; got {upd_r.status_code}"
+            assert "Day Grid" in upd_r.json()["detail"]
 
             # DraftLine notes must still be the original code
             dl = (await direct_db.execute(
@@ -2075,7 +2085,7 @@ class TestCp2dCanonicalEntryState:
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_e20_direct_update_dailystatus_inactive_rejected_no_bypass(
+    async def test_e20_generic_update_dailystatus_retired_even_when_unchanged(
         self,
         session_client,
         auth_token: str,
@@ -2083,13 +2093,9 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_id: int,
     ):
-        """E20: update_draft_line to inactive code → 422; even unchanged resave → 422.
-
-        Policy (documented): direct update_draft_line with DailyStatus always
-        requires an active StatusKey regardless of whether the submitted code
-        matches the existing selection. The deactivated-bypass is only available
-        via save_day_grid (which has explicit unchanged-resave detection).
-        """
+        """E20 (G0.3): the generic DraftLine PATCH rejects a DailyStatus line
+        outright, including an unchanged resave of a deactivated key. The
+        deactivated-key bypass lives only in save_day_grid."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e20")
         code = _sk_code("E20DEACT", start)
@@ -2101,18 +2107,20 @@ class TestCp2dCanonicalEntryState:
 
             # Add a valid DailyStatus line while key is active
             add_r = await session_client.post(
-                f"/payroll/periods/{pid}/lines",
-                headers=headers,
-                json={
-                    "driver_id": ces_driver_id,
-                    "work_date": wdate,
-                    "line_type": "DailyStatus",
-                    "quantity": "0",
-                    "notes": code,
-                },
+                f"/payroll/periods/{pid}/day-grid", headers=headers,
+                json={"work_date": wdate,
+                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                                 "status_key": code}]},
             )
-            assert add_r.status_code in (200, 201), f"add failed: {add_r.text}"
-            line_id = add_r.json()["draft_line_id"]
+            assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
+            line_id = (await direct_db.execute(
+                _text("""
+                    SELECT draftlineid FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND driverid = :did
+                      AND linetype = 'DailyStatus' AND status != 'Void'
+                """),
+                {"pid": pid, "did": ces_driver_id},
+            )).scalar_one()
 
             # Deactivate the key
             await direct_db.execute(

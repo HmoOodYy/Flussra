@@ -71,7 +71,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.company_currency import lock_and_get_company_currency
+from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
@@ -207,7 +207,7 @@ async def change_period_status(
     # fails — or if the audit write raises — everything rolls back atomically.
     # The period never reaches InReview without a corresponding review item existing.
     if existing.status == "Open" and change.status == "InReview":
-        currency = await lock_and_get_company_currency(company_id, db)
+        currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
         # CP-1D: Acquire branch advisory lock before touching any workflow rows.
         # Same lock used by period creation (CP-1C) and resubmission — ensures all
         # per-branch workflow mutations are fully serialized.
@@ -838,7 +838,7 @@ async def resubmit_period(
 
     # Permission gate: resubmission requires payroll.entry.
     await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
-    currency = await lock_and_get_company_currency(company_id, db)
+    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
     # ── Step 3: acquire branch advisory lock, then period row lock ───────── #
     # CP-1D: branch lock must come first (same order as submit and creation) to

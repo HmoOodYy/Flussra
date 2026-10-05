@@ -54,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import (
     frozen_currency,
-    lock_and_get_company_currency,
+    lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
 from app.core.service import (
@@ -801,7 +801,7 @@ async def decide_review_item(
 
     approval_currency = None
     if _pre_row.get("requesttype") == "PeriodApproval" and data.decision == "Approved":
-        approval_currency = await lock_and_get_company_currency(company_id, db)
+        approval_currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
     # Step 4: Branch advisory lock for PeriodApproval substantive decisions.
     # Comments do not mutate payroll slots; they skip the branch lock.
