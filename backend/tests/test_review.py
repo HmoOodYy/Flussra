@@ -14,6 +14,13 @@ TestGetItem         — single item (200, 404, 403 cross-branch)
 TestCreateItem      — create (201, validation, branch-scope denial, permission denial)
 TestDecideItem      — decide (approve, reject, comment, status gate, permission denial)
 TestReviewAudit     — audit-log rollback: create/decide roll back when _write_review_audit raises
+
+Isolation
+---------
+Review items are shared state: `GET /review/items` pages at 50 and other modules
+locate their period's pending item through it. Every item this module creates
+(through either HTTP client) is therefore recorded by exact ID and deleted, with
+its Decisions and audit rows, when the test ends; a failed delete fails the test.
 """
 from unittest.mock import patch
 
@@ -22,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 from app.review import service as review_service
+from tests.ownership import delete_review_items_and_children, preserved_company_profile
 
 
 def auth(token: str) -> dict[str, str]:
@@ -29,16 +37,59 @@ def auth(token: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped fixture: one review item on HQ (created once, reused for reads)
+# Exact ownership of every review item this module creates
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="session")
+def _recording_hook(created_ids: list[int]):
+    async def record(response: httpx.Response) -> None:
+        request = response.request
+        if (
+            request.method == "POST"
+            and request.url.path == "/review/items"
+            and response.status_code == 201
+        ):
+            await response.aread()
+            created_ids.append(response.json()["review_item_id"])
+
+    return record
+
+
+def _add_response_hook(http_client: httpx.AsyncClient, hook) -> None:
+    hooks = http_client.event_hooks
+    hooks["response"] = [*hooks["response"], hook]
+    http_client.event_hooks = hooks
+
+
+def _remove_response_hook(http_client: httpx.AsyncClient, hook) -> None:
+    hooks = http_client.event_hooks
+    hooks["response"] = [h for h in hooks["response"] if h is not hook]
+    http_client.event_hooks = hooks
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _own_created_review_items(
+    client: httpx.AsyncClient, session_client: httpx.AsyncClient, direct_db,
+):
+    created: list[int] = []
+    hook = _recording_hook(created)
+    _add_response_hook(client, hook)
+    _add_response_hook(session_client, hook)
+    try:
+        yield
+    finally:
+        _remove_response_hook(client, hook)
+        _remove_response_hook(session_client, hook)
+        await delete_review_items_and_children(direct_db, created)
+
+
+@pytest_asyncio.fixture(scope="module")
 async def hq_review_item_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     hq_branch_id: int,
+    session_db_conn,
 ) -> int:
-    """Create one Pending review item on the HQ branch at session start."""
+    """One Pending review item on HQ for this module's read tests; removed when it ends."""
     resp = await session_client.post(
         "/review/items",
         json={
@@ -51,7 +102,9 @@ async def hq_review_item_id(
         headers=auth(auth_token),
     )
     assert resp.status_code == 201, f"HQ review item seed failed: {resp.text}"
-    return resp.json()["review_item_id"]
+    item_id = resp.json()["review_item_id"]
+    yield item_id
+    await delete_review_items_and_children(session_db_conn, [item_id])
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +734,15 @@ class TestReviewAudit:
 # ---------------------------------------------------------------------------
 
 class TestSelfApprovalPolicy:
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _restore_company_profile(self, direct_db):
+        """`_set_self_approval` PATCHes /settings/company, which overwrites the shared
+        company-wide profile (it resets legal name and notes to NULL and the name to a
+        fixed value, not just the policy). Capture the exact original profile and
+        restore and verify it however each test ends."""
+        async with preserved_company_profile(direct_db):
+            yield
     """
     Tests for the AllowSelfApproval company policy enforced in decide_review_item.
 

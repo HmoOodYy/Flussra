@@ -1,6 +1,10 @@
 """Exact-ID teardown primitives shared by backend integration tests."""
 
+from contextlib import asynccontextmanager
+
 from sqlalchemy import text as _text
+
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 
 
 class CleanupRunner:
@@ -28,6 +32,175 @@ class CleanupRunner:
         if self._errors:
             raise ExceptionGroup(f"{len(self._errors)} cleanup step(s) failed", self._errors)
 
+
+
+MUTABLE_PERIOD_STATUSES = ("Draft", "Open", "InReview", "Returned", "Approved")
+
+
+async def assert_no_mutable_period_state(db, branch_id: int) -> None:
+    """Fail, naming IDs and statuses, if the branch retains any mutable workflow period.
+
+    Locked/Archived/Cancelled periods are legitimate retained history; a period
+    that can still be edited, reviewed, returned or approved is shared mutable
+    state that later tests on the same root would inherit.
+    """
+    rows = (await db.execute(
+        _text("""
+            SELECT payrollperiodid, status FROM payroll.payrollperiods
+            WHERE branchid = :bid AND status = ANY(:statuses)
+            ORDER BY payrollperiodid
+        """),
+        {"bid": branch_id, "statuses": list(MUTABLE_PERIOD_STATUSES)},
+    )).all()
+    assert not rows, (
+        f"branch {branch_id} retains mutable workflow periods: "
+        f"{[(row[0], row[1]) for row in rows]}"
+    )
+
+
+@asynccontextmanager
+async def preserved_company_profile(db, company_code: str = "DEMO"):
+    """Capture the Company's exact mutable profile, and restore and verify it on exit.
+
+    PATCH /settings/company rewrites the whole company-wide profile (name, legal name,
+    notes, time zone, self-approval policy), which every other module reads. Restoration
+    runs in ``finally`` -- whatever the body did, including raising -- and restores the
+    values that were captured, never a hard-coded name. A restoration mismatch fails.
+    """
+    read = _text(
+        "SELECT companyname, legalname, timezonename, notes, allowselfapproval, updatedatutc "
+        "FROM core.companies WHERE companycode = :code"
+    )
+    original = dict((await db.execute(read, {"code": company_code})).mappings().one())
+    try:
+        yield original
+    finally:
+        await db.execute(
+            _text("""
+                UPDATE core.companies
+                SET companyname = :name, legalname = :legal, timezonename = :tz,
+                    notes = :notes, allowselfapproval = :allow_self, updatedatutc = :updated
+                WHERE companycode = :code
+            """),
+            {"name": original["companyname"], "legal": original["legalname"],
+             "tz": original["timezonename"], "notes": original["notes"],
+             "allow_self": original["allowselfapproval"], "updated": original["updatedatutc"],
+             "code": company_code},
+        )
+        restored = dict((await db.execute(read, {"code": company_code})).mappings().one())
+        assert restored == original, f"company profile not restored: {original} -> {restored}"
+
+
+async def cancel_active_branch_periods(client, token: str, branch_id: int) -> None:
+    """Cancel a MODULE-OWNED branch's Draft/Open periods through the API.
+
+    Only Draft and Open are legal PATCH->Cancelled transitions (CP-1A); other
+    statuses are never requested here. A failed list or cancel fails the test --
+    cleanup must not be silent. Never call this for a shared branch.
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    for status in ("Draft", "Open"):
+        listed = await client.get(
+            "/payroll/periods", params={"branch_id": branch_id, "status": status}, headers=headers,
+        )
+        assert listed.status_code == 200, f"list {status} periods for cleanup failed: {listed.text}"
+        for period in listed.json():
+            cancelled = await client.patch(
+                f"/payroll/periods/{period['payroll_period_id']}/status",
+                json={"status": "Cancelled"}, headers=headers,
+            )
+            assert cancelled.status_code == 200, (
+                f"cleanup could not cancel {status} period "
+                f"{period['payroll_period_id']}: {cancelled.text}"
+            )
+
+
+async def retire_branch_periods_directly(
+    db, branch_id: int, *, retain_finalized_history: bool = False,
+) -> None:
+    """Retire a MODULE-OWNED branch's non-API-cancellable periods, then require a terminal branch.
+
+    InReview/Approved/Returned cannot be cancelled through PATCH. They can own review
+    state: an InReview period has a Pending PeriodApproval ManagerReviewItem and a
+    Returned period points at one through CurrentReturnReviewItemID. Retiring only the
+    period status would leave that company-wide review residue behind after a failed
+    test, so, using EXACT ownership only:
+
+      1. collect the exact IDs of the branch's InReview/Approved/Returned periods;
+      2. collect the exact ManagerReviewItems whose canonical entity reference
+         (payroll / PayrollPeriods / <period id>) is one of those periods;
+      3. cancel exactly those periods, clearing CurrentReturnReviewItemID (the
+         pointer-consistency CHECK and the item FK both require it first);
+      4. delete exactly those items with their Decisions and audit rows, and verify
+         zero review residue for those IDs (``delete_review_items_and_children``).
+         Items that immutable P6D evidence references (workflow-action or audit-
+         evidence rows RESTRICT their deletion) are retained history by product
+         rule; for exactly those, a Pending item is cancelled instead of deleted so
+         no Pending review state survives either way.
+
+    Locked/Archived additionally need the finalized-history guards suspended for
+    exactly their UPDATE; their review history is never touched. The result must hold
+    no mutable workflow period. With ``retain_finalized_history`` the Locked/Archived
+    periods are left in place as legitimate immutable history. Never call this for a
+    shared branch.
+    """
+    period_ids = [row[0] for row in (await db.execute(
+        _text("""
+            SELECT payrollperiodid FROM payroll.payrollperiods
+            WHERE branchid = :bid AND status IN ('InReview', 'Approved', 'Returned')
+            ORDER BY payrollperiodid
+        """), {"bid": branch_id},
+    )).all()]
+    review_item_ids: list[int] = []
+    if period_ids:
+        review_item_ids = [row[0] for row in (await db.execute(
+            _text("""
+                SELECT reviewitemid FROM review.managerreviewitems
+                WHERE branchid = :bid
+                  AND entityschema = 'payroll' AND entityname = 'PayrollPeriods'
+                  AND entityid = ANY(:entity_ids)
+                ORDER BY reviewitemid
+            """),
+            {"bid": branch_id, "entity_ids": [str(i) for i in period_ids]},
+        )).all()]
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods "
+                  "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+                  "WHERE payrollperiodid = ANY(:ids)"),
+            {"ids": period_ids},
+        )
+        evidenced_ids = [row[0] for row in (await db.execute(
+            _text("""
+                SELECT reviewitemid FROM payroll.payrollperiodworkflowactionevidence
+                WHERE reviewitemid = ANY(:ids)
+                UNION
+                SELECT reviewitemid FROM payroll.payrollperiodauditevidenceevents
+                WHERE reviewitemid = ANY(:ids)
+            """), {"ids": review_item_ids},
+        )).all()]
+        if evidenced_ids:
+            await db.execute(
+                _text("UPDATE review.managerreviewitems SET status = 'Cancelled' "
+                      "WHERE reviewitemid = ANY(:ids) AND status = 'Pending'"),
+                {"ids": evidenced_ids},
+            )
+        await delete_review_items_and_children(
+            db, [item_id for item_id in review_item_ids if item_id not in set(evidenced_ids)],
+        )
+        pending = (await db.execute(
+            _text("SELECT reviewitemid FROM review.managerreviewitems "
+                  "WHERE reviewitemid = ANY(:ids) AND status = 'Pending'"),
+            {"ids": review_item_ids},
+        )).scalars().all()
+        assert not pending, f"retired periods still own Pending review items: {pending}"
+    if not retain_finalized_history:
+        async with suspended_test_triggers(db, FINALIZED_HISTORY_TRIGGERS):
+            await db.execute(
+                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                      "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
+                {"bid": branch_id},
+            )
+    await assert_no_mutable_period_state(db, branch_id)
 
 
 async def delete_period_and_children(db, period_id: int) -> None:
@@ -240,6 +413,45 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
     await runner.check(_residue, label=f"driver {driver_id} residue assertion")
     runner.raise_if_any()
 
+
+
+async def delete_review_items_and_children(db, item_ids: list[int]) -> None:
+    """Delete exactly the given ad-hoc ManagerReviewItems with their Decisions and audit.
+
+    Review-domain writes record one audit entity ('ManagerReviewItems', EntityID =
+    the item id). Every statement is keyed by the exact IDs, and the residue
+    assertion covers every table and audit type those items could have produced.
+    """
+    if not item_ids:
+        return
+    id_strs = [str(i) for i in item_ids]
+    runner = CleanupRunner()
+    await runner.execute(db,
+        "DELETE FROM audit.auditlog WHERE entityname = 'ManagerReviewItems' AND entityid = ANY(:ids)",
+        {"ids": id_strs}, label="delete ManagerReviewItems audit")
+    await runner.execute(db,
+        "DELETE FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)",
+        {"ids": item_ids}, label="delete ManagerReviewDecisions rows")
+    await runner.execute(db,
+        "DELETE FROM review.managerreviewitems WHERE reviewitemid = ANY(:ids)",
+        {"ids": item_ids}, label="delete ManagerReviewItems rows")
+
+    async def _residue():
+        residue = (await db.execute(
+            _text("""
+                SELECT
+                    (SELECT COUNT(*) FROM review.managerreviewitems WHERE reviewitemid = ANY(:ids)) AS items,
+                    (SELECT COUNT(*) FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)) AS decisions,
+                    (SELECT COUNT(*) FROM audit.auditlog
+                     WHERE entityname = 'ManagerReviewItems' AND entityid = ANY(:id_strs)) AS item_audit
+            """), {"ids": item_ids, "id_strs": id_strs},
+        )).mappings().one()
+        assert all(value == 0 for value in residue.values()), (
+            f"Owned review item cleanup left residue for {item_ids}: {dict(residue)}"
+        )
+
+    await runner.check(_residue, label=f"review items {item_ids} residue assertion")
+    runner.raise_if_any()
 
 
 async def delete_user_access_state(db, user_id: int) -> None:

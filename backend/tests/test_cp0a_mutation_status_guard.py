@@ -29,6 +29,8 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -74,22 +76,11 @@ async def _force_status(direct_db, period_id: int, new_status: str) -> None:
 async def _force_cancel(direct_db, period_id: int) -> None:
     """Force a period to Cancelled (needed for cleanup when triggers fire)."""
     # Disable triggers briefly so Locked/Archived can be cleaned up
-    await direct_db.execute(
-        text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-    )
-    await direct_db.execute(
-        text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-        {"pid": period_id},
-    )
-    await direct_db.execute(
-        text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-    )
+    async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+        await direct_db.execute(
+            text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )
 
 
 async def _create_open_period(

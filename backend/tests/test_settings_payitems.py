@@ -31,6 +31,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from app.settings import service as settings_service
 
@@ -57,6 +58,24 @@ async def _item_by_code(
     item = next((i for i in resp.json() if i["pay_item_code"] == code), None)
     assert item is not None, f"{code} not found — check seed migration 0003"
     return item
+
+
+@pytest_asyncio.fixture
+async def owned_item_branch_id(client: httpx.AsyncClient, auth_token: str) -> int:
+    """A test-owned Branch for tests whose successful PATCHes create effective-dated
+    BranchPayItemConfig history. Scheduling or activating items on the shared HQ /
+    PAYTEST branches would change what every later reader of those branches sees."""
+    marker = uuid4().hex[:8]
+    resp = await client.post(
+        "/settings/branches",
+        json={
+            "branch_name": f"Pay item config {marker}",
+            "branch_code": f"PIC-{marker.upper()}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["branch_id"]
 
 
 # ===========================================================================
@@ -258,7 +277,7 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        paytest_branch_id: int,
+        owned_item_branch_id: int,
     ):
         """First PATCH creates a new open config row (fix #2 — not UPDATE-in-place).
 
@@ -266,12 +285,12 @@ class TestUpdatePayItemConfig:
         is never touched by the session autouse fixture, so it reliably starts with
         no config row (is_using_default=True).
         """
-        item = await _item_by_code(client, auth_token, paytest_branch_id, "GUARANTEED_MINIMUM")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "GUARANTEED_MINIMUM")
         assert item["is_using_default"] is True, "GUARANTEED_MINIMUM should start with no config"
         iid = item["pay_item_id"]
 
         resp = await client.patch(
-            f"/settings/branches/{paytest_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "Enabled for PAYTEST"},
             headers=auth(auth_token),
         )
@@ -335,18 +354,18 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        hq_branch_id: int,
+        owned_item_branch_id: int,
     ):
         """
         A PATCH with effective_from > today leaves is_using_default=True
         (no current config) and populates pending_config (fix #2 + #4).
         """
-        item = await _item_by_code(client, auth_token, hq_branch_id, "PALLETS")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "PALLETS")
         iid = item["pay_item_id"]
         future = str(date.today() + timedelta(days=30))
 
         resp = await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "Goes live next month", "effective_from": future},
             headers=auth(auth_token),
         )
@@ -362,18 +381,18 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        hq_branch_id: int,
+        owned_item_branch_id: int,
     ):
         """
         PATCH with a future effective_from on an already-configured item
         must close the existing open row and open a new one (fix #2 versioning).
         """
-        item = await _item_by_code(client, auth_token, hq_branch_id, "WAIT_TIME")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "WAIT_TIME")
         iid = item["pay_item_id"]
 
         # Establish today's config
         r1 = await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "current"},
             headers=auth(auth_token),
         )
@@ -383,7 +402,7 @@ class TestUpdatePayItemConfig:
         # Schedule a future change
         future = str(date.today() + timedelta(days=14))
         r2 = await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": False, "notes": "going offline", "effective_from": future},
             headers=auth(auth_token),
         )
@@ -404,20 +423,20 @@ class TestUpdatePayItemConfig:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        hq_branch_id: int,
+        owned_item_branch_id: int,
     ):
-        item = await _item_by_code(client, auth_token, hq_branch_id, "BONUS")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "BONUS")
         iid = item["pay_item_id"]
 
         r_set = await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "Bonus note"},
             headers=auth(auth_token),
         )
         assert r_set.json()["current_config"]["notes"] == "Bonus note"
 
         r_clear = await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": None},
             headers=auth(auth_token),
         )
@@ -693,20 +712,20 @@ class TestPayItemConfigHistory:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        hq_branch_id: int,
+        owned_item_branch_id: int,
     ):
         """
         Three PATCHes with increasing effective dates must produce three history rows.
         The first PATCH sets today's config; the next two schedule future versions
         (each closing the previous open row).
         """
-        item = await _item_by_code(client, auth_token, hq_branch_id, "OVERNIGHT")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "OVERNIGHT")
         iid = item["pay_item_id"]
         today = date.today()
 
         # Version 1 — today
         await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "v1"},
             headers=auth(auth_token),
         )
@@ -714,7 +733,7 @@ class TestPayItemConfigHistory:
         # Version 2 — 10 days from now (closes v1 in 9 days)
         v2_date = str(today + timedelta(days=10))
         await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": False, "notes": "v2", "effective_from": v2_date},
             headers=auth(auth_token),
         )
@@ -722,14 +741,14 @@ class TestPayItemConfigHistory:
         # Version 3 — 20 days from now (closes v2 in 9 days)
         v3_date = str(today + timedelta(days=20))
         await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{iid}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}",
             json={"is_active": True, "notes": "v3", "effective_from": v3_date},
             headers=auth(auth_token),
         )
 
         history = (
             await client.get(
-                f"/settings/branches/{hq_branch_id}/pay-items/{iid}/history",
+                f"/settings/branches/{owned_item_branch_id}/pay-items/{iid}/history",
                 headers=auth(auth_token),
             )
         ).json()
@@ -833,18 +852,18 @@ class TestMissingPayItemConfigs:
         self,
         client: httpx.AsyncClient,
         auth_token: str,
-        hq_branch_id: int,
+        owned_item_branch_id: int,
     ):
-        item = await _item_by_code(client, auth_token, hq_branch_id, "ADJUSTMENT")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "ADJUSTMENT")
         await client.patch(
-            f"/settings/branches/{hq_branch_id}/pay-items/{item['pay_item_id']}",
+            f"/settings/branches/{owned_item_branch_id}/pay-items/{item['pay_item_id']}",
             json={"is_active": True},
             headers=auth(auth_token),
         )
 
         missing = (
             await client.get(
-                f"/settings/branches/{hq_branch_id}/pay-items/missing",
+                f"/settings/branches/{owned_item_branch_id}/pay-items/missing",
                 headers=auth(auth_token),
             )
         ).json()

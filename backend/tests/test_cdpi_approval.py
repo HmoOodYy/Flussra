@@ -32,6 +32,7 @@ from app.cdpi.schemas import (
     CdpiRequestCreate,
     CdpiSubmitRequest,
 )
+from tests.db_state import CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER, suspended_test_triggers
 
 # ===========================================================================
 # Shared DB helpers (mirrors test_cdpi_draft.py pattern)
@@ -126,17 +127,10 @@ async def _cleanup_role(db, role_id: int) -> None:
 async def _cleanup_requests(db, *request_ids) -> None:
     """Delete CDPI request events then the requests themselves."""
     for rid in request_ids:
-        await db.execute(
-            _text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL")
-        )
-        try:
+        async with suspended_test_triggers(db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
             await db.execute(
                 _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
                 {"rid": str(rid)},
-            )
-        finally:
-            await db.execute(
-                _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
             )
         await db.execute(
             _text("DELETE FROM payroll.cdpirequests WHERE requestid = :rid"),
@@ -200,17 +194,10 @@ async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None
     We delete CdpiRequests before PayItems to avoid nulling ApprovedPayItemID while
     Status='Approved' (the check constraint forbids that intermediate state).
     """
-    await db.execute(
-        _text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL")
-    )
-    try:
+    async with suspended_test_triggers(db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
         await db.execute(
             _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
             {"rid": str(request_id)},
-        )
-    finally:
-        await db.execute(
-            _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
         )
     await _cleanup_cdpi_rate_rows(db, pay_item_id)
     await db.execute(

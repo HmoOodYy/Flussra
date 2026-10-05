@@ -19,6 +19,8 @@ import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
+from tests.db_state import allow_final_line_insert
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -411,26 +413,24 @@ class TestFinalLinePeriodIntegrity:
     ):
         company_id = await _get_company_id(direct_db, hq_branch_id)
         # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        with pytest.raises(IntegrityError) as exc_info:
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES
-                        (:cid, :bad_branch, :period_id, :driver_id,
-                         'REGULAR', 1, 100, 'Test', 'USD', 2)
-                """),
-                {
-                    "cid": company_id,
-                    "bad_branch": paytest_branch_id,
-                    "period_id": created_period_id,
-                    "driver_id": created_driver_id,
-                },
-            )
+        async with allow_final_line_insert(direct_db):
+            with pytest.raises(IntegrityError) as exc_info:
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.payrollfinallines
+                            (companyid, branchid, payrollperiodid, driverid,
+                             linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                        VALUES
+                            (:cid, :bad_branch, :period_id, :driver_id,
+                             'REGULAR', 1, 100, 'Test', 'USD', 2)
+                    """),
+                    {
+                        "cid": company_id,
+                        "bad_branch": paytest_branch_id,
+                        "period_id": created_period_id,
+                        "driver_id": created_driver_id,
+                    },
+                )
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )
@@ -443,26 +443,24 @@ class TestFinalLinePeriodIntegrity:
         created_period_id: int,
     ):
         # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        with pytest.raises(IntegrityError) as exc_info:
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES
-                        (:bad_cid, :branch_id, :period_id, :driver_id,
-                         'REGULAR', 1, 100, 'Test', 'USD', 2)
-                """),
-                {
-                    "bad_cid": 99999,
-                    "branch_id": hq_branch_id,
-                    "period_id": created_period_id,
-                    "driver_id": created_driver_id,
-                },
-            )
+        async with allow_final_line_insert(direct_db):
+            with pytest.raises(IntegrityError) as exc_info:
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.payrollfinallines
+                            (companyid, branchid, payrollperiodid, driverid,
+                             linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                        VALUES
+                            (:bad_cid, :branch_id, :period_id, :driver_id,
+                             'REGULAR', 1, 100, 'Test', 'USD', 2)
+                    """),
+                    {
+                        "bad_cid": 99999,
+                        "branch_id": hq_branch_id,
+                        "period_id": created_period_id,
+                        "driver_id": created_driver_id,
+                    },
+                )
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )
@@ -485,26 +483,24 @@ class TestFinalLineDriverIntegrity:
     ):
         company_id = await _get_company_id(direct_db, hq_branch_id)
         # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        with pytest.raises(IntegrityError) as exc_info:
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES
-                        (:cid, :hq_branch, :period_id, :driver_id,
-                         'REGULAR', 1, 100, 'Test', 'USD', 2)
-                """),
-                {
-                    "cid": company_id,
-                    "hq_branch": hq_branch_id,
-                    "period_id": created_period_id,
-                    "driver_id": paytest_driver_id,
-                },
-            )
+        async with allow_final_line_insert(direct_db):
+            with pytest.raises(IntegrityError) as exc_info:
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.payrollfinallines
+                            (companyid, branchid, payrollperiodid, driverid,
+                             linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                        VALUES
+                            (:cid, :hq_branch, :period_id, :driver_id,
+                             'REGULAR', 1, 100, 'Test', 'USD', 2)
+                    """),
+                    {
+                        "cid": company_id,
+                        "hq_branch": hq_branch_id,
+                        "period_id": created_period_id,
+                        "driver_id": paytest_driver_id,
+                    },
+                )
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )

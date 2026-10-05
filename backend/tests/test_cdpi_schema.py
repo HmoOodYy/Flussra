@@ -18,6 +18,8 @@ import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
+from tests.db_state import CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER, suspended_test_triggers
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -146,17 +148,10 @@ async def _cleanup_custom_pay_item(db, item_id):
 async def _cleanup_cdpi_requests(db, *request_ids):
     for rid in request_ids:
         # Temporarily disable the immutability trigger so cleanup can remove events.
-        await db.execute(
-            _text("ALTER TABLE payroll.CdpiRequestEvents DISABLE TRIGGER ALL")
-        )
-        try:
+        async with suspended_test_triggers(db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
             await db.execute(
                 _text("DELETE FROM payroll.CdpiRequestEvents WHERE requestid = :rid"),
                 {"rid": rid},
-            )
-        finally:
-            await db.execute(
-                _text("ALTER TABLE payroll.CdpiRequestEvents ENABLE TRIGGER ALL")
             )
         await db.execute(
             _text("DELETE FROM payroll.CdpiRequests WHERE requestid = :rid"),

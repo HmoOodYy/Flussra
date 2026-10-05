@@ -24,6 +24,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 
 from app.settings import service as settings_service
 
@@ -116,6 +117,34 @@ class TestGetCompanyProfile:
 
 class TestUpdateCompanyProfile:
 
+    @pytest_asyncio.fixture(autouse=True)
+    async def _restore_company_profile(self, direct_db):
+        """PATCH /settings/company overwrites the company-wide profile (name, legal name,
+        notes, time zone, self-approval policy) that every other module reads. Capture
+        its exact state, and restore and verify it however the test ends, so no test
+        here depends on another test (or on execution order) to repair shared state."""
+        read = text(
+            "SELECT companyname, legalname, timezonename, notes, allowselfapproval, updatedatutc "
+            "FROM core.companies WHERE companycode = 'DEMO'"
+        )
+        original = (await direct_db.execute(read)).mappings().one()
+        yield
+        await direct_db.execute(
+            text("""
+                UPDATE core.companies
+                SET companyname = :name, legalname = :legal, timezonename = :tz,
+                    notes = :notes, allowselfapproval = :allow_self, updatedatutc = :updated
+                WHERE companycode = 'DEMO'
+            """),
+            {"name": original["companyname"], "legal": original["legalname"],
+             "tz": original["timezonename"], "notes": original["notes"],
+             "allow_self": original["allowselfapproval"], "updated": original["updatedatutc"]},
+        )
+        restored = (await direct_db.execute(read)).mappings().one()
+        assert dict(restored) == dict(original), (
+            f"company profile not restored: {dict(original)} -> {dict(restored)}"
+        )
+
     async def test_admin_updates_profile(
         self,
         client: httpx.AsyncClient,
@@ -136,25 +165,11 @@ class TestUpdateCompanyProfile:
         assert body["company_name"] == "Demo Logistics Updated"
         assert body["legal_name"]   == "Demo Logistics Ltd Updated"
         assert body["notes"]        == "Test note"
-
-    async def test_update_restores_original(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-    ):
-        """Restore the company name after the previous update test."""
-        resp = await client.patch(
-            "/settings/company",
-            json={
-                "company_name":  "Demo Logistics",
-                "legal_name":    "Demo Logistics Ltd",
-                "timezone_name": "Africa/Cairo",
-                "notes":         None,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200
-        assert resp.json()["company_name"] == "Demo Logistics"
+        # The update is real, not just echoed: a fresh read sees it.
+        reread = (await client.get("/settings/company", headers=auth(auth_token))).json()
+        assert reread["company_name"] == "Demo Logistics Updated"
+        assert reread["legal_name"] == "Demo Logistics Ltd Updated"
+        assert reread["notes"] == "Test note"
 
     async def test_branch_user_denied(
         self,

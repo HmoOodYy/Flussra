@@ -26,6 +26,8 @@ from decimal import Decimal
 import httpx
 import pytest_asyncio
 
+from tests.ownership import assert_no_mutable_period_state
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -230,6 +232,25 @@ async def paytest_branch_id(session_db_conn) -> int:
         """), {"code": f"M14_{marker[:12]}", "name": f"M14 owned branch {marker[:8]}"},
     )).scalar_one()
     return int(branch_id)
+
+
+@pytest_asyncio.fixture(scope="module", autouse=True)
+async def m14_terminal_state(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    session_db_conn,
+):
+    """Retained finalized history is legitimate; leftover mutable workflow state is not.
+
+    M14 deliberately keeps Locked/Archived periods (immutable history) on its
+    owned branch. When the module finishes, retire the periods it can still
+    edit, review or approve, then require that none remain -- failing with the
+    period IDs and statuses otherwise.
+    """
+    yield
+    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=session_db_conn)
+    await assert_no_mutable_period_state(session_db_conn, paytest_branch_id)
 
 
 @pytest_asyncio.fixture(scope="session")

@@ -32,6 +32,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.db_state import PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER, suspended_test_triggers
+
 # ---------------------------------------------------------------------------
 # p4b_env fixture
 # ---------------------------------------------------------------------------
@@ -415,21 +417,12 @@ async def _bypass_trigger_insert_map(direct_db, piid: int, rtid: int) -> None:
     this setup, proving defence-in-depth remains intact even if the DB trigger is
     somehow bypassed.
     """
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payitemratetypemap "
-        "DISABLE TRIGGER trg_guard_payitemratetypemap_ownership"
-    ))
-    try:
+    async with suspended_test_triggers(direct_db, [PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER]):
         await direct_db.execute(_text("""
             INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
             VALUES (:piid, :rtid, FALSE, 'Active')
             ON CONFLICT (payitemid, ratetypeid) DO NOTHING
         """), {"piid": piid, "rtid": rtid})
-    finally:
-        await direct_db.execute(_text(
-            "ALTER TABLE payroll.payitemratetypemap "
-            "ENABLE TRIGGER trg_guard_payitemratetypemap_ownership"
-        ))
 
 
 # ===========================================================================
@@ -1169,16 +1162,17 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
     drv_b_id = p4b_env["driver_b_id"]
     token_b  = await _get_token_b(client)
 
-    # Force AllowSelfApproval=FALSE so we test the batch in a stricter mode
-    await direct_db.execute(_text(
-        "UPDATE core.companies SET allowselfapproval = FALSE WHERE companyid = :cid"
-    ), {"cid": cid_b})
-
-    # Insert the contaminated mapping bypassing the Phase 4C DB trigger (simulates DBA attack).
-    # Service-layer defense-in-depth (structural CompanyID check) must still catch this.
-    await _bypass_trigger_insert_map(direct_db, pi_b_id, rt_a_id)
-
     try:
+        # Force AllowSelfApproval=FALSE so we test the batch in a stricter mode. This is
+        # inside the try: a failure in the setup below must still restore the policy.
+        await direct_db.execute(_text(
+            "UPDATE core.companies SET allowselfapproval = FALSE WHERE companyid = :cid"
+        ), {"cid": cid_b})
+
+        # Insert the contaminated mapping bypassing the Phase 4C DB trigger (simulates DBA attack).
+        # Service-layer defense-in-depth (structural CompanyID check) must still catch this.
+        await _bypass_trigger_insert_map(direct_db, pi_b_id, rt_a_id)
+
         resp = await client.post(
             f"/payroll/drivers/{drv_b_id}/rates/batch",
             json={

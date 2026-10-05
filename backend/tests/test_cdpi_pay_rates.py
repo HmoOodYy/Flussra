@@ -29,6 +29,7 @@ from app.cdpi.schemas import (
     CdpiDirectCreateRequest,
 )
 from app.pay_item_rate_slots import ensure_cdpi_per_unit_rate_slot
+from tests.db_state import CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER, suspended_test_triggers
 
 # ===========================================================================
 # DB helpers (shared pattern with test_cdpi_approval.py)
@@ -93,14 +94,11 @@ async def _cleanup_cdpi_rate_rows(db, pay_item_id: int) -> None:
 
 
 async def _cleanup_approved_request(db, *, request_id, pay_item_id: int) -> None:
-    await db.execute(_text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL"))
-    try:
+    async with suspended_test_triggers(db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
         await db.execute(
             _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
             {"rid": str(request_id)},
         )
-    finally:
-        await db.execute(_text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL"))
     await _cleanup_cdpi_rate_rows(db, pay_item_id)
     await db.execute(
         _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -26,6 +27,7 @@ from app.payroll_setup.payroll_policy import (
 )
 from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.builders.company import create_branch
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,6 +42,24 @@ def _uid() -> str:
 
 def _hdr(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture(scope="module", autouse=True)
+async def pss_retires_its_evidence_free_finalized_periods(session_db_conn):
+    """The overlap/setup-safety tests insert Locked/Archived periods ('PSS-' codes) that
+    have no FinalLines or snapshot evidence. Company-wide finalized listings fail on
+    such periods, so retire exactly this module's own after it finishes."""
+    yield
+    async with suspended_test_triggers(session_db_conn, FINALIZED_HISTORY_TRIGGERS):
+        await session_db_conn.execute(_text(
+            "UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+            "WHERE periodcode LIKE 'PSS-%' AND status IN ('Locked', 'Archived')"
+        ))
+    leftover = (await session_db_conn.execute(_text(
+        "SELECT COUNT(*) FROM payroll.payrollperiods "
+        "WHERE periodcode LIKE 'PSS-%' AND status IN ('Locked', 'Archived')"
+    ))).scalar_one()
+    assert leftover == 0, f"{leftover} PSS Locked/Archived period(s) survived retirement"
 
 
 async def _fresh_candidate_branch(

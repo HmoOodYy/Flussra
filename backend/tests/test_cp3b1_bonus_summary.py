@@ -37,6 +37,11 @@ from tests.builders.access import (
     create_user_with_role_token,
     get_company_role_id,
 )
+from tests.db_state import (
+    BONUS_EVENT_OWNERSHIP_TRIGGER,
+    PERIOD_STATUS_REVERT_TRIGGER,
+    suspended_test_triggers,
+)
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -91,20 +96,13 @@ async def _insert_period_db(
 
 
 async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    # Clear the Returned pointer too — ck_PayrollPeriods_ReturnedPointerConsistency
-    # forbids a non-Returned status with CurrentReturnReviewItemID set.
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods "
-              "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
-              "WHERE payrollperiodid = :pid"),
-        {"pid": period_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(db, [PERIOD_STATUS_REVERT_TRIGGER]):
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods "
+                  "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
+                  "WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )
     await db.commit()
 
 
@@ -1004,20 +1002,15 @@ async def test_cross_branch_contaminated_event_excluded(
     # trigger or a bypass path, which is exactly what the read-side BranchID
     # filter defends against independently of the trigger.
     bad_event_id = await _post_bonus(client, auth_token, period_id, cp3b1_drivers["alpha"], "9999.00")
-    await db_conn.execute(_text(
-        "ALTER TABLE payroll.payrollbonusevents DISABLE TRIGGER trg_bonusevents_ownership"
-    ))
-    await db_conn.execute(
-        _text("""
-            UPDATE payroll.payrollbonusevents
-            SET    branchid = :bid
-            WHERE  payrollbonuseventid = :beid
-        """),
-        {"bid": hq_branch_id, "beid": bad_event_id},
-    )
-    await db_conn.execute(_text(
-        "ALTER TABLE payroll.payrollbonusevents ENABLE TRIGGER trg_bonusevents_ownership"
-    ))
+    async with suspended_test_triggers(db_conn, [BONUS_EVENT_OWNERSHIP_TRIGGER]):
+        await db_conn.execute(
+            _text("""
+                UPDATE payroll.payrollbonusevents
+                SET    branchid = :bid
+                WHERE  payrollbonuseventid = :beid
+            """),
+            {"bid": hq_branch_id, "beid": bad_event_id},
+        )
     await db_conn.commit()
 
     r = await _get_summary(client, auth_token, period_id)

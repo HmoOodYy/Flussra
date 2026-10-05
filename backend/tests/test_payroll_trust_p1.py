@@ -28,6 +28,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_branch_id(session_db_conn) -> int:
@@ -219,42 +221,20 @@ async def p1_clean(
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
     # Also force-cancel Locked/Archived periods left by finalization tests
     # (migration 0035 blocks direct status UPDATE; disable triggers temporarily)
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": paytest_branch_id},
-    )
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+        await direct_db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                  "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
+            {"bid": paytest_branch_id},
+        )
     yield paytest_branch_id
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": paytest_branch_id},
-    )
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+        await direct_db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                  "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
+            {"bid": paytest_branch_id},
+        )
 
 
 @pytest_asyncio.fixture

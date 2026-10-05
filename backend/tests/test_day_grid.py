@@ -4,12 +4,15 @@ Integration tests for CP-1 Day Grid endpoints:
   GET  /payroll/periods/{id}/day-grid?work_date=YYYY-MM-DD
   POST /payroll/periods/{id}/day-grid
 
-Test isolation: all tests use year 2081 dates and the PAYTEST branch so they
-don't collide with other test files' periods.  Each test class creates its own
-period and cancels it in teardown.
+Test isolation: this module owns its Branch and Driver (the module-level
+`paytest_branch_id` / `paytest_driver_id` fixtures below shadow the shared ones),
+so no other module's periods are ever listed, cancelled or mutated here. Dates
+are not isolation. Each test creates its own period; teardown retires them and
+fails if any mutable workflow period remains on the owned branch.
 """
 import itertools
 from datetime import date
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -21,6 +24,8 @@ from tests.builders.access import (
     create_user_with_role_token,
     get_company_role_id,
 )
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+from tests.ownership import cancel_active_branch_periods, retire_branch_periods_directly
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,52 +48,35 @@ P1_PERIOD_END   = "2081-02-28"
 _DIRECT_PERIOD_COUNTER = itertools.count()
 
 
-async def _cancel_active_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
-            )
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Module-owned branch: Day Grid tests never touch another module's periods."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"DG_{uuid4().hex}", "name": "Day Grid isolated"})).scalar_one()
+    return int(row)
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
-    """Cancel Locked/Archived periods by temporarily disabling immutability triggers."""
-    from sqlalchemy import text as _text
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Module-owned Driver on the module-owned branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "Day Grid Isolated Driver",
+            "driver_code": f"DG-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
     )
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await direct_db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    assert resp.status_code == 201, f"Day Grid driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
 
 
 async def _insert_open_period(
@@ -135,12 +123,12 @@ async def dg_clean(
     paytest_branch_id: int,
     direct_db,
 ):
-    """Cancel any conflicting PAYTEST periods before and after."""
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-    await _force_cancel_locked_periods(direct_db, paytest_branch_id)
+    """Retire this module's periods before and after each test."""
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
+    await retire_branch_periods_directly(direct_db, paytest_branch_id)
     yield paytest_branch_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
-    await _force_cancel_locked_periods(direct_db, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
+    await retire_branch_periods_directly(direct_db, paytest_branch_id)
 
 
 @pytest_asyncio.fixture
@@ -693,22 +681,11 @@ class TestDayGridSave:
             )
             assert resp.status_code in (403, 422)
         finally:
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-            ))
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-            ))
+            async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+                await direct_db.execute(
+                    _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                    {"pid": pid},
+                )
 
     async def test_day_grid_save_out_of_bounds_rejected(
         self,
@@ -1100,22 +1077,11 @@ class TestDayGridDateLoading:
             assert resp.status_code == 200, resp.text
             assert resp.json()["work_date"] == today.isoformat()
         finally:
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-            ))
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-            ))
+            async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+                await direct_db.execute(
+                    _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                    {"pid": pid},
+                )
 
 
 # ===========================================================================
@@ -2524,17 +2490,17 @@ async def elig_period(
     direct_db,
 ) -> dict:
     """
-    Open payroll period on PAYTEST for 2082-06-21 to 2082-06-27.
+    Open payroll period on the module-owned branch for 2082-06-21 to 2082-06-27.
     Used by all TestDriverEligibilityBoundaries tests.
     Cancelled in teardown.
     """
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
     data = await _insert_open_period(
         direct_db, paytest_branch_id, ELIG_PERIOD_START, ELIG_PERIOD_END, "Week", "DG-ELIG"
     )
     yield data
 
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
 
 
 async def _get_employee_id_for_driver(direct_db, driver_id: int) -> int:

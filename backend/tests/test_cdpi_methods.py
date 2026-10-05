@@ -16,6 +16,7 @@ from app.cdpi.methods import (
     get_adapter,
 )
 from app.cdpi.schemas import CdpiCalcMethodKey
+from tests.db_state import CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER, suspended_test_triggers
 
 # ===========================================================================
 # Registry coverage
@@ -191,17 +192,10 @@ class TestSubmitUsesAdapter:
             )
             assert result.status == "PendingCompanyApproval"
         finally:
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL")
-            )
-            try:
+            async with suspended_test_triggers(direct_db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
                 await direct_db.execute(
                     _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
                     {"rid": str(draft.request_id)},
-                )
-            finally:
-                await direct_db.execute(
-                    _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
                 )
             await direct_db.execute(
                 _text("DELETE FROM payroll.cdpirequests WHERE requestid = :rid"),
@@ -249,17 +243,10 @@ class TestSubmitUsesAdapter:
             assert exc_info.value.status_code == 422
             assert "PerUnit" in exc_info.value.detail
         finally:
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL")
-            )
-            try:
+            async with suspended_test_triggers(direct_db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
                 await direct_db.execute(
                     _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
                     {"rid": str(draft.request_id)},
-                )
-            finally:
-                await direct_db.execute(
-                    _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
                 )
             await direct_db.execute(
                 _text("DELETE FROM payroll.cdpirequests WHERE requestid = :rid"),

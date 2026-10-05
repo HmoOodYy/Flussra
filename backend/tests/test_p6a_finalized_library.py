@@ -24,6 +24,7 @@ from app.payroll.service import (
 )
 from tests.access_test_helpers import create_provisioned_test_user
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.db_state import allow_final_line_insert
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -531,15 +532,15 @@ async def test_legacy_final_lines_keep_money_but_report_evidence_is_unavailable(
         SELECT payitemid FROM payroll.payrollperiodpayitems
         WHERE payrollperiodid = :period_id AND payitemcode = 'HOURS'
     """), {"period_id": period_id})).scalar_one())
-    await direct_db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)"))
-    await direct_db.execute(text("""
-        INSERT INTO payroll.payrollfinallines
-            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-        VALUES (1, :branch_id, :period_id, :driver_id, '2077-01-01', 'HOURS', 'Daily',
-                :pay_item_id, 1, 12.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2)
-    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id,
-           "pay_item_id": hours_pay_item_id})
+    async with allow_final_line_insert(direct_db):
+        await direct_db.execute(text("""
+            INSERT INTO payroll.payrollfinallines
+                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
+                 payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
+            VALUES (1, :branch_id, :period_id, :driver_id, '2077-01-01', 'HOURS', 'Daily',
+                    :pay_item_id, 1, 12.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2)
+        """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id,
+               "pay_item_id": hours_pay_item_id})
     overview = await session_client.get(f"/payroll/finalized/{period_id}/overview", headers=_auth(auth_token))
     assert overview.status_code == 200, overview.text
     body = overview.json()

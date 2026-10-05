@@ -44,6 +44,7 @@ from app.payroll_setup.payroll_policy import (
     publish_version,
 )
 from tests.builders.access import create_user_with_role_token
+from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
 
 # ---------------------------------------------------------------------------
 # Unique username counter — keeps each test's users separate
@@ -263,8 +264,13 @@ async def sm_hq_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
 
 
 @pytest_asyncio.fixture(scope="module")
-async def sm_paytest_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
-    return await _get_branch_id(session_client, auth_token, "PAYTEST")
+async def sm_paytest_id(
+    session_client: httpx.AsyncClient, auth_token: str, session_db_conn,
+) -> int:
+    """Module-owned stand-in for the PAYTEST branch (Open periods are recycled here)."""
+    branch_id = await create_owned_branch(session_db_conn, "SM", "Security matrix owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
 
 
 @pytest_asyncio.fixture(scope="module")

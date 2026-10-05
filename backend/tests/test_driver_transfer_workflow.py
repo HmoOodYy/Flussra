@@ -37,7 +37,22 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.builders.owned_scope import (
+    activate_paytest_equivalent_items,
+    create_owned_branch,
+)
 from tests.builders.workforce import create_driver_employee_record
+from tests.db_state import allow_final_line_insert
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
+    """Module-owned branch standing in for PAYTEST: this module's workflow state
+    (periods it submits, approves or leaves behind) never reaches another module."""
+    branch_id = await create_owned_branch(session_db_conn, "DTW", "DTW owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1296,20 +1311,18 @@ async def test_completion_preserves_final_lines_on_old_driver(
 
     # Insert a FinalLine for the old driver
     # Phase 6: authorise via session-level GUC for test setup.
-    await direct_db.execute(
-        _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-    )
-    await direct_db.execute(
-        _text("""
-            INSERT INTO payroll.payrollfinallines
-                (payrollperiodid, companyid, branchid, driverid,
-                 linetype, sourcetype, finalamount, CurrencyCode, CurrencyMinorUnitDigits)
-            VALUES
-                (:pid, :cid, :bid, :did,
-                 'FinalHistTest', 'Manual', 100.00, 'USD', 2)
-        """),
-        {"pid": period_id, "cid": company_id, "bid": paytest_branch_id, "did": drv_id},
-    )
+    async with allow_final_line_insert(direct_db):
+        await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollfinallines
+                    (payrollperiodid, companyid, branchid, driverid,
+                     linetype, sourcetype, finalamount, CurrencyCode, CurrencyMinorUnitDigits)
+                VALUES
+                    (:pid, :cid, :bid, :did,
+                     'FinalHistTest', 'Manual', 100.00, 'USD', 2)
+            """),
+            {"pid": period_id, "cid": company_id, "bid": paytest_branch_id, "did": drv_id},
+        )
 
     # Complete transfer
     r_t = await _create_transfer(

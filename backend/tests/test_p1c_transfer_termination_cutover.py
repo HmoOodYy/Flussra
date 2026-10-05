@@ -20,6 +20,7 @@ from app.workforce.projection import (
     sync_company_employee_branch_projections,
     sync_employee_branch_projection,
 )
+from tests.db_state import allow_final_line_insert
 
 
 def auth(token: str) -> dict[str, str]:
@@ -585,18 +586,16 @@ async def test_termination_rejects_dated_finalized_work_after_date_without_mutat
         "start_date": today,
         "end_date": later,
     })).scalar_one()
-    await direct_db.execute(text(
-        "SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)"
-    ))
-    final_line_id = (await direct_db.execute(text("""
-        INSERT INTO payroll.PayrollFinalLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType, SourceType, FinalAmount, CurrencyCode, CurrencyMinorUnitDigits)
-        VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100, 'USD', 2)
-        RETURNING FinalLineID
-    """), {
-        "branch_id": paytest_branch_id, "period_id": period_id,
-        "driver_id": driver_id, "work_date": later,
-    })).scalar_one()
+    async with allow_final_line_insert(direct_db):
+        final_line_id = (await direct_db.execute(text("""
+            INSERT INTO payroll.PayrollFinalLines
+                (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType, SourceType, FinalAmount, CurrencyCode, CurrencyMinorUnitDigits)
+            VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100, 'USD', 2)
+            RETURNING FinalLineID
+        """), {
+            "branch_id": paytest_branch_id, "period_id": period_id,
+            "driver_id": driver_id, "work_date": later,
+        })).scalar_one()
 
     rejected = await client.post(
         f"/workforce/employees/{employee['employee_id']}/terminate",

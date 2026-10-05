@@ -31,6 +31,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.compensation import create_approved_rate
+from tests.db_state import allow_final_line_insert
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -627,25 +628,23 @@ class TestH_PreMigrationRowsTolerated:
         cid = companyid_row.scalar_one()
 
         # Authorise the INSERT for this AUTOCOMMIT connection (Phase 6 guard).
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, draftlineid, driverid,
-                     workdate, linetype, linescope, quantity, rateamount, finalamount,
-                     sourcetype, approvedbyuserid, approvedatutc, lockedatutc, notes,
-                     payitemid, ratetypeid, driverrateid, resolvedrateamount, ratebehavior, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES
-                    (:cid, :bid, :pid, NULL, :did,
-                     :wdate, 'HOURS', 'Daily', 1, NULL, 18.0000,
-                     'Manual', 1, NOW(), NOW(), 'pre-migration synthetic row',
-                     NULL, NULL, NULL, NULL, NULL, 'USD', 2)
-            """),
-            {"cid": cid, "bid": br, "pid": pid, "did": drv,
-             "wdate": _date.fromisoformat(H_WORK)},
-        )
+        async with allow_final_line_insert(direct_db):
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, draftlineid, driverid,
+                         workdate, linetype, linescope, quantity, rateamount, finalamount,
+                         sourcetype, approvedbyuserid, approvedatutc, lockedatutc, notes,
+                         payitemid, ratetypeid, driverrateid, resolvedrateamount, ratebehavior, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES
+                        (:cid, :bid, :pid, NULL, :did,
+                         :wdate, 'HOURS', 'Daily', 1, NULL, 18.0000,
+                         'Manual', 1, NOW(), NOW(), 'pre-migration synthetic row',
+                         NULL, NULL, NULL, NULL, NULL, 'USD', 2)
+                """),
+                {"cid": cid, "bid": br, "pid": pid, "did": drv,
+                 "wdate": _date.fromisoformat(H_WORK)},
+            )
 
         # API must return the synthetic row with NULL source fields without error
         lines = await _get_final_lines(c, tok, pid, driver_id=drv)

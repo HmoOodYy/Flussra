@@ -23,7 +23,9 @@ from sqlalchemy import text as _sqla_text
 from app.auth.security import create_access_token
 from tests.access_test_helpers import create_neutral_test_user, create_provisioned_test_user
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
 from tests.builders.workforce import create_driver_employee, create_driver_employee_record
+from tests.ownership import retire_branch_periods_directly
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,6 +43,59 @@ def _today_iso() -> str:
     constant would be yesterday and rate validators would reject it as 'in the past').
     """
     return date.today().isoformat()
+
+
+async def _create_module_owned_driver(
+    session_client: httpx.AsyncClient, auth_token: str, branch_id: int, label: str,
+) -> int:
+    marker = uuid4().hex
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": branch_id,
+            "full_name": f"Pay rates {label} driver {marker}",
+            "driver_code": f"PR{label[:2].upper()}-{marker[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"pay-rates {label} driver create failed: {resp.text}"
+    return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client: httpx.AsyncClient, auth_token: str, session_db_conn) -> int:
+    """Module-owned branch standing in for PAYTEST. The backdating-guard tests force
+    Locked/Archived periods onto it; no other module may be able to see them."""
+    branch_id = await create_owned_branch(session_db_conn, "PRT", "Pay rates owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
+
+
+@pytest_asyncio.fixture(scope="module", autouse=True)
+async def pay_rates_terminal_state(paytest_branch_id: int, session_db_conn):
+    """Retire the evidence-less Locked/Archived periods the guard tests insert, and
+    fail if any mutable workflow period remains on the owned branch."""
+    yield
+    await retire_branch_periods_directly(session_db_conn, paytest_branch_id)
+
+
+@pytest_asyncio.fixture(scope="module")
+async def created_driver_id(
+    session_client: httpx.AsyncClient, auth_token: str, hq_branch_id: int,
+) -> int:
+    """Module-owned HQ Driver: this module's successful rate mutations never land on
+    the session-shared HQ Driver other modules read."""
+    return await _create_module_owned_driver(session_client, auth_token, hq_branch_id, "hq")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
+) -> int:
+    """Module-owned PAYTEST Driver, for the same reason as `created_driver_id`."""
+    return await _create_module_owned_driver(
+        session_client, auth_token, paytest_branch_id, "paytest",
+    )
 
 
 @pytest_asyncio.fixture

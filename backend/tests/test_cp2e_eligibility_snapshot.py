@@ -30,6 +30,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -63,51 +65,40 @@ def _week_2099(offset: int = 0) -> tuple[datetime.date, datetime.date]:
 
 async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
     """Remove all periods and related rows for the branch."""
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollfinallines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrolldraftlines "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperioddrivereligibility "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiodeligibilitysnapshots "
-              "WHERE payrollperiodid IN "
-              "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
-        {"bid": branch_id},
-    )
-    await db.execute(
-        _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
-        {"bid": branch_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-    ))
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(db, FINALIZED_HISTORY_TRIGGERS):
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                  "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
+            {"bid": branch_id},
+        )
+        await db.execute(
+            _text("DELETE FROM payroll.payrollfinallines "
+                  "WHERE payrollperiodid IN "
+                  "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
+            {"bid": branch_id},
+        )
+        await db.execute(
+            _text("DELETE FROM payroll.payrolldraftlines "
+                  "WHERE payrollperiodid IN "
+                  "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
+            {"bid": branch_id},
+        )
+        await db.execute(
+            _text("DELETE FROM payroll.payrollperioddrivereligibility "
+                  "WHERE payrollperiodid IN "
+                  "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
+            {"bid": branch_id},
+        )
+        await db.execute(
+            _text("DELETE FROM payroll.payrollperiodeligibilitysnapshots "
+                  "WHERE payrollperiodid IN "
+                  "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"),
+            {"bid": branch_id},
+        )
+        await db.execute(
+            _text("DELETE FROM payroll.payrollperiods WHERE branchid = :bid"),
+            {"bid": branch_id},
+        )
     await db.commit()
 
 
