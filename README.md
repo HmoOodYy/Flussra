@@ -63,7 +63,9 @@ backend environment with `.\scripts\setup_backend.ps1` and frontend
 dependencies with `npm ci` from `frontend/` before validation.
 
 During validation, the script verifies that `C:\Temp` is writable and sets
-`TEMP` and `TMP` to that directory for its process and child tools only.
+`TEMP` and `TMP` to that directory for its process and child tools only. It
+restores the caller's original values and removes its invocation-owned
+compileall cache directory when validation ends.
 
 Future CI workflows should call this repository-owned entry point so local
 and CI validation use the same contract.

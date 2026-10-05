@@ -41,39 +41,49 @@ function Invoke-ValidationGate(
     Write-Host "PASSED: $Name ($([math]::Round($timer.Elapsed.TotalSeconds, 2))s)" -ForegroundColor Green
 }
 
-Write-Host "Flussra canonical local validation" -ForegroundColor Cyan
+$originalProcessEnvironment = [System.Environment]::GetEnvironmentVariables([System.EnvironmentVariableTarget]::Process)
+$hadOriginalTemp = $originalProcessEnvironment.Contains("TEMP")
+$hadOriginalTmp = $originalProcessEnvironment.Contains("TMP")
+$originalTemp = if ($hadOriginalTemp) { [string]$originalProcessEnvironment["TEMP"] } else { $null }
+$originalTmp = if ($hadOriginalTmp) { [string]$originalProcessEnvironment["TMP"] } else { $null }
+$script:validationPycachePrefix = $null
+$script:validationPycacheCreated = $false
+$script:validationCleanupFailed = $false
 
-$validationTemp = "C:\Temp"
 try {
-    if (-not (Test-Path -LiteralPath $validationTemp -PathType Container)) {
-        New-Item -ItemType Directory -Path $validationTemp -Force | Out-Null
-    }
-    $env:TEMP = $validationTemp
-    $env:TMP = $validationTemp
+    Write-Host "Flussra canonical local validation" -ForegroundColor Cyan
 
-    $probePath = Join-Path $validationTemp ("flussra-validation-probe-" + [guid]::NewGuid().ToString("N") + ".tmp")
-    $probeBytes = [System.Text.Encoding]::UTF8.GetBytes("Flussra validation temp probe")
+    $validationTemp = "C:\Temp"
     try {
-        $probeStream = [System.IO.File]::Open($probePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        if (-not (Test-Path -LiteralPath $validationTemp -PathType Container)) {
+            New-Item -ItemType Directory -Path $validationTemp -Force | Out-Null
+        }
+        $env:TEMP = $validationTemp
+        $env:TMP = $validationTemp
+
+        $probePath = Join-Path $validationTemp ("flussra-validation-probe-" + [guid]::NewGuid().ToString("N") + ".tmp")
+        $probeBytes = [System.Text.Encoding]::UTF8.GetBytes("Flussra validation temp probe")
         try {
-            $probeStream.Write($probeBytes, 0, $probeBytes.Length)
-            $probeStream.Flush()
+            $probeStream = [System.IO.File]::Open($probePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            try {
+                $probeStream.Write($probeBytes, 0, $probeBytes.Length)
+                $probeStream.Flush()
+            } finally {
+                $probeStream.Dispose()
+            }
+            $writtenBytes = [System.IO.File]::ReadAllBytes($probePath)
+            if ([System.Convert]::ToBase64String($writtenBytes) -ne [System.Convert]::ToBase64String($probeBytes)) {
+                throw "temporary write probe contents did not match"
+            }
         } finally {
-            $probeStream.Dispose()
+            if (Test-Path -LiteralPath $probePath -PathType Leaf) {
+                Remove-Item -LiteralPath $probePath -Force
+            }
         }
-        $writtenBytes = [System.IO.File]::ReadAllBytes($probePath)
-        if ([System.Convert]::ToBase64String($writtenBytes) -ne [System.Convert]::ToBase64String($probeBytes)) {
-            throw "temporary write probe contents did not match"
-        }
-    } finally {
-        if (Test-Path -LiteralPath $probePath -PathType Leaf) {
-            Remove-Item -LiteralPath $probePath -Force
-        }
+    } catch {
+        Stop-Validation "Temporary directory" "C:\Temp is not usable for validation: $($_.Exception.Message)"
     }
-} catch {
-    Stop-Validation "Temporary directory" "C:\Temp is not usable for validation: $($_.Exception.Message)"
-}
-Write-Host "Temporary directory: $validationTemp (process-scoped TEMP/TMP; write probe passed)" -ForegroundColor Green
+    Write-Host "Temporary directory: $validationTemp (process-scoped TEMP/TMP; write probe passed)" -ForegroundColor Green
 
 if (-not (Test-Path -LiteralPath $PYTHON -PathType Leaf)) {
     Stop-Validation "Backend tooling" "worktree backend Python is missing at $PYTHON. Run scripts/setup_backend.ps1 first."
@@ -107,10 +117,11 @@ Invoke-ValidationGate "Backend Ruff" $BACKEND $PYTHON @(
     "-m", "ruff", "check", "--no-cache", "tests"
 )
 
-$pycachePrefix = Join-Path ([System.IO.Path]::GetTempPath()) ("flussra-validation-pycache-" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Force -Path $pycachePrefix | Out-Null
+$script:validationPycachePrefix = Join-Path ([System.IO.Path]::GetTempPath()) ("flussra-validation-pycache-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $script:validationPycachePrefix | Out-Null
+$script:validationPycacheCreated = $true
 Invoke-ValidationGate "Backend compileall" $BACKEND $PYTHON @(
-    "-X", "pycache_prefix=$pycachePrefix", "-m", "compileall", "-q", "app", "tests"
+    "-X", "pycache_prefix=$script:validationPycachePrefix", "-m", "compileall", "-q", "app", "tests"
 )
 
 Write-Host "`n=== GATE: Alembic single head (expected 0077) ===" -ForegroundColor Cyan
@@ -156,3 +167,41 @@ Invoke-ValidationGate "Frontend lint" $FRONTEND $npmExecutable @("run", "lint")
 Invoke-ValidationGate "Frontend production build" $FRONTEND $npmExecutable @("run", "build")
 
 Write-Host "`nALL REQUIRED LOCAL VALIDATION GATES PASSED." -ForegroundColor Green
+} finally {
+    try {
+        if ($script:validationPycacheCreated -and (Test-Path -LiteralPath $script:validationPycachePrefix -PathType Container)) {
+            Remove-Item -LiteralPath $script:validationPycachePrefix -Recurse -Force
+        }
+    } catch {
+        $script:validationCleanupFailed = $true
+        Write-Host "FAILED: Temporary artifact cleanup — could not remove invocation-owned cache '$script:validationPycachePrefix': $($_.Exception.Message)" -ForegroundColor Red
+    } finally {
+        try {
+            if ($hadOriginalTemp) {
+                [System.Environment]::SetEnvironmentVariable("TEMP", $originalTemp, [System.EnvironmentVariableTarget]::Process)
+            } else {
+                Remove-Item Env:TEMP -ErrorAction Stop
+            }
+        } catch {
+            $script:validationCleanupFailed = $true
+            Write-Host "FAILED: Environment restoration — could not restore caller TEMP: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        try {
+            if ($hadOriginalTmp) {
+                [System.Environment]::SetEnvironmentVariable("TMP", $originalTmp, [System.EnvironmentVariableTarget]::Process)
+            } else {
+                Remove-Item Env:TMP -ErrorAction Stop
+            }
+        } catch {
+            $script:validationCleanupFailed = $true
+            Write-Host "FAILED: Environment restoration — could not restore caller TMP: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        if (-not $script:validationCleanupFailed) {
+            Write-Host "Restored caller TEMP/TMP and cleaned validation-owned cache." -ForegroundColor Green
+        }
+    }
+}
+
+if ($script:validationCleanupFailed) {
+    Stop-Validation "Validation cleanup" "temporary artifact cleanup or caller environment restoration failed"
+}
