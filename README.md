@@ -77,7 +77,7 @@ To compare the direct SQL bootstrap with a fresh Alembic upgrade through the
 current head, run this from the repository root after backend setup:
 
 ```powershell
-.\backend\.venv\Scripts\python.exe .\scripts\compare_schema_authorities.py
+.\scripts\validate_schema_authorities.ps1
 ```
 
 The command creates two invocation-owned disposable PostgreSQL databases,

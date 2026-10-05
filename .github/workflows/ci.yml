@@ -148,4 +148,4 @@ jobs:
 
       - name: Run schema authority comparison
         shell: pwsh
-        run: .\backend\.venv\Scripts\python.exe .\scripts\compare_schema_authorities.py
+        run: .\scripts\validate_schema_authorities.ps1
