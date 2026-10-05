@@ -100,7 +100,7 @@ async def test_lifecycle_change_first_retries_and_freezes_new_currency(
     first_gate = asyncio.Event()
     changed = asyncio.Event()
     gate_count = 0
-    real_gate = period_lifecycle.lock_and_get_company_currency
+    real_gate = period_lifecycle.lock_and_get_company_currency_for_monetary_write
 
     async def gated(company_id, db):
         nonlocal gate_count
@@ -110,7 +110,7 @@ async def test_lifecycle_change_first_retries_and_freezes_new_currency(
             await asyncio.wait_for(changed.wait(), 5)
         return await real_gate(company_id, db)
 
-    monkeypatch.setattr(period_lifecycle, "lock_and_get_company_currency", gated)
+    monkeypatch.setattr(period_lifecycle, "lock_and_get_company_currency_for_monetary_write", gated)
 
     async def change():
         async with test_engine.begin() as db:

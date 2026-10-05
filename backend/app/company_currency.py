@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.payroll_setup.locks import lock_company
+from app.company_concurrency import lock_company_for_monetary_use
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +61,16 @@ async def require_company_currency(
     return currency
 
 
-async def lock_and_get_company_currency(
+async def lock_and_get_company_currency_for_monetary_write(
     company_id: int, db: AsyncConnection, *, required: bool = True
 ) -> CompanyCurrency | None:
-    """Lock the canonical Company row, then read its current currency."""
-    await lock_company(company_id, db)
+    """Take the shared Company monetary guard, then read the current currency.
+
+    For transactions that durably commit monetary state under the Company
+    currency. Never call this on a path that will also mutate the Company row;
+    those take lock_company_for_mutation first.
+    """
+    await lock_company_for_monetary_use(company_id, db)
     currency = await get_company_currency(company_id, db)
     if required and currency is None:
         raise currency_error(

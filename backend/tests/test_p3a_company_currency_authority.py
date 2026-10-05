@@ -12,7 +12,7 @@ from app.company_currency import (
     CompanyCurrency,
     company_has_durable_monetary_state,
     frozen_currency,
-    lock_and_get_company_currency,
+    lock_and_get_company_currency_for_monetary_write,
 )
 from app.settings import service as settings_service
 from app.settings.schemas import CompanyUpdate
@@ -63,7 +63,7 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             profile = await settings_service.get_company_profile(company_id, 1, db)
             assert profile.currency_code is None and not profile.currency_change_locked
             with pytest.raises(HTTPException) as missing:
-                await lock_and_get_company_currency(company_id, db)
+                await lock_and_get_company_currency_for_monetary_write(company_id, db)
             assert missing.value.detail["code"] == "COMPANY_CURRENCY_REQUIRED"
             with pytest.raises(HTTPException) as unsupported:
                 await settings_service.update_company_profile(company_id, 1, update("ZZZ"), db)

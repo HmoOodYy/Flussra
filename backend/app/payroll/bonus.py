@@ -42,7 +42,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.company_currency import lock_and_get_company_currency
+from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.core.service import (
     _check_any_permission,
     _check_permission,
@@ -292,7 +292,7 @@ async def create_bonus_event(
         company_id, period.branch_id, period_id, data.driver_id, db
     )
 
-    await lock_and_get_company_currency(company_id, db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await _lock_period_for_mutation(period_id, company_id, db)
 
     insert_result = await db.execute(
@@ -425,7 +425,7 @@ async def update_bonus_event(
         return event
 
     if data.amount is not None:
-        await lock_and_get_company_currency(company_id, db)
+        await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await _lock_period_for_mutation(period_id, company_id, db)
 
     # CP-3B2a: atomic predicate. Always scoped by period/company/branch AND
@@ -698,7 +698,7 @@ async def apply_bonus_batch(
         "key": data.idempotency_key,
     })).scalar_one_or_none()
     if preexisting is None:
-        await lock_and_get_company_currency(company_id, db)
+        await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
     # ── Lock the period row (does NOT enforce editability — replay must work on
     #    a now-locked/archived period). All idempotency and write decisions

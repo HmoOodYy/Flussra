@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from app.company_currency import lock_and_get_company_currency
+from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.db.transaction_retry import run_retryable_transaction
 
 
@@ -58,7 +58,7 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
         if len(observations) == 1:
             snapshot_taken.set()
             await asyncio.wait_for(change_committed.wait(), 5)
-        currency = await lock_and_get_company_currency(company_id, db)
+        currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
         await db.execute(text("""
             INSERT INTO payroll.payprofilerates(payprofileid, ratetypeid, rateamount, effectivefrom)
             VALUES (:pid, :rid, 1.2345, DATE '2099-01-01')
@@ -104,7 +104,7 @@ async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
     async def writer():
         async with test_engine.begin() as db:
             await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-            currency = await lock_and_get_company_currency(company_id, db)
+            currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
             assert currency.code == "USD"
             await db.execute(text("""
                 INSERT INTO payroll.payprofilerates(payprofileid, ratetypeid, rateamount, effectivefrom)

@@ -19,8 +19,8 @@ Consumes, rather than owns, every adjacent domain:
   - app.payroll.period_read.get_period_by_id
   - app.payroll.period_day_calendar._validate_period_work_date
   - app.payroll.eligibility._assert_driver_eligible_for_workdate_via_snapshot
-  - app.payroll.day_entry_state (_validate_status_key, _resolve_status_key_id,
-    _upsert_entry_state, _void_entry_state_field)
+  - app.payroll.day_entry_state (_upsert_entry_state,
+    _void_entry_state_field)
   - app.payroll.draft_line_calculation._compute_calculated_amount
   - app.payroll.source_line_read._get_line_by_id
   - app.payroll.source_evidence._capture_source_evidence
@@ -45,12 +45,10 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.company_currency import currency_error, lock_and_get_company_currency
+from app.company_currency import currency_error, lock_and_get_company_currency_for_monetary_write
 from app.core.service import _check_permission
 from app.payroll.day_entry_state import (
-    _resolve_status_key_id,
     _upsert_entry_state,
-    _validate_status_key,
     _void_entry_state_field,
 )
 from app.payroll.draft_line_calculation import _compute_calculated_amount
@@ -85,6 +83,17 @@ _CALC_REQUIRED_BEHAVIORS: frozenset[str] = frozenset(
 
 # System lines written ONLY by the finalization engine — never accepted from user endpoints.
 _SYSTEM_FINALIZATION_ONLY: frozenset[str] = frozenset({"SYS_MIN_TOPUP", "SYS_MAX_CAP"})
+
+
+def _daily_status_not_supported() -> HTTPException:
+    """Generic Draft-line endpoints no longer write DailyStatus (Day Grid owns it)."""
+    return HTTPException(
+        status_code=422,
+        detail=(
+            "Daily status can't be changed on this endpoint. "
+            "Set or clear a driver's status from the Day Grid instead."
+        ),
+    )
 
 
 async def _validate_line_type(
@@ -403,7 +412,10 @@ async def add_draft_line(
     # Permission gate: adding payroll entries requires payroll.entry
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    currency = await lock_and_get_company_currency(company_id, db, required=False)
+    if _LEGACY_TO_CANONICAL.get(data.line_type, data.line_type) == "DailyStatus":
+        raise _daily_status_not_supported()
+
+    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     if data.rate_amount is not None and currency is None:
         raise currency_error(
             "COMPANY_CURRENCY_REQUIRED",
@@ -532,20 +544,6 @@ async def add_draft_line(
             ),
         )
 
-    # CP-2D1: validate DailyStatus code before any mutation.
-    # Blank/missing notes for DailyStatus add is rejected — there is no clear
-    # operation on the add path; callers must supply a valid active status code.
-    _direct_add_sk_row: dict | None = None
-    if canonical_line_type == "DailyStatus":
-        if not data.notes or not data.notes.strip():
-            raise HTTPException(
-                status_code=422,
-                detail="DailyStatus lines require a valid status code in 'notes'.",
-            )
-        _direct_add_sk_row = await _validate_status_key(
-            data.notes, company_id, period.branch_id, db,
-        )
-
     # CP-0A: Lock custom PayItem catalog row before period lock so both this path
     # and the physical-delete path acquire locks in the same order (PayItem then
     # Period), preventing deadlock while serializing against concurrent deletion.
@@ -613,29 +611,17 @@ async def add_draft_line(
             driver_id=data.driver_id, work_date=data.work_date, line_type=canonical_line_type,
         )
 
-    # CP-2D1: dual-write canonical entry-state for informational lines.
-    # DailyStatus: use statuskeyid from pre-validated _direct_add_sk_row (guaranteed active).
-    # DailyNote: plain text, no StatusKey involved.
-    if data.work_date is not None:
-        if canonical_line_type == "DailyStatus":
-            sk_id = _direct_add_sk_row["statuskeyid"] if _direct_add_sk_row else None
-            await _upsert_entry_state(
-                company_id, period.branch_id, period_id,
-                data.driver_id, data.work_date, user_id, db,
-                status_key_id=sk_id,
-                note_text=None,
-                set_status=True,
-                set_note=False,
-            )
-        elif canonical_line_type == "DailyNote":
-            await _upsert_entry_state(
-                company_id, period.branch_id, period_id,
-                data.driver_id, data.work_date, user_id, db,
-                status_key_id=None,
-                note_text=data.notes or None,
-                set_status=False,
-                set_note=True,
-            )
+    # CP-2D1: dual-write canonical entry-state for DailyNote (plain text).
+    # DailyStatus never reaches this path; the Day Grid owns it.
+    if data.work_date is not None and canonical_line_type == "DailyNote":
+        await _upsert_entry_state(
+            company_id, period.branch_id, period_id,
+            data.driver_id, data.work_date, user_id, db,
+            status_key_id=None,
+            note_text=data.notes or None,
+            set_status=False,
+            set_note=True,
+        )
 
     return await _get_line_by_id(line_id, company_id, db)
 
@@ -676,7 +662,7 @@ async def update_draft_line(
     # Permission gate: editing payroll entries requires payroll.entry
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    currency = await lock_and_get_company_currency(company_id, db, required=False)
+    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     if data.rate_amount is not None and currency is None:
         raise currency_error(
             "COMPANY_CURRENCY_REQUIRED",
@@ -686,6 +672,8 @@ async def update_draft_line(
     line = await _get_line_by_id(draft_line_id, company_id, db)
     if line.period_id != period_id:
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
+    if _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type) == "DailyStatus":
+        raise _daily_status_not_supported()
     if line.status == "Void":
         raise HTTPException(status_code=422, detail="Cannot modify a voided draft line.")
 
@@ -872,19 +860,6 @@ async def update_draft_line(
                 ),
             )
 
-    # CP-2D1: validate DailyStatus code before any DraftLine mutation.
-    # Policy for direct update_draft_line: always require an active StatusKey when
-    # notes is being changed, regardless of whether the new code matches the existing
-    # selection. The deactivated-bypass is only available via save_day_grid.
-    # Blank notes on update is treated as clearing the status (returns None, no raise).
-    _direct_upd_sk_row: dict | None = None
-    if canonical_existing_lt == "DailyStatus" and data.notes is not None and not is_void_only:
-        _direct_upd_sk_row = await _validate_status_key(
-            data.notes, company_id, period.branch_id, db,
-        )
-        # _validate_status_key returns None for blank/empty (clear operation — allowed).
-        # It raises 422 for invalid or inactive codes.
-
     if fields:
         # CP-0A: Lock custom PayItem catalog row before period lock (same order as
         # deletion path) to prevent the zero-to-meaningful race: deletion reads zero
@@ -926,41 +901,18 @@ async def update_draft_line(
                 driver_id=line.driver_id, work_date=line.work_date, line_type=line.line_type,
             )
 
-        # CP-2D1: dual-write canonical entry-state for informational lines.
-        # DailyStatus: notes was validated pre-mutation; use statuskeyid from that row.
-        # DailyNote: plain text, no StatusKey involved.
-        if line.work_date is not None and canonical_existing_lt in _INFORMATIONAL_ONLY:
-            if canonical_existing_lt == "DailyStatus":
-                # If notes changed: _direct_upd_sk_row holds the validated result.
-                # If notes not in fields (no change): resolve via _resolve_status_key_id
-                # so the canonical row stays in sync with the unchanged existing code.
-                if "notes" in fields:
-                    sk_id = _direct_upd_sk_row["statuskeyid"] if _direct_upd_sk_row else None
-                else:
-                    existing_code = line.notes
-                    sk_id = (
-                        await _resolve_status_key_id(company_id, period.branch_id, existing_code, db)
-                        if existing_code
-                        else None
-                    )
-                await _upsert_entry_state(
-                    company_id, period.branch_id, period_id,
-                    line.driver_id, line.work_date, user_id, db,
-                    status_key_id=sk_id,
-                    note_text=None,
-                    set_status=True,
-                    set_note=False,
-                )
-            else:  # DailyNote
-                new_note = fields.get("notes", line.notes)
-                await _upsert_entry_state(
-                    company_id, period.branch_id, period_id,
-                    line.driver_id, line.work_date, user_id, db,
-                    status_key_id=None,
-                    note_text=new_note or None,
-                    set_status=False,
-                    set_note=True,
-                )
+        # CP-2D1: dual-write canonical entry-state for DailyNote (plain text).
+        # DailyStatus is rejected above; the Day Grid owns it.
+        if line.work_date is not None and canonical_existing_lt == "DailyNote":
+            new_note = fields.get("notes", line.notes)
+            await _upsert_entry_state(
+                company_id, period.branch_id, period_id,
+                line.driver_id, line.work_date, user_id, db,
+                status_key_id=None,
+                note_text=new_note or None,
+                set_status=False,
+                set_note=True,
+            )
 
     return await _get_line_by_id(draft_line_id, company_id, db)
 
@@ -994,6 +946,8 @@ async def void_draft_line(
     line = await _get_line_by_id(draft_line_id, company_id, db)
     if line.period_id != period_id:
         raise HTTPException(status_code=404, detail="Draft line not found in this period.")
+    if _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type) == "DailyStatus":
+        raise _daily_status_not_supported()
     if line.status == "Void":
         return  # Idempotent
 
@@ -1058,10 +1012,10 @@ async def void_draft_line(
             line_type=line.line_type,
         )
 
-    # CP-2D1: clear canonical entry-state field for informational lines.
-    if line.line_type in _INFORMATIONAL_ONLY and line.work_date is not None:
+    # CP-2D1: clear canonical entry-state note for DailyNote (DailyStatus is rejected above).
+    if line.line_type == "DailyNote" and line.work_date is not None:
         await _void_entry_state_field(
             period_id, company_id, line.driver_id, line.work_date, user_id, db,
-            clear_status=(line.line_type == "DailyStatus"),
-            clear_note=(line.line_type == "DailyNote"),
+            clear_status=False,
+            clear_note=True,
         )
