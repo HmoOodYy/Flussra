@@ -673,10 +673,10 @@ def _run() -> int:
     print(f"Alembic graph: one head {heads[0]}; root revision 0001 starts at base.")
 
     import psycopg2
-    import testing.postgresql
     from psycopg2 import sql
+    from tests.postgresql_compat import create_test_postgresql
 
-    pg = testing.postgresql.Postgresql()
+    pg = create_test_postgresql()
     created: set[str] = set()
     cluster_dsn: dict[str, Any] | None = None
     cleanup_errors: list[BaseException] = []

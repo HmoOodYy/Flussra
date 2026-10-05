@@ -41,11 +41,7 @@ function Invoke-ValidationGate(
     Write-Host "PASSED: $Name ($([math]::Round($timer.Elapsed.TotalSeconds, 2))s)" -ForegroundColor Green
 }
 
-$originalProcessEnvironment = [System.Environment]::GetEnvironmentVariables([System.EnvironmentVariableTarget]::Process)
-$hadOriginalTemp = $originalProcessEnvironment.Contains("TEMP")
-$hadOriginalTmp = $originalProcessEnvironment.Contains("TMP")
-$originalTemp = if ($hadOriginalTemp) { [string]$originalProcessEnvironment["TEMP"] } else { $null }
-$originalTmp = if ($hadOriginalTmp) { [string]$originalProcessEnvironment["TMP"] } else { $null }
+$script:validationTempState = $null
 $script:validationPycachePrefix = $null
 $script:validationPycacheCreated = $false
 $script:validationCleanupFailed = $false
@@ -53,36 +49,13 @@ $script:validationCleanupFailed = $false
 try {
     Write-Host "Flussra canonical local validation" -ForegroundColor Cyan
 
-    $validationTemp = "C:\Temp"
+    . (Join-Path $ROOT "scripts\validation_temp.ps1")
     try {
-        if (-not (Test-Path -LiteralPath $validationTemp -PathType Container)) {
-            New-Item -ItemType Directory -Path $validationTemp -Force | Out-Null
-        }
-        $env:TEMP = $validationTemp
-        $env:TMP = $validationTemp
-
-        $probePath = Join-Path $validationTemp ("flussra-validation-probe-" + [guid]::NewGuid().ToString("N") + ".tmp")
-        $probeBytes = [System.Text.Encoding]::UTF8.GetBytes("Flussra validation temp probe")
-        try {
-            $probeStream = [System.IO.File]::Open($probePath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-            try {
-                $probeStream.Write($probeBytes, 0, $probeBytes.Length)
-                $probeStream.Flush()
-            } finally {
-                $probeStream.Dispose()
-            }
-            $writtenBytes = [System.IO.File]::ReadAllBytes($probePath)
-            if ([System.Convert]::ToBase64String($writtenBytes) -ne [System.Convert]::ToBase64String($probeBytes)) {
-                throw "temporary write probe contents did not match"
-            }
-        } finally {
-            if (Test-Path -LiteralPath $probePath -PathType Leaf) {
-                Remove-Item -LiteralPath $probePath -Force
-            }
-        }
+        $script:validationTempState = Enter-FlussraValidationTemp
     } catch {
-        Stop-Validation "Temporary directory" "C:\Temp is not usable for validation: $($_.Exception.Message)"
+        Stop-Validation "Temporary directory" "validation temp root is not usable: $($_.Exception.Message)"
     }
+    $validationTemp = $script:validationTempState.Root
     Write-Host "Temporary directory: $validationTemp (process-scoped TEMP/TMP; write probe passed)" -ForegroundColor Green
 
 if (-not (Test-Path -LiteralPath $PYTHON -PathType Leaf)) {
@@ -176,28 +149,14 @@ Write-Host "`nALL REQUIRED LOCAL VALIDATION GATES PASSED." -ForegroundColor Gree
         $script:validationCleanupFailed = $true
         Write-Host "FAILED: Temporary artifact cleanup — could not remove invocation-owned cache '$script:validationPycachePrefix': $($_.Exception.Message)" -ForegroundColor Red
     } finally {
-        try {
-            if ($hadOriginalTemp) {
-                [System.Environment]::SetEnvironmentVariable("TEMP", $originalTemp, [System.EnvironmentVariableTarget]::Process)
-            } else {
-                Remove-Item Env:TEMP -ErrorAction Stop
+        if ($null -ne $script:validationTempState) {
+            try {
+                Exit-FlussraValidationTemp $script:validationTempState
+                Write-Host "Restored caller TEMP/TMP and cleaned validation-owned cache." -ForegroundColor Green
+            } catch {
+                $script:validationCleanupFailed = $true
+                Write-Host "FAILED: Environment restoration — $($_.Exception.Message)" -ForegroundColor Red
             }
-        } catch {
-            $script:validationCleanupFailed = $true
-            Write-Host "FAILED: Environment restoration — could not restore caller TEMP: $($_.Exception.Message)" -ForegroundColor Red
-        }
-        try {
-            if ($hadOriginalTmp) {
-                [System.Environment]::SetEnvironmentVariable("TMP", $originalTmp, [System.EnvironmentVariableTarget]::Process)
-            } else {
-                Remove-Item Env:TMP -ErrorAction Stop
-            }
-        } catch {
-            $script:validationCleanupFailed = $true
-            Write-Host "FAILED: Environment restoration — could not restore caller TMP: $($_.Exception.Message)" -ForegroundColor Red
-        }
-        if (-not $script:validationCleanupFailed) {
-            Write-Host "Restored caller TEMP/TMP and cleaned validation-owned cache." -ForegroundColor Green
         }
     }
 }

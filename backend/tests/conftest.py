@@ -32,6 +32,7 @@ from tests.db_state import (
     preserve_test_guc_state,
     read_trigger_fingerprint,
 )
+from tests.postgresql_compat import create_test_postgresql
 
 # Tests that need process configuration must never inherit a developer DSN or
 # secret. Database access itself remains owned by the testing.postgresql fixture.
@@ -354,7 +355,7 @@ def pg_instance():
     Windows uses PostgreSQL's native control path because testing.postgresql
     hardcodes SIGINT, which Python cannot send to this child process.
     """
-    pg = testing.postgresql.Postgresql()
+    pg = create_test_postgresql()
     try:
         yield pg
     finally:
