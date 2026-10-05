@@ -70,6 +70,19 @@ compileall cache directory when validation ends.
 Future CI workflows should call this repository-owned entry point so local
 and CI validation use the same contract.
 
+## Database schema authority comparison
+
+To compare the direct SQL bootstrap with a fresh Alembic upgrade through the
+current head, run this from the repository root after backend setup:
+
+```powershell
+.\backend\.venv\Scripts\python.exe .\scripts\compare_schema_authorities.py
+```
+
+The command creates two invocation-owned disposable PostgreSQL databases,
+compares their application catalogs, and removes only those databases and its
+temporary PostgreSQL cluster when it exits.
+
 ## Branching
 
 - `main` — canonical, always-deployable branch
