@@ -28,6 +28,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.compensation import create_approved_rate
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -851,22 +852,11 @@ class TestFinalizeAutoRefresh:
             # the Phase 5 guard (if new_rate was used in finallines) does not
             # contaminate cp5_driver_id-based tests.
 
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-            )
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-            )
+            async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+                await direct_db.execute(
+                    _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                    {"pid": pid},
+                )
 
 
 
@@ -964,19 +954,8 @@ class TestLockedPeriodNotMutated:
             # (rate is in PayrollFinalLines), the 422 is silently accepted — the
             # isolated driver means no contamination to cp5_driver_id tests.
             await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-            )
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-            )
-            await direct_db.execute(
-                _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(_text(
-                "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-            ))
-            await direct_db.execute(
-                _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-            )
+            async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+                await direct_db.execute(
+                    _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' WHERE payrollperiodid = :pid"),
+                    {"pid": pid},
+                )

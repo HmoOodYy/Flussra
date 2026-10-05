@@ -29,6 +29,28 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from app.payroll import rates as payroll_rates
+from tests.builders.owned_scope import (
+    activate_paytest_equivalent_items,
+    create_owned_branch,
+    create_owned_driver,
+)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
+    """Module-owned branch standing in for PAYTEST: this module's workflow state
+    (periods it submits, approves or leaves behind) never reaches another module."""
+    branch_id = await create_owned_branch(session_db_conn, "RAT", "Rates owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+    """Module-owned Driver on the module-owned branch."""
+    return await create_owned_driver(
+        session_client, auth_token, paytest_branch_id, "Rates", full_name="Paytest Driver",
+    )
 
 # ---------------------------------------------------------------------------
 # Helpers

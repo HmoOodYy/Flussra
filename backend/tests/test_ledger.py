@@ -6,8 +6,12 @@ CP-4 Integration tests for the Ledger — finalized payroll periods and final li
 
 Isolation
 ---------
-Tests use dates in the year 2087 to avoid conflicts with other test modules.
-A session-scoped `locked_period` fixture creates one period, advances it to
+This module owns its Branch and Drivers (the module-level `paytest_branch_id` /
+`paytest_driver_id` fixtures shadow the shared ones). The finalized history it
+deliberately creates therefore never reaches the shared PAYTEST branch, and a
+module-level fixture requires the owned branch to end with no mutable workflow
+period (Locked/Archived history is retained). Dates are not isolation.
+A module-scoped `locked_period_data` fixture creates one period, advances it to
 Approved, seeds lines, and finalizes it once for the whole module.
 
 Covered:
@@ -24,6 +28,7 @@ Covered:
 - PeriodSummary includes final_gross and final_driver_count after finalization
 """
 import datetime
+import uuid
 from decimal import Decimal
 
 import httpx
@@ -35,6 +40,11 @@ from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
     get_company_role_id,
+)
+from tests.ownership import (
+    assert_no_mutable_period_state,
+    cancel_active_branch_periods,
+    retire_branch_periods_directly,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,29 +87,6 @@ async def _activate_bonus(
                     headers=auth(token),
                 )
                 return
-
-
-async def _cancel_active_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    # CP-1A: only Draft and Open can be cancelled via PATCH.
-    headers = auth(token)
-    for s in ("Draft", "Open"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
-            )
 
 
 async def _advance_to_approved(
@@ -157,6 +144,55 @@ async def _advance_to_approved(
 # Session-scoped locked period fixture
 # ---------------------------------------------------------------------------
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Module-owned branch: retained Ledger finalized history stays off shared PAYTEST."""
+    marker = uuid.uuid4().hex
+    row = (await session_db_conn.execute(_sqla_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"LGR_{marker[:12]}", "name": f"Ledger owned branch {marker[:8]}"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Module-owned Driver on the module-owned branch (no approved rates)."""
+    marker = uuid.uuid4().hex
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": f"Ledger owned driver {marker}",
+            "driver_code": f"LGP-{marker[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"Create ledger owned driver failed: {resp.text}"
+    return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture(scope="module", autouse=True)
+async def ledger_terminal_state(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    session_db_conn,
+):
+    """Retained Locked/Archived history is legitimate; mutable workflow state is not."""
+    yield
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
+    await retire_branch_periods_directly(
+        session_db_conn, paytest_branch_id, retain_finalized_history=True,
+    )
+    await assert_no_mutable_period_state(session_db_conn, paytest_branch_id)
+
+
 @pytest_asyncio.fixture(scope="module")
 async def ledger_driver_id(
     session_client: httpx.AsyncClient,
@@ -168,8 +204,8 @@ async def ledger_driver_id(
         "/core/drivers",
         json={
             "branch_id": paytest_branch_id,
-            "full_name": "Ledger Isolated Driver",
-            "driver_code": "LID-0001",
+            "full_name": f"Ledger Isolated Driver {uuid.uuid4().hex[:8]}",
+            "driver_code": f"LID-{uuid.uuid4().hex[:10]}",
         },
         headers=auth(auth_token),
     )
@@ -198,7 +234,7 @@ async def locked_period_data(
     An approved HOURLY DriverRate ($25) is created for ledger_driver_id.
     """
     headers = auth(auth_token)
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
 
     # Create and approve an HOURLY rate ($25) for ledger_driver_id
     rate_resp = await session_client.post(
@@ -357,10 +393,13 @@ class TestLedgerPeriodList:
             ids = [p["payroll_period_id"] for p in resp.json()]
             assert draft_pid not in ids
         finally:
-            await session_client.patch(
+            cancelled = await session_client.patch(
                 f"/payroll/periods/{draft_pid}/status",
                 json={"status": "Cancelled"},
                 headers=auth(auth_token),
+            )
+            assert cancelled.status_code == 200, (
+                f"cleanup could not cancel Draft period {draft_pid}: {cancelled.text}"
             )
 
     @pytest.mark.asyncio
@@ -438,10 +477,13 @@ class TestLedgerPeriodList:
             assert resp.status_code == 200
             assert Decimal(str(resp.json().get("final_gross", "0"))) == Decimal("0")
         finally:
-            await session_client.patch(
+            cancelled = await session_client.patch(
                 f"/payroll/periods/{pid}/status",
                 json={"status": "Cancelled"},
                 headers=auth(auth_token),
+            )
+            assert cancelled.status_code == 200, (
+                f"cleanup could not cancel period {pid}: {cancelled.text}"
             )
 
 
@@ -804,7 +846,7 @@ class TestSysAdjFinalLines:
         is no cascade to approval-conflict checks in other modules.
         """
         headers = auth(auth_token)
-        await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+        await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
 
         # Create MinimumPay rule for ledger_driver_id: $500 minimum, Oct 2087 only
         rule_resp = await session_client.post(
@@ -820,7 +862,6 @@ class TestSysAdjFinalLines:
             headers=headers,
         )
         assert rule_resp.status_code == 201, f"Create pay rule failed: {rule_resp.text}"
-        rule_id = rule_resp.json()["driver_pay_rule_id"]
 
         # Insert Open period directly (CP-1D: POST requires existing Open; PATCH Draft→Open blocked).
         _r = (await direct_db.execute(
@@ -899,10 +940,6 @@ class TestSysAdjFinalLines:
         types = [line["line_type"] for line in fl_resp.json()]
         assert "SYS_MIN_TOPUP" in types, f"SYS_MIN_TOPUP missing; got types: {types}"
 
-        # Cleanup: void the pay rule via API.
-        # topup_rate_id stays referenced in PayrollFinalLines (Phase 5 guard would
-        # reject a void attempt), but ledger_driver_id isolation prevents contamination.
-        await session_client.delete(
-            f"/payroll/driver-pay-rules/{rule_id}",
-            headers=headers,
-        )
+        # The rule and topup_rate_id now govern a finalized period; like that
+        # period they are retained history on this module's owned Driver/Branch.
+        # Nothing here touches a shared root, so there is nothing to restore.

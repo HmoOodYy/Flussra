@@ -65,6 +65,8 @@ import psycopg2
 import pytest
 from sqlalchemy import text
 
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -155,27 +157,14 @@ async def _add_draft_line(
 
 
 async def _force_cancel(direct_db, pid: int) -> None:
-    """Force period to Cancelled — disables triggers for Locked/Archived rows."""
-    for trig, tbl in (
-        ("trg_final_line_immutable",    "payroll.payrollfinallines"),
-        ("trg_period_status_revert",    "payroll.payrollperiods"),
-    ):
+    """Force period to Cancelled -- suspends the finalized-history guards for Locked/Archived rows."""
+    async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
         await direct_db.execute(
-            text(f"ALTER TABLE {tbl} DISABLE TRIGGER {trig}")
-        )
-    await direct_db.execute(
-        text(
-            "UPDATE payroll.payrollperiods "
-            "SET status = 'Cancelled' WHERE payrollperiodid = :pid"
-        ),
-        {"pid": pid},
-    )
-    for trig, tbl in (
-        ("trg_final_line_immutable",    "payroll.payrollfinallines"),
-        ("trg_period_status_revert",    "payroll.payrollperiods"),
-    ):
-        await direct_db.execute(
-            text(f"ALTER TABLE {tbl} ENABLE TRIGGER {trig}")
+            text(
+                "UPDATE payroll.payrollperiods "
+                "SET status = 'Cancelled' WHERE payrollperiodid = :pid"
+            ),
+            {"pid": pid},
         )
 
 

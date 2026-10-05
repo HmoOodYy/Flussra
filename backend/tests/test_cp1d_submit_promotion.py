@@ -28,6 +28,7 @@ import uuid
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
@@ -37,6 +38,26 @@ from app.payroll_setup.payroll_policy import (
     create_setup,
     publish_version,
 )
+from tests.builders.owned_scope import (
+    activate_paytest_equivalent_items,
+    create_owned_branch,
+    create_owned_driver,
+)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
+    """Module-owned branch standing in for PAYTEST: this module's workflow state
+    (periods it submits, approves or leaves behind) never reaches another module."""
+    branch_id = await create_owned_branch(session_db_conn, "C1D", "CP1D owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+    """Module-owned Driver on the module-owned branch."""
+    return await create_owned_driver(session_client, auth_token, paytest_branch_id, "CP1D")
 
 # ---------------------------------------------------------------------------
 # Helpers

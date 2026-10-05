@@ -22,6 +22,11 @@ from sqlalchemy import text as _text
 
 from app.cdpi import service as cdpi_service
 from app.cdpi.schemas import CdpiRequestCreate, CdpiRequestUpdate
+from tests.db_state import (
+    CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER,
+    replica_replication_role,
+    suspended_test_triggers,
+)
 
 # ===========================================================================
 # Shared DB helpers
@@ -116,17 +121,10 @@ async def _cleanup_role(db, role_id: int) -> None:
 async def _cleanup_requests(db, *request_ids) -> None:
     """Delete CDPI requests and their events safely."""
     for rid in request_ids:
-        await db.execute(
-            _text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL")
-        )
-        try:
+        async with suspended_test_triggers(db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
             await db.execute(
                 _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
                 {"rid": str(rid)},
-            )
-        finally:
-            await db.execute(
-                _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
             )
         await db.execute(
             _text("DELETE FROM payroll.cdpirequests WHERE requestid = :rid"),
@@ -792,8 +790,7 @@ class TestUpdateDraft:
         )
         try:
             # Suppress FK triggers for the forced-status setup only.
-            await direct_db.execute(_text("SET session_replication_role = replica"))
-            try:
+            async with replica_replication_role(direct_db):
                 await direct_db.execute(
                     _text("""
                         UPDATE payroll.cdpirequests
@@ -802,8 +799,6 @@ class TestUpdateDraft:
                     """),
                     {"rid": str(created.request_id)},
                 )
-            finally:
-                await direct_db.execute(_text("SET session_replication_role = DEFAULT"))
 
             with pytest.raises(HTTPException) as exc_info:
                 await cdpi_service.update_draft(
@@ -822,9 +817,8 @@ class TestUpdateDraft:
             assert row["revision"] == 1
         finally:
             # Suppress FK triggers again for cleanup (approvedpayitemid is set).
-            await direct_db.execute(_text("SET session_replication_role = replica"))
-            await _cleanup_requests(direct_db, created.request_id)
-            await direct_db.execute(_text("SET session_replication_role = DEFAULT"))
+            async with replica_replication_role(direct_db):
+                await _cleanup_requests(direct_db, created.request_id)
 
 
 # ===========================================================================

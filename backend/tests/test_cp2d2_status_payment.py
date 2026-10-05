@@ -27,6 +27,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -218,13 +220,13 @@ def _day_grid_body(driver_id: int, work_date: datetime.date, status_key: str | N
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture(scope="module")
-async def cp2d2_branch_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
-    resp = await session_client.get("/settings/branches", headers=_auth(auth_token))
-    assert resp.status_code == 200
-    for b in resp.json():
-        if b["branch_code"] == "PAYTEST":
-            return b["branch_id"]
-    raise AssertionError("PAYTEST branch not found")
+async def cp2d2_branch_id(
+    session_client: httpx.AsyncClient, auth_token: str, session_db_conn,
+) -> int:
+    """Module-owned branch: this module recycles its Open slot on every test."""
+    branch_id = await create_owned_branch(session_db_conn, "C2D2", "CP2D2 owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
 
 
 @pytest_asyncio.fixture(scope="module")

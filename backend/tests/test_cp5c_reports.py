@@ -25,6 +25,7 @@ from app.payroll.service import (
 )
 from tests.access_test_helpers import create_neutral_test_user
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.db_state import allow_final_line_insert
 
 _SECURITY_COUNTER = itertools.count(1)
 _REPORT_PATHS = ("drivers", "period-work", "period-pay", "mixed")
@@ -1294,17 +1295,17 @@ async def test_locked_and_archived_status_lines_classified_separately_from_pay_i
         period_id=period_id, company_id=1, branch_id=paytest_branch_id, start_date=date(2097, 1, 1), db=direct_db,
     )
     hours_id = await _pay_item_id(direct_db, period_id, "HOURS")
-    await direct_db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)"))
-    await direct_db.execute(text("""
-        INSERT INTO payroll.payrollfinallines
-            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-        VALUES
-            (1, :branch_id, :period_id, :driver_id, '2097-01-01', 'HOURS', 'Daily',
-             :hours_id, 2, 20.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2),
-            (1, :branch_id, :period_id, :driver_id, '2097-01-02', 'STATUS_PAY', 'Daily',
-             NULL, 1, 5.0000, 'StatusEntryState', 1, NOW(), NOW(), 'USD', 2)
-    """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": driver_id, "hours_id": hours_id})
+    async with allow_final_line_insert(direct_db):
+        await direct_db.execute(text("""
+            INSERT INTO payroll.payrollfinallines
+                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
+                 payitemid, quantity, finalamount, sourcetype, approvedbyuserid, approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
+            VALUES
+                (1, :branch_id, :period_id, :driver_id, '2097-01-01', 'HOURS', 'Daily',
+                 :hours_id, 2, 20.0000, 'DraftLine', 1, NOW(), NOW(), 'USD', 2),
+                (1, :branch_id, :period_id, :driver_id, '2097-01-02', 'STATUS_PAY', 'Daily',
+                 NULL, 1, 5.0000, 'StatusEntryState', 1, NOW(), NOW(), 'USD', 2)
+        """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": driver_id, "hours_id": hours_id})
     await direct_db.commit()
     for name in ("drivers", "period-pay", "mixed"):
         response = await _report(session_client, auth_token, period_id, name)

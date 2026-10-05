@@ -3,7 +3,11 @@ CP-2.5 — Period-level Drivers Off endpoint tests.
 
 Tests for GET /payroll/periods/{period_id}/drivers-off
 
-Uses year 2084 dates to avoid conflicts with existing test modules.
+This module owns its Branch and Driver (the module-level `paytest_branch_id` /
+`paytest_driver_id` fixtures below shadow the shared ones), so it never lists,
+cancels or mutates another module's periods; dates are not isolation. Cleanup
+failures fail the test, and an autouse fixture requires the owned branch to end
+every test with no mutable workflow period.
 Status keys are inserted per-test (function-scoped direct_db) because the
 seed data does not include PayrollStatusKeys rows.
 
@@ -19,9 +23,11 @@ and is unrelated to this unit.
 import itertools
 from datetime import date as _date
 from datetime import timedelta as _timedelta
+from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import (
@@ -29,6 +35,12 @@ from tests.builders.access import (
     create_user_with_role_token,
     get_company_role_id,
 )
+from tests.db_state import (
+    PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS,
+    allow_final_line_insert,
+    suspended_test_triggers,
+)
+from tests.ownership import assert_no_mutable_period_state, cancel_active_branch_periods
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,26 +50,56 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _cancel_active_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
-            )
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Module-owned branch for Drivers-Off scenarios."""
+    row = (await session_db_conn.execute(_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"C25_{uuid4().hex}", "name": "CP25 Drivers Off isolated"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Module-owned Driver on the module-owned branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "CP25 Isolated Driver",
+            "driver_code": f"C25-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"CP25 driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _owned_branch_ends_without_mutable_periods(
+    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
+):
+    yield
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
+    await assert_no_mutable_period_state(direct_db, paytest_branch_id)
+
+
+async def _cancel_period(client: httpx.AsyncClient, token: str, period_id: int) -> None:
+    """Cancel one Open test period through the API; a refusal fails the test."""
+    cancelled = await client.patch(
+        f"/payroll/periods/{period_id}/status",
+        json={"status": "Cancelled"},
+        headers=auth(token),
+    )
+    assert cancelled.status_code == 200, (
+        f"cleanup could not cancel period {period_id}: {cancelled.text}"
+    )
 
 
 async def _insert_open_period_direct(
@@ -106,7 +148,7 @@ async def _make_open_period(
     end: str,
     direct_db,
 ) -> dict:
-    await _cancel_active_periods(client, token, branch_id)
+    await cancel_active_branch_periods(client, token, branch_id)
     company_id = await _get_company_id(direct_db)
     return await _insert_open_period_direct(direct_db, company_id, branch_id, start, end)
 
@@ -282,11 +324,7 @@ class TestDriversOff:
             assert data["total_count"] >= 2
 
         finally:
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Cancelled"},
-                headers=auth(auth_token),
-            )
+            await _cancel_period(session_client, auth_token, pid)
             await _delete_status_key(direct_db, sk_id)
 
     @pytest.mark.asyncio
@@ -351,11 +389,7 @@ class TestDriversOff:
             assert off_code in codes, "Real off code must appear"
 
         finally:
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Cancelled"},
-                headers=auth(auth_token),
-            )
+            await _cancel_period(session_client, auth_token, pid)
             await _delete_status_key(direct_db, sk_id)
 
     @pytest.mark.asyncio
@@ -404,11 +438,7 @@ class TestDriversOff:
             assert entry["notes"] == note_text
 
         finally:
-            await session_client.patch(
-                f"/payroll/periods/{pid}/status",
-                json={"status": "Cancelled"},
-                headers=auth(auth_token),
-            )
+            await _cancel_period(session_client, auth_token, pid)
             await _delete_status_key(direct_db, sk_id)
 
     @pytest.mark.asyncio
@@ -437,11 +467,7 @@ class TestDriversOff:
         assert data["total_count"] == 0
 
         # Cleanup
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=auth(auth_token),
-        )
+        await _cancel_period(session_client, auth_token, pid)
 
     @pytest.mark.asyncio
     async def test_drivers_off_oda_blocked(
@@ -472,11 +498,7 @@ class TestDriversOff:
         assert "entries" not in body
 
         # Cleanup
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=auth(auth_token),
-        )
+        await _cancel_period(session_client, auth_token, pid)
 
     @pytest.mark.asyncio
     async def test_drivers_off_requires_payroll_view(
@@ -509,11 +531,7 @@ class TestDriversOff:
         assert resp.status_code == 403
 
         # Cleanup
-        await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Cancelled"},
-            headers=auth(auth_token),
-        )
+        await _cancel_period(session_client, auth_token, pid)
 
     @pytest.mark.asyncio
     async def test_drivers_off_respects_period_scope(
@@ -546,11 +564,7 @@ class TestDriversOff:
         )
 
         # Cancel period A, then create period B
-        await session_client.patch(
-            f"/payroll/periods/{pid_a}/status",
-            json={"status": "Cancelled"},
-            headers=auth(auth_token),
-        )
+        await _cancel_period(session_client, auth_token, pid_a)
         period_b = await _make_open_period(
             session_client, auth_token, paytest_branch_id,
             "2084-02-22", "2084-02-28", direct_db,
@@ -571,11 +585,7 @@ class TestDriversOff:
             )
 
         finally:
-            await session_client.patch(
-                f"/payroll/periods/{pid_b}/status",
-                json={"status": "Cancelled"},
-                headers=auth(auth_token),
-            )
+            await _cancel_period(session_client, auth_token, pid_b)
             await _delete_status_key(direct_db, sk_id)
 
 
@@ -606,23 +616,7 @@ async def _clean_finalized(direct_db, branch_id: int) -> None:
         {"branch_id": branch_id},
     )).scalars().all()
     if period_ids:
-        guards = [
-            ("payroll.payrollfinallines", "trg_final_line_immutable"),
-            ("payroll.payrollcalculationsnapshotlines", "trg_PayrollCalculationSnapshotLines_Immutable"),
-            ("payroll.payrollperiodauditevidencesnapshotevents", "trg_PayrollPeriodAuditEvidenceSnapshotEvents_Immutable"),
-            ("payroll.payrollperiodauditevidenceevents", "trg_PayrollPeriodAuditEvidenceEvents_Immutable"),
-            ("payroll.payrollperiodauditevidencecoverage", "trg_PayrollPeriodAuditEvidenceCoverage_Immutable"),
-            ("payroll.payrollcalculationsnapshotusedratedefinitions", "trg_PayrollCalculationSnapshotUsedRateDefinitions_Immutable"),
-            ("payroll.payrollcalculationdrivertotals", "trg_PayrollCalculationDriverTotals_Immutable"),
-            ("payroll.payrollcalculationsnapshotstatusentries", "trg_PayrollCalculationSnapshotStatusEntries_Immutable"),
-            ("payroll.payrollcalculationsnapshotbonusevents", "trg_PayrollCalculationSnapshotBonusEvents_Immutable"),
-            ("payroll.payrollperiodworkflowactionevidence", "trg_PayrollPeriodWorkflowActionEvidence_Immutable"),
-            ("payroll.payrollcalculationsnapshots", "trg_PayrollCalculationSnapshots_Immutable"),
-            ("payroll.payrollperiods", "trg_PayrollPeriods_AuditEvidenceDelete"),
-        ]
-        for table, trigger in guards:
-            await direct_db.execute(_text(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
-        try:
+        async with suspended_test_triggers(direct_db, PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS):
             snapshot_subq = (
                 "(SELECT payrollcalculationsnapshotid FROM payroll.payrollcalculationsnapshots "
                 "WHERE payrollperiodid = ANY(:ids))"
@@ -658,9 +652,6 @@ async def _clean_finalized(direct_db, branch_id: int) -> None:
                 "DELETE FROM payroll.payrollperiods WHERE payrollperiodid = ANY(:ids)",
             ):
                 await direct_db.execute(_text(stmt), {"ids": period_ids})
-        finally:
-            for table, trigger in reversed(guards):
-                await direct_db.execute(_text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
     await direct_db.execute(
         _text("DELETE FROM payroll.payrollstatuskeys WHERE branchid = :branch_id AND statuscode LIKE 'CP25FIN_%'"),
         {"branch_id": branch_id},
@@ -902,27 +893,25 @@ class TestDriversOffFinalized:
         await _insert_approved_review_item(
             direct_db, company_id, paytest_branch_id, period_id, snapshot_id,
         )
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                     linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                     approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                        'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
-            """),
-            {
-                "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
-                "wdate": start,
-                "snap": (
-                    f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
-                    f'"snapshot_hash": "{"4" * 64}"}}'
-                ),
-            },
-        )
+        async with allow_final_line_insert(direct_db):
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
+                """),
+                {
+                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "wdate": start,
+                    "snap": (
+                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                        f'"snapshot_hash": "{"4" * 64}"}}'
+                    ),
+                },
+            )
         await direct_db.commit()
 
         try:
@@ -970,27 +959,25 @@ class TestDriversOffFinalized:
         await _insert_approved_review_item(
             direct_db, company_id, paytest_branch_id, period_id, snapshot_id,
         )
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                     linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                     approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                        'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
-            """),
-            {
-                "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
-                "wdate": start,
-                "snap": (
-                    f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
-                    f'"snapshot_hash": "{"5" * 64}"}}'
-                ),
-            },
-        )
+        async with allow_final_line_insert(direct_db):
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
+                """),
+                {
+                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "wdate": start,
+                    "snap": (
+                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                        f'"snapshot_hash": "{"5" * 64}"}}'
+                    ),
+                },
+            )
         await direct_db.commit()
 
         try:
@@ -1017,23 +1004,21 @@ class TestDriversOffFinalized:
         period_id, start = await _insert_finalized_period(
             direct_db, company_id, paytest_branch_id, "NOPROV", status="Locked",
         )
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                     linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                     approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                        'DraftLine', 1, NOW(), NOW(), 'USD', 2)
-            """),
-            {
-                "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
-                "wdate": start,
-            },
-        )
+        async with allow_final_line_insert(direct_db):
+            await direct_db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                         approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                            'DraftLine', 1, NOW(), NOW(), 'USD', 2)
+                """),
+                {
+                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "wdate": start,
+                },
+            )
         await direct_db.commit()
 
         try:

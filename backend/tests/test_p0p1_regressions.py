@@ -17,7 +17,34 @@ from uuid import uuid4
 import httpx
 import psycopg2
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
+
+from tests.builders.owned_scope import (
+    activate_paytest_equivalent_items,
+    create_owned_branch,
+    create_owned_driver,
+)
+from tests.db_state import (
+    FINAL_LINE_IMMUTABLE_TRIGGER,
+    allow_final_line_insert,
+    suspended_test_triggers,
+)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
+    """Module-owned branch standing in for PAYTEST: this module's workflow state
+    (periods it submits, approves or leaves behind) never reaches another module."""
+    branch_id = await create_owned_branch(session_db_conn, "P0P", "P0P1 owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+    """Module-owned Driver on the module-owned branch."""
+    return await create_owned_driver(session_client, auth_token, paytest_branch_id, "P0P1")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -649,19 +676,17 @@ class TestDriverPayRulesArchivedProtection:
 
         # Phase 6: authorise this test-setup INSERT via the session-level GUC.
         # is_local=false (third arg) persists for this AUTOCOMMIT connection session.
-        await direct_db.execute(
-            text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
-            """),
-            {"cid": company_id, "bid": paytest_branch_id,
-             "pid": arch_pid, "did": owned_driver_id},
-        )
+        async with allow_final_line_insert(direct_db):
+            await direct_db.execute(
+                text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid,
+                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
+                """),
+                {"cid": company_id, "bid": paytest_branch_id,
+                 "pid": arch_pid, "did": owned_driver_id},
+            )
 
         try:
             # Void must be blocked because Archived period was governed by the rule
@@ -673,18 +698,11 @@ class TestDriverPayRulesArchivedProtection:
             assert "finalized" in void_resp.json()["detail"].lower() or \
                    "governed" in void_resp.json()["detail"].lower()
         finally:
-            await direct_db.execute(text(
-                "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-            ))
-            try:
+            async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
                 await direct_db.execute(
                     text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
                     {"pid": arch_pid},
                 )
-            finally:
-                await direct_db.execute(text(
-                    "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-                ))
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},
@@ -738,19 +756,17 @@ class TestDriverPayRulesArchivedProtection:
         arch_pid = p_result.scalar_one()
 
         # Phase 6: authorise this test-setup INSERT via the session-level GUC.
-        await direct_db.execute(
-            text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
-            """),
-            {"cid": company_id, "bid": paytest_branch_id,
-             "pid": arch_pid, "did": owned_driver_id},
-        )
+        async with allow_final_line_insert(direct_db):
+            await direct_db.execute(
+                text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid,
+                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
+                """),
+                {"cid": company_id, "bid": paytest_branch_id,
+                 "pid": arch_pid, "did": owned_driver_id},
+            )
 
         try:
             # Try to end rule before the archived period start — must be blocked
@@ -761,18 +777,11 @@ class TestDriverPayRulesArchivedProtection:
             )
             assert end_resp.status_code == 422
         finally:
-            await direct_db.execute(text(
-                "ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable"
-            ))
-            try:
+            async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
                 await direct_db.execute(
                     text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
                     {"pid": arch_pid},
                 )
-            finally:
-                await direct_db.execute(text(
-                    "ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable"
-                ))
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},

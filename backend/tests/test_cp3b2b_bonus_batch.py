@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.access_test_helpers import create_provisioned_test_user
 from tests.builders.access import get_company_role_id
+from tests.db_state import PERIOD_STATUS_REVERT_TRIGGER, suspended_test_triggers
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -94,33 +95,23 @@ async def _insert_period_db(
 
 
 async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', "
-              "currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
-        {"pid": period_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(db, [PERIOD_STATUS_REVERT_TRIGGER]):
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled', "
+                  "currentreturnreviewitemid = NULL WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )
     await db.commit()
 
 
 async def _force_status_db(db: AsyncConnection, period_id: int, status: str) -> None:
     """Force a period into an arbitrary status directly (bypassing the
     transition graph) for read-only lifecycle-guard tests."""
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = :s WHERE payrollperiodid = :pid"),
-        {"s": status, "pid": period_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(db, [PERIOD_STATUS_REVERT_TRIGGER]):
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = :s WHERE payrollperiodid = :pid"),
+            {"s": status, "pid": period_id},
+        )
     await db.commit()
 
 

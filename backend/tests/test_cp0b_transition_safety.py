@@ -21,7 +21,11 @@ Race/stale simulation approach:
   get_period_by_id, creating a deterministic race window: pre-flight read returns
   old_status, psycopg2 commits a different status, PATCH UPDATE finds 0 rows.
 
-Dates: 2091-* — isolated year, avoids conflicts with other test modules.
+Isolation: this module owns its Branch (the module-level `paytest_branch_id` shadows
+the shared one), and a module-level fixture retires every period it leaves, including
+the terminal Locked/Archived ones it forces. Those carry no FinalLines or snapshot
+evidence, so company-wide finalized listings (`GET /payroll/finalized`) fail on them
+if they survive. Dates are not isolation.
 Run from backend/:
     python -m pytest tests/test_cp0b_transition_safety.py -v
 """
@@ -32,7 +36,27 @@ import itertools
 import httpx
 import psycopg2
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
+
+from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+from tests.ownership import retire_branch_periods_directly
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
+    """Module-owned branch standing in for PAYTEST."""
+    branch_id = await create_owned_branch(session_db_conn, "C0B", "CP0B owned branch")
+    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
+    return branch_id
+
+
+@pytest_asyncio.fixture(scope="module", autouse=True)
+async def cp0b_terminal_state(paytest_branch_id: int, session_db_conn):
+    """Retire what this module leaves; fails if any mutable workflow period remains."""
+    yield
+    await retire_branch_periods_directly(session_db_conn, paytest_branch_id)
+
 
 # ---------------------------------------------------------------------------
 # Helpers

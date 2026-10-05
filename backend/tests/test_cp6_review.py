@@ -29,6 +29,7 @@ from tests.builders.access import (
     create_user_with_role_token,
     get_company_role_id,
 )
+from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 from tests.ownership import delete_period_and_children, delete_user_access_state
 
 # ---------------------------------------------------------------------------
@@ -378,23 +379,12 @@ async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
               "WHERE branchid = :bid AND status = 'Returned'"),
         {"bid": branch_id},
     )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-    )
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-    )
+    async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):
+        await direct_db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                  "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
+            {"bid": branch_id},
+        )
 
 
 @pytest_asyncio.fixture

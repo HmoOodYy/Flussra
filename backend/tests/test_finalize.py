@@ -29,6 +29,7 @@ from sqlalchemy import text as _sqla_text
 # resolves it as a bare name through that module's own globals — patching
 # app.payroll.service no longer intercepts it.
 from app.payroll import finalization as payroll_service
+from tests.ownership import cancel_active_branch_periods, retire_branch_periods_directly
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -70,67 +71,9 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _cancel_active_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    # CP-1A: only Draft and Open can be cancelled via PATCH.
-    headers = auth(token)
-    for s in ("Draft", "Open"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
-                headers=headers,
-            )
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-async def _force_cancel_locked_periods(direct_db, branch_id: int) -> None:
-    """Cancel Locked/Archived/InReview/Approved/Returned periods bypassing blocked PATCH paths."""
-    from sqlalchemy import text as _text
-    # CP-1A: InReview and Approved cannot be cancelled via PATCH; use direct DB.
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('InReview', 'Approved')"),
-        {"bid": branch_id},
-    )
-    # Returned: must clear CurrentReturnReviewItemID first (pointer-consistency CHECK).
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods "
-              "SET status = 'Cancelled', currentreturnreviewitemid = NULL "
-              "WHERE branchid = :bid AND status = 'Returned'"),
-        {"bid": branch_id},
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollfinallines DISABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert")
-    )
-    await direct_db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE branchid = :bid AND status IN ('Locked', 'Archived')"),
-        {"bid": branch_id},
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollfinallines ENABLE TRIGGER trg_final_line_immutable")
-    )
-    await direct_db.execute(
-        _text("ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert")
-    )
-
 
 @pytest_asyncio.fixture
 async def paytest_clean(
@@ -139,13 +82,13 @@ async def paytest_clean(
     paytest_branch_id: int,
     direct_db,
 ):
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
     # Force-cancel any Locked/Archived periods left by previous tests
-    await _force_cancel_locked_periods(direct_db, paytest_branch_id)
+    await retire_branch_periods_directly(direct_db, paytest_branch_id)
     yield paytest_branch_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
     # Force-cancel any Locked/Archived periods created during this test
-    await _force_cancel_locked_periods(direct_db, paytest_branch_id)
+    await retire_branch_periods_directly(direct_db, paytest_branch_id)
 
 
 async def _advance_to_approved(
@@ -736,7 +679,7 @@ class TestFinalizePeriod:
 
         # Cleanup: the period is Locked; bypass immutability triggers to cancel it
         # so subsequent tests can reuse the same branch/date-range.
-        await _force_cancel_locked_periods(direct_db, paytest_clean)
+        await retire_branch_periods_directly(direct_db, paytest_clean)
 
 
 # ---------------------------------------------------------------------------

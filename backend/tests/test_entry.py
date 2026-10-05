@@ -9,14 +9,19 @@ Integration tests for draft-line (entry) endpoints:
 
 Test isolation
 --------------
-All mutable tests use the PAYTEST branch (via the `open_period` fixture).
-`open_period` wraps `fresh_period` (from test_payroll.py / conftest) and
-transitions the Draft period to Open so that entry is allowed.
-`paytest_driver_id` (session-scoped, from conftest) gives us a valid driver
-on the PAYTEST branch for every test that needs to POST a line.
+This module owns its Branch and Driver: the module-level `paytest_branch_id` /
+`paytest_driver_id` fixtures shadow the shared ones, so no other module's periods
+are ever listed, cancelled or mutated here. Each test seeds its own Draft/Open
+period; teardown retires it and fails if any mutable workflow period remains on
+the owned branch.
 """
+from uuid import uuid4
+
 import httpx
 import pytest_asyncio
+from sqlalchemy import text as _sqla_text
+
+from tests.ownership import cancel_active_branch_periods, retire_branch_periods_directly
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (copied pattern from test_payroll.py)
@@ -26,25 +31,62 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _cancel_active_periods(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
+@pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(session_db_conn) -> int:
+    """Module-owned branch: draft-line tests never touch another module's periods."""
+    row = (await session_db_conn.execute(_sqla_text("""
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
+        VALUES (1, :code, :name, 'Active', FALSE)
+        RETURNING branchid
+    """), {"code": f"ENT_{uuid4().hex}", "name": "Entry isolated"})).scalar_one()
+    return int(row)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_id(
+    session_client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+) -> int:
+    """Module-owned Driver on the module-owned branch."""
+    resp = await session_client.post(
+        "/core/drivers",
+        json={
+            "branch_id": paytest_branch_id,
+            "full_name": "Entry Isolated Driver",
+            "driver_code": f"ENT-D-{uuid4().hex[:10]}",
+        },
+        headers=auth(auth_token),
+    )
+    assert resp.status_code == 201, f"Entry driver seed failed: {resp.text}"
+    return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def entry_items_activated(
+    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
 ) -> None:
-    headers = auth(token)
-    for s in ("Draft", "Open", "InReview", "Approved"):
-        resp = await client.get(
-            "/payroll/periods",
-            params={"branch_id": branch_id, "status": s},
-            headers=headers,
-        )
-        if resp.status_code != 200:
-            continue
-        for p in resp.json():
-            await client.patch(
-                f"/payroll/periods/{p['payroll_period_id']}/status",
-                json={"status": "Cancelled"},
+    """Activate, on this module's owned branch, the pay items its line types need.
+
+    The shared `activate_paytest_system_items` fixture activates items on whichever
+    `paytest_branch_id` the first requesting module resolves, so an owned branch can
+    never rely on it.
+    """
+    headers = auth(auth_token)
+    items = await session_client.get(
+        f"/settings/branches/{paytest_branch_id}/pay-items", headers=headers,
+    )
+    assert items.status_code == 200, items.text
+    wanted = {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS", "HOURS", "MILES"}
+    for item in items.json():
+        if item["pay_item_code"] in wanted:
+            activated = await session_client.patch(
+                f"/settings/branches/{paytest_branch_id}/pay-items/{item['pay_item_id']}",
+                json={"is_active": True},
                 headers=headers,
+            )
+            assert activated.status_code == 200, (
+                f"activating {item['pay_item_code']} failed: {activated.text}"
             )
 
 
@@ -57,11 +99,14 @@ async def paytest_clean(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
+    direct_db,
 ):
-    """Cancel any active PAYTEST periods before and after the test."""
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    """Retire this module's periods before and after each test."""
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
+    await retire_branch_periods_directly(direct_db, paytest_branch_id)
     yield paytest_branch_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id)
+    await cancel_active_branch_periods(session_client, auth_token, paytest_branch_id)
+    await retire_branch_periods_directly(direct_db, paytest_branch_id)
 
 
 @pytest_asyncio.fixture
@@ -71,7 +116,7 @@ async def fresh_period(
     paytest_clean: int,
     direct_db,
 ) -> dict:
-    """Create a Draft period on PAYTEST; return its response dict."""
+    """Create a Draft period on the module-owned branch; return its response dict."""
     from sqlalchemy import text as _text
     row = (await direct_db.execute(
         _text("""

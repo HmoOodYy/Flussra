@@ -46,6 +46,12 @@ from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.db_state import (
+    PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS,
+    allow_final_line_insert,
+    suspended_test_triggers,
+)
+
 # ---------------------------------------------------------------------------
 # Shared helpers / constants
 # ---------------------------------------------------------------------------
@@ -105,23 +111,7 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
     # (table, trigger) pairs, in the exact order each table's DELETE below
     # needs its own guard disabled. All names verified against migrations
     # 0035 (final_line_immutable) and 0061/0063/0064/0065 (everything else).
-    guards = [
-        ("payroll.payrollfinallines", "trg_final_line_immutable"),
-        ("payroll.payrollcalculationsnapshotlines", "trg_PayrollCalculationSnapshotLines_Immutable"),
-        ("payroll.payrollperiodauditevidencesnapshotevents", "trg_PayrollPeriodAuditEvidenceSnapshotEvents_Immutable"),
-        ("payroll.payrollperiodauditevidenceevents", "trg_PayrollPeriodAuditEvidenceEvents_Immutable"),
-        ("payroll.payrollperiodauditevidencecoverage", "trg_PayrollPeriodAuditEvidenceCoverage_Immutable"),
-        ("payroll.payrollcalculationsnapshotusedratedefinitions", "trg_PayrollCalculationSnapshotUsedRateDefinitions_Immutable"),
-        ("payroll.payrollcalculationdrivertotals", "trg_PayrollCalculationDriverTotals_Immutable"),
-        ("payroll.payrollcalculationsnapshotstatusentries", "trg_PayrollCalculationSnapshotStatusEntries_Immutable"),
-        ("payroll.payrollcalculationsnapshotbonusevents", "trg_PayrollCalculationSnapshotBonusEvents_Immutable"),
-        ("payroll.payrollperiodworkflowactionevidence", "trg_PayrollPeriodWorkflowActionEvidence_Immutable"),
-        ("payroll.payrollcalculationsnapshots", "trg_PayrollCalculationSnapshots_Immutable"),
-        ("payroll.payrollperiods", "trg_PayrollPeriods_AuditEvidenceDelete"),
-    ]
-    for table, trigger in guards:
-        await db.execute(_text(f"ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
-    try:
+    async with suspended_test_triggers(db, PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS):
         period_subq = "(SELECT payrollperiodid FROM payroll.payrollperiods WHERE branchid = :bid)"
         snapshot_subq = (
             "(SELECT payrollcalculationsnapshotid FROM payroll.payrollcalculationsnapshots "
@@ -218,9 +208,6 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
             "DELETE FROM payroll.payrollperiods WHERE branchid = :bid",
         ):
             await db.execute(_text(stmt), {"bid": branch_id})
-    finally:
-        for table, trigger in reversed(guards):
-            await db.execute(_text(f"ALTER TABLE {table} ENABLE TRIGGER {trigger}"))
     await db.commit()
 
 
@@ -1258,27 +1245,25 @@ class TestCp2dCanonicalEntryState:
             await _insert_approved_review_item(
                 direct_db, _COMPANY_ID, ces_branch_id, pid, snapshot_id,
             )
-            await direct_db.execute(
-                _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-            )
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
-                """),
-                {
-                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
-                    "wdate": start,
-                    "snap": (
-                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
-                        f'"snapshot_hash": "{"1" * 64}"}}'
-                    ),
-                },
-            )
+            async with allow_final_line_insert(direct_db):
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.payrollfinallines
+                            (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                             linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                             approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
+                        VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                                'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
+                    """),
+                    {
+                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                        "wdate": start,
+                        "snap": (
+                            f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                            f'"snapshot_hash": "{"1" * 64}"}}'
+                        ),
+                    },
+                )
             await direct_db.commit()
 
             r = await session_client.get(
@@ -1343,27 +1328,25 @@ class TestCp2dCanonicalEntryState:
             await _insert_approved_review_item(
                 direct_db, _COMPANY_ID, ces_branch_id, pid, snapshot_id,
             )
-            await direct_db.execute(
-                _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-            )
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
-                """),
-                {
-                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
-                    "wdate": start,
-                    "snap": (
-                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
-                        f'"snapshot_hash": "{"2" * 64}"}}'
-                    ),
-                },
-            )
+            async with allow_final_line_insert(direct_db):
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.payrollfinallines
+                            (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                             linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                             approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
+                        VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                                'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
+                    """),
+                    {
+                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                        "wdate": start,
+                        "snap": (
+                            f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
+                            f'"snapshot_hash": "{"2" * 64}"}}'
+                        ),
+                    },
+                )
             await direct_db.commit()
 
             r = await session_client.get(
@@ -1411,23 +1394,21 @@ class TestCp2dCanonicalEntryState:
                 _text("UPDATE payroll.payrollperiods SET status = 'Locked' WHERE payrollperiodid = :pid"),
                 {"pid": pid},
             )
-            await direct_db.execute(
-                _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-            )
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), 'USD', 2)
-                """),
-                {
-                    "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
-                    "wdate": start,
-                },
-            )
+            async with allow_final_line_insert(direct_db):
+                await direct_db.execute(
+                    _text("""
+                        INSERT INTO payroll.payrollfinallines
+                            (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                             linescope, quantity, finalamount, sourcetype, approvedbyuserid,
+                             approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
+                        VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                                'DraftLine', 1, NOW(), NOW(), 'USD', 2)
+                    """),
+                    {
+                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                        "wdate": start,
+                    },
+                )
             await direct_db.commit()
 
             r = await session_client.get(

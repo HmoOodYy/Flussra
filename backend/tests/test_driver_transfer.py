@@ -13,9 +13,15 @@ import random
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import create_provisioned_test_user
+from tests.db_state import (
+    FINAL_LINE_IMMUTABLE_TRIGGER,
+    allow_final_line_insert,
+    suspended_test_triggers,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,6 +98,98 @@ async def _get_any_rate_type_id(direct_db) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Exact-owned child state on the session-shared HQ period.
+#
+# A fresh Driver does not isolate a shared Period: lines attached to it are
+# visible to every later test that reads that Period. Lines are therefore
+# inserted through this tracker, which deletes exactly the rows it inserted
+# (asserting each delete happened and nothing remains) when the test ends.
+# ---------------------------------------------------------------------------
+
+class _OwnedPeriodLines:
+    def __init__(self, direct_db):
+        self._db = direct_db
+        self.draft_line_ids: list[int] = []
+        self.final_line_ids: list[int] = []
+
+    async def add_draft_line(
+        self, company_id: int, branch_id: int, period_id: int, driver_id: int, source: str,
+    ) -> int:
+        line_id = (await self._db.execute(
+            _text("""
+                INSERT INTO payroll.payrolldraftlines
+                    (companyid, branchid, payrollperiodid, driverid,
+                     linetype, quantity, sourcetype)
+                VALUES (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, :source)
+                RETURNING draftlineid
+            """),
+            {"cid": company_id, "bid": branch_id, "period_id": period_id,
+             "driver_id": driver_id, "source": source},
+        )).scalar_one()
+        self.draft_line_ids.append(line_id)
+        return line_id
+
+    async def add_final_line(
+        self, company_id: int, branch_id: int, period_id: int, driver_id: int, source: str,
+    ) -> int:
+        # Phase 6: direct FinalLine setup is authorised by a GUC that is
+        # revoked as soon as the INSERT returns.
+        async with allow_final_line_insert(self._db):
+            line_id = (await self._db.execute(
+                _text("""
+                    INSERT INTO payroll.payrollfinallines
+                        (companyid, branchid, payrollperiodid, driverid,
+                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
+                    VALUES (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 100, :source, 'USD', 2)
+                    RETURNING finallineid
+                """),
+                {"cid": company_id, "bid": branch_id, "period_id": period_id,
+                 "driver_id": driver_id, "source": source},
+            )).scalar_one()
+        self.final_line_ids.append(line_id)
+        return line_id
+
+    async def remove_all(self) -> None:
+        if self.final_line_ids:
+            async with suspended_test_triggers(self._db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
+                deleted = await self._db.execute(
+                    _text("DELETE FROM payroll.payrollfinallines WHERE finallineid = ANY(:ids)"),
+                    {"ids": self.final_line_ids},
+                )
+            assert deleted.rowcount == len(self.final_line_ids), (
+                f"expected to delete FinalLines {self.final_line_ids}, deleted {deleted.rowcount}"
+            )
+        if self.draft_line_ids:
+            deleted = await self._db.execute(
+                _text("DELETE FROM payroll.payrolldraftlines WHERE draftlineid = ANY(:ids)"),
+                {"ids": self.draft_line_ids},
+            )
+            assert deleted.rowcount == len(self.draft_line_ids), (
+                f"expected to delete DraftLines {self.draft_line_ids}, deleted {deleted.rowcount}"
+            )
+        residue = (await self._db.execute(
+            _text("""
+                SELECT
+                    (SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE draftlineid = ANY(:dids)) AS drafts,
+                    (SELECT COUNT(*) FROM payroll.payrollfinallines WHERE finallineid = ANY(:fids)) AS finals
+            """),
+            {"dids": self.draft_line_ids, "fids": self.final_line_ids},
+        )).mappings().one()
+        assert all(value == 0 for value in residue.values()), (
+            f"Driver Transfer test lines survived exact cleanup: {dict(residue)}"
+        )
+
+
+@pytest_asyncio.fixture
+async def owned_lines(direct_db):
+    lines = _OwnedPeriodLines(direct_db)
+    try:
+        yield lines
+    finally:
+        await lines.remove_all()
+
+
+# ---------------------------------------------------------------------------
 # Helper: create a fresh driver user on a branch, return (user_id, driver_id)
 # ---------------------------------------------------------------------------
 
@@ -154,6 +252,7 @@ class TestDriverBranchReassignment:
         paytest_branch_id: int,
         direct_db,
         created_period_id: int,
+        owned_lines,
     ):
         """Driver with DraftLines returns 422 when reassigned to another branch."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
@@ -163,20 +262,8 @@ class TestDriverBranchReassignment:
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
         # Inject a DraftLine for this driver (consistent branch)
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, sourcetype)
-                VALUES
-                    (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 'TransferTest')
-            """),
-            {
-                "cid": company_id,
-                "bid": hq_branch_id,
-                "period_id": created_period_id,
-                "driver_id": driver_id,
-            },
+        await owned_lines.add_draft_line(
+            company_id, hq_branch_id, created_period_id, driver_id, "TransferTest",
         )
 
         # Attempt reassignment → must fail with 422
@@ -204,6 +291,7 @@ class TestDriverBranchReassignment:
         paytest_branch_id: int,
         direct_db,
         created_period_id: int,
+        owned_lines,
     ):
         """Driver with FinalLines returns 422 when reassigned to another branch."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
@@ -212,24 +300,9 @@ class TestDriverBranchReassignment:
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
-        # Inject a FinalLine (Phase 6: authorise via session-level GUC for test setup)
-        await direct_db.execute(
-            _text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', false)")
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollfinallines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES
-                    (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 100, 'TransferTest', 'USD', 2)
-            """),
-            {
-                "cid": company_id,
-                "bid": hq_branch_id,
-                "period_id": created_period_id,
-                "driver_id": driver_id,
-            },
+        # Inject a FinalLine (Phase 6: authorised by a GUC that is revoked immediately)
+        await owned_lines.add_final_line(
+            company_id, hq_branch_id, created_period_id, driver_id, "TransferTest",
         )
 
         r = await _assign_driver_role(
@@ -332,6 +405,7 @@ class TestDriverBranchReassignment:
         paytest_branch_id: int,
         direct_db,
         created_period_id: int,
+        owned_lines,
     ):
         """422 detail explains that branch changes require Driver Transfer."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
@@ -340,20 +414,8 @@ class TestDriverBranchReassignment:
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, sourcetype)
-                VALUES
-                    (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 'MsgTest')
-            """),
-            {
-                "cid": company_id,
-                "bid": hq_branch_id,
-                "period_id": created_period_id,
-                "driver_id": driver_id,
-            },
+        await owned_lines.add_draft_line(
+            company_id, hq_branch_id, created_period_id, driver_id, "MsgTest",
         )
 
         r = await _assign_driver_role(

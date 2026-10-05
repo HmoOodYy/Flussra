@@ -25,6 +25,7 @@ from app.cdpi.schemas import (
     CdpiRequestUpdate,
     CdpiSubmitRequest,
 )
+from tests.db_state import CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER, suspended_test_triggers
 
 # ===========================================================================
 # Shared DB helpers (same pattern as test_cdpi_draft.py)
@@ -116,17 +117,10 @@ async def _cleanup_role(db, role_id: int) -> None:
 
 async def _cleanup_requests(db, *request_ids) -> None:
     for rid in request_ids:
-        await db.execute(
-            _text("ALTER TABLE payroll.cdpirequestevents DISABLE TRIGGER ALL")
-        )
-        try:
+        async with suspended_test_triggers(db, [CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER]):
             await db.execute(
                 _text("DELETE FROM payroll.cdpirequestevents WHERE requestid = :rid"),
                 {"rid": str(rid)},
-            )
-        finally:
-            await db.execute(
-                _text("ALTER TABLE payroll.cdpirequestevents ENABLE TRIGGER ALL")
             )
         await db.execute(
             _text("DELETE FROM payroll.cdpirequests WHERE requestid = :rid"),

@@ -25,6 +25,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.db_state import PERIOD_STATUS_REVERT_TRIGGER, suspended_test_triggers
+
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -99,17 +101,12 @@ async def _insert_period_db(
 
 
 async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER trg_period_status_revert"
-    ))
-    await db.execute(
-        _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
-              "WHERE payrollperiodid = :pid"),
-        {"pid": period_id},
-    )
-    await db.execute(_text(
-        "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER trg_period_status_revert"
-    ))
+    async with suspended_test_triggers(db, [PERIOD_STATUS_REVERT_TRIGGER]):
+        await db.execute(
+            _text("UPDATE payroll.payrollperiods SET status = 'Cancelled' "
+                  "WHERE payrollperiodid = :pid"),
+            {"pid": period_id},
+        )
     await db.commit()
 
 

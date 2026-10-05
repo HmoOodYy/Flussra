@@ -27,6 +27,12 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from tests.db_state import (
+    assert_trigger_fingerprints_equal,
+    preserve_test_guc_state,
+    read_trigger_fingerprint,
+)
+
 # Tests that need process configuration must never inherit a developer DSN or
 # secret. Database access itself remains owned by the testing.postgresql fixture.
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://test:test@127.0.0.1:1/test_configuration_only"
@@ -396,10 +402,24 @@ def test_database_url(apply_schema):
 
 @pytest_asyncio.fixture(scope="session")
 async def test_engine(test_database_url):
-    """One async SQLAlchemy engine/pool shared for the entire test session."""
+    """One async SQLAlchemy engine/pool shared for the entire test session.
+
+    It also owns the shared-database trigger sentinel. The baseline is read once
+    the schema and seed are complete; the comparison runs at teardown BEFORE the
+    engine is disposed. Every fixture that holds a connection from this engine
+    (test_app, session_db_conn, ...) depends on it, so pytest has already torn
+    them down by then, and pg_instance (which test_database_url depends on) is
+    still running. Any missing, extra or enable-state-changed trigger fails the
+    session.
+    """
     engine = create_async_engine(test_database_url, echo=False)
     try:
+        async with engine.connect() as conn:
+            baseline = await read_trigger_fingerprint(conn)
         yield engine
+        async with engine.connect() as conn:
+            final = await read_trigger_fingerprint(conn)
+        assert_trigger_fingerprints_equal(baseline, final)
     finally:
         await engine.dispose()
 
@@ -437,16 +457,22 @@ async def db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
     Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
     async with test_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
-        yield conn
+        async with preserve_test_guc_state(conn):
+            yield conn
 
 
 @pytest_asyncio.fixture(scope="session")
 async def session_db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
     """Session-scoped raw AsyncConnection for seeding in session-scoped tests.
-    Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
+    Uses AUTOCOMMIT so inserts are immediately visible to other connections.
+
+    The GUC preservation here runs once, at session end -- a boundary safety net,
+    NOT per-test isolation. Per-test safety comes from temporary_test_guc and the
+    static scan that forbids raw session-level app.* mutation."""
     async with test_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
-        yield conn
+        async with preserve_test_guc_state(conn):
+            yield conn
 
 
 @pytest_asyncio.fixture
@@ -547,12 +573,15 @@ async def created_period_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
+async def seeded_paytest_branch_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
     """
-    Return the branch_id of the PAYTEST branch seeded above.
-    Session-scoped: looked up once and reused.  Payroll-period tests use
-    this branch so their Draft/Open periods don't conflict with the
-    HQ branch used by the read-only created_period_id fixture.
+    The canonical seeded PAYTEST branch (core.branches.branchcode = 'PAYTEST').
+
+    Infrastructure that must target THIS branch regardless of what a test module
+    does (e.g. `activate_paytest_system_items`) depends on this fixture and never on
+    `paytest_branch_id`: many modules shadow `paytest_branch_id` with a module-owned
+    branch, and a session-scoped fixture's dependency on a shadowable name resolves
+    by whichever module requests it first.
     """
     resp = await session_client.get(
         "/core/branches",
@@ -566,19 +595,30 @@ async def paytest_branch_id(session_client: httpx.AsyncClient, auth_token: str) 
 
 
 @pytest_asyncio.fixture(scope="session")
+async def paytest_branch_id(seeded_paytest_branch_id: int) -> int:
+    """
+    The shared seeded PAYTEST branch, for tests that genuinely want it.  Modules
+    that recycle workflow slots shadow this name with a module-owned branch.
+    """
+    return seeded_paytest_branch_id
+
+
+@pytest_asyncio.fixture(scope="session")
 async def paytest_driver_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    seeded_paytest_branch_id: int,
 ) -> int:
     """
-    Create one driver on the PAYTEST branch at session start; return its driver_id.
-    Entry tests (test_entry.py) attach draft lines to this driver.
+    Create one driver on the seeded PAYTEST branch at session start; return its driver_id.
+    Depends on `seeded_paytest_branch_id`, not the shadowable `paytest_branch_id`: this
+    session-cached driver must never land on whichever module-owned branch happened to
+    request it first. Modules that own their branch shadow this fixture as well.
     """
     resp = await session_client.post(
         "/core/drivers",
         json={
-            "branch_id":      paytest_branch_id,
+            "branch_id":      seeded_paytest_branch_id,
             "full_name":      "Paytest Driver",
             "preferred_name": "PTD",
             "driver_code":    "PTD-001",
@@ -821,7 +861,7 @@ async def _activate_branch_items(
 async def activate_paytest_system_items(
     session_client: httpx.AsyncClient,
     auth_token: str,
-    paytest_branch_id: int,
+    seeded_paytest_branch_id: int,
 ) -> None:
     """
     Activate system pay items on the PAYTEST branch so that tests using
@@ -835,12 +875,12 @@ async def activate_paytest_system_items(
     Called once per test session (autouse + session scope).
     """
     await _activate_branch_items(
-        session_client, auth_token, paytest_branch_id,
+        session_client, auth_token, seeded_paytest_branch_id,
         {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS"},
     )
     # Force-activate so BranchPayItemConfig rows are created for matrix queries
     await _activate_branch_items(
-        session_client, auth_token, paytest_branch_id,
+        session_client, auth_token, seeded_paytest_branch_id,
         {"HOURS", "MILES"},
         force=True,
     )
@@ -872,12 +912,8 @@ async def direct_db(test_engine):
     # AUTOCOMMIT: each statement committed immediately — no BEGIN/COMMIT needed
     async with test_engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
-        # Historical FinalLine setup uses a session-level GUC. Clear it before
-        # this pooled connection can authorize another test's direct INSERT.
-        try:
+        async with preserve_test_guc_state(conn):
             yield conn
-        finally:
-            await conn.exec_driver_sql("RESET app.allow_payroll_final_line_insert")
 
 
 @pytest_asyncio.fixture(scope="session")
