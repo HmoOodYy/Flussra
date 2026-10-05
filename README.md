@@ -67,8 +67,9 @@ During validation, the script verifies that `C:\Temp` is writable and sets
 restores the caller's original values and removes its invocation-owned
 compileall cache directory when validation ends.
 
-Future CI workflows should call this repository-owned entry point so local
-and CI validation use the same contract.
+GitHub Actions runs this canonical validation on pull requests to `main` and
+pushes to `main`; the schema authority equivalence command runs as an independent
+check. Both use the repository-owned local authorities.
 
 ## Database schema authority comparison
 

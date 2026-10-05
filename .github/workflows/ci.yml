@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  canonical-validation:
+    name: Canonical Validation
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Verify PostgreSQL binaries and update PATH
+        shell: pwsh
+        run: |
+          $requiredBinaries = @("initdb.exe", "postgres.exe", "pg_ctl.exe")
+          $candidates = @(
+            Get-Item -Path "C:\Program Files\PostgreSQL\*\bin" -ErrorAction SilentlyContinue |
+              Where-Object { $_.PSIsContainer } |
+              Sort-Object FullName -Descending
+          )
+          $pgBin = $null
+          foreach ($candidate in $candidates) {
+            $allPresent = $true
+            foreach ($binary in $requiredBinaries) {
+              if (-not (Test-Path -LiteralPath (Join-Path $candidate.FullName $binary) -PathType Leaf)) {
+                $allPresent = $false
+                break
+              }
+            }
+            if ($allPresent) {
+              $pgBin = $candidate.FullName
+              break
+            }
+          }
+          if (-not $pgBin) {
+            throw "No PostgreSQL bin directory containing initdb.exe, postgres.exe, and pg_ctl.exe was found under C:\Program Files\PostgreSQL."
+          }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $pgBin -Encoding utf8
+          Write-Host "PostgreSQL binaries verified: $pgBin"
+
+      - name: Setup backend
+        shell: pwsh
+        env:
+          PY_PYTHON3: "3.12"
+        run: |
+          .\scripts\setup_backend.ps1
+          $backendPython = Join-Path $PWD "backend\.venv\Scripts\python.exe"
+          $backendVersion = (& $backendPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+          if ($LASTEXITCODE -ne 0 -or $backendVersion -ne "3.12") {
+            throw "Expected backend Python 3.12 after setup; found '$backendVersion'."
+          }
+          Write-Host "Backend Python confirmed: $backendVersion"
+
+      - name: Setup frontend
+        shell: pwsh
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run canonical validation authority
+        shell: pwsh
+        run: .\scripts\validate.ps1
+
+  schema-authority-equivalence:
+    name: Schema Authority Equivalence
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify PostgreSQL binaries and update PATH
+        shell: pwsh
+        run: |
+          $requiredBinaries = @("initdb.exe", "postgres.exe", "pg_ctl.exe")
+          $candidates = @(
+            Get-Item -Path "C:\Program Files\PostgreSQL\*\bin" -ErrorAction SilentlyContinue |
+              Where-Object { $_.PSIsContainer } |
+              Sort-Object FullName -Descending
+          )
+          $pgBin = $null
+          foreach ($candidate in $candidates) {
+            $allPresent = $true
+            foreach ($binary in $requiredBinaries) {
+              if (-not (Test-Path -LiteralPath (Join-Path $candidate.FullName $binary) -PathType Leaf)) {
+                $allPresent = $false
+                break
+              }
+            }
+            if ($allPresent) {
+              $pgBin = $candidate.FullName
+              break
+            }
+          }
+          if (-not $pgBin) {
+            throw "No PostgreSQL bin directory containing initdb.exe, postgres.exe, and pg_ctl.exe was found under C:\Program Files\PostgreSQL."
+          }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $pgBin -Encoding utf8
+          Write-Host "PostgreSQL binaries verified: $pgBin"
+
+      - name: Setup backend
+        shell: pwsh
+        env:
+          PY_PYTHON3: "3.12"
+        run: |
+          .\scripts\setup_backend.ps1
+          $backendPython = Join-Path $PWD "backend\.venv\Scripts\python.exe"
+          $backendVersion = (& $backendPython -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+          if ($LASTEXITCODE -ne 0 -or $backendVersion -ne "3.12") {
+            throw "Expected backend Python 3.12 after setup; found '$backendVersion'."
+          }
+          Write-Host "Backend Python confirmed: $backendVersion"
+
+      - name: Run schema authority comparison
+        shell: pwsh
+        run: .\backend\.venv\Scripts\python.exe .\scripts\compare_schema_authorities.py
