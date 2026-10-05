@@ -304,9 +304,9 @@ class TestMigration:
         """
         from pathlib import Path
 
-        import testing.postgresql
+        from tests.postgresql_compat import create_test_postgresql
 
-        pg = testing.postgresql.Postgresql()
+        pg = create_test_postgresql()
         try:
             conn = psycopg2.connect(pg.url())
             conn.autocommit = True
