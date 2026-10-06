@@ -178,7 +178,7 @@ async def _validate_line_type(
                     status_code=422,
                     detail=(
                         f"'{line_type}' is a Period-scope pay item and cannot be entered "
-                        "as a daily draft line. Use the Period Pay endpoint instead."
+                        "as a daily draft line."
                     ),
                 )
             if not bool(snap_row["isactiveinperiod"]):
@@ -253,7 +253,7 @@ async def _validate_line_type(
             status_code=422,
             detail=(
                 f"'{line_type}' is a Period-scope pay item and cannot be entered "
-                "as a daily draft line. Use the Period Pay endpoint instead."
+                "as a daily draft line."
             ),
         )
 

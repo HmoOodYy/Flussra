@@ -14,10 +14,10 @@ resubmission, status change, finalization) — a different granularity and a
 different concern (branch-wide serialization vs. this period's own
 editability). The two must not be merged.
 
-Genuinely shared by four domains, each now in its own module — Draft-line
-CRUD (app.payroll.draft_line_mutation), Period Pay Lines (app.payroll.period_pay),
-Bonus (app.payroll.bonus), and Day Grid (app.payroll.day_grid) — none of
-which is more entitled to own it than the others. app.payroll.service
+Genuinely shared by three domains, each now in its own module — Draft-line
+CRUD (app.payroll.draft_line_mutation), Bonus (app.payroll.bonus), and Day
+Grid (app.payroll.day_grid) — none of which is more entitled to own it than
+the others. app.payroll.service
 retains a plain imported binding purely for legacy test compatibility
 (test_cp0a_mutation_status_guard.py, which reassigns it directly — a
 resolution-sensitive patch); it has no production callers of its own.

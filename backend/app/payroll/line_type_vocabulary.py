@@ -10,8 +10,8 @@ validation policy: _LineTypeInfo is a result/type shape, _SYSTEM_ITEM_DB_CODES
 and _LEGACY_TO_CANONICAL are legacy-to-canonical naming facts, and
 _INFORMATIONAL_ONLY is a catalog-shape fact (which line types have no
 PayItems catalog row). Live consumers span Draft CRUD
-(app.payroll.draft_line_mutation), Period Pay (app.payroll.period_pay), Day
-Grid (app.payroll.day_grid), and Calculation (app.payroll.period_calculation),
+(app.payroll.draft_line_mutation), Day Grid (app.payroll.day_grid), and
+Calculation (app.payroll.period_calculation),
 none of which is more entitled to own this vocabulary than the others.
 
 _SYSTEM_ITEM_DB_CODES is NOT re-exported from app.payroll.service: its only

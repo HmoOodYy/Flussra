@@ -16,8 +16,6 @@ Coverage:
   TestBranchInactiveRejected    — explicitly deactivated items → 422.
   TestCustomCompanyItemsWork    — custom company items (companyid IS NOT NULL) still
                                    validate and store correctly.
-  TestPeriodPayCanonical        — "BONUS" / "ADJUSTMENT" accepted by period-pay
-                                   endpoint alongside legacy "Bonus" / "Adjustment".
   TestFinalizationGuardCanonical— zero-calc guard catches canonical-code PerUnit
                                    lines (linetype="HOURS") with no rate.
 
@@ -443,96 +441,6 @@ class TestBranchInactiveRejected:
                     """),
                     {"c": cid, "b": paytest_branch_id, "p": piid, "ef": eff_from},
                 )
-
-
-# ---------------------------------------------------------------------------
-# Session fixture — activate BONUS / ADJUSTMENT on PAYTEST
-# ---------------------------------------------------------------------------
-
-async def _activate_branch_item_by_code(
-    client: httpx.AsyncClient, token: str, branch_id: int, code: str
-) -> None:
-    """Ensure a pay item is active for branch_id; idempotent."""
-    items = (await client.get(
-        f"/settings/branches/{branch_id}/pay-items", headers=auth(token),
-    )).json()
-    for item in items:
-        if item.get("pay_item_code") == code:
-            if not item.get("is_active", False):
-                await client.patch(
-                    f"/settings/branches/{branch_id}/pay-items/{item['pay_item_id']}",
-                    json={"is_active": True}, headers=auth(token),
-                )
-            return
-
-
-@pytest_asyncio.fixture(scope="session")
-async def cp0_period_items_activated(
-    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int
-) -> None:
-    """Activate BONUS and ADJUSTMENT for PAYTEST branch (idempotent, session-scoped)."""
-    for code in ("BONUS", "ADJUSTMENT"):
-        await _activate_branch_item_by_code(
-            session_client, auth_token, paytest_branch_id, code
-        )
-
-
-# ---------------------------------------------------------------------------
-# TestPeriodPayCanonical
-# ---------------------------------------------------------------------------
-
-class TestPeriodPayCanonical:
-    """The generic Period Pay surface rejects retired Bonus/Adjustment writes."""
-
-    @pytest.mark.asyncio
-    async def test_canonical_bonus_rejected(
-        self, session_client, auth_token, paytest_driver_id, cp0_clean,
-        cp0_period_items_activated,
-    ):
-        branch_id, db = cp0_clean
-        period = await _open_period(db, branch_id, "2080-06-02", "2080-06-08")
-        pid = period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "BONUS", "amount": "250.00"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
-        assert "bonus events" in resp.text.lower()
-
-    @pytest.mark.asyncio
-    async def test_legacy_bonus_rejected(
-        self, session_client, auth_token, paytest_driver_id, cp0_clean,
-        cp0_period_items_activated,
-    ):
-        branch_id, db = cp0_clean
-        period = await _open_period(db, branch_id, "2080-06-16", "2080-06-22")
-        pid = period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "100.00"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422, f"Legacy 'Bonus' must be rejected; got {resp.text}"
-        assert "bonus events" in resp.text.lower()
-
-    @pytest.mark.asyncio
-    async def test_daily_canonical_code_rejected_on_period_pay_endpoint(
-        self, session_client, auth_token, paytest_driver_id, cp0_clean,
-    ):
-        """'HOURS' is a Daily-scope item — period-pay endpoint must reject it with 422."""
-        branch_id, db = cp0_clean
-        period = await _open_period(db, branch_id, "2080-06-23", "2080-06-29")
-        pid = period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/period-pay",
-            json={"driver_id": paytest_driver_id, "line_type": "HOURS", "amount": "50.00"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422, (
-            f"Daily-scope 'HOURS' must be rejected by period-pay endpoint; "
-            f"got {resp.status_code}: {resp.text}"
-        )
 
 
 # ---------------------------------------------------------------------------

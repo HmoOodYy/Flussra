@@ -449,59 +449,6 @@ class DriverRateUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Period Pay schemas (M14 — period-level lump-sum lines)
-# ---------------------------------------------------------------------------
-
-class PeriodPayLineCreate(BaseModel):
-    """
-    Add a period-level pay line (Bonus, Adjustment, custom Period item).
-
-    Period Pay lines are stored in PayrollDraftLines with WorkDate = NULL.
-    Amount is the exact dollar value for this line; sign determines direction
-    (positive = bonus/addition, negative = deduction/adjustment).
-
-    Quantity is always 1; RateAmount is always NULL; CalculatedAmount = amount.
-    NeedsManagerReview is always False (no rate lookup needed).
-    """
-    driver_id: int
-    line_type: str                 # must map to an ItemScope='Period' pay item
-    amount: Decimal                # non-zero; positive or negative
-    notes: str | None = None
-
-    @field_validator("line_type")
-    @classmethod
-    def line_type_non_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("line_type must not be blank")
-        return v
-
-    @field_validator("amount")
-    @classmethod
-    def amount_non_zero(cls, v: Decimal) -> Decimal:
-        if v == 0:
-            raise ValueError("amount must be non-zero (positive or negative)")
-        return v
-
-
-class PeriodPayLineUpdate(BaseModel):
-    """
-    Partial update for a Period Pay line (only amount and/or notes).
-    The period must still be Open or InReview.
-    Updating amount rewrites CalculatedAmount to the new value immediately.
-    """
-    amount: Decimal | None = None   # non-zero if supplied
-    notes: str | None = None
-
-    @field_validator("amount")
-    @classmethod
-    def amount_non_zero(cls, v: Decimal | None) -> Decimal | None:
-        if v is not None and v == 0:
-            raise ValueError("amount must be non-zero (positive or negative)")
-        return v
-
-
-# ---------------------------------------------------------------------------
 # CP-3A — Bonus Events schemas
 # ---------------------------------------------------------------------------
 

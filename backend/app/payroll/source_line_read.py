@@ -13,15 +13,11 @@ SELECT/projection SQL, _line_row_to_summary maps a row to a DraftLineSummary,
 and _get_line_by_id is the shared lookup by draft-line id + company id using
 the same projection.
 
-This is a read-model responsibility only — it is neutral between Draft CRUD
-and Period Pay, and contains no source-write locking, source-evidence/audit,
-mutation-locking, or daily-vs-period-pay policy. Daily-vs-period semantics
-(WorkDate filtering, allowed behaviors, validation) remain the responsibility
-of each caller's own WHERE clauses and validation, not this module.
-
-Genuinely shared by Draft-line CRUD (app.payroll.draft_line_mutation) and
-Period Pay (app.payroll.period_pay) — none of which is more entitled to own
-it than the others.
+This is a read-model responsibility only — it contains no source-write
+locking, source-evidence/audit, mutation-locking, or daily-vs-period-pay
+policy. Daily-vs-period semantics (WorkDate filtering, allowed behaviors,
+validation) remain the responsibility of each caller's own WHERE clauses and
+validation, not this module.
 
 Stage B4-21 moved get_period_lines and get_period_draft_summary here from
 app.payroll.service — pure relocation, no behavior change. get_period_lines
@@ -126,9 +122,7 @@ async def get_period_lines(
     conditions = [
         "dl.payrollperiodid  = :period_id",
         "dl.companyid        = :company_id",
-        # M14: exclude Period Pay lines from the daily lines list.
-        # Period Pay lines have linescope='Period' and are returned by
-        # get_period_pay_lines() instead.  Using the explicit LineScope column
+        # Daily lines list only: filter on the explicit LineScope column
         # (not WorkDate IS NOT NULL) because daily lines can also have NULL WorkDate.
         "dl.linescope        = 'Daily'",
     ]

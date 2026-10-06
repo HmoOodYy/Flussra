@@ -27,11 +27,8 @@ Dependency direction is one-way: source_evidence.py -> audit_evidence.py.
 audit_evidence.py has no dependency on this module, and this module has no
 dependency on app.payroll.service.
 
-Genuinely shared by six call sites across two modules — Draft-line CRUD
-(add_draft_line, update_draft_line, void_draft_line, in
-app.payroll.draft_line_mutation) and Period Pay (add_period_pay_line,
-update_period_pay_line, void_period_pay_line, in app.payroll.period_pay) —
-none of which is more entitled to own it than the others.
+Used by Draft-line CRUD (add_draft_line, update_draft_line,
+void_draft_line, in app.payroll.draft_line_mutation).
 """
 from datetime import date
 from typing import Any

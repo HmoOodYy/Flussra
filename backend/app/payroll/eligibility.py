@@ -15,7 +15,7 @@ _period_has_driver_eligibility_snapshot/_create_period_driver_eligibility_rows
 above, and this module's own _assert_driver_eligible_for_period docstring
 already documented parity with get_period_eligible_drivers's period-pay
 eligibility list — table ownership, not physical adjacency, is why it moved
-here rather than to period_read.py, off_drivers.py, or period_pay.py. This
+here rather than to period_read.py or off_drivers.py. This
 is the one symbol in the B4 residue that costs this module its status as a
 zero-app-dependency leaf: it now imports app.core.service (permission/role
 guards) and app.payroll.period_read (the period access gate), verified to

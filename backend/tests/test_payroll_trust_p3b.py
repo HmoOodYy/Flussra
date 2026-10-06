@@ -201,27 +201,6 @@ async def _activate_pay_item(
             return
 
 
-async def _add_period_pay_line(
-    client: httpx.AsyncClient,
-    token: str,
-    period_id: int,
-    driver_id: int,
-    line_type: str,
-    amount: str,
-) -> dict:
-    r = await client.post(
-        f"/payroll/periods/{period_id}/period-pay",
-        json={
-            "driver_id": driver_id,
-            "line_type": line_type,
-            "amount":    amount,
-        },
-        headers=auth(token),
-    )
-    assert r.status_code == 201, f"add period-pay ({line_type}): {r.text}"
-    return r.json()
-
-
 async def _advance_to_approved(
     client: httpx.AsyncClient,
     token: str,
