@@ -10,36 +10,43 @@ from sqlalchemy.exc import DBAPIError
 
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.db.transaction_retry import run_retryable_transaction
+from tests.p3a_currency_fixtures import (
+    INSERT_DRIVER_RATE,
+    create_branch_and_driver,
+    first_rate_type_id,
+)
 
 
-async def _company_and_profile(engine):
+async def _company_and_driver(engine):
     code = "P3ARACE_" + uuid4().hex[:14]
     async with engine.begin() as db:
         company_id = (await db.execute(text("""
             INSERT INTO core.companies(companycode, companyname, currencycode)
             VALUES (:code, 'P3a race', 'USD') RETURNING companyid
         """), {"code": code})).scalar_one()
-        profile_id = (await db.execute(text("""
-            INSERT INTO payroll.payprofiles(companyid, profilecode, profilename, effectivefrom)
-            VALUES (:cid, :code, 'P3a race', DATE '2099-01-01') RETURNING payprofileid
-        """), {"cid": company_id, "code": code})).scalar_one()
-        rate_type_id = (await db.execute(text(
-            "SELECT ratetypeid FROM payroll.ratetypes ORDER BY ratetypeid LIMIT 1"
-        ))).scalar_one()
-    return company_id, profile_id, rate_type_id
+        branch_id, driver_id = await create_branch_and_driver(db, company_id, code[-12:])
+        rate_type_id = await first_rate_type_id(db)
+    return {"cid": company_id, "bid": branch_id, "did": driver_id,
+            "rid": rate_type_id, "amount": "1.2345"}
 
 
-async def _cleanup(engine, company_id, profile_id):
+async def _cleanup(engine, params):
+    cid = params["cid"]
     async with engine.begin() as db:
-        await db.execute(text("DELETE FROM payroll.payprofilerates WHERE payprofileid=:pid"), {"pid": profile_id})
-        await db.execute(text("DELETE FROM payroll.payprofiles WHERE payprofileid=:pid"), {"pid": profile_id})
-        await db.execute(text("DELETE FROM core.companies WHERE companyid=:cid"), {"cid": company_id})
+        # A monetary row permanently locks the Company currency; remove the
+        # whole disposable test company (rates, driver, employee, branch).
+        await db.execute(text("DELETE FROM payroll.driverrates WHERE companyid=:cid"), {"cid": cid})
+        await db.execute(text("DELETE FROM core.drivers WHERE companyid=:cid"), {"cid": cid})
+        await db.execute(text("DELETE FROM core.employees WHERE companyid=:cid"), {"cid": cid})
+        await db.execute(text("DELETE FROM core.branches WHERE companyid=:cid"), {"cid": cid})
+        await db.execute(text("DELETE FROM core.companies WHERE companyid=:cid"), {"cid": cid})
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation_name", ["submit", "resubmit"])
 async def test_change_first_retries_a_real_repeatable_read_transaction(test_engine, operation_name):
-    company_id, profile_id, rate_type_id = await _company_and_profile(test_engine)
+    rate_params = await _company_and_driver(test_engine)
+    company_id = rate_params["cid"]
     change_held = asyncio.Event()
     snapshot_taken = asyncio.Event()
     change_committed = asyncio.Event()
@@ -59,10 +66,7 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
             snapshot_taken.set()
             await asyncio.wait_for(change_committed.wait(), 5)
         currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
-        await db.execute(text("""
-            INSERT INTO payroll.payprofilerates(payprofileid, ratetypeid, rateamount, effectivefrom)
-            VALUES (:pid, :rid, 1.2345, DATE '2099-01-01')
-        """), {"pid": profile_id, "rid": rate_type_id})
+        await db.execute(INSERT_DRIVER_RATE, rate_params)
         return currency.code
 
     async def no_delay(_seconds):
@@ -80,10 +84,9 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
         assert observations == ["USD", "EUR"]
         async with test_engine.connect() as db:
             row = (await db.execute(text("""
-                SELECT c.currencycode, COUNT(pr.payprofilerateid) AS rate_count
+                SELECT c.currencycode, COUNT(dr.driverrateid) AS rate_count
                 FROM core.companies c
-                JOIN payroll.payprofiles pp ON pp.companyid = c.companyid
-                LEFT JOIN payroll.payprofilerates pr ON pr.payprofileid = pp.payprofileid
+                LEFT JOIN payroll.driverrates dr ON dr.companyid = c.companyid
                 WHERE c.companyid=:cid GROUP BY c.currencycode
             """), {"cid": company_id})).mappings().one()
             assert row["currencycode"] == "EUR" and row["rate_count"] == 1
@@ -94,11 +97,12 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
                 await task
             except asyncio.CancelledError:
                 pass
-        await _cleanup(test_engine, company_id, profile_id)
+        await _cleanup(test_engine, rate_params)
 
 @pytest.mark.asyncio
 async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
-    company_id, profile_id, rate_type_id = await _company_and_profile(test_engine)
+    rate_params = await _company_and_driver(test_engine)
+    company_id = rate_params["cid"]
     writer_locked = asyncio.Event()
     change_started = asyncio.Event()
     async def writer():
@@ -106,10 +110,7 @@ async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
             await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
             assert currency.code == "USD"
-            await db.execute(text("""
-                INSERT INTO payroll.payprofilerates(payprofileid, ratetypeid, rateamount, effectivefrom)
-                VALUES (:pid, :rid, 1.2345, DATE '2099-01-01')
-            """), {"pid": profile_id, "rid": rate_type_id})
+            await db.execute(INSERT_DRIVER_RATE, rate_params)
             writer_locked.set()
             await asyncio.wait_for(change_started.wait(), 5)
 
@@ -128,4 +129,4 @@ async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
             code = (await db.execute(text("SELECT currencycode FROM core.companies WHERE companyid=:cid"), {"cid": company_id})).scalar_one()
             assert code == "USD"
     finally:
-        await _cleanup(test_engine, company_id, profile_id)
+        await _cleanup(test_engine, rate_params)

@@ -34,7 +34,6 @@ from app.settings.schemas import CompanyUpdate
     ("draft_voided", "Void", None),
     ("snapshot", "Frozen", None),
     ("final_line", "Frozen", None),
-    ("pay_profile_rate", "Voided", None),
 ])
 async def test_each_durable_monetary_state_locks_company_currency(
     test_engine, monkeypatch, state_kind, state, cleanup_sql,
@@ -72,17 +71,13 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 VALUES (:cid, :bid, 'Open', :code, 'P3a acceptance', 'Week', DATE '2099-01-01', DATE '2099-01-07')
                 RETURNING payrollperiodid
             """), {"cid": company_id, "bid": branch_id, "code": f"P3AP_{marker}"})).scalar_one())
-            profile_id = int((await db.execute(text("""
-                INSERT INTO payroll.payprofiles(companyid, profilecode, profilename, effectivefrom)
-                VALUES (:cid, :code, 'P3a acceptance', DATE '2099-01-01') RETURNING payprofileid
-            """), {"cid": company_id, "code": f"P3APR_{marker}"})).scalar_one())
             rate_type_id = int((await db.execute(text("SELECT ratetypeid FROM payroll.ratetypes ORDER BY ratetypeid LIMIT 1"))).scalar_one())
             await settings_service.update_company_profile(
                 company_id, 1, CompanyUpdate(company_name="P3a acceptance", currency_code="USD"), db,
             )
 
             params = {"cid": company_id, "bid": branch_id, "did": driver_id,
-                      "eid": employee_id, "pid": period_id, "profile_id": profile_id,
+                      "eid": employee_id, "pid": period_id,
                       "rid": rate_type_id, "uid": 1, "state": state,
                       "hash": "a" * 64, "code": f"P3A_{marker}"}
             if state_kind in {"driver_rate", "driver_rate_tier"}:
@@ -145,11 +140,6 @@ async def test_each_durable_monetary_state_locks_company_currency(
                          currencyminorunitdigits)
                     VALUES (:cid,:bid,:pid,:did,'OTHER','Period',10,'P3a',1,NOW(),'USD',2)
                     RETURNING finallineid
-                """), params)).scalar_one())
-            else:
-                row_id = int((await db.execute(text("""
-                    INSERT INTO payroll.payprofilerates(payprofileid, ratetypeid, rateamount, effectivefrom, status)
-                    VALUES (:profile_id,:rid,10,DATE '2099-01-01','Voided') RETURNING payprofilerateid
                 """), params)).scalar_one())
 
             with pytest.raises(HTTPException) as blocked:

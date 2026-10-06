@@ -16,6 +16,11 @@ from app.company_currency import (
 )
 from app.settings import service as settings_service
 from app.settings.schemas import CompanyUpdate
+from tests.p3a_currency_fixtures import (
+    INSERT_DRIVER_RATE,
+    create_branch_and_driver,
+    first_rate_type_id,
+)
 
 
 @pytest.mark.asyncio
@@ -78,16 +83,12 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             profile = await settings_service.update_company_profile(company_id, 1, update("JPY"), db)
             assert profile.currency_code == "JPY" and profile.currency_minor_unit_digits == 0
 
-            profile_id = (await db.execute(text("""
-                INSERT INTO payroll.payprofiles(companyid, profilecode, profilename, effectivefrom)
-                VALUES (:cid, :code, 'P3a profile', DATE '2099-01-01')
-                RETURNING payprofileid
-            """), {"cid": company_id, "code": code})).scalar_one()
-            rate_type_id = (await db.execute(text("SELECT ratetypeid FROM payroll.ratetypes ORDER BY ratetypeid LIMIT 1"))).scalar_one()
-            await db.execute(text("""
-                INSERT INTO payroll.payprofilerates(payprofileid, ratetypeid, rateamount, effectivefrom)
-                VALUES (:pid, :rid, 1.2345, DATE '2099-01-01')
-            """), {"pid": profile_id, "rid": rate_type_id})
+            branch_id, driver_id = await create_branch_and_driver(db, company_id, code[-12:])
+            rate_type_id = await first_rate_type_id(db)
+            driver_rate_id = (await db.execute(INSERT_DRIVER_RATE, {
+                "cid": company_id, "bid": branch_id, "did": driver_id,
+                "rid": rate_type_id, "amount": "1.2345",
+            })).scalar_one()
             assert await company_has_durable_monetary_state(company_id, db)
             profile = await settings_service.get_company_profile(company_id, 1, db)
             assert profile.currency_change_locked
@@ -96,7 +97,7 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             assert changed.value.detail["code"] == "COMPANY_CURRENCY_CHANGE_BLOCKED"
             # Cleanup of an active row must not be used to unlock the Company. A
             # lifecycle change (to Voided) retains the durable row.
-            await db.execute(text("UPDATE payroll.payprofilerates SET status = 'Voided' WHERE payprofileid = :pid"), {"pid": profile_id})
+            await db.execute(text("UPDATE payroll.driverrates SET status = 'Voided' WHERE driverrateid = :id"), {"id": driver_rate_id})
             assert await company_has_durable_monetary_state(company_id, db)
             with pytest.raises(DBAPIError) as direct:
                 await db.execute(text("UPDATE core.companies SET currencycode = 'USD' WHERE companyid = :cid"), {"cid": company_id})
