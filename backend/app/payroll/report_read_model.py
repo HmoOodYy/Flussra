@@ -162,7 +162,7 @@ def _pay_item_amounts(
 async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
     rows = (await db.execute(text("""
         SELECT dl.driverid, d.drivercode, e.fullname AS drivername, dl.workdate,
-               dl.linetype, dl.linescope, dl.quantity, dl.sourcetype, dl.sourceid,
+               dl.linetype, dl.quantity, dl.sourcetype, dl.sourceid,
                pppi.payitemid
         FROM payroll.payrolldraftlines dl
         JOIN core.drivers d ON d.driverid = dl.driverid
@@ -174,7 +174,7 @@ async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tupl
          AND pppi.payitemcode = dl.linetype
         WHERE dl.payrollperiodid = :period_id AND dl.companyid = :company_id
           AND dl.branchid = :branch_id AND dl.status != 'Void'
-        ORDER BY dl.driverid, dl.workdate NULLS LAST, dl.draftlineid
+        ORDER BY dl.driverid, dl.workdate, dl.draftlineid
     """), {"period_id": period["payrollperiodid"], "company_id": period["companyid"],
           "branch_id": period["branchid"]})).mappings().all()
     drivers: dict[int, dict[str, Any]] = {}
@@ -183,10 +183,10 @@ async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tupl
         driver_id = int(row["driverid"])
         drivers.setdefault(driver_id, {"driver_id": driver_id, "driver_code": row["drivercode"],
                                        "driver_name": row["drivername"]})
-        if row["linescope"] == "Daily" and row["sourcetype"] not in {"System", "BonusEvent"}:
+        if row["sourcetype"] not in {"System", "BonusEvent"}:
             work.append({"driver_id": driver_id, "work_date": row["workdate"],
                          "line_type": row["linetype"], "pay_item_id": row["payitemid"],
-                         "quantity": row["quantity"], "line_scope": row["linescope"]})
+                         "quantity": row["quantity"], "line_scope": "Daily"})
     return drivers, work
 
 

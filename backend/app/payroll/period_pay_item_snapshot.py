@@ -7,14 +7,14 @@ module — no behavior change, pure relocation.
 
 _period_has_pay_item_snapshot and _get_period_pay_item_snapshot are read
 accessors over the PayrollPeriodPayItems snapshot table. They are NOT owned
-by app.payroll.period_creation, Period Pay, or Day Grid: these two helpers
+by app.payroll.period_creation or Day Grid: these two helpers
 were briefly moved into app.payroll.period_creation during Stage B4-4A and
 then returned, because period_creation.py only ever *writes*
 PayrollPeriodDays/PayrollPeriodPayItems once (via its own
 _create_period_day_rows/_create_period_pay_item_rows) and has no caller of
 either helper inside its own logic. They are read/validate accessors
-consumed by Period Pay and Day Grid — neither of which is more entitled to
-own them than the other.
+consumed by Draft-line CRUD and Day Grid — neither of which is more entitled
+to own them than the other.
 
 This module owns only shared read access to snapshot rows: determining
 whether a period has any snapshot rows, and retrieving snapshot rows for a

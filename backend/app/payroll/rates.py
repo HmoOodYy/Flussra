@@ -1100,7 +1100,7 @@ async def create_rate(
         block_size = data.block_size
         rounding_rule = data.rounding_rule
 
-    else:  # PerUnit, EnteredAmount, Fixed, None
+    else:  # PerUnit, Fixed, None
         if data.ordinal_tiers or data.range_tiers:
             raise HTTPException(
                 422,
@@ -2037,7 +2037,6 @@ async def get_driver_rate_matrix(
         text("""
             SELECT pi.payitemid,
                    pi.payitemname,
-                   pi.itemscope,
                    pi.ratebehavior,
                    rt.ratetypeid,
                    rt.ratecode,
@@ -2133,7 +2132,6 @@ async def get_driver_rate_matrix(
                 rate_source="PayItem",
                 pay_item_id=pay_item_id,
                 pay_item_name=row["payitemname"],
-                item_scope=row["itemscope"],
                 rate_behavior=row["ratebehavior"],
                 status_rate_column_id=None,
                 rate_type_id=rate_type_id,
@@ -2227,7 +2225,6 @@ async def get_driver_rate_matrix(
                 rate_source="StatusRateColumn",
                 pay_item_id=None,
                 pay_item_name=None,
-                item_scope="Daily",
                 rate_behavior="PerUnit",
                 status_rate_column_id=src_col_id,
                 rate_type_id=src_rate_type_id,
@@ -2271,7 +2268,7 @@ async def batch_save_rates(
     All validation runs before any writes so the operation is all-or-nothing
     within the caller's transaction.
 
-    Phase 2A: only PerUnit, EnteredAmount, and Fixed rate behaviors are
+    Phase 2A: only PerUnit and Fixed rate behaviors are
     supported.  Tiered (OrdinalTier, RangeBracket, RangeProgressive) and
     Block rates must be saved via individual endpoints.
     """

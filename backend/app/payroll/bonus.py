@@ -5,9 +5,8 @@ zero-inclusive bonus summary.
 Extracted from app.payroll.service (Stage B4-8) as a dependency-closed leaf
 module — no behavior change, pure relocation.
 
-Bonus canonical source is payroll.PayrollBonusEvents — distinct from the
-generic Period Pay "BONUS" line type, which remains rejected wherever that
-rule already applied before this move. apply_bonus_batch retains its bespoke
+Bonus canonical source is payroll.PayrollBonusEvents — the sole Bonus
+authority. apply_bonus_batch retains its bespoke
 inline "SELECT ... FOR UPDATE" period lock (deliberately NOT
 _lock_period_for_mutation): idempotent replay must still succeed on a period
 that has since become Locked/Archived, which _lock_period_for_mutation's
@@ -18,8 +17,8 @@ this module — _load_active_bonus_events is owned by
 app.payroll.period_calculation and get_period_eligible_drivers by
 app.payroll.eligibility. _load_active_bonus_events
 is consumed by Calculation, Reporting, and report_read_model.py, not by
-Bonus CRUD/domain ownership. get_period_eligible_drivers is shared with
-other period-pay behavior, not Bonus-exclusive.
+Bonus CRUD/domain ownership. get_period_eligible_drivers (the Bonus driver
+picker) is owned by app.payroll.eligibility.
 
 Every private helper here (_get_bonus_event_by_id, _increment_bonus_data_revision,
 _bonus_batch_canonical_payload, _bonus_batch_request_hash,
@@ -52,7 +51,6 @@ from app.core.service import (
 from app.payroll.audit_evidence import capture_period_audit_evidence
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_period_via_snapshot,
-    _driver_has_existing_period_pay_source,
     _period_has_driver_eligibility_snapshot,
 )
 from app.payroll.line_audit import _write_line_audit
@@ -96,7 +94,6 @@ async def _get_bonus_event_by_id(
                 be.notes,
                 be.status,
                 be.datarevision,
-                be.sourcedraftlineid,
                 be.voidedbyuserid,
                 be.voidedatutc,
                 be.voidreason,
@@ -124,7 +121,6 @@ async def _get_bonus_event_by_id(
         notes=row["notes"],
         status=row["status"],
         data_revision=int(row["datarevision"]),
-        source_draft_line_id=row["sourcedraftlineid"],
         voided_by_user_id=row["voidedbyuserid"],
         voided_at_utc=row["voidedatutc"],
         void_reason=row["voidreason"],
@@ -166,7 +162,6 @@ async def list_bonus_events(
                 be.notes,
                 be.status,
                 be.datarevision,
-                be.sourcedraftlineid,
                 be.voidedbyuserid,
                 be.voidedatutc,
                 be.voidreason,
@@ -195,7 +190,6 @@ async def list_bonus_events(
             notes=r["notes"],
             status=r["status"],
             data_revision=int(r["datarevision"]),
-            source_draft_line_id=r["sourcedraftlineid"],
             voided_by_user_id=r["voidedbyuserid"],
             voided_at_utc=r["voidedatutc"],
             void_reason=r["voidreason"],
@@ -287,7 +281,7 @@ async def create_bonus_event(
 
     await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    # CP-3A: same snapshot-aware eligibility guard as non-BONUS period-pay.
+    # CP-3A: snapshot-aware period eligibility guard.
     await _assert_driver_eligible_for_period_via_snapshot(
         company_id, period.branch_id, period_id, data.driver_id, db
     )
@@ -790,7 +784,7 @@ async def apply_bonus_batch(
 
     # Validate every item before any insert (all-or-nothing). The eligibility
     # guard raises the same 422s as single-event POST /bonuses, including the
-    # IncludedByExistingData-without-source and wrong-branch cases.
+    # IncludedByExistingData and wrong-branch cases.
     for idx, item in enumerate(data.items):
         try:
             await _assert_driver_eligible_for_period_via_snapshot(
@@ -963,26 +957,19 @@ async def apply_bonus_batch(
 # CP-3B1: Zero-inclusive bonus summary
 # ---------------------------------------------------------------------------
 
-async def _bonus_summary_driver_create_eligible(
-    eligibility_reason_code: str,
-    period_id: int,
-    driver_id: int,
-    db: AsyncConnection,
-) -> bool:
+def _bonus_summary_driver_create_eligible(eligibility_reason_code: str) -> bool:
     """Read-only mirror of the snapshot branch of
     _assert_driver_eligible_for_period_via_snapshot — never raises, never
     mutates.  The bonus summary is only ever computed for periods that have
     a CP-2E snapshot (enforced earlier in get_bonus_summary), so only the
     snapshot branch of that eligibility check is relevant here.
 
-    IncludedByExistingData drivers are period-eligible for VIEWING but not for
-    NEW bonus creation unless they already have a period-pay source — this
-    must match create_bonus_event's guard exactly so summary capabilities
-    never claim can_create=true when POST /bonuses would reject.
+    IncludedByExistingData drivers are period-eligible for VIEWING (their
+    existing events stay visible and voidable) but never for NEW bonus
+    creation — this must match create_bonus_event's guard exactly so summary
+    capabilities never claim can_create=true when POST /bonuses would reject.
     """
-    if eligibility_reason_code == "IncludedByExistingData":
-        return await _driver_has_existing_period_pay_source(period_id, driver_id, db)
-    return True  # Active / TerminatedHistorical / Transferred
+    return eligibility_reason_code != "IncludedByExistingData"
 
 
 async def get_bonus_summary(
@@ -1059,7 +1046,6 @@ async def get_bonus_summary(
                 be.datarevision,
                 be.batchcorrelationid,
                 be.idempotencykey,
-                be.sourcedraftlineid,
                 be.voidedbyuserid,
                 be.voidedatutc,
                 be.voidreason,
@@ -1097,7 +1083,6 @@ async def get_bonus_summary(
                     str(r["batchcorrelationid"]) if r["batchcorrelationid"] is not None else None
                 ),
                 idempotency_key=r["idempotencykey"],
-                source_draft_line_id=r["sourcedraftlineid"],
             )
         )
 
@@ -1123,9 +1108,7 @@ async def get_bonus_summary(
         reason_codes = list(period_reason_codes)
         can_create = period_allows_mutation
         if period_allows_mutation:
-            driver_create_eligible = await _bonus_summary_driver_create_eligible(
-                reason_code, period_id, driver_id, db
-            )
+            driver_create_eligible = _bonus_summary_driver_create_eligible(reason_code)
             if not driver_create_eligible:
                 can_create = False
                 reason_codes.append("eligibility_existing_data_only")

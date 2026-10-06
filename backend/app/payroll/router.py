@@ -1267,10 +1267,11 @@ async def void_bonus_event(
 @router.get(
     "/periods/{period_id}/eligible-drivers",
     response_model=PeriodEligibleDriversResponse,
-    summary="List drivers eligible for a period-pay Bonus (period-scoped, not day-scoped)",
+    summary="List drivers eligible for a new Bonus (period-scoped, not day-scoped)",
     description=(
-        "Returns drivers who were active in the period's branch during the period dates, "
-        "plus any driver who already has period-pay lines in this period. "
+        "Returns drivers who were active in the period's branch during the period dates. "
+        "Drivers included only because of existing saved source "
+        "(IncludedByExistingData) are not offered for new Bonus entries. "
         "This is the stable source-of-truth for the Bonus driver dropdown — "
         "it does not change when the user navigates to a different day in the grid. "
         "DRIVER/Self users receive 403."

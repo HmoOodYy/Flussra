@@ -46,12 +46,6 @@ _NON_WORK_DAILY_LINE_TYPES = (
     "DailyNote",
     "STATUS_PAYMENT",
     "STATUS_PAY",
-    "BONUS",
-    "ADJUSTMENT",
-    "MINIMUM",
-    "MAXIMUM",
-    "SYS_MIN_TOPUP",
-    "SYS_MAX_CAP",
 )
 
 
@@ -175,7 +169,6 @@ async def _period_metrics(
               AND dl.branchid = :branch_id
               AND dl.driverid IN ({in_clause})
               AND dl.status != 'Void'
-              AND dl.linescope = 'Daily'
               AND dl.workdate >= :period_start
               AND dl.workdate <= :period_end
               AND dl.quantity IS NOT NULL
@@ -539,7 +532,7 @@ def _build_branch_entry(
 
         # can_enter_source
         # CP-2F: Draft (Prepared) supports operational source entry (day grid save,
-        # daily lines). Financial entry (Period Pay, Bonus) is blocked separately.
+        # daily lines). Financial entry (Bonus) is blocked separately.
         if not (has_entry or has_view):
             ce = _denied("PERMISSION_DENIED", "payroll.view or payroll.entry required.")
         elif st == "InReview":

@@ -325,20 +325,18 @@ async def change_period_status(
         await _refresh_draft_calculations(
             period_id=period_id,
             company_id=company_id,
-            period_start_date=existing.start_date,
             db=db,
             currency=currency,
         )
 
         # Guard 1: empty period — refuse to submit a period with no payroll data.
-        # CP-3A: count non-BONUS DraftLines + Active BonusEvents (BONUS DraftLines
-        # are no longer used; bonus data lives in PayrollBonusEvents).
+        # Count DraftLines + Active BonusEvents (bonus data lives in PayrollBonusEvents).
         empty_result = await db.execute(
             text("""
                 SELECT (
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
                     WHERE  payrollperiodid = :pid AND companyid = :cid
-                      AND  status != 'Void' AND linetype != 'BONUS'
+                      AND  status != 'Void'
                 ) + (
                     SELECT COUNT(*) FROM payroll.payrollbonusevents
                     WHERE  payrollperiodid = :pid AND companyid = :cid
@@ -379,7 +377,7 @@ async def change_period_status(
                 ),
             )
 
-        # Guard 3: zero-calc unresolved lines (same three-clause check as finalization).
+        # Guard 3: zero-calc unresolved lines (same check as finalization).
         # CP-0: EXISTS subqueries now match system items (companyid IS NULL) as well as
         # custom items (companyid = dl.companyid) so that new rows storing canonical
         # PayItemCodes ("HOURS") are caught alongside legacy rows ("Hours").
@@ -412,7 +410,6 @@ async def change_period_status(
                               AND  pi.ratebehavior = 'PerUnit'
                         )
                     )
-                    OR dl.linescope = 'Period'
                   )
             """),
             {"pid": period_id, "cid": company_id},
@@ -672,13 +669,9 @@ async def change_period_status(
             )
             # CP-2F: refresh daily calculations for Draft-era source lines now that
             # the period is Open and approved rates can be looked up.
-            _draft_period_summary = await get_period_by_id(
-                company_id, user_id, _eligible_draft["payrollperiodid"], db
-            )
             await _refresh_draft_calculations(
                 period_id=_eligible_draft["payrollperiodid"],
                 company_id=company_id,
-                period_start_date=_draft_period_summary.start_date,
                 db=db,
                 currency=currency,
             )
@@ -885,19 +878,18 @@ async def resubmit_period(
     await _refresh_draft_calculations(
         period_id=period_id,
         company_id=company_id,
-        period_start_date=existing.start_date,
         db=db,
         currency=currency,
     )
 
     # Guard 1: empty period.
-    # CP-3A: count non-BONUS DraftLines + Active BonusEvents.
+    # Count DraftLines + Active BonusEvents.
     empty_result = await db.execute(
         text("""
             SELECT (
                 SELECT COUNT(*) FROM payroll.payrolldraftlines
                 WHERE  payrollperiodid = :pid AND companyid = :cid
-                  AND  status != 'Void' AND linetype != 'BONUS'
+                  AND  status != 'Void'
             ) + (
                 SELECT COUNT(*) FROM payroll.payrollbonusevents
                 WHERE  payrollperiodid = :pid AND companyid = :cid
@@ -968,7 +960,6 @@ async def resubmit_period(
                           AND  pi.ratebehavior = 'PerUnit'
                     )
                 )
-                OR dl.linescope = 'Period'
               )
         """),
         {"pid": period_id, "cid": company_id},

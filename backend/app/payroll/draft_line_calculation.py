@@ -6,7 +6,7 @@ Extracted from app.payroll.service (Stage B4-13C) as a dependency-closed leaf
 module — no behavior change, pure relocation.
 
 _compute_calculated_amount is the pure rate-behavior dispatch kernel:
-EnteredAmount, Fixed/None (informational/unimplemented), the three tiered
+Fixed/None (informational/unimplemented), the three tiered
 behaviors (OrdinalTier, RangeBracket, RangeProgressive) and Block (delegated
 to app.payroll.rates), and PerUnit (driver-rate lookup + the CP-4A pure core
 in app.payroll.calculation.per_unit). It performs no DraftLine mutation, no
@@ -89,15 +89,11 @@ async def _compute_calculated_amount(
       PerUnit:       qty × approved DriverRate for rate_code (looked up by date).
                      No approved rate → (None, True) — flagged for review.
                      No rate_code mapping → (None, True).
-      EnteredAmount: (rate_amount_override, False) — user-supplied dollar amount.
       Fixed:         (None, False) — fixed amounts from PayItemSettings (M13c+).
       None / other:  (None, False) — informational or unimplemented behavior.
     Tiered/Block:    delegates to dedicated helpers which return (amount, nmr,
                      driver_rate_id, rate_type_id).
     """
-    if rate_behavior == "EnteredAmount":
-        return _CalcResult(rate_amount_override, False, rate_behavior="EnteredAmount")
-
     # M13c tiered / block behaviors — dispatch to dedicated helpers.
     if rate_behavior in _TIERED_BEHAVIORS or rate_behavior == "Block":
         if not rate_code:

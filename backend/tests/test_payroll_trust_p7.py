@@ -149,10 +149,10 @@ async def test_p7_t1_duplicate_daily_source_is_rejected_and_snapshot_finalizes(
                     _text("""
                         INSERT INTO payroll.payrolldraftlines
                             (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
+                             workdate, linetype, quantity,
                              sourcetype, status, needsmanagerreview, addedbyuserid)
                         SELECT companyid, :bid, :pid, :did,
-                               :wdate, 'DailyNote', 'Daily', 1,
+                               :wdate, 'DailyNote', 1,
                                'Manual', 'Active', FALSE, 1
                         FROM payroll.payrollperiods
                         WHERE payrollperiodid = :pid

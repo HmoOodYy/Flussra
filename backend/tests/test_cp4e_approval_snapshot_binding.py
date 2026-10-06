@@ -79,9 +79,9 @@ async def cp4e_db(test_database_url):
             line_id = (await seed.execute(text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                     quantity, sourcetype, sourceid, status, needsmanagerreview, linescope)
+                     quantity, sourcetype, sourceid, status, needsmanagerreview)
                 VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date,
-                        'DailyNote', 1, 'User', :source_id, 'Active', FALSE, 'Daily')
+                        'DailyNote', 1, 'User', :source_id, 'Active', FALSE)
                 RETURNING draftlineid
             """), {
                 **ids, "period_id": period_id, "driver_id": driver_id,

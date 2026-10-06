@@ -137,10 +137,8 @@ async def _insert_http_work(
 ) -> None:
     await direct_db.execute(text("""
         INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-        VALUES (1, :branch_id, :period_id, :driver_id, '2099-01-01', :line_type, 'Daily',
-                1, 'Manual', 'Active', FALSE, 1)
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2099-01-01', :line_type, 1, 'Manual', 'Active', FALSE, 1)
     """), {"branch_id": branch_id, "period_id": period_id, "driver_id": driver_id, "line_type": line_type})
     await direct_db.commit()
 
@@ -1195,10 +1193,8 @@ async def test_live_fallback_amount_reconciles_pay_item_total(
     # per-item aggregation, not the raw (None) calculated_amount.
     await direct_db.execute(text("""
         INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             quantity, rateamount, calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
-        VALUES (1, :branch_id, :period_id, :driver_id, '2099-01-01', 'HOURS', 'Daily',
-                2.0000, 15.0000, NULL, 'Manual', 'Active', TRUE, 1)
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, rateamount, calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2099-01-01', 'HOURS', 2.0000, 15.0000, NULL, 'Manual', 'Active', TRUE, 1)
     """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id})
     await direct_db.commit()
     report = await _report(session_client, auth_token, period_id, "drivers")
@@ -1450,10 +1446,8 @@ async def test_missing_frozen_layout_fails_closed_but_period_work_still_availabl
     """), {"branch_id": paytest_branch_id, "code": f"CP5C-{marker}"})).scalar_one())
     await direct_db.execute(text("""
         INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-        VALUES (1, :branch_id, :period_id, :driver_id, '2096-01-01', 'HOURS', 'Daily',
-                2.0000, 'Manual', 'Active', FALSE, 1)
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2096-01-01', 'HOURS', 2.0000, 'Manual', 'Active', FALSE, 1)
     """), {"branch_id": paytest_branch_id, "period_id": period_id, "driver_id": paytest_driver_id})
     await direct_db.commit()
     assert not await report_read_model._period_has_pay_item_snapshot(period_id, direct_db)

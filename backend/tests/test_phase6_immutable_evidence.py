@@ -89,9 +89,9 @@ async def foundation_db(test_database_url):
             line_id = (await seed.execute(text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                     quantity, sourcetype, sourceid, status, needsmanagerreview, linescope)
+                     quantity, sourcetype, sourceid, status, needsmanagerreview)
                 VALUES (:cid, :bid, :pid, :did, :work_date, 'DailyNote', 1,
-                        'User', :source_id, 'Active', FALSE, 'Daily')
+                        'User', :source_id, 'Active', FALSE)
                 RETURNING draftlineid
             """), {
                 "cid": ids["company_id"], "bid": ids["branch_id"], "pid": period_id,

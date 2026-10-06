@@ -5,19 +5,16 @@ payroll.payrolldraftlines.
 Extracted from app.payroll.service (Stage B4-11C) as a dependency-closed leaf
 module — no behavior change, pure relocation.
 
-Draft CRUD and Period Pay both store their source rows in
-payroll.payrolldraftlines, with WorkDate NULL distinguishing Period Pay rows
-from daily source rows. These three symbols are the common row-level
+payroll.payrolldraftlines holds day-bound operational source rows only
+(WorkDate is required). These three symbols are the common row-level
 read/projection contract over that table: _LINE_SELECT is the canonical
 SELECT/projection SQL, _line_row_to_summary maps a row to a DraftLineSummary,
 and _get_line_by_id is the shared lookup by draft-line id + company id using
 the same projection.
 
 This is a read-model responsibility only — it contains no source-write
-locking, source-evidence/audit, mutation-locking, or daily-vs-period-pay
-policy. Daily-vs-period semantics (WorkDate filtering, allowed behaviors,
-validation) remain the responsibility of each caller's own WHERE clauses and
-validation, not this module.
+locking, source-evidence/audit, or mutation-locking policy. Allowed
+behaviors and validation remain the responsibility of each caller.
 
 Stage B4-21 moved get_period_lines and get_period_draft_summary here from
 app.payroll.service — pure relocation, no behavior change. get_period_lines
@@ -45,7 +42,6 @@ _LINE_SELECT = """
         e.fullname         AS drivername,
         dl.workdate,
         dl.linetype,
-        dl.linescope,
         dl.quantity,
         dl.rateamount,
         dl.calculatedamount,
@@ -70,7 +66,6 @@ def _line_row_to_summary(r: Any) -> DraftLineSummary:
         driver_name=r["drivername"],
         work_date=r["workdate"],
         line_type=r["linetype"],
-        line_scope=r["linescope"],
         quantity=r["quantity"],
         rate_amount=r["rateamount"],
         calculated_amount=r["calculatedamount"],
@@ -122,24 +117,17 @@ async def get_period_lines(
     conditions = [
         "dl.payrollperiodid  = :period_id",
         "dl.companyid        = :company_id",
-        # Daily lines list only: filter on the explicit LineScope column
-        # (not WorkDate IS NOT NULL) because daily lines can also have NULL WorkDate.
-        "dl.linescope        = 'Daily'",
     ]
     params: dict[str, Any] = {
         "period_id": period_id,
         "company_id": company_id,
     }
 
-    # CP-2F: for Draft periods, exclude System-sourced lines, STATUS_PAYMENT, and
-    # ADJUSTMENT / MINIMUM / MAXIMUM pay items — these are financial and must not be
-    # visible until the period is promoted to Open.
+    # CP-2F: for Draft periods, exclude System-sourced lines and STATUS_PAYMENT —
+    # these are financial and must not be visible until the period is promoted to Open.
     if period.status == "Draft":
         conditions.append("dl.sourcetype != 'System'")
-        conditions.append(
-            "dl.linetype NOT IN ('STATUS_PAYMENT', 'ADJUSTMENT', 'MINIMUM', 'MAXIMUM',"
-            " 'SYS_MIN_TOPUP', 'SYS_MAX_CAP')"
-        )
+        conditions.append("dl.linetype != 'STATUS_PAYMENT'")
 
     if driver_id is not None:
         conditions.append("dl.driverid = :driver_id")
@@ -220,7 +208,6 @@ async def get_period_draft_summary(
             WHERE  dl.payrollperiodid = :period_id
               AND  dl.companyid       = :company_id
               AND  dl.status         != 'Void'
-              AND  dl.linescope       = 'Daily'
             GROUP  BY dl.driverid, e.fullname, dl.payrollperiodid, dl.linetype
             ORDER  BY e.fullname, dl.linetype
         """),

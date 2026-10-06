@@ -1,5 +1,5 @@
 """
-Draft-line / Period-Pay / Bonus-event mutation audit writer.
+Draft-line / Bonus-event mutation audit writer.
 
 Extracted from app.payroll.service (Stage B4-5A) as a dependency-closed leaf
 module — no behavior change, pure relocation.

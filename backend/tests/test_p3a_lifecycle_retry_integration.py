@@ -83,9 +83,9 @@ async def _seed_tenant(engine, status, currency_code="USD"):
         await db.execute(text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                 quantity, sourcetype, sourceid, status, needsmanagerreview, linescope)
+                 quantity, sourcetype, sourceid, status, needsmanagerreview)
             VALUES (:cid, :bid, :pid, :did, DATE '2099-01-01', 'DailyNote',
-                    1, 'User', :source, 'Active', FALSE, 'Daily')
+                    1, 'User', :source, 'Active', FALSE)
         """), {"cid": cid, "bid": bid, "pid": pid, "did": did, "source": marker})
     return cid, bid, uid, pid
 

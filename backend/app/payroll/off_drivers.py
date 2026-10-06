@@ -31,12 +31,6 @@ _NON_WORK_DAILY_LINE_TYPES = (
     "DailyNote",
     "STATUS_PAYMENT",
     "STATUS_PAY",
-    "BONUS",
-    "ADJUSTMENT",
-    "MINIMUM",
-    "MAXIMUM",
-    "SYS_MIN_TOPUP",
-    "SYS_MAX_CAP",
 )
 
 
@@ -363,7 +357,6 @@ async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> se
               AND dl.companyid = :company_id
               AND dl.branchid = :branch_id
               AND dl.status != 'Void'
-              AND dl.linescope = 'Daily'
               AND dl.workdate >= :period_start
               AND dl.workdate <= :period_end
               AND dl.quantity IS NOT NULL

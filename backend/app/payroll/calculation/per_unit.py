@@ -15,8 +15,8 @@ inputs and returns a deterministic typed result. Rate resolution,
 eligibility, source lookups, and orchestration remain the caller's
 responsibility, unchanged.
 
-Only the current PerUnit RateBehavior is represented here. EnteredAmount,
-Fixed, None, the CalculatedAmount-null fallback, and the dormant M13c
+Only the current PerUnit RateBehavior is represented here. Fixed,
+None, the CalculatedAmount-null fallback, and the dormant M13c
 legacy methods (OrdinalTier, RangeBracket, RangeProgressive, Block) are out
 of scope for this module and remain unchanged in their current call sites.
 """

@@ -510,7 +510,7 @@ async def _hire_date_has_payroll_history(
                 FROM payroll.PayrollDraftLines dl
                 JOIN core.Drivers d ON d.DriverID = dl.DriverID
                 WHERE d.CompanyID = :company_id AND d.EmployeeID = :employee_id
-                  AND dl.CompanyID = :company_id AND dl.WorkDate IS NOT NULL
+                  AND dl.CompanyID = :company_id
                   AND dl.Status <> 'Void' AND dl.WorkDate < :hire_date
             ) OR EXISTS (
                 SELECT 1

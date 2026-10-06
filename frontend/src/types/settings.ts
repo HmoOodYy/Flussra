@@ -150,7 +150,6 @@ export interface BranchPayItemState {
   appears_in_reports: boolean;
   requires_rate: boolean;
   is_system_standard: boolean;
-  item_scope: 'Daily' | 'Period' | 'Summary';
   rate_behavior: string;
   item_status: 'Active' | 'Retired';  // server-side item status
   is_active: boolean;                  // derived: current branch config or system default
@@ -197,7 +196,7 @@ export interface BulkPayItemConfigResult {
   results: BulkPayItemBranchResult[];
 }
 
-export type WizardValueType = 'Time' | 'Number' | 'Money';
+export type WizardValueType = 'Time' | 'Number';
 export type WizardRateMethod = 'PerUnit';
 
 // Pay item ordering

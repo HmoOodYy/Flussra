@@ -82,7 +82,7 @@ class PeriodEntryCount(BaseModel):
     """
     period_id: int
     driver_count: int    # distinct drivers with any non-voided draft lines
-    entry_count: int     # total non-voided draft lines (daily + period-pay)
+    entry_count: int     # total non-voided draft lines
     has_data: bool       # True when entry_count > 0
 
 
@@ -128,7 +128,7 @@ ENTRY_ALLOWED_STATUSES = {"Open", "Returned"}
 
 # CP-2F: Draft (Prepared) allows operational source-entry only — not financial paths.
 # Use SOURCE_ENTRY_STATUSES for day-grid save and daily-source DraftLine guards only.
-# Do NOT use this constant for Period Pay, Bonus, or any financial line creation.
+# Do NOT use this constant for Bonus or any financial line creation.
 SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}
 
 # CP-0A: Periods frozen to all source mutations.
@@ -145,11 +145,8 @@ class DraftLineSummary(BaseModel):
     branch_id: int
     driver_id: int
     driver_name: str
-    work_date: date | None = None
+    work_date: date
     line_type: str
-    # M14: 'Daily' for daily draft lines; 'Period' for period-level pay lines.
-    # Populated from the LineScope column added in migration 0010.
-    line_scope: str = "Daily"
     quantity: Decimal
     rate_amount: Decimal | None = None
     calculated_amount: Decimal | None = None
@@ -176,7 +173,7 @@ class DriverPeriodSummary(BaseModel):
 
 class DraftLineCreate(BaseModel):
     driver_id: int
-    work_date: date | None = None
+    work_date: date
     line_type: str
     quantity: Decimal = Decimal("0")
     rate_amount: Decimal | None = None
@@ -464,7 +461,6 @@ class BonusEventResponse(BaseModel):
     notes: str | None
     status: str                     # 'Active' | 'Voided'
     data_revision: int
-    source_draft_line_id: int | None
     voided_by_user_id: int | None
     voided_at_utc: datetime | None
     void_reason: str | None
@@ -530,7 +526,6 @@ class BonusSummaryEvent(BaseModel):
     data_revision: int
     batch_correlation_id: str | None
     idempotency_key: str | None
-    source_draft_line_id: int | None
 
 
 class BonusSummaryCapabilities(BaseModel):
@@ -706,14 +701,13 @@ class RateMatrixGroup(BaseModel):
     """One rate group in the driver pay-rate matrix.
 
     rate_source distinguishes PayItem-backed groups from StatusRateColumn groups.
-    For PayItem groups: pay_item_id, pay_item_name, item_scope, rate_behavior are set.
+    For PayItem groups: pay_item_id, pay_item_name, rate_behavior are set.
     For StatusRateColumn groups: status_rate_column_id is set; pay_item_* are None.
     """
     group_key: str          # "{pay_item_id}:{rate_type_id}" or "SRC:{src_id}:{rate_type_id}"
     rate_source: str        # "PayItem" | "StatusRateColumn"
     pay_item_id: int | None = None
     pay_item_name: str | None = None
-    item_scope: str | None = None
     rate_behavior: str | None = None
     status_rate_column_id: int | None = None
     rate_type_id: int
@@ -1203,7 +1197,7 @@ class FinalizationPreviewResponse(BaseModel):
     lines: list[FinalizationPreviewLine]
     total_final_gross: Decimal
     # Line count semantics (explicit to avoid frontend guessing):
-    draft_line_count: int        # non-Void, non-BONUS draft lines that will be inserted
+    draft_line_count: int        # non-Void draft lines that will be inserted
     sys_adjustment_count: int    # SYS_MIN_TOPUP / SYS_MAX_CAP rows to be inserted
     bonus_event_count: int = 0   # active PayrollBonusEvents rows to be inserted (CP-3A)
     final_line_count_estimate: int  # draft_line_count + sys_adjustment_count + bonus_event_count
@@ -1221,7 +1215,7 @@ class FinalizationPreviewResponse(BaseModel):
 # (current source/config, not a submitted snapshot), and deliberately
 # omits a period-wide calculation_version -- a single version would
 # misrepresent the several distinct calculation lanes it aggregates
-# (PerUnit, EnteredAmount/manual, canonical Status, bonus, min/max).
+# (PerUnit, canonical Status, bonus, min/max).
 # ---------------------------------------------------------------------------
 
 class CalculationPreviewLine(BaseModel):

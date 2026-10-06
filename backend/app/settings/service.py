@@ -2022,7 +2022,6 @@ def _build_pay_item_state(
         appears_in_reports=bool(item_row["appearsinreports"]),
         requires_rate=bool(item_row["requiresrate"]),
         is_system_standard=bool(item_row["issystemstandard"]),
-        item_scope=item_row["itemscope"],
         rate_behavior=item_row["ratebehavior"],
         item_status=item_row["itemstatus"],
         is_active=is_active,
@@ -2041,7 +2040,7 @@ _PI_ITEM_COLS = """
     pi.datatype, pi.unit, pi.sortorder,
     pi.appearsinpayrollentry, pi.appearsinledger, pi.appearsinreports,
     pi.requiresrate, pi.issystemstandard,
-    pi.itemscope, pi.ratebehavior, pi.isdefaultbranchactive,
+    pi.ratebehavior, pi.isdefaultbranchactive,
     pi.status AS itemstatus
 """
 
@@ -2233,7 +2232,9 @@ async def get_pay_items(
     db: AsyncConnection,
 ) -> list[BranchPayItemState]:
     """
-    List all non-Retired pay items with their branch-level config state.
+    List all non-Retired Daily operational pay items with their branch-level
+    config state. System-generated Period outputs (SYS_MIN_TOPUP / SYS_MAX_CAP)
+    are not branch-configurable and are not listed.
 
     Readable by any authenticated user with access to this branch.
     Branch ownership is validated (branch must belong to this company).
@@ -2252,6 +2253,7 @@ async def get_pay_items(
             SELECT {_PI_ITEM_COLS}
             FROM   payroll.payitems pi
             WHERE  pi.status != 'Retired'
+              AND  pi.itemscope = 'Daily'
               AND  (pi.companyid IS NULL OR pi.companyid = :cid)
             ORDER  BY pi.sortorder, pi.payitemname
         """),
@@ -2513,6 +2515,7 @@ async def update_pay_item_config(
             SELECT payitemid, payitemcode FROM payroll.payitems
             WHERE  payitemid = :piid
               AND  status   != 'Retired'
+              AND  itemscope = 'Daily'
               AND  (companyid IS NULL OR companyid = :cid)
         """),
         {"piid": pay_item_id, "cid": company_id},
@@ -2582,6 +2585,7 @@ async def bulk_update_pay_item_config(
             SELECT payitemid, payitemcode FROM payroll.payitems
             WHERE  payitemid = :piid
               AND  status   != 'Retired'
+              AND  itemscope = 'Daily'
               AND  (companyid IS NULL OR companyid = :cid)
         """),
         {"piid": pay_item_id, "cid": company_id},
@@ -2777,6 +2781,7 @@ async def get_missing_pay_item_configs(
             SELECT pi.payitemcode
             FROM   payroll.payitems pi
             WHERE  pi.status != 'Retired'
+              AND  pi.itemscope = 'Daily'
               AND  (pi.companyid IS NULL OR pi.companyid = :cid)
               AND  NOT EXISTS (
                        SELECT 1
@@ -2805,10 +2810,8 @@ Custom Pay Items design (M12):
     (IsActive=TRUE) so the item starts active there and inactive everywhere else.
   - System items (IsSystemStandard=TRUE) cannot be deleted via these endpoints.
 
-M12 item scope / rate behavior constraints:
-  - Daily items  → RateBehavior = 'PerUnit'       (quantity × driver rate)
-  - Period items → RateBehavior = 'EnteredAmount'  (user enters dollar amount)
-  Additional rate behaviors (OrdinalTier, RangeBracket, Block …) are M13 work.
+Custom pay items are Daily operational items (quantity × driver rate, or the
+M13 tiered/block behaviors).
 
 Smart delete logic:
   - Never used              → physical delete (rows removed from DB).
@@ -2827,7 +2830,7 @@ _CUSTOM_ITEM_COLS = """
     pi.payitemname, pi.category, pi.datatype, pi.unit, pi.status, pi.sortorder,
     pi.appearsinpayrollentry, pi.appearsinledger, pi.appearsinreports,
     pi.requiresrate, pi.issystemstandard,
-    pi.itemscope, pi.ratebehavior,
+    pi.ratebehavior,
     pi.requestingbranchid,
     pi.createdbyuserid, pi.createdatutc, pi.updatedatutc,
     pi.notes
@@ -2847,7 +2850,6 @@ def _row_to_custom_pay_item(
         category=row["category"],
         data_type=row["datatype"],
         unit=row.get("unit"),
-        item_scope=row["itemscope"],
         rate_behavior=row["ratebehavior"],
         status=row["status"],
         sort_order=row["sortorder"],
@@ -2904,7 +2906,7 @@ _REQUEST_COLS = """
     u.displayname AS requestedby,
     r.requestedatutc,
     r.payitemcode, r.displaylabel, r.payitemname,
-    r.itemscope, r.ratebehavior, r.category, r.unit, r.notes, r.sortorder,
+    r.ratebehavior, r.category, r.unit, r.notes, r.sortorder,
     r.status,
     r.decidedbyuserid,
     du.displayname AS decidedby,
@@ -2924,7 +2926,6 @@ def _row_to_request(row) -> CustomPayItemRequest:
         pay_item_code=row["payitemcode"],
         display_label=row.get("displaylabel"),
         pay_item_name=row["payitemname"],
-        item_scope=row["itemscope"],
         rate_behavior=row["ratebehavior"],
         category=row["category"],
         unit=row.get("unit"),
@@ -3220,210 +3221,14 @@ async def create_custom_pay_item(
     """
     await _ensure_company_admin(company_id, user_id, db)
 
-    # LLR-A: New Custom Daily PayItems must be created through the CDPI workflow.
-    if data.item_scope == "Daily":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Custom Daily PayItems must be created through the CDPI workflow. "
-                "Use POST /settings/cdpi/direct-company-items instead."
-            ),
-        )
-
-    # Resolve pay_item_code: use supplied value or auto-generate.
-    if data.pay_item_code is None:
-        # Auto-generation with collision retry.
-        # _block_if_code_taken raises HTTPException on conflict; we catch it
-        # and try a fresh code rather than surfacing the error to the caller.
-        pay_item_code: str | None = None
-        for attempt in range(_CPI_MAX_RETRIES):
-            candidate = _generate_pay_item_code()
-            try:
-                await _block_if_code_taken(company_id, candidate, db)
-                pay_item_code = candidate
-                break
-            except HTTPException:
-                if attempt == _CPI_MAX_RETRIES - 1:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=(
-                            "Could not generate a unique pay item code. "
-                            "Please try again."
-                        ),
-                    )
-        assert pay_item_code is not None  # loop always breaks or raises above
-    else:
-        await _block_if_code_taken(company_id, data.pay_item_code, db)
-        pay_item_code = data.pay_item_code
-
-    # Resolve datatype and unit from value_type (wizard path) or legacy fields.
-    from app.settings.schemas import _VALUE_TYPE_DATATYPE_MAP  # local avoids circular
-    _RATE_USING_BEHAVIORS = {
-        "PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"
-    }
-    if data.value_type is not None:
-        _dt, _default_unit = _VALUE_TYPE_DATATYPE_MAP.get(data.value_type, ("Decimal", None))
-        item_datatype: str      = _dt
-        item_unit:     str | None = data.unit or _default_unit
-    else:
-        item_datatype = "Decimal"
-        item_unit     = data.unit
-
-    # Derive display flags from item_scope / rate_behavior
-    appears_in_entry = data.item_scope == "Daily"
-    requires_rate    = data.rate_behavior in _RATE_USING_BEHAVIORS
-
-    # Auto-assign sort_order when not supplied: append after the highest existing
-    # company item, using gap-of-10 spacing so future items can be inserted between.
-    if data.sort_order is None:
-        max_r = await db.execute(
-            text("""
-                SELECT COALESCE(MAX(sortorder), 0) AS max_order
-                FROM   payroll.payitems
-                WHERE  companyid = :cid
-            """),
-            {"cid": company_id},
-        )
-        next_order: int = int(max_r.scalar_one() or 0) + 10
-    else:
-        next_order = data.sort_order
-
-    result = await db.execute(
-        text("""
-            INSERT INTO payroll.payitems (
-                companyid, branchid, payitemcode, displaylabel, payitemname,
-                category, datatype, unit, status, sortorder,
-                appearsinpayrollentry, appearsinledger, appearsinreports,
-                requiresrate, issystemstandard,
-                itemscope, ratebehavior, isdefaultbranchactive,
-                requestingbranchid, createdbyuserid, notes
-            ) VALUES (
-                :cid, NULL, :code, :display_label, :name,
-                :category, :datatype, :unit, 'Active', :sort_order,
-                :in_entry, TRUE, TRUE,
-                :requires_rate, FALSE,
-                :item_scope, :rate_behavior, FALSE,
-                NULL, :uid, :notes
-            )
-            RETURNING payitemid
-        """),
-        {
-            "cid":           company_id,
-            "code":          pay_item_code,
-            "display_label": data.display_label,
-            "name":          data.pay_item_name,
-            "category":      data.category,
-            "unit":          item_unit,
-            "datatype":      item_datatype,
-            "sort_order":    next_order,
-            "in_entry":      appears_in_entry,
-            "requires_rate": requires_rate,
-            "item_scope":    data.item_scope,
-            "rate_behavior": data.rate_behavior,
-            "uid":           user_id,
-            "notes":         data.notes,
-        },
+    # LLR-A: Custom Daily PayItems are created through the CDPI workflow only.
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Custom Daily PayItems must be created through the CDPI workflow. "
+            "Use POST /settings/cdpi/direct-company-items instead."
+        ),
     )
-    new_id = result.scalar_one()
-
-    # Build the list of rate field names for this item.
-    # For PerUnit: one field (use rate_names[0] or fall back to pay_item_name + " Rate").
-    # For multi-bracket behaviors: use all supplied rate_names or default to "Rate 1", "Rate 2", …3.
-    _MULTI_RATE_BEHAVIORS = {"OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-    effective_rate_names: list[str] = []
-    if requires_rate:
-        if data.rate_names:
-            effective_rate_names = [n.strip() for n in data.rate_names if n.strip()]
-        if not effective_rate_names:
-            if data.rate_behavior in _MULTI_RATE_BEHAVIORS:
-                effective_rate_names = ["Rate 1", "Rate 2", "Rate 3"]
-            elif requires_rate:
-                effective_rate_names = [data.pay_item_name.strip() + " Rate"]
-
-    # Persist rate_names to payitemsettings (rate_name_1, rate_name_2, …) AND
-    # create the corresponding RateTypes + PayItemRateTypeMap rows so the item
-    # appears in the Pay Rates matrix.
-    # Fix 3E-A: previously only payitemsettings rows were written; RateTypes and
-    # PayItemRateTypeMap rows were missing, causing custom items to be invisible
-    # in Pay Rates (INNER JOIN on PayItemRateTypeMap filtered them out).
-    for idx, rname in enumerate(effective_rate_names, start=1):
-        # 1. Persist display name to PayItemSettings
-        await db.execute(
-            text("""
-                INSERT INTO payroll.payitemsettings
-                    (payitemid, companyid, settingkey,
-                     settingdatatype, settingvaluetext,
-                     status, createdbyuserid)
-                VALUES
-                    (:piid, :cid, :key,
-                     'Text', :val,
-                     'Active', :uid)
-                ON CONFLICT DO NOTHING
-            """),
-            {
-                "piid": new_id,
-                "cid":  company_id,
-                "key":  f"rate_name_{idx}",
-                "val":  rname,
-                "uid":  user_id,
-            },
-        )
-        # 2. Create a RateTypes row for this rate field.
-        # Rate code: CPI_<payitemid>_<idx> -- unique, company-scoped in practice.
-        # Phase 4C: set CompanyID so the RateType is structurally owned by this company.
-        rate_code = f"CPI_{new_id}_{idx}"
-        rt_result = await db.execute(
-            text("""
-                INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
-                VALUES (:code, :name, :unit, TRUE, :cid)
-                ON CONFLICT (ratecode) DO UPDATE
-                    SET ratename  = EXCLUDED.ratename,
-                        companyid = EXCLUDED.companyid
-                RETURNING ratetypeid
-            """),
-            {
-                "code": rate_code,
-                "name": rname,
-                "unit": item_unit or "Unit",
-                "cid":  company_id,
-            },
-        )
-        rt_id = rt_result.scalar_one()
-        # 3. Create the PayItemRateTypeMap row.
-        await db.execute(
-            text("""
-                INSERT INTO payroll.payitemratetypemap
-                    (payitemid, ratetypeid, isprimary, status)
-                VALUES
-                    (:piid, :rtid, :primary, 'Active')
-                ON CONFLICT (payitemid, ratetypeid) DO NOTHING
-            """),
-            {
-                "piid":    new_id,
-                "rtid":    rt_id,
-                "primary": (idx == 1),
-            },
-        )
-
-    await _write_settings_audit(
-        db,
-        company_id=company_id,
-        branch_id=None,
-        user_id=user_id,
-        action_code="CUSTOM_PAY_ITEM_CREATED",
-        entity_name="PayItems",
-        entity_id=str(new_id),
-        new_value={
-            "pay_item_code":  pay_item_code,
-            "item_scope":     data.item_scope,
-            "rate_behavior":  data.rate_behavior,
-            "pay_item_name":  data.pay_item_name,
-        },
-    )
-
-    row = await _get_custom_item_or_404(new_id, company_id, db)
-    rn_map = await _fetch_rate_names_for_items([new_id], company_id, db)
-    return _row_to_custom_pay_item(row, rate_names=rn_map.get(new_id))
 
 
 async def update_custom_pay_item(
@@ -3436,7 +3241,7 @@ async def update_custom_pay_item(
     """
     Partially update mutable metadata on a custom pay item.
 
-    Immutable fields (PayItemCode, ItemScope, RateBehavior) are never touched.
+    Immutable fields (PayItemCode, RateBehavior) are never touched.
     System items (IsSystemStandard=TRUE) are rejected with 422.
     Retired items cannot be updated.
 
@@ -3472,23 +3277,12 @@ async def update_custom_pay_item(
     new_order   = data.sort_order     if data.sort_order     is not None else row["sortorder"]
     new_notes   = data.notes          if data.notes          is not None else row.get("notes")
 
-    # Enforce Daily/Period invariants (ItemScope is immutable — check against DB value).
-    item_scope = row["itemscope"]
-    if item_scope == "Daily":
-        # Daily items must always have a unit.
-        if not new_unit or not str(new_unit).strip():
-            raise HTTPException(
-                status_code=422,
-                detail="Daily custom pay items require a unit (e.g. 'Stop', 'km').",
-            )
-    elif item_scope == "Period":
-        # Period items must not have a unit; reject if caller is trying to set one.
-        if data.unit is not None:
-            raise HTTPException(
-                status_code=422,
-                detail="Period custom pay items do not use a unit. Remove 'unit' from the request.",
-            )
-        new_unit = None  # Always keep null for Period items regardless.
+    # Custom items are Daily operational items: they must always have a unit.
+    if not new_unit or not str(new_unit).strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Daily custom pay items require a unit (e.g. 'Stop', 'km').",
+        )
 
     await db.execute(
         text("""
@@ -3983,75 +3777,14 @@ async def create_pay_item_request(
     # Permission gate
     await _check_permission(company_id, user_id, data.branch_id, "payroll.entry", db)
 
-    # LLR-A: New Custom Daily requests must use the CDPI workflow.
-    if data.item_scope == "Daily":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Custom Daily PayItems must be requested through the CDPI workflow. "
-                "Use POST /settings/cdpi/requests instead."
-            ),
-        )
-
-    # Duplicate / conflict checks (service-level; DB index is the race backstop)
-    await _block_if_code_taken(company_id, data.pay_item_code, db)
-
-    try:
-        result = await db.execute(
-            text("""
-                INSERT INTO payroll.custompayitemrequests (
-                    companyid, requestingbranchid, requestedbyuserid,
-                    payitemcode, displaylabel, payitemname,
-                    itemscope, ratebehavior, category, unit, notes, sortorder
-                ) VALUES (
-                    :cid, :bid, :uid,
-                    :code, :display_label, :name,
-                    :item_scope, :rate_behavior, :category, :unit, :notes, :sort_order
-                )
-                RETURNING requestid
-            """),
-            {
-                "cid":           company_id,
-                "bid":           data.branch_id,
-                "uid":           user_id,
-                "code":          data.pay_item_code,
-                "display_label": data.display_label,
-                "name":          data.pay_item_name,
-                "item_scope":    data.item_scope,
-                "rate_behavior": data.rate_behavior,
-                "category":      data.category,
-                "unit":          data.unit,
-                "notes":         data.notes,
-                "sort_order":    data.sort_order,
-            },
-        )
-    except SAIntegrityError:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"A pending or approved request for code '{data.pay_item_code}' already "
-                "exists for this company."
-            ),
-        )
-    new_request_id = result.scalar_one()
-
-    await _write_settings_audit(
-        db,
-        company_id=company_id,
-        branch_id=data.branch_id,
-        user_id=user_id,
-        action_code="CUSTOM_PAY_ITEM_REQUESTED",
-        entity_name="CustomPayItemRequests",
-        entity_id=str(new_request_id),
-        new_value={
-            "pay_item_code": data.pay_item_code,
-            "item_scope":    data.item_scope,
-            "rate_behavior": data.rate_behavior,
-            "pay_item_name": data.pay_item_name,
-        },
+    # LLR-A: Custom Daily PayItems are requested through the CDPI workflow only.
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Custom Daily PayItems must be requested through the CDPI workflow. "
+            "Use POST /settings/cdpi/requests instead."
+        ),
     )
-
-    return await _load_request_by_id(new_request_id, db)
 
 
 async def _load_request_by_id(request_id: int, db: AsyncConnection) -> CustomPayItemRequest:
@@ -4162,14 +3895,8 @@ async def decide_pay_item_request(
     db: AsyncConnection,
 ) -> CustomPayItemRequest:
     """
-    Admin approves or rejects a custom pay item request.
-
-    Approval (atomic transaction):
-      1. Re-run duplicate code check (race-condition guard).
-      2. INSERT payroll.PayItems (company-level, Active, IsDefaultBranchActive=FALSE).
-      3. INSERT payroll.BranchPayItemConfig for the requesting branch (IsActive=TRUE).
-      4. UPDATE CustomPayItemRequests (Status=Approved, ApprovedPayItemID=new id).
-      5. Audit CUSTOM_PAY_ITEM_APPROVED.
+    Admin rejects a legacy custom pay item request. Approval is disabled:
+    Custom Daily PayItems are created through the CDPI workflow.
 
     Rejection:
       1. UPDATE CustomPayItemRequests (Status=Rejected).
@@ -4184,7 +3911,7 @@ async def decide_pay_item_request(
     lock_result = await db.execute(
         text("""
             SELECT requestid, companyid, requestingbranchid, payitemcode,
-                   displaylabel, payitemname, itemscope, ratebehavior,
+                   displaylabel, payitemname, ratebehavior,
                    category, unit, notes, sortorder, status
             FROM   payroll.custompayitemrequests
             WHERE  requestid = :rid AND companyid = :cid
@@ -4208,168 +3935,13 @@ async def decide_pay_item_request(
         )
 
     if data.decision == "Approved":
-        # LLR-A: Approving legacy Daily requests is disabled; CDPI must be used.
-        if req["itemscope"] == "Daily":
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Approving legacy Daily custom pay item requests is disabled. "
-                    "Create Custom Daily PayItems through the CDPI workflow instead."
-                ),
-            )
-
-        # Race-condition guard: re-check code availability
-        await _block_if_code_taken(
-            company_id, req["payitemcode"], db,
-            exclude_request_id=request_id,
-        )
-
-        _rate_using = {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-        appears_in_entry = req["itemscope"] == "Daily"
-        requires_rate    = req["ratebehavior"] in _rate_using
-        today            = _date.today()
-
-        # Determine safe effective_from for the BranchPayItemConfig:
-        # If the requesting branch has an open payroll period containing today,
-        # the config must not start inside it — schedule it for the day after
-        # that period ends (same rule as M11 update_pay_item_config).
-        requesting_branch_id = req["requestingbranchid"]
-        period_max_end = await _get_current_open_period_max_end(
-            requesting_branch_id, company_id, db
-        )
-        if period_max_end is not None:
-            config_effective_from: _date = period_max_end + _timedelta(days=1)
-        else:
-            config_effective_from = today
-
-        # 1. Create the PayItem
-        ins = await db.execute(
-            text("""
-                INSERT INTO payroll.payitems (
-                    companyid, branchid, payitemcode, displaylabel, payitemname,
-                    category, datatype, unit, status, sortorder,
-                    appearsinpayrollentry, appearsinledger, appearsinreports,
-                    requiresrate, issystemstandard,
-                    itemscope, ratebehavior, isdefaultbranchactive,
-                    requestingbranchid, createdbyuserid, notes
-                ) VALUES (
-                    :cid, NULL, :code, :display_label, :name,
-                    :category, 'Decimal', :unit, 'Active', :sort_order,
-                    :in_entry, TRUE, TRUE,
-                    :requires_rate, FALSE,
-                    :item_scope, :rate_behavior, FALSE,
-                    :req_branch_id, :uid, :notes
-                )
-                RETURNING payitemid
-            """),
-            {
-                "cid":           company_id,
-                "code":          req["payitemcode"],
-                "display_label": req.get("displaylabel"),
-                "name":          req["payitemname"],
-                "category":      req["category"],
-                "unit":          req.get("unit"),
-                "sort_order":    req["sortorder"],
-                "in_entry":      appears_in_entry,
-                "requires_rate": requires_rate,
-                "item_scope":    req["itemscope"],
-                "rate_behavior": req["ratebehavior"],
-                "req_branch_id": req["requestingbranchid"],
-                "uid":           user_id,
-                "notes":         req.get("notes"),
-            },
-        )
-        new_item_id = ins.scalar_one()
-
-        # 1b. Create RateTypes + PayItemRateTypeMap for rate-using items (Fix 3E-A).
-        _req_item_unit = req.get("unit")
-        _req_rate_behavior = req["ratebehavior"]
-        _MULTI_RATE_BEHAVIORS_REQ = {"OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-        if requires_rate:
-            _req_rate_names: list[str] = (
-                ["Rate 1", "Rate 2", "Rate 3"]
-                if _req_rate_behavior in _MULTI_RATE_BEHAVIORS_REQ
-                else [req["payitemname"].strip() + " Rate"]
-            )
-            for _idx, _rname in enumerate(_req_rate_names, start=1):
-                _rate_code = f"CPI_{new_item_id}_{_idx}"
-                _rt_result = await db.execute(
-                    text("""
-                        INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
-                        VALUES (:code, :name, :unit, TRUE, :cid)
-                        ON CONFLICT (ratecode) DO UPDATE
-                            SET ratename  = EXCLUDED.ratename,
-                                companyid = EXCLUDED.companyid
-                        RETURNING ratetypeid
-                    """),
-                    {"code": _rate_code, "name": _rname, "unit": _req_item_unit or "Unit", "cid": company_id},
-                )
-                _rt_id = _rt_result.scalar_one()
-                await db.execute(
-                    text("""
-                        INSERT INTO payroll.payitemratetypemap
-                            (payitemid, ratetypeid, isprimary, status)
-                        VALUES (:piid, :rtid, :primary, 'Active')
-                        ON CONFLICT (payitemid, ratetypeid) DO NOTHING
-                    """),
-                    {"piid": new_item_id, "rtid": _rt_id, "primary": (_idx == 1)},
-                )
-
-        # 2. Create BranchPayItemConfig for requesting branch.
-        # Use safe effective_from: if an open period is running for that branch today,
-        # schedule activation for the day after it ends (same rule as M11).
-        await db.execute(
-            text("""
-                INSERT INTO payroll.branchpayitemconfig (
-                    companyid, branchid, payitemid,
-                    isactive, effectivefrom, createdbyuserid
-                ) VALUES (
-                    :cid, :bid, :item_id, TRUE, :eff_from, :uid
-                )
-            """),
-            {
-                "cid":      company_id,
-                "bid":      requesting_branch_id,
-                "item_id":  new_item_id,
-                "eff_from": config_effective_from,
-                "uid":      user_id,
-            },
-        )
-
-        # 3. Mark request as Approved
-        await db.execute(
-            text("""
-                UPDATE payroll.custompayitemrequests
-                SET    status            = 'Approved',
-                       decidedbyuserid   = :uid,
-                       decidedatutc      = NOW(),
-                       decisionreason    = :reason,
-                       approvedpayitemid = :item_id
-                WHERE  requestid = :rid
-            """),
-            {
-                "uid":     user_id,
-                "reason":  data.decision_reason,
-                "item_id": new_item_id,
-                "rid":     request_id,
-            },
-        )
-
-        # 4. Audit
-        await _write_settings_audit(
-            db,
-            company_id=company_id,
-            branch_id=req["requestingbranchid"],
-            user_id=user_id,
-            action_code="CUSTOM_PAY_ITEM_APPROVED",
-            entity_name="CustomPayItemRequests",
-            entity_id=str(request_id),
-            new_value={
-                "pay_item_code":         req["payitemcode"],
-                "approved_pay_item_id":  new_item_id,
-                "activated_for_branch":  requesting_branch_id,
-                "config_effective_from": str(config_effective_from),
-            },
+        # LLR-A: Approving legacy custom pay item requests is disabled; CDPI must be used.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Approving legacy custom pay item requests is disabled. "
+                "Create Custom Daily PayItems through the CDPI workflow instead."
+            ),
         )
 
     else:  # Rejected
@@ -4424,7 +3996,7 @@ async def assign_rate_type_to_pay_item(
       - Caller must have AllCompanyBranches scope + setup.manage permission.
       - Pay item must belong to this company (not a system item).
       - Pay item must use a rate-based behavior (PerUnit, OrdinalTier, RangeBracket,
-        RangeProgressive, or Block).  EnteredAmount / Fixed / None items do not
+        RangeProgressive, or Block).  Fixed / None items do not
         use DriverRates and therefore do not need a RateType mapping.
       - rate_type_id must exist and be active.
     """
@@ -4459,7 +4031,7 @@ async def assign_rate_type_to_pay_item(
             detail=(
                 "Rate type mapping requires a rate-based pay item behavior. "
                 f"This item has RateBehavior '{pi_row['ratebehavior']}' "
-                "which does not use driver rates (EnteredAmount / Fixed / None)."
+                "which does not use driver rates (Fixed / None)."
             ),
         )
 
@@ -4607,6 +4179,7 @@ async def update_pay_item_order(
             FROM   payroll.payitems
             WHERE  payitemid IN ({in_clause})
               AND  status    != 'Retired'
+              AND  itemscope  = 'Daily'
               AND  (companyid IS NULL OR companyid = :cid)
         """),
         {"cid": company_id, **in_params},

@@ -119,8 +119,8 @@ class _OwnedPeriodLines:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, sourcetype)
-                VALUES (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, :source)
+                     workdate, linetype, quantity, sourcetype)
+                VALUES (:cid, :bid, :period_id, :driver_id, DATE '2090-01-01', 'REGULAR', 1, :source)
                 RETURNING draftlineid
             """),
             {"cid": company_id, "bid": branch_id, "period_id": period_id,

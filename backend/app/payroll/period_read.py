@@ -10,7 +10,7 @@ and neither is referenced anywhere else in the backend or tests.
 
 get_period_by_id is a genuine cross-domain dependency gate: call sites
 remain across many payroll domain modules (Lifecycle, Resubmission,
-Draft-line CRUD, Finalization, Calculation, Period Pay Lines, Bonus,
+Draft-line CRUD, Finalization, Calculation, Bonus,
 Drivers Off, Day Grid — Period Create's own call site moved here directly
 with it in B4-21). Stage B4-22 retargeted app.payroll.off_drivers to import
 this function directly from this module — it no longer resolves it via
@@ -249,8 +249,8 @@ async def get_period_entry_count(
     """
     Return a count of non-voided draft entries in *period_id* for the caller.
 
-    Counts all rows in payroll.PayrollDraftLines (both 'Day' and 'Period'
-    linescope) that are not Void.  Used by the UI to show a data-loss warning
+    Counts all rows in payroll.PayrollDraftLines that are not Void.  Used by
+    the UI to show a data-loss warning
     before cancelling a period.
 
     Raises 403 / 404 via ``get_period_by_id`` if the caller lacks access.

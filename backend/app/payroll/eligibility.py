@@ -13,7 +13,7 @@ pure relocation, no behavior change. This module already owned the table its
 primary (snapshot) branch reads, payroll.payrollperioddrivereligibility, via
 _period_has_driver_eligibility_snapshot/_create_period_driver_eligibility_rows
 above, and this module's own _assert_driver_eligible_for_period docstring
-already documented parity with get_period_eligible_drivers's period-pay
+already documented parity with get_period_eligible_drivers's Bonus
 eligibility list — table ownership, not physical adjacency, is why it moved
 here rather than to period_read.py or off_drivers.py. This
 is the one symbol in the B4 residue that costs this module its status as a
@@ -132,7 +132,7 @@ async def _assert_driver_eligible_for_period(
     Raise HTTP 422 if the driver is not eligible for at least one day in the
     payroll period.
 
-    Mirrors the period-pay eligibility list in get_period_eligible_drivers:
+    Mirrors the Bonus eligibility list in get_period_eligible_drivers:
       - driver belongs to company and branch
       - employment_status = 'Active'
       - driver_status = 'Active'  (no in-transfer; transferred drivers keep their
@@ -282,21 +282,6 @@ async def _driver_has_existing_daily_source_on_date(
     return r2 is not None
 
 
-async def _driver_has_existing_period_pay_source(
-    period_id: int, driver_id: int, db: AsyncConnection
-) -> bool:
-    r = (await db.execute(
-        text("""
-            SELECT 1 FROM payroll.payrolldraftlines
-            WHERE payrollperiodid = :pid AND driverid = :did
-              AND linescope = 'Period' AND status != 'Void'
-            LIMIT 1
-        """),
-        {"pid": period_id, "did": driver_id},
-    )).first()
-    return r is not None
-
-
 async def _assert_driver_eligible_for_workdate_via_snapshot(
     company_id: int, branch_id: int, period_id: int,
     driver_id: int, work_date: date, db: AsyncConnection,
@@ -366,7 +351,12 @@ async def _assert_driver_eligible_for_period_via_snapshot(
     company_id: int, branch_id: int, period_id: int,
     driver_id: int, db: AsyncConnection,
 ) -> None:
-    """Check period-level eligibility, using snapshot when available."""
+    """Check period-level (Bonus) eligibility, using snapshot when available.
+
+    IncludedByExistingData drivers are in the roster only because they have
+    existing saved daily source; that history never grants authority to create
+    new period-level Bonus money, so they are rejected here.
+    """
     if not await _period_has_driver_eligibility_snapshot(period_id, db):
         period = (await db.execute(
             text(
@@ -386,13 +376,10 @@ async def _assert_driver_eligible_for_period_via_snapshot(
             detail="Driver has no eligibility snapshot for this period.",
         )
     if row.eligibilityreasoncode == "IncludedByExistingData":
-        has_existing = await _driver_has_existing_period_pay_source(period_id, driver_id, db)
-        if not has_existing:
-            raise HTTPException(
-                status_code=422,
-                detail="Driver is not eligible for new period-pay entries in this period.",
-            )
-        return
+        raise HTTPException(
+            status_code=422,
+            detail="Driver is not eligible for new Bonus entries in this period.",
+        )
     # Active / TerminatedHistorical / Transferred — present in snapshot = period-eligible
 
 
@@ -606,15 +593,13 @@ async def get_period_eligible_drivers(
     db: AsyncConnection,
 ) -> list[dict]:
     """
-    Return drivers eligible for a Bonus (or other period-pay line) for the
-    given period.
+    Return drivers eligible for a new Bonus in the given period.
 
-    Eligibility = period-scoped, NOT day-scoped:
-      1. Active drivers (employmentstatus='Active' AND driverstatus='Active')
-         whose hire/termination window overlaps the period dates.
-      2. OR any driver who already has period-pay lines in this period —
-         so existing bonuses stay voidable even if the driver was later
-         terminated.
+    Eligibility = period-scoped, NOT day-scoped: Active drivers
+    (employmentstatus='Active' AND driverstatus='Active') whose
+    hire/termination window overlaps the period dates. For snapshotted
+    periods this is the CP-2E roster minus IncludedByExistingData drivers,
+    which never gain new Bonus creation authority from existing source.
 
     DRIVER/Self users are blocked unconditionally (same boundary as day-grid).
     payroll.view OR payroll.entry permission is required.
@@ -624,7 +609,7 @@ async def get_period_eligible_drivers(
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
-    # CP-2F: Period Pay / Bonus eligible driver list is a financial path — block for Draft.
+    # CP-2F: the Bonus eligible driver list is a financial path — block for Draft.
     if period.status == "Draft":
         raise HTTPException(
             status_code=422,
@@ -638,52 +623,31 @@ async def get_period_eligible_drivers(
     # CP-2E: For snapshotted periods use the snapshot roster instead of live tables.
     _has_snap = await _period_has_driver_eligibility_snapshot(period_id, db)
     if _has_snap:
-        # Active / TerminatedHistorical / Transferred → prospective choices
-        # IncludedByExistingData → only if they already have a period-pay line
+        # Active / TerminatedHistorical / Transferred → prospective choices.
+        # IncludedByExistingData is excluded: it cannot create new Bonus money.
         snap_result = await db.execute(
             text("""
                 SELECT ppde.driverid,
                        COALESCE(ppde.drivernamesnapshot, '') AS drivername,
-                       COALESCE(ppde.drivercodesnapshot, '') AS drivercode,
-                       ppde.eligibilityreasoncode
+                       COALESCE(ppde.drivercodesnapshot, '') AS drivercode
                 FROM   payroll.payrollperioddrivereligibility ppde
                 WHERE  ppde.payrollperiodid = :period_id
                   AND  ppde.companyid       = :cid
                   AND  ppde.branchid        = :bid
                   AND  ppde.iseligibleforperiod = TRUE
+                  AND  ppde.eligibilityreasoncode <> 'IncludedByExistingData'
                 ORDER BY ppde.drivernamesnapshot
             """),
             {"period_id": period_id, "cid": company_id, "bid": period.branch_id},
         )
-        snap_rows = list(snap_result.mappings().all())
-
-        # For IBED: check which have existing period-pay lines
-        ibed_ids = [r["driverid"] for r in snap_rows if r["eligibilityreasoncode"] == "IncludedByExistingData"]
-        ibed_with_period_pay: set[int] = set()
-        if ibed_ids:
-            in_cl, in_pr = _build_in_clause(ibed_ids, "ibed")
-            ibed_res = await db.execute(
-                text(f"""
-                    SELECT DISTINCT driverid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :period_id AND linescope = 'Period'
-                      AND status != 'Void'
-                      AND driverid IN ({in_cl})
-                """),
-                {"period_id": period_id, **in_pr},
-            )
-            ibed_with_period_pay = {r["driverid"] for r in ibed_res.mappings().all()}
-
-        out = []
-        for r in snap_rows:
-            if r["eligibilityreasoncode"] == "IncludedByExistingData":
-                if r["driverid"] not in ibed_with_period_pay:
-                    continue
-            out.append({
+        return [
+            {
                 "driver_id":   int(r["driverid"]),
                 "driver_name": r["drivername"],
                 "driver_code": r["drivercode"],
-            })
-        return out
+            }
+            for r in snap_result.mappings().all()
+        ]
 
     result = await db.execute(
         text("""
@@ -692,24 +656,11 @@ async def get_period_eligible_drivers(
             JOIN   core.employees e ON e.employeeid = d.employeeid
             WHERE  d.companyid = :cid
               AND  d.branchid  = :bid
-              AND  (
-                    -- Active driver whose hire/termination window overlaps the period
-                    (    e.employmentstatus = 'Active'
-                     AND d.driverstatus     = 'Active'
-                     AND (e.hiredate IS NULL OR e.hiredate <= :period_end)
-                     AND (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
-                    )
-                    OR
-                    -- Driver who already has period-pay lines in this period
-                    -- (keeps existing bonuses voidable even if driver was terminated)
-                    EXISTS (
-                        SELECT 1
-                        FROM   payroll.payrolldraftlines pdl
-                        WHERE  pdl.driverid        = d.driverid
-                          AND  pdl.payrollperiodid = :period_id
-                          AND  pdl.linescope        = 'Period'
-                    )
-              )
+              -- Active driver whose hire/termination window overlaps the period
+              AND  e.employmentstatus = 'Active'
+              AND  d.driverstatus     = 'Active'
+              AND  (e.hiredate IS NULL OR e.hiredate <= :period_end)
+              AND  (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
             ORDER BY e.fullname
         """),
         {
@@ -717,7 +668,6 @@ async def get_period_eligible_drivers(
             "bid":          period.branch_id,
             "period_start": period.start_date,
             "period_end":   period.end_date,
-            "period_id":    period_id,
         },
     )
     rows = result.mappings().all()

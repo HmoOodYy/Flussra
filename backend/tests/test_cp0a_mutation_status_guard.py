@@ -1180,7 +1180,7 @@ async def _insert_minimal_custom_item(direct_db, *, company_id: int, user_id: in
                  requiresrate, createdbyuserid, createdatutc)
             VALUES
                 (:cid, :code, 'CP0A Test Item', 'Custom', 'Decimal',
-                 'Active', 'Daily', 'EnteredAmount', FALSE, FALSE,
+                 'Active', 'Daily', 'Fixed', FALSE, FALSE,
                  999, TRUE, TRUE, TRUE,
                  FALSE, :uid, NOW())
             RETURNING payitemid
@@ -1255,11 +1255,11 @@ class TestSettingsDeletionGuard:
                 text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES
                         (:cid, :bid, :pid, :did,
-                         :dt, :code, 'Daily', 0,
+                         :dt, :code, 0,
                          'Manual', 'Void', FALSE, :uid)
                 """),
                 {
@@ -1330,11 +1330,11 @@ class TestSettingsDeletionGuard:
                 text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES
                         (:cid, :bid, :pid, :did,
-                         :dt, :code, 'Daily', 0,
+                         :dt, :code, 0,
                          'Manual', 'Void', FALSE, :uid)
                 """),
                 {
@@ -1424,11 +1424,11 @@ class TestSettingsDeletionGuard:
                 text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES
                         (:cid, :bid, :pid, :did,
-                         :dt, :code, 'Daily', 0,
+                         :dt, :code, 0,
                          'Manual', 'Void', FALSE, :uid)
                 """),
                 {
@@ -2130,10 +2130,10 @@ class TestZeroToMeaningfulRace:
                 text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES (:cid, :bid, :pid, :did,
-                            :dt, :code, 'Daily', 0,
+                            :dt, :code, 0,
                             'Manual', 'Active', FALSE, :uid)
                     RETURNING draftlineid
                 """),
@@ -2309,10 +2309,10 @@ class TestZeroToMeaningfulRace:
                 text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES (:cid, :bid, :pid, :did,
-                            :dt, :code, 'Daily', 0,
+                            :dt, :code, 0,
                             'Manual', 'Active', FALSE, :uid)
                     RETURNING draftlineid
                 """),

@@ -122,9 +122,9 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 status = "Void" if state_kind == "draft_voided" else "Active"
                 row_id = int((await db.execute(text(f"""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid, linetype, linescope,
+                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
                          {amount}, sourcetype, sourceid, status)
-                    VALUES (:cid,:bid,:pid,:did,'OTHER','Period',10,'P3a',:code,:status)
+                    VALUES (:cid,:bid,:pid,:did,DATE '2099-01-01','OTHER',10,'P3a',:code,:status)
                     RETURNING draftlineid
                 """), {**params, "status": status})).scalar_one())
             elif state_kind == "snapshot":
@@ -183,7 +183,7 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
             eid = int((await db.execute(text("INSERT INTO core.employees(companyid,branchid,fullname,employeetype,employmentstatus,createdbyuserid) VALUES (:c,:b,'P3a invalid','Driver','Active',1) RETURNING employeeid"), {"c": cid, "b": bid})).scalar_one())
             did = int((await db.execute(text("INSERT INTO core.drivers(companyid,branchid,employeeid,drivercode,driverstatus) VALUES (:c,:b,:e,:d,'Active') RETURNING driverid"), {"c": cid, "b": bid, "e": eid, "d": f"P3AID_{marker}"})).scalar_one())
             period_id = int((await db.execute(text("INSERT INTO payroll.payrollperiods(companyid,branchid,status,periodcode,periodname,periodtype,startdate,enddate) VALUES (:c,:b,'Open',:p,'P3a invalid','Week',DATE '2099-01-01',DATE '2099-01-07') RETURNING payrollperiodid"), {"c": cid, "b": bid, "p": f"P3AIP_{marker}"})).scalar_one())
-            await db.execute(text("INSERT INTO payroll.payrolldraftlines(companyid,branchid,payrollperiodid,driverid,linetype,linescope,rateamount,sourcetype,sourceid) VALUES (:c,:b,:p,:d,'OTHER','Period',10,'P3a',:s)"), {"c":cid,"b":bid,"p":period_id,"d":did,"s":marker})
+            await db.execute(text("INSERT INTO payroll.payrolldraftlines(companyid,branchid,payrollperiodid,driverid,workdate,linetype,rateamount,sourcetype,sourceid) VALUES (:c,:b,:p,:d,DATE '2099-01-01','OTHER',10,'P3a',:s)"), {"c":cid,"b":bid,"p":period_id,"d":did,"s":marker})
             with pytest.raises(HTTPException) as profile_error:
                 await settings_service.get_company_profile(cid, 1, db)
             assert profile_error.value.detail["code"] == "COMPANY_CURRENCY_INVARIANT_VIOLATION"

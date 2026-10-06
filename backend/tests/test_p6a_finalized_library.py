@@ -100,10 +100,8 @@ async def _seed_finalized_period(
     """), {"period_id": period_id})).scalar_one())
     await direct_db.execute(text("""
         INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-             quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-        VALUES (1, :branch_id, :period_id, :driver_id, '2098-01-01', 'HOURS', 'Daily',
-                2.0000, 'Manual', 'Active', FALSE, 1)
+            (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+        VALUES (1, :branch_id, :period_id, :driver_id, '2098-01-01', 'HOURS', 2.0000, 'Manual', 'Active', FALSE, 1)
     """), {"branch_id": branch_id, "period_id": period_id, "driver_id": driver_id})
     rate_type_id = int((await direct_db.execute(text("""
         SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'HOURLY'

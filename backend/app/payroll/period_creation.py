@@ -432,7 +432,9 @@ async def _create_period_pay_item_rows(
     company custom) as of start_date.
 
     Branch activation is resolved from BranchPayItemConfig using start_date.
-    Both Daily and Period scope items are snapshotted.
+    The catalog admits only Daily operational PayItems and the two
+    system-generated Period output identities (SYS_MIN_TOPUP / SYS_MAX_CAP);
+    all of them are snapshotted so the period carries a frozen output layout.
     DailyStatus / DailyNote pseudo-lines are excluded (no PayItems catalog row).
 
     Called once at period creation; rows are immutable afterward.

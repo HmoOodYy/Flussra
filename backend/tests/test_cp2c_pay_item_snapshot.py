@@ -282,7 +282,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0077."""
+        """S03: Alembic migration chain is linear and head is 0078."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -294,7 +294,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0077" in lines[0], f"Expected head 0077, got: {lines[0]}"
+        assert "0078" in lines[0], f"Expected head 0078, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist
@@ -983,7 +983,7 @@ class TestCp2cPayItemSnapshot:
                      requiresrate, issystemstandard, isdefaultbranchactive)
                 VALUES
                     (:cid, 'SNAP_CUSTOM_2094', 'Snapshot Custom 2094', 'Custom', 'Number',
-                     'Period', 'EnteredAmount', 'Active', 500,
+                     'Daily', 'PerUnit', 'Active', 500,
                      FALSE, TRUE, TRUE, FALSE, FALSE, TRUE)
                 ON CONFLICT DO NOTHING
                 RETURNING payitemid

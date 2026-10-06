@@ -7,7 +7,7 @@ module — no behavior change, pure relocation.
 
 _lock_pay_item_for_source_write is a concurrency-safety primitive: it
 acquires a FOR UPDATE row lock on the company-owned payroll.PayItems catalog
-row before a source mutation (draft line, period pay line, or day-grid save)
+row before a source mutation (draft line or day-grid save)
 inserts or updates a DraftLine reference to it. It serializes against the
 physical-delete/retirement path's own FOR UPDATE on the same row (see
 app.settings.service, the pay-item delete endpoint), closing the

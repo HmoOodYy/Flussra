@@ -210,12 +210,12 @@ async def _insert_daily_status_line(
         _text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, quantity,
+                 workdate, linetype, quantity,
                  rateamount, calculatedamount, sourcetype,
                  status, needsmanagerreview, notes, addedbyuserid)
             VALUES
                 (:cid, :bid, :pid, :did,
-                 :workdate, 'DailyStatus', 'Daily', 1,
+                 :workdate, 'DailyStatus', 1,
                  NULL, NULL, 'Manual',
                  'Active', FALSE, :status_code, 1)
             RETURNING draftlineid
@@ -248,12 +248,12 @@ async def _insert_daily_note_line(
         _text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, quantity,
+                 workdate, linetype, quantity,
                  rateamount, calculatedamount, sourcetype,
                  status, needsmanagerreview, notes, addedbyuserid)
             VALUES
                 (:cid, :bid, :pid, :did,
-                 :workdate, 'DailyNote', 'Daily', 1,
+                 :workdate, 'DailyNote', 1,
                  NULL, NULL, 'Manual',
                  'Active', FALSE, :note_text, 1)
             RETURNING draftlineid
@@ -357,12 +357,12 @@ class TestDriversOff:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          rateamount, calculatedamount, sourcetype,
                          status, needsmanagerreview, notes, addedbyuserid)
                     VALUES
                         (:cid, :bid, :pid, :did,
-                         :dt, 'DailyStatus', 'Daily', 1,
+                         :dt, 'DailyStatus', 1,
                          NULL, NULL, 'Manual',
                          'Active', FALSE, 'NOTANOFFCODE_XYZ', 1)
                 """),

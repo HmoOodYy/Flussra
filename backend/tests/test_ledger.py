@@ -55,40 +55,6 @@ def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _activate_bonus(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    """Activate the BONUS pay item for a branch if not already active."""
-    items = await client.get(
-        f"/settings/branches/{branch_id}/pay-items",
-        headers=auth(token),
-    )
-    if items.status_code != 200:
-        return
-    for item in items.json():
-        if item["pay_item_code"] == "BONUS":
-            if not item.get("is_active", False):
-                await client.patch(
-                    f"/settings/branches/{branch_id}/pay-items/{item['pay_item_id']}",
-                    json={"is_active": True},
-                    headers=auth(token),
-                )
-            return
-    # Try global items list
-    all_items = await client.get("/settings/pay-items", headers=auth(token))
-    if all_items.status_code == 200:
-        for item in all_items.json():
-            if item.get("pay_item_code") == "BONUS":
-                await client.patch(
-                    f"/settings/branches/{branch_id}/pay-items/{item['pay_item_id']}",
-                    json={"is_active": True},
-                    headers=auth(token),
-                )
-                return
-
-
 async def _advance_to_approved(
     client: httpx.AsyncClient,
     token: str,

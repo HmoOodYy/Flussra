@@ -518,10 +518,10 @@ async def test_finalization_blocks_preexisting_duplicates(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     SELECT companyid, :bid, :pid, :did,
-                           :wdate, 'DailyNote', 'Daily', 1,
+                           :wdate, 'DailyNote', 1,
                            'Manual', 'Active', FALSE, NULL, 1
                     FROM   payroll.payrollperiods
                     WHERE  payrollperiodid = :pid
@@ -554,8 +554,7 @@ async def test_finalization_blocks_preexisting_duplicates(
                     uix_payrolldraftlines_daily_active_business_key
                 ON payroll.payrolldraftlines
                     (companyid, payrollperiodid, driverid, workdate, linetype)
-                WHERE linescope = 'Daily'
-                  AND status   != 'Void'
+                WHERE status != 'Void'
             """)
         )
 
@@ -588,10 +587,10 @@ async def test_db_unique_index_prevents_direct_duplicate(
     insert_sql = _text("""
         INSERT INTO payroll.payrolldraftlines
             (companyid, branchid, payrollperiodid, driverid,
-             workdate, linetype, linescope, quantity,
+             workdate, linetype, quantity,
              sourcetype, status, needsmanagerreview, notes, addedbyuserid)
         SELECT companyid, :bid, :pid, :did,
-               :wdate, 'DailyNote', 'Daily', 1,
+               :wdate, 'DailyNote', 1,
                'Manual', 'Active', FALSE, NULL, 1
         FROM   payroll.payrollperiods
         WHERE  payrollperiodid = :pid
@@ -641,10 +640,10 @@ async def test_normal_add_and_finalize_still_works(
         _text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, quantity,
+                 workdate, linetype, quantity,
                  sourcetype, status, needsmanagerreview, notes, addedbyuserid)
             SELECT companyid, branchid, :pid, :did,
-                   :wdate, 'DailyNote', 'Daily', 1,
+                   :wdate, 'DailyNote', 1,
                    'Manual', 'Active', FALSE, NULL, 1
             FROM   payroll.payrollperiods
             WHERE  payrollperiodid = :pid

@@ -17,7 +17,6 @@ from app.payroll.eligibility import (
     _assert_driver_eligible_for_workdate_via_snapshot,  # noqa: F401
     _create_period_driver_eligibility_rows,  # noqa: F401
     _driver_has_existing_daily_source_on_date,  # noqa: F401
-    _driver_has_existing_period_pay_source,  # noqa: F401
     _freeze_period_driver_eligibility_snapshot,  # noqa: F401
     _get_driver_eligibility_row,  # noqa: F401
     _is_snapshot_row_eligible_for_workdate,  # noqa: F401

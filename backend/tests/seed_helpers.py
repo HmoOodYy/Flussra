@@ -20,7 +20,6 @@ async def seed_legacy_item(
     user_id: int = 1,
     code: str,
     name: str = "Legacy Test Item",
-    item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
     unit: str | None = "Stop",
     category: str = "Count",
@@ -38,14 +37,14 @@ async def seed_legacy_item(
             ) VALUES (
                 :cid, :code, :name, :category, :datatype, :unit,
                 'Active', 100, TRUE, TRUE, TRUE, TRUE, FALSE,
-                :scope, :behavior, FALSE, :uid
+                'Daily', :behavior, FALSE, :uid
             )
             RETURNING payitemid
         """),
         {
             "cid": company_id, "code": code, "name": name,
             "category": category, "datatype": datatype, "unit": unit,
-            "scope": item_scope, "behavior": rate_behavior, "uid": user_id,
+            "behavior": rate_behavior, "uid": user_id,
         }
     )
     return result.scalar_one()
@@ -161,7 +160,6 @@ async def seed_legacy_request(
     branch_id: int,
     code: str,
     name: str = "Legacy Test Request",
-    item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
     unit: str | None = "Unit",
     category: str = "Count",
@@ -176,14 +174,14 @@ async def seed_legacy_request(
                 category, unit, sortorder, status
             ) VALUES (
                 :cid, :bid, :uid,
-                :code, :name, :scope, :behavior,
+                :code, :name, 'Daily', :behavior,
                 :category, :unit, 100, :status
             )
             RETURNING requestid
         """),
         {
             "cid": company_id, "bid": branch_id, "uid": user_id,
-            "code": code, "name": name, "scope": item_scope,
+            "code": code, "name": name,
             "behavior": rate_behavior, "category": category,
             "unit": unit, "status": req_status,
         }

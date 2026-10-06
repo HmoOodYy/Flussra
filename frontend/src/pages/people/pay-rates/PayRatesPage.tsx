@@ -29,7 +29,6 @@ interface RateMatrixGroup {
   group_key: string;
   pay_item_id: number;
   pay_item_name: string;
-  item_scope: string;
   rate_behavior: string;
   rate_type_id: number;
   rate_code: string;
@@ -910,7 +909,7 @@ export function PayRatesPage() {
                                         Payroll active from {new Date(g.pay_item_effective_from + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                                       </div>
                                     )}
-                                    {g.rate_behavior !== 'Flat' && g.rate_behavior !== 'EnteredAmount' && (
+                                    {g.rate_behavior !== 'Flat' && (
                                       <span className={styles.advancedBadge} title={`Rate behavior: ${g.rate_behavior}`}>
                                         {g.rate_behavior === 'Block' ? 'Block' :
                                          g.rate_behavior === 'OrdinalTier' ? 'Tiered' :

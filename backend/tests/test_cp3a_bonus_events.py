@@ -228,7 +228,7 @@ async def test_bonus_events_canonical_columns(db_conn: AsyncConnection) -> None:
     )).scalars().all()
     required = {
         "payrollbonuseventid", "companyid", "branchid", "payrollperiodid", "driverid",
-        "amount", "reason", "notes", "status", "datarevision", "sourcedraftlineid",
+        "amount", "reason", "notes", "status", "datarevision",
         "voidedbyuserid", "voidedatutc", "voidreason",
         "createdbyuserid", "createdatutc", "updatedbyuserid", "updatedatutc",
     }

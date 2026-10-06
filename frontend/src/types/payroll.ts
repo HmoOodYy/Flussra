@@ -306,7 +306,6 @@ export interface BonusEventResponse extends BonusEvent {
   period_id: number;
   company_id: number;
   branch_id: number;
-  source_draft_line_id: number | null;
   voided_by_user_id: number | null;
   voided_at_utc: string | null;
   void_reason: string | null;

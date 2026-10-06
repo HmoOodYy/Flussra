@@ -917,9 +917,7 @@ async def _finalized_normal_work_pairs(
           AND dt.companyid = :company_id AND dt.branchid = :branch_id
           AND sl.sourcetype = 'DraftLine' AND sl.linescope = 'Daily'
           AND sl.workdate IS NOT NULL AND sl.quantity IS NOT NULL AND sl.quantity <> 0
-          AND sl.linetype NOT IN ('DailyStatus', 'DailyNote', 'STATUS_PAYMENT', 'STATUS_PAY',
-                                  'BONUS', 'ADJUSTMENT', 'MINIMUM', 'MAXIMUM',
-                                  'SYS_MIN_TOPUP', 'SYS_MAX_CAP')
+          AND sl.linetype NOT IN ('DailyStatus', 'DailyNote', 'STATUS_PAYMENT', 'STATUS_PAY')
           AND pppi.itemscope = 'Daily' AND pppi.appearsinpayrollentry = TRUE
           AND pppi.isactiveinperiod = TRUE
     """), {

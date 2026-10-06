@@ -1278,30 +1278,6 @@ class TestCustomItemBehaviorValidation:
         )
         assert resp.status_code in (200, 201), resp.text
 
-    async def test_rate_type_map_rejected_for_entered_amount_item(
-        self, session_client, auth_token, m13c_ordinal_rt_id,
-    ):
-        """
-        Custom Period-scope items (EnteredAmount) cannot be created.
-        Verify the creation endpoint rejects Period-scope custom items with 422
-        and an informative message — the rate-type-map guard is therefore
-        unreachable for custom non-rate-based items.
-        """
-        item_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "M13C_PERIOD_ONLY",
-                "pay_item_name": "Period Only Item",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Bonus",
-            },
-            headers=auth(auth_token),
-        )
-        assert item_resp.status_code == 422
-        assert "period" in item_resp.text.lower()
-
-
 # ===========================================================================
 # TestM13cSafetyFixes — review issues fixed
 # ===========================================================================
