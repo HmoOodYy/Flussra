@@ -171,11 +171,11 @@ async def _insert_driver_total(
     return (await db.conn.execute(text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
             (payrollcalculationsnapshotid, companyid, branchid, driverid,
-             drivercodesnapshot, drivernamesnapshot, dailypay, statuspay, periodpay,
+             drivercodesnapshot, drivernamesnapshot, dailypay, statuspay,
              minimumadjustment, maximumadjustment, bonustotal, expectedpay)
         VALUES
             (:snapshot_id, :company_id, :branch_id, :driver_id,
-             'CP4C', 'CP4C Driver', :daily, :status, :period, :minimum, :maximum,
+             'CP4C', 'CP4C Driver', :daily, :status, :minimum, :maximum,
              :bonus, :expected)
         RETURNING payrollcalculationdrivertotalid
     """), {
@@ -185,11 +185,10 @@ async def _insert_driver_total(
         "driver_id": db.driver_id if driver_id is None else driver_id,
         "daily": Decimal("100.0000"),
         "status": Decimal("10.0000"),
-        "period": Decimal("5.0000"),
         "minimum": Decimal("8.0000"),
         "maximum": Decimal("-2.0000"),
         "bonus": Decimal("3.0000"),
-        "expected": Decimal("124.0000"),
+        "expected": Decimal("119.0000"),
     })).scalar_one()
 
 
@@ -375,10 +374,10 @@ async def test_driver_total_requires_matching_snapshot_and_driver_tenant(snapsho
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
             (payrollcalculationsnapshotid, companyid, branchid, driverid,
-             dailypay, statuspay, periodpay, minimumadjustment, maximumadjustment,
+             dailypay, statuspay, minimumadjustment, maximumadjustment,
              bonustotal, expectedpay)
         VALUES (:snapshot_id, :company_id, :branch_id, :driver_id,
-                0, 0, 0, 0, 0, 0, 0)
+                0, 0, 0, 0, 0, 0)
     """), {
         "snapshot_id": snapshot_id,
         "company_id": snapshot_db.company_id,
@@ -396,10 +395,10 @@ async def test_driver_total_requires_matching_snapshot_and_driver_tenant(snapsho
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
             (payrollcalculationsnapshotid, companyid, branchid, driverid,
-             dailypay, statuspay, periodpay, minimumadjustment, maximumadjustment,
+             dailypay, statuspay, minimumadjustment, maximumadjustment,
              bonustotal, expectedpay)
         VALUES (:snapshot_id, :company_id, :branch_id, :driver_id,
-                0, 0, 0, 0, 0, 0, 0)
+                0, 0, 0, 0, 0, 0)
     """), {
         "snapshot_id": snapshot_id,
         "company_id": snapshot_db.company_id,
@@ -414,10 +413,10 @@ async def test_driver_total_is_unique_per_snapshot_and_driver(snapshot_db):
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
             (payrollcalculationsnapshotid, companyid, branchid, driverid,
-             dailypay, statuspay, periodpay, minimumadjustment, maximumadjustment,
+             dailypay, statuspay, minimumadjustment, maximumadjustment,
              bonustotal, expectedpay)
         VALUES (:snapshot_id, :company_id, :branch_id, :driver_id,
-                0, 0, 0, 0, 0, 0, 0)
+                0, 0, 0, 0, 0, 0)
     """), {
         "snapshot_id": snapshot_id,
         "company_id": snapshot_db.company_id,
@@ -595,20 +594,31 @@ def _total(driver_id: int, *lines):
         "DriverNameSnapshot": f"Driver {driver_id}",
         "DailyPay": Decimal("1.0000"),
         "StatusPay": Decimal("2.0000"),
-        "PeriodPay": Decimal("3.0000"),
         "MinimumAdjustment": Decimal("0"),
         "MaximumAdjustment": Decimal("0"),
         "BonusTotal": Decimal("0"),
-        "ExpectedPay": Decimal("6.0000"),
+        "ExpectedPay": Decimal("3.0000"),
         "Lines": list(lines),
     }
 
 
 def test_canonical_decimal_datetime_dict_and_unicode_contract():
-    assert CURRENT_PAYROLL_CALCULATION_VERSION == "current-payroll-v1"
+    assert CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v1"
     assert canonical_json({"b": Decimal("-0.0000"), "a": Decimal("12.3400")}) == '{"a":"12.34","b":"0"}'
     assert canonical_json({"when": datetime(2040, 1, 1, 7, tzinfo=timezone(timedelta(hours=2)))}) == '{"when":"2040-01-01T05:00:00.000000Z"}'
     assert canonical_json({"text": "cafe\u0301"}) == '{"text":"café"}'
+
+
+def test_only_the_current_calculation_version_is_supported():
+    from app.payroll.snapshot_hash import (
+        UnsupportedCalculationVersionError,
+        require_supported_calculation_version,
+    )
+
+    require_supported_calculation_version(CURRENT_PAYROLL_CALCULATION_VERSION)
+    for value in ("current-payroll-v1", "payroll-calculation-v2", "", None):
+        with pytest.raises(UnsupportedCalculationVersionError):
+            require_supported_calculation_version(value)
 
 
 @pytest.mark.parametrize("value", [1.0, {"nested": 1.0}])

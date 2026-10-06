@@ -237,7 +237,6 @@ function DriverReport({
                 {([
                   ['Daily pay', driver.pay.daily_pay],
                   ['Status pay', driver.pay.status_pay],
-                  ['Period pay', driver.pay.period_pay],
                   ['Minimum adjustment', driver.pay.minimum_adjustment],
                   ['Maximum adjustment', driver.pay.maximum_adjustment],
                   ['Bonus total', driver.pay.bonus_total],

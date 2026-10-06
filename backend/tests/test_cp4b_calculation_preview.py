@@ -2205,7 +2205,6 @@ class TestDriverUnion:
                     assert len(matching) == 1
                     drv = matching[0]
                     assert Decimal(str(drv["daily_pay"])) == Decimal("36.0000")
-                    assert Decimal(str(drv["period_pay"])) == Decimal("0")
                     assert Decimal(str(drv["bonus_total"])) == Decimal("0")
                     assert Decimal(str(drv["status_pay"])) == Decimal("0")
 
@@ -2229,7 +2228,6 @@ class TestDriverUnion:
                 drv = matching[0]
                 assert Decimal(str(drv["bonus_total"])) == Decimal("60.00")
                 assert Decimal(str(drv["daily_pay"])) == Decimal("0")
-                assert Decimal(str(drv["period_pay"])) == Decimal("0")
                 assert Decimal(str(drv["expected_pay"])) == Decimal("60.00")
 
     @pytest.mark.asyncio

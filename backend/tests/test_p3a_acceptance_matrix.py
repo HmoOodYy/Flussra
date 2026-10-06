@@ -133,7 +133,7 @@ async def test_each_durable_monetary_state_locks_company_currency(
                         (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
                          sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
                          currencycode, currencyminorunitdigits)
-                    VALUES (:cid,:bid,:pid,1,'p3a-test',:hash,:hash,1,10,'USD',2)
+                    VALUES (:cid,:bid,:pid,1,'payroll-calculation-v1',:hash,:hash,1,10,'USD',2)
                     RETURNING payrollcalculationsnapshotid
                 """), params)).scalar_one())
             elif state_kind == "final_line":

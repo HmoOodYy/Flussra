@@ -27,6 +27,30 @@ def _unavailable(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=422, detail=f"{code}: {message}")
 
 
+def classify_final_line_component(row: Any) -> str:
+    """Map one immutable FinalLine to its canonical financial component.
+
+    Every monetary FinalLine must belong to an explicit canonical owner; an
+    unrecognized source fails closed instead of falling into a catch-all.
+    """
+    if row["linetype"] == "SYS_MIN_TOPUP":
+        return "minimum_adjustment"
+    if row["linetype"] == "SYS_MAX_CAP":
+        return "maximum_adjustment"
+    if row["sourcetype"] == "BonusEvent":
+        return "bonus_total"
+    if row["sourcetype"] in {"StatusEntryState", "Status"}:
+        return "status_pay"
+    if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
+        return "daily_pay"
+    raise _unavailable(
+        "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
+        "a FinalLine does not belong to a canonical payroll component "
+        f"(sourcetype={row['sourcetype']!r}, linetype={row['linetype']!r}, "
+        f"linescope={row['linescope']!r}).",
+    )
+
+
 async def _final_lines_currency(company_id: int, period_id: int, db: AsyncConnection):
     """Use one coherent immutable FinalLines denomination or fail closed."""
     row = (await db.execute(text("""
@@ -295,7 +319,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
             for driver in packet.drivers for line in driver.lines
         ]
         totals = {d.driver_id: {"daily_pay": d.daily_pay, "status_pay": d.status_pay,
-                  "period_pay": d.period_pay, "minimum_adjustment": d.minimum_adjustment,
+                  "minimum_adjustment": d.minimum_adjustment,
                   "maximum_adjustment": d.maximum_adjustment, "bonus_total": d.bonus_total,
                   "total_pay": d.expected_pay, "driver_code": d.driver_code, "driver_name": d.driver_name}
                   for d in packet.drivers}
@@ -305,7 +329,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
         assert snapshot_id is not None
         rows = (await db.execute(text("""
             SELECT dt.driverid, dt.drivercodesnapshot, dt.drivernamesnapshot, dt.dailypay,
-                   dt.statuspay, dt.periodpay, dt.minimumadjustment, dt.maximumadjustment,
+                   dt.statuspay, dt.minimumadjustment, dt.maximumadjustment,
                    dt.bonustotal, dt.expectedpay, sl.sourcetype, sl.sourceid, sl.linetype,
                    sl.linescope, sl.workdate, sl.payitemid, sl.quantity, sl.resolvedrateamount,
                    sl.calculatedamount, sl.bonuseventid
@@ -319,7 +343,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
         lines: list[dict[str, Any]] = []
         for r in rows:
             did = int(r["driverid"])
-            totals.setdefault(did, {"daily_pay": r["dailypay"], "status_pay": r["statuspay"], "period_pay": r["periodpay"],
+            totals.setdefault(did, {"daily_pay": r["dailypay"], "status_pay": r["statuspay"],
                                     "minimum_adjustment": r["minimumadjustment"], "maximum_adjustment": r["maximumadjustment"],
                                     "bonus_total": r["bonustotal"], "total_pay": r["expectedpay"], "driver_code": r["drivercodesnapshot"], "driver_name": r["drivernamesnapshot"]})
             if r["linetype"] is not None:
@@ -339,24 +363,13 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
         WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
         ORDER BY driverid, finallineid
     """), {"period_id": period["payrollperiodid"], "company_id": period["companyid"], "branch_id": period["branchid"]})).mappings().all()
-    totals: dict[int, dict[str, Any]] = defaultdict(lambda: {"daily_pay": Decimal("0"), "status_pay": Decimal("0"), "period_pay": Decimal("0"), "minimum_adjustment": Decimal("0"), "maximum_adjustment": Decimal("0"), "bonus_total": Decimal("0"), "total_pay": Decimal("0"), "driver_code": None, "driver_name": None})
+    totals: dict[int, dict[str, Any]] = defaultdict(lambda: {"daily_pay": Decimal("0"), "status_pay": Decimal("0"), "minimum_adjustment": Decimal("0"), "maximum_adjustment": Decimal("0"), "bonus_total": Decimal("0"), "total_pay": Decimal("0"), "driver_code": None, "driver_name": None})
     lines: list[dict[str, Any]] = []
     for r in rows:
         did, amount = int(r["driverid"]), Decimal(str(r["finalamount"]))
         total = totals[did]
         total["total_pay"] += amount
-        if r["linetype"] == "SYS_MIN_TOPUP":
-            total["minimum_adjustment"] += amount
-        elif r["linetype"] == "SYS_MAX_CAP":
-            total["maximum_adjustment"] += amount
-        elif r["sourcetype"] == "BonusEvent":
-            total["bonus_total"] += amount
-        elif r["sourcetype"] in {"StatusEntryState", "Status"}:
-            total["status_pay"] += amount
-        elif r["linescope"] == "Daily":
-            total["daily_pay"] += amount
-        else:
-            total["period_pay"] += amount
+        total[classify_final_line_component(r)] += amount
         lines.append({"driver_id": did, "source_type": r["sourcetype"], "source_id": r["sourceid"], "line_type": r["linetype"], "line_scope": r["linescope"], "work_date": r["workdate"], "pay_item_id": r["payitemid"], "quantity": r["quantity"], "resolved_rate_amount": r["resolvedrateamount"], "calculated_amount": amount, "bonus_event_id": r["bonuseventid"], "snapshot_source_type": r["sourcetype"]})
     provenance = (await db.execute(text("""
         SELECT DISTINCT sourcesnapshot ->> 'payroll_calculation_snapshot_id' AS snapshot_id
@@ -394,14 +407,14 @@ def _report_totals(
     if not financials_available:
         return dict(work_totals), None
     names = (
-        "daily_pay", "status_pay", "period_pay", "minimum_adjustment",
+        "daily_pay", "status_pay", "minimum_adjustment",
         "maximum_adjustment", "bonus_total", "total_pay",
     )
     pay_totals = {
         name: sum((Decimal(str(total[name])) for total in financial_totals.values()), Decimal("0"))
         for name in names
     }
-    pay_totals["gross_pay"] = pay_totals["daily_pay"] + pay_totals["status_pay"] + pay_totals["period_pay"]
+    pay_totals["gross_pay"] = pay_totals["daily_pay"] + pay_totals["status_pay"]
     return dict(work_totals), pay_totals
 
 
@@ -482,7 +495,7 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         pay = None
         if total is not None:
             item_amounts = per_driver_pay_items.get(driver_id, {})
-            gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"])) + Decimal(str(total["period_pay"]))
+            gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
                 **total,
                 "gross_pay": gross_pay,

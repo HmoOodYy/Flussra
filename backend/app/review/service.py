@@ -71,6 +71,10 @@ from app.payroll.audit_evidence import (
 )
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_lifecycle import _write_period_status_audit  # M16, CP-1D
+from app.payroll.snapshot_hash import (
+    UnsupportedCalculationVersionError,
+    require_supported_calculation_version,
+)
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.review.schemas import (
     _DECIDABLE_STATUSES,
@@ -310,7 +314,7 @@ async def _load_period_approval_context(
     snapshot_result = await db.execute(
         text("""
             SELECT payrollcalculationsnapshotid, payrollperiodid, revisionnumber,
-                   createdatutc, totalexpectedpay, snapshothash, currencycode, currencyminorunitdigits
+                   calculationversion, createdatutc, totalexpectedpay, snapshothash, currencycode, currencyminorunitdigits
             FROM payroll.payrollcalculationsnapshots
             WHERE payrollcalculationsnapshotid = :snapshot_id
               AND companyid = :company_id
@@ -328,6 +332,12 @@ async def _load_period_approval_context(
             status_code=422,
             detail="PeriodApproval review item references an unavailable calculation snapshot.",
         )
+    try:
+        require_supported_calculation_version(snapshot["calculationversion"])
+    except UnsupportedCalculationVersionError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"UNSUPPORTED_CALCULATION_VERSION: {exc}"
+        ) from exc
     if int(snapshot["payrollperiodid"]) != period_id:
         raise HTTPException(
             status_code=422,
@@ -557,7 +567,7 @@ async def get_review_item_payroll_snapshot(
     total_result = await db.execute(
         text("""
             SELECT driverid, drivercodesnapshot, drivernamesnapshot,
-                   dailypay, statuspay, periodpay, minimumadjustment,
+                   dailypay, statuspay, minimumadjustment,
                    maximumadjustment, bonustotal, expectedpay
             FROM payroll.payrollcalculationdrivertotals
             WHERE payrollcalculationsnapshotid = :snapshot_id
@@ -574,7 +584,6 @@ async def get_review_item_payroll_snapshot(
             driver_name_snapshot=row["drivernamesnapshot"],
             daily_pay=row["dailypay"],
             status_pay=row["statuspay"],
-            period_pay=row["periodpay"],
             minimum_adjustment=row["minimumadjustment"],
             maximum_adjustment=row["maximumadjustment"],
             bonus_total=row["bonustotal"],

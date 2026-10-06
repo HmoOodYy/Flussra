@@ -74,6 +74,10 @@ from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodSummary
+from app.payroll.snapshot_hash import (
+    UnsupportedCalculationVersionError,
+    require_supported_calculation_version,
+)
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 
 if TYPE_CHECKING:
@@ -192,7 +196,7 @@ async def _load_approved_snapshot_packet(
         )
     snapshot = (await db.execute(text("""
         SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-               revisionnumber, snapshothash, totalexpectedpay, createdatutc,
+               revisionnumber, calculationversion, snapshothash, totalexpectedpay, createdatutc,
                currencycode, currencyminorunitdigits
         FROM payroll.payrollcalculationsnapshots
         WHERE payrollcalculationsnapshotid = :snapshot_id
@@ -203,10 +207,14 @@ async def _load_approved_snapshot_packet(
             "APPROVED_SNAPSHOT_INTEGRITY_ERROR",
             "the approved review item does not reference a snapshot for this exact period.",
         )
+    try:
+        require_supported_calculation_version(snapshot["calculationversion"])
+    except UnsupportedCalculationVersionError as exc:
+        raise _snapshot_finalization_error("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
     totals = (await db.execute(text("""
         SELECT dt.payrollcalculationdrivertotalid, dt.driverid,
                dt.drivercodesnapshot, dt.drivernamesnapshot,
-               dt.dailypay, dt.statuspay, dt.periodpay, dt.minimumadjustment,
+               dt.dailypay, dt.statuspay, dt.minimumadjustment,
                dt.maximumadjustment, dt.bonustotal, dt.expectedpay
         FROM payroll.payrollcalculationdrivertotals dt
         JOIN core.drivers d ON d.driverid = dt.driverid
@@ -245,7 +253,7 @@ def _reconcile_approved_snapshot_packet(packet: dict[str, Any]) -> None:
     for total in totals:
         key = int(total["payrollcalculationdrivertotalid"])
         components = sum((Decimal(str(total[column])) for column in (
-            "dailypay", "statuspay", "periodpay", "minimumadjustment",
+            "dailypay", "statuspay", "minimumadjustment",
             "maximumadjustment", "bonustotal",
         )), Decimal("0"))
         expected = Decimal(str(total["expectedpay"]))
@@ -402,15 +410,15 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
             needs_manager_review=False, rate_behavior=evidence.get("RateBehavior"),
             driver_rate_id=row["driverrateid"], rate_type_id=row["ratetypeid"], resolved_rate_amount=row["resolvedrateamount"],
         ))
-        normal_base = sum((Decimal(str(total[key])) for key in ("dailypay", "statuspay", "periodpay")), Decimal("0"))
+        normal_base = Decimal(str(total["dailypay"])) + Decimal(str(total["statuspay"]))
         if row["linetype"] in {"SYS_MIN_TOPUP", "SYS_MAX_CAP"}:
             adjustments.append(FinalizationPreviewSysAdjustment(driver_id=int(row["driverid"]), driver_name=total["drivernamesnapshot"], adjustment_type=row["linetype"], gross_before=normal_base, adjustment_amount=amount, bonus_total=Decimal(str(total["bonustotal"])), final_pay=Decimal(str(total["expectedpay"]))))
         if row["sourcetype"] == "BonusEvent" and row["bonuseventid"] is not None:
             bonuses.append(BonusEventPreviewEntry(bonus_event_id=int(row["bonuseventid"]), driver_id=int(row["driverid"]), driver_name=total["drivernamesnapshot"], amount=amount, reason=evidence.get("Reason"), notes=evidence.get("Notes")))
     driver_totals = [FinalizationPreviewDriverTotal(
         driver_id=int(row["driverid"]), driver_name=row["drivernamesnapshot"],
-        daily_pay=Decimal(str(row["dailypay"])), status_pay=Decimal(str(row["statuspay"])), period_pay=Decimal(str(row["periodpay"])),
-        gross_pay=sum((Decimal(str(row[key])) for key in ("dailypay", "statuspay", "periodpay")), Decimal("0")),
+        daily_pay=Decimal(str(row["dailypay"])), status_pay=Decimal(str(row["statuspay"])),
+        gross_pay=Decimal(str(row["dailypay"])) + Decimal(str(row["statuspay"])),
         sys_adjustment=Decimal(str(row["minimumadjustment"])) + Decimal(str(row["maximumadjustment"])),
         bonus_total=Decimal(str(row["bonustotal"])), final_pay=Decimal(str(row["expectedpay"])),
         line_count=sum(1 for line in packet["lines"] if line["payrollcalculationdrivertotalid"] == row["payrollcalculationdrivertotalid"]),

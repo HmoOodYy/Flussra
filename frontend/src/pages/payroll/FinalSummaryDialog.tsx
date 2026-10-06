@@ -35,10 +35,22 @@ interface DriverTotal {
   driver_id: number;
   driver_name: string;
   daily_pay: number;
-  period_pay: number;
+  status_pay: number;
+  bonus_total: number;
   sys_adjustment: number;
   final_pay: number;
   line_count: number;
+}
+
+function isBonusEventLine(line: FinalLineSummary): boolean {
+  return line.source_type === 'BonusEvent';
+}
+
+function lineComponent(line: FinalLineSummary): 'sys_adjustment' | 'bonus' | 'status' | 'daily' {
+  if (line.line_type === 'SYS_MIN_TOPUP' || line.line_type === 'SYS_MAX_CAP') return 'sys_adjustment';
+  if (isBonusEventLine(line)) return 'bonus';
+  if (line.source_type === 'StatusEntryState') return 'status';
+  return 'daily';
 }
 
 function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
@@ -50,7 +62,8 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
         driver_id: line.driver_id,
         driver_name: line.driver_name,
         daily_pay: 0,
-        period_pay: 0,
+        status_pay: 0,
+        bonus_total: 0,
         sys_adjustment: 0,
         final_pay: 0,
         line_count: 0,
@@ -58,12 +71,11 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
     }
     const dt = map.get(line.driver_id)!;
     if (!Number.isFinite(amt)) continue;
-    if (line.line_type.startsWith('SYS_')) {
-      dt.sys_adjustment += amt;
-    } else if (line.line_scope === 'Period') {
-      dt.period_pay += amt;
-    } else {
-      dt.daily_pay += amt;
+    switch (lineComponent(line)) {
+      case 'sys_adjustment': dt.sys_adjustment += amt; break;
+      case 'bonus': dt.bonus_total += amt; break;
+      case 'status': dt.status_pay += amt; break;
+      default: dt.daily_pay += amt;
     }
     dt.final_pay += amt;
     dt.line_count++;
@@ -124,7 +136,8 @@ function DriverTotalsTable({ rows, code, digits }: { rows: DriverTotal[]; code: 
         <tr>
           <th>Driver</th>
           <th className={styles.numCol}>Daily Pay</th>
-          <th className={styles.numCol}>Period Pay</th>
+          <th className={styles.numCol}>Status Pay</th>
+          <th className={styles.numCol}>Bonus</th>
           <th className={styles.numCol}>Sys Adj</th>
           <th className={styles.numCol}>Final Pay</th>
           <th className={styles.numCol}>Lines</th>
@@ -135,7 +148,8 @@ function DriverTotalsTable({ rows, code, digits }: { rows: DriverTotal[]; code: 
           <tr key={r.driver_id}>
             <td className={styles.nameCell}>{r.driver_name}</td>
             <td className={styles.numCol}>{fmt(r.daily_pay, code, digits)}</td>
-            <td className={styles.numCol}>{fmt(r.period_pay, code, digits)}</td>
+            <td className={styles.numCol}>{fmt(r.status_pay, code, digits)}</td>
+            <td className={styles.numCol}>{fmt(r.bonus_total, code, digits)}</td>
             <td className={`${styles.numCol} ${r.sys_adjustment !== 0 ? styles.adjCell : ''}`}>
               {r.sys_adjustment !== 0
                 ? `${r.sys_adjustment >= 0 ? '+' : '-'}${formatCurrencyMoney(Math.abs(r.sys_adjustment), code, digits)}`
@@ -181,9 +195,9 @@ function SysAdjTable({ lines }: { lines: FinalLineSummary[] }) {
   );
 }
 
-function PeriodPayTable({ lines }: { lines: FinalLineSummary[] }) {
-  const periodLines = lines.filter((l) => l.line_scope === 'Period' && !l.line_type.startsWith('SYS_'));
-  if (periodLines.length === 0) return <div className={styles.emptyMsg}>No period pay / bonus lines.</div>;
+function BonusEventsTable({ lines }: { lines: FinalLineSummary[] }) {
+  const periodLines = lines.filter(isBonusEventLine);
+  if (periodLines.length === 0) return <div className={styles.emptyMsg}>No bonus events.</div>;
   return (
     <table className={styles.table}>
       <thead>
@@ -296,7 +310,7 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
 
   const driverTotals = buildDriverTotals(lines);
   const sysCount = lines.filter((l) => l.line_type.startsWith('SYS_')).length;
-  const periodPayCount = lines.filter((l) => l.line_scope === 'Period' && !l.line_type.startsWith('SYS_')).length;
+  const bonusCount = lines.filter(isBonusEventLine).length;
   const dailyCount = lines.filter((l) => l.line_scope === 'Daily' && !l.line_type.startsWith('SYS_')).length;
 
   return (
@@ -357,8 +371,8 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
                 {sysCount > 0 && (
                   <KpiCard label="Sys Adjustments" value={String(sysCount)} />
                 )}
-                {periodPayCount > 0 && (
-                  <KpiCard label="Period Pay" value={String(periodPayCount)} />
+                {bonusCount > 0 && (
+                  <KpiCard label="Bonus Events" value={String(bonusCount)} />
                 )}
               </div>
 
@@ -367,13 +381,13 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
                 <DriverTotalsTable rows={driverTotals} code={lines[0].currency_code} digits={lines[0].currency_minor_unit_digits} />
               </Section>
 
-              {/* ── Period Pay / Bonus ───────────────────────── */}
+              {/* ── Bonus Events ─────────────────────────────── */}
               <Section
-                title="Period Pay / Bonus"
-                badge={periodPayCount}
-                defaultOpen={periodPayCount > 0}
+                title="Bonus Events"
+                badge={bonusCount}
+                defaultOpen={bonusCount > 0}
               >
-                <PeriodPayTable lines={lines} />
+                <BonusEventsTable lines={lines} />
               </Section>
 
               {/* ── System Adjustments ───────────────────────── */}

@@ -49,7 +49,6 @@ export interface ReviewPayrollSnapshotDriverTotal {
   driver_name_snapshot: string | null;
   daily_pay: string;
   status_pay: string;
-  period_pay: string;
   minimum_adjustment: string;
   maximum_adjustment: string;
   bonus_total: string;

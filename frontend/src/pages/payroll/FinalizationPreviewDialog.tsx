@@ -126,7 +126,6 @@ function DriverTotalsTable({ rows, code, digits }: { rows: FinalizationPreviewDr
           <th>Driver</th>
           <th className={styles.numCol}>Daily Pay</th>
           <th className={styles.numCol}>Status</th>
-          <th className={styles.numCol}>Period Pay</th>
           <th className={styles.numCol}>Sys Adj</th>
           <th className={styles.numCol}>Bonus</th>
           <th className={styles.numCol}>Final Pay</th>
@@ -139,7 +138,6 @@ function DriverTotalsTable({ rows, code, digits }: { rows: FinalizationPreviewDr
             <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
             <td className={styles.numCol}>{fmt(r.daily_pay, code, digits)}</td>
             <td className={styles.numCol}>{fmt(r.status_pay, code, digits)}</td>
-            <td className={styles.numCol}>{fmt(r.period_pay, code, digits)}</td>
             <td className={`${styles.numCol} ${hasNonZero(r.sys_adjustment) ? styles.adjCell : ''}`}>
               {hasNonZero(r.sys_adjustment) ? fmtAdj(r.sys_adjustment, code, digits) : '-'}
             </td>

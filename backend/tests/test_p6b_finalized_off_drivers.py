@@ -344,7 +344,7 @@ async def _seed_finalized_off_period(
         blockers=[], warnings=[], total_expected_pay=expected_pay,
         drivers=[_CalculationPacketDriverTotal(
             driver_id=driver_id, driver_code="P6B-FROZEN", driver_name="P6B Frozen Driver",
-            daily_pay=Decimal("0"), status_pay=status_pay, period_pay=Decimal("0"),
+            daily_pay=Decimal("0"), status_pay=status_pay,
             minimum_adjustment=Decimal("1"), maximum_adjustment=Decimal("0"),
             bonus_total=bonus_total, expected_pay=expected_pay, needs_manager_review=False,
             blockers=[], lines=lines,

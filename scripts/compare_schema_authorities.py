@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 MIGRATIONS_SQL = ROOT / "migrations" / "sql"
 ALEMBIC_CONFIG = ROOT / "alembic.ini"
-EXPECTED_HEAD = "0078"
+EXPECTED_HEAD = "0079"
 OWNED_DATABASE = re.compile(r"flussra_g02d_(?:direct|alembic)_[0-9a-f]{12}\Z")
 ALEMBIC_BOOKKEEPING = {("public", "alembic_version")}
 

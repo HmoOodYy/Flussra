@@ -209,7 +209,7 @@ async def _period_metrics(
 
 def _financial_summary(packet) -> CurrentPayrollHubFinancialSummary:
     normal_pay = sum(
-        (driver.daily_pay + driver.status_pay + driver.period_pay for driver in packet.drivers),
+        (driver.daily_pay + driver.status_pay for driver in packet.drivers),
         Decimal("0"),
     )
     bonus_total = sum((driver.bonus_total for driver in packet.drivers), Decimal("0"))

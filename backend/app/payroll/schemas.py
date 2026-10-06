@@ -1164,7 +1164,7 @@ class FinalizationPreviewSysAdjustment(BaseModel):
 class FinalizationPreviewDriverTotal(BaseModel):
     """Aggregated pay summary for one driver in the preview.
 
-    CP-3C: gross_pay is normal pay only (daily_pay + period_pay) — bonus is
+    CP-3C: gross_pay is normal pay only (daily_pay + status_pay) — bonus is
     never folded into it. sys_adjustment (min/max) is computed from that same
     bonus-free base. bonus_total is added back in only after min/max, so
     final_pay = gross_pay + sys_adjustment + bonus_total.
@@ -1173,7 +1173,6 @@ class FinalizationPreviewDriverTotal(BaseModel):
     driver_name: str | None
     daily_pay: Decimal
     status_pay: Decimal = Decimal("0")
-    period_pay: Decimal
     gross_pay: Decimal            # normal pay only — excludes bonus
     sys_adjustment: Decimal       # sum of SYS_MIN_TOPUP / SYS_MAX_CAP deltas, computed on gross_pay (bonus-free)
     bonus_total: Decimal = Decimal("0")   # sum of Active canonical PayrollBonusEvents for this driver
@@ -1241,7 +1240,6 @@ class CalculationPreviewDriverTotal(BaseModel):
     driver_name: str | None
     daily_pay: Decimal
     status_pay: Decimal
-    period_pay: Decimal
     normal_base: Decimal
     minimum_adjustment: Decimal
     maximum_adjustment: Decimal
@@ -1522,7 +1520,6 @@ class ReportWorkSection(BaseModel):
 class ReportPaySection(BaseModel):
     daily_pay: Decimal
     status_pay: Decimal
-    period_pay: Decimal
     minimum_adjustment: Decimal
     maximum_adjustment: Decimal
     bonus_total: Decimal
