@@ -5,7 +5,7 @@ Corrects the financial bug where finalize_period and get_finalization_preview
 both summed bonus into the earned/gross figure BEFORE comparing against
 Minimum/Maximum pay rules. The corrected order is:
 
-    normal_base = normal_daily_pay + non_bonus_normal_period_pay
+    normal_base = normal_daily_pay + status_pay
     minimum_adjustment = max(minimum - normal_base, 0)
     after_minimum = normal_base + minimum_adjustment
     maximum_adjustment = min(maximum - after_minimum, 0)
@@ -161,49 +161,42 @@ async def _advance_to_approved(
     assert decide.status_code == 200, f"Approval failed: {decide.text}"
 
 
-async def _inject_adjustment_line(
+async def _inject_normal_pay_line(
     db: AsyncConnection, branch_id: int, period_id: int, driver_id: int, amount: str,
-    linetype: str = "Adjustment",
 ) -> int:
-    """Directly insert a non-BONUS Period DraftLine with a fixed calculated
-    amount (bypasses branch pay-item activation) — the same technique CP-3A's
-    own test_non_bonus_period_pay_unaffected uses to seed a specific normal-pay
-    dollar figure without depending on rate resolution."""
+    """Directly insert a Daily source line with a fixed calculated amount.
+
+    CP3C_FIXED is a Fixed-behavior Daily PayItem, so the stored amount is
+    authoritative; this seeds a specific normal-pay dollar figure without
+    depending on rate resolution."""
+    await db.execute(_text("""
+        INSERT INTO payroll.payitems
+            (companyid, payitemcode, payitemname, category, datatype, itemscope,
+             ratebehavior, status, sortorder, appearsinpayrollentry, appearsinledger,
+             appearsinreports, requiresrate, issystemstandard, isdefaultbranchactive)
+        SELECT 1, 'CP3C_FIXED', 'CP3C Fixed Pay', 'Custom', 'Decimal', 'Daily',
+               'Fixed', 'Retired', 990, TRUE, TRUE, TRUE, FALSE, FALSE, FALSE
+        WHERE NOT EXISTS (
+            SELECT 1 FROM payroll.payitems WHERE companyid = 1 AND payitemcode = 'CP3C_FIXED'
+        )
+    """))
     row = (await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, calculatedamount,
+                 workdate, linetype, quantity, calculatedamount,
                  sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES
-                (1, :bid, :pid, :did,
-                 NULL, :linetype, 'Period', :amount,
-                 'Manual', 'Active', FALSE, 1)
+            SELECT 1, :bid, :pid, :did, p.startdate, 'CP3C_FIXED', 1, :amount,
+                   'Manual', 'Active', FALSE, 1
+            FROM payroll.payrollperiods p
+            WHERE p.payrollperiodid = :pid
             RETURNING draftlineid
         """),
-        {"bid": branch_id, "pid": period_id, "did": driver_id, "amount": amount, "linetype": linetype},
+        {"bid": branch_id, "pid": period_id, "did": driver_id, "amount": amount},
     )).mappings().first()
     await db.commit()
     assert row is not None
     return row["draftlineid"]
-
-
-async def _inject_status_payment_line(
-    db: AsyncConnection, branch_id: int, period_id: int, driver_id: int, amount: str,
-) -> int:
-    return await _inject_adjustment_line(
-        db, branch_id, period_id, driver_id, amount, linetype="STATUS_PAYMENT"
-    )
-
-
-async def _inject_legacy_bonus_draftline(
-    db: AsyncConnection, branch_id: int, period_id: int, driver_id: int, amount: str,
-) -> int:
-    """Simulate a pre-CP-3A legacy BONUS DraftLine trace row — must never be
-    counted as normal pay, bonus, or anything else in CP-3C's formula."""
-    return await _inject_adjustment_line(
-        db, branch_id, period_id, driver_id, amount, linetype="BONUS"
-    )
 
 
 async def _post_bonus(
@@ -348,7 +341,7 @@ async def test_minimum_without_bonus_unchanged(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
     rule_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
     )
@@ -372,7 +365,7 @@ async def test_maximum_without_bonus_unchanged(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
     rule_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MaximumPay", "300.00", start, end
     )
@@ -400,7 +393,7 @@ async def test_minimum_with_bonus_does_not_reduce_topup(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "40.00")
     rule_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
@@ -459,7 +452,7 @@ async def test_maximum_with_bonus_added_after_cap(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "100.00")
     rule_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MaximumPay", "300.00", start, end
@@ -514,7 +507,7 @@ async def test_bonus_alone_does_not_trigger_maximum_cap(
     (buggy) combined total over it. The cap must NOT trigger under CP-3C."""
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "250.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "250.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "100.00")  # 250+100=350 > 300 (old bug)
     rule_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MaximumPay", "300.00", start, end
@@ -544,7 +537,7 @@ async def test_normal_between_min_max_with_bonus_no_adjustment(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "250.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "250.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "30.00")
     min_rule = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
@@ -607,7 +600,7 @@ async def test_multiple_bonus_events_active_summed_voided_excluded(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "100.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "100.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "20.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "30.00")
     voided_id = await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "999.00")
@@ -627,91 +620,6 @@ async def test_multiple_bonus_events_active_summed_voided_excluded(
 
 
 # ===========================================================================
-# 8. STATUS_PAYMENT — remains in normal/minmax base
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_status_payment_remains_in_minmax_base(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_status_payment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "180.00")
-    await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "25.00")
-    rule_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
-    )
-
-    await _advance_to_approved(client, auth_token, period_id)
-    r = await _get_preview(client, auth_token, period_id)
-    assert r.status_code == 200, r.text
-    row = _driver_row(r.json(), cp3c_driver_id)
-    assert Decimal(row["gross_pay"]) == Decimal("180.00"), "STATUS_PAYMENT counts as normal pay"
-    assert Decimal(row["sys_adjustment"]) == Decimal("20.00"), "min top-up = 200 - 180 (STATUS_PAYMENT counted)"
-    assert Decimal(row["final_pay"]) == Decimal("225.00"), "total = minimum (200) + bonus (25)"
-
-    await _void_pay_rule(client, auth_token, rule_id)
-    await _cancel_period_db(db_conn, period_id)
-
-
-# ===========================================================================
-# 9. Non-BONUS period pay (ADJUSTMENT) — remains in normal/minmax base
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_adjustment_remains_in_minmax_base(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "150.00")
-    rule_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
-    )
-
-    await _advance_to_approved(client, auth_token, period_id)
-    r = await _get_preview(client, auth_token, period_id)
-    assert r.status_code == 200, r.text
-    row = _driver_row(r.json(), cp3c_driver_id)
-    assert Decimal(row["gross_pay"]) == Decimal("150.00")
-    assert Decimal(row["sys_adjustment"]) == Decimal("50.00")
-
-    await _void_pay_rule(client, auth_token, rule_id)
-    await _cancel_period_db(db_conn, period_id)
-
-
-# ===========================================================================
-# 10. Legacy BONUS DraftLines — ignored; canonical PayrollBonusEvents only
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_legacy_bonus_draftline_ignored_in_minmax(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "100.00")
-    # Legacy BONUS DraftLine trace row — must not count as normal pay OR bonus.
-    await _inject_legacy_bonus_draftline(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
-    await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "20.00")
-    rule_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
-    )
-
-    await _advance_to_approved(client, auth_token, period_id)
-    r = await _get_preview(client, auth_token, period_id)
-    assert r.status_code == 200, r.text
-    row = _driver_row(r.json(), cp3c_driver_id)
-    assert Decimal(row["gross_pay"]) == Decimal("100.00"), "legacy BONUS DraftLine must not count as normal pay"
-    assert Decimal(row["bonus_total"]) == Decimal("20.00"), "legacy BONUS DraftLine must not count as bonus either"
-    assert Decimal(row["sys_adjustment"]) == Decimal("100.00")
-    assert Decimal(row["final_pay"]) == Decimal("220.00")
-
-    await _void_pay_rule(client, auth_token, rule_id)
-    await _cancel_period_db(db_conn, period_id)
-
-
-# ===========================================================================
 # 11. Preview / finalization parity
 # ===========================================================================
 
@@ -721,7 +629,7 @@ async def test_preview_finalization_parity_minimum(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "40.00")
     await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
@@ -767,7 +675,7 @@ async def test_minimum_greater_than_maximum_blocks_finalization(
     """Finalization must reject an applicable minimum above the maximum."""
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "600.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "600.00")
     minimum_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id,
         "MinimumPay", "800.00", start, end,
@@ -813,7 +721,7 @@ async def test_ended_and_voided_rules_resolve_by_period_start(
     assert ended.json()["status"] == "Ended"
 
     first_period = await _insert_period_db(db_conn, cp3c_branch_id, first_start, first_end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, first_period, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, first_period, cp3c_driver_id, "50.00")
     await _advance_to_approved(client, auth_token, first_period)
     first_preview = await _get_preview(client, auth_token, first_period)
     assert first_preview.status_code == 200, first_preview.text
@@ -822,7 +730,7 @@ async def test_ended_and_voided_rules_resolve_by_period_start(
 
     after_end_start, after_end = _week(1)
     second_period = await _insert_period_db(db_conn, cp3c_branch_id, after_end_start, after_end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, second_period, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, second_period, cp3c_driver_id, "50.00")
     await _advance_to_approved(client, auth_token, second_period)
     second_preview = await _get_preview(client, auth_token, second_period)
     assert second_preview.status_code == 200, second_preview.text
@@ -842,7 +750,7 @@ async def test_ended_and_voided_rules_resolve_by_period_start(
 
     third_start, third_end = _week(2)
     third_period = await _insert_period_db(db_conn, cp3c_branch_id, third_start, third_end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, third_period, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, third_period, cp3c_driver_id, "50.00")
     await _advance_to_approved(client, auth_token, third_period)
     third_preview = await _get_preview(client, auth_token, third_period)
     assert third_preview.status_code == 200, third_preview.text
@@ -857,7 +765,7 @@ async def test_preview_finalization_parity_maximum(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "100.00")
     rule_id = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MaximumPay", "300.00", start, end
@@ -930,7 +838,7 @@ async def test_batch_created_bonus_follows_corrected_formula(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
 
     batch_resp = await client.post(
         f"/payroll/periods/{period_id}/bonuses/batch",
@@ -991,8 +899,8 @@ async def test_two_drivers_bonus_isolated_per_driver(
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
-    await _inject_adjustment_line(db_conn, cp3c_branch_id, period_id, cp3c_driver2_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver2_id, "50.00")
     await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "500.00")
     rule1 = await _add_pay_rule(
         client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end

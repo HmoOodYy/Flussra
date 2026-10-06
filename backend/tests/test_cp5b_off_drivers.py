@@ -374,10 +374,8 @@ async def _insert_daily_line(
     await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-                 quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date, :line_type, 'Daily',
-                    :quantity, :source_type, 'Active', FALSE, 1)
+                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+            VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date, :line_type, :quantity, :source_type, 'Active', FALSE, 1)
         """),
         {
             "company_id": _COMPANY_ID,
@@ -830,10 +828,9 @@ class TestOffDrivers:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-                     quantity, sourcetype, status, needsmanagerreview, notes, addedbyuserid)
+                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                 VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date, 'DailyStatus',
-                        'Daily', 1, 'Manual', 'Active', FALSE, :status_code, 1)
+                        1, 'Manual', 'Active', FALSE, :status_code, 1)
             """),
             {
                 "company_id": _COMPANY_ID,

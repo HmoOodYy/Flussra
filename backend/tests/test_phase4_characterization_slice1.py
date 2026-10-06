@@ -4,7 +4,7 @@ Phase 4 calculation characterization gate — Slice 1.
 Locks the CURRENT (pre-CP-4A) numeric and dispatch behavior of:
   - the ambient Decimal compatibility environment (context precision/rounding);
   - PerUnit (authoritative current daily calculation core);
-  - EnteredAmount and Fixed/manual (direct/manual boundaries — not computed methods);
+  - Fixed/manual (direct/manual boundaries — not computed methods);
   - None (non-core/retired compatibility value);
   - the legacy/manual COALESCE(calculatedamount, quantity * rateamount) fallback;
   - PostgreSQL NUMERIC(18,4)/NUMERIC(18,2) column coercion;
@@ -764,86 +764,6 @@ class TestPerUnitCharacterization:
 
 
 # ---------------------------------------------------------------------------
-# 3. EnteredAmount characterization (direct/manual boundary, not a formula)
-# ---------------------------------------------------------------------------
-
-class TestEnteredAmountCharacterization:
-    """
-    EnteredAmount: `_compute_calculated_amount` returns
-    `(rate_amount_override, False)` immediately — the supplied direct amount
-    passes through verbatim. The PerUnit 0.0001-quantize rule is NOT applied
-    by the dispatch for this behavior.
-
-    Live-reachability note: as of this slice, there is no supported public
-    creation path for a NEW custom Period + EnteredAmount PayItem — admin
-    direct creation of custom Period items is rejected by the settings API
-    (`test_create_period_item_is_rejected` in test_settings_custom_pay_items.py),
-    and CDPI is a Daily-only domain. The only live system items using the
-    M14 direct-amount storage contract (`CalculatedAmount = amount`, no
-    dispatch through `_compute_calculated_amount` at all) are the Period-
-    scope system items BONUS (canonical Bonus Events API only) and ADJUSTMENT
-    (RateBehavior='Fixed' at the catalog level).
-    """
-
-    @pytest.mark.asyncio
-    async def test_dispatch_preserves_override_exact_no_quantization(
-        self, direct_db,
-    ):
-        """
-        Unit-level dispatch characterization: an override with more than
-        four fractional digits passes through completely unchanged — the
-        dispatch does not quantize it to 0.0001 (that rule is PerUnit-only).
-        """
-        override = Decimal("42.123456789")
-        result = await _compute_calculated_amount(
-            rate_behavior="EnteredAmount",
-            rate_code=None,
-            quantity=Decimal("1"),
-            rate_amount_override=override,
-            driver_id=1,
-            company_id=1,
-            as_of_date=datetime.date(2091, 3, 5),
-            db=direct_db,
-        )
-        assert result.calculated_amount == override, (
-            "EnteredAmount dispatch must return the override completely "
-            "unchanged — no quantization, no rounding."
-        )
-        assert result.calculated_amount == Decimal("42.123456789"), (
-            "Confirms no 0.0001 quantization occurred (would have produced "
-            "42.1235 under ROUND_HALF_EVEN)."
-        )
-        assert result.needs_manager_review is False
-        assert result.rate_behavior == "EnteredAmount"
-
-    @pytest.mark.asyncio
-    async def test_no_live_creation_path_for_new_period_entered_amount_item(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-    ):
-        """
-        Documents (re-confirms) the current reachability gap: admin direct
-        creation of a NEW custom Period + EnteredAmount PayItem is rejected
-        today. This is why sections 1-2 of the required output report this
-        as a live-reachability gap rather than a full HTTP round-trip.
-        """
-        resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "P4S1_PERIOD_EA",
-                "pay_item_name": "P4S1 Period EnteredAmount Probe",
-                "item_scope": "Period",
-                "rate_behavior": "EnteredAmount",
-                "category": "Bonus",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422, (
-            f"Expected current guard to reject new custom Period item creation; "
-            f"got {resp.status_code}: {resp.text}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # 4. Fixed and None characterization (dispatch-only — see class docstring)
 # ---------------------------------------------------------------------------
 
@@ -969,11 +889,11 @@ class TestLegacyManualFallbackCharacterization:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity, rateamount,
+                         workdate, linetype, quantity, rateamount,
                          calculatedamount, sourcetype, status, needsmanagerreview)
                     VALUES
                         (1, :bid, :pid, :did,
-                         :wd, 'HOURS', 'Daily', :qty, :rate,
+                         :wd, 'HOURS', :qty, :rate,
                          NULL, 'Manual', 'Active', FALSE)
                     RETURNING draftlineid
                 """),
@@ -1124,11 +1044,11 @@ class TestPostgresNumericCoercion:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity, rateamount,
+                         workdate, linetype, quantity, rateamount,
                          calculatedamount, sourcetype, status, needsmanagerreview)
                     VALUES
                         (1, :bid, :pid, :did,
-                         :wd, 'DailyNote', 'Daily', :qty, NULL,
+                         :wd, 'DailyNote', :qty, NULL,
                          NULL, 'Manual', 'Active', FALSE)
                     RETURNING draftlineid, quantity
                 """),
@@ -1244,7 +1164,6 @@ class TestFloatProhibitionCharacterization:
     @pytest.mark.asyncio
     async def test_all_current_dispatch_branches_return_decimal_not_float(self, direct_db):
         cases = [
-            ("EnteredAmount", None, Decimal("1"), Decimal("9.99")),
             ("Fixed", None, Decimal("1"), None),
             ("None", None, Decimal("1"), None),
         ]

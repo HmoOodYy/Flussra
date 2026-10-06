@@ -1313,10 +1313,10 @@ async def test_t15_finalization_refuses_contaminated_driver_rate(
     draft_row = (await direct_db.execute(_text("""
         INSERT INTO payroll.payrolldraftlines
             (companyid, branchid, payrollperiodid, driverid,
-             workdate, linetype, linescope, quantity, rateamount,
+             workdate, linetype, quantity, rateamount,
              status, sourcetype, needsmanagerreview)
         VALUES (:cid, :bid, :pid, :did,
-                '2065-01-15', :linetype, 'Daily', 1, '10.00',
+                '2065-01-15', :linetype, 1, '10.00',
                 'Approved', 'Manual', FALSE)
         RETURNING draftlineid
     """), {"cid": cid_b, "bid": bid_b, "pid": test_period_id,

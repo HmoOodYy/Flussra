@@ -9,7 +9,6 @@ fields added in migration 0034:
   B  Superseded-rate finalization: the DriverRateID from the superseded (but
      historically-valid) rate row is stored, not the newer rate's ID.
   C  Rate change after finalization does not alter locked source fields.
-  D  BONUS period-pay line: RateBehavior='EnteredAmount', rate fields NULL.
   E  DailyNote line: RateBehavior='None', rate fields NULL (replaces removed PTO_STATUS test).
   F  SYS_MIN_TOPUP line: RateBehavior='System', rate fields NULL.
   G  Finalization preview exposes resolved_rate_amount / rate_behavior
@@ -56,8 +55,6 @@ A_START, A_END, A_WORK = "2035-04-07", "2035-04-20", "2035-04-10"
 B_START, B_END, B_WORK = "2036-04-07", "2036-04-20", "2036-04-10"
 # Test C — 2037 (immutability test)
 C_START, C_END, C_WORK = "2037-04-07", "2037-04-20", "2037-04-10"
-# Test D — 2038 (EnteredAmount / BONUS)
-D_START, D_END, D_WORK = "2038-04-07", "2038-04-20", "2038-04-10"
 # Test E — 2039 (DailyNote None behavior)
 E_START, E_END, E_WORK = "2039-04-07", "2039-04-20", "2039-04-10"
 # Test F — 2040 (SYS_MIN_TOPUP)
@@ -476,10 +473,6 @@ class TestC_ImmutableAfterFinalize:
         )
         assert Decimal(str(hours_after["final_amount"])) == Decimal("200.0000")
 
-
-# ---------------------------------------------------------------------------
-# Test D — BONUS (EnteredAmount) period pay
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Test E — DailyNote (None behavior, replaces removed PTO_STATUS test)

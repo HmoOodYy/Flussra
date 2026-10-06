@@ -124,7 +124,7 @@ async def _validate_line_type(
           3. CP-2C: if period_id is supplied and PayrollPeriodPayItems rows exist,
              validate against the snapshot instead of live BranchPayItemConfig.
           4. DB lookup — both system and custom.
-          5. Retired / Period-scope guards.
+          5. Retired / non-Daily-scope guards.
           6. Branch activation (BranchPayItemConfig LEFT JOIN + COALESCE fallback).
           7. Rate-type mapping (from PayItemRateTypeMap).
 
@@ -140,7 +140,7 @@ async def _validate_line_type(
     # ── 2. Informational-only items (no catalog row) ───────────────────── #
     if line_type in _INFORMATIONAL_ONLY:
         # DailyStatus / DailyNote — no monetary value, no branch check needed.
-        return _LineTypeInfo("None", None, "Daily")
+        return _LineTypeInfo("None", None)
 
     # ── 3. CP-2C: snapshot-first validation ───────────────────────────── #
     # When period_id is provided and PayrollPeriodPayItems rows exist, validate
@@ -173,11 +173,11 @@ async def _validate_line_type(
                         "The item was not active or did not exist when the period was created."
                     ),
                 )
-            if snap_row["itemscope"] == "Period":
+            if snap_row["itemscope"] != "Daily":
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"'{line_type}' is a Period-scope pay item and cannot be entered "
+                        f"'{line_type}' is not a Daily pay item and cannot be entered "
                         "as a daily draft line."
                     ),
                 )
@@ -248,19 +248,13 @@ async def _validate_line_type(
             detail=f"Pay item '{line_type}' has been retired and cannot be used for new entries.",
         )
 
-    if pi_row["itemscope"] == "Period":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"'{line_type}' is a Period-scope pay item and cannot be entered "
-                "as a daily draft line."
-            ),
-        )
-
     if pi_row["itemscope"] != "Daily":
         raise HTTPException(
             status_code=422,
-            detail=f"'{line_type}' has an unrecognised item scope '{pi_row['itemscope']}'.",
+            detail=(
+                f"'{line_type}' is not a Daily pay item and cannot be entered "
+                "as a daily draft line."
+            ),
         )
 
     # ── 5. Branch activation — LEFT JOIN + COALESCE fallback ──────────── #
@@ -343,18 +337,12 @@ async def add_draft_line(
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     # CP-2F: Draft periods allow daily source-only lines (operational entry).
-    # Period Pay, Bonus, System lines, STATUS_PAYMENT, ADJUSTMENT, MINIMUM/MAXIMUM,
-    # NeedsManagerReview=True, and lines without work_date are blocked.
+    # System lines, rate amounts and NeedsManagerReview=True are blocked.
     if period.status == "Draft":
         if data.source_type == "System":
             raise HTTPException(
                 status_code=422,
                 detail="System lines cannot be added to a Prepared (Draft) period.",
-            )
-        if data.work_date is None:
-            raise HTTPException(
-                status_code=422,
-                detail="work_date is required when adding lines to a Prepared (Draft) period.",
             )
         # CP-2F: Draft is source-only — rate_amount is a financial field, always rejected.
         if data.rate_amount is not None:
@@ -367,39 +355,6 @@ async def add_draft_line(
                 status_code=422,
                 detail="needs_manager_review cannot be set on a Prepared (Draft) period.",
             )
-        # Period-scope and financial items are blocked in Draft
-        _draft_pi_check = await db.execute(
-            text("""
-                SELECT itemscope, payitemcode FROM payroll.payitems
-                WHERE payitemcode = :code
-                  AND (companyid IS NULL OR companyid = :cid)
-                  AND status != 'Retired'
-                LIMIT 1
-            """),
-            {"code": _LEGACY_TO_CANONICAL.get(data.line_type, data.line_type), "cid": company_id},
-        )
-        _draft_pi_row = _draft_pi_check.mappings().first()
-        if _draft_pi_row:
-            if _draft_pi_row["itemscope"] == "Period":
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "Period-scope pay lines (Period Pay, Bonus, etc.) cannot be added "
-                        "to a Prepared (Draft) period."
-                    ),
-                )
-            # Block STATUS_PAYMENT / ADJUSTMENT / MINIMUM / MAXIMUM pay items
-            _blocked_codes = {"STATUS_PAYMENT", "ADJUSTMENT", "MINIMUM", "MAXIMUM",
-                              "SYS_MIN_TOPUP", "SYS_MAX_CAP"}
-            if _draft_pi_row["payitemcode"] in _blocked_codes:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Pay item '{_draft_pi_row['payitemcode']}' cannot be added "
-                        "to a Prepared (Draft) period."
-                    ),
-                )
-        # informational (DailyStatus, DailyNote) and Daily pay items are allowed
     elif period.status not in ENTRY_ALLOWED_STATUSES:
         raise HTTPException(
             status_code=422,
@@ -420,14 +375,6 @@ async def add_draft_line(
         raise currency_error(
             "COMPANY_CURRENCY_REQUIRED",
             "Configure Company currency before writing a rate amount.",
-        )
-
-    # Daily lines require a work_date: the eligibility check, duplicate guard,
-    # and rate lookups all depend on it.
-    if data.work_date is None:
-        raise HTTPException(
-            status_code=422,
-            detail="work_date is required for Daily draft lines.",
         )
 
     # CP-2B: snapshot-aware work_date validation.
@@ -454,10 +401,8 @@ async def add_draft_line(
     # and are kept verbatim.  Custom company items are already canonical.
     canonical_line_type: str = _LEGACY_TO_CANONICAL.get(data.line_type, data.line_type)
 
-    # M13a: PayItem-driven line-type validation.
-    # as_of_date: use work_date when supplied, otherwise fall back to the period
-    # start date (covers retro-entry where work_date is omitted).
-    as_of_date: date = data.work_date if data.work_date is not None else period.start_date
+    # M13a: PayItem-driven line-type validation as of the work date.
+    as_of_date: date = data.work_date
     lt_info: _LineTypeInfo = await _validate_line_type(
         canonical_line_type, period.branch_id, company_id, as_of_date, db,
         period_id=period.payroll_period_id,
@@ -523,7 +468,6 @@ async def add_draft_line(
               AND  driverid        = :driver_id
               AND  workdate        = :work_date
               AND  linetype        = :line_type
-              AND  linescope       = 'Daily'
               AND  status         != 'Void'
             LIMIT 1
         """),
@@ -556,11 +500,11 @@ async def add_draft_line(
         text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, quantity, rateamount, calculatedamount,
+                 workdate, linetype, quantity, rateamount, calculatedamount,
                  sourcetype, status, needsmanagerreview, notes, addedbyuserid)
             VALUES
                 (:company_id, :branch_id, :period_id, :driver_id,
-                 :work_date, :line_type, 'Daily', :quantity, :rate_amount, :calc_amount,
+                 :work_date, :line_type, :quantity, :rate_amount, :calc_amount,
                  :source_type, 'Active', :needs_review, :notes, :added_by)
             RETURNING draftlineid
         """),
@@ -603,7 +547,7 @@ async def add_draft_line(
             user_id=user_id, line_id=line_id, action_code="SOURCE_CREATED", db=db,
             before_state=None,
             after_state={
-                "line_type": canonical_line_type, "line_scope": "Daily",
+                "line_type": canonical_line_type,
                 "quantity": data.quantity, "rate_amount": data.rate_amount,
                 "calculated_amount": calc_amount, "source_type": data.source_type,
                 "status": "Active", "notes": data.notes,
@@ -613,7 +557,7 @@ async def add_draft_line(
 
     # CP-2D1: dual-write canonical entry-state for DailyNote (plain text).
     # DailyStatus never reaches this path; the Day Grid owns it.
-    if data.work_date is not None and canonical_line_type == "DailyNote":
+    if canonical_line_type == "DailyNote":
         await _upsert_entry_state(
             company_id, period.branch_id, period_id,
             data.driver_id, data.work_date, user_id, db,
@@ -679,7 +623,7 @@ async def update_draft_line(
 
     # CP-2F: For Draft periods, only daily source lines may be updated.
     if period.status == "Draft":
-        if line.line_scope != "Daily" or line.source_type == "System":
+        if line.source_type == "System":
             raise HTTPException(
                 status_code=422,
                 detail="Only daily source lines can be updated on a Prepared (Draft) period.",
@@ -703,7 +647,7 @@ async def update_draft_line(
             ),
         )
 
-    as_of_date: date = line.work_date if line.work_date is not None else period.start_date
+    as_of_date: date = line.work_date
     canonical_existing_lt: str = _LEGACY_TO_CANONICAL.get(line.line_type, line.line_type)
 
     # Determine void-only before validation: void cleanup must remain possible
@@ -754,7 +698,7 @@ async def update_draft_line(
     # For any other meaningful change (quantity / rate / notes / NMR), verify
     # that the line's existing driver/work_date combination is still eligible.
     # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
-    if not is_void_only and line.work_date is not None:
+    if not is_void_only:
         await _assert_driver_eligible_for_workdate_via_snapshot(
             company_id, period.branch_id, period_id, line.driver_id, line.work_date, db
         )
@@ -833,7 +777,7 @@ async def update_draft_line(
         # engine must resolve the tier/block result.  NULL calc cannot be cleared.
         # For PerUnit, qty × rateamount is a valid finalization path, so clearing the
         # flag is allowed when rateamount is present even if calculatedamount is NULL.
-        # For EnteredAmount / Fixed / Calculated / None, NULL calc is expected — allow.
+        # For Fixed / None, NULL calc is expected — allow.
         if lt_info.rate_behavior in _CALC_REQUIRED_BEHAVIORS and line.calculated_amount is None:
             raise HTTPException(
                 status_code=422,
@@ -889,7 +833,7 @@ async def update_draft_line(
         )
         if canonical_existing_lt not in _INFORMATIONAL_ONLY:
             before_state = {
-                "line_type": line.line_type, "line_scope": line.line_scope,
+                "line_type": line.line_type,
                 "quantity": line.quantity, "rate_amount": line.rate_amount,
                 "calculated_amount": line.calculated_amount, "source_type": line.source_type,
                 "status": line.status, "notes": line.notes,
@@ -903,7 +847,7 @@ async def update_draft_line(
 
         # CP-2D1: dual-write canonical entry-state for DailyNote (plain text).
         # DailyStatus is rejected above; the Day Grid owns it.
-        if line.work_date is not None and canonical_existing_lt == "DailyNote":
+        if canonical_existing_lt == "DailyNote":
             new_note = fields.get("notes", line.notes)
             await _upsert_entry_state(
                 company_id, period.branch_id, period_id,
@@ -953,7 +897,7 @@ async def void_draft_line(
 
     # CP-2F: For Draft periods, only daily source lines may be voided.
     if period.status == "Draft":
-        if line.line_scope != "Daily" or line.source_type == "System":
+        if line.source_type == "System":
             raise HTTPException(
                 status_code=422,
                 detail="Only daily source lines can be voided on a Prepared (Draft) period.",
@@ -1003,7 +947,7 @@ async def void_draft_line(
             company_id=company_id, branch_id=period.branch_id, period_id=period_id,
             user_id=user_id, line_id=draft_line_id, action_code="SOURCE_VOIDED", db=db,
             before_state={
-                "line_type": line.line_type, "line_scope": line.line_scope,
+                "line_type": line.line_type,
                 "quantity": line.quantity, "rate_amount": line.rate_amount,
                 "calculated_amount": line.calculated_amount, "source_type": line.source_type,
                 "status": line.status, "notes": line.notes,
@@ -1013,7 +957,7 @@ async def void_draft_line(
         )
 
     # CP-2D1: clear canonical entry-state note for DailyNote (DailyStatus is rejected above).
-    if line.line_type == "DailyNote" and line.work_date is not None:
+    if line.line_type == "DailyNote":
         await _void_entry_state_field(
             period_id, company_id, line.driver_id, line.work_date, user_id, db,
             clear_status=False,

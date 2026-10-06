@@ -739,10 +739,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyStatus', 'Daily', 0,
+                            'DailyStatus', 0,
                             'Manual', 'Active', FALSE, :code, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
@@ -812,10 +812,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyStatus', 'Daily', 0, 'Manual', 'Active', FALSE, :code, 1)
+                            'DailyStatus', 0, 'Manual', 'Active', FALSE, :code, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id_b, "dt": start, "code": code_b},
             )
@@ -1545,10 +1545,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyStatus', 'Daily', 0, 'Manual', 'Active', FALSE, :code, 1)
+                            'DailyStatus', 0, 'Manual', 'Active', FALSE, :code, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
             )
@@ -1557,10 +1557,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyNote', 'Daily', 1, 'Manual', 'Active', FALSE, 1)
+                            'DailyNote', 1, 'Manual', 'Active', FALSE, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start},
             )
@@ -2263,10 +2263,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyNote', 'Daily', 1, 'Manual', 'Active', FALSE,
+                            'DailyNote', 1, 'Manual', 'Active', FALSE,
                             'legacy note only', 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start},
@@ -2321,10 +2321,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyStatus', 'Daily', 0, 'Manual', 'Void', FALSE, :code, 1)
+                            'DailyStatus', 0, 'Manual', 'Void', FALSE, :code, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
             )
@@ -2332,10 +2332,10 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity,
+                         workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyNote', 'Daily', 1, 'Manual', 'Active', FALSE, 1)
+                            'DailyNote', 1, 'Manual', 'Active', FALSE, 1)
                 """),
                 {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start},
             )

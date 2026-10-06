@@ -499,9 +499,9 @@ async def test_hire_date_guard_uses_nonvoid_daily_draft_lines_across_driver_hist
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
             (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType,
-             Quantity, SourceType, Status, LineScope)
+             Quantity, SourceType, Status)
         VALUES (1, :branch_id, :period_id, :driver_id, DATE '2018-06-01',
-                :line_type, 1, 'Manual', 'Active', 'Daily')
+                :line_type, 1, 'Manual', 'Active')
     """), {"branch_id": hq_branch_id, "period_id": created_period_id,
            "driver_id": source_id, "line_type": f"P1B-{suffix()}"})
 
@@ -526,9 +526,9 @@ async def test_hire_date_guard_ignores_void_draft_line(
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
             (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType,
-             Quantity, SourceType, Status, LineScope)
+             Quantity, SourceType, Status)
         VALUES (1, :branch_id, :period_id, :driver_id, DATE '2018-06-01',
-                :line_type, 1, 'Manual', 'Void', 'Daily')
+                :line_type, 1, 'Manual', 'Void')
     """), {"branch_id": hq_branch_id, "period_id": created_period_id,
            "driver_id": driver_id, "line_type": f"P1B-{suffix()}"})
     response = await client.patch(

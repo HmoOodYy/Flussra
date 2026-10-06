@@ -309,10 +309,8 @@ async def _seed_finalized_off_period(
     if resubmittable:
         await direct_db.execute(text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, linescope,
-                 quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'Daily',
-                    1.0000, 'Manual', 'Active', FALSE, 1)
+                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+            VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 1.0000, 'Manual', 'Active', FALSE, 1)
         """), {
             "branch_id": branch_id, "period_id": period_id, "driver_id": driver_id,
             "work_date": days[0],

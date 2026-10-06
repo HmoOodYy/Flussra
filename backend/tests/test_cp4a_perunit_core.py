@@ -7,7 +7,7 @@ Covers:
     pre-cutover inline formula;
   - the real production caller (`add_draft_line` via the HTTP endpoint, and
     `_compute_calculated_amount` directly) now delegating to the pure core;
-  - boundary non-regression for EnteredAmount/Fixed/None, which return
+  - boundary non-regression for Fixed/None, which return
     before any database access in `_compute_calculated_amount` and are
     therefore exercised here directly, without database fixtures.
 
@@ -1282,29 +1282,12 @@ class TestPeriodCodeUuidRetention:
 
 
 # ---------------------------------------------------------------------------
-# 4. Boundary non-regression: EnteredAmount/Fixed/None return before any
+# 4. Boundary non-regression: Fixed/None return before any
 #    database access in `_compute_calculated_amount`, so these are exercised
 #    directly with no database fixtures.
 # ---------------------------------------------------------------------------
 
 class TestBoundaryNonRegressionDirect:
-
-    @pytest.mark.asyncio
-    async def test_entered_amount_passthrough_unchanged(self):
-        cr = await _compute_calculated_amount(
-            rate_behavior="EnteredAmount",
-            rate_code=None,
-            quantity=Decimal("1"),
-            rate_amount_override=Decimal("55.5000"),
-            driver_id=0,
-            company_id=1,
-            as_of_date=datetime.date(2099, 1, 6),
-            db=None,
-        )
-        assert cr.calculated_amount == Decimal("55.5000"), (
-            "EnteredAmount must pass the user-supplied amount through verbatim, unquantized"
-        )
-        assert cr.needs_manager_review is False
 
     @pytest.mark.asyncio
     async def test_fixed_returns_no_computed_amount_unchanged(self):

@@ -97,7 +97,7 @@ Invoke-ValidationGate "Backend compileall" $BACKEND $PYTHON @(
     "-X", "pycache_prefix=$script:validationPycachePrefix", "-m", "compileall", "-q", "app", "tests"
 )
 
-Write-Host "`n=== GATE: Alembic single head (expected 0077) ===" -ForegroundColor Cyan
+Write-Host "`n=== GATE: Alembic single head (expected 0078) ===" -ForegroundColor Cyan
 Write-Host "Command: $PYTHON -m alembic heads"
 $alembicTimer = [System.Diagnostics.Stopwatch]::StartNew()
 Push-Location $ROOT
@@ -123,10 +123,10 @@ $heads = @(
         }
     }
 )
-if ($heads.Count -ne 1 -or $heads[0] -ne "0077") {
-    Stop-Validation "Alembic heads" "expected exactly one head 0077; found: $($heads -join ', ')"
+if ($heads.Count -ne 1 -or $heads[0] -ne "0078") {
+    Stop-Validation "Alembic heads" "expected exactly one head 0078; found: $($heads -join ', ')"
 }
-Write-Host "PASSED: Alembic single head 0077 ($([math]::Round($alembicTimer.Elapsed.TotalSeconds, 2))s)" -ForegroundColor Green
+Write-Host "PASSED: Alembic single head 0078 ($([math]::Round($alembicTimer.Elapsed.TotalSeconds, 2))s)" -ForegroundColor Green
 
 $nodeExecutable = if ($nodeCommand.Source) { $nodeCommand.Source } else { $nodeCommand.Path }
 $npmExecutable = if ($npmCommand.Source) { $npmCommand.Source } else { $npmCommand.Path }

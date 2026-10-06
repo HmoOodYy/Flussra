@@ -33,7 +33,7 @@ Gap 3 — Area B / source-write-wins direction (TestSourceMutationFirstSerializa
 
 Confirmed-adequate coverage (not duplicated here):
     Area 1  — Source mutations reject non-Open: TestDraftLineMutationStatusGuard,
-              TestPeriodPayMutationStatusGuard, TestDayGridMutationStatusGuard (CP-0A).
+              TestBonusMutationStatusGuard, TestDayGridMutationStatusGuard (CP-0A).
     Area 3  — PayItem deletion/retirement races: TestSettingsDeletionGuard,
               TestFirstReferenceRace, TestStaleRetirementRace,
               TestZeroToMeaningfulRace (CP-0A).

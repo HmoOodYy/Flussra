@@ -30,7 +30,7 @@ import styles from './PayItemsPage.module.css';
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const RATE_BEHAVIOR_LABELS: Record<string, string> = {
-  PerUnit: 'Per Unit', EnteredAmount: 'Entered Amount', Fixed: 'Fixed Amount (Compatibility)',
+  PerUnit: 'Per Unit', Fixed: 'Fixed Amount (Compatibility)',
   Calculated: 'Calculated (Reserved)', None: 'None (Compatibility)',
   OrdinalTier: 'Legacy / Unsupported: Ordinal Tier',
   RangeBracket: 'Legacy / Unsupported: Range Bracket',
@@ -114,7 +114,6 @@ function defaultRateNames(method: WizardRateMethod): string[] {
 
 interface WizardState {
   step:          1 | 2 | 3;
-  scope:         'Daily' | 'Period' | null;
   value_type:    WizardValueType | null;
   rate_method:   WizardRateMethod | null;
   rate_names:    string[];
@@ -125,14 +124,13 @@ interface WizardState {
 }
 
 const WIZARD_INITIAL: WizardState = {
-  step: 1, scope: 'Daily', value_type: null, rate_method: null,
+  step: 1, value_type: null, rate_method: null,
   rate_names: [], item_name: '', display_label: '', unit: '', notes: '',
 };
 
 type WizardAction =
   | { type: 'RESET' }
   | { type: 'SET_STEP';         step:   1 | 2 | 3 }
-  | { type: 'SET_SCOPE';        scope:  'Daily' | 'Period' }
   | { type: 'SET_VALUE_TYPE';   vt:     WizardValueType }
   | { type: 'SET_RATE_METHOD';  method: WizardRateMethod }
   | { type: 'SET_RATE_NAME';    idx:    number; name: string }
@@ -147,12 +145,7 @@ function wizardReducer(s: WizardState, a: WizardAction): WizardState {
   switch (a.type) {
     case 'RESET': return { ...WIZARD_INITIAL };
     case 'SET_STEP':  return { ...s, step: a.step };
-    case 'SET_SCOPE': return { ...s, scope: a.scope, value_type: null, rate_method: null, rate_names: [] };
-    case 'SET_VALUE_TYPE': {
-      const rate_method: WizardRateMethod | null = a.vt === 'Money' ? null : s.rate_method;
-      const rate_names = rate_method ? s.rate_names : [];
-      return { ...s, value_type: a.vt, rate_method, rate_names };
-    }
+    case 'SET_VALUE_TYPE': return { ...s, value_type: a.vt };
     case 'SET_RATE_METHOD': {
       const names = defaultRateNames(a.method);
       return { ...s, rate_method: a.method, rate_names: names };
@@ -230,13 +223,12 @@ function branchesReducer(s: BranchesState, a: BranchesAction): BranchesState {
   }
 }
 
-// Single-branch items — separate pending orders per scope (null = use server order)
+// Single-branch items — pending display order (null = use server order)
 type ItemsState = {
   items:            BranchPayItemState[];
   loading:          boolean;
   error:            string;
-  localOrderDaily:  BranchPayItemState[] | null;  // pending Daily reorder
-  localOrderPeriod: BranchPayItemState[] | null;  // pending Period reorder
+  localOrderDaily:  BranchPayItemState[] | null;  // pending reorder
 };
 type ItemsAction =
   | { type: 'FETCH_START' }
@@ -244,20 +236,16 @@ type ItemsAction =
   | { type: 'FETCH_ERROR';      error:   string }
   | { type: 'ITEM_UPDATED';     updated: BranchPayItemState }
   | { type: 'REORDER_DAILY';    ordered: BranchPayItemState[] }
-  | { type: 'REORDER_PERIOD';   ordered: BranchPayItemState[] }
-  | { type: 'CANCEL_ORDER_DAILY' }
-  | { type: 'CANCEL_ORDER_PERIOD' };
+  | { type: 'CANCEL_ORDER_DAILY' };
 
 function itemsReducer(s: ItemsState, a: ItemsAction): ItemsState {
   switch (a.type) {
-    case 'FETCH_START':          return { items: [], loading: true,  error: '',      localOrderDaily: null, localOrderPeriod: null };
-    case 'FETCH_OK':             return { items: a.items, loading: false, error: '', localOrderDaily: null, localOrderPeriod: null };
-    case 'FETCH_ERROR':          return { items: [], loading: false, error: a.error, localOrderDaily: null, localOrderPeriod: null };
+    case 'FETCH_START':          return { items: [], loading: true,  error: '',      localOrderDaily: null };
+    case 'FETCH_OK':             return { items: a.items, loading: false, error: '', localOrderDaily: null };
+    case 'FETCH_ERROR':          return { items: [], loading: false, error: a.error, localOrderDaily: null };
     case 'ITEM_UPDATED':         return { ...s, items: s.items.map(i => i.pay_item_id === a.updated.pay_item_id ? a.updated : i) };
     case 'REORDER_DAILY':        return { ...s, localOrderDaily:  a.ordered };
-    case 'REORDER_PERIOD':       return { ...s, localOrderPeriod: a.ordered };
     case 'CANCEL_ORDER_DAILY':   return { ...s, localOrderDaily:  null };
-    case 'CANCEL_ORDER_PERIOD':  return { ...s, localOrderPeriod: null };
     default:                     return s;
   }
 }
@@ -341,7 +329,6 @@ interface AggregateItem {
   pay_item_code: string;
   pay_item_name: string;
   category: string;
-  item_scope: 'Daily' | 'Period' | 'Summary';
   rate_behavior: string;
   requires_rate: boolean;
   appears_in_payroll_entry: boolean;
@@ -367,7 +354,7 @@ function buildAggregates(byBranch: Record<number, BranchPayItemState[]>, branche
         map.set(item.pay_item_id, {
           pay_item_id: item.pay_item_id, pay_item_code: item.pay_item_code,
           pay_item_name: item.pay_item_name, category: item.category,
-          item_scope: item.item_scope, rate_behavior: item.rate_behavior,
+          rate_behavior: item.rate_behavior,
           requires_rate: item.requires_rate, appears_in_payroll_entry: item.appears_in_payroll_entry,
           is_system_standard: item.is_system_standard, sort_order: item.sort_order,
           totalBranches: 0, activeBranches: 0, coverage: 'all-inactive', perBranch: [], sample: item,
@@ -439,7 +426,7 @@ export function PayItemsPage() {
   const [branchSt, dispatchBranches] = useReducer(branchesReducer,
     { branches: [], loading: true, error: '' });
   const [singleSt, dispatchSingle] = useReducer(itemsReducer,
-    { items: [], loading: false, error: '', localOrderDaily: null, localOrderPeriod: null });
+    { items: [], loading: false, error: '', localOrderDaily: null });
   const [allSt, dispatchAll] = useReducer(allBranchReducer,
     { byBranch: {}, loading: false, error: '', partialWarning: null, failedBranches: [] });
 
@@ -526,7 +513,7 @@ export function PayItemsPage() {
   // localOrder is held in singleSt.localOrder (reducer) so FETCH_START resets it.
   // dragOverId and orderSaving are UI-only, never set inside effects.
   const [dragOverId, setDragOverId]       = useState<number | null>(null);
-  const [orderSaving, setOrderSaving]     = useState<'Daily' | 'Period' | null>(null);
+  const [orderSaving, setOrderSaving]     = useState(false);
   const [isDraggingCursor, setIsDraggingCursor] = useState(false);
   const dragItemIdRef = useRef<number | null>(null);
 
@@ -630,13 +617,11 @@ export function PayItemsPage() {
 
   // ── Filtered items ────────────────────────────────────────────────────────
 
-  // Base filter: search + status only (NOT scope tab).
-  // Used to derive per-scope display lists so localOrderDaily/Period work correctly
-  // regardless of which scope tab is active.
+  // Base filter: search + status. localOrderDaily (a pending reorder) takes
+  // precedence over this list for display.
   const filteredBase = useMemo(() => {
     const q = search.trim().toLowerCase();
     return singleSt.items.filter(item => {
-      if (item.item_scope !== 'Daily') return false;
       if (statusFilter === 'active'   && !item.is_active) return false;
       if (statusFilter === 'inactive' &&  item.is_active) return false;
       if (q && !item.pay_item_name.toLowerCase().includes(q) && !item.pay_item_code.toLowerCase().includes(q)) return false;
@@ -650,7 +635,6 @@ export function PayItemsPage() {
   const filteredAgg = useMemo(() => {
     const q = search.trim().toLowerCase();
     return aggregates.filter(agg => {
-      if (agg.item_scope !== 'Daily') return false;
       if (statusFilter === 'active'   && agg.coverage !== 'all-active')   return false;
       if (statusFilter === 'inactive' && agg.coverage !== 'all-inactive') return false;
       if (statusFilter === 'mixed'    && agg.coverage !== 'mixed')        return false;
@@ -750,7 +734,7 @@ export function PayItemsPage() {
       setCreateError('Only "Same rate" (PerUnit) is supported at this time. Please select it in Step 2.');
       return;
     }
-    // input_type is always Time or Number in this wizard (Money card not shown in step 1)
+    // input_type is always Time or Number in this wizard
     const input_type = wizard.value_type === 'Time' ? 'Time' as const : 'Number' as const;
 
     setCreateSaving(true);
@@ -1036,13 +1020,11 @@ export function PayItemsPage() {
   // Wizard: can we advance from step 1 to step 2?
   const wizardStep1Complete = wizard.value_type !== null;
   // Wizard: can we advance from step 2 to step 3?
-  const wizardStep2Complete = wizard.value_type !== null &&
-    (wizard.value_type === 'Money' || wizard.rate_method !== null);
+  const wizardStep2Complete = wizard.value_type !== null && wizard.rate_method !== null;
   // Wizard: can we submit?
   const wizardStep3Complete = wizard.item_name.trim().length > 0;
 
-  // Drag-to-reorder: available in any scope tab when no search/status filter is active.
-  // Scope boundary enforcement happens in handleDrop (Daily cannot be dropped onto Period and vice versa).
+  // Drag-to-reorder: available when no search/status filter is active.
   const canReorder = isAdmin && branchMode === 'single' && !search && statusFilter === 'all' && !singleSt.loading;
 
   // ── Drag handlers ─────────────────────────────────────────────────────────
@@ -1087,11 +1069,11 @@ export function PayItemsPage() {
     setIsDraggingCursor(false);
   }
 
-  // ── Save order (scope-specific) ────────────────────────────────────────────
-  async function saveOrderForScope(scope: 'Daily' | 'Period') {
-    const localOrder = scope === 'Daily' ? singleSt.localOrderDaily : singleSt.localOrderPeriod;
+  // ── Save order ─────────────────────────────────────────────────────────────
+  async function saveOrder() {
+    const localOrder = singleSt.localOrderDaily;
     if (!localOrder) return;
-    setOrderSaving(scope);
+    setOrderSaving(true);
     const payload: PayItemOrderUpdate = {
       items: localOrder.map((item, idx) => ({
         pay_item_id: item.pay_item_id,
@@ -1100,17 +1082,17 @@ export function PayItemsPage() {
     };
     try {
       await apiClient.patch('/settings/pay-items/order', payload);
-      // Reload from server to confirm saved order (FETCH_START clears both local orders).
+      // Reload from server to confirm saved order (FETCH_START clears the local order).
       dispatchSingle({ type: 'FETCH_START' });
       const { data } = await apiClient.get<BranchPayItemState[]>(
         `/settings/branches/${selectedBranchId}/pay-items`
       );
       dispatchSingle({ type: 'FETCH_OK', items: data });
-      showToast(`${scope === 'Daily' ? 'Daily' : 'Pay Period'} display order saved.`);
+      showToast('Display order saved.');
     } catch (e) {
       showToast(apiError(e));
     } finally {
-      setOrderSaving(null);
+      setOrderSaving(false);
     }
   }
 
@@ -1249,29 +1231,16 @@ export function PayItemsPage() {
             </div>
           </div>
 
-          {/* Order save/cancel bars — one per scope, shown when user has a pending reorder */}
+          {/* Order save/cancel bar — shown when user has a pending reorder */}
           {singleSt.localOrderDaily && (
             <div className={styles.orderBar}>
-              <span className={styles.orderBarMsg}><DragIcon /> Daily order changed — save to persist</span>
+              <span className={styles.orderBarMsg}><DragIcon /> Order changed — save to persist</span>
               <button className={styles.btnPrimary}
-                onClick={() => void saveOrderForScope('Daily')} disabled={orderSaving !== null}>
-                {orderSaving === 'Daily' ? <><SpinnerIcon /> Saving…</> : 'Save Daily Order'}
+                onClick={() => void saveOrder()} disabled={orderSaving}>
+                {orderSaving ? <><SpinnerIcon /> Saving…</> : 'Save Order'}
               </button>
               <button className={styles.btnSecondary}
-                onClick={() => dispatchSingle({ type: 'CANCEL_ORDER_DAILY' })} disabled={orderSaving !== null}>
-                Cancel
-              </button>
-            </div>
-          )}
-          {singleSt.localOrderPeriod && (
-            <div className={styles.orderBar}>
-              <span className={styles.orderBarMsg}><DragIcon /> Pay Period order changed — save to persist</span>
-              <button className={styles.btnPrimary}
-                onClick={() => void saveOrderForScope('Period')} disabled={orderSaving !== null}>
-                {orderSaving === 'Period' ? <><SpinnerIcon /> Saving…</> : 'Save Period Order'}
-              </button>
-              <button className={styles.btnSecondary}
-                onClick={() => dispatchSingle({ type: 'CANCEL_ORDER_PERIOD' })} disabled={orderSaving !== null}>
+                onClick={() => dispatchSingle({ type: 'CANCEL_ORDER_DAILY' })} disabled={orderSaving}>
                 Cancel
               </button>
             </div>
@@ -1290,7 +1259,7 @@ export function PayItemsPage() {
             )}
 
             {/* Drag hint when filters prevent reordering */}
-            {isAdmin && branchMode === 'single' && !canReorder && !singleSt.localOrderDaily && !singleSt.localOrderPeriod && !singleSt.loading && displayDaily.length > 0 && (
+            {isAdmin && branchMode === 'single' && !canReorder && !singleSt.localOrderDaily && !singleSt.loading && displayDaily.length > 0 && (
               <div className={styles.dragHint}>
                 Clear search and status filter to drag-reorder.
               </div>
@@ -2015,7 +1984,6 @@ function SingleItemDetail({
       <div className={styles.detailHeader}>
         <h2 className={styles.detailItemName}>{item.pay_item_name}</h2>
         <div className={styles.detailBadgeRow}>
-          <ScopeBadge scope={item.item_scope} />
           <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
             {item.is_system_standard ? 'Standard' : 'Custom'}
           </span>
@@ -2239,7 +2207,6 @@ function AggItemDetail({ agg, isAdmin, onEdit }: { agg: AggregateItem; isAdmin: 
       <div className={styles.detailHeader}>
         <h2 className={styles.detailItemName}>{agg.pay_item_name}</h2>
         <div className={styles.detailBadgeRow}>
-          <ScopeBadge scope={agg.item_scope} />
           <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
             {agg.is_system_standard ? 'Standard' : 'Custom'}
           </span>
@@ -2363,7 +2330,7 @@ function WizardStep2({
 }) {
   const config = value_type === 'Time' ? STEP2_TIME : STEP2_NUMBER;
 
-  if (!value_type || value_type === 'Money') return <div className={styles.wizardStep} />;
+  if (!value_type) return <div className={styles.wizardStep} />;
 
   return (
     <div className={styles.wizardStep}>
@@ -2547,13 +2514,6 @@ function WizardStep3({
 
 
 // ─── Badges ───────────────────────────────────────────────────────────────────
-
-function ScopeBadge({ scope }: { scope: string }) {
-  const cls = scope === 'Daily' ? styles.badgeScopeDaily
-    : scope === 'Period' ? styles.badgeScopePeriod
-    : styles.badgeScopeSummary;
-  return <span className={`${styles.badgeScope} ${cls}`}>{scope}</span>;
-}
 
 function StatusBadge({ active, isDefault }: { active: boolean; isDefault?: boolean }) {
   if (isDefault && active) {

@@ -11,7 +11,6 @@ Covers:
   - canonical live Status-derived pay, and exclusion of the stale persisted
     STATUS_PAYMENT/STATUS_PAY compatibility projection;
   - missing-Status-rate blocker behavior;
-  - non-BONUS period pay inclusion, legacy BONUS DraftLine exclusion;
   - canonical Active-only bonus, CP-3C minimum/maximum-then-bonus ordering;
   - financial-source-driven driver union/deduplication;
   - structural-blocker propagation from the shared read-only validator;
@@ -1882,12 +1881,12 @@ class TestCanonicalLiveStatus:
                     _text("""
                         INSERT INTO payroll.payrolldraftlines
                             (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
+                             workdate, linetype, quantity,
                              calculatedamount, sourcetype, sourceid,
                              status, needsmanagerreview, addedbyuserid)
                         VALUES
                             (1, :bid, :pid, :did,
-                             :wdate, 'CP4BFAKE', 'Daily', 1,
+                             :wdate, 'CP4BFAKE', 1,
                              5.0000, 'Manual', 'STATUS_PAYMENT:not-the-real-format',
                              'Active', FALSE, 1)
                     """),
@@ -1925,12 +1924,12 @@ class TestCanonicalLiveStatus:
                     _text("""
                         INSERT INTO payroll.payrolldraftlines
                             (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
+                             workdate, linetype, quantity,
                              calculatedamount, sourcetype, sourceid,
                              status, needsmanagerreview, addedbyuserid)
                         VALUES
                             (1, :bid, :pid, :did,
-                             :wdate, 'STATUS_PAY', 'Daily', 1,
+                             :wdate, 'STATUS_PAY', 1,
                              99.0000, 'System', 'STATUS_PAYMENT:1:2:3',
                              'Active', FALSE, 1)
                     """),
@@ -2211,44 +2210,6 @@ class TestDriverUnion:
                     assert Decimal(str(drv["status_pay"])) == Decimal("0")
 
     @pytest.mark.asyncio
-    async def test_period_pay_only_driver_included_once(
-        self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
-    ):
-        """
-        There is no supported API path to CREATE a new non-BONUS Period-scope
-        line (BONUS lives in /bonuses). CP-4B's own contract is to include whatever
-        non-BONUS Period-scope DraftLines already exist (e.g. legacy/
-        imported data), so this line is constructed directly, matching that
-        contract. This also exercises the Fixed/EnteredAmount period-pay
-        passthrough: CalculatedAmount is stored/read verbatim -- no PerUnit
-        4dp rule and no additional 2dp rounding is applied by the preview.
-        """
-        async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open") as pid:
-            async with _owned_driver_and_employee(session_client, auth_token, paytest_branch_id, direct_db, name="CP4B PeriodPayOnly") as driver_id:
-                await direct_db.execute(
-                    _text("""
-                        INSERT INTO payroll.payrolldraftlines
-                            (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
-                             calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
-                        VALUES
-                            (1, :bid, :pid, :did, NULL, 'ADJUSTMENT', 'Period', 1,
-                             75.00, 'Manual', 'Active', FALSE, 1)
-                    """),
-                    {"bid": paytest_branch_id, "pid": pid, "did": driver_id},
-                )
-
-                r = await session_client.get(f"/payroll/periods/{pid}/calculation-preview", headers=auth(auth_token))
-                assert r.status_code == 200, r.text
-                matching = [d for d in r.json()["drivers"] if d["driver_id"] == driver_id]
-                assert len(matching) == 1
-                drv = matching[0]
-                assert Decimal(str(drv["period_pay"])) == Decimal("75.00"), "amount must pass through unchanged"
-                assert Decimal(str(drv["daily_pay"])) == Decimal("0")
-                assert Decimal(str(drv["bonus_total"])) == Decimal("0")
-                assert Decimal(str(drv["expected_pay"])) == Decimal("75.00")
-
-    @pytest.mark.asyncio
     async def test_bonus_only_driver_included_once(
         self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
     ):
@@ -2296,23 +2257,6 @@ class TestDriverUnion:
                                 )).mappings().first()
                                 await _save_day_grid_status(session_client, auth_token, pid, driver_id, DATE_FEB05, code_row["statuscode"])  # 60.00
 
-                                # No supported API path creates a Period-scope line (see
-                                # test_period_pay_only_driver_included_once's docstring) --
-                                # construct the legacy-style Period-scope line directly,
-                                # matching CP-4B's own inclusion contract.
-                                await direct_db.execute(
-                                    _text("""
-                                        INSERT INTO payroll.payrolldraftlines
-                                            (companyid, branchid, payrollperiodid, driverid,
-                                             workdate, linetype, linescope, quantity,
-                                             calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
-                                        VALUES
-                                            (1, :bid, :pid, :did, NULL, 'ADJUSTMENT', 'Period', 1,
-                                             5.00, 'Manual', 'Active', FALSE, 1)
-                                    """),
-                                    {"bid": paytest_branch_id, "pid": pid, "did": driver_id},
-                                )
-
                                 bonus_r = await session_client.post(
                                     f"/payroll/periods/{pid}/bonuses",
                                     json={"driver_id": driver_id, "amount": "3.00", "reason": "Multi-source bonus"},
@@ -2323,21 +2267,20 @@ class TestDriverUnion:
                                 r = await session_client.get(f"/payroll/periods/{pid}/calculation-preview", headers=auth(auth_token))
                                 assert r.status_code == 200, r.text
                                 matching = [d for d in r.json()["drivers"] if d["driver_id"] == driver_id]
-                                assert len(matching) == 1, "driver must appear exactly once despite four distinct sources"
+                                assert len(matching) == 1, "driver must appear exactly once despite three distinct sources"
                                 drv = matching[0]
                                 assert Decimal(str(drv["daily_pay"])) == Decimal("20.0000")
                                 assert Decimal(str(drv["status_pay"])) == Decimal("60.0000")
-                                assert Decimal(str(drv["period_pay"])) == Decimal("5.00")
                                 assert Decimal(str(drv["bonus_total"])) == Decimal("3.00")
-                                assert Decimal(str(drv["normal_base"])) == Decimal("85.0000"), "20 + 60 + 5, bonus excluded from base"
-                                assert Decimal(str(drv["expected_pay"])) == Decimal("88.0000"), "85 base + 3 bonus, no min/max rule active"
+                                assert Decimal(str(drv["normal_base"])) == Decimal("80.0000"), "20 + 60, bonus excluded from base"
+                                assert Decimal(str(drv["expected_pay"])) == Decimal("83.0000"), "80 base + 3 bonus, no min/max rule active"
 
 
 # ---------------------------------------------------------------------------
 # 6b. Structural blockers (P1-A/P1-C fix) -- CP-4B must surface the
 # same structural findings `_validate_period_can_finalize` reports for
 # finalization-preview: duplicate active Daily lines, driver eligibility
-# violations (Daily and Period-pay), contaminated/foreign RateType
+# violations, contaminated/foreign RateType
 # references, and unresolvable rate-type mapping.
 #
 # This module never mutates shared schema objects to manufacture a
@@ -2371,7 +2314,7 @@ class TestStructuralBlockers:
             "(driver 1 2199-02-04 DailyNote ×2). Void the extra lines before finalizing."
         )
 
-        async def _stub_validator(*, period_id, company_id, branch_id, period_start, period_end, db):
+        async def _stub_validator(*, period_id, company_id, branch_id, db):
             return [real_duplicate_text]
 
         # Stage B4-17: _validate_period_can_finalize now lives in
@@ -2426,61 +2369,6 @@ class TestStructuralBlockers:
                     blockers_text = " ".join(body["blockers"]).lower()
                     assert "eligible" in blockers_text or "ineligible" in blockers_text, (
                         f"expected an eligibility blocker; got: {body['blockers']}"
-                    )
-                finally:
-                    await direct_db.execute(
-                        _text("UPDATE core.employees SET terminationdate = NULL WHERE employeeid = :eid"),
-                        {"eid": emp_id},
-                    )
-
-    @pytest.mark.asyncio
-    async def test_period_pay_ineligible_driver_line_surfaced(
-        self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
-    ):
-        """
-        Distinct validator category from the Daily-eligibility test above:
-        `_validate_period_can_finalize`'s Period-Pay eligibility check uses
-        the period's overlap window (EffectiveFrom/EffectiveTo vs.
-        period start/end), not a single WorkDate. Terminating the employee
-        before the period's own start date makes a Period-scope line
-        ineligible for the whole period. Constructed via the same safe
-        direct-insert convention already used for period-pay lines
-        elsewhere in this file -- no shared-schema mutation.
-        """
-        async with _owned_period(session_client, auth_token, paytest_branch_id, direct_db, status="Open") as pid:
-            async with _owned_driver_and_employee(session_client, auth_token, paytest_branch_id, direct_db, name="CP4B PeriodPayInelig") as driver_id:
-                emp_row = (await direct_db.execute(
-                    _text("SELECT employeeid FROM core.drivers WHERE driverid = :id"), {"id": driver_id},
-                )).mappings().first()
-                emp_id = emp_row["employeeid"]
-
-                await direct_db.execute(
-                    _text("""
-                        INSERT INTO payroll.payrolldraftlines
-                            (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
-                             calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
-                        VALUES
-                            (1, :bid, :pid, :did, NULL, 'ADJUSTMENT', 'Period', 1,
-                             10.00, 'Manual', 'Active', FALSE, 1)
-                    """),
-                    {"bid": paytest_branch_id, "pid": pid, "did": driver_id},
-                )
-
-                term_date = datetime.date.fromisoformat(PERIOD_START) - datetime.timedelta(days=1)
-                try:
-                    await direct_db.execute(
-                        _text("UPDATE core.employees SET terminationdate = :td WHERE employeeid = :eid"),
-                        {"td": term_date, "eid": emp_id},
-                    )
-
-                    r = await session_client.get(f"/payroll/periods/{pid}/calculation-preview", headers=auth(auth_token))
-                    assert r.status_code == 200, r.text
-                    body = r.json()
-                    assert body["has_blockers"] is True
-                    blockers_text = " ".join(body["blockers"]).lower()
-                    assert "eligible" in blockers_text or "ineligible" in blockers_text, (
-                        f"expected a Period-Pay eligibility blocker; got: {body['blockers']}"
                     )
                 finally:
                     await direct_db.execute(

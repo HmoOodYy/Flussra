@@ -1429,8 +1429,8 @@ class TestSerializationConcurrency:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status, workdate)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
+                    (payrollperiodid, companyid, branchid, driverid, linetype, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 1, 'Manual', 'Active', :workdate)
             """),
             {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id, "workdate": ret_start},
         )
@@ -1492,8 +1492,8 @@ class TestSerializationConcurrency:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (payrollperiodid, companyid, branchid, driverid, linetype, linescope, quantity, sourcetype, status, workdate)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
+                    (payrollperiodid, companyid, branchid, driverid, linetype, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 1, 'Manual', 'Active', :workdate)
             """),
             {"pid": ret_pid, "cid": _COMPANY_ID, "bid": paytest_branch_id, "did": paytest_driver_id, "workdate": ret_start},
         )
@@ -1579,8 +1579,8 @@ class TestSerializationConcurrency:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
-                     linetype, linescope, quantity, sourcetype, status, workdate)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
+                     linetype, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 1, 'Manual', 'Active', :workdate)
             """),
             {"pid": pid_b, "cid": _COMPANY_ID, "bid": hq_branch_id, "did": hq_driver_id, "workdate": start_b},
         )
@@ -1915,8 +1915,8 @@ class TestDeterministicLockBoundary:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (payrollperiodid, companyid, branchid, driverid,
-                     linetype, linescope, quantity, sourcetype, status, workdate)
-                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 'Daily', 1, 'Manual', 'Active', :workdate)
+                     linetype, quantity, sourcetype, status, workdate)
+                VALUES (:pid, :cid, :bid, :did, 'DailyNote', 1, 'Manual', 'Active', :workdate)
             """),
             {
                 "pid": pid_b,

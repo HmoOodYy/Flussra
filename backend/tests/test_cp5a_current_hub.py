@@ -220,9 +220,9 @@ async def _insert_daily_line(
         _text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid, workdate,
-                 linetype, linescope, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+                 linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
             VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date,
-                    :line_type, 'Daily', :quantity, :source_type, 'Active', FALSE, 1)
+                    :line_type, :quantity, :source_type, 'Active', FALSE, 1)
         """),
         {
             "company_id": _COMPANY_ID,
@@ -233,30 +233,6 @@ async def _insert_daily_line(
             "line_type": line_type,
             "quantity": quantity,
             "source_type": source_type,
-        },
-    )
-    await db.commit()
-
-
-async def _insert_period_line(
-    db: AsyncConnection,
-    period_id: int,
-    branch_id: int,
-    driver_id: int,
-) -> None:
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, linetype, linescope,
-                 quantity, calculatedamount, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (:company_id, :branch_id, :period_id, :driver_id, 'ADJUSTMENT', 'Period',
-                    1, 25, 'Manual', 'Active', FALSE, 1)
-        """),
-        {
-            "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
-            "period_id": period_id,
-            "driver_id": driver_id,
         },
     )
     await db.commit()
@@ -672,7 +648,7 @@ class TestCurrentPayrollHub:
             "fully_off_drivers": 0,
         }
 
-    async def test_bonus_and_period_financial_only_do_not_count_as_working(
+    async def test_bonus_only_does_not_count_as_working(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
@@ -684,7 +660,6 @@ class TestCurrentPayrollHub:
             headers=_auth(auth_token),
         )
         assert bonus.status_code == 201, bonus.text
-        await _insert_period_line(direct_db, period_id, paytest_branch_id, paytest_driver_id)
 
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text

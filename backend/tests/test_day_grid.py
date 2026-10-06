@@ -296,9 +296,8 @@ class TestDayGridColumns:
         )
         assert resp.status_code == 200
         codes = {c["pay_item_code"] for c in resp.json()["columns"]}
-        # Period-scope items must not appear as columns
-        assert "BONUS" not in codes
-        assert "ADJUSTMENT" not in codes
+        # System-generated Period outputs must not appear as columns
+        assert not {"SYS_MIN_TOPUP", "SYS_MAX_CAP"} & codes
 
     async def test_day_grid_excludes_retired_items(
         self,
@@ -324,8 +323,8 @@ class TestDayGridColumns:
         for col in columns:
             assert "pay_item_code" in col
             assert "rate_behavior" in col
-            # BONUS and ADJUSTMENT are Period-scope, so must not appear
-            assert col["pay_item_code"] not in ("BONUS", "ADJUSTMENT")
+            # System-generated Period outputs must not appear
+            assert col["pay_item_code"] not in ("SYS_MIN_TOPUP", "SYS_MAX_CAP")
 
 
 # ---------------------------------------------------------------------------
@@ -1552,12 +1551,12 @@ class TestDayGridLegacyDuplicates:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, sourcetype,
+                     workdate, linetype, quantity, sourcetype,
                      status, needsmanagerreview, addedbyuserid)
                 VALUES
                     ((SELECT companyid FROM core.branches WHERE branchid = :bid),
                      :bid, :pid, :did,
-                     :dt, 'Hours', 'Daily', 7, 'Manual', 'Active', FALSE,
+                     :dt, 'Hours', 7, 'Manual', 'Active', FALSE,
                      (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
             """),
             {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id, "dt": wdate},
@@ -1608,12 +1607,12 @@ class TestDayGridLegacyDuplicates:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, sourcetype,
+                     workdate, linetype, quantity, sourcetype,
                      status, needsmanagerreview, addedbyuserid)
                 VALUES
                     ((SELECT companyid FROM core.branches WHERE branchid = :bid),
                      :bid, :pid, :did,
-                     :dt, 'Hours', 'Daily', 5, 'Manual', 'Active', FALSE,
+                     :dt, 'Hours', 5, 'Manual', 'Active', FALSE,
                      (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
             """),
             {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id, "dt": wdate},
@@ -1664,12 +1663,12 @@ class TestDayGridLegacyDuplicates:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, sourcetype,
+                     workdate, linetype, quantity, sourcetype,
                      status, needsmanagerreview, addedbyuserid)
                 VALUES
                     ((SELECT companyid FROM core.branches WHERE branchid = :bid),
                      :bid, :pid, :did,
-                     :dt, 'Hours', 'Daily', 4, 'Manual', 'Active', FALSE,
+                     :dt, 'Hours', 4, 'Manual', 'Active', FALSE,
                      (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
             """),
             {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id, "dt": wdate},
@@ -1759,12 +1758,12 @@ class TestDayGridLegacyDuplicates:
         insert_sql = _text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, quantity, sourcetype,
+                 workdate, linetype, quantity, sourcetype,
                  status, needsmanagerreview, addedbyuserid)
             VALUES
                 ((SELECT companyid FROM core.branches WHERE branchid = :bid),
                  :bid, :pid, :did,
-                 :dt, :lt, 'Daily', 3, 'Manual', 'Active', FALSE,
+                 :dt, :lt, 3, 'Manual', 'Active', FALSE,
                  (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
         """)
         await direct_db.execute(insert_sql, {"bid": paytest_branch_id, "pid": pid, "did": paytest_driver_id, "dt": wdate, "lt": "Hours"})
@@ -2968,13 +2967,11 @@ class TestDriverEligibilityBoundaries:
 async def _create_test_pay_item(
     db_conn,
     name: str,
-    item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
 ) -> dict:
     """
     Seed a custom Daily pay item directly into the DB (bypasses LLR-A guard).
     Returns a dict with pay_item_id, pay_item_code, and pay_item_name.
-    item_scope   : 'Daily' only (Period-scope items are blocked; tests expecting 422 use HTTP)
     """
     import hashlib
 
@@ -3270,34 +3267,6 @@ class TestPayItemEffectiveDateBoundaries:
                 )
         finally:
             await _delete_test_pay_item(session_client, auth_token, iid)
-
-    # ── Test 5: Period-scope item absent from Daily grid ─────────────────── #
-
-    @pytest.mark.asyncio
-    async def test_period_scope_item_does_not_appear_in_daily_grid(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        elig_period: dict,
-        paytest_branch_id: int,
-    ):
-        """
-        Custom Period-scope items cannot be created (422).
-        Verify the creation guard; Period-scope items are therefore guaranteed
-        never to appear as day-grid columns.  System Period items (BONUS,
-        ADJUSTMENT) are tested by test_day_grid_excludes_period_scope_items.
-        """
-        r = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "P3B Test Period Scope Item",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-            },
-            headers=auth(auth_token),
-        )
-        assert r.status_code == 422, f"Expected 422 blocking custom Period item creation, got {r.status_code}"
-        assert "period" in r.text.lower()
 
     # ── Test 6: Branch isolation — item configured for HQ not on PAYTEST ─── #
 

@@ -99,9 +99,9 @@ async def cp4d_db(test_database_url):
             line_id = (await seed.execute(text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
-                     quantity, sourcetype, sourceid, status, needsmanagerreview, linescope)
+                     quantity, sourcetype, sourceid, status, needsmanagerreview)
                 VALUES (:cid, :bid, :pid, :did, :work_date, 'DailyNote', 1,
-                        'User', :source_id, 'Active', FALSE, 'Daily')
+                        'User', :source_id, 'Active', FALSE)
                 RETURNING draftlineid
             """), {
                 "cid": seed_ids["company_id"], "bid": seed_ids["branch_id"],
@@ -1004,32 +1004,6 @@ async def test_submit_needs_manager_review_guard_leaves_no_snapshot(cp4d_db, mon
     # compatibility re-export no longer intercepts it.
     monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
     with pytest.raises(HTTPException, match="require manager review"):
-        await change_period_status(
-            cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id,
-            PeriodStatusChange(status="InReview"), cp4d_db.conn,
-        )
-    assert await _snapshot_count(cp4d_db) == 0
-
-
-@pytest.mark.asyncio
-async def test_submit_unresolved_period_amount_guard_leaves_no_snapshot(cp4d_db, monkeypatch):
-    await cp4d_db.conn.execute(text("""
-        UPDATE payroll.payrolldraftlines
-        SET linetype = 'Adjustment', linescope = 'Period', calculatedamount = NULL,
-            needsmanagerreview = FALSE
-        WHERE draftlineid = :line_id
-    """), {"line_id": cp4d_db.line_id})
-
-    async def _no_op_isolation(_db):
-        return None
-
-    # Stage B4-18: _set_submit_transaction_isolation's real implementation
-    # now lives in app.payroll.period_lifecycle, and change_period_status /
-    # resubmit_period (also in period_lifecycle) resolve it as a bare name
-    # through that module's own globals — patching app.payroll.service's
-    # compatibility re-export no longer intercepts it.
-    monkeypatch.setattr(period_lifecycle, "_set_submit_transaction_isolation", _no_op_isolation)
-    with pytest.raises(HTTPException, match="no resolved calculation amount"):
         await change_period_status(
             cp4d_db.company_id, cp4d_db.user_id, cp4d_db.period_id,
             PeriodStatusChange(status="InReview"), cp4d_db.conn,

@@ -277,10 +277,10 @@ class TestDraftLinePeriodIntegrity:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, sourcetype)
+                         workdate, linetype, quantity, sourcetype)
                     VALUES
                         (:cid, :bad_branch, :period_id, :driver_id,
-                         'REGULAR', 1, 'Test')
+                         DATE '2090-01-01', 'REGULAR', 1, 'Test')
                 """),
                 {
                     "cid": company_id,
@@ -306,10 +306,10 @@ class TestDraftLinePeriodIntegrity:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, sourcetype)
+                         workdate, linetype, quantity, sourcetype)
                     VALUES
                         (:bad_cid, :branch_id, :period_id, :driver_id,
-                         'REGULAR', 1, 'Test')
+                         DATE '2090-01-01', 'REGULAR', 1, 'Test')
                 """),
                 {
                     "bad_cid": 99999,
@@ -345,10 +345,10 @@ class TestDraftLineDriverIntegrity:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         linetype, quantity, sourcetype)
+                         workdate, linetype, quantity, sourcetype)
                     VALUES
                         (:cid, :hq_branch, :period_id, :driver_id,
-                         'REGULAR', 1, 'Test')
+                         DATE '2090-01-01', 'REGULAR', 1, 'Test')
                 """),
                 {
                     "cid": company_id,
@@ -374,10 +374,10 @@ class TestDraftLineDriverIntegrity:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     linetype, quantity, sourcetype)
+                     workdate, linetype, quantity, sourcetype)
                 VALUES
                     (:cid, :bid, :period_id, :driver_id,
-                     'REGULAR', 1, 'IntegrityTest')
+                     DATE '2090-01-01', 'REGULAR', 1, 'IntegrityTest')
                 RETURNING draftlineid
             """),
             {

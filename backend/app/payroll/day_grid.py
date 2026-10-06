@@ -1007,11 +1007,11 @@ async def save_day_grid(
                     text("""
                         INSERT INTO payroll.payrolldraftlines
                             (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
+                             workdate, linetype, quantity,
                              sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                         VALUES
                             (:cid, :bid, :pid, :did,
-                             :dt, 'DailyStatus', 'Daily', 0,
+                             :dt, 'DailyStatus', 0,
                              'Manual', 'Active', FALSE, :n, :uid)
                         RETURNING draftlineid
                     """),
@@ -1104,11 +1104,11 @@ async def save_day_grid(
                     text("""
                         INSERT INTO payroll.payrolldraftlines
                             (companyid, branchid, payrollperiodid, driverid,
-                             workdate, linetype, linescope, quantity,
+                             workdate, linetype, quantity,
                              sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                         VALUES
                             (:cid, :bid, :pid, :did,
-                             :dt, 'DailyNote', 'Daily', 0,
+                             :dt, 'DailyNote', 0,
                              'Manual', 'Active', FALSE, :n, :uid)
                         RETURNING draftlineid
                     """),

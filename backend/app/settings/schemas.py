@@ -532,8 +532,7 @@ class BranchPayItemState(BaseModel):
     appears_in_reports: bool
     requires_rate: bool
     is_system_standard: bool
-    item_scope: str       # Daily | Period | Summary
-    rate_behavior: str    # PerUnit | Fixed | Calculated | None
+    rate_behavior: str    # PerUnit | Fixed | Calculated | None | tiered/block behaviors
     item_status: str      # Active | Retired
 
     # --- Derived effective state ---
@@ -677,16 +676,9 @@ class BulkPayItemConfigResult(BaseModel):
 # Custom Pay Items (M12)
 # ---------------------------------------------------------------------------
 
-# Valid ItemScope and RateBehavior combos.
-# M13c adds OrdinalTier, RangeBracket, RangeProgressive, Block for Daily items.
-_M12_ITEM_SCOPES     = {"Daily", "Period"}
-# All valid rate behaviors across M12 + M13c.
-_VALID_RATE_BEHAVIORS = {"PerUnit", "EnteredAmount", "Fixed", "Calculated", "None",
-                         "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-# Daily items may use any rate behavior except EnteredAmount.
+# Custom pay items are Daily operational items. M13c adds OrdinalTier,
+# RangeBracket, RangeProgressive, Block alongside PerUnit.
 _DAILY_RATE_BEHAVIORS = {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-# Legacy name kept for internal backward-compat reference.
-_M12_RATE_BEHAVIORS  = _VALID_RATE_BEHAVIORS
 _M12_CUSTOM_STATUSES = {"Active", "Inactive", "Retired"}
 _REQUEST_STATUSES    = {"PendingApproval", "Approved", "Rejected"}
 _DECISION_VALUES     = {"Approved", "Rejected"}
@@ -696,18 +688,15 @@ class CustomPayItem(BaseModel):
     """
     A company-level custom pay item — returned by admin catalog endpoints.
 
-    item_scope     : 'Daily'  (appears in daily entry, requires WorkDate)
-                   | 'Period' (applies to whole period, no WorkDate)
     rate_behavior  : 'PerUnit'          (quantity × single rate)
-                   | 'EnteredAmount'    (user enters dollar directly — Period Money only)
                    | 'OrdinalTier'      (different rate by item number: 1st/2nd/3rd+)
                    | 'Block'            (pay by blocks, each block has a rate)
                    | 'RangeBracket'     (total falls into one bracket, that rate applies)
                    | 'RangeProgressive' (progressive tiers, each tier has a rate)
     status         : 'Active' | 'Inactive' | 'Retired'
                      Retired items are hidden from normal lists; history is preserved.
-    value_type     : wizard-captured value type — 'Time' | 'Number' | 'Money' | None
-                     Stored as datatype ('Time', 'Decimal', 'Currency') in the DB.
+    value_type     : wizard-captured value type — 'Time' | 'Number' | None
+                     Stored as datatype ('Time', 'Decimal') in the DB.
     rate_names     : ordered list of pay rate names configured at creation time.
                      Stored in payitemsettings (settingkey = rate_name_1, rate_name_2 …).
                      These will become column headers in Pay Rates configuration.
@@ -720,9 +709,8 @@ class CustomPayItem(BaseModel):
     display_label:        str | None = None
     pay_item_name:        str
     category:             str
-    data_type:            str        # 'Time' | 'Decimal' | 'Integer' | 'Currency' | …
+    data_type:            str        # 'Time' | 'Decimal' | 'Integer' | …
     unit:                 str | None = None
-    item_scope:           str
     rate_behavior:        str
     status:               str
     sort_order:           int
@@ -739,41 +727,26 @@ class CustomPayItem(BaseModel):
     rate_names:           list[str] = []
 
 
-_VALID_VALUE_TYPES = {"Time", "Number", "Money"}
-
-# value_type → (datatype stored in DB, default unit)
-_VALUE_TYPE_DATATYPE_MAP: dict[str, tuple[str, str | None]] = {
-    "Time":   ("Time",     "Hour"),
-    "Number": ("Decimal",  None),
-    "Money":  ("Currency", None),
-}
+_VALID_VALUE_TYPES = {"Time", "Number"}
 
 
 class CustomPayItemCreate(BaseModel):
     """
     Payload for admin-direct custom item creation (wizard or API).
 
-    Wizard path (new):
-      value_type controls the user-visible question "what type of value?":
-        'Time'   → datatype='Time',    unit='Hour',  requires rate setup
-        'Number' → datatype='Decimal', unit=null,    requires rate setup
-        'Money'  → datatype='Currency', unit=null,   rate_behavior forced to 'EnteredAmount'
-                   (Period items only — direct dollar amount entry)
+    Custom items are Daily operational items; there is no scope to choose.
 
-      When value_type is provided the scope/behavior validator is relaxed:
-        - Daily + Time/Number  → any _DAILY_RATE_BEHAVIORS allowed
-        - Period + Money       → rate_behavior forced to 'EnteredAmount'
-        - Period + Time/Number → any _DAILY_RATE_BEHAVIORS allowed
+    value_type controls the user-visible question "what type of value?":
+      'Time'   → datatype='Time',    unit='Hour',  requires rate setup
+      'Number' → datatype='Decimal', unit=null,    requires rate setup
 
-    Legacy API path (backward compat, value_type=None):
-        - Daily  → rate_behavior must be in _DAILY_RATE_BEHAVIORS; unit required
-        - Period → rate_behavior must be 'EnteredAmount'
+    rate_behavior must be one of _DAILY_RATE_BEHAVIORS; unit is required for
+    rate-based items unless value_type is 'Time' (unit defaults to 'Hour') or
+    'Number' (plain quantity, unit optional).
 
     rate_names: pay rate column names captured in the wizard.
       Stored in payroll.payitemsettings (key = rate_name_1, rate_name_2 …).
       These will be the column headers in the Pay Rates configuration page.
-      Phase 2 gap: rate names are persisted but not yet linked to payroll.ratetypes
-      (which lacks companyid) — rate-type linkage requires a separate backend step.
 
     pay_item_code: Optional — backend auto-generates CPI_XXXXXXXX when omitted.
     category:      Optional — defaults to 'Custom'.  Not user-facing.
@@ -784,12 +757,11 @@ class CustomPayItemCreate(BaseModel):
     pay_item_name:  str
     category:       str = "Custom"
     unit:           str | None = None
-    item_scope:     str
     rate_behavior:  str
     sort_order:     int | None = None
     notes:          str | None = None
     # Wizard fields
-    value_type:     str | None = None          # 'Time' | 'Number' | 'Money'
+    value_type:     str | None = None          # 'Time' | 'Number'
     rate_names:     list[str] = []
 
     @field_validator("pay_item_code")
@@ -825,19 +797,12 @@ class CustomPayItemCreate(BaseModel):
             raise ValueError(f"value_type must be one of {sorted(_VALID_VALUE_TYPES)}")
         return v
 
-    @field_validator("item_scope")
-    @classmethod
-    def scope_valid(cls, v: str) -> str:
-        if v not in _M12_ITEM_SCOPES:
-            raise ValueError(f"item_scope must be one of {sorted(_M12_ITEM_SCOPES)}")
-        return v
-
     @field_validator("rate_behavior")
     @classmethod
     def behavior_valid(cls, v: str) -> str:
-        if v not in _VALID_RATE_BEHAVIORS:
+        if v not in _DAILY_RATE_BEHAVIORS:
             raise ValueError(
-                f"rate_behavior must be one of {sorted(_VALID_RATE_BEHAVIORS)}"
+                f"rate_behavior must be one of {sorted(_DAILY_RATE_BEHAVIORS)}"
             )
         return v
 
@@ -847,41 +812,14 @@ class CustomPayItemCreate(BaseModel):
         return [n.strip() for n in v if n.strip()]
 
     @model_validator(mode="after")
-    def validate_scope_behavior_combo(self) -> "CustomPayItemCreate":
-        vt = self.value_type
-
-        # Daily items never accept direct money entry
-        if self.item_scope == "Daily":
-            if vt == "Money":
-                raise ValueError(
-                    "Daily items cannot be money-type. "
-                    "Choose Time/Hours or Regular Number."
-                )
-            if self.rate_behavior not in _DAILY_RATE_BEHAVIORS:
-                raise ValueError(
-                    f"Daily custom items must use one of {sorted(_DAILY_RATE_BEHAVIORS)}"
-                )
-
-        elif self.item_scope == "Period":
-            raise ValueError(
-                "Custom Pay Period items are not supported. "
-                "Create a Daily custom item instead."
-            )
-
-        # Unit validation for rate-based behaviors
-        if self.rate_behavior in _DAILY_RATE_BEHAVIORS:
-            if vt == "Time":
-                pass   # service will set unit = 'Hour' automatically
-            elif not (self.unit and self.unit.strip()):
-                if vt is None:
-                    # Legacy API: unit was always required for rate-based items
-                    raise ValueError("unit is required for rate-based items")
-                # vt == 'Number': unit is optional (plain quantity, no unit label)
-
-        # EnteredAmount items have no rate unit
-        if self.rate_behavior == "EnteredAmount" and self.unit:
-            self.unit = None
-
+    def validate_unit(self) -> "CustomPayItemCreate":
+        if self.value_type == "Time":
+            pass   # service will set unit = 'Hour' automatically
+        elif not (self.unit and self.unit.strip()):
+            if self.value_type is None:
+                # Legacy API: unit was always required for rate-based items
+                raise ValueError("unit is required for rate-based items")
+            # value_type == 'Number': unit is optional (plain quantity, no unit label)
         return self
 
 
@@ -890,7 +828,7 @@ class CustomPayItemUpdate(BaseModel):
     Partial update for a custom pay item (admin only).
 
     Mutable fields: display_label, pay_item_name, category, unit, sort_order, notes.
-    Immutable fields (PayItemCode, ItemScope, RateBehavior) cannot be changed
+    Immutable fields (PayItemCode, RateBehavior) cannot be changed
     after creation because they define the meaning of historical draft/final lines.
     """
     display_label: str | None = None
@@ -973,7 +911,6 @@ class CustomPayItemRequest(BaseModel):
     pay_item_code:          str
     display_label:          str | None = None
     pay_item_name:          str
-    item_scope:             str
     rate_behavior:          str
     category:               str
     unit:                   str | None = None
@@ -990,7 +927,7 @@ class CustomPayItemRequest(BaseModel):
 class CustomPayItemRequestCreate(BaseModel):
     """
     Payload for a branch user submitting a new custom pay item request.
-    Same M12 validation rules as CustomPayItemCreate apply.
+    Requests describe Daily operational items only.
     """
     branch_id:     int
     pay_item_code: str
@@ -998,7 +935,6 @@ class CustomPayItemRequestCreate(BaseModel):
     pay_item_name: str
     category:      str
     unit:          str | None = None
-    item_scope:    str
     rate_behavior: str
     sort_order:    int = 0
     notes:         str | None = None
@@ -1027,37 +963,19 @@ class CustomPayItemRequestCreate(BaseModel):
             raise ValueError("category must not be blank")
         return v
 
-    @field_validator("item_scope")
-    @classmethod
-    def scope_valid(cls, v: str) -> str:
-        if v not in _M12_ITEM_SCOPES:
-            raise ValueError(f"item_scope must be one of {sorted(_M12_ITEM_SCOPES)}")
-        return v
-
     @field_validator("rate_behavior")
     @classmethod
     def behavior_valid(cls, v: str) -> str:
-        if v not in _VALID_RATE_BEHAVIORS:
+        if v not in _DAILY_RATE_BEHAVIORS:
             raise ValueError(
-                f"rate_behavior must be one of {sorted(_VALID_RATE_BEHAVIORS)}"
+                f"rate_behavior must be one of {sorted(_DAILY_RATE_BEHAVIORS)}"
             )
         return v
 
     @model_validator(mode="after")
-    def validate_scope_behavior_combo(self) -> "CustomPayItemRequestCreate":
-        if self.item_scope == "Daily" and self.rate_behavior not in _DAILY_RATE_BEHAVIORS:
-            raise ValueError(
-                f"Daily custom items must use one of {sorted(_DAILY_RATE_BEHAVIORS)}"
-            )
-        if self.item_scope == "Period":
-            raise ValueError(
-                "Custom Pay Period items are not supported. "
-                "Create a Daily custom item instead."
-            )
-        if self.rate_behavior in _DAILY_RATE_BEHAVIORS and not (self.unit and self.unit.strip()):
+    def validate_unit(self) -> "CustomPayItemRequestCreate":
+        if not (self.unit and self.unit.strip()):
             raise ValueError("unit is required for rate-based items")
-        if self.rate_behavior == "EnteredAmount" and self.unit:
-            self.unit = None
         return self
 
 

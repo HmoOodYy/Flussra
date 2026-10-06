@@ -67,7 +67,7 @@ _REQUIRED_TRIGGERS = {
 # Phase 1 / Migration 0033 — Duplicate daily draft line protection
 _PT_INDEXES = [
     # (schema, index_name, phase_label)
-    ("payroll", "uix_payrolldraftlines_daily_active_business_key", "Phase 1 (0033)"),
+    ("payroll", "uix_payrolldraftlines_daily_active_business_key", "Phase 1 (0033, rebuilt 0078)"),
     # Phase 5 / Migration 0037 — DriverRate void guard lookup index
     ("payroll", "ix_payrollfinallines_driverrateid", "Phase 5 (0037)"),
     # Phase 4C / Migration 0036 — RateTypes.CompanyID filter index

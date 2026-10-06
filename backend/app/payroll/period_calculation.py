@@ -115,7 +115,6 @@ _RATE_DEPENDENT_BEHAVIORS = frozenset(
 async def _refresh_draft_calculations(
     period_id: int,
     company_id: int,
-    period_start_date: date,
     db: AsyncConnection,
     currency: CompanyCurrency,
 ) -> int:
@@ -131,9 +130,8 @@ async def _refresh_draft_calculations(
         blocker guards) so finalization uses the most current rates.
 
     Only touches PerUnit / OrdinalTier / RangeBracket / RangeProgressive /
-    Block lines.  EnteredAmount (BONUS, etc.), Fixed, and None lines are
-    left unchanged — their calculatedamount is either entered directly by
-    the user or not applicable.
+    Block lines.  Fixed and None lines are left unchanged — their
+    calculatedamount is not rate-derived.
 
     Returns the count of lines whose stored values were updated.
     """
@@ -201,11 +199,9 @@ async def _refresh_draft_calculations(
         if lt_info is None:
             continue  # unknown/retired item — leave as-is
         if lt_info.rate_behavior not in _RATE_DEPENDENT_BEHAVIORS:
-            continue  # EnteredAmount / Fixed / None — not our concern
+            continue  # Fixed / None — not rate-dependent
 
-        as_of: date = (
-            row["workdate"] if row["workdate"] is not None else period_start_date
-        )
+        as_of: date = row["workdate"]
         qty = Decimal(str(row["quantity"])) if row["quantity"] is not None else Decimal("0")
         rate_ovr = (
             Decimal(str(row["rateamount"])) if row["rateamount"] is not None else None
@@ -282,8 +278,6 @@ async def _validate_period_can_finalize(
     period_id: int,
     company_id: int,
     branch_id: int,
-    period_start: date,
-    period_end: date,
     db: AsyncConnection,
 ) -> list[str]:
     """
@@ -294,8 +288,8 @@ async def _validate_period_can_finalize(
     Checks (in order):
       1. Duplicate active Daily draft lines for the same (driver, date, type).
       2. Driver eligibility for Daily lines (per-date window).
-      3. Driver eligibility for Period Pay lines (period overlap window).
-      4. Contaminated/foreign RateType used by any rate-driven draft line.
+      3. Contaminated/foreign RateType used by any rate-driven draft line.
+      4. Rate-dependent draft lines with no PayItem rate-type mapping.
 
     The messages are intentionally kept identical to the strings previously
     raised as individual HTTPException 422 details in finalize_period so that
@@ -311,7 +305,6 @@ async def _validate_period_can_finalize(
             FROM   payroll.payrolldraftlines
             WHERE  payrollperiodid = :period_id
               AND  companyid       = :company_id
-              AND  linescope       = 'Daily'
               AND  status         != 'Void'
             GROUP BY driverid, workdate, linetype
             HAVING COUNT(*) > 1
@@ -343,7 +336,6 @@ async def _validate_period_can_finalize(
                 WHERE  dl.payrollperiodid = :period_id
                   AND  dl.companyid       = :company_id
                   AND  dl.status         != 'Void'
-                  AND  dl.linescope       = 'Daily'
                   AND  NOT EXISTS (
                            SELECT 1
                            FROM   payroll.payrollperioddrivereligibility ppde
@@ -366,7 +358,6 @@ async def _validate_period_can_finalize(
                 WHERE  dl.payrollperiodid = :period_id
                   AND  dl.companyid       = :company_id
                   AND  dl.status         != 'Void'
-                  AND  dl.linescope       = 'Daily'
                   AND  NOT EXISTS (
                            SELECT 1
                            FROM   core.drivers   d
@@ -402,72 +393,7 @@ async def _validate_period_can_finalize(
             f"({examples}). Void these lines before finalizing."
         )
 
-    # ── 3. Driver eligibility — Period Pay lines ──────────────────────────────
-    if _has_snapshot:
-        elig_period_result = await db.execute(
-            text("""
-                SELECT dl.draftlineid, dl.driverid, dl.linetype
-                FROM   payroll.payrolldraftlines dl
-                WHERE  dl.payrollperiodid = :period_id
-                  AND  dl.companyid       = :company_id
-                  AND  dl.status         != 'Void'
-                  AND  dl.linescope       = 'Period'
-                  AND  NOT EXISTS (
-                           SELECT 1
-                           FROM   payroll.payrollperioddrivereligibility ppde
-                           WHERE  ppde.payrollperiodid = dl.payrollperiodid
-                             AND  ppde.driverid        = dl.driverid
-                             AND  ppde.iseligibleforperiod = TRUE
-                       )
-                LIMIT 5
-            """),
-            {"period_id": period_id, "company_id": company_id},
-        )
-    else:
-        elig_period_result = await db.execute(
-            text("""
-                SELECT dl.draftlineid, dl.driverid, dl.linetype
-                FROM   payroll.payrolldraftlines dl
-                WHERE  dl.payrollperiodid = :period_id
-                  AND  dl.companyid       = :company_id
-                  AND  dl.status         != 'Void'
-                  AND  dl.linescope       = 'Period'
-                  AND  NOT EXISTS (
-                           SELECT 1
-                           FROM   core.drivers   d
-                           JOIN   core.employees e ON e.employeeid = d.employeeid
-                           WHERE  d.driverid         = dl.driverid
-                             AND  d.companyid        = :company_id
-                             AND  d.branchid         = :branch_id
-                             AND  e.employmentstatus = 'Active'
-                             AND  d.driverstatus     = 'Active'
-                             AND  (e.hiredate IS NULL OR e.hiredate <= :period_end)
-                             AND  (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
-                             AND  (d.effectivefrom IS NULL OR d.effectivefrom <= :period_end)
-                             AND  (d.effectiveto   IS NULL OR d.effectiveto   >= :period_start)
-                       )
-                LIMIT 5
-            """),
-            {
-                "period_id":    period_id,
-                "company_id":   company_id,
-                "branch_id":    branch_id,
-                "period_start": period_start,
-                "period_end":   period_end,
-            },
-        )
-    elig_period_rows = elig_period_result.mappings().all()
-    if elig_period_rows:
-        examples = "; ".join(
-            f"driver {r['driverid']} {r['linetype']}"
-            for r in elig_period_rows
-        )
-        blockers.append(
-            f"Cannot finalize: {len(elig_period_rows)} Period Pay draft line(s) reference "
-            f"ineligible drivers ({examples}). Void these lines before finalizing."
-        )
-
-    # ── 4. Contaminated / foreign RateType ────────────────────────────────────
+    # ── 3. Contaminated / foreign RateType ────────────────────────────────────
     # (unchanged from Phase 7)
     contaminated_result = await db.execute(
         text("""
@@ -497,7 +423,7 @@ async def _validate_period_can_finalize(
             "or orphaned). Investigate and void or correct the affected draft lines."
         )
 
-    # ── 5. Unresolvable rate type mapping (Phase 8 — fail-closed) ────────────
+    # ── 4. Unresolvable rate type mapping (Phase 8 — fail-closed) ────────────
     # Finds non-void, rate-dependent draft lines whose PayItem has no active
     # PayItemRateTypeMap entry.  These lines cannot be correctly calculated
     # because their rate_code is unknown — the rate behavior is unresolvable.
@@ -556,7 +482,6 @@ async def _validate_period_can_finalize(
 async def _compute_draft_line_preview_amounts(
     period_id: int,
     company_id: int,
-    period_start_date: date,
     db: AsyncConnection,
 ) -> dict[int, tuple[Decimal | None, bool]]:
     """
@@ -643,7 +568,7 @@ async def _compute_draft_line_preview_amounts(
         if old_review and (old_calc is not None or old_rate_ovr is not None):
             continue  # manager-flagged with a resolvable path — honour stored values
 
-        as_of: date = row["workdate"] if row["workdate"] is not None else period_start_date
+        as_of: date = row["workdate"]
         qty = Decimal(str(row["quantity"])) if row["quantity"] is not None else Decimal("0")
 
         _cr_prev = await _compute_calculated_amount(
@@ -916,7 +841,7 @@ async def _build_live_calculation_packet(
     Reuses, unchanged:
       - `_compute_draft_line_preview_amounts` -> `_compute_calculated_amount`
         -> CP-4A's `calculate_per_unit` for daily PerUnit lines (and the
-        existing EnteredAmount/Fixed/None/manual dispatch for the rest);
+        existing Fixed/None dispatch for the rest);
       - the canonical PayrollBonusEvents Active-only read;
       - the CP-3C minimum/maximum-then-bonus ordering.
 
@@ -929,8 +854,8 @@ async def _build_live_calculation_packet(
         as live truth, so a stale projection can never be double-counted.
 
     Driver inclusion is financial-source-driven only (a driver with a
-    current daily line, a canonical selected Status, a non-BONUS period-pay
-    line, or an Active bonus event) -- not a full eligible-driver roster.
+    current daily line, a canonical selected Status, or an Active bonus
+    event) -- not a full eligible-driver roster.
     """
     period_id = period.payroll_period_id
 
@@ -950,8 +875,6 @@ async def _build_live_calculation_packet(
         period_id=period_id,
         company_id=company_id,
         branch_id=period.branch_id,
-        period_start=period.start_date,
-        period_end=period.end_date,
         db=db,
     ))
 
@@ -966,12 +889,12 @@ async def _build_live_calculation_packet(
         db=db,
     ))
 
-    # ── Daily/period-pay lines: virtual (unpersisted) rate refresh, exactly
-    # like get_finalization_preview — but excluding the persisted
-    # STATUS_PAYMENT/STATUS_PAY compatibility projection and legacy BONUS
-    # lines, since Status and Bonus are supplied live/canonically below.
+    # ── Daily lines: virtual (unpersisted) rate refresh, exactly like
+    # get_finalization_preview — but excluding the persisted
+    # STATUS_PAYMENT/STATUS_PAY compatibility projection, since Status is
+    # supplied live/canonically below.
     refreshed_calcs = await _compute_draft_line_preview_amounts(
-        period_id, company_id, period.start_date, db
+        period_id, company_id, db
     )
 
     lines_result = await db.execute(
@@ -984,7 +907,6 @@ async def _build_live_calculation_packet(
                 e.fullname          AS drivername,
                 dl.workdate,
                 dl.linetype,
-                dl.linescope,
                 dl.quantity,
                 dl.rateamount,
                 dl.calculatedamount,
@@ -1005,10 +927,9 @@ async def _build_live_calculation_packet(
             WHERE  dl.payrollperiodid = :period_id
               AND  dl.companyid       = :company_id
               AND  dl.status         != 'Void'
-              AND  dl.linetype       != 'BONUS'
               AND  dl.linetype       NOT IN ('DailyStatus', 'DailyNote')
               AND  NOT {_STATUS_PAYMENT_PROJECTION_SQL}
-            ORDER BY dl.driverid, dl.workdate NULLS LAST, dl.draftlineid
+            ORDER BY dl.driverid, dl.workdate, dl.draftlineid
         """),
         {"period_id": period_id, "company_id": company_id},
     )
@@ -1017,7 +938,6 @@ async def _build_live_calculation_packet(
     driver_names: dict[int, str | None] = {}
     driver_codes: dict[int, str | None] = {}
     driver_daily: dict[int, Decimal] = {}
-    driver_period: dict[int, Decimal] = {}
     driver_status: dict[int, Decimal] = {}
     driver_bonus: dict[int, Decimal] = {}
     driver_line_nmr: dict[int, bool] = {}
@@ -1052,16 +972,13 @@ async def _build_live_calculation_packet(
 
         amt = effective_calc if effective_calc is not None else qty * (rate if rate is not None else Decimal("0"))
 
-        if r["linescope"] == "Daily":
-            driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amt
-        else:
-            driver_period[drv] = driver_period.get(drv, Decimal("0")) + amt
+        driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amt
 
         driver_lines[drv].append(_CalculationPacketLine(
             source_type=r["sourcetype"] or "DraftLine",
             source_id=r["sourceid"],
             line_type=r["linetype"],
-            line_scope=r["linescope"],
+            line_scope="Daily",
             work_date=r["workdate"],
             driver_id=drv,
             quantity=qty,
@@ -1156,7 +1073,7 @@ async def _build_live_calculation_packet(
             snapshot_source_id=str(sl.entry_state_id),
         ))
 
-    # ── Canonical Active bonus (never Voided; never legacy BONUS DraftLines).
+    # ── Canonical Active bonus (never Voided).
     for b in await _load_active_bonus_events(period_id, company_id, db):
         drv = int(b["driverid"])
         driver_names.setdefault(drv, b["drivername"])
@@ -1189,7 +1106,7 @@ async def _build_live_calculation_packet(
 
     # ── Financial-source-driven driver union (CP-4B: not a full roster).
     all_driver_ids = (
-        set(driver_daily) | set(driver_period) | set(driver_status) | set(driver_bonus)
+        set(driver_daily) | set(driver_status) | set(driver_bonus)
     )
 
     if not all_driver_ids:
@@ -1223,7 +1140,6 @@ async def _build_live_calculation_packet(
         normal_base = (
             driver_daily.get(drv_id, Decimal("0"))
             + driver_status.get(drv_id, Decimal("0"))
-            + driver_period.get(drv_id, Decimal("0"))
         )
 
         min_row = (await db.execute(
@@ -1288,7 +1204,9 @@ async def _build_live_calculation_packet(
     for drv_id in sorted(all_driver_ids):
         daily = driver_daily.get(drv_id, Decimal("0"))
         status_pay = driver_status.get(drv_id, Decimal("0"))
-        period_pay = driver_period.get(drv_id, Decimal("0"))
+        # No source feeds the legacy period_pay bucket any more; the field
+        # stays in the frozen v1 packet contract until G0.4C replaces it.
+        period_pay = Decimal("0")
         normal_base = daily + status_pay + period_pay
         min_adj = driver_min_adj.get(drv_id, Decimal("0"))
         max_adj = driver_max_adj.get(drv_id, Decimal("0"))

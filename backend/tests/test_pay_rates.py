@@ -4853,75 +4853,30 @@ class TestCustomPayItemRateStructure:
     # Test 8 — Period/DirectMoney item NOT in daily rate matrix
     # ------------------------------------------------------------------
     @pytest.mark.asyncio
-    async def test_period_direct_money_custom_item_not_in_daily_matrix(
+    async def test_system_output_items_not_in_daily_matrix(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         created_driver_id: int,
     ):
         """
-        Custom Period/EnteredAmount items cannot be created (blocked with 422).
-        Verify the creation guard; such items therefore can never appear in the
-        daily rate matrix.  System Period items (BONUS, ADJUSTMENT) are excluded
-        from the rate matrix by their Fixed/EnteredAmount behavior.
+        System-generated Period outputs (SYS_MIN_TOPUP / SYS_MAX_CAP) carry no
+        driver rates and must not appear in the daily rate matrix.
         """
         h = auth(auth_token)
-
-        create_resp = await session_client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Period Bonus Item",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Custom",
-            },
-            headers=h,
-        )
-        assert create_resp.status_code == 422, (
-            f"Expected 422 blocking custom Period item creation, got {create_resp.status_code}: {create_resp.text}"
-        )
-        assert "period" in create_resp.text.lower()
-
-    # ------------------------------------------------------------------
-    # Test 8b — system Period item (BONUS) absent from daily rate matrix
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_system_period_item_not_in_daily_matrix(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        hq_branch_id: int,
-        created_driver_id: int,
-    ):
-        """
-        System Period-scope items (BONUS, requires_rate=False) must not appear
-        in the daily rate matrix regardless of branch activation state.
-
-        This replaces the deleted custom-item matrix-exclusion test; BONUS exercises
-        the same matrix-filtering path (INNER JOIN on PayItemRateTypeMap excludes
-        items with no rate type mapping and requires_rate=False).
-        """
-        h = auth(auth_token)
-
-        # Confirm BONUS is marked requires_rate=False in the settings catalog.
-        items_resp = await session_client.get(
-            f"/settings/branches/{hq_branch_id}/pay-items", headers=h
-        )
-        assert items_resp.status_code == 200
-        bonus = next(i for i in items_resp.json() if i.get("pay_item_code") == "BONUS")
-        assert bonus["requires_rate"] is False, "BONUS must have requires_rate=False"
-
-        # BONUS must not appear in the driver rate matrix.
         matrix_resp = await session_client.get(
             f"/payroll/drivers/{created_driver_id}/rate-matrix",
             params={"as_of": _today_iso()},
             headers=h,
         )
         assert matrix_resp.status_code == 200
-        bonus_groups = [g for g in matrix_resp.json()["groups"] if g.get("pay_item_code") == "BONUS"]
-        assert len(bonus_groups) == 0, (
-            "System Period item BONUS (requires_rate=False) must NOT appear in the "
-            f"daily rate matrix. Found groups: {bonus_groups}"
+        system_groups = [
+            g for g in matrix_resp.json()["groups"]
+            if g.get("pay_item_name") in ("Minimum Pay Top-Up", "Maximum Pay Cap")
+        ]
+        assert len(system_groups) == 0, (
+            "System-generated outputs must NOT appear in the daily rate matrix. "
+            f"Found groups: {system_groups}"
         )
 
     # ------------------------------------------------------------------

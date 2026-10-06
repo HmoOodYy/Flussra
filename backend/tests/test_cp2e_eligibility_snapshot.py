@@ -1135,10 +1135,13 @@ class TestGetPeriodEligibleDriversSnapshot:
             )
             await direct_db.commit()
 
-    async def test_cp2e_bonus_eligible_list_excludes_included_by_existing_data_as_prospective_choice(
+    async def test_cp2e_bonus_eligibility_rejects_included_by_existing_data_driver(
         self, direct_db: AsyncConnection, branch_id: int, driver_id: int
     ):
-        """IncludedByExistingData driver excluded from prospective bonus list (no period-pay line)."""
+        """IncludedByExistingData never gains authority to create new Bonus money."""
+        from fastapi import HTTPException
+
+        from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
         start, end = _week_2099()
         pid = await _insert_open_period(direct_db, branch_id, start, end)
         await _insert_eligibility_row(
@@ -1146,60 +1149,18 @@ class TestGetPeriodEligibleDriversSnapshot:
             reason_code="IncludedByExistingData",
         )
         try:
-            # No period-pay lines → not in prospective bonus list
-            from app.payroll.service import _driver_has_existing_period_pay_source
-            has_period_pay = await _driver_has_existing_period_pay_source(
-                pid, driver_id, direct_db
-            )
-            assert has_period_pay is False
+            with pytest.raises(HTTPException) as exc:
+                await _assert_driver_eligible_for_period_via_snapshot(
+                    _COMPANY_ID, branch_id, pid, driver_id, direct_db
+                )
+            assert exc.value.status_code == 422
+            assert "Bonus" in exc.value.detail
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": pid},
             )
             await direct_db.commit()
-
-    async def test_cp2e_existing_period_pay_line_remains_manageable(
-        self, direct_db: AsyncConnection, branch_id: int, driver_id: int
-    ):
-        """IBED driver with existing period-pay line is included for management."""
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end)
-        await _insert_eligibility_row(
-            direct_db, _COMPANY_ID, branch_id, pid, driver_id,
-            reason_code="IncludedByExistingData",
-        )
-        # Insert a fake period-pay draft line
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     linetype, linescope, quantity, calculatedamount,
-                     sourcetype, sourceid, status, addedbyuserid)
-                VALUES (:cid, :bid, :pid, :did,
-                        'BONUS', 'Period', 1, 100,
-                        'Manual', 'test-bonus', 'Active', 1)
-            """),
-            {"cid": _COMPANY_ID, "bid": branch_id, "pid": pid, "did": driver_id},
-        )
-        await direct_db.commit()
-        try:
-            from app.payroll.service import _driver_has_existing_period_pay_source
-            has_period_pay = await _driver_has_existing_period_pay_source(
-                pid, driver_id, direct_db
-            )
-            assert has_period_pay is True
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
 
 # ===========================================================================
 # Current candidate creation: Open snapshots are frozen; Prepared snapshots are provisional.
@@ -1450,10 +1411,10 @@ class TestStatusPaymentRefreshEligibilityAware:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, calculatedamount,
+                     workdate, linetype, quantity, calculatedamount,
                      sourcetype, sourceid, status, addedbyuserid)
                 VALUES (:cid, :bid, :pid, :did,
-                        :dt, 'HOURS', 'Daily', 8, 0,
+                        :dt, 'HOURS', 8, 0,
                         'Manual', 'test-hours', 'Active', 1)
             """),
             {"cid": _COMPANY_ID, "bid": branch_id, "pid": pid, "did": driver_id, "dt": start},
@@ -1789,10 +1750,10 @@ class TestGeneratedRowExistingSourceRescue:
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, calculatedamount,
+                     workdate, linetype, quantity, calculatedamount,
                      sourcetype, sourceid, status, addedbyuserid)
                 VALUES (:cid, :bid, :pid, :did,
-                        :dt, 'HOURS', 'Daily', 8, 0,
+                        :dt, 'HOURS', 8, 0,
                         'Manual', 'test-rescue', 'Active', 1)
             """),
             {
@@ -2078,7 +2039,7 @@ class TestGeneratedRowExistingSourceRescue:
         )
         try:
             blockers = await _validate_period_can_finalize(
-                pid, _COMPANY_ID, branch_id, start, end, direct_db
+                pid, _COMPANY_ID, branch_id, direct_db
             )
             # The existing DraftLine proves existing source → finalization must not block
             elig_blockers = [b for b in blockers if "no longer eligible" in b]

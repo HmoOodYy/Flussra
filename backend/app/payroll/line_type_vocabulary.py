@@ -29,9 +29,8 @@ from typing import NamedTuple
 
 class _LineTypeInfo(NamedTuple):
     """Validation result for a draft line's line_type value."""
-    rate_behavior: str         # 'PerUnit', 'EnteredAmount', 'Fixed', 'None', etc.
+    rate_behavior: str         # 'PerUnit', the tiered behaviors, 'Fixed', 'None'
     rate_code: str | None      # RateTypes.RateCode for PerUnit; None for other behaviors
-    item_scope: str = "Daily"  # 'Daily' | 'Period' — Period items are blocked from daily entry
 
 
 # Maps each legacy line-type string to its PayItemCode in payroll.PayItems
@@ -47,8 +46,6 @@ _SYSTEM_ITEM_DB_CODES: dict[str, str | None] = {
     "Silos":       "SILOS",
     "DailyStatus": None,      # no DB counterpart; informational only
     "DailyNote":   None,      # no DB counterpart; informational only
-    "Bonus":       "BONUS",
-    "Adjustment":  "ADJUSTMENT",
 }
 
 # CP-0: Maps legacy display-name line-type strings to their canonical PayItemCode.
@@ -61,7 +58,7 @@ _LEGACY_TO_CANONICAL: dict[str, str] = {
     for legacy, code in _SYSTEM_ITEM_DB_CODES.items()
     if code is not None   # DailyStatus / DailyNote have no canonical PayItemCode
 }
-# e.g. {"Hours": "HOURS", "Miles": "MILES", ..., "Silos": "SILOS", "Bonus": "BONUS", ...}
+# e.g. {"Hours": "HOURS", "Miles": "MILES", ..., "Silos": "SILOS"}
 
 # Pure-informational items that have no PayItems catalog counterpart.
 # Accepted unconditionally (no scope, branch, or rate checks).

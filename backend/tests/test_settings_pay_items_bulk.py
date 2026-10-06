@@ -96,7 +96,7 @@ class TestBulkAllBranches:
         hq_branch_id: int,
     ):
         """Every result row must contain the required fields (test 11)."""
-        item_id = await _get_pay_item_id(client, auth_token, hq_branch_id, "BONUS")
+        item_id = await _get_pay_item_id(client, auth_token, hq_branch_id, "SILOS")
 
         resp = await client.patch(
             BULK_URL.format(item_id=item_id),
@@ -154,7 +154,7 @@ class TestBulkSelectedBranches:
         paytest_branch_id: int,
     ):
         """SelectedBranches updates exactly the listed branches."""
-        item_id = await _get_pay_item_id(client, auth_token, hq_branch_id, "ADJUSTMENT")
+        item_id = await _get_pay_item_id(client, auth_token, hq_branch_id, "SILOS")
 
         resp = await client.patch(
             BULK_URL.format(item_id=item_id),
@@ -491,7 +491,7 @@ class TestBulkWritePhaseRollback:
         the implicit engine.begin() transaction must roll back the first write too.
         Verifies true atomicity beyond the pre-write validation phase.
         """
-        item_id = await _get_pay_item_id(client, auth_token, hq_branch_id, "ADJUSTMENT")
+        item_id = await _get_pay_item_id(client, auth_token, hq_branch_id, "SILOS")
 
         # Capture PAYTEST config before the attempt
         before_resp = await client.get(

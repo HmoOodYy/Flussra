@@ -5,16 +5,14 @@ the generic P6D immutable audit-evidence system.
 Extracted from app.payroll.service (Stage B4-11D) as a dependency-closed leaf
 module — no behavior change, pure relocation.
 
-_capture_source_evidence is a shared adapter used by both Draft CRUD and
-Period Pay: it resolves the relevant PayItemID from the period/pay-item
+_capture_source_evidence is the SOURCE adapter used by Draft CRUD: it resolves the relevant PayItemID from the period/pay-item
 relationship, then calls app.payroll.audit_evidence.capture_period_audit_evidence
 with domain="SOURCE", source_entity_type="PayrollDraftLines", and
 required_permission_code="payroll.entry", preserving the
 SOURCE_CREATED / SOURCE_UPDATED / SOURCE_VOIDED evidence semantics.
 
-work_date is intentional domain data supplied by the caller, not module
-policy: daily Draft source lines pass their real work date, Period Pay lines
-pass None. This module does not interpret or branch on that difference.
+work_date is intentional domain data supplied by the caller (the source
+line's real work date), not module policy.
 
 app.payroll.audit_evidence is deliberately generic infrastructure — existing
 domains (Bonus, Review, Status Note) each call capture_period_audit_evidence
@@ -43,7 +41,7 @@ async def _capture_source_evidence(
     *, company_id: int, branch_id: int, period_id: int, user_id: int,
     line_id: int, action_code: str, db: AsyncConnection,
     before_state: dict[str, Any] | None, after_state: dict[str, Any] | None,
-    driver_id: int | None, work_date: date | None, line_type: str,
+    driver_id: int | None, work_date: date, line_type: str,
 ) -> None:
     """Capture one non-compatibility DraftLine mutation for P6D."""
     pay_item_id = (await db.execute(text("""

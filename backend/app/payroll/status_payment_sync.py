@@ -304,12 +304,12 @@ async def _sync_status_payment_for_entry_state(
         text("""
             INSERT INTO payroll.payrolldraftlines
                 (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, linescope, quantity,
+                 workdate, linetype, quantity,
                  calculatedamount, sourcetype, sourceid,
                  status, needsmanagerreview, addedbyuserid, sourcesnapshot)
             VALUES
                 (:cid, :bid, :pid, :did,
-                 :dt, :lt, 'Daily', :qty,
+                 :dt, :lt, :qty,
                  :calc, 'System', :sid,
                  'Active', :review, :uid, CAST(:snap AS JSONB))
         """),

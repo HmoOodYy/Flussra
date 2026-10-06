@@ -139,9 +139,10 @@ class TestListPayItems:
         assert resp.status_code == 200
         codes = {i["pay_item_code"] for i in resp.json()}
         for expected in ("HOURS", "MILES", "LOADS", "OVERNIGHT", "WAIT_TIME",
-                         "PALLETS", "SILOS", "BONUS",
-                         "ADJUSTMENT", "GUARANTEED_MINIMUM"):
+                         "PALLETS", "SILOS"):
             assert expected in codes, f"{expected} missing from pay items list"
+        # System-generated Period outputs are not branch-configurable.
+        assert not {"SYS_MIN_TOPUP", "SYS_MAX_CAP"} & codes
         assert "PTO_STATUS" not in codes, "PTO_STATUS must not appear in pay items list (removed in 0055)"
 
     async def test_schema_complete(
@@ -160,7 +161,7 @@ class TestListPayItems:
             "pay_item_id", "pay_item_code", "pay_item_name",
             "category", "data_type", "sort_order",
             "appears_in_payroll_entry", "appears_in_ledger",
-            "is_system_standard", "item_scope", "rate_behavior",
+            "is_system_standard", "rate_behavior",
             "is_active", "is_using_default",
             "current_config", "pending_config",       # fix #8 schema
             "line_type_mappings", "rate_type_mappings",
@@ -281,12 +282,11 @@ class TestUpdatePayItemConfig:
     ):
         """First PATCH creates a new open config row (fix #2 — not UPDATE-in-place).
 
-        Uses GUARANTEED_MINIMUM (Period scope, IsDefaultBranchActive=FALSE) which
-        is never touched by the session autouse fixture, so it reliably starts with
-        no config row (is_using_default=True).
+        Uses SILOS (IsDefaultBranchActive=FALSE) on a branch owned by this test
+        module, so it reliably starts with no config row (is_using_default=True).
         """
-        item = await _item_by_code(client, auth_token, owned_item_branch_id, "GUARANTEED_MINIMUM")
-        assert item["is_using_default"] is True, "GUARANTEED_MINIMUM should start with no config"
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "SILOS")
+        assert item["is_using_default"] is True, "SILOS should start with no config"
         iid = item["pay_item_id"]
 
         resp = await client.patch(
@@ -425,7 +425,7 @@ class TestUpdatePayItemConfig:
         auth_token: str,
         owned_item_branch_id: int,
     ):
-        item = await _item_by_code(client, auth_token, owned_item_branch_id, "BONUS")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "SILOS")
         iid = item["pay_item_id"]
 
         r_set = await client.patch(
@@ -854,7 +854,7 @@ class TestMissingPayItemConfigs:
         auth_token: str,
         owned_item_branch_id: int,
     ):
-        item = await _item_by_code(client, auth_token, owned_item_branch_id, "ADJUSTMENT")
+        item = await _item_by_code(client, auth_token, owned_item_branch_id, "PALLETS")
         await client.patch(
             f"/settings/branches/{owned_item_branch_id}/pay-items/{item['pay_item_id']}",
             json={"is_active": True},
@@ -867,7 +867,7 @@ class TestMissingPayItemConfigs:
                 headers=auth(auth_token),
             )
         ).json()
-        assert "ADJUSTMENT" not in missing
+        assert "PALLETS" not in missing
 
 
 # ===========================================================================

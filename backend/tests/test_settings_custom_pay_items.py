@@ -2,9 +2,9 @@
 M12 integration tests — Custom Pay Items catalog + branch request/approval flow.
 
 LLR-A (Legacy Custom Daily Lockdown):
-  POST /settings/pay-items with item_scope='Daily' → 422 (use CDPI instead)
-  POST /settings/pay-item-requests with item_scope='Daily' → 422 (use CDPI instead)
-  POST /settings/pay-item-requests/{id}/decide Approved for Daily → 422
+  POST /settings/pay-items → 422 (use CDPI instead)
+  POST /settings/pay-item-requests → 422 (use CDPI instead)
+  POST /settings/pay-item-requests/{id}/decide Approved → 422
   Reject/ReturnToDraft decisions for legacy requests still work.
   All read/update/delete compatibility for existing legacy items is preserved.
 
@@ -16,7 +16,7 @@ branch_user  SpecificBranch=HQ, PAYROLL_VIEWER (no write permissions)
 Test classes
 ------------
 TestLegacyDailyLockdown        LLR-A acceptance tests (new)
-TestCustomPayItemCreate        admin direct create (now blocked for Daily; Period still rejected)
+TestCustomPayItemCreate        admin direct create (blocked; CDPI is the only creation path)
 TestCustomPayItemCodeGeneration  code-gen paths now blocked by LLR-A
 TestCustomPayItemUpdate        mutable metadata, immutable fields (items seeded via DB)
 TestCustomPayItemUsage         usage detection for smart delete (items seeded via DB)
@@ -27,7 +27,7 @@ TestPayItemRequestApprove      approval blocked for Daily (items seeded via DB)
 TestPayItemRequestReject       rejection still works for legacy pending requests
 TestCustomPayItemAudit         rollback compatibility
 TestCustomPayItemM11Flow       approved custom item integrates with M11 branch config
-TestCustomPayItemUpdateInvariants  scope/unit immutability on PATCH (items seeded via DB)
+TestCustomPayItemUpdateInvariants  unit immutability on PATCH (items seeded via DB)
 TestUsageVoidStatus            _compute_usage void-row semantics (items seeded via DB)
 TestApprovalEffectiveDate      BranchPayItemConfig effective-date rule (now blocked via HTTP)
 """
@@ -55,7 +55,6 @@ async def _create_item(
     *,
     code: str,
     name: str = "Test Item",
-    item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
     unit: str | None = "Stop",
     category: str = "Count",
@@ -65,7 +64,6 @@ async def _create_item(
     payload: dict = {
         "pay_item_code": code,
         "pay_item_name": name,
-        "item_scope":    item_scope,
         "rate_behavior": rate_behavior,
         "category":      category,
     }
@@ -82,7 +80,6 @@ async def _seed_legacy_item(
     user_id: int = 1,
     code: str,
     name: str = "Legacy Test Item",
-    item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
     unit: str | None = "Stop",
     category: str = "Count",
@@ -100,14 +97,14 @@ async def _seed_legacy_item(
             ) VALUES (
                 :cid, :code, :name, :category, 'Decimal', :unit,
                 'Active', 100, TRUE, TRUE, TRUE, TRUE, FALSE,
-                :scope, :behavior, FALSE, :uid
+                'Daily', :behavior, FALSE, :uid
             )
             RETURNING payitemid
         """),
         {
             "cid": company_id, "code": code, "name": name,
             "category": category, "unit": unit,
-            "scope": item_scope, "behavior": rate_behavior, "uid": user_id,
+            "behavior": rate_behavior, "uid": user_id,
         }
     )
     return result.scalar_one()
@@ -140,7 +137,6 @@ async def _seed_legacy_request(
     branch_id: int,
     code: str,
     name: str = "Legacy Test Request",
-    item_scope: str = "Daily",
     rate_behavior: str = "PerUnit",
     unit: str | None = "Unit",
     category: str = "Count",
@@ -156,14 +152,14 @@ async def _seed_legacy_request(
                 category, unit, sortorder, status
             ) VALUES (
                 :cid, :bid, :uid,
-                :code, :name, :scope, :behavior,
+                :code, :name, 'Daily', :behavior,
                 :category, :unit, 100, :status
             )
             RETURNING requestid
         """),
         {
             "cid": company_id, "bid": branch_id, "uid": user_id,
-            "code": code, "name": name, "scope": item_scope,
+            "code": code, "name": name,
             "behavior": rate_behavior, "category": category,
             "unit": unit, "status": req_status,
         }
@@ -218,13 +214,12 @@ class TestLegacyDailyLockdown:
     async def test_direct_create_daily_blocked(
         self, client: httpx.AsyncClient, auth_token: str
     ):
-        """POST /settings/pay-items with item_scope='Daily' returns 422."""
+        """POST /settings/pay-items returns 422."""
         resp = await client.post(
             "/settings/pay-items",
             json={
                 "pay_item_code": "LLRA_BLOCK_1",
                 "pay_item_name": "Should Be Blocked",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Stop",
                 "category":      "Count",
@@ -244,7 +239,6 @@ class TestLegacyDailyLockdown:
             "/settings/pay-items",
             json={
                 "pay_item_name": "Another Blocked Item",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Load",
             },
@@ -257,14 +251,13 @@ class TestLegacyDailyLockdown:
     async def test_legacy_request_daily_blocked(
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
     ):
-        """POST /settings/pay-item-requests with item_scope='Daily' returns 422."""
+        """POST /settings/pay-item-requests returns 422."""
         resp = await client.post(
             "/settings/pay-item-requests",
             json={
                 "branch_id":     hq_branch_id,
                 "pay_item_code": "LLRA_REQ_BLOCK",
                 "pay_item_name": "Blocked Request",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Trip",
                 "category":      "Count",
@@ -285,7 +278,6 @@ class TestLegacyDailyLockdown:
                 "branch_id":     hq_branch_id,
                 "pay_item_code": "LLRA_REQ_NOROW",
                 "pay_item_name": "Should Not Be Saved",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
                 "category":      "Count",
@@ -380,7 +372,6 @@ class TestLegacyDailyLockdown:
             json={
                 "pay_item_code": "LLRA_NOROW_CHK",
                 "pay_item_name": "Should Not Persist",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
             },
@@ -406,7 +397,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "M12_DAILY_A",
                 "pay_item_name": "Stop Pay",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Stop",
                 "category":      "Count",
@@ -418,80 +408,6 @@ class TestCustomPayItemCreate:
         assert resp.status_code == 422
         assert "CDPI" in resp.json()["detail"] or "cdpi" in resp.json()["detail"].lower()
 
-    async def test_create_period_item_is_rejected(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        """Custom Period items are not supported — schema validator fires before LLR-A guard."""
-        resp = await client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "M12_PERIOD_A",
-                "pay_item_name": "Safety Bonus",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Bonus",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        detail = resp.json()["detail"]
-        assert "Pay Period" in str(detail)
-        assert "Daily" in str(detail)
-
-    async def test_create_period_item_all_value_types_rejected(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        """Wizard value_type paths for Period are all rejected by schema."""
-        for vt, rb in [("Money", "EnteredAmount"), ("Time", "PerUnit"), ("Number", "PerUnit")]:
-            resp = await client.post(
-                "/settings/pay-items",
-                json={
-                    "pay_item_name": f"Period {vt} Item",
-                    "item_scope":    "Period",
-                    "rate_behavior": rb,
-                    "value_type":    vt,
-                },
-                headers=auth(auth_token),
-            )
-            assert resp.status_code == 422, (
-                f"Expected 422 for Period + value_type={vt!r}, got {resp.status_code}: {resp.text}"
-            )
-
-    async def test_daily_enteredamount_rejected(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        """Daily + EnteredAmount is not allowed (schema validator fires before LLR-A guard)."""
-        resp = await client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "M12_BAD_A",
-                "pay_item_name": "Bad Combo",
-                "item_scope":    "Daily",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Count",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
-    async def test_period_perunit_rejected(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        """All custom Period items are rejected, regardless of rate_behavior."""
-        resp = await client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "M12_BAD_B",
-                "pay_item_name": "Bad Combo Period PerUnit",
-                "item_scope":    "Period",
-                "rate_behavior": "PerUnit",
-                "unit":          "Unit",
-                "category":      "Count",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
     async def test_daily_perunit_missing_unit_rejected(
         self, client: httpx.AsyncClient, auth_token: str
     ):
@@ -501,7 +417,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "M12_BAD_C",
                 "pay_item_name": "Missing Unit",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "category":      "Count",
             },
@@ -517,7 +432,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "   ",
                 "pay_item_name": "Something",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
                 "category":      "Count",
@@ -534,7 +448,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "M12_BLKNAME",
                 "pay_item_name": "   ",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
                 "category":      "Count",
@@ -552,7 +465,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "HOURS",
                 "pay_item_name": "Custom Hours",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Hour",
                 "category":      "Time",
@@ -570,7 +482,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "M12_DAILY_A",
                 "pay_item_name": "Duplicate",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Stop",
                 "category":      "Count",
@@ -588,7 +499,6 @@ class TestCustomPayItemCreate:
             json={
                 "pay_item_code": "M12_NO_PERMS",
                 "pay_item_name": "Should fail",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
                 "category":      "Count",
@@ -628,7 +538,6 @@ class TestCustomPayItemCreate:
                 "/settings/pay-items",
                 json={
                     "pay_item_name": f"Blocked {rb} Item",
-                    "item_scope":    "Daily",
                     "rate_behavior": rb,
                     "unit":          "Unit",
                 },
@@ -639,29 +548,10 @@ class TestCustomPayItemCreate:
             )
             assert "CDPI" in resp.json()["detail"] or "cdpi" in resp.json()["detail"].lower()
 
-    async def test_custom_period_item_rejected_with_expected_status_and_message(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        """Requirement 2: Period creation returns HTTP 422 with the specified message."""
-        resp = await client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "REQ2_PERIOD_BAD",
-                "pay_item_name": "Requirement 2 Period Item",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        detail_text = str(resp.json()["detail"])
-        assert "Custom Pay Period items are not supported" in detail_text
-        assert "Daily" in detail_text
-
-    async def test_system_period_items_readable_and_unchanged(
+    async def test_system_items_readable_and_unchanged(
         self, client: httpx.AsyncClient, auth_token: str, hq_branch_id: int
     ):
-        """Requirement 3: Built-in PayPeriod items remain readable through branch endpoints."""
+        """Built-in system items remain readable through branch endpoints."""
         resp = await client.get(
             f"/settings/branches/{hq_branch_id}/pay-items",
             headers=auth(auth_token),
@@ -671,29 +561,6 @@ class TestCustomPayItemCreate:
         assert len(items) > 0
         system_items = [i for i in items if i.get("is_system_standard")]
         assert len(system_items) > 0
-
-    async def test_update_endpoint_cannot_convert_daily_to_period(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        db_conn,
-    ):
-        """
-        item_scope is immutable on PATCH. item_scope is not in CustomPayItemUpdate,
-        so passing it is silently ignored. Confirm item remains Daily.
-        """
-        item_id = await _seed_legacy_item(
-            db_conn, code="REQ6_SCOPE_IMMUT", name="Scope Immutable Test"
-        )
-
-        patch_resp = await client.patch(
-            f"/settings/pay-items/{item_id}",
-            json={"pay_item_name": "Scope Immutable Test Renamed", "item_scope": "Period"},
-            headers=auth(auth_token),
-        )
-        assert patch_resp.status_code == 200
-        assert patch_resp.json()["item_scope"] == "Daily"
-
 
 # ---------------------------------------------------------------------------
 # TestCustomPayItemCodeGeneration
@@ -714,7 +581,6 @@ class TestCustomPayItemCodeGeneration:
             "/settings/pay-items",
             json={
                 "pay_item_name": "Auto Code Daily Item",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Stop",
             },
@@ -722,21 +588,6 @@ class TestCustomPayItemCodeGeneration:
         )
         assert resp.status_code == 422
         assert "CDPI" in resp.json()["detail"] or "cdpi" in resp.json()["detail"].lower()
-
-    async def test_create_without_code_period_item_rejected(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        """Period items are rejected even without an explicit code."""
-        resp = await client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_name": "Auto Code Period Item",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
 
     async def test_multiple_auto_code_attempts_all_blocked(
         self, client: httpx.AsyncClient, auth_token: str
@@ -747,7 +598,6 @@ class TestCustomPayItemCodeGeneration:
                 "/settings/pay-items",
                 json={
                     "pay_item_name": f"Blocked Auto Code Item {i}",
-                    "item_scope":    "Daily",
                     "rate_behavior": "PerUnit",
                     "unit":          "Unit",
                 },
@@ -764,7 +614,6 @@ class TestCustomPayItemCodeGeneration:
             json={
                 "pay_item_code": "EXPLICIT_CODE_A",
                 "pay_item_name": "Explicit Code Item",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
             },
@@ -792,7 +641,6 @@ class TestCustomPayItemCodeGeneration:
                 "/settings/pay-items",
                 json={
                     "pay_item_name": "Retry Item",
-                    "item_scope":    "Daily",
                     "rate_behavior": "PerUnit",
                     "unit":          "Unit",
                 },
@@ -810,7 +658,6 @@ class TestCustomPayItemCodeGeneration:
             "/settings/pay-items",
             json={
                 "pay_item_name": "Auto Code Inactive Branch Test",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
             },
@@ -849,7 +696,6 @@ class TestCustomPayItemUpdate:
         assert updated["notes"]         == "Now with notes"
         assert updated["sort_order"]    == 99
         assert updated["pay_item_code"] == "M12_UPD_A"
-        assert updated["item_scope"]    == "Daily"
         assert updated["rate_behavior"] == "PerUnit"
 
     async def test_cannot_update_deleted_item(
@@ -1083,7 +929,6 @@ class TestCustomPayItemDelete:
             json={
                 "pay_item_code": "M12_DEL_MEANINGFUL",
                 "pay_item_name": "Reuse Retired Code",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Stop",
                 "category":      "Count",
@@ -1242,7 +1087,6 @@ class TestPayItemRequestSubmit:
                 "branch_id":    hq_branch_id,
                 "pay_item_code": "M12_REQ_A",
                 "pay_item_name": "Fuel Bonus Request",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Trip",
                 "category":      "Count",
@@ -1252,29 +1096,6 @@ class TestPayItemRequestSubmit:
         )
         assert resp.status_code == 422
         assert "CDPI" in resp.json()["detail"] or "cdpi" in resp.json()["detail"].lower()
-
-    async def test_period_request_is_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        hq_branch_id: int,
-    ):
-        """Branch requests for custom Period items are rejected with 422 (schema validator)."""
-        resp = await client.post(
-            "/settings/pay-item-requests",
-            json={
-                "branch_id":    hq_branch_id,
-                "pay_item_code": "M12_REQ_B",
-                "pay_item_name": "Layover Pay Request",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Allowance",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        detail_text = str(resp.json()["detail"])
-        assert "Custom Pay Period items are not supported" in detail_text
 
     async def test_daily_request_blocked_all_behaviors(
         self,
@@ -1290,7 +1111,6 @@ class TestPayItemRequestSubmit:
                     "branch_id":    hq_branch_id,
                     "pay_item_code": f"M12_REQ_BLK_{rb}",
                     "pay_item_name": f"Blocked {rb}",
-                    "item_scope":    "Daily",
                     "rate_behavior": rb,
                     "unit":          "Unit",
                     "category":      "Count",
@@ -1312,31 +1132,9 @@ class TestPayItemRequestSubmit:
                 "branch_id":    hq_branch_id,
                 "pay_item_code": "MILES",
                 "pay_item_name": "Custom Miles",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Mile",
                 "category":      "Distance",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-
-    async def test_invalid_combo_in_request_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        hq_branch_id: int,
-    ):
-        """Daily + EnteredAmount blocked by schema validator before LLR-A guard."""
-        resp = await client.post(
-            "/settings/pay-item-requests",
-            json={
-                "branch_id":    hq_branch_id,
-                "pay_item_code": "M12_REQBAD",
-                "pay_item_name": "Bad Combo",
-                "item_scope":    "Daily",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Count",
             },
             headers=auth(auth_token),
         )
@@ -1355,7 +1153,6 @@ class TestPayItemRequestSubmit:
                 "branch_id":    hq_branch_id,
                 "pay_item_code": "M12_REQ_NOPERM",
                 "pay_item_name": "No Permission",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Trip",
                 "category":      "Count",
@@ -1594,7 +1391,6 @@ class TestPayItemRequestReject:
                 "branch_id":    hq_branch_id,
                 "pay_item_code": "M12_REJ_RESUB",
                 "pay_item_name": "Resubmit Attempt",
-                "item_scope":    "Daily",
                 "rate_behavior": "PerUnit",
                 "unit":          "Unit",
                 "category":      "Count",
@@ -1673,7 +1469,6 @@ class TestCustomPayItemAudit:
                 json={
                     "pay_item_code": "M12_AUDIT_A",
                     "pay_item_name": "Should Roll Back",
-                    "item_scope":    "Daily",
                     "rate_behavior": "PerUnit",
                     "unit":          "Unit",
                     "category":      "Count",
@@ -1755,7 +1550,6 @@ class TestCustomPayItemAudit:
                     "branch_id":    hq_branch_id,
                     "pay_item_code": "M12_AUDIT_D",
                     "pay_item_name": "Audit Request Test",
-                    "item_scope":    "Daily",
                     "rate_behavior": "PerUnit",
                     "unit":          "Unit",
                     "category":      "Count",
@@ -1886,31 +1680,11 @@ class TestCustomPayItemM11Flow:
 
 class TestCustomPayItemUpdateInvariants:
     """
-    ItemScope / RateBehavior / unit constraints that must survive PATCH.
+    RateBehavior / unit constraints that must survive PATCH.
 
-    Daily  items must always have a unit; cannot receive unit=None or unit="".
-    Period items must not have a unit; cannot receive unit=<any value>.
-    ItemScope and RateBehavior are immutable (not accepted by the schema at all).
+    Custom items must always have a unit; cannot receive unit=None or unit="".
+    RateBehavior is immutable (not accepted by the schema at all).
     """
-
-    async def test_create_period_item_via_direct_endpoint_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-    ):
-        """Custom Period items cannot be created — 422."""
-        resp = await client.post(
-            "/settings/pay-items",
-            json={
-                "pay_item_code": "M12_INV_PERIOD_UNIT",
-                "pay_item_name": "Period Item No Unit",
-                "item_scope":    "Period",
-                "rate_behavior": "EnteredAmount",
-                "category":      "Bonus",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
 
     async def test_update_daily_item_clears_unit_is_rejected(
         self,

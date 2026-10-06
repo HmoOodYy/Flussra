@@ -113,7 +113,7 @@ async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
 async def _get_draft_lines(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
-            SELECT draftlineid, driverid, workdate, linetype, linescope,
+            SELECT draftlineid, driverid, workdate, linetype,
                    quantity, calculatedamount, rateamount, sourcetype,
                    sourceid, status, needsmanagerreview, notes
             FROM   payroll.payrolldraftlines
@@ -1161,9 +1161,9 @@ class TestDraftDirectDraftLineAPI:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity, sourcetype, status,
+                         workdate, linetype, quantity, sourcetype, status,
                          needsmanagerreview, addedbyuserid)
-                    VALUES (1, :bid, :pid, :did, :wd, 'HOURS', 'Daily', 8, 'System', 'Active', FALSE, 1)
+                    VALUES (1, :bid, :pid, :did, :wd, 'HOURS', 8, 'System', 'Active', FALSE, 1)
                     RETURNING draftlineid
                 """),
                 {"bid": branch_id, "pid": pid, "did": driver_id, "wd": start},
@@ -1509,9 +1509,9 @@ class TestDraftReadEndpointProtection:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity, sourcetype, status,
+                         workdate, linetype, quantity, sourcetype, status,
                          needsmanagerreview, sourceid, addedbyuserid)
-                    VALUES (1, :bid, :pid, :did, :wd, 'STATUS_PAYMENT', 'Daily', 1,
+                    VALUES (1, :bid, :pid, :did, :wd, 'STATUS_PAYMENT', 1,
                             'System', 'Active', FALSE, 'STATUS_PAYMENT:99', 1)
                 """),
                 {"bid": branch_id, "pid": pid, "did": driver_id, "wd": start},
@@ -1594,9 +1594,9 @@ class TestDraftReadEndpointProtection:
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverid,
-                         workdate, linetype, linescope, quantity, sourcetype, status,
+                         workdate, linetype, quantity, sourcetype, status,
                          needsmanagerreview, sourceid, addedbyuserid)
-                    VALUES (1, :bid, :pid, :did, :wd, 'STATUS_PAYMENT', 'Daily', 1,
+                    VALUES (1, :bid, :pid, :did, :wd, 'STATUS_PAYMENT', 1,
                             'System', 'Active', FALSE, 'STATUS_PAYMENT:1', 1)
                 """),
                 {"bid": branch_id, "pid": pid, "did": driver_id, "wd": start},

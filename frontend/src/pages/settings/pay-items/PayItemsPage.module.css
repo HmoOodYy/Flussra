@@ -480,20 +480,6 @@
 .skeletonRow td { padding: 0.75rem 0.9rem; }
 
 /* ── Badges ── */
-.badgeScope {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-  padding: 0.18rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.badgeScopeDaily   { background: #dbeafe; color: #1d4ed8; }
-.badgeScopePeriod  { background: #e0e7ff; color: #4338ca; }
-.badgeScopeSummary { background: #f1f5f9; color: #64748b; }
-
 .badgeStatus {
   display: inline-flex;
   align-items: center;

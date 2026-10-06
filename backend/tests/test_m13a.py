@@ -225,19 +225,6 @@ async def m13_inactive_item(
     return {"pay_item_id": item_id, "pay_item_code": "M13A_INACT"}
 
 
-@pytest_asyncio.fixture(scope="session")
-async def m13_period_item(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-) -> dict:
-    """
-    Stub: system BONUS (Period-scope) is always seeded — no DB fetch needed.
-    Custom Period-scope items are no longer creatable; tests now use the
-    system BONUS item to verify Period items are blocked from daily entry.
-    """
-    return {"pay_item_code": "BONUS"}
-
-
 # ---------------------------------------------------------------------------
 # Function-scoped driver rate fixtures (cleaned up after each test)
 # ---------------------------------------------------------------------------
@@ -396,26 +383,6 @@ class TestM13aValidation:
         )
         assert resp.status_code == 422
         assert "not active" in resp.json()["detail"].lower()
-
-    async def test_period_custom_item_blocked_from_daily_entry(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        m13_open_period: dict, paytest_driver_id: int,
-        m13_period_item: dict,
-    ):
-        """
-        Period-scope item (system BONUS) → 422 with 'Period-scope' message.
-        Period items have their own endpoint (M14+). Custom Period-scope items
-        are no longer creatable; the system BONUS item exercises the same guard.
-        """
-        pid = m13_open_period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                  "line_type": "Bonus", "quantity": "1.00"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "period" in resp.json()["detail"].lower()
 
     async def test_retired_custom_item_rejected(
         self, session_client: httpx.AsyncClient, auth_token: str,
@@ -942,7 +909,7 @@ class TestM13bRegressionFixes:
     """
     Focused regression tests for the 8 issues reported by review.
 
-    Issue 1 — Period system items blocked from daily entry
+    Issue 1 — system-generated output items blocked from daily entry
     Issue 2 — System fast-path respects BranchPayItemConfig
     Issue 3 — work_date constrained to period range
     Issue 4 — system calc uses PayItemRateTypeMap (tested via issue 2 flow)
@@ -952,37 +919,22 @@ class TestM13bRegressionFixes:
     Issue 8 (test fixture) — custom PerUnit item with rate map calculates correctly
     """
 
-    # ── Issue 1: Period system items must be rejected ────────────────────── #
+    # ── Issue 1: system-generated output items must be rejected ──────────── #
 
-    async def test_bonus_system_item_rejected_from_daily_entry(
+    async def test_system_output_item_rejected_from_daily_entry(
         self, session_client: httpx.AsyncClient, auth_token: str,
         m13_open_period: dict, paytest_driver_id: int,
     ):
-        """'Bonus' is a Period-scope system item and must be rejected with a clear message."""
+        """System-generated outputs (SYS_MIN_TOPUP) are finalization-only, not daily line types."""
         pid = m13_open_period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/lines",
             json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                  "line_type": "Bonus", "quantity": "1.00"},
+                  "line_type": "SYS_MIN_TOPUP", "quantity": "1.00"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
-        assert "period" in resp.json()["detail"].lower()
-
-    async def test_adjustment_system_item_rejected_from_daily_entry(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        m13_open_period: dict, paytest_driver_id: int,
-    ):
-        """'Adjustment' is a Period-scope system item and must be rejected."""
-        pid = m13_open_period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                  "line_type": "Adjustment", "quantity": "1.00"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "period" in resp.json()["detail"].lower()
+        assert "finalization" in resp.json()["detail"].lower()
 
     # ── Issue 2: System fast-path now checks branch activation ───────────── #
 
