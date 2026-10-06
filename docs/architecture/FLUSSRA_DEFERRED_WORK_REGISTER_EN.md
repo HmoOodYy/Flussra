@@ -116,15 +116,17 @@ If an issue is officially moved to a different work unit:
 
 **P2c:** CLOSED / merged (PR #28; merge `af00a22915f93810d123aadea18c3a73da1360aa`).
 
-**P3a:** Implemented and under Lead review.
+**P3a:** CLOSED / merged (PR #30; migration `0076`).
 
-**P3b:** Not started.
+**G0:** CLOSED (G0.1 PR #34; G0.2 PRs #35–#39; G0.3 PR #40; G0.4 PRs #41–#43; G0.5 PR #44; G0.6 PR #45).
 
-**Current investigated main:** `f671a2ee61e9d31b0804af95eaff9973978a94af`.
+**P3b:** Current implementation work unit (Target Compensation schema/invariants).
+
+**Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`.
 
 **Test Hygiene:** PR #29 merged after P2c.
 
-**Pre-P3a migration head:** `0075`; P3a branch head: `0076`.
+**Pre-P3b migration head:** `0081`; P3b advances it to `0082`.
 
 **Important rule:** Anything below marked `NOT YET` remains intentional architectural/product debt until the entry itself is updated to `YES`.
 
@@ -592,13 +594,13 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
 
 **Current State:**  
-P3a Company currency authority is implemented and under Lead review. The user-reported full backend run was 4 failed, 3312 passed, 3 skipped in 1143.67s; all four failures were stale pre-P3a Alembic-head assertions. Those assertions were corrected and all four focused reruns passed; the full suite was not rerun after correction. Broader Compensation refoundation remains unresolved through P3b–P6.
+P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45), and target Compensation refoundation has entered P3b, which establishes a dormant target persistence model and database invariants beside the legacy compensation model. Legacy compensation remains the sole operational payroll authority. P3b alone does not resolve this debt: target authoring/resolver (P3c), the operational authority cutover and evidence (P4), Status and OrdinalTier (P5) and transfer copy (P6) remain.
 
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Last Updated:** 2026-10-07
 
 \---
 

@@ -197,14 +197,14 @@ def _seed_legacy_access_state(dsn, *, invalid_non_driver_oda: bool = False):
         conn.close()
 
 
-def test_fresh_database_upgrades_through_0081(access_migration_db):
+def test_fresh_database_upgrades_through_0082(access_migration_db):
     config, dsn = access_migration_db
     _upgrade(config, "head")
     conn = _db(dsn)
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0081"
+            assert cur.fetchone()[0] == "0082"
             cur.execute("""
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint

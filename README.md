@@ -55,7 +55,7 @@ root in PowerShell:
 ```
 
 The command runs the full backend pytest suite, Ruff, Python compileall, and an
-assertion that Alembic has exactly one head at `0081`. It then runs every
+assertion that Alembic has exactly one head at `0082`. It then runs every
 frontend `tests/*.test.ts` file, ESLint, and the production build. A successful
 exit means every required gate passed; the command stops and returns nonzero
 when a gate fails or required tooling is missing. Install the worktree-local

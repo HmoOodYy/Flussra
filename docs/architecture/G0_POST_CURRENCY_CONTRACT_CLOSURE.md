@@ -21,9 +21,35 @@ The implementation will be performed separately after this architectural intent 
 
 \---
 
+\# Closure Status — G0 CLOSED
+
+G0 is closed. The six workstreams were implemented and merged as separate work units:
+
+```text
+G0.1  Monetary precision contract         PR #34       migration 0077
+G0.2  Continuous validation / CI          PRs #35-#39  required merge checks enforced on main
+G0.3  Currency concurrency / lock owner   PR #40
+G0.4  Generic Period Pay retirement       PRs #41-#43  migrations 0078, 0079
+G0.5  Predecessor custom Pay Item writers PR #44       migration 0080
+G0.6  Pay Profile family                  PR #45       migration 0081
+```
+
+The post-G0 accepted baseline is `main` at the PR #45 merge,
+`f2937bfdcbe1266a00716905a8712f3fe29baff2`, with Alembic head `0081`.
+
+The handoff into P3b is as described in Section 18: legacy compensation
+(PayItems / RateTypes / DriverRates) remains the sole operational authority,
+unnecessary side writers and dead financial roots are gone, and target
+Compensation begins with P3b as a dormant persistence model and database
+invariants. G0 was closed as part of the P3b branch rather than a separate
+closeout branch. The sections below preserve the original architectural
+explanation and rationale as written before implementation.
+
+\---
+
 \# 1. Current Baseline
 
-The current accepted baseline is:
+The accepted baseline when this document was written (historical) was:
 
 ```text
 main
