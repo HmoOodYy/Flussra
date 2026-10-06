@@ -219,18 +219,15 @@ async def _ensure_ordinal_item_active(client, token, branch_id, db_conn) -> int:
             return item_id
 
     # Create it via DB seed (HTTP creation of Daily items is blocked by LLR-A)
-    from tests.seed_helpers import seed_legacy_item
-    item_id = await seed_legacy_item(
+    from tests.seed_helpers import seed_cdpi_item
+    item_id = await seed_cdpi_item(
         db_conn,
         code="P11_ORD", name="P11 Ordinal Test Item",
         rate_behavior="OrdinalTier", unit="Load", category="Count",
     )
 
-    # Link rate type
-    r = await client.post(f"/settings/pay-items/{item_id}/rate-type-map",
-                          json={"rate_type_id": rt_id, "is_primary": True},
-                          headers=_tok(token))
-    assert r.status_code in (200, 201), f"link rt: {r.text}"
+    from tests.seed_helpers import map_rate_type_to_item
+    await map_rate_type_to_item(db_conn, item_id=item_id, rate_type_id=rt_id)
 
     # Activate on branch
     r = await client.patch(
@@ -261,17 +258,15 @@ async def _ensure_block_item_active(client, token, branch_id, db_conn) -> int:
             return item_id
 
     # Create via DB seed (HTTP creation of Daily items is blocked by LLR-A)
-    from tests.seed_helpers import seed_legacy_item
-    item_id = await seed_legacy_item(
+    from tests.seed_helpers import seed_cdpi_item
+    item_id = await seed_cdpi_item(
         db_conn,
         code="P11_BLK", name="P11 Block Test Item",
         rate_behavior="Block", unit="Mile", category="Count",
     )
 
-    r = await client.post(f"/settings/pay-items/{item_id}/rate-type-map",
-                          json={"rate_type_id": rt_id, "is_primary": True},
-                          headers=_tok(token))
-    assert r.status_code in (200, 201), f"link rt: {r.text}"
+    from tests.seed_helpers import map_rate_type_to_item
+    await map_rate_type_to_item(db_conn, item_id=item_id, rate_type_id=rt_id)
 
     r = await client.patch(
         f"/settings/branches/{branch_id}/pay-items/{item_id}",

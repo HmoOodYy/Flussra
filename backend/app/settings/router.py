@@ -27,18 +27,11 @@ from app.settings.schemas import (
     CompanyProfile,
     CompanyUpdate,
     CustomPayItem,
-    CustomPayItemCreate,
-    CustomPayItemDeleteResult,
-    CustomPayItemRequest,
-    CustomPayItemRequestCreate,
-    CustomPayItemRequestDecide,
-    CustomPayItemUpdate,
+    CustomPayItemRetireResult,
     CustomPayItemUsage,
     OnboardingOptionsResponse,
     PayItemConfigUpdate,
     PayItemOrderUpdate,
-    PayItemRateTypeMapCreate,
-    PayItemRateTypeMapSummary,
     StatusKey,
     StatusKeyCreate,
     StatusKeyUpdate,
@@ -689,7 +682,7 @@ async def list_missing_pay_item_configs(
 
 
 # ---------------------------------------------------------------------------
-# M12: Custom Pay Items — admin catalog endpoints
+# Company PayItem catalog reads and lifecycle (definition authority is CDPI)
 # ---------------------------------------------------------------------------
 
 @router.get(
@@ -717,39 +710,6 @@ async def list_custom_pay_items(
     )
 
 
-@router.post(
-    "/pay-items",
-    response_model=CustomPayItem,
-    status_code=201,
-    summary="Create a custom pay item (admin direct)",
-    description=(
-        "Admin-direct path: creates a company-level custom pay item without "
-        "the branch request/approval flow.\n\n"
-        "Custom items are Daily operational items; `rate_behavior` must be a "
-        "rate-based behavior and `unit` is required unless `value_type` is given.\n\n"
-        "The item starts **inactive on all branches** (IsDefaultBranchActive=FALSE, no "
-        "BranchPayItemConfig row created).  Branches activate it via "
-        "`PATCH /settings/branches/{id}/pay-items/{item_id}`.\n\n"
-        "Requires AllCompanyBranches scope + `setup.manage`."
-    ),
-    responses={
-        403: {"description": "Insufficient scope or permission"},
-        422: {"description": "Validation error, duplicate code, or system-reserved code"},
-    },
-)
-async def create_custom_pay_item(
-    body: CustomPayItemCreate,
-    token: TokenDep,
-    db: DbDep,
-) -> CustomPayItem:
-    return await service.create_custom_pay_item(
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=body,
-        db=db,
-    )
-
-
 @router.get(
     "/pay-items/{item_id}",
     response_model=CustomPayItem,
@@ -772,50 +732,13 @@ async def get_custom_pay_item(
     )
 
 
-@router.patch(
-    "/pay-items/{item_id}",
-    response_model=CustomPayItem,
-    summary="Update mutable metadata on a custom pay item",
-    description=(
-        "Applies non-null fields from the request body.  "
-        "Mutable fields: `display_label`, `pay_item_name`, `category`, `unit`, "
-        "`sort_order`, `notes`.\n\n"
-        "Immutable after creation: `pay_item_code`, `rate_behavior` "
-        "— these define the meaning of historical payroll lines and cannot be changed.\n\n"
-        "System items and Retired items cannot be updated through this endpoint.\n\n"
-        "Requires AllCompanyBranches scope + `setup.manage`."
-    ),
-    responses={
-        403: {"description": "Insufficient scope or permission"},
-        404: {"description": "Custom pay item not found"},
-        422: {"description": "Attempt to update system or Retired item, or immutable field"},
-    },
-)
-async def update_custom_pay_item(
-    item_id: int,
-    body: CustomPayItemUpdate,
-    token: TokenDep,
-    db: DbDep,
-) -> CustomPayItem:
-    return await service.update_custom_pay_item(
-        item_id=item_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=body,
-        db=db,
-    )
-
-
 @router.get(
     "/pay-items/{item_id}/usage",
     response_model=CustomPayItemUsage,
-    summary="Check usage of a custom pay item before deletion",
+    summary="Show the history a custom pay item retirement preserves",
     description=(
-        "Returns draft-line and final-line usage counts for a custom pay item.  "
-        "`can_physical_delete=true` means no meaningful usage exists and the item "
-        "can be removed from the database.  `deletion_would_retire=true` means "
-        "meaningful or finalized lines exist and deletion will archive the item "
-        "(Status=Retired) rather than remove it.\n\n"
+        "Returns the meaningful draft-line, final-line and driver-rate counts "
+        "for a custom pay item.  Retiring the item never removes this history.\n\n"
         "Requires AllCompanyBranches scope."
     ),
     responses={
@@ -838,154 +761,31 @@ async def get_custom_pay_item_usage(
 
 @router.delete(
     "/pay-items/{item_id}",
-    response_model=CustomPayItemDeleteResult,
-    summary="Delete or retire a custom pay item",
+    response_model=CustomPayItemRetireResult,
+    summary="Retire a custom pay item",
     description=(
-        "Smart delete — the actual action depends on usage history:\n\n"
-        "- **Never used** → physical delete (row removed).\n"
-        "- **Only empty/voided draft lines** → those lines are cleaned up, "
-        "then physical delete.\n"
-        "- **Meaningful usage** (any active draft line with quantity/amount, "
-        "or any final payroll line) → item is **retired** (Status=Retired).  "
-        "The code is permanently locked to protect historical records.\n\n"
-        "System items (`is_system_standard=true`) cannot be deleted.\n"
+        "Retires a company custom pay item (Status=Retired).  The code is "
+        "permanently locked to protect historical records and no data is "
+        "removed.\n\n"
+        "System items (`is_system_standard=true`) cannot be retired.\n"
         "Calling DELETE on an already-Retired item is idempotent.\n\n"
         "Requires AllCompanyBranches scope + `setup.manage`."
     ),
     responses={
         403: {"description": "Insufficient scope or permission"},
         404: {"description": "Custom pay item not found"},
-        422: {"description": "System pay items cannot be deleted"},
+        422: {"description": "System pay items cannot be retired"},
     },
 )
 async def delete_custom_pay_item(
     item_id: int,
     token: TokenDep,
     db: DbDep,
-) -> CustomPayItemDeleteResult:
+) -> CustomPayItemRetireResult:
     return await service.delete_custom_pay_item(
         item_id=item_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
-        db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# M12: Custom Pay Items — branch request / admin approval endpoints
-# ---------------------------------------------------------------------------
-
-@router.post(
-    "/pay-item-requests",
-    response_model=CustomPayItemRequest,
-    status_code=201,
-    summary="Submit a branch request for a new custom pay item",
-    description=(
-        "A branch user submits a request for a new company-level custom pay item.  "
-        "The request enters `PendingApproval` status and must be approved by an "
-        "admin before the item is created.\n\n"
-        "Duplicate requests: if a `PendingApproval` or `Approved` request already "
-        "exists for the same `pay_item_code` in this company, the request is "
-        "rejected with HTTP 422.\n\n"
-        "Requires branch access + `payroll.entry` permission on the requesting branch."
-    ),
-    responses={
-        403: {"description": "No branch access or missing payroll.entry permission"},
-        422: {"description": "Validation error, duplicate code, or system-reserved code"},
-    },
-)
-async def submit_pay_item_request(
-    body: CustomPayItemRequestCreate,
-    token: TokenDep,
-    db: DbDep,
-) -> CustomPayItemRequest:
-    return await service.create_pay_item_request(
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=body,
-        db=db,
-    )
-
-
-@router.get(
-    "/pay-item-requests",
-    response_model=list[CustomPayItemRequest],
-    summary="List custom pay item requests",
-    description=(
-        "Admin (AllCompanyBranches) sees all requests for the company.  "
-        "Branch-scoped users see only their own branch's requests.  "
-        "Optionally filter by `status` (PendingApproval | Approved | Rejected)."
-    ),
-    responses={403: {"description": "No branch access"}},
-)
-async def list_pay_item_requests(
-    token: TokenDep,
-    db: DbDep,
-    request_status: str | None = Query(None, alias="status",
-                                       description="Filter by status: PendingApproval, Approved, or Rejected"),
-) -> list[CustomPayItemRequest]:
-    return await service.get_pay_item_requests(
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        db=db,
-        request_status=request_status,
-    )
-
-
-@router.get(
-    "/pay-item-requests/{request_id}",
-    response_model=CustomPayItemRequest,
-    summary="Get a single custom pay item request",
-    responses={
-        403: {"description": "No access to this request's branch"},
-        404: {"description": "Request not found"},
-    },
-)
-async def get_pay_item_request(
-    request_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> CustomPayItemRequest:
-    return await service.get_pay_item_request_by_id(
-        request_id=request_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        db=db,
-    )
-
-
-@router.post(
-    "/pay-item-requests/{request_id}/decide",
-    response_model=CustomPayItemRequest,
-    summary="Approve or reject a custom pay item request",
-    description=(
-        "Admin decision on a `PendingApproval` request.\n\n"
-        "**Approved**: atomically creates the pay item (company-level, Active) and "
-        "a `BranchPayItemConfig` row for the requesting branch (IsActive=TRUE, "
-        "effective today).  All other branches start inactive.  They can activate "
-        "the item later via `PATCH /settings/branches/{id}/pay-items/{item_id}`.\n\n"
-        "**Rejected**: marks the request as Rejected; no pay item is created.  "
-        "The same `pay_item_code` can be re-requested after rejection.\n\n"
-        "Attempting to decide an already-Approved or Rejected request returns HTTP 422.\n\n"
-        "Requires AllCompanyBranches scope + `setup.manage`."
-    ),
-    responses={
-        403: {"description": "Insufficient scope or permission"},
-        404: {"description": "Request not found"},
-        422: {"description": "Request already decided, or code conflict on approval"},
-    },
-)
-async def decide_pay_item_request(
-    request_id: int,
-    body: CustomPayItemRequestDecide,
-    token: TokenDep,
-    db: DbDep,
-) -> CustomPayItemRequest:
-    return await service.decide_pay_item_request(
-        request_id=request_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=body,
         db=db,
     )
 
@@ -1025,45 +825,5 @@ async def update_pay_item_order(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
-        db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# M13: Assign a rate type to a custom PerUnit pay item
-# ---------------------------------------------------------------------------
-
-@router.post(
-    "/pay-items/{item_id}/rate-type-map",
-    response_model=PayItemRateTypeMapSummary,
-    status_code=201,
-    summary="Assign a rate type to a custom PerUnit pay item",
-    description=(
-        "Creates or updates the `PayItemRateTypeMap` entry for a custom PerUnit pay item.\n\n"
-        "This mapping is required for the calculation engine to look up the driver's "
-        "approved `DriverRate` when inserting daily draft lines for the item.  "
-        "Without this mapping the engine sets `calculatedamount = NULL` and flags "
-        "`needs_manager_review = True`.\n\n"
-        "Idempotent: calling this endpoint twice for the same `(item_id, rate_type_id)` "
-        "pair just refreshes the row.\n\n"
-        "Requires AllCompanyBranches scope + `setup.manage`."
-    ),
-    responses={
-        403: {"description": "Insufficient scope or permission"},
-        404: {"description": "Pay item not found for this company"},
-        422: {"description": "Item is not PerUnit, or rate_type_id is inactive"},
-    },
-)
-async def assign_rate_type_to_pay_item(
-    item_id: int,
-    body: PayItemRateTypeMapCreate,
-    token: TokenDep,
-    db: DbDep,
-) -> PayItemRateTypeMapSummary:
-    return await service.assign_rate_type_to_pay_item(
-        item_id=item_id,
-        data=body,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
         db=db,
     )

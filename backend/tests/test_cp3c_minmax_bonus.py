@@ -34,6 +34,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.seed_helpers import attach_cdpi_owner_by_code
+
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -180,6 +182,7 @@ async def _inject_normal_pay_line(
             SELECT 1 FROM payroll.payitems WHERE companyid = 1 AND payitemcode = 'CP3C_FIXED'
         )
     """))
+    await attach_cdpi_owner_by_code(db, company_id=1, code="CP3C_FIXED")
     row = (await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines

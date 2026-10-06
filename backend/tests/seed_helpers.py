@@ -1,19 +1,17 @@
 """
-Shared DB-seeding helpers for LLR-A compatibility tests.
+Shared DB-seeding helpers for current custom Daily PayItem fixtures.
 
-These helpers insert legacy PayItems rows directly into the test DB,
-bypassing the LLR-A HTTP guard that blocks new Custom Daily creation
-through the legacy settings API.
-
-Use these in any test that needs an existing legacy custom Daily item
-to verify read / update / delete / rate-matrix compatibility behavior.
+Custom Daily PayItems are created through the CDPI workflow. These helpers
+build the same canonical structure directly in the test DB (PayItems row +
+CdpiDefinitions owner marker, optionally RateType / PayItemRateTypeMap) so
+tests of Pay Rates, Day Grid, calculation and lifecycle can set up an item
+without driving the whole CDPI request flow.
 """
-from datetime import date as _date
 
 from sqlalchemy import text
 
 
-async def seed_legacy_item(
+async def seed_cdpi_item(
     db_conn,
     *,
     company_id: int = 1,
@@ -25,7 +23,7 @@ async def seed_legacy_item(
     category: str = "Count",
     datatype: str = "Decimal",
 ) -> int:
-    """Insert a bare legacy PayItems row. Returns pay_item_id."""
+    """Insert a company custom Daily PayItem owned by a CdpiDefinitions row. Returns pay_item_id."""
     result = await db_conn.execute(
         text("""
             INSERT INTO payroll.payitems (
@@ -47,10 +45,19 @@ async def seed_legacy_item(
             "behavior": rate_behavior, "uid": user_id,
         }
     )
-    return result.scalar_one()
+    item_id = result.scalar_one()
+    await db_conn.execute(
+        text("""
+            INSERT INTO payroll.cdpidefinitions
+                (payitemid, definitionschemaversion, lockedatutc, createdbyuserid)
+            VALUES (:piid, 1, NOW(), :uid)
+        """),
+        {"piid": item_id, "uid": user_id},
+    )
+    return item_id
 
 
-async def seed_legacy_item_with_rate_structure(
+async def seed_cdpi_item_with_rate_structure(
     db_conn,
     *,
     company_id: int = 1,
@@ -62,10 +69,9 @@ async def seed_legacy_item_with_rate_structure(
     rate_behavior: str = "PerUnit",
     rate_name: str | None = None,
 ) -> dict:
-    """Insert a legacy Daily PayItem + CPI_ RateType + PayItemRateTypeMap.
-    Mirrors what create_custom_pay_item() service did before LLR-A.
+    """Insert a CDPI-owned Daily PayItem + RateType + PayItemRateTypeMap.
     Returns {pay_item_id, rate_type_id, rate_type_code}."""
-    item_id = await seed_legacy_item(
+    item_id = await seed_cdpi_item(
         db_conn, company_id=company_id, user_id=user_id,
         code=code, name=name, unit=unit, category=category,
         rate_behavior=rate_behavior,
@@ -95,11 +101,12 @@ async def seed_legacy_item_with_rate_structure(
         """),
         {"piid": item_id, "rtid": rt_id},
     )
+    await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rt_id, sort_order=1)
 
     return {"pay_item_id": item_id, "rate_type_id": rt_id, "rate_type_code": rate_code}
 
 
-async def seed_legacy_item_multi_rate(
+async def seed_cdpi_item_multi_rate(
     db_conn,
     *,
     company_id: int = 1,
@@ -111,10 +118,10 @@ async def seed_legacy_item_multi_rate(
     rate_behavior: str = "RangeBracket",
     rate_names: list[str] | None = None,
 ) -> dict:
-    """Insert a legacy Daily PayItem with multiple CPI_ rate types.
+    """Insert a CDPI-owned Daily PayItem with multiple rate types.
     For OrdinalTier / RangeBracket / Block / RangeProgressive behaviors.
     Returns {pay_item_id, rate_type_ids: list[int], rate_type_codes: list[str]}."""
-    item_id = await seed_legacy_item(
+    item_id = await seed_cdpi_item(
         db_conn, company_id=company_id, user_id=user_id,
         code=code, name=name, unit=unit, category=category,
         rate_behavior=rate_behavior,
@@ -146,77 +153,85 @@ async def seed_legacy_item_multi_rate(
             """),
             {"piid": item_id, "rtid": rt_id, "primary": (idx == 1)},
         )
+        await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rt_id, sort_order=idx)
         rt_ids.append(rt_id)
         rt_codes.append(rate_code)
 
     return {"pay_item_id": item_id, "rate_type_ids": rt_ids, "rate_type_codes": rt_codes}
 
 
-async def seed_legacy_request(
-    db_conn,
-    *,
-    company_id: int = 1,
-    user_id: int = 1,
-    branch_id: int,
-    code: str,
-    name: str = "Legacy Test Request",
-    rate_behavior: str = "PerUnit",
-    unit: str | None = "Unit",
-    category: str = "Count",
-    req_status: str = "PendingApproval",
-) -> int:
-    """Insert a legacy CustomPayItemRequests row. Returns request_id."""
-    result = await db_conn.execute(
-        text("""
-            INSERT INTO payroll.custompayitemrequests (
-                companyid, requestingbranchid, requestedbyuserid,
-                payitemcode, payitemname, itemscope, ratebehavior,
-                category, unit, sortorder, status
-            ) VALUES (
-                :cid, :bid, :uid,
-                :code, :name, 'Daily', :behavior,
-                :category, :unit, 100, :status
-            )
-            RETURNING requestid
-        """),
-        {
-            "cid": company_id, "bid": branch_id, "uid": user_id,
-            "code": code, "name": name,
-            "behavior": rate_behavior, "category": category,
-            "unit": unit, "status": req_status,
-        }
-    )
-    return result.scalar_one()
-
-
-async def seed_legacy_approved_item(
-    db_conn,
-    *,
-    company_id: int = 1,
-    user_id: int = 1,
-    branch_id: int,
-    code: str,
-    name: str = "Legacy Approved Item",
-    unit: str = "Stop",
-) -> int:
-    """Seed a legacy Daily item + BranchPayItemConfig (active, effective today)."""
-    item_id = await seed_legacy_item(
-        db_conn, company_id=company_id, user_id=user_id,
-        code=code, name=name, unit=unit,
-    )
+async def _ensure_rate_slot(db_conn, *, item_id: int, rate_type_id: int, sort_order: int) -> None:
+    """The PayItemRateSlots row CDPI creation produces alongside each map row."""
     await db_conn.execute(
         text("""
-            INSERT INTO payroll.branchpayitemconfig (
-                companyid, branchid, payitemid, isactive, effectivefrom,
-                createdbyuserid
-            ) VALUES (
-                :cid, :bid, :piid, TRUE, :eff, :uid
+            INSERT INTO payroll.payitemrateslots
+                (payitemid, ratetypeid, slotkey, slotrole, sortorder, isrequired,
+                 issystemgenerated, sourcekind, status)
+            SELECT :piid, :rtid, :slotkey, 'perunit', :sort, TRUE, TRUE, 'CDPI', 'Active'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM payroll.payitemrateslots
+                WHERE payitemid = :piid AND ratetypeid = :rtid AND status = 'Active'
             )
-            ON CONFLICT DO NOTHING
         """),
-        {
-            "cid": company_id, "bid": branch_id, "piid": item_id,
-            "eff": _date.today(), "uid": user_id,
-        }
+        {"piid": item_id, "rtid": rate_type_id, "slotkey": f"rate_{rate_type_id}", "sort": sort_order},
     )
-    return item_id
+
+
+async def map_rate_type_to_item(
+    db_conn,
+    *,
+    item_id: int,
+    rate_type_id: int,
+    is_primary: bool = True,
+) -> None:
+    """Create the PayItemRateTypeMap + PayItemRateSlots rows CDPI creation produces."""
+    await db_conn.execute(
+        text("""
+            INSERT INTO payroll.payitemratetypemap
+                (payitemid, ratetypeid, isprimary, status)
+            VALUES (:piid, :rtid, :primary, 'Active')
+            ON CONFLICT (payitemid, ratetypeid) DO NOTHING
+        """),
+        {"piid": item_id, "rtid": rate_type_id, "primary": is_primary},
+    )
+    await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rate_type_id, sort_order=1)
+
+
+async def ensure_rate_slot(db_conn, *, item_id: int, rate_type_id: int, sort_order: int = 1) -> None:
+    """Public form of the CDPI rate slot for an already mapped rate type."""
+    await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rate_type_id, sort_order=sort_order)
+
+
+async def attach_cdpi_owner(
+    db_conn,
+    *,
+    item_id: int,
+    rate_type_id: int | None = None,
+    user_id: int | None = None,
+) -> None:
+    """Give an existing company PayItem its canonical CDPI ownership.
+
+    Inserts the CdpiDefinitions owner marker and, when the item's mapped rate type
+    is given, the PayItemRateSlots row CDPI creation produces beside the map row.
+    """
+    await db_conn.execute(
+        text("""
+            INSERT INTO payroll.cdpidefinitions
+                (payitemid, definitionschemaversion, lockedatutc, createdbyuserid)
+            VALUES (:piid, 1, NOW(),
+                    COALESCE(:uid, (SELECT MIN(userid) FROM sec.users)))
+            ON CONFLICT (payitemid) DO NOTHING
+        """),
+        {"piid": item_id, "uid": user_id},
+    )
+    if rate_type_id is not None:
+        await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rate_type_id, sort_order=1)
+
+
+async def attach_cdpi_owner_by_code(db_conn, *, company_id: int, code: str) -> None:
+    """attach_cdpi_owner for a company PayItem identified by its code."""
+    item_id = (await db_conn.execute(
+        text("SELECT payitemid FROM payroll.payitems WHERE companyid = :cid AND payitemcode = :code"),
+        {"cid": company_id, "code": code},
+    )).scalar_one()
+    await attach_cdpi_owner(db_conn, item_id=item_id)

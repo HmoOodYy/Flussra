@@ -7,7 +7,7 @@ Covers:
   - Branch payroll setup (upsert)
   - Payroll status keys (full CRUD)
   - Pay items & branch configuration (read + patch)
-  - Custom pay items (M12): catalog CRUD + branch request/approval flow
+  - Company custom pay items: catalog reads, usage and retirement (definition is CDPI)
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -586,7 +586,7 @@ class PayItemConfigUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Bulk branch pay item configuration (M12)
+# Bulk branch pay item configuration
 # ---------------------------------------------------------------------------
 
 class BulkPayItemTarget(StrEnum):
@@ -673,16 +673,8 @@ class BulkPayItemConfigResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Custom Pay Items (M12)
+# Company custom pay items
 # ---------------------------------------------------------------------------
-
-# Custom pay items are Daily operational items. M13c adds OrdinalTier,
-# RangeBracket, RangeProgressive, Block alongside PerUnit.
-_DAILY_RATE_BEHAVIORS = {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-_M12_CUSTOM_STATUSES = {"Active", "Inactive", "Retired"}
-_REQUEST_STATUSES    = {"PendingApproval", "Approved", "Rejected"}
-_DECISION_VALUES     = {"Approved", "Rejected"}
-
 
 class CustomPayItem(BaseModel):
     """
@@ -695,13 +687,8 @@ class CustomPayItem(BaseModel):
                    | 'RangeProgressive' (progressive tiers, each tier has a rate)
     status         : 'Active' | 'Inactive' | 'Retired'
                      Retired items are hidden from normal lists; history is preserved.
-    value_type     : wizard-captured value type — 'Time' | 'Number' | None
-                     Stored as datatype ('Time', 'Decimal') in the DB.
-    rate_names     : ordered list of pay rate names configured at creation time.
-                     Stored in payitemsettings (settingkey = rate_name_1, rate_name_2 …).
-                     These will become column headers in Pay Rates configuration.
-    requesting_branch_id: the branch that originally requested this item via the
-                          approval flow, or None for admin-direct creates.
+    requesting_branch_id: the branch that requested this item through the CDPI
+                          workflow (PayItems.RequestingBranchID, written by CDPI).
     """
     pay_item_id:          int
     company_id:           int
@@ -723,304 +710,26 @@ class CustomPayItem(BaseModel):
     notes:                str | None = None
     created_at_utc:       datetime
     updated_at_utc:       datetime | None = None
-    # Wizard-captured metadata (stored in payitemsettings)
-    rate_names:           list[str] = []
-
-
-_VALID_VALUE_TYPES = {"Time", "Number"}
-
-
-class CustomPayItemCreate(BaseModel):
-    """
-    Payload for admin-direct custom item creation (wizard or API).
-
-    Custom items are Daily operational items; there is no scope to choose.
-
-    value_type controls the user-visible question "what type of value?":
-      'Time'   → datatype='Time',    unit='Hour',  requires rate setup
-      'Number' → datatype='Decimal', unit=null,    requires rate setup
-
-    rate_behavior must be one of _DAILY_RATE_BEHAVIORS; unit is required for
-    rate-based items unless value_type is 'Time' (unit defaults to 'Hour') or
-    'Number' (plain quantity, unit optional).
-
-    rate_names: pay rate column names captured in the wizard.
-      Stored in payroll.payitemsettings (key = rate_name_1, rate_name_2 …).
-      These will be the column headers in the Pay Rates configuration page.
-
-    pay_item_code: Optional — backend auto-generates CPI_XXXXXXXX when omitted.
-    category:      Optional — defaults to 'Custom'.  Not user-facing.
-    sort_order:    Optional — auto-assigned (MAX company sort_order + 10) when omitted.
-    """
-    pay_item_code:  str | None = None
-    display_label:  str | None = None
-    pay_item_name:  str
-    category:       str = "Custom"
-    unit:           str | None = None
-    rate_behavior:  str
-    sort_order:     int | None = None
-    notes:          str | None = None
-    # Wizard fields
-    value_type:     str | None = None          # 'Time' | 'Number'
-    rate_names:     list[str] = []
-
-    @field_validator("pay_item_code")
-    @classmethod
-    def code_non_empty(cls, v: str | None) -> str | None:
-        if v is None:
-            return None  # will be auto-generated in the service
-        v = v.strip().upper()
-        if not v:
-            raise ValueError("pay_item_code must not be blank if provided")
-        return v
-
-    @field_validator("pay_item_name")
-    @classmethod
-    def name_non_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("pay_item_name must not be blank")
-        return v
-
-    @field_validator("category")
-    @classmethod
-    def category_non_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("category must not be blank")
-        return v
-
-    @field_validator("value_type")
-    @classmethod
-    def value_type_valid(cls, v: str | None) -> str | None:
-        if v is not None and v not in _VALID_VALUE_TYPES:
-            raise ValueError(f"value_type must be one of {sorted(_VALID_VALUE_TYPES)}")
-        return v
-
-    @field_validator("rate_behavior")
-    @classmethod
-    def behavior_valid(cls, v: str) -> str:
-        if v not in _DAILY_RATE_BEHAVIORS:
-            raise ValueError(
-                f"rate_behavior must be one of {sorted(_DAILY_RATE_BEHAVIORS)}"
-            )
-        return v
-
-    @field_validator("rate_names")
-    @classmethod
-    def rate_names_clean(cls, v: list[str]) -> list[str]:
-        return [n.strip() for n in v if n.strip()]
-
-    @model_validator(mode="after")
-    def validate_unit(self) -> "CustomPayItemCreate":
-        if self.value_type == "Time":
-            pass   # service will set unit = 'Hour' automatically
-        elif not (self.unit and self.unit.strip()):
-            if self.value_type is None:
-                # Legacy API: unit was always required for rate-based items
-                raise ValueError("unit is required for rate-based items")
-            # value_type == 'Number': unit is optional (plain quantity, no unit label)
-        return self
-
-
-class CustomPayItemUpdate(BaseModel):
-    """
-    Partial update for a custom pay item (admin only).
-
-    Mutable fields: display_label, pay_item_name, category, unit, sort_order, notes.
-    Immutable fields (PayItemCode, RateBehavior) cannot be changed
-    after creation because they define the meaning of historical draft/final lines.
-    """
-    display_label: str | None = None
-    pay_item_name: str | None = None
-    category:      str | None = None
-    unit:          str | None = None
-    sort_order:    int | None = None
-    notes:         str | None = None
-
-    @field_validator("pay_item_name")
-    @classmethod
-    def name_non_empty(cls, v: str | None) -> str | None:
-        if v is not None:
-            v = v.strip()
-            if not v:
-                raise ValueError("pay_item_name must not be blank if provided")
-        return v
-
-    @field_validator("category")
-    @classmethod
-    def category_non_empty(cls, v: str | None) -> str | None:
-        if v is not None:
-            v = v.strip()
-            if not v:
-                raise ValueError("category must not be blank if provided")
-        return v
 
 
 class CustomPayItemUsage(BaseModel):
     """
-    Usage check result for smart delete.
+    Historical usage that retiring a custom pay item preserves.
 
-    can_physical_delete  : True when no meaningful lines exist, no driver rates exist,
-                            and the item is not an approved CDPI definition.
-    deletion_would_retire: True when meaningful or final lines exist, driver rates exist,
-                            or the item is an approved CDPI definition.
+    Retirement never removes data; these counts explain what history exists.
     """
-    pay_item_id:                    int
-    pay_item_code:                  str
-    has_meaningful_usage:           bool
-    has_final_lines:                bool
-    meaningful_draft_line_count:    int
-    final_line_count:               int
-    non_meaningful_draft_line_count: int
-    driver_rates_count:             int = 0
-    has_cdpi_definition:            bool = False
-    can_physical_delete:            bool
-    deletion_would_retire:          bool
+    pay_item_id:                 int
+    pay_item_code:               str
+    meaningful_draft_line_count: int
+    final_line_count:            int
+    driver_rates_count:          int = 0
 
 
-class CustomPayItemDeleteResult(BaseModel):
-    """
-    Result of the smart delete operation.
-
-    deletion_type : 'physical' — row removed from database
-                  | 'retired'  — row kept, Status set to 'Retired'
-    pay_item_id   : None when physically deleted (row no longer exists).
-    """
-    pay_item_id:         int | None = None
-    pay_item_code:       str
-    deletion_type:       str   # 'physical' | 'retired'
-    cleaned_draft_lines: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Custom Pay Item Requests (branch request / admin approval flow)
-# ---------------------------------------------------------------------------
-
-class CustomPayItemRequest(BaseModel):
-    """
-    A branch request for a new custom pay item — returned by request endpoints.
-    """
-    request_id:             int
-    company_id:             int
-    requesting_branch_id:   int
-    requesting_branch_name: str | None = None
-    requested_by_user_id:   int
-    requested_by:           str | None = None
-    requested_at_utc:       datetime
-    pay_item_code:          str
-    display_label:          str | None = None
-    pay_item_name:          str
-    rate_behavior:          str
-    category:               str
-    unit:                   str | None = None
-    notes:                  str | None = None
-    sort_order:             int
-    status:                 str   # PendingApproval | Approved | Rejected
-    decided_by_user_id:     int | None = None
-    decided_by:             str | None = None
-    decided_at_utc:         datetime | None = None
-    decision_reason:        str | None = None
-    approved_pay_item_id:   int | None = None
-
-
-class CustomPayItemRequestCreate(BaseModel):
-    """
-    Payload for a branch user submitting a new custom pay item request.
-    Requests describe Daily operational items only.
-    """
-    branch_id:     int
+class CustomPayItemRetireResult(BaseModel):
+    """Result of retiring a custom pay item (idempotent)."""
+    pay_item_id:   int
     pay_item_code: str
-    display_label: str | None = None
-    pay_item_name: str
-    category:      str
-    unit:          str | None = None
-    rate_behavior: str
-    sort_order:    int = 0
-    notes:         str | None = None
-
-    @field_validator("pay_item_code")
-    @classmethod
-    def code_non_empty(cls, v: str) -> str:
-        v = v.strip().upper()
-        if not v:
-            raise ValueError("pay_item_code must not be blank")
-        return v
-
-    @field_validator("pay_item_name")
-    @classmethod
-    def name_non_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("pay_item_name must not be blank")
-        return v
-
-    @field_validator("category")
-    @classmethod
-    def category_non_empty(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("category must not be blank")
-        return v
-
-    @field_validator("rate_behavior")
-    @classmethod
-    def behavior_valid(cls, v: str) -> str:
-        if v not in _DAILY_RATE_BEHAVIORS:
-            raise ValueError(
-                f"rate_behavior must be one of {sorted(_DAILY_RATE_BEHAVIORS)}"
-            )
-        return v
-
-    @model_validator(mode="after")
-    def validate_unit(self) -> "CustomPayItemRequestCreate":
-        if not (self.unit and self.unit.strip()):
-            raise ValueError("unit is required for rate-based items")
-        return self
-
-
-class CustomPayItemRequestDecide(BaseModel):
-    """
-    Admin decision on a pending custom pay item request.
-    decision       : 'Approved' | 'Rejected'
-    decision_reason: required for Rejected; strongly recommended for Approved.
-    """
-    decision:        str
-    decision_reason: str | None = None
-
-    @field_validator("decision")
-    @classmethod
-    def decision_valid(cls, v: str) -> str:
-        if v not in _DECISION_VALUES:
-            raise ValueError(f"decision must be one of {sorted(_DECISION_VALUES)}")
-        return v
-
-
-# ---------------------------------------------------------------------------
-# M13: PayItemRateTypeMap — assign a rate type to a custom PerUnit item
-# ---------------------------------------------------------------------------
-
-class PayItemRateTypeMapCreate(BaseModel):
-    """
-    Payload to assign (or replace) a rate type mapping for a custom PerUnit pay item.
-
-    The mapping tells the calculation engine which RateType to use when looking
-    up the driver's approved DriverRate for a given PayItem.  Required for
-    custom PerUnit items to produce a calculatedamount at draft-line entry time.
-    """
-    rate_type_id: int
-    is_primary: bool = True
-
-
-class PayItemRateTypeMapSummary(BaseModel):
-    """Result of POST /settings/pay-items/{id}/rate-type-map."""
-    pay_item_rate_type_map_id: int
-    pay_item_id: int
-    rate_type_id: int
-    rate_code: str
-    rate_name: str
-    is_primary: bool
-    status: str
+    status:        str   # always 'Retired'
 
 
 # ---------------------------------------------------------------------------

@@ -495,8 +495,10 @@ class TestCdpiPerUnitBackfill:
     async def _make_legacy_cdpi_item(self, db, *, company_id: int, branch_id: int,  # noqa: ARG002
                                       user_id: int, item_name: str) -> int:
         """
-        Insert a CDPI PerUnit PayItem that simulates a pre-PR-1B item:
-        RequiresRate=FALSE, no RateType, no PayItemRateTypeMap, no PayItemRateSlots.
+        INTENTIONALLY INCOMPLETE FIXTURE (no CDPI owner, no rate structure): a
+        company PerUnit PayItem with RequiresRate=FALSE, no RateType, no
+        PayItemRateTypeMap and no PayItemRateSlots, used to prove the CDPI pay
+        rates guards handle an item whose rate structure is missing.
         """
         import uuid as _uuid
         code = f"CDPI_LEGACY_{_uuid.uuid4().hex[:8].upper()}"
@@ -613,6 +615,7 @@ class TestCdpiPerUnitBackfill:
         import uuid as _uuid
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
 
+        # INTENTIONALLY INCOMPLETE FIXTURE: partial rate slots, no CDPI owner.
         code = f"CDPI_PS_{_uuid.uuid4().hex[:8].upper()}"
         pid = (await direct_db.execute(
             _text("""
@@ -702,6 +705,7 @@ class TestCdpiPerUnitBackfill:
         import uuid as _uuid
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
 
+        # INTENTIONALLY INCOMPLETE FIXTURE: partial rate map, no CDPI owner.
         code = f"CDPI_PM_{_uuid.uuid4().hex[:8].upper()}"
         pid = (await direct_db.execute(
             _text("""

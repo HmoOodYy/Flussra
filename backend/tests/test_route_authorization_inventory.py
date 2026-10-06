@@ -131,7 +131,6 @@ def test_inventory_records_match_tricky_route_authority():
         "GET /review/items/{item_id}": ("ANY_OF", ("payroll.view", "payroll.entry", "payroll.finalize", "review.decide")),
         "POST /review/items/{item_id}/decide": ("PERMISSION", ("review.decide",)),
         "PATCH /payroll/periods/{period_id}/status": ("SPECIAL_POLICY", ()),
-        "POST /settings/pay-item-requests": ("PERMISSION", ("payroll.entry",)),
     }
     for route, (mode, codes) in expected.items():
         item = ROUTE_AUTHORIZATION[route]

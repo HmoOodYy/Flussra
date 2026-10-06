@@ -822,7 +822,7 @@ class TestUpdateDraft:
 
 
 # ===========================================================================
-# No-legacy-write coverage
+# No approved-PayItem side effects
 # ===========================================================================
 
 @pytest.mark.asyncio
@@ -830,7 +830,7 @@ class TestNoLegacyWrites:
     """
     Create and update Draft requests must remain isolated from approved
     Pay Item infrastructure.  Each test verifies that a CDPI Draft CRUD
-    operation inserts zero rows into the listed legacy tables.
+    operation inserts zero rows into the listed approved-PayItem tables.
     """
 
     async def _counts(self, db) -> dict:
@@ -838,7 +838,6 @@ class TestNoLegacyWrites:
             ("payroll", "payitems"),
             ("payroll", "cdpidefinitions"),
             ("payroll", "branchpayitemconfig"),
-            ("payroll", "payitemsettings"),
             ("payroll", "ratetypes"),
             ("payroll", "payitemratetypemap"),
         ]
@@ -852,7 +851,7 @@ class TestNoLegacyWrites:
     async def test_create_draft_touches_no_legacy_tables(self, direct_db):
         """
         POST (create_draft) must not insert rows into PayItems,
-        CdpiDefinitions, BranchPayItemConfig, PayItemSettings,
+        CdpiDefinitions, BranchPayItemConfig,
         RateTypes, or PayItemRateTypeMap.
         """
         company_id, hq_id, _, admin_id = await _get_ids(direct_db)
@@ -871,7 +870,7 @@ class TestNoLegacyWrites:
     async def test_update_draft_touches_no_legacy_tables(self, direct_db):
         """
         PATCH (update_draft) must not insert rows into PayItems,
-        CdpiDefinitions, BranchPayItemConfig, PayItemSettings,
+        CdpiDefinitions, BranchPayItemConfig,
         RateTypes, or PayItemRateTypeMap.
         """
         company_id, hq_id, _, admin_id = await _get_ids(direct_db)

@@ -671,7 +671,7 @@ class TestUpdateBranchCdpiItem:
           - PATCH returns 404
           - Item is excluded from list results
           - Zero writes across all guarded tables (BranchPayItemConfig, CdpiDefinitions,
-            CdpiRequests, CdpiRequestEvents, PayItemSettings, RateTypes, PayItemRateTypeMap)
+            CdpiRequests, CdpiRequestEvents, RateTypes, PayItemRateTypeMap)
         """
         cid, hq_id, _, admin_id = await _get_ids(direct_db)
 
@@ -701,7 +701,6 @@ class TestUpdateBranchCdpiItem:
             before = {
                 "branchpayitemconfig": await _count("payroll.branchpayitemconfig", "payitemid", non_cdpi_pid),
                 "cdpidefinitions":      await _count("payroll.cdpidefinitions",      "payitemid", non_cdpi_pid),
-                "payitemsettings":      await _count("payroll.payitemsettings",      "payitemid", non_cdpi_pid),
                 "payitemratetypemap":   await _count("payroll.payitemratetypemap",   "payitemid", non_cdpi_pid),
                 # ratetypes links via payitemratetypemap; count entries in that map for this item.
                 "ratetypes_via_map": (await direct_db.execute(
@@ -740,7 +739,6 @@ class TestUpdateBranchCdpiItem:
             after = {
                 "branchpayitemconfig": await _count("payroll.branchpayitemconfig", "payitemid", non_cdpi_pid),
                 "cdpidefinitions":      await _count("payroll.cdpidefinitions",      "payitemid", non_cdpi_pid),
-                "payitemsettings":      await _count("payroll.payitemsettings",      "payitemid", non_cdpi_pid),
                 "payitemratetypemap":   await _count("payroll.payitemratetypemap",   "payitemid", non_cdpi_pid),
                 "ratetypes_via_map": (await direct_db.execute(
                     _text("""

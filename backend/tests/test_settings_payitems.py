@@ -871,13 +871,13 @@ class TestMissingPayItemConfigs:
 
 
 # ===========================================================================
-# TestPayItemDeleteSafety — Phase 3D fix: DriverRates must prevent physical delete
+# TestPayItemDeleteSafety — retirement preserves DriverRates and reports usage
 # ===========================================================================
 
 class TestPayItemDeleteSafety:
     """
     Verify that _compute_usage counts DriverRates, and that delete_custom_pay_item
-    retires (rather than physically deletes) items with associated driver rates.
+    retires items and preserves their associated driver rates.
 
     Uses direct_db for inserting DriverRates to bypass the branch-activation
     check in create_rate (which would require complex branch setup for each test).
@@ -900,9 +900,9 @@ class TestPayItemDeleteSafety:
         import random
         import string
 
-        from tests.seed_helpers import seed_legacy_item_with_rate_structure
+        from tests.seed_helpers import seed_cdpi_item_with_rate_structure
         actual_code = code or "DS_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        result = await seed_legacy_item_with_rate_structure(
+        result = await seed_cdpi_item_with_rate_structure(
             db_conn,
             code=actual_code,
             name=name,
@@ -916,61 +916,18 @@ class TestPayItemDeleteSafety:
         }
 
     # -------------------------------------------------------------------------
-    # Helper: assign a rate type to the custom item
+    # Helper: map a rate type to the custom item
     # -------------------------------------------------------------------------
 
     async def _assign_rate_type(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        item_id: int,
-        rate_type_id: int,
-    ) -> int:
-        """POST /settings/pay-items/{id}/rate-type-map. Returns the mapping ID."""
-        resp = await client.post(
-            f"/settings/pay-items/{item_id}/rate-type-map",
-            json={"rate_type_id": rate_type_id},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 201, resp.text
-        return resp.json()["pay_item_rate_type_map_id"]
+        self, db_conn, item_id: int, rate_type_id: int,
+    ) -> None:
+        """Map a rate type to the item (the structure CDPI creation produces)."""
+        from tests.seed_helpers import map_rate_type_to_item
+        await map_rate_type_to_item(db_conn, item_id=item_id, rate_type_id=rate_type_id)
 
     # -------------------------------------------------------------------------
-    # Test 1: item with no usage is physically deleted
-    # -------------------------------------------------------------------------
-
-    async def test_custom_item_with_no_usage_physically_deletes(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        db_conn,
-    ):
-        """A custom item with no draft lines, final lines, or driver rates → physical delete."""
-        item = await self._create_custom_item(
-            db_conn, name="No-Usage Delete Test"
-        )
-        item_id = item["pay_item_id"]
-
-        resp = await client.delete(
-            f"/settings/pay-items/{item_id}",
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["deletion_type"] == "physical", (
-            f"Expected physical delete but got: {body['deletion_type']}"
-        )
-        assert body["pay_item_id"] is None  # physically removed
-
-        # Subsequent GET must return 404
-        get_resp = await client.get(
-            f"/settings/pay-items/{item_id}",
-            headers=auth(auth_token),
-        )
-        assert get_resp.status_code == 404
-
-    # -------------------------------------------------------------------------
-    # Test 2: item WITH driver rates is retired, not physically deleted
+    # Test 2: item WITH driver rates is retired and the rates are preserved
     # -------------------------------------------------------------------------
 
     async def test_custom_item_with_driver_rates_retires_not_deletes(
@@ -988,7 +945,7 @@ class TestPayItemDeleteSafety:
 
         Given a custom pay item with a PayItemRateTypeMap entry and at least one
         DriverRate row that references the mapped rate type, DELETE must retire
-        (not physically delete) the item — preserving the DriverRate record.
+        the item — preserving the DriverRate record.
         """
         from sqlalchemy import text as _text
 
@@ -997,8 +954,8 @@ class TestPayItemDeleteSafety:
         )
         item_id = item["pay_item_id"]
 
-        # Map this custom item to the HOURLY rate type (legacy endpoint still works for existing items)
-        await self._assign_rate_type(client, auth_token, item_id, paytest_rate_type_id)
+        # Map this custom item to the HOURLY rate type
+        await self._assign_rate_type(db_conn, item_id, paytest_rate_type_id)
 
         # Insert a DriverRate directly (bypasses branch-activation check which would
         # require complex branch/item activation setup not relevant to this test).
@@ -1027,10 +984,7 @@ class TestPayItemDeleteSafety:
             )
             assert del_resp.status_code == 200, del_resp.text
             body = del_resp.json()
-            assert body["deletion_type"] == "retired", (
-                f"Expected retire but got physical delete. "
-                f"DriverRates were not counted by _compute_usage. Body: {body}"
-            )
+            assert body["status"] == "Retired"
             assert body["pay_item_id"] == item_id  # still exists in DB
 
             # Subsequent GET must return the item with status Retired
@@ -1089,11 +1043,9 @@ class TestPayItemDeleteSafety:
             )
         ).json()
         assert usage_before["driver_rates_count"] == 0
-        assert usage_before["can_physical_delete"] is True
-        assert usage_before["deletion_would_retire"] is False
 
         # Map item → rate type
-        await self._assign_rate_type(client, auth_token, item_id, paytest_rate_type_id)
+        await self._assign_rate_type(db_conn, item_id, paytest_rate_type_id)
 
         # Insert a DriverRate
         insert_result = await direct_db.execute(
@@ -1120,15 +1072,13 @@ class TestPayItemDeleteSafety:
                 )
             ).json()
             assert usage_after["driver_rates_count"] >= 1
-            assert usage_after["can_physical_delete"] is False
-            assert usage_after["deletion_would_retire"] is True
 
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.driverrates WHERE driverrateid = :id"),
                 {"id": driver_rate_id},
             )
-            # Physical delete the pay item (now that driver rate is removed)
+            # Retire the item so it leaves the active catalog
             await client.delete(
                 f"/settings/pay-items/{item_id}",
                 headers=auth(auth_token),
@@ -1179,7 +1129,7 @@ class TestPayItemDeleteSafety:
         """
         Historical preservation: after a pay item is retired, any DriverRate rows
         linked via PayItemRateTypeMap must remain intact in the database.
-        Physical delete of the item must NOT cascade to DriverRates.
+        Retirement must NOT cascade to DriverRates.
         """
         from sqlalchemy import text as _text
 
@@ -1187,7 +1137,7 @@ class TestPayItemDeleteSafety:
             db_conn, name="Preservation Test"
         )
         item_id = item["pay_item_id"]
-        await self._assign_rate_type(client, auth_token, item_id, paytest_rate_type_id)
+        await self._assign_rate_type(db_conn, item_id, paytest_rate_type_id)
 
         # Insert two DriverRate rows
         rate_ids = []
@@ -1215,7 +1165,7 @@ class TestPayItemDeleteSafety:
                 headers=auth(auth_token),
             )
             assert del_resp.status_code == 200
-            assert del_resp.json()["deletion_type"] == "retired"
+            assert del_resp.json()["status"] == "Retired"
 
             # Both DriverRate rows must still exist
             for rid in rate_ids:

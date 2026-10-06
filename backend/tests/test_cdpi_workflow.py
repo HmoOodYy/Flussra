@@ -181,7 +181,6 @@ async def _legacy_counts(db) -> dict:
         ("payroll", "payitems"),
         ("payroll", "cdpidefinitions"),
         ("payroll", "branchpayitemconfig"),
-        ("payroll", "payitemsettings"),
         ("payroll", "ratetypes"),
         ("payroll", "payitemratetypemap"),
     ]
@@ -548,7 +547,7 @@ class TestSubmitDraft:
                 await _cleanup_requests(direct_db, draft.request_id)
 
     async def test_submit_creates_no_legacy_rows(self, direct_db):
-        """Submit must not touch PayItems, CdpiDefinitions, or any legacy table."""
+        """Submit must not touch PayItems, CdpiDefinitions, or the rate structure tables."""
         company_id, hq_id, _, admin_id = await _get_ids(direct_db)
         draft = await _create_complete_draft(direct_db, company_id, hq_id, admin_id)
         before = await _legacy_counts(direct_db)
@@ -983,7 +982,7 @@ class TestCopyRejected:
             await _cleanup_role(direct_db, role_id)
 
     async def test_copy_creates_no_legacy_rows(self, direct_db):
-        """Copy must not touch PayItems, CdpiDefinitions, or any legacy table."""
+        """Copy must not touch PayItems, CdpiDefinitions, or the rate structure tables."""
         company_id, hq_id, _, admin_id = await _get_ids(direct_db)
         original = await self._reject_request(direct_db, company_id, admin_id, hq_id)
         before = await _legacy_counts(direct_db)

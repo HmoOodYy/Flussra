@@ -212,21 +212,15 @@ export interface PayItemOrderUpdate {
 export interface CustomPayItemUsage {
   pay_item_id: number;
   pay_item_code: string;
-  has_meaningful_usage: boolean;
-  has_final_lines: boolean;
   meaningful_draft_line_count: number;
   final_line_count: number;
-  non_meaningful_draft_line_count: number;
-  has_cdpi_definition: boolean;
-  can_physical_delete: boolean;
-  deletion_would_retire: boolean;
+  driver_rates_count: number;
 }
 
-export interface CustomPayItemDeleteResult {
-  pay_item_id: number | null;          // null when physically deleted
+export interface CustomPayItemRetireResult {
+  pay_item_id: number;
   pay_item_code: string;
-  deletion_type: 'physical' | 'retired';
-  cleaned_draft_lines: number;
+  status: 'Retired';
 }
 
 // ─── CDPI (Custom Daily Pay Item) ─────────────────────────────────────────────
