@@ -123,7 +123,7 @@ def _packet(db) -> _LiveCalculationPacket:
     )
     total = _CalculationPacketDriverTotal(
         driver_id=db.driver_id, driver_code="CP4F", driver_name="CP4F Driver",
-        daily_pay=Decimal("25.0000"), status_pay=Decimal("0"), period_pay=Decimal("0"),
+        daily_pay=Decimal("25.0000"), status_pay=Decimal("0"),
         minimum_adjustment=Decimal("0"), maximum_adjustment=Decimal("0"), bonus_total=Decimal("0"),
         expected_pay=Decimal("25.0000"), needs_manager_review=False, blockers=[], lines=[line],
     )
@@ -138,20 +138,19 @@ def _all_line_types_packet(db) -> _LiveCalculationPacket:
     lines = [
         _CalculationPacketLine("DraftLine", str(db.line_id), "DailyNote", "Daily", date(2089, 1, 1), db.driver_id, Decimal("1"), None, Decimal("25"), False, None, source_evidence={"DraftLineID": db.line_id}),
         _CalculationPacketLine("StatusEntryState", "501", "STATUS_PAY", "Daily", date(2089, 1, 2), db.driver_id, Decimal("3"), Decimal("6"), Decimal("18"), False, None, source_evidence={"StatusKeyID": 101}),
-        _CalculationPacketLine("Manual", "period-pay:701", "Adjustment", "Period", None, db.driver_id, None, None, Decimal("10"), False, None, source_evidence={"EnteredAmount": Decimal("10")}),
         _CalculationPacketLine("System", "801", "SYS_MIN_TOPUP", "Period", None, db.driver_id, Decimal("1"), None, Decimal("2"), False, None, source_evidence={"DriverPayRuleID": db.minimum_rule_id}),
         _CalculationPacketLine("System", "802", "SYS_MAX_CAP", "Period", None, db.driver_id, Decimal("1"), None, Decimal("-1"), False, None, source_evidence={"DriverPayRuleID": db.maximum_rule_id}),
         _CalculationPacketLine("BonusEvent", "901", "BONUS", "Period", None, db.driver_id, None, None, Decimal("5"), False, None, source_evidence={"PayrollBonusEventID": 901, "Status": "Active"}),
     ]
     total = _CalculationPacketDriverTotal(
         driver_id=db.driver_id, driver_code="CP4F", driver_name="CP4F Driver",
-        daily_pay=Decimal("25"), status_pay=Decimal("18"), period_pay=Decimal("10"),
+        daily_pay=Decimal("25"), status_pay=Decimal("18"),
         minimum_adjustment=Decimal("2"), maximum_adjustment=Decimal("-1"), bonus_total=Decimal("5"),
-        expected_pay=Decimal("59"), needs_manager_review=False, blockers=[], lines=lines,
+        expected_pay=Decimal("49"), needs_manager_review=False, blockers=[], lines=lines,
     )
     return _LiveCalculationPacket(
         payroll_period_id=db.period_id, company_id=db.company_id, branch_id=db.branch_id,
-        status="Open", blockers=[], warnings=[], drivers=[total], total_expected_pay=Decimal("59"),
+        status="Open", blockers=[], warnings=[], drivers=[total], total_expected_pay=Decimal("49"),
     )
 
 
@@ -223,6 +222,22 @@ async def test_finalize_projects_exact_approved_snapshot_and_audits_provenance(c
         ORDER BY auditid DESC LIMIT 1
     """), {"period_id": str(cp4f_db.period_id)})).scalar_one()
     assert json.loads(audit)["approved_review_item_id"] == review_id
+
+
+@pytest.mark.asyncio
+async def test_finalization_fails_closed_on_unsupported_calculation_version(
+    cp4f_db, no_access_checks, monkeypatch,
+):
+    from app.payroll import snapshot_hash
+
+    await _approved_snapshot(cp4f_db)
+    # The persisted v1 packet is no longer a supported contract for this code.
+    monkeypatch.setattr(snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v2")
+    with pytest.raises(HTTPException, match="UNSUPPORTED_CALCULATION_VERSION"):
+        await finalize_period(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
+    assert (await cp4f_db.conn.execute(text(
+        "SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid=:id"
+    ), {"id": cp4f_db.period_id})).scalar_one() == 0
 
 
 @pytest.mark.asyncio
@@ -323,7 +338,7 @@ async def test_projection_failure_rolls_back_locked_transition(cp4f_db, no_acces
 async def test_projection_preserves_all_snapshot_line_classes_and_never_invents_draft_ids(cp4f_db, no_access_checks):
     _, snapshot_id = await _approved_snapshot(cp4f_db, _all_line_types_packet(cp4f_db))
     preview = await get_finalization_preview(cp4f_db.period_id, cp4f_db.company_id, cp4f_db.user_id, cp4f_db.conn)
-    assert preview.total_final_gross == Decimal("59.0000")
+    assert preview.total_final_gross == Decimal("49.0000")
     status_preview = next(line for line in preview.lines if line.line_type == "STATUS_PAY")
     system_preview = next(line for line in preview.lines if line.line_type == "SYS_MIN_TOPUP")
     assert status_preview.draft_line_id is None
@@ -334,10 +349,10 @@ async def test_projection_preserves_all_snapshot_line_classes_and_never_invents_
         SELECT linetype, draftlineid, finalamount, sourcetype, sourcesnapshot
         FROM payroll.payrollfinallines WHERE payrollperiodid = :period_id ORDER BY linetype
     """), {"period_id": cp4f_db.period_id})).mappings().all()
-    assert {row["linetype"] for row in lines} == {"DailyNote", "STATUS_PAY", "Adjustment", "BONUS", "SYS_MIN_TOPUP", "SYS_MAX_CAP"}
+    assert {row["linetype"] for row in lines} == {"DailyNote", "STATUS_PAY", "BONUS", "SYS_MIN_TOPUP", "SYS_MAX_CAP"}
     assert next(row for row in lines if row["linetype"] == "STATUS_PAY")["draftlineid"] is None
     assert next(row for row in lines if row["linetype"] == "SYS_MIN_TOPUP")["draftlineid"] is None
-    assert sum((Decimal(str(row["finalamount"])) for row in lines), Decimal("0")) == Decimal("59.0000")
+    assert sum((Decimal(str(row["finalamount"])) for row in lines), Decimal("0")) == Decimal("49.0000")
     assert all(row["sourcesnapshot"]["payroll_calculation_snapshot_id"] == snapshot_id for row in lines)
 
 

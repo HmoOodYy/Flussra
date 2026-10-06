@@ -234,7 +234,6 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                           <th>Driver</th>
                           <th className={styles.right}>Daily</th>
                           <th className={styles.right}>Status</th>
-                          <th className={styles.right}>Period</th>
                           <th className={styles.right}>Min</th>
                           <th className={styles.right}>Max</th>
                           <th className={styles.right}>Bonus</th>
@@ -247,7 +246,6 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                             <td>{driver.driver_name_snapshot ?? driver.driver_code_snapshot ?? `Driver ${driver.driver_id}`}</td>
                             <td className={styles.right}>{formatMoney(driver.daily_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                             <td className={styles.right}>{formatMoney(driver.status_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
-                            <td className={styles.right}>{formatMoney(driver.period_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                             <td className={styles.right}>{formatMoney(driver.minimum_adjustment, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                             <td className={styles.right}>{formatMoney(driver.maximum_adjustment, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                             <td className={styles.right}>{formatMoney(driver.bonus_total, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>

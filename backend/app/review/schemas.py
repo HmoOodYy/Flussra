@@ -83,7 +83,6 @@ class ReviewPayrollSnapshotDriverTotal(BaseModel):
     driver_name_snapshot: str | None = None
     daily_pay: Decimal
     status_pay: Decimal
-    period_pay: Decimal
     minimum_adjustment: Decimal
     maximum_adjustment: Decimal
     bonus_total: Decimal

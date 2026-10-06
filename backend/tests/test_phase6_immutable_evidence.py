@@ -235,7 +235,6 @@ def _rate_packet(db: SimpleNamespace, rate_amount: Decimal) -> _LiveCalculationP
         driver_name="Phase 6 Evidence Driver",
         daily_pay=daily_pay,
         status_pay=Decimal("0"),
-        period_pay=Decimal("0"),
         minimum_adjustment=Decimal("5.0000"),
         maximum_adjustment=Decimal("0"),
         bonus_total=Decimal("0"),

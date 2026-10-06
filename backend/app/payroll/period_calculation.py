@@ -624,7 +624,6 @@ class _CalculationPacketDriverTotal:
     driver_name: str | None
     daily_pay: Decimal
     status_pay: Decimal
-    period_pay: Decimal
     minimum_adjustment: Decimal
     maximum_adjustment: Decimal
     bonus_total: Decimal
@@ -1204,10 +1203,7 @@ async def _build_live_calculation_packet(
     for drv_id in sorted(all_driver_ids):
         daily = driver_daily.get(drv_id, Decimal("0"))
         status_pay = driver_status.get(drv_id, Decimal("0"))
-        # No source feeds the legacy period_pay bucket any more; the field
-        # stays in the frozen v1 packet contract until G0.4C replaces it.
-        period_pay = Decimal("0")
-        normal_base = daily + status_pay + period_pay
+        normal_base = daily + status_pay
         min_adj = driver_min_adj.get(drv_id, Decimal("0"))
         max_adj = driver_max_adj.get(drv_id, Decimal("0"))
         bonus = driver_bonus.get(drv_id, Decimal("0"))
@@ -1270,7 +1266,6 @@ async def _build_live_calculation_packet(
             driver_name=driver_names.get(drv_id),
             daily_pay=daily,
             status_pay=status_pay,
-            period_pay=period_pay,
             minimum_adjustment=min_adj,
             maximum_adjustment=max_adj,
             bonus_total=bonus,
@@ -1348,8 +1343,7 @@ async def get_calculation_preview(
                 driver_name=driver.driver_name,
                 daily_pay=driver.daily_pay,
                 status_pay=driver.status_pay,
-                period_pay=driver.period_pay,
-                normal_base=driver.daily_pay + driver.status_pay + driver.period_pay,
+                normal_base=driver.daily_pay + driver.status_pay,
                 minimum_adjustment=driver.minimum_adjustment,
                 maximum_adjustment=driver.maximum_adjustment,
                 bonus_total=driver.bonus_total,
@@ -1391,7 +1385,6 @@ def _packet_driver_totals_for_hash(
             "DriverNameSnapshot": driver.driver_name,
             "DailyPay": driver.daily_pay,
             "StatusPay": driver.status_pay,
-            "PeriodPay": driver.period_pay,
             "MinimumAdjustment": driver.minimum_adjustment,
             "MaximumAdjustment": driver.maximum_adjustment,
             "BonusTotal": driver.bonus_total,
@@ -1619,11 +1612,11 @@ async def _capture_calculation_snapshot(
                 INSERT INTO payroll.payrollcalculationdrivertotals
                     (payrollcalculationsnapshotid, companyid, branchid, driverid,
                      drivercodesnapshot, drivernamesnapshot, dailypay, statuspay,
-                     periodpay, minimumadjustment, maximumadjustment, bonustotal,
+                     minimumadjustment, maximumadjustment, bonustotal,
                      expectedpay)
                 VALUES
                     (:snapshot_id, :cid, :bid, :driver_id, :driver_code, :driver_name,
-                     :daily, :status, :period, :minimum, :maximum, :bonus, :expected)
+                     :daily, :status, :minimum, :maximum, :bonus, :expected)
                 RETURNING payrollcalculationdrivertotalid
             """),
             {
@@ -1635,7 +1628,6 @@ async def _capture_calculation_snapshot(
                 "driver_name": driver.driver_name,
                 "daily": driver.daily_pay,
                 "status": driver.status_pay,
-                "period": driver.period_pay,
                 "minimum": driver.minimum_adjustment,
                 "maximum": driver.maximum_adjustment,
                 "bonus": driver.bonus_total,

@@ -125,7 +125,7 @@ async def _snapshot(db, period_id: int, amount: Decimal) -> int:
     )
     total = _CalculationPacketDriverTotal(
         driver_id=db.driver_id, driver_code="RP1", driver_name="RP1 Driver",
-        daily_pay=amount, status_pay=Decimal("0"), period_pay=Decimal("0"),
+        daily_pay=amount, status_pay=Decimal("0"),
         minimum_adjustment=Decimal("0"), maximum_adjustment=Decimal("0"), bonus_total=Decimal("0"),
         expected_pay=amount, needs_manager_review=False, blockers=[], lines=[line],
     )

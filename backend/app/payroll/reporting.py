@@ -10,6 +10,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import frozen_currency
+from app.payroll.snapshot_hash import (
+    UnsupportedCalculationVersionError,
+    require_supported_calculation_version,
+)
 
 
 class ReportAuthorityKind(StrEnum):
@@ -89,7 +93,7 @@ async def _resolve_review_snapshot_authority(
 
     snapshot = (await db.execute(text("""
         SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-               revisionnumber, snapshothash, createdatutc, currencycode, currencyminorunitdigits
+               revisionnumber, calculationversion, snapshothash, createdatutc, currencycode, currencyminorunitdigits
         FROM payroll.payrollcalculationsnapshots
         WHERE payrollcalculationsnapshotid = :snapshot_id
     """), {"snapshot_id": snapshot_id})).mappings().first()
@@ -98,6 +102,10 @@ async def _resolve_review_snapshot_authority(
             "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
             "the PeriodApproval review item references an unavailable calculation snapshot.",
         )
+    try:
+        require_supported_calculation_version(snapshot["calculationversion"])
+    except UnsupportedCalculationVersionError as exc:
+        raise _authority_error("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
     if (
         int(snapshot["companyid"]) != company_id
         or int(snapshot["branchid"]) != branch_id

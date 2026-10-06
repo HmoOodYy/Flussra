@@ -210,7 +210,6 @@ function PaySection({ driver, code, digits }: { driver: ReportDriver; code: stri
   const fields: readonly [string, string][] = [
     ['Daily pay', pay.daily_pay],
     ['Status pay', pay.status_pay],
-    ['Period pay', pay.period_pay],
     ['Minimum adjustment', pay.minimum_adjustment],
     ['Maximum adjustment', pay.maximum_adjustment],
     ['Bonus total', pay.bonus_total],

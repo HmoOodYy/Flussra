@@ -60,7 +60,6 @@ function DriverTotals({ drivers, code, digits }: { drivers: CalculationPreviewDr
             <th>Driver</th>
             <th className={styles.numeric}>Daily</th>
             <th className={styles.numeric}>Status</th>
-            <th className={styles.numeric}>Period</th>
             <th className={styles.numeric}>Min</th>
             <th className={styles.numeric}>Max</th>
             <th className={styles.numeric}>Bonus</th>
@@ -74,7 +73,6 @@ function DriverTotals({ drivers, code, digits }: { drivers: CalculationPreviewDr
               <td>{driver.driver_name ?? `Driver #${driver.driver_id}`}</td>
               <td className={styles.numeric}>{formatMoney(driver.daily_pay, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.status_pay, code, digits)}</td>
-              <td className={styles.numeric}>{formatMoney(driver.period_pay, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.minimum_adjustment, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.maximum_adjustment, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.bonus_total, code, digits)}</td>

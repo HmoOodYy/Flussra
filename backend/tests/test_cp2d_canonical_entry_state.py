@@ -1234,7 +1234,7 @@ class TestCp2dCanonicalEntryState:
                     INSERT INTO payroll.payrollcalculationsnapshots
                         (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
                          sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0, 'USD', 2)
+                    VALUES (:cid, :bid, :pid, 1, 'payroll-calculation-v1', :source_hash, :snapshot_hash, 1, 0, 'USD', 2)
                     RETURNING payrollcalculationsnapshotid
                 """),
                 {
@@ -1315,7 +1315,7 @@ class TestCp2dCanonicalEntryState:
                         (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
                          sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
                          reportevidenceversion, reportevidencehash, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, 1, 0,
+                    VALUES (:cid, :bid, :pid, 1, 'payroll-calculation-v1', :source_hash, :snapshot_hash, 1, 0,
                             1, :evidence_hash, 'USD', 2)
                     RETURNING payrollcalculationsnapshotid
                 """),

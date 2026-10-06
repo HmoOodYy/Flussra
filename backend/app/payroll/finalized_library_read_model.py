@@ -20,6 +20,10 @@ from app.core.service import (
 )
 from app.payroll import report_read_model, status_evidence
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
+from app.payroll.snapshot_hash import (
+    UnsupportedCalculationVersionError,
+    require_supported_calculation_version,
+)
 
 _REPORT_TYPES = {"drivers", "period-work", "period-pay", "mixed"}
 _FINALIZED_STATUSES = {"Locked", "Archived"}
@@ -297,7 +301,7 @@ async def _originating_snapshot(
     except (TypeError, ValueError):
         return None, _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
     snapshot = (await db.execute(text("""
-        SELECT payrollcalculationsnapshotid, revisionnumber, snapshothash, sourceconfighash,
+        SELECT payrollcalculationsnapshotid, revisionnumber, calculationversion, snapshothash, sourceconfighash,
                currencycode, currencyminorunitdigits, reportevidenceversion, reportevidencehash
         FROM payroll.payrollcalculationsnapshots
         WHERE payrollcalculationsnapshotid = :snapshot_id
@@ -311,6 +315,10 @@ async def _originating_snapshot(
         or str(snapshot["snapshothash"]) != str(source["snapshot_hash"])
     ):
         return None, _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
+    try:
+        require_supported_calculation_version(snapshot["calculationversion"])
+    except UnsupportedCalculationVersionError as exc:
+        raise _unavailable("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
     return dict(snapshot), _availability("AVAILABLE")
 
 
@@ -349,7 +357,7 @@ async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[lis
         "branch_id": period["branchid"],
     })).mappings().all()
     totals: dict[int, dict[str, Any]] = defaultdict(lambda: {
-        "daily_pay": Decimal("0"), "status_pay": Decimal("0"), "period_pay": Decimal("0"),
+        "daily_pay": Decimal("0"), "status_pay": Decimal("0"),
         "minimum_adjustment": Decimal("0"), "maximum_adjustment": Decimal("0"),
         "bonus_total": Decimal("0"), "total_pay": Decimal("0"),
     })
@@ -359,18 +367,7 @@ async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[lis
         amount = Decimal(str(row["finalamount"]))
         total = totals[driver_id]
         total["total_pay"] += amount
-        if row["linetype"] == "SYS_MIN_TOPUP":
-            total["minimum_adjustment"] += amount
-        elif row["linetype"] == "SYS_MAX_CAP":
-            total["maximum_adjustment"] += amount
-        elif row["sourcetype"] == "BonusEvent":
-            total["bonus_total"] += amount
-        elif row["sourcetype"] in {"StatusEntryState", "Status"}:
-            total["status_pay"] += amount
-        elif row["linescope"] == "Daily":
-            total["daily_pay"] += amount
-        else:
-            total["period_pay"] += amount
+        total[report_read_model.classify_final_line_component(row)] += amount
         lines.append({
             "driver_id": driver_id, "source_type": row["sourcetype"],
             "source_id": row["sourceid"], "line_type": row["linetype"],
@@ -618,14 +615,14 @@ def _work_totals(work_rows: list[dict[str, Any]]) -> dict[str, Decimal]:
 
 def _pay_totals(totals: dict[int, dict[str, Any]]) -> dict[str, Decimal]:
     names = (
-        "daily_pay", "status_pay", "period_pay", "minimum_adjustment",
+        "daily_pay", "status_pay", "minimum_adjustment",
         "maximum_adjustment", "bonus_total", "total_pay",
     )
     pay_totals = {
         name: sum((Decimal(str(total[name])) for total in totals.values()), Decimal("0"))
         for name in names
     }
-    pay_totals["gross_pay"] = pay_totals["daily_pay"] + pay_totals["status_pay"] + pay_totals["period_pay"]
+    pay_totals["gross_pay"] = pay_totals["daily_pay"] + pay_totals["status_pay"]
     return pay_totals
 
 
@@ -749,7 +746,7 @@ async def build_finalized_report(
         pay = None
         if total is not None:
             item_amounts = per_driver_pay_items.get(driver_id, {})
-            gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"])) + Decimal(str(total["period_pay"]))
+            gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
                 **total,
                 "gross_pay": gross_pay,

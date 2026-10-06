@@ -465,7 +465,6 @@ export interface FinalizationPreviewDriverTotal {
   driver_name: string | null;
   daily_pay: string;
   status_pay: string;
-  period_pay: string;
   gross_pay: string;
   sys_adjustment: string;
   bonus_total: string;
@@ -549,7 +548,6 @@ export interface PayItemAmount {
 export interface ReportPaySection {
   daily_pay: string;
   status_pay: string;
-  period_pay: string;
   minimum_adjustment: string;
   maximum_adjustment: string;
   bonus_total: string;
@@ -885,7 +883,6 @@ export interface CalculationPreviewDriver {
   driver_name: string | null;
   daily_pay: string;
   status_pay: string;
-  period_pay: string;
   normal_base: string;
   minimum_adjustment: string;
   maximum_adjustment: string;

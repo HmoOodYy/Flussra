@@ -119,7 +119,7 @@ def _packet(db) -> _LiveCalculationPacket:
     )
     driver = _CalculationPacketDriverTotal(
         driver_id=db.driver_id, driver_code="CP4E", driver_name="CP4E Driver",
-        daily_pay=Decimal("25.0000"), status_pay=Decimal("0"), period_pay=Decimal("0"),
+        daily_pay=Decimal("25.0000"), status_pay=Decimal("0"),
         minimum_adjustment=Decimal("0"), maximum_adjustment=Decimal("0"), bonus_total=Decimal("0"),
         expected_pay=Decimal("25.0000"), needs_manager_review=False, blockers=[], lines=[line],
     )

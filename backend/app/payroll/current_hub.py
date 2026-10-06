@@ -173,7 +173,7 @@ async def _period_metrics(
               AND dl.workdate <= :period_end
               AND dl.quantity IS NOT NULL
               AND dl.quantity <> 0
-              AND dl.sourcetype NOT IN ('System', 'BonusEvent')
+              AND dl.sourcetype <> 'System'
               AND dl.linetype NOT IN ({', '.join(repr(code) for code in _NON_WORK_DAILY_LINE_TYPES)})
               AND COALESCE(pppi.itemscope, pi.itemscope) = 'Daily'
               AND COALESCE(pppi.appearsinpayrollentry, pi.appearsinpayrollentry, FALSE) = TRUE
@@ -209,7 +209,7 @@ async def _period_metrics(
 
 def _financial_summary(packet) -> CurrentPayrollHubFinancialSummary:
     normal_pay = sum(
-        (driver.daily_pay + driver.status_pay + driver.period_pay for driver in packet.drivers),
+        (driver.daily_pay + driver.status_pay for driver in packet.drivers),
         Decimal("0"),
     )
     bonus_total = sum((driver.bonus_total for driver in packet.drivers), Decimal("0"))

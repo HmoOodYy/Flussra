@@ -241,7 +241,7 @@ async def _seed_submitted_snapshot(
         payroll_period_id=period_id, company_id=1, branch_id=branch_id, status="Open", blockers=[], warnings=[],
         drivers=[_CalculationPacketDriverTotal(
             driver_id=driver_id, driver_code="CP5C", driver_name="CP5C Frozen Driver",
-            daily_pay=Decimal("16"), status_pay=Decimal("0"), period_pay=Decimal("0"),
+            daily_pay=Decimal("16"), status_pay=Decimal("0"),
             minimum_adjustment=minimum_adjustment, maximum_adjustment=maximum_adjustment, bonus_total=bonus_total,
             expected_pay=Decimal("16") + bonus_total + minimum_adjustment + maximum_adjustment,
             needs_manager_review=False, blockers=[], lines=lines,
@@ -296,17 +296,17 @@ async def _seed_legacy_snapshot(direct_db, branch_id: int, driver_id: int) -> tu
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
              sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
-        VALUES (1, :branch_id, :period_id, 1, 'legacy-cp5c', :source_hash, :snapshot_hash, 1, 16.0000, 'USD', 2)
+        VALUES (1, :branch_id, :period_id, 1, 'payroll-calculation-v1', :source_hash, :snapshot_hash, 1, 16.0000, 'USD', 2)
         RETURNING payrollcalculationsnapshotid
     """), {"branch_id": branch_id, "period_id": period_id,
            "source_hash": "0" * 64, "snapshot_hash": "1" * 64})).scalar_one()
     total_id = (await direct_db.execute(text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
             (payrollcalculationsnapshotid, companyid, branchid, driverid, drivercodesnapshot,
-             drivernamesnapshot, dailypay, statuspay, periodpay, minimumadjustment,
+             drivernamesnapshot, dailypay, statuspay, minimumadjustment,
              maximumadjustment, bonustotal, expectedpay)
         VALUES (:snapshot_id, 1, :branch_id, :driver_id, 'LEGACY', 'Legacy Driver',
-                16.0000, 0, 0, 0, 0, 0, 16.0000)
+                16.0000, 0, 0, 0, 0, 16.0000)
         RETURNING payrollcalculationdrivertotalid
     """), {"snapshot_id": snapshot_id, "branch_id": branch_id, "driver_id": driver_id})).scalar_one()
     await direct_db.execute(text("""
@@ -442,7 +442,7 @@ async def test_frozen_report_uses_the_rp1_selected_snapshot_and_immutable_eviden
         currency_code="USD", currency_minor_unit_digits=2,
     )
     totals = {7: {"daily_pay": Decimal("16"), "status_pay": Decimal("0"),
-                  "period_pay": Decimal("0"), "minimum_adjustment": Decimal("0"),
+                  "minimum_adjustment": Decimal("0"),
                   "maximum_adjustment": Decimal("0"), "bonus_total": Decimal("4"),
                   "total_pay": Decimal("20"), "driver_code": "D7", "driver_name": "Frozen"}}
 
@@ -1066,7 +1066,7 @@ async def _pay_item_id(direct_db, period_id: int, code: str) -> int:
 
 
 def _pay_gross_reconciles(pay: dict) -> None:
-    gross = Decimal(pay["daily_pay"]) + Decimal(pay["status_pay"]) + Decimal(pay["period_pay"])
+    gross = Decimal(pay["daily_pay"]) + Decimal(pay["status_pay"])
     assert Decimal(pay["gross_pay"]) == gross
     assert (
         gross + Decimal(pay["minimum_adjustment"]) + Decimal(pay["maximum_adjustment"]) + Decimal(pay["bonus_total"])
@@ -1460,3 +1460,21 @@ async def test_missing_frozen_layout_fails_closed_but_period_work_still_availabl
     assert work.status_code == 200, work.text
     assert Decimal(work.json()["work_totals"]["HOURS"]) == Decimal("2")
     assert work.json()["pay_item_totals"] is None
+
+
+@pytest.mark.parametrize("row, component", [
+    ({"linetype": "HOURS", "sourcetype": "DraftLine", "linescope": "Daily"}, "daily_pay"),
+    ({"linetype": "STATUS_PAY", "sourcetype": "StatusEntryState", "linescope": "Daily"}, "status_pay"),
+    ({"linetype": "BONUS", "sourcetype": "BonusEvent", "linescope": "Period"}, "bonus_total"),
+    ({"linetype": "SYS_MIN_TOPUP", "sourcetype": "System", "linescope": "Period"}, "minimum_adjustment"),
+    ({"linetype": "SYS_MAX_CAP", "sourcetype": "System", "linescope": "Period"}, "maximum_adjustment"),
+])
+def test_final_line_components_are_classified_explicitly(row, component):
+    assert report_read_model.classify_final_line_component(row) == component
+
+
+def test_unclassifiable_final_line_fails_closed():
+    with pytest.raises(HTTPException, match="REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR"):
+        report_read_model.classify_final_line_component(
+            {"linetype": "Adjustment", "sourcetype": "Manual", "linescope": "Period"}
+        )

@@ -14,7 +14,7 @@ function makeColumn(overrides: Partial<ReportColumn> = {}): ReportColumn {
 
 function makePay(overrides: Partial<ReportPaySection> = {}): ReportPaySection {
   return {
-    daily_pay: '0.00', status_pay: '0.00', period_pay: '0.00', minimum_adjustment: '0.00',
+    daily_pay: '0.00', status_pay: '0.00', minimum_adjustment: '0.00',
     maximum_adjustment: '0.00', bonus_total: '0.00', total_pay: '0.00', gross_pay: '0.00',
     pay_item_amounts: [], driver_code: null, driver_name: null, financial_lines: [],
     ...overrides,

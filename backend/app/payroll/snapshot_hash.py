@@ -8,8 +8,28 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-CURRENT_PAYROLL_CALCULATION_VERSION = "current-payroll-v1"
+# CalculationVersion identifies the financial calculation semantics plus the
+# canonical immutable snapshot/hash shape -- nothing else (not the app, a
+# migration, the UI, a report, or company configuration). Bump it only for an
+# incompatible change to component arithmetic, min/max/bonus ordering, the
+# meaning or set of canonical hashed components, or the source/provenance
+# semantics inside the hash. New rates, PayItem data, company setup, wording
+# and report formatting do not bump it.
+CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v1"
 CURRENT_REPORT_EVIDENCE_VERSION = 2
+
+class UnsupportedCalculationVersionError(ValueError):
+    """A persisted calculation packet uses a contract this code cannot parse."""
+
+
+def require_supported_calculation_version(version: object) -> None:
+    """Fail closed unless the packet was captured under the supported contract."""
+    if version != CURRENT_PAYROLL_CALCULATION_VERSION:
+        raise UnsupportedCalculationVersionError(
+            f"unsupported calculation version {version!r}; "
+            f"only {CURRENT_PAYROLL_CALCULATION_VERSION!r} can be consumed"
+        )
+
 
 _DRIVER_TOTAL_FIELDS = (
     "DriverID",
@@ -17,7 +37,6 @@ _DRIVER_TOTAL_FIELDS = (
     "DriverNameSnapshot",
     "DailyPay",
     "StatusPay",
-    "PeriodPay",
     "MinimumAdjustment",
     "MaximumAdjustment",
     "BonusTotal",

@@ -212,7 +212,6 @@ def _packet(db: SimpleNamespace) -> _LiveCalculationPacket:
         driver_name="CP4D Driver",
         daily_pay=Decimal("25.0000"),
         status_pay=Decimal("0"),
-        period_pay=Decimal("0"),
         minimum_adjustment=Decimal("0"),
         maximum_adjustment=Decimal("0"),
         bonus_total=Decimal("0"),
@@ -279,22 +278,6 @@ def _semantic_packet(db: SimpleNamespace) -> _LiveCalculationPacket:
             "ResolvedDriverRateID": 301,
         },
     )
-    period_pay = _CalculationPacketLine(
-        source_type="Manual",
-        source_id="period-pay:701",
-        snapshot_source_type="DraftLine",
-        snapshot_source_id="701",
-        line_type="Adjustment",
-        line_scope="Period",
-        work_date=None,
-        driver_id=db.driver_id,
-        quantity=None,
-        resolved_rate_amount=None,
-        calculated_amount=Decimal("10.0000"),
-        needs_manager_review=False,
-        blocker_reason=None,
-        source_evidence={"DraftLineID": 701, "EnteredAmount": Decimal("10.0000")},
-    )
     minimum = _CalculationPacketLine(
         source_type="System",
         source_id="801",
@@ -343,14 +326,13 @@ def _semantic_packet(db: SimpleNamespace) -> _LiveCalculationPacket:
         driver_name="CP4D Driver",
         daily_pay=Decimal("25.0000"),
         status_pay=Decimal("18.0000"),
-        period_pay=Decimal("10.0000"),
         minimum_adjustment=Decimal("2.0000"),
         maximum_adjustment=Decimal("-1.0000"),
         bonus_total=Decimal("5.0000"),
-        expected_pay=Decimal("59.0000"),
+        expected_pay=Decimal("49.0000"),
         needs_manager_review=False,
         blockers=[],
-        lines=[daily, status, period_pay, minimum, maximum, bonus],
+        lines=[daily, status, minimum, maximum, bonus],
     )
     return _LiveCalculationPacket(
         payroll_period_id=db.period_id,
@@ -360,7 +342,7 @@ def _semantic_packet(db: SimpleNamespace) -> _LiveCalculationPacket:
         blockers=[],
         warnings=[],
         drivers=[total],
-        total_expected_pay=Decimal("59.0000"),
+        total_expected_pay=Decimal("49.0000"),
     )
 
 
@@ -399,7 +381,7 @@ async def _persisted_hash_totals(
     """Rebuild the hash projection only from persisted immutable rows."""
     totals = (await conn.execute(text("""
         SELECT payrollcalculationdrivertotalid, driverid, drivercodesnapshot,
-               drivernamesnapshot, dailypay, statuspay, periodpay,
+               drivernamesnapshot, dailypay, statuspay,
                minimumadjustment, maximumadjustment, bonustotal, expectedpay
         FROM payroll.payrollcalculationdrivertotals
         WHERE payrollcalculationsnapshotid = :snapshot_id
@@ -420,7 +402,6 @@ async def _persisted_hash_totals(
             "DriverNameSnapshot": total["drivernamesnapshot"],
             "DailyPay": total["dailypay"],
             "StatusPay": total["statuspay"],
-            "PeriodPay": total["periodpay"],
             "MinimumAdjustment": total["minimumadjustment"],
             "MaximumAdjustment": total["maximumadjustment"],
             "BonusTotal": total["bonustotal"],
@@ -848,7 +829,7 @@ async def test_capture_persists_daily_status_period_bonus_and_system_evidence(cp
         WHERE payrollcalculationsnapshotid = :snapshot_id
     """), {"snapshot_id": snapshot_id})).scalar_one()
     total = (await cp4d_db.conn.execute(text("""
-        SELECT dailypay + statuspay + periodpay + minimumadjustment + maximumadjustment + bonustotal
+        SELECT dailypay + statuspay + minimumadjustment + maximumadjustment + bonustotal
         FROM payroll.payrollcalculationdrivertotals
         WHERE payrollcalculationsnapshotid = :snapshot_id
     """), {"snapshot_id": snapshot_id})).scalar_one()
@@ -861,12 +842,11 @@ async def test_capture_persists_daily_status_period_bonus_and_system_evidence(cp
         ORDER BY line.linetype
     """), {"snapshot_id": snapshot_id})).mappings().all()
     line_map = {row["linetype"]: row for row in lines}
-    assert header == total == Decimal("59.0000")
-    assert set(line_map) == {"HOURS", "STATUS_PAY", "Adjustment", "BONUS", "SYS_MIN_TOPUP", "SYS_MAX_CAP"}
+    assert header == total == Decimal("49.0000")
+    assert set(line_map) == {"HOURS", "STATUS_PAY", "BONUS", "SYS_MIN_TOPUP", "SYS_MAX_CAP"}
     assert line_map["HOURS"]["sourceevidencejsonb"]["PerUnitCalculationVersion"] == "cp4a-per-unit-v1"
     assert line_map["STATUS_PAY"]["sourcetype"] == "StatusEntryState"
     assert line_map["STATUS_PAY"]["sourceevidencejsonb"]["StatusKeyID"] == 101
-    assert Decimal(line_map["Adjustment"]["sourceevidencejsonb"]["EnteredAmount"]) == Decimal("10.0000")
     assert line_map["BONUS"]["sourceevidencejsonb"]["Status"] == "Active"
     assert line_map["SYS_MIN_TOPUP"]["calculatedamount"] == Decimal("2.0000")
     assert line_map["SYS_MAX_CAP"]["calculatedamount"] == Decimal("-1.0000")

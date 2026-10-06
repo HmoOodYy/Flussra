@@ -228,7 +228,6 @@ def _direct_packet(db: SimpleNamespace, *, include_bonus: bool = True) -> _LiveC
         driver_name="CP5C Evidence Driver",
         daily_pay=Decimal("20.0000"),
         status_pay=Decimal("0"),
-        period_pay=Decimal("0"),
         minimum_adjustment=Decimal("0"),
         maximum_adjustment=Decimal("0"),
         bonus_total=bonus_total,
@@ -540,7 +539,7 @@ async def test_legacy_snapshot_marker_remains_explicitly_nullable(evidence_db):
         INSERT INTO payroll.payrollcalculationsnapshots
             (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
              sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
-        VALUES (:cid, :bid, :pid, 1, 'legacy', :source_hash, :snapshot_hash, :uid, 0, 'USD', 2)
+        VALUES (:cid, :bid, :pid, 1, 'payroll-calculation-v1', :source_hash, :snapshot_hash, :uid, 0, 'USD', 2)
         RETURNING payrollcalculationsnapshotid
     """), {
         "cid": evidence_db.company_id, "bid": evidence_db.branch_id,
