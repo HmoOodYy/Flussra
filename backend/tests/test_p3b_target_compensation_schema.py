@@ -553,26 +553,19 @@ def test_superseded_assignment_requires_a_closed_window(cur):
                     "WHERE driverrateassignmentid = %s", (assignment,))
 
 
-def test_authoritative_references_can_only_target_non_pending_assignments(cur):
-    """The generated IsAuthoritative key is the anchor later evidence tables use."""
+def test_assignment_has_no_generalized_authority_flag(cur):
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS payroll.p3b_probe_reference (
-            probeid SERIAL PRIMARY KEY,
-            driverrateassignmentid INTEGER NOT NULL,
-            isauthoritative BOOLEAN NOT NULL DEFAULT TRUE CHECK (isauthoritative),
-            FOREIGN KEY (driverrateassignmentid, isauthoritative)
-                REFERENCES payroll.driverrateassignments (driverrateassignmentid, isauthoritative)
-        )
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'payroll' AND table_name = 'driverrateassignments'
+          AND column_name LIKE '%authoritative%'
     """)
-    fx = Scalar(cur)
-    pending = make_pending(cur, fx)
-    with rejected(errors.ForeignKeyViolation):
-        cur.execute("INSERT INTO payroll.p3b_probe_reference (driverrateassignmentid) VALUES (%s)",
-                    (pending,))
-    set_value(cur, pending, fx.rate_definition_id, fx.component_id, "1")
-    approve(cur, pending)
-    cur.execute("INSERT INTO payroll.p3b_probe_reference (driverrateassignmentid) VALUES (%s)",
-                (pending,))
+    assert cur.fetchall() == []
+    cur.execute("""
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'payroll.driverrateassignments'::regclass
+          AND conname = 'uq_driverrateassignments_id_authoritative'
+    """)
+    assert cur.fetchall() == []
 
 
 # ---------------------------------------------------------------------------

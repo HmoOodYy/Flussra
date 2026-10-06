@@ -150,7 +150,6 @@ CREATE TABLE payroll.DriverRateAssignments (
     EffectiveFrom           DATE         NOT NULL,
     EffectiveTo             DATE,
     Status                  VARCHAR(30)  NOT NULL DEFAULT 'Pending',
-    IsAuthoritative         BOOLEAN      GENERATED ALWAYS AS (Status <> 'Pending') STORED,
     CreatedByUserID         INTEGER,
     CreatedAtUtc            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UpdatedByUserID         INTEGER,
@@ -178,8 +177,6 @@ CREATE TABLE payroll.DriverRateAssignments (
         REFERENCES sec.Users(UserID),
     CONSTRAINT uq_DriverRateAssignments_ID_RateDefinition
         UNIQUE (DriverRateAssignmentID, RateDefinitionID),
-    CONSTRAINT uq_DriverRateAssignments_ID_Authoritative
-        UNIQUE (DriverRateAssignmentID, IsAuthoritative),
     CONSTRAINT ck_DriverRateAssignments_Status
         CHECK (Status IN ('Pending', 'Approved', 'Superseded', 'Voided')),
     CONSTRAINT ck_DriverRateAssignments_EffectiveDates
@@ -755,9 +752,10 @@ BEFORE INSERT OR UPDATE OR DELETE ON payroll.DriverRateValues
 FOR EACH ROW EXECUTE FUNCTION payroll.trg_DriverRateValues_PendingOnly();
 
 -- ---------------------------------------------------------------------------
--- 13. Company currency authority: authoritative target assignments are durable
---     monetary state. Pending assignments are non-authoritative and do not
---     count; Voided assignments kept their authoritative values and do.
+-- 13. Company currency authority: Approved, Superseded and Voided target
+--     assignments are durable monetary history. Pending assignments do not
+--     count. Voided is not an authoritative schedule, but it retains values
+--     that were once authoritative, so it keeps the Company currency locked.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION core.fn_company_has_durable_monetary_state(p_company_id INTEGER)
 RETURNS BOOLEAN
@@ -770,7 +768,7 @@ LANGUAGE sql STABLE AS $$
                    WHERE r.companyid = p_company_id)
         OR EXISTS (SELECT 1 FROM payroll.driverrateassignments a
                    WHERE a.companyid = p_company_id
-                     AND a.isauthoritative)
+                     AND a.status IN ('Approved', 'Superseded', 'Voided'))
         OR EXISTS (SELECT 1 FROM payroll.payrollbonusevents b
                    WHERE b.companyid = p_company_id)
         OR EXISTS (SELECT 1 FROM payroll.driverpayrules p
