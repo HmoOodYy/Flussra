@@ -130,11 +130,31 @@ def test_0079_snapshot_rejects_unsupported_calculation_version(g0_4c_database):
             _insert_snapshot(cur, ids, "current-payroll-v1")
 
 
-def test_0079_refuses_to_reinterpret_existing_calculation_snapshot(g0_4c_database):
+def _seed_retired_state(cur, ids: dict[str, int], kind: str) -> None:
+    if kind == "calculation_snapshot":
+        _insert_snapshot(cur, ids, "current-payroll-v1")
+    elif kind == "final_line":
+        cur.execute("SELECT set_config('app.allow_payroll_final_line_insert', 'true', true)")
+        cur.execute("""
+            INSERT INTO payroll.payrollfinallines
+                (companyid, branchid, payrollperiodid, driverid, linetype, quantity,
+                 finalamount, sourcetype, approvedatutc, currencycode, currencyminorunitdigits)
+            VALUES (%s, %s, %s, %s, 'HOURS', 1, 20, 'DraftLine', NOW(), 'USD', 2)
+        """, (ids["company_id"], ids["branch_id"], ids["period_id"], ids["driver_id"]))
+    else:
+        cur.execute("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (%s, %s, %s, 'G04C-OLD', 'G04C-OLD', 'Week', '2098-04-01', '2098-04-07')
+        """, (ids["company_id"], ids["branch_id"], kind))
+
+
+@pytest.mark.parametrize("kind", ["calculation_snapshot", "final_line", "Locked", "Archived"])
+def test_0079_refuses_to_reinterpret_retired_finalized_state(g0_4c_database, kind):
     env, dsn = g0_4c_database
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         ids = _seed_period(cur)
-        _insert_snapshot(cur, ids, "current-payroll-v1")
+        _seed_retired_state(cur, ids, kind)
 
     refused = _alembic(env, "upgrade", "0079")
     assert refused.returncode != 0
@@ -143,5 +163,3 @@ def test_0079_refuses_to_reinterpret_existing_calculation_snapshot(g0_4c_databas
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
         assert cur.fetchone() == ("0078",)
-        cur.execute("SELECT calculationversion FROM payroll.payrollcalculationsnapshots")
-        assert cur.fetchall() == [("current-payroll-v1",)]

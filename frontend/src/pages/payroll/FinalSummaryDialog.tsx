@@ -46,11 +46,14 @@ function isBonusEventLine(line: FinalLineSummary): boolean {
   return line.source_type === 'BonusEvent';
 }
 
-function lineComponent(line: FinalLineSummary): 'sys_adjustment' | 'bonus' | 'status' | 'daily' {
+// Explicit canonical classification only. A line that matches no supported
+// component is never folded into a subtotal; it is surfaced as an integrity error.
+function lineComponent(line: FinalLineSummary): 'sys_adjustment' | 'bonus' | 'status' | 'daily' | null {
   if (line.line_type === 'SYS_MIN_TOPUP' || line.line_type === 'SYS_MAX_CAP') return 'sys_adjustment';
   if (isBonusEventLine(line)) return 'bonus';
   if (line.source_type === 'StatusEntryState') return 'status';
-  return 'daily';
+  if (line.source_type === 'DraftLine' && line.line_scope === 'Daily') return 'daily';
+  return null;
 }
 
 function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
@@ -75,7 +78,8 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
       case 'sys_adjustment': dt.sys_adjustment += amt; break;
       case 'bonus': dt.bonus_total += amt; break;
       case 'status': dt.status_pay += amt; break;
-      default: dt.daily_pay += amt;
+      case 'daily': dt.daily_pay += amt; break;
+      default: break;
     }
     dt.final_pay += amt;
     dt.line_count++;
@@ -309,6 +313,7 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
   }, [onClose]);
 
   const driverTotals = buildDriverTotals(lines);
+  const unclassifiedCount = lines.filter((l) => lineComponent(l) === null).length;
   const sysCount = lines.filter((l) => l.line_type.startsWith('SYS_')).length;
   const bonusCount = lines.filter(isBonusEventLine).length;
   const dailyCount = lines.filter((l) => l.line_scope === 'Daily' && !l.line_type.startsWith('SYS_')).length;
@@ -363,6 +368,12 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
             </div>
           ) : (
             <>
+              {unclassifiedCount > 0 && (
+                <div className={styles.errorBox}>
+                  Integrity error: {unclassifiedCount} final line(s) do not belong to a supported
+                  payroll component and are excluded from the component subtotals below.
+                </div>
+              )}
               {/* ── KPIs ─────────────────────────────────────────── */}
               <div className={styles.kpiRow}>
                 <KpiCard label="Drivers Paid" value={String(period.final_driver_count)} />
