@@ -30,6 +30,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.db_state import PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER, suspended_test_triggers
+from tests.seed_helpers import attach_cdpi_owner
 
 # ---------------------------------------------------------------------------
 # p4b_env fixture
@@ -96,6 +97,7 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
         VALUES (:piid, :rtid, TRUE, 'Active')
         ON CONFLICT DO NOTHING
     """), {"piid": pi_a_id, "rtid": rt_a_custom_id})
+    await attach_cdpi_owner(direct_db, item_id=pi_a_id, rate_type_id=rt_a_custom_id)
 
     await direct_db.execute(_text("""
         INSERT INTO payroll.branchpayitemconfig
@@ -136,6 +138,16 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
         DELETE FROM payroll.branchpayitemconfig WHERE payitemid IN (
             SELECT payitemid FROM payroll.payitems WHERE companyid IN
                 (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4B')
+        )
+    """))
+    await direct_db.execute(_text("""
+        DELETE FROM payroll.payitemrateslots WHERE payitemid IN (
+            SELECT payitemid FROM payroll.payitems WHERE companyid IN (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4B')
+        )
+    """))
+    await direct_db.execute(_text("""
+        DELETE FROM payroll.cdpidefinitions WHERE payitemid IN (
+            SELECT payitemid FROM payroll.payitems WHERE companyid IN (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4B')
         )
     """))
     await direct_db.execute(_text("""
@@ -254,6 +266,7 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
         VALUES (:piid, :rtid, TRUE, 'Active')
         ON CONFLICT DO NOTHING
     """), {"piid": pi_b_id, "rtid": rt_b_own_id})
+    await attach_cdpi_owner(direct_db, item_id=pi_b_id, rate_type_id=rt_b_own_id)
 
     # Activate Company B's PayItem on Branch B
     await direct_db.execute(_text("""
@@ -296,6 +309,16 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
             (SELECT payitemid FROM payroll.payitems WHERE companyid = :cid)
     """), {"cid": cid_b})
     await direct_db.execute(_text("""
+        DELETE FROM payroll.payitemrateslots WHERE payitemid IN (
+            SELECT payitemid FROM payroll.payitems WHERE companyid = :cid
+        )
+    """), {"cid": cid_b})
+    await direct_db.execute(_text("""
+        DELETE FROM payroll.cdpidefinitions WHERE payitemid IN (
+            SELECT payitemid FROM payroll.payitems WHERE companyid = :cid
+        )
+    """), {"cid": cid_b})
+    await direct_db.execute(_text("""
         DELETE FROM payroll.payitemratetypemap WHERE payitemid IN
             (SELECT payitemid FROM payroll.payitems WHERE companyid = :cid)
     """), {"cid": cid_b})
@@ -335,6 +358,12 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     ), {"rtid": rt_a_custom_id})
     await direct_db.execute(_text(
         "DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :piid"
+    ), {"piid": pi_a_id})
+    await direct_db.execute(_text(
+        "DELETE FROM payroll.payitemrateslots WHERE payitemid = :piid"
+    ), {"piid": pi_a_id})
+    await direct_db.execute(_text(
+        "DELETE FROM payroll.cdpidefinitions WHERE payitemid = :piid"
     ), {"piid": pi_a_id})
     await direct_db.execute(_text(
         "DELETE FROM payroll.payitemratetypemap WHERE ratetypeid = :rtid"

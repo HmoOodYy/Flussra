@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from tests.builders.company import create_branch
 from tests.builders.payroll import create_period_from_candidate, get_period_candidates
 from tests.builders.payroll_setup import create_published_setup_assignment
+from tests.seed_helpers import attach_cdpi_owner_by_code
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -431,6 +432,7 @@ class TestCp2cPayItemSnapshot:
             """),
             {"cid": _COMPANY_ID},
         )
+        await attach_cdpi_owner_by_code(direct_db, company_id=_COMPANY_ID, code="RETIRED_2094")
 
         await _setup(direct_db, snap_branch_id)
         candidates = await get_period_candidates(client, auth_token, snap_branch_id)
@@ -990,6 +992,7 @@ class TestCp2cPayItemSnapshot:
             """),
             {"cid": _COMPANY_ID},
         )).scalar_one()
+        await attach_cdpi_owner_by_code(direct_db, company_id=_COMPANY_ID, code="SNAP_CUSTOM_2094")
 
         # Create a period (will snapshot the new custom item)
         await _setup(direct_db, snap_branch_id)
@@ -1163,6 +1166,7 @@ class TestCp2cPayItemSnapshot:
             """),
             {"cid": _COMPANY_ID},
         )).scalar_one()
+        await attach_cdpi_owner_by_code(direct_db, company_id=_COMPANY_ID, code="SNAP_DAILY_2094")
 
         await _setup(direct_db, snap_branch_id)
         candidates = await get_period_candidates(client, auth_token, snap_branch_id)
@@ -1238,6 +1242,7 @@ class TestCp2cPayItemSnapshot:
             """),
             {"cid": _COMPANY_ID},
         )
+        await attach_cdpi_owner_by_code(direct_db, company_id=_COMPANY_ID, code="SNAP_UPD_2094")
         await direct_db.commit()
 
         await _setup(direct_db, snap_branch_id)
@@ -1663,6 +1668,7 @@ class TestCp2cPayItemSnapshot:
             """),
             {"cid": _COMPANY_ID},
         )
+        await attach_cdpi_owner_by_code(direct_db, company_id=_COMPANY_ID, code="SNAP_GRID_2094")
         await direct_db.commit()
 
         await _setup(direct_db, snap_branch_id)

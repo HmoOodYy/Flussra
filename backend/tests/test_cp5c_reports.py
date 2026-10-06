@@ -26,6 +26,7 @@ from app.payroll.service import (
 from tests.access_test_helpers import create_neutral_test_user
 from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.db_state import allow_final_line_insert
+from tests.seed_helpers import attach_cdpi_owner
 
 _SECURITY_COUNTER = itertools.count(1)
 _REPORT_PATHS = ("drivers", "period-work", "period-pay", "mixed")
@@ -1377,6 +1378,7 @@ async def test_pay_item_columns_frozen_and_scoped_to_active_reportable_daily(
                 TRUE, TRUE, TRUE, TRUE, FALSE, 'Daily', 'PerUnit', FALSE)
         RETURNING payitemid
     """), {"code": f"C13A{marker}".upper()})).scalar_one())
+    await attach_cdpi_owner(direct_db, item_id=custom_pay_item_id)
     await direct_db.execute(text("""
         INSERT INTO payroll.branchpayitemconfig (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
         VALUES (1, :branch_id, :pay_item_id, TRUE, '2099-01-01', 1)

@@ -231,3 +231,40 @@ def test_0080_refuses_when_final_ledger_depends_on_predecessor_item(g0_5_databas
         assert cur.fetchone() == ("0079",)
         cur.execute("SELECT COUNT(*) FROM payroll.payitems WHERE payitemcode = 'G05_OLD'")
         assert cur.fetchone() == (1,)
+
+
+@pytest.mark.parametrize("period_status", ["InReview", "Approved", "Locked", "Archived"])
+def test_0080_refuses_to_delete_frozen_period_layout_of_predecessor_item(
+    g0_5_database, period_status
+):
+    env, dsn = g0_5_database
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        ids = _seed_catalog(cur)
+        cur.execute("""
+            INSERT INTO payroll.payrollperiods
+                (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+            VALUES (%s, %s, %s, 'G05-L', 'G05-L', 'Week', '2098-07-01', '2098-07-07')
+            RETURNING payrollperiodid
+        """, (ids["company_id"], ids["branch_id"], period_status))
+        period_id = cur.fetchone()[0]
+        cur.execute("""
+            INSERT INTO payroll.payrollperiodpayitems
+                (payrollperiodid, companyid, branchid, payitemid, payitemcode, payitemname,
+                 category, datatype, unit, itemscope, ratebehavior, appearsinpayrollentry,
+                 appearsinledger, appearsinreports, requiresrate, issystemstandard, iscustom,
+                 payitemstatusatsnapshot, isactiveinperiod)
+            VALUES (%s, %s, %s, %s, 'G05_OLD', 'Predecessor Item', 'Custom', 'Decimal', 'Stop',
+                    'Daily', 'PerUnit', TRUE, TRUE, TRUE, TRUE, FALSE, TRUE, 'Active', TRUE)
+        """, (period_id, ids["company_id"], ids["branch_id"], ids["old_item_id"]))
+
+    refused = _alembic(env, "upgrade", "0080")
+    assert refused.returncode != 0
+    assert "G05_BLOCKED_FROZEN_PERIOD_LAYOUT_DEPENDENCY" in refused.stderr
+
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT version_num FROM public.alembic_version")
+        assert cur.fetchone() == ("0079",)
+        cur.execute("""
+            SELECT COUNT(*) FROM payroll.payrollperiodpayitems WHERE payitemid = %s
+        """, (ids["old_item_id"],))
+        assert cur.fetchone() == (1,)

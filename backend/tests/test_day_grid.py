@@ -3543,6 +3543,8 @@ async def _seed_payitem(
         """),
         {"cid": company_id, "code": code, "name": name, "dt": datatype, "rb": rate_behavior},
     )).scalar_one()
+    from tests.seed_helpers import attach_cdpi_owner
+    await attach_cdpi_owner(db, item_id=pid)
     return pid
 
 
@@ -3570,6 +3572,10 @@ async def _delete_cdpi_item(db, *, pay_item_id: int) -> None:
     from sqlalchemy import text as _text
     await db.execute(
         _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
+    )
+    await db.execute(
+        _text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
         {"pid": pay_item_id},
     )
     await db.execute(

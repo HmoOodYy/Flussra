@@ -195,3 +195,43 @@ async def map_rate_type_to_item(
         {"piid": item_id, "rtid": rate_type_id, "primary": is_primary},
     )
     await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rate_type_id, sort_order=1)
+
+
+async def ensure_rate_slot(db_conn, *, item_id: int, rate_type_id: int, sort_order: int = 1) -> None:
+    """Public form of the CDPI rate slot for an already mapped rate type."""
+    await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rate_type_id, sort_order=sort_order)
+
+
+async def attach_cdpi_owner(
+    db_conn,
+    *,
+    item_id: int,
+    rate_type_id: int | None = None,
+    user_id: int | None = None,
+) -> None:
+    """Give an existing company PayItem its canonical CDPI ownership.
+
+    Inserts the CdpiDefinitions owner marker and, when the item's mapped rate type
+    is given, the PayItemRateSlots row CDPI creation produces beside the map row.
+    """
+    await db_conn.execute(
+        text("""
+            INSERT INTO payroll.cdpidefinitions
+                (payitemid, definitionschemaversion, lockedatutc, createdbyuserid)
+            VALUES (:piid, 1, NOW(),
+                    COALESCE(:uid, (SELECT MIN(userid) FROM sec.users)))
+            ON CONFLICT (payitemid) DO NOTHING
+        """),
+        {"piid": item_id, "uid": user_id},
+    )
+    if rate_type_id is not None:
+        await _ensure_rate_slot(db_conn, item_id=item_id, rate_type_id=rate_type_id, sort_order=1)
+
+
+async def attach_cdpi_owner_by_code(db_conn, *, company_id: int, code: str) -> None:
+    """attach_cdpi_owner for a company PayItem identified by its code."""
+    item_id = (await db_conn.execute(
+        text("SELECT payitemid FROM payroll.payitems WHERE companyid = :cid AND payitemcode = :code"),
+        {"cid": company_id, "code": code},
+    )).scalar_one()
+    await attach_cdpi_owner(db_conn, item_id=item_id)

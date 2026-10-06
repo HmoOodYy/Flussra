@@ -29,6 +29,7 @@ import pytest
 from sqlalchemy import text
 
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+from tests.seed_helpers import attach_cdpi_owner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1186,6 +1187,7 @@ async def _insert_minimal_custom_item(direct_db, *, company_id: int, user_id: in
         """),
         {"cid": company_id, "uid": user_id, "code": code},
     )).scalar_one()
+    await attach_cdpi_owner(direct_db, item_id=iid, user_id=user_id)
     return iid, code
 
 
@@ -1203,6 +1205,10 @@ async def _cleanup_custom_item(direct_db, item_id: int) -> None:
     await direct_db.execute(
         text("DELETE FROM payroll.payrolldraftlines WHERE linetype IN "
              "(SELECT payitemcode FROM payroll.payitems WHERE payitemid = :iid)"),
+        {"iid": item_id},
+    )
+    await direct_db.execute(
+        text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :iid"),
         {"iid": item_id},
     )
     await direct_db.execute(

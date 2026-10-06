@@ -23,6 +23,7 @@ from sqlalchemy import text as _sqla_text
 from sqlalchemy import text as _text
 
 from tests.builders.compensation import create_approved_rate
+from tests.seed_helpers import attach_cdpi_owner
 
 # ---------------------------------------------------------------------------
 # Year slots / URL templates
@@ -385,6 +386,7 @@ async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
         """),
         {"piid": pi_id, "rtid": rt_id},
     )
+    await attach_cdpi_owner(direct_db, item_id=pi_id, rate_type_id=rt_id)
 
     try:
         # DriverRate create for the mapped custom RateType must SUCCEED (no 422)
@@ -416,10 +418,11 @@ async def test_p8_t4_valid_custom_ratetype_with_mapping_still_works(
             """),
             {"rtid": rt_id},
         )
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :piid"),
-            {"piid": pi_id},
-        )
+        for tbl in ("payitemrateslots", "payitemratetypemap", "cdpidefinitions"):
+            await direct_db.execute(
+                _text(f"DELETE FROM payroll.{tbl} WHERE payitemid = :piid"),
+                {"piid": pi_id},
+            )
         await direct_db.execute(
             _text("DELETE FROM payroll.payitems WHERE payitemid = :piid"),
             {"piid": pi_id},
@@ -454,6 +457,8 @@ async def test_p8_t5_unresolvable_mapping_blocks_submit_before_snapshot_capture(
     )
     company_id = cid_row.scalar_one()
 
+    # INTENTIONALLY MALFORMED FIXTURE: a custom PerUnit PayItem with no CDPI
+    # owner and NO PayItemRateTypeMap, to prove the unmapped-item guard fires.
     # Insert a custom PayItem with PerUnit behavior but NO PayItemRateTypeMap.
     # Keep it off other branches; activate only this test's branch.
     item_code = f"TST_P8_T5_{uuid4().hex[:8]}"

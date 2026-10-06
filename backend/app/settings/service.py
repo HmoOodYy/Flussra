@@ -79,24 +79,24 @@ if TYPE_CHECKING:
     )
 
 # ---------------------------------------------------------------------------
-# Custom pay item code generation
+# Status rate-column code generation
 # ---------------------------------------------------------------------------
 
-# Characters used in auto-generated CPI_ codes.
+# Characters used in generated SRC_ rate codes.
 # Ambiguous characters (O / 0 / I / 1 / L) are excluded so printed codes
 # are easy to read and transcribe without error.
-_CPI_CHARSET: str = "".join(
+_RATE_CODE_CHARSET: str = "".join(
     c for c in (_string.ascii_uppercase + _string.digits)
     if c not in "O0I1L"
 )
-_CPI_MAX_RETRIES: int = 10  # collision is astronomically unlikely; 10 gives a clean ceiling
+_SRC_CODE_MAX_RETRIES: int = 10  # collision is astronomically unlikely; 10 gives a clean ceiling
 
 _SRC_SUFFIX_LEN: int = 8  # SRC_{company_id}_{8 chars}
 
 
 def _generate_src_rate_code(company_id: int) -> str:
     """Return a new candidate StatusRateColumn RateCode: SRC_{company_id}_{8 chars}."""
-    suffix = "".join(secrets.choice(_CPI_CHARSET) for _ in range(_SRC_SUFFIX_LEN))
+    suffix = "".join(secrets.choice(_RATE_CODE_CHARSET) for _ in range(_SRC_SUFFIX_LEN))
     return f"SRC_{company_id}_{suffix}"
 
 
@@ -1758,7 +1758,7 @@ async def create_status_rate_column(
 
     # Create a new company-owned RateType backing this column
     rate_type_id: int | None = None
-    for attempt in range(_CPI_MAX_RETRIES):
+    for attempt in range(_SRC_CODE_MAX_RETRIES):
         rate_code = _generate_src_rate_code(company_id)
         try:
             async with db.begin_nested():
@@ -1780,7 +1780,7 @@ async def create_status_rate_column(
             break
         except SAIntegrityError as exc:
             msg = str(exc.orig).lower() if exc.orig else str(exc).lower()
-            if "ratecode" in msg and attempt < _CPI_MAX_RETRIES - 1:
+            if "ratecode" in msg and attempt < _SRC_CODE_MAX_RETRIES - 1:
                 continue
             raise HTTPException(status_code=500, detail="Could not generate unique rate code.")
 
@@ -2766,30 +2766,28 @@ async def get_missing_pay_item_configs(
 
 
 # ===========================================================================
-# M12: Custom Pay Items — admin catalog + branch request/approval flow
+# Company PayItem catalog — reads, usage visibility and retirement
 # ===========================================================================
 """
-Custom Pay Items design (M12):
-  - Items are company-level after approval: CompanyID set, BranchID = NULL.
-  - RequestingBranchID records provenance (which branch requested the item).
-  - Admin-direct creates have RequestingBranchID = None.
-  - On approval, BranchPayItemConfig is created for the requesting branch
-    (IsActive=TRUE) so the item starts active there and inactive everywhere else.
-  - System items (IsSystemStandard=TRUE) cannot be deleted via these endpoints.
+Company custom PayItems are defined and governed by CDPI (see app.cdpi):
+  - Items are company-level: CompanyID set, BranchID = NULL.
+  - PayItems.RequestingBranchID is the provenance CDPI records.
+  - Settings only reads the catalog, shows the history a retirement preserves,
+    and retires items; it never creates or edits a definition.
+  - System items (IsSystemStandard=TRUE) cannot be retired via these endpoints.
 
 Custom pay items are Daily operational items (quantity × driver rate, or the
-M13 tiered/block behaviors).
+tiered/block behaviors).
 
-Smart delete logic:
-  - Never used              → physical delete (rows removed from DB).
-  - Only non-meaningful use → clean up empty/voided draft lines, physical delete.
-  - Meaningful use          → retire (Status = 'Retired'); code permanently locked.
-  Meaningful = any active draft line with Quantity>0, RateAmount, or CalculatedAmount≠0,
-               OR any final payroll line.
+Retirement:
+  - DELETE retires the item (Status = 'Retired'); the code is permanently locked
+    and no data is removed.
+  - Usage visibility counts meaningful draft lines (active, with Quantity>0,
+    RateAmount, or CalculatedAmount≠0), final payroll lines, and driver rates.
 """
 
 # ---------------------------------------------------------------------------
-# Internal helpers (M12)
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 _CUSTOM_ITEM_COLS = """
@@ -2908,7 +2906,7 @@ async def _compute_usage(
 
 
 # ---------------------------------------------------------------------------
-# Public service functions — admin direct catalog management
+# Public service functions — catalog reads, usage and retirement
 # ---------------------------------------------------------------------------
 
 async def get_custom_pay_items(
@@ -2965,8 +2963,7 @@ async def get_custom_pay_item_usage(
     db: AsyncConnection,
 ) -> CustomPayItemUsage:
     """
-    Return usage counts for a custom pay item (draft lines + final lines).
-    Used to decide between physical delete and retire.
+    Return the history a retirement preserves (draft lines, final lines, driver rates).
     Requires AllCompanyBranches scope.
     """
     await _ensure_company_admin(company_id, user_id, db)

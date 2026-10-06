@@ -126,6 +126,21 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
 
+    -- PayrollPeriodPayItems is the frozen PayItem layout of a period. Once a
+    -- period has left the editable states it is evidence, and this migration
+    -- must neither delete it nor rewrite it.
+    SELECT COUNT(*) INTO v_count
+    FROM payroll.PayrollPeriodPayItems pppi
+    JOIN payroll.PayrollPeriods p ON p.PayrollPeriodID = pppi.PayrollPeriodID
+    WHERE pppi.PayItemID IN (SELECT PayItemID FROM g05_ownerless_payitems)
+      AND p.Status IN ('InReview', 'Approved', 'Locked', 'Archived');
+    IF v_count > 0 THEN
+        RAISE EXCEPTION
+            'G05_BLOCKED_FROZEN_PERIOD_LAYOUT_DEPENDENCY: % frozen PayrollPeriodPayItems row(s) of InReview, Approved, Locked or Archived periods contain predecessor custom PayItems that have no CDPI definition. Reset and reseed the development database, then rerun.',
+            v_count
+            USING ERRCODE = 'check_violation';
+    END IF;
+
     SELECT COUNT(*) INTO v_count
     FROM payroll.CdpiRequests r
     WHERE r.ApprovedPayItemID IN (SELECT PayItemID FROM g05_ownerless_payitems);

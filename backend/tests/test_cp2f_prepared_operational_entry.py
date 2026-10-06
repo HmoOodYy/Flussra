@@ -26,6 +26,7 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.db_state import PERIOD_STATUS_REVERT_TRIGGER, suspended_test_triggers
+from tests.seed_helpers import attach_cdpi_owner
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -1259,6 +1260,7 @@ class TestDraftDirectDraftLineAPI:
         )).mappings().first()
         assert pi_row is not None, "Could not create test pay item"
         pi_id = pi_row["payitemid"]
+        await attach_cdpi_owner(direct_db, item_id=pi_id)
 
         # Activate for the test branch (branchpayitemconfig)
         await direct_db.execute(

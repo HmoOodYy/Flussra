@@ -7,7 +7,7 @@ Covers:
   - Branch payroll setup (upsert)
   - Payroll status keys (full CRUD)
   - Pay items & branch configuration (read + patch)
-  - Custom pay items (M12): catalog CRUD + branch request/approval flow
+  - Company custom pay items: catalog reads, usage and retirement (definition is CDPI)
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -586,7 +586,7 @@ class PayItemConfigUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Bulk branch pay item configuration (M12)
+# Bulk branch pay item configuration
 # ---------------------------------------------------------------------------
 
 class BulkPayItemTarget(StrEnum):
@@ -673,7 +673,7 @@ class BulkPayItemConfigResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Custom Pay Items (M12)
+# Company custom pay items
 # ---------------------------------------------------------------------------
 
 class CustomPayItem(BaseModel):
