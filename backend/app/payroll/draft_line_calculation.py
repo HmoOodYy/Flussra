@@ -89,7 +89,7 @@ async def _compute_calculated_amount(
       PerUnit:       qty × approved DriverRate for rate_code (looked up by date).
                      No approved rate → (None, True) — flagged for review.
                      No rate_code mapping → (None, True).
-      Fixed:         (None, False) — fixed amounts from PayItemSettings (M13c+).
+      Fixed:         (None, False) — the stored amount is authoritative.
       None / other:  (None, False) — informational or unimplemented behavior.
     Tiered/Block:    delegates to dedicated helpers which return (amount, nmr,
                      driver_rate_id, rate_type_id).

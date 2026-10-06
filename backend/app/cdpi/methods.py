@@ -32,7 +32,7 @@ class RateFieldDescriptor:
     Describes a single future Pay Rate field that this method will require.
 
     This is a contract/preview only.  Task 5 does not create RateTypes,
-    PayItemRateTypeMap, PayItemSettings, or Pay Rates rows.
+    PayItemRateTypeMap, or Pay Rates rows.
     """
     key:        str   # stable machine identifier, e.g. 'per_unit_rate'
     role:       str   # semantic role, e.g. 'per_unit'

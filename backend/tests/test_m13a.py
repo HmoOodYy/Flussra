@@ -24,7 +24,6 @@ wrapper so they don't collide with test_rates.py.
 """
 import uuid
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest_asyncio
@@ -186,8 +185,8 @@ async def m13_daily_item(
     No PayItemRateTypeMap entry is seeded for this item, so calculation will
     return (None, True) — correct behaviour for M13b with unlinked custom items.
     """
-    from tests.seed_helpers import seed_legacy_item
-    item_id = await seed_legacy_item(
+    from tests.seed_helpers import seed_cdpi_item
+    item_id = await seed_cdpi_item(
         session_db_conn,
         code="M13A_STOP",
         name="Stop Pay (M13 test)",
@@ -213,8 +212,8 @@ async def m13_inactive_item(
     Seed a custom Daily PerUnit item (M13A_INACT) but do NOT activate it on
     any branch.  Used to test the 'inactive on branch' rejection path.
     """
-    from tests.seed_helpers import seed_legacy_item
-    item_id = await seed_legacy_item(
+    from tests.seed_helpers import seed_cdpi_item
+    item_id = await seed_cdpi_item(
         session_db_conn,
         code="M13A_INACT",
         name="Inactive Item (M13 test)",
@@ -392,17 +391,11 @@ class TestM13aValidation:
         """
         A retired custom item code → 422 'retired'.
 
-        M12_DEL_MEANINGFUL was retired in TestCustomPayItemDelete tests —
-        if tests run in order that item is retired.  We use a fresh item here
-        to be self-contained.
+        A fresh item is seeded and retired so the test is self-contained.
         """
-        # Seed a temporary item and immediately retire it via smart-delete
-        # (force the retire path by mocking meaningful usage).
-        from app.settings import service as settings_service
-        from app.settings.schemas import CustomPayItemUsage
-        from tests.seed_helpers import seed_legacy_item
+        from tests.seed_helpers import seed_cdpi_item
 
-        item_id = await seed_legacy_item(
+        item_id = await seed_cdpi_item(
             db_conn,
             code="M13A_RETD",
             name="Retire Me (M13 test)",
@@ -410,20 +403,10 @@ class TestM13aValidation:
             category="Count",
         )
 
-        # Retire via forced meaningful-usage mock
-        mock_usage = CustomPayItemUsage(
-            pay_item_id=item_id, pay_item_code="M13A_RETD",
-            has_meaningful_usage=True, has_final_lines=False,
-            meaningful_draft_line_count=1, final_line_count=0,
-            non_meaningful_draft_line_count=0,
-            can_physical_delete=False, deletion_would_retire=True,
+        del_resp = await session_client.delete(
+            f"/settings/pay-items/{item_id}", headers=auth(auth_token)
         )
-        with patch.object(settings_service, "_compute_usage",
-                          new=AsyncMock(return_value=mock_usage)):
-            del_resp = await session_client.delete(
-                f"/settings/pay-items/{item_id}", headers=auth(auth_token)
-            )
-        assert del_resp.json()["deletion_type"] == "retired"
+        assert del_resp.json()["status"] == "Retired"
 
         # Now try to use the retired code as a line type
         pid = m13_open_period["payroll_period_id"]
@@ -1297,16 +1280,12 @@ class TestM13bRegressionFixes:
         (not paytest_driver_id, which is a driver ID, not a branch ID).
         Issue 4 fix: all updates (quantity, notes, status) trigger revalidation.
         """
-        from unittest.mock import patch as mock_patch
-
-        from app.settings import service as settings_service
-        from app.settings.schemas import CustomPayItemUsage
-        from tests.seed_helpers import seed_legacy_item
+        from tests.seed_helpers import seed_cdpi_item
 
         pid = m13_open_period["payroll_period_id"]
 
         # Seed a fresh item to retire (avoid touching session-scoped M13A_STOP).
-        retire_id = await seed_legacy_item(
+        retire_id = await seed_cdpi_item(
             db_conn,
             code="M13A_RETIRE2",
             name="Retire Me 2 (M13 test)",
@@ -1335,20 +1314,11 @@ class TestM13bRegressionFixes:
         )
         line_id = add_resp.json()["draft_line_id"]
 
-        # Retire M13A_RETIRE2 via the smart-delete endpoint (mocking usage check).
-        mock_usage = CustomPayItemUsage(
-            pay_item_id=retire_id, pay_item_code="M13A_RETIRE2",
-            has_meaningful_usage=True, has_final_lines=False,
-            meaningful_draft_line_count=1, final_line_count=0,
-            non_meaningful_draft_line_count=0,
-            can_physical_delete=False, deletion_would_retire=True,
+        # Retire M13A_RETIRE2 through the lifecycle endpoint.
+        del_resp = await session_client.delete(
+            f"/settings/pay-items/{retire_id}", headers=auth(auth_token)
         )
-        with mock_patch.object(settings_service, "_compute_usage",
-                               new=AsyncMock(return_value=mock_usage)):
-            del_resp = await session_client.delete(
-                f"/settings/pay-items/{retire_id}", headers=auth(auth_token)
-            )
-        assert del_resp.json()["deletion_type"] == "retired"
+        assert del_resp.json()["status"] == "Retired"
 
         # Verify item is now Retired.
         get_resp = await session_client.get(
@@ -1391,16 +1361,16 @@ class TestM13bRegressionFixes:
         Flow:
           1. Seed custom item M13A_MAPPED (PerUnit, Daily)
           2. Activate it on PAYTEST
-          3. Assign rate type HOURLY via POST /settings/pay-items/{id}/rate-type-map
+          3. Map rate type HOURLY to the item (PayItemRateTypeMap)
           4. Approve an HOURLY driver rate $25.00 (effective from 2032-01-01)
           5. Add a draft line: qty=4 → calculatedamount must be 4 × 25 = 100.0000
         """
-        from tests.seed_helpers import seed_legacy_item
+        from tests.seed_helpers import seed_cdpi_item
         await _void_all_rates(session_client, auth_token)
         item_id = None
         try:
             # 1. Seed custom item
-            item_id = await seed_legacy_item(
+            item_id = await seed_cdpi_item(
                 db_conn,
                 code="M13A_MAPPED",
                 name="Mapped Stop (M13 test)",
@@ -1416,14 +1386,11 @@ class TestM13bRegressionFixes:
             )
             assert act_resp.status_code == 200, f"activate: {act_resp.text}"
 
-            # 3. Assign rate type
-            map_resp = await session_client.post(
-                f"/settings/pay-items/{item_id}/rate-type-map",
-                json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
-                headers=auth(auth_token),
+            # 3. Map rate type HOURLY (the structure CDPI creation produces)
+            from tests.seed_helpers import map_rate_type_to_item
+            await map_rate_type_to_item(
+                db_conn, item_id=item_id, rate_type_id=paytest_rate_type_id
             )
-            assert map_resp.status_code == 201, f"rate-type-map: {map_resp.text}"
-            assert map_resp.json()["rate_code"] == "HOURLY"
 
             # 4. Approve driver rate $25.00 effective 2032-01-01
             rate_resp = await session_client.post(
@@ -1579,80 +1546,6 @@ class TestM13bRegressionFixes:
                 json={"status": "Cancelled"}, headers=auth(auth_token),
             )
             await _void_all_rates(session_client, auth_token)
-
-    # ── Issue 5: rate-type-map endpoint requires setup.manage ─────────────── #
-
-    async def test_rate_type_map_requires_setup_manage_branch_user_denied(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        branch_user_token: str, paytest_rate_type_id: int, db_conn,
-    ):
-        """
-        POST /settings/pay-items/{id}/rate-type-map must require
-        AllCompanyBranches scope + setup.manage.
-
-        branch_user has SpecificBranch scope + PAYROLL_VIEWER role (no write
-        permissions) and must receive 403.
-        """
-        from tests.seed_helpers import seed_legacy_item
-        # Seed a custom PerUnit item as admin so we have a valid item_id.
-        item_id = await seed_legacy_item(
-            db_conn,
-            code="M13A_PERM_TEST",
-            name="Permission Test Item (M13)",
-            unit="Unit",
-            category="Count",
-        )
-
-        try:
-            deny_resp = await session_client.post(
-                f"/settings/pay-items/{item_id}/rate-type-map",
-                json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
-                headers=auth(branch_user_token),
-            )
-            assert deny_resp.status_code == 403, (
-                f"branch_user should be denied (403) but got {deny_resp.status_code}: "
-                f"{deny_resp.text}"
-            )
-        finally:
-            cleanup = await session_client.delete(
-                f"/settings/pay-items/{item_id}", headers=auth(auth_token)
-            )
-            assert cleanup.status_code == 200, cleanup.text
-
-    async def test_rate_type_map_admin_can_assign(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        paytest_rate_type_id: int, db_conn,
-    ):
-        """
-        Admin (AllCompanyBranches + setup.manage) must be able to call
-        POST /settings/pay-items/{id}/rate-type-map successfully.
-
-        Positive counterpart to the denial test above.
-        """
-        from tests.seed_helpers import seed_legacy_item
-        item_id = await seed_legacy_item(
-            db_conn,
-            code="M13A_PERM_TEST",
-            name="Permission Test Item (M13)",
-            unit="Unit",
-            category="Count",
-        )
-        try:
-            ok_resp = await session_client.post(
-                f"/settings/pay-items/{item_id}/rate-type-map",
-                json={"rate_type_id": paytest_rate_type_id, "is_primary": True},
-                headers=auth(auth_token),
-            )
-            assert ok_resp.status_code == 201, (
-                f"Admin should be allowed (201) but got {ok_resp.status_code}: "
-                f"{ok_resp.text}"
-            )
-            assert ok_resp.json()["rate_code"] == "HOURLY"
-        finally:
-            cleanup = await session_client.delete(
-                f"/settings/pay-items/{item_id}", headers=auth(auth_token)
-            )
-            assert cleanup.status_code == 200, cleanup.text
 
     # ── System line update uses DB-driven path (not hardcoded dict) ───────── #
 

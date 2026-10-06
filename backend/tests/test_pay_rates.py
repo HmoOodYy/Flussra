@@ -101,9 +101,9 @@ async def paytest_driver_id(
 @pytest_asyncio.fixture
 async def additional_hourly_item(direct_db, paytest_rate_type_id: int):
     """A second HOURLY-mapped item, removed after each activation test."""
-    from tests.seed_helpers import seed_legacy_item
+    from tests.seed_helpers import seed_cdpi_item
 
-    item_id = await seed_legacy_item(
+    item_id = await seed_cdpi_item(
         direct_db, code=f"RATE_GUARD_{uuid4().hex[:12]}", name="Rate Guard Item"
     )
     await direct_db.execute(
@@ -123,6 +123,10 @@ async def additional_hourly_item(direct_db, paytest_rate_type_id: int):
         )
         await direct_db.execute(
             _sqla_text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :item_id"),
+            {"item_id": item_id},
+        )
+        await direct_db.execute(
+            _sqla_text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :item_id"),
             {"item_id": item_id},
         )
         await direct_db.execute(
@@ -4348,12 +4352,10 @@ class TestFinalProductRule:
 
 class TestCustomPayItemRateStructure:
     """
-    Phase 3E: custom custom pay items must appear in the Pay Rates matrix.
+    Custom Daily pay items must appear in the Pay Rates matrix.
 
-    Root-cause: create_custom_pay_item previously saved rate_names only to
-    payitemsettings, without creating RateTypes or PayItemRateTypeMap rows.
-    get_driver_rate_matrix uses INNER JOIN on PayItemRateTypeMap so items
-    with no mapping rows are invisible in Pay Rates.
+    get_driver_rate_matrix uses an INNER JOIN on PayItemRateTypeMap, so an item
+    appears only when its rate structure (RateType + map) exists.
     """
 
     # ------------------------------------------------------------------
@@ -4371,10 +4373,10 @@ class TestCustomPayItemRateStructure:
         Seed a custom Daily PerUnit item, activate it for the driver's branch,
         then verify it appears as exactly one group in the rate matrix.
         """
-        from tests.seed_helpers import seed_legacy_item_with_rate_structure
+        from tests.seed_helpers import seed_cdpi_item_with_rate_structure
         h = auth(auth_token)
 
-        seeded = await seed_legacy_item_with_rate_structure(
+        seeded = await seed_cdpi_item_with_rate_structure(
             session_db_conn,
             code="TST_PERUNIT_SAMYA",
             name="Samya Rate Test",
@@ -4431,10 +4433,10 @@ class TestCustomPayItemRateStructure:
         Seed a custom Daily RangeBracket item and verify it produces multiple
         rate groups (one per bracket) in the matrix, and still one payroll column.
         """
-        from tests.seed_helpers import seed_legacy_item_multi_rate
+        from tests.seed_helpers import seed_cdpi_item_multi_rate
         h = auth(auth_token)
 
-        seeded = await seed_legacy_item_multi_rate(
+        seeded = await seed_cdpi_item_multi_rate(
             session_db_conn,
             code="TST_BRACKET_RATE",
             name="Bracket Rate Test",
@@ -4496,13 +4498,13 @@ class TestCustomPayItemRateStructure:
         Self-contained: creates its own payroll period at far-future dates
         (2082-07-01 to 2082-07-07) to avoid conflicts, then cancels it on cleanup.
         """
-        from tests.seed_helpers import seed_legacy_item_multi_rate
+        from tests.seed_helpers import seed_cdpi_item_multi_rate
         h = auth(auth_token)
 
         # ------------------------------------------------------------------ #
         # 1. Seed the custom RangeBracket pay item (2 rate fields)
         # ------------------------------------------------------------------ #
-        seeded = await seed_legacy_item_multi_rate(
+        seeded = await seed_cdpi_item_multi_rate(
             session_db_conn,
             code="TST_BRACKET_COL",
             name="Bracket Column Test",
@@ -4631,13 +4633,13 @@ class TestCustomPayItemRateStructure:
     ):
         """
         After seeding a custom Daily PerUnit item, PayItemRateTypeMap rows
-        must exist — verified via the GET endpoint and rate_names field.
+        must exist — verified via the GET endpoint.
         """
-        from tests.seed_helpers import seed_legacy_item_with_rate_structure
+        from tests.seed_helpers import seed_cdpi_item_with_rate_structure
 
         h = auth(auth_token)
 
-        seeded = await seed_legacy_item_with_rate_structure(
+        seeded = await seed_cdpi_item_with_rate_structure(
             session_db_conn,
             code="TST_RATE_STRUCT",
             name="Rate Structure Verify",
@@ -4648,7 +4650,7 @@ class TestCustomPayItemRateStructure:
         pay_item_id = seeded["pay_item_id"]
 
         try:
-            # Verify PayItemRateTypeMap row exists (seed_legacy_item_with_rate_structure creates it)
+            # Verify PayItemRateTypeMap row exists (seed_cdpi_item_with_rate_structure creates it)
             from sqlalchemy import text as _text
             check = await session_db_conn.execute(
                 _text(
@@ -4658,80 +4660,7 @@ class TestCustomPayItemRateStructure:
                 {"pid": pay_item_id},
             )
             assert check.scalar_one() >= 1, (
-                "seed_legacy_item_with_rate_structure must create a PayItemRateTypeMap row"
-            )
-        finally:
-            await session_client.delete(f"/settings/pay-items/{pay_item_id}", headers=h)
-
-    # ------------------------------------------------------------------
-    # Test 5 — backfill repairs broken items
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_broken_item_backfill_repair(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        test_app,
-        session_db_conn,
-    ):
-        """
-        Insert a 'broken' custom item (PayItems row only, no PayItemRateTypeMap),
-        run backfill_custom_pay_item_rate_structure, and confirm the item is repaired.
-        """
-        from sqlalchemy import text as _text
-
-        from app.settings.service import backfill_custom_pay_item_rate_structure
-        from tests.seed_helpers import seed_legacy_item_with_rate_structure
-
-        h = auth(auth_token)
-
-        # Seed the item with rate structure, then surgically delete the mapping
-        # to simulate the broken state, then run backfill and verify repair.
-        seeded = await seed_legacy_item_with_rate_structure(
-            session_db_conn,
-            code="TST_BACKFILL",
-            name="Backfill Test Item",
-            unit="Trip",
-            rate_behavior="PerUnit",
-            rate_name="Trip Rate",
-        )
-        pay_item_id = seeded["pay_item_id"]
-
-        try:
-            # Delete the mapping to simulate the broken state
-            await session_db_conn.execute(
-                _text("DELETE FROM payroll.payitemratetypemap WHERE payitemid = :pid"),
-                {"pid": pay_item_id},
-            )
-            # Verify it's broken now
-            check = await session_db_conn.execute(
-                _text(
-                    "SELECT COUNT(*) FROM payroll.payitemratetypemap "
-                    "WHERE payitemid = :pid AND status = 'Active'"
-                ),
-                {"pid": pay_item_id},
-            )
-            assert check.scalar_one() == 0, "Setup: mapping should be deleted"
-
-            # Run backfill directly via session_db_conn (AUTOCOMMIT — changes are immediate)
-            repaired = await backfill_custom_pay_item_rate_structure(
-                company_id=1, db=session_db_conn
-            )
-            assert any(r["pay_item_id"] == pay_item_id for r in repaired), (
-                f"Backfill must repair pay_item_id={pay_item_id}. "
-                f"Repaired: {repaired}"
-            )
-
-            # Verify mapping now exists
-            check2 = await session_db_conn.execute(
-                _text(
-                    "SELECT COUNT(*) FROM payroll.payitemratetypemap "
-                    "WHERE payitemid = :pid AND status = 'Active'"
-                ),
-                {"pid": pay_item_id},
-            )
-            assert check2.scalar_one() >= 1, (
-                "After backfill, PayItemRateTypeMap row must exist"
+                "seed_cdpi_item_with_rate_structure must create a PayItemRateTypeMap row"
             )
         finally:
             await session_client.delete(f"/settings/pay-items/{pay_item_id}", headers=h)
@@ -4753,12 +4682,12 @@ class TestCustomPayItemRateStructure:
         """
         from datetime import timedelta
 
-        from tests.seed_helpers import seed_legacy_item_with_rate_structure
+        from tests.seed_helpers import seed_cdpi_item_with_rate_structure
         h = auth(auth_token)
 
         future_date = (date.today() + timedelta(days=30)).isoformat()
 
-        seeded = await seed_legacy_item_with_rate_structure(
+        seeded = await seed_cdpi_item_with_rate_structure(
             session_db_conn,
             code="TST_FUTURE_ITEM",
             name="Future Custom Item",
@@ -4809,10 +4738,10 @@ class TestCustomPayItemRateStructure:
         """
         A custom item activated only for HQ must NOT appear in the PAYTEST driver's matrix.
         """
-        from tests.seed_helpers import seed_legacy_item_with_rate_structure
+        from tests.seed_helpers import seed_cdpi_item_with_rate_structure
         h = auth(auth_token)
 
-        seeded = await seed_legacy_item_with_rate_structure(
+        seeded = await seed_cdpi_item_with_rate_structure(
             session_db_conn,
             code="TST_HQ_ONLY",
             name="HQ Only Item",

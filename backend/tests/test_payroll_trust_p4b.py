@@ -3,7 +3,6 @@ Phase 4B.2 + 4B.3 — Cross-company RateType scope enforcement (full closure).
 
 4B.2 Covers:
   T1  Direct create_rate with foreign custom RateType → 422
-  T2  Two-step mapping exploit blocked at settings endpoint → 422
   T3  Mixed-mapping contaminated DB still blocked at all write endpoints
   T4  System RateType (HOURLY) still works for both companies
   T5  Same-company custom RateType still works
@@ -13,8 +12,6 @@ Phase 4B.2 + 4B.3 — Cross-company RateType scope enforcement (full closure).
   T9  Batch save rejects cross-company custom RateType precisely (422)
 
 4B.3 Covers (orphaned CPI_ exploit):
-  T10 Physical PayItem delete deactivates orphaned CPI_ RateType; invisible + unmappable
-  T11 assign_rate_type_to_pay_item rejects unmapped/orphaned active CPI_ RateType
   T12 /payroll/rate-types hides unmapped CPI_ types from all companies
   T13 batch_save_rates rejects contaminated mapping via defense-in-depth
   T14 Rate matrix hides contaminated (direct-DB) mapping
@@ -137,12 +134,6 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     """))
     await direct_db.execute(_text("""
         DELETE FROM payroll.branchpayitemconfig WHERE payitemid IN (
-            SELECT payitemid FROM payroll.payitems WHERE companyid IN
-                (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4B')
-        )
-    """))
-    await direct_db.execute(_text("""
-        DELETE FROM payroll.payitemsettings WHERE payitemid IN (
             SELECT payitemid FROM payroll.payitems WHERE companyid IN
                 (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4B')
         )
@@ -305,10 +296,6 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
             (SELECT payitemid FROM payroll.payitems WHERE companyid = :cid)
     """), {"cid": cid_b})
     await direct_db.execute(_text("""
-        DELETE FROM payroll.payitemsettings WHERE payitemid IN
-            (SELECT payitemid FROM payroll.payitems WHERE companyid = :cid)
-    """), {"cid": cid_b})
-    await direct_db.execute(_text("""
         DELETE FROM payroll.payitemratetypemap WHERE payitemid IN
             (SELECT payitemid FROM payroll.payitems WHERE companyid = :cid)
     """), {"cid": cid_b})
@@ -348,9 +335,6 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     ), {"rtid": rt_a_custom_id})
     await direct_db.execute(_text(
         "DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :piid"
-    ), {"piid": pi_a_id})
-    await direct_db.execute(_text(
-        "DELETE FROM payroll.payitemsettings WHERE payitemid = :piid"
     ), {"piid": pi_a_id})
     await direct_db.execute(_text(
         "DELETE FROM payroll.payitemratetypemap WHERE ratetypeid = :rtid"
@@ -459,63 +443,6 @@ async def test_t1_create_rate_rejects_foreign_custom_rate_type(
         WHERE driverid = :did AND ratetypeid = :rtid
     """), {"did": drv_b_id, "rtid": rt_a_id})).first()
     assert row is None, "No DriverRate row must exist after rejected create_rate"
-
-
-# ===========================================================================
-# T2 — Two-step mapping exploit blocked at settings endpoint
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_t2_two_step_mapping_exploit_blocked(
-    p4b_env, client: httpx.AsyncClient, direct_db
-):
-    """
-    Company B tries the two-step exploit:
-      Step 1 — Company B creates own PayItem (done in fixture as CPI_P4B_B).
-      Step 2 — Company B maps CPI_P4B_B to Company A's CPI_P4B_RT via settings endpoint.
-
-    The settings endpoint must return 422.
-    No PayItemRateTypeMap row for (CPI_P4B_B, CPI_P4B_RT) must be created.
-    Subsequent create_rate with CPI_P4B_RT + Company B driver must still fail 422.
-    """
-    token_b  = await _get_token_b(client)
-    rt_a_id  = p4b_env["rt_a_custom_id"]
-    pi_b_id  = p4b_env["pi_b_id"]
-    drv_b_id = p4b_env["driver_b_id"]
-
-    # Step 2: attempt to map Company B PayItem → Company A RateType
-    resp_map = await client.post(
-        f"/settings/pay-items/{pi_b_id}/rate-type-map",
-        json={"rate_type_id": rt_a_id, "is_primary": True},
-        headers=_auth(token_b),
-    )
-    assert resp_map.status_code == 422, (
-        f"Mapping exploit must be blocked 422, got {resp_map.status_code}: {resp_map.text}"
-    )
-    assert "does not belong to this company" in resp_map.json()["detail"].lower()
-
-    # Confirm no row was inserted
-    map_row = (await direct_db.execute(_text("""
-        SELECT 1 FROM payroll.payitemratetypemap
-        WHERE payitemid = :piid AND ratetypeid = :rtid
-    """), {"piid": pi_b_id, "rtid": rt_a_id})).first()
-    assert map_row is None, "PayItemRateTypeMap must NOT be created by the blocked exploit"
-
-    # Confirm create_rate is still rejected for Company B with the foreign RateType
-    resp_rate = await client.post(
-        "/payroll/rates",
-        json={
-            "driver_id":      drv_b_id,
-            "rate_type_id":   rt_a_id,
-            "amount":         "10.00",
-            "effective_from": "2056-01-01",
-        },
-        headers=_auth(token_b),
-    )
-    assert resp_rate.status_code == 422, (
-        f"create_rate must still be rejected after blocked mapping, "
-        f"got {resp_rate.status_code}: {resp_rate.text}"
-    )
 
 
 # ===========================================================================
@@ -906,183 +833,6 @@ async def test_t9_batch_save_rejects_cross_company_rate_type_precisely(
 # ===========================================================================
 # Phase 4B.3 tests — Orphaned CPI_ RateType exploit
 # ===========================================================================
-
-# ===========================================================================
-# T10 — Physical delete deactivates orphaned CPI_ RateType; it is invisible
-#       and unmappable by another company
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_t10_orphaned_cpi_after_physical_delete(
-    p4b_env, client: httpx.AsyncClient, direct_db
-):
-    """
-    Phase 4B.3 exploit path:
-      1. Company A creates a custom PayItem via API → CPI_ RateType auto-created.
-      2. Company A physically deletes the PayItem via API.
-      3. The generated CPI_ RateType must be deactivated (not claimable).
-      4. Company B must NOT see it in /payroll/rate-types.
-      5. Company B must NOT be able to map its PayItem to that RateType.
-      6. Company B must NOT be able to create_rate with that RateType.
-    """
-    token_a = p4b_env["auth_a"]
-    token_b = await _get_token_b(client)
-    pi_b_id = p4b_env["pi_b_id"]
-
-    # Step 1: Company A seeds a throw-away custom PayItem via direct DB (LLR-A blocks HTTP)
-    cid_a = p4b_env["cid_a"]
-    pi_throw_row = (await direct_db.execute(_text("""
-        INSERT INTO payroll.payitems
-            (companyid, payitemcode, payitemname, ratebehavior,
-             requiresrate, isdefaultbranchactive, status,
-             category, datatype, itemscope, unit)
-        VALUES (:cid, 'CPI_P4B_T10', 'T10 Throwaway Item', 'PerUnit',
-                TRUE, FALSE, 'Active', 'Count', 'Decimal', 'Daily', 'Unit')
-        ON CONFLICT (companyid, payitemcode) WHERE companyid IS NOT NULL
-            DO UPDATE SET status = 'Active'
-        RETURNING payitemid
-    """), {"cid": cid_a})).mappings().first()
-    throwaway_pi_id = pi_throw_row["payitemid"]
-
-    rt_throw_ins = (await direct_db.execute(_text("""
-        INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
-        VALUES (:code, 'T10 Throwaway Rate', 'Unit', TRUE, :cid)
-        ON CONFLICT (ratecode) DO UPDATE SET isactive = TRUE, companyid = :cid
-        RETURNING ratetypeid, ratecode
-    """), {"code": f"CPI_{throwaway_pi_id}_1", "cid": cid_a})).mappings().first()
-    rt_throwaway_id   = rt_throw_ins["ratetypeid"]
-    rt_throwaway_code = rt_throw_ins["ratecode"]
-
-    await direct_db.execute(_text("""
-        INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
-        VALUES (:piid, :rtid, TRUE, 'Active')
-        ON CONFLICT DO NOTHING
-    """), {"piid": throwaway_pi_id, "rtid": rt_throwaway_id})
-    assert rt_throwaway_code.startswith("CPI_"), (
-        f"Seeded rate code must start with CPI_, got {rt_throwaway_code!r}"
-    )
-
-    # Step 2: Company A physically deletes the PayItem (no DriverRates → physical delete)
-    resp_delete = await client.delete(
-        f"/settings/pay-items/{throwaway_pi_id}",
-        headers=_auth(token_a),
-    )
-    assert resp_delete.status_code == 200, f"PayItem delete failed: {resp_delete.text}"
-    result_data = resp_delete.json()
-    assert result_data["deletion_type"] == "physical", (
-        f"Expected physical delete, got {result_data['deletion_type']!r}"
-    )
-
-    # Step 3: Verify the CPI_ RateType is now inactive
-    rt_active_row = (await direct_db.execute(_text("""
-        SELECT isactive FROM payroll.ratetypes WHERE ratetypeid = :rtid
-    """), {"rtid": rt_throwaway_id})).mappings().first()
-    if rt_active_row is not None:
-        assert not rt_active_row["isactive"], (
-            "Orphaned CPI_ RateType must be deactivated after PayItem physical delete"
-        )
-    # (if rt_active_row is None, the RateType was actually deleted — also correct)
-
-    # Step 4: Company B must NOT see this rate type in /payroll/rate-types
-    resp_list = await client.get("/payroll/rate-types", headers=_auth(token_b))
-    assert resp_list.status_code == 200
-    rate_type_ids = {rt["rate_type_id"] for rt in resp_list.json()}
-    assert rt_throwaway_id not in rate_type_ids, (
-        "Orphaned/deactivated CPI_ RateType must NOT appear in Company B's rate-types list"
-    )
-
-    # Step 5: Company B must NOT be able to map its PayItem to the orphaned RateType
-    resp_map = await client.post(
-        f"/settings/pay-items/{pi_b_id}/rate-type-map",
-        json={"rate_type_id": rt_throwaway_id, "is_primary": False},
-        headers=_auth(token_b),
-    )
-    assert resp_map.status_code == 422, (
-        f"Mapping to orphaned/deactivated CPI_ RateType must return 422, "
-        f"got {resp_map.status_code}: {resp_map.text}"
-    )
-
-    # Step 6: Company B must NOT be able to create_rate with the orphaned RateType
-    drv_b_id = p4b_env["driver_b_id"]
-    resp_rate = await client.post(
-        "/payroll/rates",
-        json={"driver_id": drv_b_id, "rate_type_id": rt_throwaway_id,
-              "amount": "5.00", "effective_from": "2063-01-01"},
-        headers=_auth(token_b),
-    )
-    assert resp_rate.status_code == 422, (
-        f"create_rate with orphaned CPI_ RateType must return 422, "
-        f"got {resp_rate.status_code}: {resp_rate.text}"
-    )
-
-    # Cleanup (throwaway PayItem already deleted; clean up residual RateType row if present)
-    await direct_db.execute(_text(
-        "DELETE FROM payroll.driverrates WHERE ratetypeid = :rtid"
-    ), {"rtid": rt_throwaway_id})
-    await direct_db.execute(_text(
-        "DELETE FROM payroll.payitemratetypemap WHERE ratetypeid = :rtid"
-    ), {"rtid": rt_throwaway_id})
-    await direct_db.execute(_text(
-        "DELETE FROM payroll.ratetypes WHERE ratetypeid = :rtid"
-    ), {"rtid": rt_throwaway_id})
-
-
-# ===========================================================================
-# T11 — assign_rate_type_to_pay_item rejects unmapped active custom RateType
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_t11_assign_rejects_unmapped_active_raw_rate_type(
-    p4b_env, client: httpx.AsyncClient, direct_db
-):
-    """
-    Phase 4C: assign_rate_type_to_pay_item must reject a RateType that belongs to
-    a different company (structural ownership: rt.companyid != cid_b -> 422).
-
-    The RateType is owned by Company A (companyid=cid_a).
-    Company B tries to map its PayItem to it -> must be rejected.
-    No PayItemRateTypeMap row must be created (trigger also blocks it at DB level).
-    """
-    token_b = await _get_token_b(client)
-    pi_b_id = p4b_env["pi_b_id"]
-    cid_a   = p4b_env["cid_a"]
-
-    # Insert a RateType owned by Company A (foreign from Company B's perspective)
-    orphan_row = (await direct_db.execute(_text("""
-        INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
-        VALUES ('CPI_TEST_ORPHAN_T11', 'T11 Orphan Test', 'Unit', TRUE, :cid_a)
-        ON CONFLICT (ratecode) DO UPDATE SET isactive = TRUE, companyid = :cid_a
-        RETURNING ratetypeid
-    """), {"cid_a": cid_a})).mappings().first()
-    orphan_rt_id = orphan_row["ratetypeid"]
-
-    try:
-        resp = await client.post(
-            f"/settings/pay-items/{pi_b_id}/rate-type-map",
-            json={"rate_type_id": orphan_rt_id, "is_primary": False},
-            headers=_auth(token_b),
-        )
-        assert resp.status_code == 422, (
-            f"Mapping to unmapped/orphaned CPI_ RateType must return 422, "
-            f"got {resp.status_code}: {resp.text}"
-        )
-        assert "does not belong to this company" in resp.json()["detail"].lower()
-
-        # No PayItemRateTypeMap row must exist
-        map_row = (await direct_db.execute(_text("""
-            SELECT 1 FROM payroll.payitemratetypemap
-            WHERE payitemid = :piid AND ratetypeid = :rtid
-        """), {"piid": pi_b_id, "rtid": orphan_rt_id})).first()
-        assert map_row is None, "No PayItemRateTypeMap must be created for orphaned RateType"
-
-    finally:
-        await direct_db.execute(_text(
-            "DELETE FROM payroll.payitemratetypemap WHERE ratetypeid = :rtid"
-        ), {"rtid": orphan_rt_id})
-        await direct_db.execute(_text(
-            "DELETE FROM payroll.ratetypes WHERE ratetypeid = :rtid"
-        ), {"rtid": orphan_rt_id})
-
 
 # ===========================================================================
 # T12 — /payroll/rate-types hides unmapped non-system CPI_ RateTypes

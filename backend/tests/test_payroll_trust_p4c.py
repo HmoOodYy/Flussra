@@ -4,11 +4,9 @@ Payroll Trust Phase 4C -- RateTypes.CompanyID Structural Ownership Tests.
 Verifies:
   A. Migration backfill: system RateTypes have companyid=NULL; custom RateTypes
      get companyid set to the owning company.
-  B. Service creation: create_custom_pay_item, decide_pay_item_request, and
-     backfill_custom_pay_item_rate_structure all set companyid on new CPI_ RateTypes.
+  B. CPI_ RateTypes created for custom items carry the owning companyid.
   C. Structural ownership guard: foreign RateType rejected for create_rate,
-     approve_rate, update_rate, batch_save, assign_rate_type, rate-types list,
-     and rate matrix.
+     approve_rate, update_rate, batch_save, rate-types list, and rate matrix.
   D. DB trigger: trg_guard_payitemratetypemap_ownership blocks cross-company
      PayItemRateTypeMap inserts at the database level.
   E. Phase 4B regression: all prior 4B protections remain intact via structural check.
@@ -93,12 +91,6 @@ async def p4c_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     """))
     await direct_db.execute(_text("""
         DELETE FROM payroll.payitemratetypemap WHERE payitemid IN (
-            SELECT payitemid FROM payroll.payitems WHERE companyid IN
-                (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4C')
-        )
-    """))
-    await direct_db.execute(_text("""
-        DELETE FROM payroll.payitemsettings WHERE payitemid IN (
             SELECT payitemid FROM payroll.payitems WHERE companyid IN
                 (SELECT companyid FROM core.companies WHERE companycode = 'COMP_B_P4C')
         )
@@ -236,11 +228,6 @@ async def p4c_env(direct_db, client: httpx.AsyncClient, auth_token: str):
             SELECT payitemid FROM payroll.payitems WHERE companyid = :cid
         )
     """), {"cid": cid_b})
-    await direct_db.execute(_text("""
-        DELETE FROM payroll.payitemsettings WHERE payitemid IN (
-            SELECT payitemid FROM payroll.payitems WHERE companyid = :cid
-        )
-    """), {"cid": cid_b})
     # Delete auto-generated CPI_ RateTypes for Company B
     if rt_b_id:
         await direct_db.execute(_text(
@@ -347,13 +334,12 @@ async def test_p4c_a3_ownership_trigger_exists(direct_db):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_p4c_b1_create_custom_pay_item_sets_companyid(
+async def test_p4c_b1_company_b_custom_rate_type_has_companyid(
     p4c_env, direct_db, client: httpx.AsyncClient
 ):
     """
-    create_custom_pay_item creates CPI_ RateTypes with companyid=company_id.
-    The fixture already called this endpoint for Company B.
-    Verify that the auto-generated CPI_ RateType for Company B has companyid=cid_b.
+    A custom item's CPI_ RateType carries its owning company.
+    The fixture seeds Company B's PayItem and RateType; verify companyid=cid_b.
     """
     cid_b    = p4c_env["cid_b"]
     rt_b_id  = p4c_env["rt_b_id"]
@@ -446,36 +432,6 @@ async def test_p4c_c2_get_rate_types_shows_own_from_company_a_perspective(
         assert rt_b_id not in ids, (
             "Company B's CPI_ RateType must NOT appear for Company A"
         )
-
-
-@pytest.mark.asyncio
-async def test_p4c_c3_assign_rate_type_rejects_foreign_company_type(
-    p4c_env, client: httpx.AsyncClient, direct_db
-):
-    """
-    Company B tries to assign Company A's CPI_ RateType to its own PayItem.
-    Must be rejected 422 (structural: rt.companyid=cid_a != cid_b).
-    """
-    token_b = p4c_env["auth_b"]
-    pi_b_id = p4c_env["pi_b_id"]
-    rt_a_id = p4c_env["rt_a_id"]
-
-    resp = await client.post(
-        f"/settings/pay-items/{pi_b_id}/rate-type-map",
-        json={"rate_type_id": rt_a_id, "is_primary": False},
-        headers=_auth(token_b),
-    )
-    assert resp.status_code == 422, (
-        f"Expected 422 for foreign RateType assignment, got {resp.status_code}: {resp.text}"
-    )
-    assert "does not belong to this company" in resp.json()["detail"].lower()
-
-    # Verify no PayItemRateTypeMap row was created
-    map_row = (await direct_db.execute(_text("""
-        SELECT 1 FROM payroll.payitemratetypemap
-        WHERE payitemid = :piid AND ratetypeid = :rtid
-    """), {"piid": pi_b_id, "rtid": rt_a_id})).first()
-    assert map_row is None, "No PayItemRateTypeMap must be created for foreign RateType"
 
 
 @pytest.mark.asyncio

@@ -122,22 +122,16 @@ async def _create_custom_item(
     unit: str = "Unit",
 ) -> dict:
     """Seed a legacy custom Daily pay item directly into the DB (bypasses LLR-A guard)."""
-    from tests.seed_helpers import seed_legacy_item
-    item_id = await seed_legacy_item(
+    from tests.seed_helpers import seed_cdpi_item
+    item_id = await seed_cdpi_item(
         db_conn, code=code, name=name, rate_behavior=behavior, unit=unit, category="Count",
     )
     return {"pay_item_id": item_id, "pay_item_code": code, "pay_item_name": name}
 
 
-async def _link_rate_type(
-    client: httpx.AsyncClient, token: str, item_id: int, rate_type_id: int
-) -> None:
-    resp = await client.post(
-        f"/settings/pay-items/{item_id}/rate-type-map",
-        json={"rate_type_id": rate_type_id, "is_primary": True},
-        headers=auth(token),
-    )
-    assert resp.status_code in (200, 201), f"link rate type failed: {resp.text}"
+async def _link_rate_type(db_conn, item_id: int, rate_type_id: int) -> None:
+    from tests.seed_helpers import map_rate_type_to_item
+    await map_rate_type_to_item(db_conn, item_id=item_id, rate_type_id=rate_type_id)
 
 
 async def _activate_item(
@@ -226,7 +220,7 @@ async def m13c_ordinal_item(
         session_db_conn, "M13C_LOADS", "Load Tier Test", "OrdinalTier", "Load"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_ORDINAL")
-    await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
+    await _link_rate_type(session_db_conn, item["pay_item_id"], rt_id)
     await _activate_item(session_client, auth_token, paytest_branch_id, item["pay_item_id"])
     return item
 
@@ -243,7 +237,7 @@ async def m13c_rbrkt_item(
         session_db_conn, "M13C_RBRKT", "Range Bracket Test", "RangeBracket", "Mile"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_RBRKT")
-    await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
+    await _link_rate_type(session_db_conn, item["pay_item_id"], rt_id)
     await _activate_item(session_client, auth_token, paytest_branch_id, item["pay_item_id"])
     return item
 
@@ -260,7 +254,7 @@ async def m13c_rprog_item(
         session_db_conn, "M13C_RPROG", "Range Progressive Test", "RangeProgressive", "Mile"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_RPROG")
-    await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
+    await _link_rate_type(session_db_conn, item["pay_item_id"], rt_id)
     await _activate_item(session_client, auth_token, paytest_branch_id, item["pay_item_id"])
     return item
 
@@ -277,7 +271,7 @@ async def m13c_block_item(
         session_db_conn, "M13C_BLOCK", "Block Rate Test", "Block", "Mile"
     )
     rt_id = await _get_rate_type_id(session_client, auth_token, "M13C_BLOCK")
-    await _link_rate_type(session_client, auth_token, item["pay_item_id"], rt_id)
+    await _link_rate_type(session_db_conn, item["pay_item_id"], rt_id)
     await _activate_item(session_client, auth_token, paytest_branch_id, item["pay_item_id"])
     return item
 
@@ -1259,24 +1253,6 @@ class TestRateDetailEndpoint:
         assert get_resp.status_code == 200
         assert get_resp.json()["tiers"] == []   # loaded but empty
 
-
-# ===========================================================================
-# TestCustomItemBehaviorValidation — settings API gates
-# ===========================================================================
-
-class TestCustomItemBehaviorValidation:
-
-    async def test_rate_type_map_allowed_for_ordinal_item(
-        self, session_client, auth_token, m13c_ordinal_item, m13c_ordinal_rt_id,
-    ):
-        """POST /settings/pay-items/{id}/rate-type-map works for OrdinalTier items."""
-        # Re-assign (idempotent ON CONFLICT) — should succeed.
-        resp = await session_client.post(
-            f"/settings/pay-items/{m13c_ordinal_item['pay_item_id']}/rate-type-map",
-            json={"rate_type_id": m13c_ordinal_rt_id, "is_primary": True},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code in (200, 201), resp.text
 
 # ===========================================================================
 # TestM13cSafetyFixes — review issues fixed

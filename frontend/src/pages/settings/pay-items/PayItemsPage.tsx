@@ -14,7 +14,7 @@ import type {
   BulkPayItemConfigUpdate,
   BulkPayItemConfigResult,
   CustomPayItemUsage,
-  CustomPayItemDeleteResult,
+  CustomPayItemRetireResult,
   PayItemOrderUpdate,
   WizardValueType,
   WizardRateMethod,
@@ -45,8 +45,6 @@ interface RateMethodDef {
   label:   string;
   desc:    string;
   example: string;
-  // Number of rate-name inputs required by the supported method.
-  fixedCount?: number;
 }
 
 const RATE_METHODS: RateMethodDef[] = [
@@ -55,7 +53,6 @@ const RATE_METHODS: RateMethodDef[] = [
     label:   'Same rate for every value',
     desc:    'Each unit is paid at one fixed rate.',
     example: 'e.g. $X per mile, $X per hour',
-    fixedCount: 1,
   },
 ];
 
@@ -102,30 +99,20 @@ const STEP2_NUMBER: Step2SectionConfig = {
   ],
 };
 
-// Default rate names for each method
-function defaultRateNames(method: WizardRateMethod): string[] {
-  const def = RATE_METHODS.find(m => m.value === method);
-  if (!def) return [''];
-  if (def.fixedCount !== undefined) return Array(def.fixedCount).fill('');
-  return [''];
-}
-
 // ─── Wizard state / reducer ───────────────────────────────────────────────────
 
 interface WizardState {
   step:          1 | 2 | 3;
   value_type:    WizardValueType | null;
   rate_method:   WizardRateMethod | null;
-  rate_names:    string[];
   item_name:     string;
-  display_label: string;
   unit:          string;
   notes:         string;
 }
 
 const WIZARD_INITIAL: WizardState = {
   step: 1, value_type: null, rate_method: null,
-  rate_names: [], item_name: '', display_label: '', unit: '', notes: '',
+  item_name: '', unit: '', notes: '',
 };
 
 type WizardAction =
@@ -133,11 +120,7 @@ type WizardAction =
   | { type: 'SET_STEP';         step:   1 | 2 | 3 }
   | { type: 'SET_VALUE_TYPE';   vt:     WizardValueType }
   | { type: 'SET_RATE_METHOD';  method: WizardRateMethod }
-  | { type: 'SET_RATE_NAME';    idx:    number; name: string }
-  | { type: 'ADD_RATE_NAME' }
-  | { type: 'REMOVE_RATE_NAME'; idx:    number }
   | { type: 'SET_ITEM_NAME';    name:   string }
-  | { type: 'SET_DISPLAY_LABEL'; label: string }
   | { type: 'SET_UNIT';         unit:   string }
   | { type: 'SET_NOTES';        notes:  string };
 
@@ -146,19 +129,8 @@ function wizardReducer(s: WizardState, a: WizardAction): WizardState {
     case 'RESET': return { ...WIZARD_INITIAL };
     case 'SET_STEP':  return { ...s, step: a.step };
     case 'SET_VALUE_TYPE': return { ...s, value_type: a.vt };
-    case 'SET_RATE_METHOD': {
-      const names = defaultRateNames(a.method);
-      return { ...s, rate_method: a.method, rate_names: names };
-    }
-    case 'SET_RATE_NAME': {
-      const updated = [...s.rate_names];
-      updated[a.idx] = a.name;
-      return { ...s, rate_names: updated };
-    }
-    case 'ADD_RATE_NAME':    return { ...s, rate_names: [...s.rate_names, ''] };
-    case 'REMOVE_RATE_NAME': return { ...s, rate_names: s.rate_names.filter((_, i) => i !== a.idx) };
+    case 'SET_RATE_METHOD': return { ...s, rate_method: a.method };
     case 'SET_ITEM_NAME':     return { ...s, item_name: a.name };
-    case 'SET_DISPLAY_LABEL': return { ...s, display_label: a.label };
     case 'SET_UNIT':          return { ...s, unit: a.unit };
     case 'SET_NOTES':         return { ...s, notes: a.notes };
     default: return s;
@@ -804,7 +776,7 @@ export function PayItemsPage() {
     }
   }
 
-  // ── Custom item: delete ────────────────────────────────────────────────────
+  // ── Custom item: retire ────────────────────────────────────────────────────
   async function startDelete() {
     if (!selSt.selectedItem) return;
     setUsageLoading(true);
@@ -822,15 +794,12 @@ export function PayItemsPage() {
     if (!selSt.selectedItem) return;
     setDeleteWorking(true);
     try {
-      const { data } = await apiClient.delete<CustomPayItemDeleteResult>(
+      const { data } = await apiClient.delete<CustomPayItemRetireResult>(
         `/settings/pay-items/${selSt.selectedItem.pay_item_id}`
       );
       setDeleteConfirmOpen(false);
       dispatchSel({ type: 'RESET' });
-      showToast(data.deletion_type === 'physical'
-        ? `"${data.pay_item_code}" deleted permanently.`
-        : `"${data.pay_item_code}" retired (it was used in payroll data).`
-      );
+      showToast(`"${data.pay_item_code}" retired.`);
       if (branchMode === 'single' && selectedBranchId) {
         dispatchSingle({ type: 'FETCH_START' });
         apiClient.get<BranchPayItemState[]>(`/settings/branches/${selectedBranchId}/pay-items`)
@@ -1863,25 +1832,19 @@ export function PayItemsPage() {
         </div>
       )}
 
-      {/* ── Delete confirm (with usage info) ── */}
+      {/* ── Retire confirm (with usage info) ── */}
       {deleteConfirmOpen && usageData && selSt.selectedItem && (
         <div className={styles.modalOverlay} onClick={e => { if (e.target === e.currentTarget) setDeleteConfirmOpen(false); }}>
           <div className={styles.modal}>
             <div className={styles.modalHeader}>
-              <h2 className={styles.modalTitle}>
-                {usageData.deletion_would_retire ? 'Retire Pay Item' : 'Delete Pay Item'}
-              </h2>
+              <h2 className={styles.modalTitle}>Retire Pay Item</h2>
               <button className={styles.modalCloseBtn} onClick={() => setDeleteConfirmOpen(false)}><CloseIcon /></button>
             </div>
             <div className={styles.modalBody}>
-              <div className={usageData.deletion_would_retire ? styles.warnBanner : styles.infoBanner}>
-                {usageData.deletion_would_retire ? <WarnIcon /> : <InfoIcon />}
+              <div className={styles.warnBanner}>
+                <WarnIcon />
                 <span>
-                  {usageData.deletion_would_retire
-                    ? usageData.has_cdpi_definition
-                      ? `"${selSt.selectedItem.pay_item_name}" is an approved Custom Daily Pay Item and cannot be physically deleted. It will be retired — the code is permanently locked and the item hidden from all UIs.`
-                      : `"${selSt.selectedItem.pay_item_name}" has been used in finalized or meaningful payroll data and cannot be physically deleted. It will be retired — the code is permanently locked and the item hidden from all UIs.`
-                    : `"${selSt.selectedItem.pay_item_name}" has no meaningful usage and will be permanently deleted.`}
+                  {`"${selSt.selectedItem.pay_item_name}" will be retired. The code is permanently locked, the item is hidden from all UIs, and its payroll history is preserved.`}
                 </span>
               </div>
               <div className={styles.usageStats}>
@@ -1897,7 +1860,7 @@ export function PayItemsPage() {
             </div>
             <div className={styles.modalFooter}>
               <button className={styles.btnDanger} onClick={() => void confirmDelete()} disabled={deleteWorking}>
-                {deleteWorking ? <><SpinnerIcon /> Working…</> : usageData.deletion_would_retire ? 'Retire Item' : 'Delete Permanently'}
+                {deleteWorking ? <><SpinnerIcon /> Working…</> : 'Retire Item'}
               </button>
               <button className={styles.btnSecondary} onClick={() => setDeleteConfirmOpen(false)} disabled={deleteWorking}>
                 Cancel

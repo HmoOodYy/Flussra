@@ -59,17 +59,10 @@ from app.settings.schemas import (
     CompanyProfile,
     CompanyUpdate,
     CustomPayItem,
-    CustomPayItemCreate,
-    CustomPayItemDeleteResult,
-    CustomPayItemRequest,
-    CustomPayItemRequestCreate,
-    CustomPayItemRequestDecide,
-    CustomPayItemUpdate,
+    CustomPayItemRetireResult,
     CustomPayItemUsage,
     OnboardingOptionsResponse,
     PayItemConfigUpdate,
-    PayItemRateTypeMapCreate,
-    PayItemRateTypeMapSummary,
     StatusKey,
     StatusKeyCreate,
     StatusKeyUpdate,
@@ -96,28 +89,9 @@ _CPI_CHARSET: str = "".join(
     c for c in (_string.ascii_uppercase + _string.digits)
     if c not in "O0I1L"
 )
-_CPI_PREFIX:   str = "CPI_"
-_CPI_SUFFIX_LEN: int = 8
 _CPI_MAX_RETRIES: int = 10  # collision is astronomically unlikely; 10 gives a clean ceiling
 
 _SRC_SUFFIX_LEN: int = 8  # SRC_{company_id}_{8 chars}
-
-
-def _generate_pay_item_code() -> str:
-    """
-    Return a new candidate custom pay item code: CPI_ + 8 random characters.
-
-    Characters are drawn from uppercase letters + digits, excluding visually
-    ambiguous characters (O, 0, I, 1, L).  With ~32 usable characters and an
-    8-character suffix, the keyspace is 32^8 ≈ 1 trillion, so collisions are
-    practically impossible in any real deployment.
-
-    Separated into its own function so tests can monkeypatch it to exercise
-    the retry path without actually creating database rows.
-    """
-    return _CPI_PREFIX + "".join(
-        secrets.choice(_CPI_CHARSET) for _ in range(_CPI_SUFFIX_LEN)
-    )
 
 
 def _generate_src_rate_code(company_id: int) -> str:
@@ -139,7 +113,6 @@ _SETTINGS_AUDIT_REASONS: dict[str, str] = {
     "STATUS_KEY_CREATED":        "Payroll status key created",
     "STATUS_KEY_UPDATED":        "Payroll status key updated",
     "STATUS_KEY_DEACTIVATED":    "Payroll status key deactivated",
-    "PAY_ITEM_RATE_TYPE_ASSIGNED": "Rate type mapped to pay item",
 }
 
 
@@ -1937,14 +1910,8 @@ _SETTINGS_AUDIT_REASONS.update({
     "PAY_ITEM_CONFIG_UPDATED":        "Branch pay item configuration updated (same-day amendment)",
     "PAY_ITEM_CONFIG_VERSIONED":      "Branch pay item configuration versioned (new effective date)",
     "PAY_ITEM_BULK_CONFIG":           "Bulk branch pay item configuration applied",
-    # M12 custom pay item audit codes
-    "CUSTOM_PAY_ITEM_CREATED":           "Custom pay item created (admin direct)",
-    "CUSTOM_PAY_ITEM_UPDATED":           "Custom pay item metadata updated",
-    "CUSTOM_PAY_ITEM_DELETED":           "Custom pay item physically deleted",
+    # Company PayItem lifecycle audit codes
     "CUSTOM_PAY_ITEM_RETIRED":           "Custom pay item retired (meaningful usage preserved)",
-    "CUSTOM_PAY_ITEM_REQUESTED":         "Custom pay item request submitted by branch",
-    "CUSTOM_PAY_ITEM_APPROVED":          "Custom pay item request approved — item created",
-    "CUSTOM_PAY_ITEM_REJECTED":          "Custom pay item request rejected",
     "PAY_ITEM_ORDER_UPDATED":            "Pay item display order saved",
 })
 
@@ -2837,10 +2804,7 @@ _CUSTOM_ITEM_COLS = """
 """
 
 
-def _row_to_custom_pay_item(
-    row,
-    rate_names: "list[str] | None" = None,
-) -> "CustomPayItem":
+def _row_to_custom_pay_item(row) -> "CustomPayItem":
     return CustomPayItem(
         pay_item_id=row["payitemid"],
         company_id=row["companyid"],
@@ -2862,165 +2826,7 @@ def _row_to_custom_pay_item(
         notes=row.get("notes"),
         created_at_utc=row["createdatutc"],
         updated_at_utc=row.get("updatedatutc"),
-        rate_names=rate_names or [],
     )
-
-
-async def _fetch_rate_names_for_items(
-    item_ids: "list[int]",
-    company_id: int,
-    db: AsyncConnection,
-) -> "dict[int, list[str]]":
-    """
-    Return ordered rate_name lists keyed by payitemid.
-
-    Rate names are stored in payroll.payitemsettings with
-    settingkey = 'rate_name_1', 'rate_name_2', etc.
-    """
-    if not item_ids:
-        return {}
-    in_clause, in_params = _build_in_clause(item_ids, "sid")
-    result = await db.execute(
-        text(f"""
-            SELECT payitemid, settingkey, settingvaluetext
-            FROM   payroll.payitemsettings
-            WHERE  payitemid IN ({in_clause})
-              AND  companyid  = :cid
-              AND  settingkey LIKE 'rate_name_%'
-              AND  status     = 'Active'
-              AND  settingvaluetext IS NOT NULL
-            ORDER  BY payitemid, settingkey
-        """),
-        {"cid": company_id, **in_params},
-    )
-    result_dict: dict[int, list[str]] = {}
-    for row in result.mappings().all():
-        result_dict.setdefault(row["payitemid"], []).append(row["settingvaluetext"])
-    return result_dict
-
-
-_REQUEST_COLS = """
-    r.requestid, r.companyid, r.requestingbranchid,
-    b.branchname AS requestingbranchname,
-    r.requestedbyuserid,
-    u.displayname AS requestedby,
-    r.requestedatutc,
-    r.payitemcode, r.displaylabel, r.payitemname,
-    r.ratebehavior, r.category, r.unit, r.notes, r.sortorder,
-    r.status,
-    r.decidedbyuserid,
-    du.displayname AS decidedby,
-    r.decidedatutc, r.decisionreason, r.approvedpayitemid
-"""
-
-
-def _row_to_request(row) -> CustomPayItemRequest:
-    return CustomPayItemRequest(
-        request_id=row["requestid"],
-        company_id=row["companyid"],
-        requesting_branch_id=row["requestingbranchid"],
-        requesting_branch_name=row.get("requestingbranchname"),
-        requested_by_user_id=row["requestedbyuserid"],
-        requested_by=row.get("requestedby"),
-        requested_at_utc=row["requestedatutc"],
-        pay_item_code=row["payitemcode"],
-        display_label=row.get("displaylabel"),
-        pay_item_name=row["payitemname"],
-        rate_behavior=row["ratebehavior"],
-        category=row["category"],
-        unit=row.get("unit"),
-        notes=row.get("notes"),
-        sort_order=row["sortorder"],
-        status=row["status"],
-        decided_by_user_id=row.get("decidedbyuserid"),
-        decided_by=row.get("decidedby"),
-        decided_at_utc=row.get("decidedatutc"),
-        decision_reason=row.get("decisionreason"),
-        approved_pay_item_id=row.get("approvedpayitemid"),
-    )
-
-
-async def _block_if_code_taken(
-    company_id: int,
-    pay_item_code: str,
-    db: AsyncConnection,
-    *,
-    exclude_request_id: int | None = None,
-) -> None:
-    """
-    Raise HTTP 422 if any of these conditions are true:
-      1. A SYSTEM item (CompanyID IS NULL) has this code — explicit service-layer
-         block, independent of DB constraints (requirement #9).
-      2. An Active or Inactive custom item for this company has this code.
-      3. A Retired custom item for this company has this code (code permanently locked).
-      4. A PendingApproval or Approved request for this company has this code
-         (prevents racing duplicate submissions).
-    """
-    # 1. System item check (explicit — do not rely only on DB constraints)
-    sys_row = await db.execute(
-        text("""
-            SELECT payitemid FROM payroll.payitems
-            WHERE  companyid IS NULL AND payitemcode = :code
-        """),
-        {"code": pay_item_code},
-    )
-    if sys_row.first() is not None:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"'{pay_item_code}' is a system pay item code and cannot be used "
-                "for a custom item."
-            ),
-        )
-
-    # 2 & 3. Existing custom item (Active, Inactive, or Retired)
-    item_row = await db.execute(
-        text("""
-            SELECT payitemid, status FROM payroll.payitems
-            WHERE  companyid = :cid AND payitemcode = :code
-        """),
-        {"cid": company_id, "code": pay_item_code},
-    )
-    existing = item_row.mappings().first()
-    if existing is not None:
-        if existing["status"] == "Retired":
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"'{pay_item_code}' was previously used and has been retired. "
-                    "Retired codes cannot be reused to protect historical payroll records."
-                ),
-            )
-        raise HTTPException(
-            status_code=422,
-            detail=f"A custom pay item with code '{pay_item_code}' already exists for this company.",
-        )
-
-    # 4. Pending or approved request for same code
-    req_params: dict = {"cid": company_id, "code": pay_item_code}
-    extra = ""
-    if exclude_request_id is not None:
-        extra = " AND r.requestid != :excl"
-        req_params["excl"] = exclude_request_id
-
-    req_row = await db.execute(
-        text(f"""
-            SELECT requestid FROM payroll.custompayitemrequests r
-            WHERE  companyid = :cid
-              AND  payitemcode = :code
-              AND  status IN ('PendingApproval', 'Approved')
-              {extra}
-        """),
-        req_params,
-    )
-    if req_row.first() is not None:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"A pending or approved request for code '{pay_item_code}' already exists "
-                "for this company."
-            ),
-        )
 
 
 async def _get_custom_item_or_404(
@@ -3054,40 +2860,24 @@ async def _compute_usage(
     db: AsyncConnection,
 ) -> CustomPayItemUsage:
     """
-    Return usage counts for a custom pay item.
+    Return the historical usage that retiring a custom pay item preserves.
 
-    Meaningful draft line: Status='Active' AND
+    Meaningful draft line: Status != 'Void' AND
         (Quantity > 0 OR RateAmount IS NOT NULL
          OR (CalculatedAmount IS NOT NULL AND CalculatedAmount != 0))
-
-    Non-meaningful draft line: Status='Voided' OR all numeric fields are zero/null.
     """
     draft_result = await db.execute(
         text("""
-            SELECT
-                SUM(CASE
-                    WHEN status != 'Void'
-                     AND (quantity > 0
-                          OR rateamount IS NOT NULL
-                          OR (calculatedamount IS NOT NULL AND calculatedamount != 0))
-                    THEN 1 ELSE 0
-                END)  AS meaningful_count,
-                SUM(CASE
-                    WHEN status = 'Void'
-                      OR (quantity = 0
-                          AND rateamount IS NULL
-                          AND (calculatedamount IS NULL OR calculatedamount = 0))
-                    THEN 1 ELSE 0
-                END)  AS non_meaningful_count
+            SELECT COUNT(*) AS meaningful_count
             FROM payroll.payrolldraftlines
             WHERE companyid = :cid AND linetype = :code
+              AND status != 'Void'
+              AND (quantity > 0
+                   OR rateamount IS NOT NULL
+                   OR (calculatedamount IS NOT NULL AND calculatedamount != 0))
         """),
         {"cid": company_id, "code": pay_item_code},
     )
-    draft_row = draft_result.mappings().first()
-    meaningful = int(draft_row["meaningful_count"] or 0)
-    non_meaningful = int(draft_row["non_meaningful_count"] or 0)
-
     final_result = await db.execute(
         text("""
             SELECT COUNT(*) AS cnt
@@ -3096,11 +2886,7 @@ async def _compute_usage(
         """),
         {"cid": company_id, "code": pay_item_code},
     )
-    final_count = int(final_result.scalar_one() or 0)
-
-    # Count DriverRates rows linked to this Pay Item via PayItemRateTypeMap.
-    # A custom pay item with existing driver rates must be retired, not physically
-    # deleted, to avoid orphaning rate records that reference a deleted rate type mapping.
+    # DriverRates linked to this Pay Item through PayItemRateTypeMap.
     driver_rates_result = await db.execute(
         text("""
             SELECT COUNT(*) AS cnt
@@ -3112,42 +2898,12 @@ async def _compute_usage(
         """),
         {"item_id": item_id, "company_id": company_id},
     )
-    driver_rates_count = int(driver_rates_result.scalar_one() or 0)
-
-    # CdpiDefinitions is the authority for "approved CDPI" — an approved CDPI
-    # PayItem must always retire, never physically delete, regardless of usage:
-    # fk_CdpiDefinitions_PayItem is ON DELETE RESTRICT, so a physical delete
-    # would fail at the DB layer anyway. Company-scoped via the PayItems join
-    # since CdpiDefinitions itself carries no CompanyID.
-    cdpi_result = await db.execute(
-        text("""
-            SELECT EXISTS (
-                SELECT 1
-                FROM   payroll.cdpidefinitions cd
-                JOIN   payroll.payitems pi ON pi.payitemid = cd.payitemid
-                WHERE  cd.payitemid = :item_id AND pi.companyid = :company_id
-            ) AS has_cdpi
-        """),
-        {"item_id": item_id, "company_id": company_id},
-    )
-    has_cdpi_definition = bool(cdpi_result.scalar_one())
-
-    has_meaningful = meaningful > 0
-    has_final = final_count > 0
-    has_driver_rates = driver_rates_count > 0
-
     return CustomPayItemUsage(
         pay_item_id=item_id,
         pay_item_code=pay_item_code,
-        has_meaningful_usage=has_meaningful,
-        has_final_lines=has_final,
-        meaningful_draft_line_count=meaningful,
-        final_line_count=final_count,
-        non_meaningful_draft_line_count=non_meaningful,
-        driver_rates_count=driver_rates_count,
-        has_cdpi_definition=has_cdpi_definition,
-        can_physical_delete=not has_meaningful and not has_final and not has_driver_rates and not has_cdpi_definition,
-        deletion_would_retire=has_meaningful or has_final or has_driver_rates or has_cdpi_definition,
+        meaningful_draft_line_count=int(draft_result.scalar_one() or 0),
+        final_line_count=int(final_result.scalar_one() or 0),
+        driver_rates_count=int(driver_rates_result.scalar_one() or 0),
     )
 
 
@@ -3182,9 +2938,7 @@ async def get_custom_pay_items(
         {"cid": company_id},
     )
     rows = result.mappings().all()
-    item_ids = [r["payitemid"] for r in rows]
-    rn_map = await _fetch_rate_names_for_items(item_ids, company_id, db)
-    return [_row_to_custom_pay_item(r, rate_names=rn_map.get(r["payitemid"])) for r in rows]
+    return [_row_to_custom_pay_item(r) for r in rows]
 
 
 async def get_custom_pay_item_by_id(
@@ -3201,131 +2955,7 @@ async def get_custom_pay_item_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Custom pay item {item_id} not found.",
         )
-    rn_map = await _fetch_rate_names_for_items([item_id], company_id, db)
-    return _row_to_custom_pay_item(row, rate_names=rn_map.get(item_id))
-
-
-async def create_custom_pay_item(
-    company_id: int,
-    user_id: int,
-    data: CustomPayItemCreate,
-    db: AsyncConnection,
-) -> CustomPayItem:
-    """
-    Admin-direct create: insert a new company-level custom pay item.
-
-    Does NOT create any BranchPayItemConfig — the item starts inactive on all
-    branches. Branches activate it via PATCH /settings/branches/{id}/pay-items/{id}.
-
-    Requires AllCompanyBranches scope + setup.manage.
-    """
-    await _ensure_company_admin(company_id, user_id, db)
-
-    # LLR-A: Custom Daily PayItems are created through the CDPI workflow only.
-    raise HTTPException(
-        status_code=422,
-        detail=(
-            "Custom Daily PayItems must be created through the CDPI workflow. "
-            "Use POST /settings/cdpi/direct-company-items instead."
-        ),
-    )
-
-
-async def update_custom_pay_item(
-    item_id: int,
-    company_id: int,
-    user_id: int,
-    data: CustomPayItemUpdate,
-    db: AsyncConnection,
-) -> CustomPayItem:
-    """
-    Partially update mutable metadata on a custom pay item.
-
-    Immutable fields (PayItemCode, RateBehavior) are never touched.
-    System items (IsSystemStandard=TRUE) are rejected with 422.
-    Retired items cannot be updated.
-
-    Requires AllCompanyBranches scope + setup.manage.
-    """
-    await _ensure_company_admin(company_id, user_id, db)
-
-    cur = await db.execute(
-        text(f"""
-            SELECT {_CUSTOM_ITEM_COLS}
-            FROM   payroll.payitems pi
-            WHERE  pi.payitemid = :iid AND pi.companyid = :cid
-            FOR UPDATE
-        """),
-        {"iid": item_id, "cid": company_id},
-    )
-    row = cur.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"Custom pay item {item_id} not found.")
-    if bool(row["issystemstandard"]):
-        raise HTTPException(status_code=422,
-                            detail="System pay items cannot be modified through this endpoint.")
-    if row["status"] == "Retired":
-        raise HTTPException(status_code=422,
-                            detail="Retired pay items cannot be updated.")
-
-    # Merge: apply patch where non-None, otherwise keep current DB value.
-    new_label   = data.display_label if data.display_label  is not None else row.get("displaylabel")
-    new_name    = data.pay_item_name  if data.pay_item_name  is not None else row["payitemname"]
-    new_cat     = data.category       if data.category       is not None else row["category"]
-    new_unit    = data.unit           if data.unit           is not None else row.get("unit")
-    new_order   = data.sort_order     if data.sort_order     is not None else row["sortorder"]
-    new_notes   = data.notes          if data.notes          is not None else row.get("notes")
-
-    # Custom items are Daily operational items: they must always have a unit.
-    if not new_unit or not str(new_unit).strip():
-        raise HTTPException(
-            status_code=422,
-            detail="Daily custom pay items require a unit (e.g. 'Stop', 'km').",
-        )
-
-    await db.execute(
-        text("""
-            UPDATE payroll.payitems
-            SET    displaylabel  = :label,
-                   payitemname   = :name,
-                   category      = :cat,
-                   unit          = :unit,
-                   sortorder     = :order,
-                   notes         = :notes,
-                   updatedbyuserid = :uid,
-                   updatedatutc  = NOW()
-            WHERE  payitemid = :iid
-        """),
-        {
-            "label": new_label, "name": new_name, "cat": new_cat,
-            "unit": new_unit, "order": new_order, "notes": new_notes,
-            "uid": user_id, "iid": item_id,
-        },
-    )
-
-    await _write_settings_audit(
-        db,
-        company_id=company_id,
-        branch_id=None,
-        user_id=user_id,
-        action_code="CUSTOM_PAY_ITEM_UPDATED",
-        entity_name="PayItems",
-        entity_id=str(item_id),
-        old_value={
-            "pay_item_name": row["payitemname"],
-            "category":      row["category"],
-            "display_label": row.get("displaylabel"),
-        },
-        new_value={
-            "pay_item_name": new_name,
-            "category":      new_cat,
-            "display_label": new_label,
-        },
-    )
-
-    updated = await _get_custom_item_or_404(item_id, company_id, db)
-    return _row_to_custom_pay_item(updated)
+    return _row_to_custom_pay_item(row)
 
 
 async def get_custom_pay_item_usage(
@@ -3352,32 +2982,25 @@ async def delete_custom_pay_item(
     company_id: int,
     user_id: int,
     db: AsyncConnection,
-) -> CustomPayItemDeleteResult:
+) -> CustomPayItemRetireResult:
     """
-    Smart delete for a custom pay item.
+    Retire a company custom pay item (DELETE /settings/pay-items/{id}).
 
-    Decision tree:
-      - System item              → 422, blocked.
-      - Already Retired          → idempotent 200, returns current state.
-      - Meaningful or final use  → retire (Status = 'Retired').
-      - Only non-meaningful use  → clean empty/voided draft lines, physical delete.
-      - Never used               → physical delete.
+    Every company custom PayItem is CDPI-managed and its code is permanently
+    reserved to protect historical payroll records, so the only lifecycle
+    command is retirement (Status = 'Retired'):
+      - System item        -> 422.
+      - Other company item -> 404.
+      - Already Retired    -> idempotent 200.
 
-    Physical delete sequence: PayItemSettings → PayItemLineTypeMap →
-        PayItemRateTypeMap → BranchPayItemConfig → PayrollDraftLines (empty only)
-        → NULL out CustomPayItemRequests.ApprovedPayItemID → PayItems.
-
-    Retired item codes are permanently blocked (ux_PayItems_Company_PayItemCode
-    index keeps the code row, so the unique constraint prevents reuse).
+    The PayItem row lock serializes retirement with concurrent writers.
 
     Requires AllCompanyBranches scope + setup.manage.
     """
     await _ensure_company_admin(company_id, user_id, db)
 
-    # Pre-check: look up item by ID only so we can distinguish "not found"
-    # from "found but belongs to a different company / is a system item".
-    # System items have CompanyID IS NULL — the company-scoped FOR UPDATE query
-    # below would silently return no row for them, yielding a misleading 404.
+    # Look up by ID only so "not found" can be told apart from a system item
+    # (CompanyID IS NULL), which the company-scoped FOR UPDATE below would hide.
     pre = await db.execute(
         text("""
             SELECT payitemid, companyid, issystemstandard
@@ -3392,7 +3015,7 @@ async def delete_custom_pay_item(
                             detail=f"Custom pay item {item_id} not found.")
     if bool(pre_row["issystemstandard"]):
         raise HTTPException(status_code=422,
-                            detail="System pay items cannot be deleted.")
+                            detail="System pay items cannot be retired.")
     if pre_row["companyid"] != company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"Custom pay item {item_id} not found.")
@@ -3412,39 +3035,9 @@ async def delete_custom_pay_item(
                             detail=f"Custom pay item {item_id} not found.")
     if bool(row["issystemstandard"]):
         raise HTTPException(status_code=422,
-                            detail="System pay items cannot be deleted.")
+                            detail="System pay items cannot be retired.")
 
-    pay_item_code = row["payitemcode"]
-
-    # Idempotent: already retired
-    if row["status"] == "Retired":
-        return CustomPayItemDeleteResult(
-            pay_item_id=item_id,
-            pay_item_code=pay_item_code,
-            deletion_type="retired",
-            cleaned_draft_lines=0,
-        )
-
-    usage = await _compute_usage(item_id, company_id, pay_item_code, db)
-
-    # CP-2C: if the item is referenced by any period pay-item snapshot, retire
-    # instead of physically deleting — snapshot rows must outlive the catalog row.
-    if not usage.deletion_would_retire:
-        snap_count_row = await db.execute(
-            text("""
-                SELECT COUNT(*) AS cnt
-                FROM payroll.payrollperiodpayitems
-                WHERE payitemid = :iid
-            """),
-            {"iid": item_id},
-        )
-        snap_count = int(snap_count_row.scalar_one() or 0)
-        if snap_count > 0:
-            # Force retire path — physical delete would violate the FK.
-            usage = usage.model_copy(update={"deletion_would_retire": True})
-
-    if usage.deletion_would_retire:
-        # --- RETIRE ---
+    if row["status"] != "Retired":
         await db.execute(
             text("""
                 UPDATE payroll.payitems
@@ -3464,679 +3057,11 @@ async def delete_custom_pay_item(
             old_value={"status": row["status"]},
             new_value={"status": "Retired"},
         )
-        return CustomPayItemDeleteResult(
-            pay_item_id=item_id,
-            pay_item_code=pay_item_code,
-            deletion_type="retired",
-            cleaned_draft_lines=0,
-        )
 
-    else:
-        # --- PHYSICAL DELETE ---
-        cleaned = usage.non_meaningful_draft_line_count
-
-        # CP-0A: Lock all periods that have DraftLines referencing this pay item, then
-        # verify none are non-Open.  Using SELECT FOR UPDATE means any concurrent
-        # period-status transition must wait for this transaction to commit, so the
-        # status we read is guaranteed to be the committed final state at decision time.
-        # This prevents the race where a period transitions from Open → InReview between
-        # our safety check and the physical deletion.
-        locked_periods = await db.execute(
-            text("""
-                SELECT pp.payrollperiodid, pp.status
-                FROM   payroll.payrollperiods pp
-                WHERE  pp.companyid = :cid
-                  AND  pp.payrollperiodid IN (
-                           SELECT DISTINCT dl.payrollperiodid
-                           FROM   payroll.payrolldraftlines dl
-                           WHERE  dl.companyid = :cid
-                             AND  dl.linetype  = :code
-                       )
-                FOR UPDATE
-            """),
-            {"cid": company_id, "code": pay_item_code},
-        )
-        locked_rows = locked_periods.mappings().all()
-        non_open_count = sum(1 for r in locked_rows if r["status"] != "Open")
-        if non_open_count > 0:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Cannot physically delete pay item '{pay_item_code}': "
-                    f"{non_open_count} payroll source row(s) reference it in non-Open "
-                    "periods (InReview, Approved, Locked, Archived, or Cancelled). "
-                    "Deactivate or retire the item instead to preserve historical records."
-                ),
-            )
-
-        # CP-0A: Recompute usage after holding both the PayItem lock and all
-        # referenced Period locks.  Any concurrent zero→meaningful update or new
-        # DraftLine insert would have had to acquire the PayItem lock first; since
-        # we hold it, no such change can commit between our initial usage check and
-        # here.  The recompute is defence-in-depth: if usage changed while we were
-        # waiting to acquire the period locks (which also serialise via FOR UPDATE),
-        # we re-evaluate and route to retire instead of physical delete.
-        usage = await _compute_usage(item_id, company_id, pay_item_code, db)
-        if usage.deletion_would_retire:
-            await db.execute(
-                text("""
-                    UPDATE payroll.payitems
-                    SET    status = 'Retired', updatedatutc = NOW(), updatedbyuserid = :uid
-                    WHERE  payitemid = :iid
-                """),
-                {"uid": user_id, "iid": item_id},
-            )
-            await _write_settings_audit(
-                db,
-                company_id=company_id,
-                branch_id=None,
-                user_id=user_id,
-                action_code="CUSTOM_PAY_ITEM_RETIRED",
-                entity_name="PayItems",
-                entity_id=str(item_id),
-                old_value={"status": row["status"]},
-                new_value={"status": "Retired"},
-            )
-            return CustomPayItemDeleteResult(
-                pay_item_id=item_id,
-                pay_item_code=pay_item_code,
-                deletion_type="retired",
-                cleaned_draft_lines=0,
-            )
-
-        # 1. Clean empty/voided draft lines in Open periods only.
-        # After all locks and the recomputed usage check we know all remaining
-        # references are non-meaningful rows in Open periods.
-        cleaned = usage.non_meaningful_draft_line_count
-        if cleaned > 0:
-            await db.execute(
-                text("""
-                    DELETE FROM payroll.payrolldraftlines
-                    WHERE  companyid = :cid
-                      AND  linetype  = :code
-                      AND  (status = 'Void'
-                            OR (quantity = 0
-                                AND rateamount IS NULL
-                                AND (calculatedamount IS NULL OR calculatedamount = 0)))
-                      AND  payrollperiodid IN (
-                               SELECT payrollperiodid
-                               FROM   payroll.payrollperiods
-                               WHERE  companyid = :cid AND status = 'Open'
-                           )
-                """),
-                {"cid": company_id, "code": pay_item_code},
-            )
-
-        # 2. Remove supporting catalog rows (FK safety — no ON DELETE CASCADE)
-        #    Phase 4B.3: capture the mapped CPI_ RateType IDs BEFORE deleting
-        #    PayItemRateTypeMap, so we can deactivate any that become orphaned
-        #    (no remaining mappings, no DriverRates) after the delete.  This
-        #    prevents the orphaned-CPI_ exploit where an active+unmapped RateType
-        #    generated by a now-deleted PayItem could be claimed by another company.
-        mapped_rt_result = await db.execute(
-            text("""
-                SELECT pirm.ratetypeid, rt.ratecode
-                FROM   payroll.payitemratetypemap pirm
-                JOIN   payroll.ratetypes rt ON rt.ratetypeid = pirm.ratetypeid
-                WHERE  pirm.payitemid = :iid
-                  AND  rt.ratecode LIKE 'CPI_%'
-            """),
-            {"iid": item_id},
-        )
-        cpi_rt_ids = [r["ratetypeid"] for r in mapped_rt_result.mappings().all()]
-
-        for tbl in (
-            "payroll.payitemsettings",
-            "payroll.payitemlinetypemap",
-            "payroll.payitemratetypemap",
-            "payroll.branchpayitemconfig",
-        ):
-            await db.execute(
-                text(f"DELETE FROM {tbl} WHERE payitemid = :iid"),
-                {"iid": item_id},
-            )
-
-        # Deactivate generated CPI_ RateTypes that are now orphaned:
-        # no remaining PayItemRateTypeMap rows AND no DriverRates using them.
-        # RateTypes with any remaining usage are left untouched.
-        for rtid in cpi_rt_ids:
-            await db.execute(
-                text("""
-                    UPDATE payroll.ratetypes
-                    SET    isactive = FALSE
-                    WHERE  ratetypeid = :rtid
-                      AND  NOT EXISTS (
-                              SELECT 1 FROM payroll.payitemratetypemap
-                              WHERE  ratetypeid = :rtid
-                           )
-                      AND  NOT EXISTS (
-                              SELECT 1 FROM payroll.driverrates
-                              WHERE  ratetypeid = :rtid
-                           )
-                """),
-                {"rtid": rtid},
-            )
-
-        # 3. NULL out ApprovedPayItemID in any matching request (preserve request history)
-        await db.execute(
-            text("""
-                UPDATE payroll.custompayitemrequests
-                SET    approvedpayitemid = NULL
-                WHERE  approvedpayitemid = :iid
-            """),
-            {"iid": item_id},
-        )
-
-        # 4. Delete the item itself
-        await db.execute(
-            text("DELETE FROM payroll.payitems WHERE payitemid = :iid"),
-            {"iid": item_id},
-        )
-
-        await _write_settings_audit(
-            db,
-            company_id=company_id,
-            branch_id=None,
-            user_id=user_id,
-            action_code="CUSTOM_PAY_ITEM_DELETED",
-            entity_name="PayItems",
-            entity_id=str(item_id),
-            old_value={
-                "pay_item_code": pay_item_code,
-                "status":        row["status"],
-                "cleaned_lines": cleaned,
-            },
-            new_value=None,
-        )
-        return CustomPayItemDeleteResult(
-            pay_item_id=None,
-            pay_item_code=pay_item_code,
-            deletion_type="physical",
-            cleaned_draft_lines=cleaned,
-        )
-
-
-# ---------------------------------------------------------------------------
-# Fix 3E-B: Backfill broken custom pay items (no PayItemRateTypeMap rows)
-# ---------------------------------------------------------------------------
-
-async def backfill_custom_pay_item_rate_structure(
-    company_id: int,
-    db: AsyncConnection,
-) -> list[dict]:
-    """
-    Scan all custom Daily pay items for this company that have RequiresRate=TRUE
-    but NO active PayItemRateTypeMap rows, and create minimal RateTypes +
-    PayItemRateTypeMap rows for each.
-
-    Safe to run multiple times (idempotent: ON CONFLICT DO NOTHING).
-    Does NOT delete or modify any existing DriverRates, PayrollDraftLines, or
-    PayrollFinalLines rows.
-
-    Returns a list of repaired items: [{"pay_item_id": ..., "pay_item_name": ..., "rate_types_created": N}]
-    """
-    # Find broken items: custom + requires_rate + no active mapping
-    broken_result = await db.execute(
-        text("""
-            SELECT pi.payitemid, pi.payitemname, pi.unit, pi.ratebehavior
-            FROM   payroll.payitems pi
-            WHERE  pi.companyid        = :cid
-              AND  pi.issystemstandard = FALSE
-              AND  pi.requiresrate     = TRUE
-              AND  pi.status          != 'Retired'
-              AND  NOT EXISTS (
-                       SELECT 1
-                       FROM   payroll.payitemratetypemap pirm
-                       WHERE  pirm.payitemid = pi.payitemid
-                         AND  pirm.status    = 'Active'
-                   )
-        """),
-        {"cid": company_id},
-    )
-    broken_rows = broken_result.mappings().all()
-    repaired: list[dict] = []
-    _MULTI_BEHAVIORS = {"OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-
-    for row in broken_rows:
-        pid = row["payitemid"]
-        pname = row["payitemname"]
-        punit = row.get("unit")
-        pbehav = row["ratebehavior"]
-
-        rate_names = (
-            ["Rate 1", "Rate 2", "Rate 3"]
-            if pbehav in _MULTI_BEHAVIORS
-            else [pname.strip() + " Rate"]
-        )
-        created = 0
-        for idx, rname in enumerate(rate_names, start=1):
-            rate_code = f"CPI_{pid}_{idx}"
-            # Phase 4C: set CompanyID on the RateType for structural ownership.
-            rt_result = await db.execute(
-                text("""
-                    INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive, companyid)
-                    VALUES (:code, :name, :unit, TRUE, :cid)
-                    ON CONFLICT (ratecode) DO UPDATE
-                        SET ratename  = EXCLUDED.ratename,
-                            companyid = EXCLUDED.companyid
-                    RETURNING ratetypeid
-                """),
-                {"code": rate_code, "name": rname, "unit": punit or "Unit", "cid": company_id},
-            )
-            rt_id = rt_result.scalar_one()
-            map_result = await db.execute(
-                text("""
-                    INSERT INTO payroll.payitemratetypemap
-                        (payitemid, ratetypeid, isprimary, status)
-                    VALUES (:piid, :rtid, :primary, 'Active')
-                    ON CONFLICT (payitemid, ratetypeid) DO NOTHING
-                    RETURNING payitemratetypemapid
-                """),
-                {"piid": pid, "rtid": rt_id, "primary": (idx == 1)},
-            )
-            if map_result.first() is not None:
-                created += 1
-        repaired.append({
-            "pay_item_id":        pid,
-            "pay_item_name":      pname,
-            "rate_types_created": created,
-        })
-
-    return repaired
-
-
-# ---------------------------------------------------------------------------
-# Public service functions — branch request / admin approval flow
-# ---------------------------------------------------------------------------
-
-async def create_pay_item_request(
-    company_id: int,
-    user_id: int,
-    data: CustomPayItemRequestCreate,
-    db: AsyncConnection,
-) -> CustomPayItemRequest:
-    """
-    Branch user submits a request for a new custom pay item.
-
-    Requires branch access + payroll.entry permission on the requesting branch.
-    Blocks duplicate requests: if a PendingApproval or Approved request already
-    exists for this code in this company, returns 422.
-    System item codes are explicitly blocked.
-    """
-    # Branch access check
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    if not can_see_all and data.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have access to this branch.",
-        )
-
-    # Branch must belong to this company
-    await _check_branch_belongs_to_company(data.branch_id, company_id, db)
-
-    # Permission gate
-    await _check_permission(company_id, user_id, data.branch_id, "payroll.entry", db)
-
-    # LLR-A: Custom Daily PayItems are requested through the CDPI workflow only.
-    raise HTTPException(
-        status_code=422,
-        detail=(
-            "Custom Daily PayItems must be requested through the CDPI workflow. "
-            "Use POST /settings/cdpi/requests instead."
-        ),
-    )
-
-
-async def _load_request_by_id(request_id: int, db: AsyncConnection) -> CustomPayItemRequest:
-    """Internal: load a request row with joined display names."""
-    result = await db.execute(
-        text(f"""
-            SELECT {_REQUEST_COLS}
-            FROM   payroll.custompayitemrequests r
-            JOIN   core.branches b  ON b.branchid = r.requestingbranchid
-            JOIN   sec.users u      ON u.userid   = r.requestedbyuserid
-            LEFT JOIN sec.users du  ON du.userid  = r.decidedbyuserid
-            WHERE  r.requestid = :rid
-        """),
-        {"rid": request_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"Request {request_id} not found.")
-    return _row_to_request(row)
-
-
-async def get_pay_item_requests(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-    *,
-    request_status: str | None = None,
-) -> list[CustomPayItemRequest]:
-    """
-    List pay item requests.
-    Admin (AllCompanyBranches) sees all company requests.
-    Branch-scoped users see only requests from their own branch(es).
-    """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-
-    filters = ["r.companyid = :cid"]
-    params: dict = {"cid": company_id}
-
-    if not can_see_all:
-        if not branch_ids:
-            return []
-        in_clause, in_params = _build_in_clause(branch_ids, "bid")
-        filters.append(f"r.requestingbranchid IN ({in_clause})")
-        params.update(in_params)
-
-    if request_status is not None:
-        filters.append("r.status = :req_status")
-        params["req_status"] = request_status
-
-    where = " AND ".join(filters)
-    result = await db.execute(
-        text(f"""
-            SELECT {_REQUEST_COLS}
-            FROM   payroll.custompayitemrequests r
-            JOIN   core.branches b  ON b.branchid = r.requestingbranchid
-            JOIN   sec.users u      ON u.userid   = r.requestedbyuserid
-            LEFT JOIN sec.users du  ON du.userid  = r.decidedbyuserid
-            WHERE  {where}
-            ORDER BY r.requestedatutc DESC
-        """),
-        params,
-    )
-    return [_row_to_request(r) for r in result.mappings().all()]
-
-
-async def get_pay_item_request_by_id(
-    request_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> CustomPayItemRequest:
-    """
-    Fetch a single request. Branch-scoped users can only see requests from
-    their own branch(es); admin can see all.
-    """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-
-    result = await db.execute(
-        text(f"""
-            SELECT {_REQUEST_COLS}
-            FROM   payroll.custompayitemrequests r
-            JOIN   core.branches b  ON b.branchid = r.requestingbranchid
-            JOIN   sec.users u      ON u.userid   = r.requestedbyuserid
-            LEFT JOIN sec.users du  ON du.userid  = r.decidedbyuserid
-            WHERE  r.requestid  = :rid
-              AND  r.companyid  = :cid
-        """),
-        {"rid": request_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"Request {request_id} not found.")
-
-    # Scope check for branch-limited users
-    if not can_see_all and row["requestingbranchid"] not in branch_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="You do not have access to this request.")
-    return _row_to_request(row)
-
-
-async def decide_pay_item_request(
-    request_id: int,
-    company_id: int,
-    user_id: int,
-    data: CustomPayItemRequestDecide,
-    db: AsyncConnection,
-) -> CustomPayItemRequest:
-    """
-    Admin rejects a legacy custom pay item request. Approval is disabled:
-    Custom Daily PayItems are created through the CDPI workflow.
-
-    Rejection:
-      1. UPDATE CustomPayItemRequests (Status=Rejected).
-      2. Audit CUSTOM_PAY_ITEM_REJECTED.
-      No PayItem row is created.
-
-    Requires AllCompanyBranches scope + setup.manage.
-    """
-    await _ensure_company_admin(company_id, user_id, db)
-
-    # Lock the request row
-    lock_result = await db.execute(
-        text("""
-            SELECT requestid, companyid, requestingbranchid, payitemcode,
-                   displaylabel, payitemname, ratebehavior,
-                   category, unit, notes, sortorder, status
-            FROM   payroll.custompayitemrequests
-            WHERE  requestid = :rid AND companyid = :cid
-            FOR UPDATE
-        """),
-        {"rid": request_id, "cid": company_id},
-    )
-    req = lock_result.mappings().first()
-    if req is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail=f"Request {request_id} not found.")
-
-    # Terminal status check
-    if req["status"] != "PendingApproval":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"This request is already in '{req['status']}' status "
-                "and cannot be decided again."
-            ),
-        )
-
-    if data.decision == "Approved":
-        # LLR-A: Approving legacy custom pay item requests is disabled; CDPI must be used.
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Approving legacy custom pay item requests is disabled. "
-                "Create Custom Daily PayItems through the CDPI workflow instead."
-            ),
-        )
-
-    else:  # Rejected
-        await db.execute(
-            text("""
-                UPDATE payroll.custompayitemrequests
-                SET    status          = 'Rejected',
-                       decidedbyuserid = :uid,
-                       decidedatutc    = NOW(),
-                       decisionreason  = :reason
-                WHERE  requestid = :rid
-            """),
-            {"uid": user_id, "reason": data.decision_reason, "rid": request_id},
-        )
-
-        await _write_settings_audit(
-            db,
-            company_id=company_id,
-            branch_id=req["requestingbranchid"],
-            user_id=user_id,
-            action_code="CUSTOM_PAY_ITEM_REJECTED",
-            entity_name="CustomPayItemRequests",
-            entity_id=str(request_id),
-            old_value={"pay_item_code": req["payitemcode"]},
-            new_value={"decision_reason": data.decision_reason},
-        )
-
-    return await _load_request_by_id(request_id, db)
-
-
-# ===========================================================================
-# M13: PayItemRateTypeMap — assign a rate type to a custom PerUnit item
-# ===========================================================================
-
-async def assign_rate_type_to_pay_item(
-    item_id: int,
-    data: PayItemRateTypeMapCreate,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> PayItemRateTypeMapSummary:
-    """
-    Create or update the PayItemRateTypeMap entry for a custom PerUnit pay item.
-
-    This mapping is required for the calculation engine to look up the driver's
-    approved DriverRate when inserting draft lines for the item.
-
-    Idempotent on (PayItemID, RateTypeID): an ON CONFLICT DO UPDATE is used so
-    calling this endpoint twice for the same pair just refreshes the row.
-
-    Guards:
-      - Caller must have AllCompanyBranches scope + setup.manage permission.
-      - Pay item must belong to this company (not a system item).
-      - Pay item must use a rate-based behavior (PerUnit, OrdinalTier, RangeBracket,
-        RangeProgressive, or Block).  Fixed / None items do not
-        use DriverRates and therefore do not need a RateType mapping.
-      - rate_type_id must exist and be active.
-    """
-    # Issue 5 fix: this write requires AllCompanyBranches scope + setup.manage,
-    # the same gate as all other pay-item and company-setup writes.
-    await _ensure_company_admin(company_id, user_id, db)
-
-    # Behaviors that use DriverRates (and therefore need a RateType mapping).
-    _RATE_USING_BEHAVIORS = {
-        "PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"
-    }
-
-    # Verify the item belongs to this company and uses a rate-based behavior.
-    pi_result = await db.execute(
-        text("""
-            SELECT payitemid, companyid, ratebehavior, payitemcode
-            FROM   payroll.payitems
-            WHERE  payitemid = :piid
-              AND  companyid = :cid
-        """),
-        {"piid": item_id, "cid": company_id},
-    )
-    pi_row = pi_result.mappings().first()
-    if pi_row is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Pay item not found for this company.",
-        )
-    if pi_row["ratebehavior"] not in _RATE_USING_BEHAVIORS:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Rate type mapping requires a rate-based pay item behavior. "
-                f"This item has RateBehavior '{pi_row['ratebehavior']}' "
-                "which does not use driver rates (Fixed / None)."
-            ),
-        )
-
-    # Verify rate type exists and is active.
-    rt_result = await db.execute(
-        text("""
-            SELECT ratetypeid, ratecode, ratename
-            FROM   payroll.ratetypes
-            WHERE  ratetypeid = :rtid AND isactive = TRUE
-        """),
-        {"rtid": data.rate_type_id},
-    )
-    rt_row = rt_result.mappings().first()
-    if rt_row is None:
-        raise HTTPException(
-            status_code=422,
-            detail="rate_type_id does not exist or is inactive.",
-        )
-
-    # Company scope guard (Phase 4C structural check):
-    # Prevent mapping a company PayItem to a foreign or unmapped RateType.
-    #
-    # Valid targets (RateType.CompanyID):
-    #   IS NULL          -> system type: any company may add its own PayItem
-    #   = company_id     -> own custom type: safe
-    #
-    # Invalid targets:
-    #   IS NOT NULL AND != company_id -> foreign company type: reject
-    #
-    # The DB trigger (trg_guard_payitemratetypemap_ownership) enforces the same
-    # rule at insert time, so this service check is defence-in-depth.
-    scope_result = await db.execute(
-        text("""
-            SELECT companyid
-            FROM   payroll.ratetypes
-            WHERE  ratetypeid = :rtid
-        """),
-        {"rtid": data.rate_type_id},
-    )
-    scope_row = scope_result.mappings().first()
-    rt_company = scope_row["companyid"] if scope_row else None
-
-    if rt_company is not None and rt_company != company_id:
-        # Foreign-owned custom RateType
-        raise HTTPException(
-            status_code=422,
-            detail="Rate type does not belong to this company.",
-        )
-
-    # If this mapping is primary, demote any existing primary mapping for the item.
-    if data.is_primary:
-        await db.execute(
-            text("""
-                UPDATE payroll.payitemratetypemap
-                SET    isprimary = FALSE
-                WHERE  payitemid  = :piid
-                  AND  isprimary  = TRUE
-                  AND  ratetypeid != :rtid
-            """),
-            {"piid": item_id, "rtid": data.rate_type_id},
-        )
-
-    # Insert or update (idempotent on the unique key PayItemID+RateTypeID).
-    map_result = await db.execute(
-        text("""
-            INSERT INTO payroll.payitemratetypemap
-                (payitemid, ratetypeid, isprimary, status)
-            VALUES (:piid, :rtid, :is_primary, 'Active')
-            ON CONFLICT (payitemid, ratetypeid) DO UPDATE
-                SET isprimary = EXCLUDED.isprimary,
-                    status    = 'Active'
-            RETURNING payitemratetypemapid
-        """),
-        {
-            "piid":       item_id,
-            "rtid":       data.rate_type_id,
-            "is_primary": data.is_primary,
-        },
-    )
-    map_id: int = map_result.scalar_one()
-
-    await _write_settings_audit(
-        db,
-        company_id=company_id,
-        branch_id=None,
-        user_id=user_id,
-        action_code="PAY_ITEM_RATE_TYPE_ASSIGNED",
-        entity_name="PayItemRateTypeMap",
-        entity_id=str(map_id),
-        new_value={
-            "pay_item_id":  item_id,
-            "rate_type_id": data.rate_type_id,
-            "rate_code":    rt_row["ratecode"],
-            "is_primary":   data.is_primary,
-        },
-    )
-
-    return PayItemRateTypeMapSummary(
-        pay_item_rate_type_map_id=map_id,
+    return CustomPayItemRetireResult(
         pay_item_id=item_id,
-        rate_type_id=int(rt_row["ratetypeid"]),
-        rate_code=rt_row["ratecode"],
-        rate_name=rt_row["ratename"],
-        is_primary=data.is_primary,
-        status="Active",
+        pay_item_code=row["payitemcode"],
+        status="Retired",
     )
 
 

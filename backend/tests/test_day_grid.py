@@ -2975,9 +2975,9 @@ async def _create_test_pay_item(
     """
     import hashlib
 
-    from tests.seed_helpers import seed_legacy_item_with_rate_structure
+    from tests.seed_helpers import seed_cdpi_item_with_rate_structure
     code = "P3B_" + hashlib.md5(name.encode()).hexdigest()[:8].upper()
-    result = await seed_legacy_item_with_rate_structure(
+    result = await seed_cdpi_item_with_rate_structure(
         db_conn, code=code, name=name, unit="Unit", rate_behavior=rate_behavior,
     )
     return {"pay_item_id": result["pay_item_id"], "pay_item_code": code, "pay_item_name": name}
@@ -3499,70 +3499,6 @@ class TestPayItemEffectiveDateBoundaries:
             f"create_rate should accept HOURLY rate (HOURS active on PAYTEST as of 2099-01-01). "
             f"Got {resp.status_code}: {resp.text}"
         )
-
-    # ── Test 10: Delete with driver rate — current behavior (Phase 3D) ────── #
-
-    @pytest.mark.asyncio
-    async def test_delete_with_driver_rate_current_behavior(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-        session_db_conn,
-    ):
-        """
-        Documents whether physical delete of a custom pay item with existing
-        DriverRates is blocked or allowed.
-
-        Custom items without PayItemRateTypeMap entries cannot have DriverRates
-        created via the normal API flow (create_rate requires a rate_type_id
-        linked to the pay item via PayItemRateTypeMap).  So this test confirms
-        that a fresh custom item with no usage is physically deleted (safe path).
-
-        KNOWN GAP — Phase 3D (for items WITH DriverRates):
-        If DriverRates exist for a pay item and the usage check in _compute_usage
-        does not count them, a physical delete would orphan those rate records.
-        Fix: _compute_usage should include DriverRates in the usage count so that
-        items with rates are retired rather than physically deleted.
-
-        Current behavior for zero-usage custom item: physical delete (can_physical_delete=True).
-        """
-        item = await _create_test_pay_item(
-            session_db_conn,
-            "P3B Test Delete Behavior",
-        )
-        iid = item["pay_item_id"]
-
-        # Check usage first
-        usage_resp = await session_client.get(
-            f"/settings/pay-items/{iid}/usage",
-            headers=auth(auth_token),
-        )
-        assert usage_resp.status_code == 200, usage_resp.text
-        usage = usage_resp.json()
-
-        # Attempt delete
-        del_resp = await session_client.delete(
-            f"/settings/pay-items/{iid}",
-            headers=auth(auth_token),
-        )
-        assert del_resp.status_code == 200, del_resp.text
-        del_body = del_resp.json()
-
-        if usage.get("can_physical_delete"):
-            # Zero usage → physical delete expected
-            assert del_body.get("deletion_type") == "physical", (
-                f"Expected deletion_type='physical' for zero-usage custom item, got: {del_body}"
-            )
-        else:
-            # Has usage → retirement expected (safe path already implemented)
-            assert del_body.get("deletion_type") == "retired", (
-                f"Expected deletion_type='retired' for item with usage, got: {del_body}"
-            )
-            # KNOWN GAP — Phase 3D: if DriverRates are not counted in usage,
-            # can_physical_delete would be True even when rates exist, leading
-            # to a physical delete that orphans the DriverRate records.
 
 
 # ===========================================================================

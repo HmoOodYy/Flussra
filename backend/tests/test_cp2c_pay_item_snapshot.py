@@ -282,7 +282,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0079."""
+        """S03: Alembic migration chain is linear and head is 0080."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -294,7 +294,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0079" in lines[0], f"Expected head 0079, got: {lines[0]}"
+        assert "0080" in lines[0], f"Expected head 0080, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist
@@ -1006,15 +1006,15 @@ class TestCp2cPayItemSnapshot:
         )).first()
         assert snap_check is not None, "Custom item not snapshotted"
 
-        # Delete the custom item — should retire (not physically delete)
+        # Delete the custom item — it is retired
         r_del = await client.delete(
             f"/settings/pay-items/{item_id}",
             headers=_auth(auth_token),
         )
         assert r_del.status_code in (200, 204), f"delete failed: {r_del.text}"
         result = r_del.json() if r_del.status_code == 200 else {}
-        assert result.get("deletion_type") == "retired", (
-            f"Expected 'retired', got {result.get('deletion_type')!r}"
+        assert result.get("status") == "Retired", (
+            f"Expected 'Retired', got {result.get('status')!r}"
         )
 
         # Snapshot row should still exist
