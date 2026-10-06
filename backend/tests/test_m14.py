@@ -209,11 +209,11 @@ async def m14_open_period(
 
 
 # ===========================================================================
-# TestPeriodPayCreate
+# TestBonusCreate
 # ===========================================================================
 
-class TestPeriodPayCreate:
-    """Bonus validation and daily-lines scope separation."""
+class TestBonusCreate:
+    """Bonus amount validation."""
 
     async def test_zero_amount_rejected(
         self,
@@ -234,10 +234,10 @@ class TestPeriodPayCreate:
 
 
 # ===========================================================================
-# TestPeriodPayUpdate
+# TestBonusUpdate
 # ===========================================================================
 
-class TestPeriodPayUpdate:
+class TestBonusUpdate:
     """PATCH /periods/{id}/bonuses/{event_id}."""
 
     async def test_update_amount_recalculates(
@@ -321,10 +321,10 @@ class TestPeriodPayUpdate:
         assert patch.json()["notes"] == "Fuel bonus correction"
 
 # ===========================================================================
-# TestPeriodPayVoid
+# TestBonusVoid
 # ===========================================================================
 
-class TestPeriodPayVoid:
+class TestBonusVoid:
     """DELETE /periods/{id}/bonuses/{event_id}."""
 
     async def test_void_bonus_event_sets_voided_status(
@@ -386,10 +386,10 @@ class TestPeriodPayVoid:
 
 
 # ===========================================================================
-# TestPeriodPayFinalization
+# TestBonusFinalization
 # ===========================================================================
 
-class TestPeriodPayFinalization:
+class TestBonusFinalization:
     """Bonus events finalize correctly and appear in PayrollFinalLines."""
 
     async def test_finalization_includes_bonus_period_line(
@@ -495,15 +495,15 @@ class TestPeriodPayFinalization:
 
 
 # ===========================================================================
-# TestPeriodPaySafetyGuards
+# TestBonusSafetyGuards
 # ===========================================================================
 
-class TestPeriodPaySafetyGuards:
+class TestBonusSafetyGuards:
     """
     Guards: a Bonus event must not interfere with the review/approval flow.
     """
 
-    async def test_period_with_period_pay_approves_cleanly(
+    async def test_period_with_bonus_event_approves_cleanly(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -613,7 +613,7 @@ class TestM14SafetyFixes:
         paytest_branch_id: int,
         direct_db,
     ):
-        """Period with daily + period-pay lines: each final line gets its correct scope."""
+        """Period with a daily line and a bonus event: each final line gets its correct scope."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         pid = (await _open_period(direct_db, paytest_branch_id, start="2034-12-01", end="2034-12-07"))["payroll_period_id"]
 

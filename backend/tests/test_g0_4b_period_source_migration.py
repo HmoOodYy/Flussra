@@ -115,7 +115,7 @@ def _seed_legacy_period_state(conn) -> dict[str, int]:
     }
 
 
-def test_0078_removes_legacy_rows_and_keeps_canonical_state(g0_4b_database):
+def test_0078_preserves_canonical_daily_bonus_and_system_output_state(g0_4b_database):
     env, dsn = g0_4b_database
     with psycopg2.connect(**dsn) as conn:
         ids = _seed_legacy_period_state(conn)
@@ -124,20 +124,22 @@ def test_0078_removes_legacy_rows_and_keeps_canonical_state(g0_4b_database):
     assert upgraded.returncode == 0, upgraded.stderr
 
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
-        cur.execute("SELECT draftlineid FROM payroll.payrolldraftlines ORDER BY draftlineid")
-        assert cur.fetchall() == [(ids["daily_line_id"],)]
+        cur.execute(
+            "SELECT draftlineid, linetype, quantity, calculatedamount "
+            "FROM payroll.payrolldraftlines WHERE draftlineid = %s",
+            (ids["daily_line_id"],),
+        )
+        assert cur.fetchall() == [(ids["daily_line_id"], "HOURS", 2, 20)]
         cur.execute("SELECT payrollbonuseventid, amount FROM payroll.payrollbonusevents")
         assert cur.fetchall() == [(ids["bonus_event_id"], 50)]
         cur.execute("""
-            SELECT payitemcode FROM payroll.payitems
-            WHERE itemscope = 'Period' ORDER BY payitemcode
+            SELECT payitemcode, itemscope, ratebehavior FROM payroll.payitems
+            WHERE payitemcode IN ('SYS_MIN_TOPUP', 'SYS_MAX_CAP') ORDER BY payitemcode
         """)
-        assert cur.fetchall() == [("SYS_MAX_CAP",), ("SYS_MIN_TOPUP",)]
-        cur.execute("""
-            SELECT DISTINCT ratebehavior FROM payroll.payitems
-            WHERE payitemcode IN ('SYS_MIN_TOPUP', 'SYS_MAX_CAP')
-        """)
-        assert cur.fetchall() == [("Calculated",)]
+        assert cur.fetchall() == [
+            ("SYS_MAX_CAP", "Period", "Calculated"),
+            ("SYS_MIN_TOPUP", "Period", "Calculated"),
+        ]
         cur.execute("SELECT version_num FROM public.alembic_version")
         assert cur.fetchone() == ("0078",)
 

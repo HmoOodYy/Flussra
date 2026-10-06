@@ -251,8 +251,9 @@ class FinalLineSummary(BaseModel):
     draft_line_id: int | None = None
     work_date: date | None = None
     line_type: str
-    # M14: 'Daily' for daily final lines; 'Period' for period-level pay lines.
-    # Copied from PayrollDraftLines.LineScope during finalization (migration 0011).
+    # LineScope is financial-component evidence. 'Daily': day-bound DraftLine and
+    # Status-derived components. 'Period': canonical period-level calculated
+    # outputs (BonusEvent and system min/max adjustment components).
     line_scope: str = "Daily"
     quantity: Decimal
     rate_amount: Decimal | None = None

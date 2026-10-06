@@ -354,10 +354,10 @@ class TestDraftLineMutationStatusGuard:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-class TestPeriodPayMutationStatusGuard:
+class TestBonusMutationStatusGuard:
     """
-    Each period-pay mutation (create / update / void) must accept Open
-    and reject every other status.  Bonus lines use the same endpoint.
+    Each Bonus event mutation (create / update / void) must accept Open
+    and reject every other status.
     """
 
     async def test_add_bonus_open_succeeds(

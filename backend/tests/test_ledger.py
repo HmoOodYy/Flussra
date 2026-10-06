@@ -546,7 +546,7 @@ class TestFinalLines:
         auth_token: str,
         locked_period_data: dict,
     ):
-        """BONUS period-pay line seeded before finalization must appear in final lines."""
+        """Bonus event seeded before finalization must appear in final lines."""
         pid = locked_period_data["period_id"]
         resp = await session_client.get(
             f"/payroll/periods/{pid}/final-lines",
