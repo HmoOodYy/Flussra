@@ -12,7 +12,7 @@ Covers (grouped A–H per the CP-3B2b spec):
   E. Lifecycle (Draft/InReview/Approved/… blocked) and permissions (DRIVER/Self, view-only).
   F. Audit correlation + audit-failure rollback.
   G. DB ownership hardening (migration 0060 trigger + constraints).
-  H. Regression (/period-pay BONUS still blocked; no DraftLine BONUS rows).
+  H. Regression (no DraftLine BONUS rows).
 
 Dates: 2093-* — isolated year.
 
@@ -1049,21 +1049,6 @@ async def test_downgrade_guard_detects_live_batch_rows(
 # ===========================================================================
 # H. Regression
 # ===========================================================================
-
-@pytest.mark.asyncio
-async def test_period_pay_bonus_still_blocked(
-    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
-) -> None:
-    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
-    r = await client.post(
-        f"/payroll/periods/{period_id}/period-pay",
-        json={"driver_id": cp3b2b_drivers["alpha"], "amount": 100, "line_type": "BONUS"},
-        headers=_auth(auth_token),
-    )
-    assert r.status_code == 422, r.text
-    assert "/bonuses" in r.json()["detail"]
-    await _cancel_period_db(db_conn, period_id)
-
 
 @pytest.mark.asyncio
 async def test_batch_creates_no_draftline_bonus_rows(

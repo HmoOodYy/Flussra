@@ -12,14 +12,14 @@ with concurrency safety; it is the audit-trail counterpart, a genuinely
 separate responsibility that happens to be invoked by some of the same
 callers.
 
-It already writes audit rows for three different entity types (DraftLines,
-PeriodPay lines, BonusEvents — see its own action-code docstring below), so
+It already writes audit rows for different entity types (DraftLines,
+BonusEvents — see its own action-code docstring below), so
 it was never owned by a single domain the way _write_rate_audit belongs to
 Rates or _write_pay_rule_audit belongs to Driver Pay Rules. It is genuinely
-shared by four domains, each now in its own module — Draft-line CRUD
-(app.payroll.draft_line_mutation), Period Pay Lines (app.payroll.period_pay),
-Bonus (app.payroll.bonus), and Day Grid (app.payroll.day_grid) — none of
-which is more entitled to own it than the others. app.payroll.service
+shared by three domains, each now in its own module — Draft-line CRUD
+(app.payroll.draft_line_mutation), Bonus (app.payroll.bonus), and Day Grid
+(app.payroll.day_grid) — none of which is more entitled to own it than the
+others. app.payroll.service
 retains a plain imported binding purely for legacy test compatibility
 (test_cp3b2a_bonus_batch_safety.py); it has no production callers of its
 own.
@@ -46,15 +46,12 @@ async def _write_line_audit(
     correlation_id: str | None = None,
 ) -> None:
     """
-    Insert one row into audit.AuditLog for a draft-line, period-pay, or bonus-event mutation.
+    Insert one row into audit.AuditLog for a draft-line or bonus-event mutation.
 
     Known action codes:
       DRAFT_LINE_ADDED      — new draft line inserted
       DRAFT_LINE_UPDATED    — draft line fields changed
       DRAFT_LINE_VOIDED     — draft line status set to Void
-      PERIOD_PAY_ADDED      — new period-pay line inserted
-      PERIOD_PAY_UPDATED    — period-pay line fields changed
-      PERIOD_PAY_VOIDED     — period-pay line status set to Void
       BONUS_EVENT_ADDED     — new canonical bonus event created (CP-3A)
       BONUS_EVENT_UPDATED   — bonus event fields changed (CP-3A)
       BONUS_EVENT_VOIDED    — bonus event voided (CP-3A)
@@ -73,9 +70,6 @@ async def _write_line_audit(
         "DRAFT_LINE_ADDED":    "Draft line added",
         "DRAFT_LINE_UPDATED":  "Draft line updated",
         "DRAFT_LINE_VOIDED":   "Draft line voided",
-        "PERIOD_PAY_ADDED":    "Period pay line added",
-        "PERIOD_PAY_UPDATED":  "Period pay line updated",
-        "PERIOD_PAY_VOIDED":   "Period pay line voided",
         "BONUS_EVENT_ADDED":   "Bonus event added",
         "BONUS_EVENT_UPDATED": "Bonus event updated",
         "BONUS_EVENT_VOIDED":  "Bonus event voided",

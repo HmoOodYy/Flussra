@@ -15,7 +15,7 @@ Covers:
     Cancelled read-only.
   - Permissions: view-only capabilities false; DRIVER/Self denied; branch isolation.
   - No-marker periods: controlled 422, no live-roster fallback.
-  - Existing GET /bonuses event list unchanged; /period-pay BONUS still blocked.
+  - Existing GET /bonuses event list unchanged.
 
 Dates: 2095-* — isolated year (CP-3A uses 2096, CP-2F 2097, CP-2E 2099).
 
@@ -927,30 +927,6 @@ async def test_event_list_endpoint_unchanged(
     assert "total_bonus" not in event
 
     await _cancel_period_db(db_conn, period_id)
-
-
-# ---------------------------------------------------------------------------
-# 16. CP-3A regression — /period-pay still rejects BONUS
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_period_pay_bonus_still_blocked(
-    client: httpx.AsyncClient,
-    auth_token: str,
-    db_conn: AsyncConnection,
-    cp3b1_branch_id: int,
-    cp3b1_drivers: dict[str, int],
-) -> None:
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3b1_branch_id, start, end)
-
-    r = await client.post(
-        f"/payroll/periods/{period_id}/period-pay",
-        json={"driver_id": cp3b1_drivers["alpha"], "amount": 100, "line_type": "BONUS"},
-        headers=_auth(auth_token),
-    )
-    assert r.status_code == 422, r.text
-    assert "/bonuses" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

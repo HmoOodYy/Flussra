@@ -4,7 +4,7 @@ CP-2F: Controlled Prepared Operational Entry — full test suite.
 Covers:
   - Draft (Prepared) day-grid: GET returns 200, financial fields suppressed.
   - Draft day-grid save: PPDES written, no STATUS_PAYMENT line, NULL calc.
-  - Draft financial blocking: Period Pay, Bonus, finalization, direct submit blocked.
+  - Draft financial blocking: Bonus, finalization, direct submit blocked.
   - Direct DraftLine API in Draft: daily source allowed (NULL calc), Period blocked.
   - Draft → Open activation: calculations refreshed, status payments derived, no dups.
   - Regression: no PTO_STATUS, status saved in PPDES not as DraftLine pay item.
@@ -136,26 +136,6 @@ async def _get_ppdes_rows(db: AsyncConnection, period_id: int) -> list[dict]:
         {"pid": period_id},
     )).mappings().all()
     return [dict(r) for r in rows]
-
-
-async def _ensure_bonus_active(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    r = await client.get(
-        f"/settings/branches/{branch_id}/pay-items",
-        headers=_auth(token),
-    )
-    assert r.status_code == 200, r.text
-    bonus = next((i for i in r.json() if i.get("pay_item_code") == "BONUS"), None)
-    if bonus and not bonus.get("is_active"):
-        r2 = await client.patch(
-            f"/settings/branches/{branch_id}/pay-items/{bonus['pay_item_id']}",
-            json={"is_active": True},
-            headers=_auth(token),
-        )
-        assert r2.status_code == 200, r2.text
 
 
 async def _ensure_status_key(
@@ -597,30 +577,7 @@ class TestDraftDayGridSave:
 
 @pytest.mark.asyncio
 class TestDraftFinancialBlocking:
-    """Financial paths (Period Pay, Bonus, finalization, submit) are blocked in Draft."""
-
-    async def test_cp2f_draft_period_pay_create_blocked(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        branch_id: int,
-        driver_id: int,
-        direct_db: AsyncConnection,
-    ):
-        """POST add_period_pay_line on Draft returns 422."""
-        start, end = _week()
-        pid = await _insert_period_db(direct_db, branch_id, start, end, status="Draft")
-        try:
-            r = await client.post(
-                f"/payroll/periods/{pid}/period-pay",
-                json={"driver_id": driver_id, "line_type": "Bonus", "amount": "50.00"},
-                headers=_auth(auth_token),
-            )
-            assert r.status_code in (422, 409, 403), (
-                f"Expected rejection for period-pay on Draft, got {r.status_code}: {r.text}"
-            )
-        finally:
-            await _cancel_period_db(direct_db, pid)
+    """Financial paths (Bonus, finalization, submit) are blocked in Draft."""
 
     async def test_cp2f_draft_bonus_create_blocked(
         self,
@@ -630,14 +587,13 @@ class TestDraftFinancialBlocking:
         driver_id: int,
         direct_db: AsyncConnection,
     ):
-        """POST add Bonus period-pay on Draft returns 422."""
-        await _ensure_bonus_active(client, auth_token, branch_id)
+        """POST canonical Bonus event on Draft returns 422."""
         start, end = _week()
         pid = await _insert_period_db(direct_db, branch_id, start, end, status="Draft")
         try:
             r = await client.post(
-                f"/payroll/periods/{pid}/period-pay",
-                json={"driver_id": driver_id, "line_type": "Bonus", "amount": "100.00"},
+                f"/payroll/periods/{pid}/bonuses",
+                json={"driver_id": driver_id, "amount": "100.00"},
                 headers=_auth(auth_token),
             )
             assert r.status_code in (422, 409, 403), (
@@ -1599,28 +1555,6 @@ class TestDraftReadEndpointProtection:
         finally:
             await _cancel_period_db(direct_db, pid)
 
-    async def test_cp2f_draft_period_pay_list_blocked(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        branch_id: int,
-        driver_id: int,
-        direct_db: AsyncConnection,
-    ):
-        """GET /period-pay on Draft returns 422."""
-        start, end = _week()
-        pid = await _insert_period_db(direct_db, branch_id, start, end, status="Draft")
-        try:
-            r = await client.get(
-                f"/payroll/periods/{pid}/period-pay",
-                headers=_auth(auth_token),
-            )
-            assert r.status_code in (422, 409, 403), (
-                f"Expected rejection for period-pay GET on Draft, got {r.status_code}: {r.text}"
-            )
-        finally:
-            await _cancel_period_db(direct_db, pid)
-
     async def test_cp2f_draft_period_eligible_drivers_blocked_if_money_flow(
         self,
         client: httpx.AsyncClient,
@@ -1629,7 +1563,7 @@ class TestDraftReadEndpointProtection:
         driver_id: int,
         direct_db: AsyncConnection,
     ):
-        """GET /eligible-drivers on Draft returns 422 (it feeds period-pay money UX)."""
+        """GET /eligible-drivers on Draft returns 422 (it feeds Bonus money UX)."""
         start, end = _week()
         pid = await _insert_period_db(direct_db, branch_id, start, end, status="Draft")
         try:
@@ -1678,29 +1612,6 @@ class TestDraftReadEndpointProtection:
                 assert len(sp_lines) == 0, "STATUS_PAYMENT must not appear in Draft /lines"
             elif r.status_code in (422, 409, 403):
                 pass  # block is also fine
-        finally:
-            await _cancel_period_db(direct_db, pid)
-
-    async def test_cp2f_draft_stale_period_pay_not_visible(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        branch_id: int,
-        driver_id: int,
-        direct_db: AsyncConnection,
-    ):
-        """A Period-scope line in Draft is not visible via /period-pay (blocked)."""
-        start, end = _week()
-        pid = await _insert_period_db(direct_db, branch_id, start, end, status="Draft")
-        try:
-            r = await client.get(
-                f"/payroll/periods/{pid}/period-pay",
-                headers=_auth(auth_token),
-            )
-            # Period-pay list must be blocked for Draft
-            assert r.status_code in (422, 409, 403), (
-                f"Draft /period-pay must be blocked, got {r.status_code}"
-            )
         finally:
             await _cancel_period_db(direct_db, pid)
 

@@ -211,7 +211,7 @@ async def delete_period_and_children(db, period_id: int) -> None:
     created immutable audit evidence.  Cancellation releases the branch's
     mutable workflow slot without weakening that retention boundary.
 
-    `add_draft_line`/`add_period_pay_line`/bonus-event creation each write a
+    `add_draft_line`/bonus-event creation each write a
     real AuditLog row (`_write_line_audit`, entity_name='PayrollDraftLines'
     or 'PayrollBonusEvents') immediately after insert -- this captures the
     exact DraftLineIDs/BonusEventIDs for this period BEFORE the rows

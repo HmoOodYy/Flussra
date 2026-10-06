@@ -184,27 +184,6 @@ async def _events(direct_db, period_id: int) -> list[dict]:
     """), {"period_id": period_id})).mappings().all()
 
 
-async def _create_legacy_period_pay_item(
-    direct_db,
-    branch_id: int,
-) -> str:
-    """Seed an existing legacy custom Period item for the supported route."""
-    code = f"P6D_LEGACY_{uuid4().hex[:10]}".upper()
-    await direct_db.execute(text("""
-        INSERT INTO payroll.payitems
-            (companyid, branchid, payitemcode, payitemname, category, datatype,
-             itemscope, ratebehavior, status, sortorder,
-             appearsinpayrollentry, appearsinledger, appearsinreports,
-             requiresrate, issystemstandard, isdefaultbranchactive)
-        VALUES
-            (1, :branch_id, :code, 'P6D Legacy Period Pay', 'Custom', 'Number',
-             'Period', 'EnteredAmount', 'Active', 901,
-             FALSE, TRUE, TRUE, FALSE, FALSE, TRUE)
-    """), {"branch_id": branch_id, "code": code})
-    await direct_db.commit()
-    return code
-
-
 async def _seed_driver(direct_db, branch_id: int) -> int:
     marker = uuid4().hex
     employee_id = int((await direct_db.execute(text("""
@@ -964,49 +943,6 @@ async def test_real_review_comment_is_frozen_and_linked_to_its_review_snapshot(
         WHERE payrollperiodid = :period_id
     """), {"period_id": period_id})
     await direct_db.commit()
-
-
-@pytest.mark.asyncio
-async def test_non_bonus_period_pay_create_update_void_capture_source_history(
-    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
-):
-    pay_item = await _create_legacy_period_pay_item(direct_db, paytest_branch_id)
-    period_id, driver_id, _ = await _seed_open_period(direct_db, paytest_branch_id, status="Open")
-    snapshot_item = (await direct_db.execute(text("""
-        SELECT payitemcode
-        FROM payroll.payrollperiodpayitems
-        WHERE payrollperiodid = :period_id AND itemscope = 'Period'
-          AND payitemcode = :pay_item AND isactiveinperiod = TRUE
-        ORDER BY sortorder, payrollperiodpayitemid
-        LIMIT 1
-    """), {"period_id": period_id, "pay_item": pay_item})).scalar_one_or_none()
-    assert snapshot_item == pay_item, "Legacy Period Pay item must be frozen active in the period layout"
-    created = await session_client.post(
-        f"/payroll/periods/{period_id}/period-pay", headers=_auth(auth_token),
-        json={"driver_id": driver_id, "line_type": pay_item, "amount": "10", "notes": "created"},
-    )
-    assert created.status_code == 201, created.text
-    line_id = created.json()["draft_line_id"]
-    updated = await session_client.patch(
-        f"/payroll/periods/{period_id}/period-pay/{line_id}", headers=_auth(auth_token),
-        json={"amount": "12", "notes": "updated"},
-    )
-    assert updated.status_code == 200, updated.text
-    voided = await session_client.delete(
-        f"/payroll/periods/{period_id}/period-pay/{line_id}", headers=_auth(auth_token),
-    )
-    assert voided.status_code == 200, voided.text
-    events = [event for event in await _events(direct_db, period_id) if event["evidencedomain"] == "SOURCE"]
-    assert [event["actioncode"] for event in events] == [
-        "SOURCE_CREATED", "SOURCE_UPDATED", "SOURCE_VOIDED",
-    ]
-    assert all(event["workdate"] is None and event["driverid"] == driver_id for event in events)
-    assert all(event["payitemid"] is not None for event in events)
-    assert events[0]["afterstatejson"]["line_scope"] == "Period"
-    assert Decimal(events[1]["beforestatejson"]["calculated_amount"]) == Decimal("10")
-    # The current writer records SQL column names in the immutable evidence
-    # payload for the update; the source-of-truth amount is calculatedamount.
-    assert Decimal(events[1]["afterstatejson"]["calculatedamount"]) == Decimal("12")
 
 
 @pytest.mark.asyncio

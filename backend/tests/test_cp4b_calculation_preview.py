@@ -2215,11 +2215,8 @@ class TestDriverUnion:
         self, session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
     ):
         """
-        POST /periods/{id}/period-pay blocks BOTH the system BONUS item
-        (redirects to /bonuses) and manual ADJUSTMENT entry in this version
-        (confirmed by test_m14.py::test_add_canonical_adjustment_blocked) --
-        there is currently no supported API path to CREATE a new non-BONUS
-        Period-scope line. CP-4B's own contract is to include whatever
+        There is no supported API path to CREATE a new non-BONUS Period-scope
+        line (BONUS lives in /bonuses). CP-4B's own contract is to include whatever
         non-BONUS Period-scope DraftLines already exist (e.g. legacy/
         imported data), so this line is constructed directly, matching that
         contract. This also exercises the Fixed/EnteredAmount period-pay
@@ -2299,10 +2296,10 @@ class TestDriverUnion:
                                 )).mappings().first()
                                 await _save_day_grid_status(session_client, auth_token, pid, driver_id, DATE_FEB05, code_row["statuscode"])  # 60.00
 
-                                # POST /period-pay blocks manual ADJUSTMENT entry in this
-                                # version (see test_period_pay_only_driver_included_once's
-                                # docstring) -- construct the legacy-style Period-scope
-                                # line directly, matching CP-4B's own inclusion contract.
+                                # No supported API path creates a Period-scope line (see
+                                # test_period_pay_only_driver_included_once's docstring) --
+                                # construct the legacy-style Period-scope line directly,
+                                # matching CP-4B's own inclusion contract.
                                 await direct_db.execute(
                                     _text("""
                                         INSERT INTO payroll.payrolldraftlines

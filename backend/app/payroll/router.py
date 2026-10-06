@@ -27,7 +27,6 @@ from app.payroll import (
     period_calculation,
     period_creation,
     period_lifecycle,
-    period_pay,
     period_read,
     rates,
     report_read_model,
@@ -79,8 +78,6 @@ from app.payroll.schemas import (
     PeriodCreationResponse,
     PeriodEligibleDriversResponse,
     PeriodEntryCount,
-    PeriodPayLineCreate,
-    PeriodPayLineUpdate,
     PeriodPayReportResponse,
     PeriodStatusChange,
     PeriodSummary,
@@ -1107,104 +1104,6 @@ async def copy_driver_rates(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
-        db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# M14 — Period Pay  (/payroll/periods/{id}/period-pay)
-# ---------------------------------------------------------------------------
-
-@router.post(
-    "/periods/{period_id}/period-pay",
-    response_model=DraftLineSummary,
-    status_code=201,
-    summary="Add a period-level pay line (Bonus, Adjustment, custom Period item)",
-    responses={
-        422: {"description": "Invalid item type, inactive item, or period not Open/InReview"},
-    },
-)
-async def add_period_pay_line(
-    period_id: int,
-    data: PeriodPayLineCreate,
-    token: TokenDep,
-    db: DbDep,
-) -> DraftLineSummary:
-    return await period_pay.add_period_pay_line(
-        period_id=period_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=data,
-        db=db,
-    )
-
-
-@router.get(
-    "/periods/{period_id}/period-pay",
-    response_model=list[DraftLineSummary],
-    summary="List period-level pay lines for a period",
-)
-async def list_period_pay_lines(
-    period_id: int,
-    token: TokenDep,
-    db: DbDep,
-    driver_id: int | None = Query(None, description="Filter to a specific driver"),
-) -> list[DraftLineSummary]:
-    return await period_pay.get_period_pay_lines(
-        period_id=period_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        db=db,
-        driver_id=driver_id,
-    )
-
-
-@router.patch(
-    "/periods/{period_id}/period-pay/{line_id}",
-    response_model=DraftLineSummary,
-    summary="Update a period-level pay line (amount and/or notes)",
-    responses={
-        404: {"description": "Line not found in this period"},
-        422: {"description": "Period not Open/InReview, or line is Voided"},
-    },
-)
-async def update_period_pay_line(
-    period_id: int,
-    line_id: int,
-    data: PeriodPayLineUpdate,
-    token: TokenDep,
-    db: DbDep,
-) -> DraftLineSummary:
-    return await period_pay.update_period_pay_line(
-        period_id=period_id,
-        line_id=line_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=data,
-        db=db,
-    )
-
-
-@router.delete(
-    "/periods/{period_id}/period-pay/{line_id}",
-    response_model=DraftLineSummary,
-    summary="Void a period-level pay line",
-    responses={
-        404: {"description": "Line not found in this period"},
-        422: {"description": "Period not Open/InReview"},
-    },
-)
-async def void_period_pay_line(
-    period_id: int,
-    line_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> DraftLineSummary:
-    return await period_pay.void_period_pay_line(
-        period_id=period_id,
-        line_id=line_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
         db=db,
     )
 

@@ -2,7 +2,7 @@
 CP-0A: Freeze InReview source mutations.
 
 Verifies that every payroll source mutation path (draft-line create/update/void,
-period-pay create/update/void, day-grid save) accepts only Open periods and
+bonus-event create/update/void, day-grid save) accepts only Open periods and
 rejects all other statuses (Draft, InReview, Approved, Locked, Archived,
 Cancelled).
 
@@ -146,27 +146,6 @@ async def _add_draft_line(
     )
     assert r.status_code == 201, f"add line failed: {r.text}"
     return r.json()["draft_line_id"]
-
-
-async def _ensure_bonus_active(
-    client: httpx.AsyncClient,
-    token: str,
-    branch_id: int,
-) -> None:
-    """Activate the system BONUS pay item for the branch (idempotent)."""
-    r = await client.get(
-        f"/settings/branches/{branch_id}/pay-items",
-        headers=_auth(token),
-    )
-    assert r.status_code == 200, r.text
-    bonus = next((i for i in r.json() if i.get("pay_item_code") == "BONUS"), None)
-    if bonus and not bonus.get("is_active"):
-        r2 = await client.patch(
-            f"/settings/branches/{branch_id}/pay-items/{bonus['pay_item_id']}",
-            json={"is_active": True},
-            headers=_auth(token),
-        )
-        assert r2.status_code == 200, r2.text
 
 
 async def _add_bonus_line(
@@ -1008,56 +987,6 @@ class TestRejectedMutationInvariants:
                 {"eid": str(lid)},
             )).scalar_one()
             assert audit_after == audit_before, "Rejected void must not write a VOIDED audit event"
-        finally:
-            await _force_cancel(direct_db, pid)
-
-    @pytest.mark.parametrize("bad_status", ["InReview", "Approved"])
-    async def test_rejected_bonus_add_no_row_and_no_audit(
-        self,
-        bad_status: str,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-        direct_db,
-    ):
-        pid = await _create_open_period(direct_db, paytest_branch_id)
-        try:
-            await _ensure_bonus_active(client, auth_token, paytest_branch_id)
-
-            audit_before = (await direct_db.execute(
-                text(
-                    "SELECT COUNT(*) FROM audit.auditlog "
-                    "WHERE actioncode = 'PERIOD_PAY_ADDED' AND entityschema = 'payroll'"
-                ),
-            )).scalar_one()
-
-            await _force_status(direct_db, pid, bad_status)
-
-            r = await client.post(
-                f"/payroll/periods/{pid}/period-pay",
-                json={"driver_id": paytest_driver_id, "line_type": "Bonus", "amount": "25.00"},
-                headers=_auth(auth_token),
-            )
-            assert r.status_code in (403, 409, 422), r.text
-
-            row_count = (await direct_db.execute(
-                text(
-                    "SELECT COUNT(*) FROM payroll.payrolldraftlines "
-                    "WHERE payrollperiodid = :pid AND driverid = :did AND linescope = 'Period'"
-                    "  AND status != 'Void'"
-                ),
-                {"pid": pid, "did": paytest_driver_id},
-            )).scalar_one()
-            assert row_count == 0, "Rejected period-pay add must not insert a row"
-
-            audit_after = (await direct_db.execute(
-                text(
-                    "SELECT COUNT(*) FROM audit.auditlog "
-                    "WHERE actioncode = 'PERIOD_PAY_ADDED' AND entityschema = 'payroll'"
-                ),
-            )).scalar_one()
-            assert audit_after == audit_before, "Rejected period-pay add must not write audit"
         finally:
             await _force_cancel(direct_db, pid)
 

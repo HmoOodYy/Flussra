@@ -12,8 +12,8 @@ Tests covering the P2 eligibility guard on every payroll write path:
   T7  update_draft_line cannot edit non-void field on stale ineligible line
   T8  update_draft_line allows voiding a stale ineligible line
   T9  finalization blocks stale ineligible daily line
-  T10 add_period_pay_line rejects driver not eligible anywhere in period
-  T11 add_period_pay_line accepts driver eligible at least one day in period
+  T10 Bonus create rejects driver not eligible anywhere in period
+  T11 Bonus create accepts driver eligible at least one day in period
   T12 add_draft_line rejects transferred driver using source branch after transfer
   T13 add_draft_line rejects driver using target branch before effective date
   T14 normal valid daily payroll still works end-to-end
@@ -624,32 +624,12 @@ class TestFinalizationEligibility:
         )
 
 
-class TestPeriodPayEligibility:
-
-    @staticmethod
-    async def _ensure_bonus_active(c, tok, bid) -> None:
-        """Activate the legacy Period-scope ADJUSTMENT item for eligibility coverage."""
-        items_resp = await c.get(
-            f"/settings/branches/{bid}/pay-items",
-            headers=auth(tok),
-        )
-        assert items_resp.status_code == 200
-        for item in items_resp.json():
-            if item["pay_item_code"] == "ADJUSTMENT":
-                activated = await c.patch(
-                    f"/settings/branches/{bid}/pay-items/{item['pay_item_id']}",
-                    headers=auth(tok),
-                    json={"is_active": True},
-                )
-                assert activated.status_code == 200, activated.text
-                return
-        raise AssertionError("ADJUSTMENT pay item missing from the current catalog")
+class TestBonusEligibility:
 
     @pytest.mark.asyncio
-    async def test_t10_period_pay_rejects_driver_not_eligible_in_period(self, p2_env):
-        """T10 — add_period_pay_line 422 when driver has no overlap with the period."""
+    async def test_t10_bonus_rejects_driver_not_eligible_in_period(self, p2_env):
+        """T10 — Bonus create 422 when driver has no overlap with the period."""
         c, tok, bid = p2_env["client"], p2_env["token"], p2_env["branch_id"]
-        await self._ensure_bonus_active(c, tok, bid)
 
         # Driver terminated before period start
         driver_id = await _create_driver(
@@ -663,11 +643,10 @@ class TestPeriodPayEligibility:
         pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await c.post(
-            f"/payroll/periods/{pid}/period-pay",
+            f"/payroll/periods/{pid}/bonuses",
             headers=auth(tok),
             json={
                 "driver_id": driver_id,
-                "line_type": "ADJUSTMENT",
                 "amount":    "50.00",
             },
         )
@@ -675,11 +654,10 @@ class TestPeriodPayEligibility:
         assert "eligible" in resp.text.lower()
 
     @pytest.mark.asyncio
-    async def test_t11_period_pay_accepts_driver_eligible_partial_period(self, p2_env):
-        """T11 — add_period_pay_line 201 when driver is eligible for at least one
+    async def test_t11_bonus_accepts_driver_eligible_partial_period(self, p2_env):
+        """T11 — Bonus create 201 when driver is eligible for at least one
         day of the period (hired on the last day of the period)."""
         c, tok, bid = p2_env["client"], p2_env["token"], p2_env["branch_id"]
-        await self._ensure_bonus_active(c, tok, bid)
 
         # Hired on last day of period — still overlaps by one day
         driver_id = await _create_driver(
@@ -691,11 +669,10 @@ class TestPeriodPayEligibility:
         pid = await _make_open_period(p2_env["db"], bid)
 
         resp = await c.post(
-            f"/payroll/periods/{pid}/period-pay",
+            f"/payroll/periods/{pid}/bonuses",
             headers=auth(tok),
             json={
                 "driver_id": driver_id,
-                "line_type": "ADJUSTMENT",
                 "amount":    "50.00",
             },
         )

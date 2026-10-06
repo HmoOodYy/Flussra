@@ -9,7 +9,7 @@ Design notes:
     Draft slot is freed), then stores those period_ids for reuse.
   - Tests that need blocked-user access just try the endpoint and expect 403.
   - User/role creation uses function-unique usernames to avoid collisions.
-  - Period pay tests use PAYTEST branch where BONUS is active.
+  - Payroll mutation tests use the PAYTEST branch.
 
 Matrix:
   1.  DRIVER/Self user cannot access payroll period list/detail/lines/summary.
@@ -24,7 +24,6 @@ Matrix:
   10. Final-lines require payroll read permission.
   11. Final-lines reject non-Locked/non-Archived periods.
   12. Driver/DRIVER/Self cannot access final-lines.
-  13. Manual ADJUSTMENT period-pay create/update is rejected.
   15. Driver role with SpecificBranch (not only DRIVER/Self) is specifically blocked.
 """
 
@@ -314,7 +313,7 @@ async def sm_paytest_driver_id(
     auth_token: str,
     sm_paytest_id: int,
 ) -> int:
-    """One driver on PAYTEST branch for period-pay tests."""
+    """One driver on PAYTEST branch for payroll mutation tests."""
     return await _create_driver(session_client, auth_token, sm_paytest_id, "SM-PAY")
 
 
@@ -326,54 +325,6 @@ async def sm_hq_driver_id(
 ) -> int:
     """One driver on HQ branch for mutation tests."""
     return await _create_driver(session_client, auth_token, sm_hq_id, "SM-HQ")
-
-
-@pytest_asyncio.fixture(scope="module")
-async def sm_bonus_activated(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-    sm_paytest_id: int,
-) -> None:
-    """Activate BONUS for PAYTEST branch (effectivefrom=tdriver_selfy, effectiveto=NULL covers all future dates)."""
-    items_resp = await session_client.get(
-        f"/settings/branches/{sm_paytest_id}/pay-items",
-        headers=_hdr(auth_token),
-    )
-    assert items_resp.status_code == 200
-    for item in items_resp.json():
-        if item["pay_item_code"] == "BONUS":
-            await session_client.patch(
-                f"/settings/branches/{sm_paytest_id}/pay-items/{item['pay_item_id']}",
-                json={"is_active": True},
-                headers=_hdr(auth_token),
-            )
-            return
-
-
-@pytest_asyncio.fixture(scope="module")
-async def sm_adjustment_activated(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-    sm_paytest_id: int,
-) -> None:
-    """Activate the supported non-Bonus Period Pay item for route-security tests."""
-    items_resp = await session_client.get(
-        f"/settings/branches/{sm_paytest_id}/pay-items",
-        headers=_hdr(auth_token),
-    )
-    assert items_resp.status_code == 200
-    item = next(
-        (i for i in items_resp.json() if i["pay_item_code"] == "ADJUSTMENT"),
-        None,
-    )
-    assert item is not None, "ADJUSTMENT pay item not found"
-    if not item.get("is_active", False):
-        resp = await session_client.patch(
-            f"/settings/branches/{sm_paytest_id}/pay-items/{item['pay_item_id']}",
-            json={"is_active": True},
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -977,282 +928,8 @@ class TestSecurityMatrix:
         assert resp.status_code == 403
 
     # -----------------------------------------------------------------------
-    # 12b. Reachable legacy Period Pay route: DRIVER/Self, permission, and branch scope
-    # -----------------------------------------------------------------------
-
-    async def test_12b_period_pay_driver_self_cannot_read_or_mutate(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-        sm_driver_role_id: int,
-        sm_adjustment_activated: None,
-    ):
-        """DRIVER/Self is blocked across GET/POST/PATCH/DELETE without data leakage."""
-        created = await session_client.post(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "line_type": "ADJUSTMENT",
-                "amount": "51.00",
-            },
-            headers=_hdr(auth_token),
-        )
-        assert created.status_code == 201, created.text
-        line_id = created.json()["draft_line_id"]
-
-        driver_self_token = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_paytest_id
-        )
-        headers = _hdr(driver_self_token)
-        attempts = [
-            await session_client.get(
-                f"/payroll/periods/{sm_paytest_period_id}/period-pay", headers=headers
-            ),
-            await session_client.post(
-                f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-                json={
-                    "driver_id": sm_paytest_driver_id,
-                    "line_type": "ADJUSTMENT",
-                    "amount": "52.00",
-                },
-                headers=headers,
-            ),
-            await session_client.patch(
-                f"/payroll/periods/{sm_paytest_period_id}/period-pay/{line_id}",
-                json={"notes": "DRIVER/Self must not update"},
-                headers=headers,
-            ),
-            await session_client.delete(
-                f"/payroll/periods/{sm_paytest_period_id}/period-pay/{line_id}",
-                headers=headers,
-            ),
-        ]
-        for response in attempts:
-            assert response.status_code == 403, response.text
-            assert str(line_id) not in response.text
-
-        visible = await session_client.get(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            headers=_hdr(auth_token),
-        )
-        assert visible.status_code == 200
-        current = next(x for x in visible.json() if x["draft_line_id"] == line_id)
-        assert current["calculated_amount"] == "51.0000"
-        assert current["status"] == "Active"
-
-    async def test_12b_period_pay_all_company_can_read_and_write(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-        sm_adjustment_activated: None,
-    ):
-        """An AllCompanyBranches user with payroll permissions can use the route."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, f"SM Period Pay AllCompany {_uid()}",
-            ["payroll.view", "payroll.entry"],
-        )
-        user = await _create_user(session_client, auth_token, f"sm_pp_all_{_uid()}")
-        await _assign_role(session_client, auth_token, user["user_id"], role_id)
-        token = await _login(session_client, user["username"])
-
-        read = await session_client.get(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            headers=_hdr(token),
-        )
-        assert read.status_code == 200, read.text
-        write = await session_client.post(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "line_type": "ADJUSTMENT",
-                "amount": "53.00",
-            },
-            headers=_hdr(token),
-        )
-        assert write.status_code == 201, write.text
-
-    async def test_12b_period_pay_requires_payroll_entry(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-        sm_adjustment_activated: None,
-    ):
-        """Read permission alone does not authorize a Period Pay mutation."""
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, f"SM Period Pay ViewOnly {_uid()}",
-            ["payroll.view"],
-        )
-        user = await _create_user(session_client, auth_token, f"sm_pp_view_{_uid()}")
-        await _assign_role(session_client, auth_token, user["user_id"], role_id)
-        token = await _login(session_client, user["username"])
-
-        response = await session_client.post(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "line_type": "ADJUSTMENT",
-                "amount": "54.00",
-            },
-            headers=_hdr(token),
-        )
-        assert response.status_code == 403, response.text
-
-    async def test_12b_period_pay_specific_branch_cannot_cross_branch(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_paytest_id: int,
-        sm_hq_period_id: int,
-        sm_hq_driver_id: int,
-        direct_db,
-    ):
-        """SpecificBranch scope protects all four legacy Period Pay operations."""
-        from sqlalchemy import text as _text
-
-        result = await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
-                     workdate, linetype, linescope, quantity, calculatedamount,
-                     sourcetype, status, needsmanagerreview, addedbyuserid)
-                VALUES
-                    (1, :bid, :pid, :did, NULL, 'ADJUSTMENT', 'Period', 1,
-                     61.00, 'Manual', 'Active', FALSE,
-                     (SELECT userid FROM sec.users WHERE username = 'admin' LIMIT 1))
-                RETURNING draftlineid
-            """),
-            {"bid": sm_hq_id, "pid": sm_hq_period_id, "did": sm_hq_driver_id},
-        )
-        line_id = result.scalar_one()
-
-        role_id = await _create_role_with_perms(
-            session_client, auth_token, f"SM Period Pay Branch {_uid()}",
-            ["payroll.view", "payroll.entry"],
-        )
-        user = await _create_user(session_client, auth_token, f"sm_pp_branch_{_uid()}")
-        await _assign_role(
-            session_client, auth_token, user["user_id"], role_id,
-            scope="SpecificBranch", branch_id=sm_paytest_id,
-        )
-        token = await _login(session_client, user["username"])
-        headers = _hdr(token)
-
-        attempts = [
-            await session_client.get(
-                f"/payroll/periods/{sm_hq_period_id}/period-pay", headers=headers
-            ),
-            await session_client.post(
-                f"/payroll/periods/{sm_hq_period_id}/period-pay",
-                json={
-                    "driver_id": sm_hq_driver_id,
-                    "line_type": "ADJUSTMENT",
-                    "amount": "62.00",
-                },
-                headers=headers,
-            ),
-            await session_client.patch(
-                f"/payroll/periods/{sm_hq_period_id}/period-pay/{line_id}",
-                json={"notes": "cross-branch"}, headers=headers,
-            ),
-            await session_client.delete(
-                f"/payroll/periods/{sm_hq_period_id}/period-pay/{line_id}",
-                headers=headers,
-            ),
-        ]
-        for response in attempts:
-            assert response.status_code in (403, 404), response.text
-
-        row = (await direct_db.execute(
-            _text("SELECT status, calculatedamount FROM payroll.payrolldraftlines WHERE draftlineid = :lid"),
-            {"lid": line_id},
-        )).mappings().one()
-        assert row["status"] == "Active"
-        assert str(row["calculatedamount"]) == "61.0000"
-
-    # -----------------------------------------------------------------------
-    # 13. Manual ADJUSTMENT period-pay is rejected
-    # -----------------------------------------------------------------------
-
-    async def test_13_adjustment_period_pay_supported_canonical(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-    ):
-        """Active canonical ADJUSTMENT remains supported on the legacy route."""
-        resp = await session_client.post(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "line_type": "ADJUSTMENT",
-                "amount": "50.00",
-            },
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 201, resp.text
-        assert resp.json()["line_type"] == "ADJUSTMENT"
-
-    async def test_13_adjustment_period_pay_supported_legacy(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-    ):
-        """The legacy Adjustment spelling normalizes to canonical ADJUSTMENT."""
-        resp = await session_client.post(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "line_type": "Adjustment",
-                "amount": "50.00",
-            },
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 201, resp.text
-        assert resp.json()["line_type"] == "ADJUSTMENT"
-
-    async def test_13_bonus_period_pay_is_retired(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-        sm_bonus_activated: None,
-    ):
-        """BONUS must use the canonical Bonus Events API, not period-pay."""
-        resp = await session_client.post(
-            f"/payroll/periods/{sm_paytest_period_id}/period-pay",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "line_type": "BONUS",
-                "amount": "100.00",
-            },
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 422, (
-            f"BONUS period-pay must be rejected; got {resp.status_code}: {resp.text}"
-        )
-        assert "bonus events" in resp.json()["detail"].lower()
-
-    # -----------------------------------------------------------------------
     # 11b. Final-lines accepted for Locked period
-    #      Runs AFTER test_13 so sm_paytest_period_id is still Open here;
-    #      we advance it through the full lifecycle to Locked.
+    #      Advances sm_paytest_period_id through the full lifecycle to Locked.
     # -----------------------------------------------------------------------
 
     async def test_11b_final_lines_accepted_for_locked_period(
@@ -1262,13 +939,11 @@ class TestSecurityMatrix:
         sm_paytest_id: int,
         sm_paytest_driver_id: int,
         sm_paytest_period_id: int,
-        sm_bonus_activated: None,
         direct_db,
     ):
         """Final-lines returns 200 for a Locked period.
 
         Advances sm_paytest_period_id: Open→InReview→Approved→Locked.
-        Must run after test_13_* (which rely on the period being Open).
         """
         from sqlalchemy import text as _sqla_text
         pid = sm_paytest_period_id
