@@ -41,3 +41,10 @@ ALTER TABLE payroll.PayrollCalculationDriverTotals DROP COLUMN PeriodPay;
 ALTER TABLE payroll.PayrollCalculationSnapshots
     ADD CONSTRAINT ck_PayrollCalculationSnapshots_CalculationVersion
     CHECK (CalculationVersion = 'payroll-calculation-v1');
+
+ALTER TABLE payroll.PayrollCalculationSnapshotLines
+    ALTER COLUMN LineScope SET NOT NULL;
+
+ALTER TABLE payroll.PayrollCalculationSnapshotLines
+    ADD CONSTRAINT ck_PayrollCalculationSnapshotLines_LineScope
+    CHECK (LineScope IN ('Daily', 'Period'));

@@ -318,7 +318,7 @@ async def _project_approved_snapshot_final_lines(
             "draft_line_id": _snapshot_line_draft_line_id(line),
             "bonus_event_id": line["bonuseventid"], "driver_id": line["driverid"],
             "work_date": line["workdate"], "line_type": line["linetype"],
-            "line_scope": line["linescope"] or "Period", "quantity": line["quantity"] or Decimal("0"),
+            "line_scope": line["linescope"], "quantity": line["quantity"] or Decimal("0"),
             "rate_amount": line["resolvedrateamount"], "final_amount": line["calculatedamount"],
             "source_type": source_type, "source_id": line["sourceid"], "approved_by": user_id,
             "notes": evidence.get("Notes"), "pay_item_id": line["payitemid"],
@@ -405,7 +405,7 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
         lines.append(FinalizationPreviewLine(
             draft_line_id=_snapshot_line_draft_line_id(row), source_key=f"snapshot-line:{row['payrollcalculationsnapshotlineid']}",
             driver_id=int(row["driverid"]), driver_name=total["drivernamesnapshot"], work_date=row["workdate"],
-            line_type=row["linetype"], line_scope=row["linescope"] or "Period", quantity=row["quantity"],
+            line_type=row["linetype"], line_scope=row["linescope"], quantity=row["quantity"],
             rate_amount=row["resolvedrateamount"], calculated_amount=amount, final_amount=amount,
             needs_manager_review=False, rate_behavior=evidence.get("RateBehavior"),
             driver_rate_id=row["driverrateid"], rate_type_id=row["ratetypeid"], resolved_rate_amount=row["resolvedrateamount"],

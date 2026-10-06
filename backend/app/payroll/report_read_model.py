@@ -39,7 +39,7 @@ def classify_final_line_component(row: Any) -> str:
         return "maximum_adjustment"
     if row["sourcetype"] == "BonusEvent":
         return "bonus_total"
-    if row["sourcetype"] in {"StatusEntryState", "Status"}:
+    if row["sourcetype"] == "StatusEntryState":
         return "status_pay"
     if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
         return "daily_pay"
@@ -207,7 +207,7 @@ async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tupl
         driver_id = int(row["driverid"])
         drivers.setdefault(driver_id, {"driver_id": driver_id, "driver_code": row["drivercode"],
                                        "driver_name": row["drivername"]})
-        if row["sourcetype"] not in {"System", "BonusEvent"}:
+        if row["sourcetype"] != "System":
             work.append({"driver_id": driver_id, "work_date": row["workdate"],
                          "line_type": row["linetype"], "pay_item_id": row["payitemid"],
                          "quantity": row["quantity"], "line_scope": "Daily"})
@@ -380,8 +380,9 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
     """), {"period_id": period["payrollperiodid"], "company_id": period["companyid"],
           "branch_id": period["branchid"]})).mappings().all()
     snapshot_ids = {int(row["snapshot_id"]) for row in provenance if row["snapshot_id"] is not None}
-    # Legacy finalization rows can retain money authority without a snapshot;
-    # report-only evidence is then marked unavailable by the caller.
+    # FinalLines remain the money authority; when snapshot provenance cannot be
+    # resolved to exactly one snapshot, report-only evidence is marked
+    # unavailable by the caller.
     provenance_snapshot_id = next(iter(snapshot_ids)) if len(snapshot_ids) == 1 else None
     return lines, dict(totals), [], [], True, provenance_snapshot_id, None
 

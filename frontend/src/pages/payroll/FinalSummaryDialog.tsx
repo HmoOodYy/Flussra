@@ -42,6 +42,10 @@ interface DriverTotal {
   line_count: number;
 }
 
+function isSystemAdjustmentLine(line: FinalLineSummary): boolean {
+  return line.line_type === 'SYS_MIN_TOPUP' || line.line_type === 'SYS_MAX_CAP';
+}
+
 function isBonusEventLine(line: FinalLineSummary): boolean {
   return line.source_type === 'BonusEvent';
 }
@@ -49,7 +53,7 @@ function isBonusEventLine(line: FinalLineSummary): boolean {
 // Explicit canonical classification only. A line that matches no supported
 // component is never folded into a subtotal; it is surfaced as an integrity error.
 function lineComponent(line: FinalLineSummary): 'sys_adjustment' | 'bonus' | 'status' | 'daily' | null {
-  if (line.line_type === 'SYS_MIN_TOPUP' || line.line_type === 'SYS_MAX_CAP') return 'sys_adjustment';
+  if (isSystemAdjustmentLine(line)) return 'sys_adjustment';
   if (isBonusEventLine(line)) return 'bonus';
   if (line.source_type === 'StatusEntryState') return 'status';
   if (line.source_type === 'DraftLine' && line.line_scope === 'Daily') return 'daily';
@@ -169,7 +173,7 @@ function DriverTotalsTable({ rows, code, digits }: { rows: DriverTotal[]; code: 
 }
 
 function SysAdjTable({ lines }: { lines: FinalLineSummary[] }) {
-  const sysLines = lines.filter((l) => l.line_type.startsWith('SYS_'));
+  const sysLines = lines.filter(isSystemAdjustmentLine);
   if (sysLines.length === 0) return <div className={styles.emptyMsg}>No system adjustments.</div>;
   return (
     <table className={styles.table}>
@@ -227,7 +231,7 @@ function BonusEventsTable({ lines }: { lines: FinalLineSummary[] }) {
 }
 
 function LineDetailsTable({ lines }: { lines: FinalLineSummary[] }) {
-  const dailyLines = lines.filter((l) => l.line_scope === 'Daily' && !l.line_type.startsWith('SYS_'));
+  const dailyLines = lines.filter((l) => l.line_scope === 'Daily' && !isSystemAdjustmentLine(l));
   if (dailyLines.length === 0) return <div className={styles.emptyMsg}>No daily lines.</div>;
   return (
     <table className={styles.table}>
@@ -314,9 +318,9 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
 
   const driverTotals = buildDriverTotals(lines);
   const unclassifiedCount = lines.filter((l) => lineComponent(l) === null).length;
-  const sysCount = lines.filter((l) => l.line_type.startsWith('SYS_')).length;
+  const sysCount = lines.filter(isSystemAdjustmentLine).length;
   const bonusCount = lines.filter(isBonusEventLine).length;
-  const dailyCount = lines.filter((l) => l.line_scope === 'Daily' && !l.line_type.startsWith('SYS_')).length;
+  const dailyCount = lines.filter((l) => l.line_scope === 'Daily' && !isSystemAdjustmentLine(l)).length;
 
   return (
     <div className={styles.backdrop} onClick={onClose}>

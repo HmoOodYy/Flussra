@@ -112,9 +112,25 @@ def test_0079_clean_upgrade_accepts_canonical_calculation_snapshot(g0_4c_databas
                  dailypay, statuspay, minimumadjustment, maximumadjustment,
                  bonustotal, expectedpay)
             VALUES (%s, %s, %s, %s, 25, 18, 2, -1, 5, 49)
-            RETURNING expectedpay
+            RETURNING payrollcalculationdrivertotalid, expectedpay
         """, (snapshot_id, ids["company_id"], ids["branch_id"], ids["driver_id"]))
-        assert cur.fetchone() == (49,)
+        total_id, expected = cur.fetchone()
+        assert expected == 49
+        insert_line = """
+            INSERT INTO payroll.payrollcalculationsnapshotlines
+                (payrollcalculationdrivertotalid, sourcetype, linetype, linescope,
+                 calculatedamount, sourceevidencejsonb)
+            VALUES (%s, %s, %s, %s, 5, '{}'::jsonb)
+        """
+        cur.execute(insert_line, (total_id, "DraftLine", "HOURS", "Daily"))
+        cur.execute(insert_line, (total_id, "BonusEvent", "BONUS", "Period"))
+        cur.execute("SAVEPOINT bad_scope")
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            cur.execute(insert_line, (total_id, "DraftLine", "HOURS", "Weekly"))
+        cur.execute("ROLLBACK TO SAVEPOINT bad_scope")
+        with pytest.raises(psycopg2.errors.NotNullViolation):
+            cur.execute(insert_line, (total_id, "DraftLine", "HOURS", None))
+        cur.connection.rollback()
         cur.execute("SELECT version_num FROM public.alembic_version")
         assert cur.fetchone() == ("0079",)
 
