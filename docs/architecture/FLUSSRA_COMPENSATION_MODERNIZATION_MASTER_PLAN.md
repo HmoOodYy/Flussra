@@ -1,12 +1,12 @@
 # Flussra Compensation Architecture Modernization — Master Implementation Plan
 
-**Status:** APPROVED TARGET ARCHITECTURE — P3b is the current implementation work unit
+**Status:** APPROVED TARGET ARCHITECTURE — P3c is the current implementation work unit
 **Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
 **Current baseline:** Post-G0 accepted `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` (PR #45 merge); Alembic head `0081`. Historical earlier baseline: `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`, with P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`
-**Execution state:** P2c, Phase 2, P3a (PR #30) and G0 (G0.1–G0.6, PR #34 through PR #45) are closed; P3b — Target Compensation schema/invariants — is the current implementation work unit and advances the migration head from `0081` to `0082`
+**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (G0.1–G0.6, PR #34 through PR #45) and P3b (PR #46, `main @ edcf871f59d0616e194a8e752d9b6ba23f42b8a2`, migration head `0082`) are closed; P3c — Dormant target Compensation authoring and resolver — is the current implementation work unit and advances the migration head from `0082` to `0083`
 
-> This document records the approved target architecture. P3b is the current implementation unit; P3c and later units have not started.
+> This document records the approved target architecture. P3c is the current implementation unit; P4 and later units have not started.
 
 > **Naming note:** The Unified Refoundation Execution Plan controls work-unit boundaries and order. The internal phase labels in §12–§13 below (for example "P3A Core target schema" and "P3B Evidence-v2 schema foundation") are not Unified work-unit identifiers. The core target schema described under §13 "P3A" is delivered by the Unified P3b work unit; evidence structures are sequenced by the Unified plan's later units.
 
@@ -14,7 +14,7 @@
 
 ## 0. Resume Protocol — Read This First When Work Restarts
 
-P3b is the current implementation unit. Before each later work unit starts, the implementation lead performs a read-only drift review:
+P3c is the current implementation unit. Before each later work unit starts, the implementation lead performs a read-only drift review:
 
 1. Fetch current `main` and record the new SHA.
 2. Compare changes since the current approved baseline recorded above.
@@ -32,7 +32,7 @@ P3b is the current implementation unit. Before each later work unit starts, the 
 5. If material drift exists, update **only the affected phase/dependency**, not the entire architecture from scratch.
 6. Do not re-open frozen product decisions unless a real technical impossibility or new explicit product requirement exists.
 
-P2c merged through PR #28 as `af00a22915f93810d123aadea18c3a73da1360aa`; Test Hygiene PR #29 merged afterward. P3a closed via PR #30 and G0 closed with PR #45. The post-G0 accepted baseline is `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` at migration head `0081`; P3b advances it to `0082`.
+P2c merged through PR #28 as `af00a22915f93810d123aadea18c3a73da1360aa`; Test Hygiene PR #29 merged afterward. P3a closed via PR #30, G0 closed with PR #45 (`main @ f2937bfdcbe1266a00716905a8712f3fe29baff2`, migration head `0081`) and P3b closed via PR #46 (`main @ edcf871f59d0616e194a8e752d9b6ba23f42b8a2`, migration head `0082`); P3c advances the head to `0083`.
 
 ---
 
@@ -1742,7 +1742,7 @@ The implementation lead may **not** reinterpret:
 
 # 20. Implementation Must Remain Deferred Until Explicitly Started
 
-This plan is a target and dependency reference. P2c, Phase 2, P3a and G0 are closed. P3b is the current implementation work unit; later phases remain subject to their stated dependencies and review gates.
+This plan is a target and dependency reference. P2c, Phase 2, P3a, G0 and P3b are closed. P3c is the current implementation work unit; later phases remain subject to their stated dependencies and review gates.
 
 No implementation should begin merely because this document exists.
 

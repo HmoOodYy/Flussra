@@ -57,7 +57,7 @@ def _target_tables(cur) -> set[str]:
     return {row[0] for row in cur.fetchall()}
 
 
-def test_alembic_has_a_single_head_at_0082():
+def test_alembic_has_a_single_head():
     result = subprocess.run(
         [sys.executable, "-B", "-m", "alembic", "heads"],
         cwd=_ROOT, capture_output=True, text=True, check=False,
@@ -66,7 +66,7 @@ def test_alembic_has_a_single_head_at_0082():
     )
     assert result.returncode == 0, result.stderr
     heads = [line for line in result.stdout.splitlines() if "(head)" in line]
-    assert len(heads) == 1 and heads[0].startswith("0082"), result.stdout
+    assert len(heads) == 1 and heads[0].startswith("0083"), result.stdout
 
 
 def test_0081_with_legacy_state_upgrades_to_0082_without_touching_it(p3b_migration_database):
@@ -109,7 +109,7 @@ def test_0081_with_legacy_state_upgrades_to_0082_without_touching_it(p3b_migrati
         pay_items_before = cur.fetchone()[0]
         conn.commit()
 
-    upgraded = _alembic(env, "upgrade", "head")
+    upgraded = _alembic(env, "upgrade", "0082")
     assert upgraded.returncode == 0, upgraded.stderr
 
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
@@ -138,7 +138,7 @@ def test_fresh_database_upgrades_to_head_with_the_target_schema(p3b_migration_da
     assert upgraded.returncode == 0, upgraded.stderr
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0082",)
+        assert cur.fetchone() == ("0083",)
         assert _target_tables(cur) == TARGET_TABLES
         cur.execute("""
             SELECT count(*) FROM pg_trigger t

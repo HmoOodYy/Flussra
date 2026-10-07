@@ -120,13 +120,15 @@ If an issue is officially moved to a different work unit:
 
 **G0:** CLOSED (G0.1 PR #34; G0.2 PRs #35–#39; G0.3 PR #40; G0.4 PRs #41–#43; G0.5 PR #44; G0.6 PR #45).
 
-**P3b:** Current implementation work unit (Target Compensation schema/invariants).
+**P3b:** CLOSED / merged (PR #46; migration `0082`; Target Compensation schema/invariants).
 
-**Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`.
+**P3c:** Current implementation work unit (dormant target Compensation authoring and resolver).
+
+**Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`. P3b merge baseline: `main` at the PR #46 merge, `edcf871f59d0616e194a8e752d9b6ba23f42b8a2`.
 
 **Test Hygiene:** PR #29 merged after P2c.
 
-**Pre-P3b migration head:** `0081`; P3b advances it to `0082`.
+**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c advances it to `0083`.
 
 **Important rule:** Anything below marked `NOT YET` remains intentional architectural/product debt until the entry itself is updated to `YES`.
 
@@ -594,7 +596,7 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
 
 **Current State:**  
-P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45), and target Compensation refoundation has entered P3b, which establishes a dormant target persistence model and database invariants beside the legacy compensation model. Legacy compensation remains the sole operational payroll authority. P3b alone does not resolve this debt: target authoring/resolver (P3c), the operational authority cutover and evidence (P4), Status and OrdinalTier (P5) and transfer copy (P6) remain.
+P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45). P3b is closed (PR #46): it established a dormant target persistence model and database invariants beside the legacy compensation model. Target Compensation refoundation is now in P3c, which makes the dormant model authorable and resolvable (generic PayDefinition governance and provenance, PerUnit assignment authoring, canonical resolver) without switching any operational path. Legacy compensation remains the sole operational payroll authority. Neither P3b nor P3c resolves this debt: the operational authority cutover and evidence (P4), Status and OrdinalTier (P5) and transfer copy (P6) remain.
 
 **Issue Resolved?:** NOT YET
 
