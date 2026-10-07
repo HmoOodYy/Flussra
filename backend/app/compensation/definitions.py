@@ -41,6 +41,7 @@ from app.compensation.schemas import (
     RateComponentSummary,
 )
 from app.core.service import _check_branch_access
+from app.rate_definition_concurrency import lock_rate_definition_structure
 
 GOVERNANCE_SCHEMA_VERSION = 1
 CALCULATION_METHOD_VERSION = 1
@@ -625,6 +626,19 @@ async def retire_definition(
     """Retire a PayDefinition. Nothing is deleted: structure, provenance, rate
     assignments and branch configuration history are preserved."""
     await require_definition_company_edit(company_id, user_id, db)
+    # Lock order: RateDefinition structure first (the same first lock every target
+    # authoring path takes), then the PayDefinition row. The RateDefinition is
+    # resolved with a plain read so no conflicting lock is taken before it.
+    rate_definition_id = (await db.execute(
+        text("""
+            SELECT rd.ratedefinitionid
+            FROM   payroll.ratedefinitions rd
+            WHERE  rd.paydefinitionid = :pid AND rd.companyid = :cid
+        """),
+        {"pid": pay_definition_id, "cid": company_id},
+    )).scalar_one_or_none()
+    if rate_definition_id is not None:
+        await lock_rate_definition_structure(rate_definition_id, db)
     row = (await db.execute(
         text("""
             SELECT status FROM payroll.paydefinitions

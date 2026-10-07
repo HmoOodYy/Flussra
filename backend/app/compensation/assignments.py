@@ -27,6 +27,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
+from app.compensation.branch_config import require_definition_applicable
 from app.compensation.errors import compensation_error, translate_database_error
 from app.compensation.guards import (
     load_company_driver_branch,
@@ -180,6 +181,21 @@ async def _authorable_rate_definition(
     return dict(row)
 
 
+async def _require_authoring_authority(
+    company_id: int, rate_definition_id: int, branch_id: int, effective_from: date,
+    db: AsyncConnection,
+) -> None:
+    """Revalidate PayDefinition status and Branch applicability for a target write.
+
+    The caller holds the RateDefinition structural lock. PayDefinition retirement
+    takes that same lock before touching the PayDefinition, so the status read here
+    cannot change underneath the caller until it ends.
+    """
+    definition = await _authorable_rate_definition(company_id, rate_definition_id, db)
+    await require_definition_applicable(
+        company_id, branch_id, definition["paydefinitionid"], effective_from, db)
+
+
 def _validate_window(effective_from: date, effective_to: date | None) -> None:
     if effective_to is not None and effective_to < effective_from:
         raise compensation_error(
@@ -195,6 +211,8 @@ async def create_pending(
     _validate_window(data.effective_from, data.effective_to)
 
     await lock_rate_definition_structure(data.rate_definition_id, db)
+    await _require_authoring_authority(
+        company_id, data.rate_definition_id, branch_id, data.effective_from, db)
     try:
         assignment_id = (await db.execute(
             text("""
@@ -243,6 +261,9 @@ async def update_pending(
         else row["effective_to"]
     notes = data.notes if "notes" in data.model_fields_set else row["notes"]
     _validate_window(effective_from, effective_to)
+    if effective_from != row["effective_from"]:
+        await _require_authoring_authority(
+            company_id, row["rate_definition_id"], row["branch_id"], effective_from, db)
     try:
         await db.execute(
             text("""
@@ -320,6 +341,8 @@ async def approve(
 ) -> AssignmentSummary:
     row = await _lock_monetary_pending_assignment(
         company_id, user_id, assignment_id, "approved", db)
+    await _require_authoring_authority(
+        company_id, row["rate_definition_id"], row["branch_id"], row["effective_from"], db)
     await _check_not_in_finalized_period(
         company_id, row["branch_id"], row["effective_from"], db, label="rate")
 

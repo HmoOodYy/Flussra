@@ -10,6 +10,7 @@ from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
     build_tenant,
     create_definition,
     create_pending,
+    grant_applicability,
     p3c_application,
     p3c_database_engine,
     p3c_http_client,
@@ -21,10 +22,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _activate(client, tenant, branch_id, definition, *, active=True, headers=None):
-    response = await client.patch(
-        f"/compensation/branches/{branch_id}/pay-definitions/{definition['pay_definition_id']}",
-        json={"is_active": active}, headers=headers or tenant.admin)
-    assert response.status_code == 200, response.text
+    grant_applicability(tenant, definition, branch_id, active=active)
 
 
 async def _rows(client, tenant, driver_id, headers=None, **params):
