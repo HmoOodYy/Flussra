@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.policy import require_non_driver_subject
 from app.compensation.audit import write_audit
-from app.compensation.branch_config import apply_config
+from app.compensation.branch_config import activate_for_requesting_branch
 from app.compensation.errors import compensation_error, translate_database_error
 from app.compensation.guards import (
     require_definition_branch_edit,
@@ -478,12 +478,9 @@ async def _approve_request(
          "submitter": row["submitted_by_user_id"], "submitted_at": row["submitted_at_utc"],
          "uid": user_id, "gv": GOVERNANCE_SCHEMA_VERSION, "mv": CALCULATION_METHOD_VERSION},
     )
-    today = (await db.execute(
-        text("SELECT core.fn_CompanyToday(:cid)"), {"cid": company_id})).scalar_one()
-    await apply_config(
+    await activate_for_requesting_branch(
         db, company_id=company_id, branch_id=row["requesting_branch_id"],
-        pay_definition_id=pay_definition_id, user_id=user_id, is_active=True, notes=None,
-        effective_from=today)
+        pay_definition_id=pay_definition_id, user_id=user_id)
     await _insert_event(
         db, request_id, "Approved", "PendingCompanyApproval", "Approved", user_id,
         revision, data.reason)

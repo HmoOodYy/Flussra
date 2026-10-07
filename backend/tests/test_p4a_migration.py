@@ -164,3 +164,117 @@ def test_0084_is_irreversible(p4a_database):
     result = _alembic(env, "downgrade", "0083")
     assert result.returncode != 0
     assert "irreversible" in (result.stderr + result.stdout).lower()
+
+
+# ---------------------------------------------------------------------------
+# Mixed-era guard: non-terminal pre-cutover periods block the cutover
+# ---------------------------------------------------------------------------
+
+MUTABLE = ["Draft", "Open", "InReview", "Returned", "Approved"]
+TERMINAL = ["Locked", "Archived", "Cancelled"]
+
+
+def _period(cur, company_id: int, branch_id: int, status: str) -> int:
+    pointer = None
+    if status == "Returned":
+        cur.execute("""
+            INSERT INTO review.managerreviewitems
+                (companyid, branchid, requesttype, title, status, priority)
+            VALUES (%s, %s, 'PeriodApproval', 'P4A preflight', 'Pending', 'Normal')
+            RETURNING reviewitemid
+        """, (company_id, branch_id))
+        pointer = cur.fetchone()[0]
+    cur.execute("""
+        INSERT INTO payroll.payrollperiods
+            (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate,
+             currentreturnreviewitemid)
+        VALUES (%s, %s, %s, %s, %s, 'Week', '2030-01-07', '2030-01-13', %s)
+        RETURNING payrollperiodid
+    """, (company_id, branch_id, status, "P-" + uuid4().hex[:8], "Preflight " + status, pointer))
+    return cur.fetchone()[0]
+
+
+def _legacy_config(cur, company_id: int, branch_id: int) -> int:
+    cur.execute("SELECT payitemid FROM payroll.payitems WHERE companyid IS NULL LIMIT 1")
+    item_id = cur.fetchone()[0]
+    cur.execute("""
+        INSERT INTO payroll.branchpayitemconfig
+            (companyid, branchid, payitemid, isactive, effectivefrom)
+        VALUES (%s, %s, %s, TRUE, '2020-01-01') RETURNING configid
+    """, (company_id, branch_id, item_id))
+    return cur.fetchone()[0]
+
+
+@pytest.mark.parametrize("status", MUTABLE)
+def test_each_mutable_period_status_blocks_the_cutover_and_leaves_0083_untouched(
+    p4a_database, status,
+):
+    env, dsn = p4a_database
+    assert _alembic(env, "upgrade", "0083").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        company_id, branch_id = _company_with_branch(cur, "P4AB")
+        config_id = _legacy_config(cur, company_id, branch_id)
+        definition_id = _definition(cur, company_id, "STAYS")
+        _period(cur, company_id, branch_id, status)
+        before_columns = _columns(cur)
+        conn.commit()
+
+    result = _alembic(env, "upgrade", "0084")
+    assert result.returncode != 0
+    assert "P4A_MUTABLE_LEGACY_PERIODS_REQUIRE_RESET" in result.stderr + result.stdout
+
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT version_num FROM public.alembic_version")
+        assert cur.fetchone() == ("0083",)
+        assert _columns(cur) == before_columns
+        assert "paydefinitionid" not in before_columns
+        cur.execute("SELECT configid, payitemid IS NOT NULL FROM payroll.branchpayitemconfig")
+        assert cur.fetchall() == [(config_id, True)]
+        cur.execute("SELECT count(*) FROM payroll.paydefinitions WHERE paydefinitionid = %s",
+                    (definition_id,))
+        assert cur.fetchone() == (1,)
+        cur.execute("SELECT count(*) FROM payroll.payrollperiods WHERE status = %s", (status,))
+        assert cur.fetchone() == (1,)
+
+
+def test_terminal_periods_do_not_trigger_the_preflight_and_stay_untouched(p4a_database):
+    env, dsn = p4a_database
+    assert _alembic(env, "upgrade", "0083").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        company_id, branch_id = _company_with_branch(cur, "P4AC")
+        _legacy_config(cur, company_id, branch_id)
+        for status in TERMINAL:
+            _period(cur, company_id, branch_id, status)
+        cur.execute("""
+            SELECT payrollperiodid, status, periodcode FROM payroll.payrollperiods
+            ORDER BY payrollperiodid
+        """)
+        periods = cur.fetchall()
+        conn.commit()
+
+    upgraded = _alembic(env, "upgrade", "0084")
+    assert upgraded.returncode == 0, upgraded.stderr
+
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT payrollperiodid, status, periodcode FROM payroll.payrollperiods
+            ORDER BY payrollperiodid
+        """)
+        assert cur.fetchall() == periods
+        cur.execute("SELECT count(*) FROM payroll.branchpayitemconfig")
+        assert cur.fetchone() == (0,)
+
+
+def test_nothing_is_backfilled_from_payitems_into_paydefinitions(p4a_database):
+    env, dsn = p4a_database
+    assert _alembic(env, "upgrade", "0083").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        company_id, branch_id = _company_with_branch(cur, "P4AD")
+        _legacy_config(cur, company_id, branch_id)
+        conn.commit()
+    assert _alembic(env, "upgrade", "0084").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM payroll.paydefinitions")
+        assert cur.fetchone() == (0,)
+        cur.execute("SELECT count(*) FROM payroll.branchpayitemconfig")
+        assert cur.fetchone() == (0,)

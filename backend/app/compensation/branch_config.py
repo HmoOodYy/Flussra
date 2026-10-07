@@ -89,18 +89,23 @@ async def _company_today(company_id: int, db: AsyncConnection) -> date:
     )).scalar_one()
 
 
+# Non-terminal payroll workflow states: configuration must not take effect inside them.
+MUTABLE_PERIOD_STATUSES = ("Draft", "Open", "InReview", "Returned", "Approved")
+
+
 async def _open_period_max_end(
     company_id: int, branch_id: int, today: date, db: AsyncConnection,
 ) -> date | None:
-    """End of the latest open period that contains today, or None."""
+    """End of the latest non-terminal period that contains today, or None."""
     return (await db.execute(
         text("""
             SELECT MAX(enddate) FROM payroll.payrollperiods
             WHERE  companyid = :cid AND branchid = :bid
-              AND  status IN ('Draft', 'Open', 'InReview', 'Approved')
+              AND  status = ANY(:statuses)
               AND  startdate <= :today AND enddate >= :today
         """),
-        {"cid": company_id, "bid": branch_id, "today": today},
+        {"cid": company_id, "bid": branch_id, "today": today,
+         "statuses": list(MUTABLE_PERIOD_STATUSES)},
     )).scalar_one()
 
 
@@ -120,6 +125,32 @@ def resolve_effective_from(
             f"take effect during an open period. The earliest allowed effective_from is "
             f"{earliest}.", 422)
     return requested
+
+
+async def resolve_activation_date(
+    company_id: int, branch_id: int, requested: date | None, today: date,
+    db: AsyncConnection,
+) -> tuple[date, date | None]:
+    """The one effective-date policy for target Branch applicability.
+
+    ``today`` is Company-local today. With no requested date the result is today, or
+    the day after the end of a non-terminal period that contains today. An explicit
+    date inside such a period is rejected. Returns the date and that period end.
+    """
+    period_end = await _open_period_max_end(company_id, branch_id, today, db)
+    return resolve_effective_from(requested, period_end, today), period_end
+
+
+async def activate_for_requesting_branch(
+    db: AsyncConnection, *, company_id: int, branch_id: int, pay_definition_id: int,
+    user_id: int,
+) -> None:
+    """Activate a newly approved PayDefinition for the Branch that requested it."""
+    today = await _company_today(company_id, db)
+    effective_from, _ = await resolve_activation_date(company_id, branch_id, None, today, db)
+    await apply_config(
+        db, company_id=company_id, branch_id=branch_id, pay_definition_id=pay_definition_id,
+        user_id=user_id, is_active=True, notes=None, effective_from=effective_from)
 
 
 async def _require_branch_in_company(
@@ -362,8 +393,8 @@ async def update_branch_config(
     _require_activatable(definition, data.is_active)
 
     today = await _company_today(company_id, db)
-    period_end = await _open_period_max_end(company_id, branch_id, today, db)
-    effective_from = resolve_effective_from(data.effective_from, period_end, today)
+    effective_from, period_end = await resolve_activation_date(
+        company_id, branch_id, data.effective_from, today, db)
     await apply_config(
         db, company_id=company_id, branch_id=branch_id, pay_definition_id=pay_definition_id,
         user_id=user_id, is_active=data.is_active, notes=data.notes,
@@ -405,10 +436,10 @@ async def bulk_update_branch_config(
     validated: list[tuple[dict, date]] = []
     errors: list[dict] = []
     for row in rows:
-        period_end = await _open_period_max_end(company_id, row["branchid"], today, db)
         try:
-            validated.append((dict(row), resolve_effective_from(
-                data.effective_from, period_end, today)))
+            resolved, _ = await resolve_activation_date(
+                company_id, row["branchid"], data.effective_from, today, db)
+            validated.append((dict(row), resolved))
         except HTTPException as exc:
             errors.append({"branch_id": row["branchid"], "branch_name": row["branchname"],
                            "error": exc.detail["message"]})

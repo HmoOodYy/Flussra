@@ -18,7 +18,31 @@
 -- Legacy PayItems, RateTypes, DriverRates and the period evidence that
 -- references them are NOT touched here. Payroll periods carry immutable
 -- evidence and Payroll Setup audit coupling, so they are not wiped by this
--- migration; reset and reseed a development database to clear them.
+-- migration. Terminal periods (Locked, Archived, Cancelled) remain as history.
+-- Non-terminal periods block the migration (see the preflight below).
+
+-- Preflight: refuse to cut over while a pre-cutover period can still move through the
+-- legacy payroll runtime. Nothing is converted, finalized or deleted here. The check
+-- runs before any destructive statement and the whole migration is one transaction,
+-- so a failure leaves the database at 0083 with its legacy configuration intact.
+-- Locked, Archived and Cancelled periods are terminal history and are not touched.
+DO $preflight$
+DECLARE
+    mutable_periods INTEGER;
+BEGIN
+    SELECT count(*) INTO mutable_periods
+    FROM   payroll.PayrollPeriods
+    WHERE  Status IN ('Draft', 'Open', 'InReview', 'Returned', 'Approved');
+
+    IF mutable_periods > 0 THEN
+        RAISE EXCEPTION
+            'P4A_MUTABLE_LEGACY_PERIODS_REQUIRE_RESET: % non-terminal payroll period(s) '
+            'still use the legacy PayItem runtime. Migration 0084 does not convert them. '
+            'Reset and reseed the development database, then run the migration again.',
+            mutable_periods;
+    END IF;
+END
+$preflight$;
 
 DELETE FROM payroll.BranchPayItemConfig;
 

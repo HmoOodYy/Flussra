@@ -1,8 +1,13 @@
 """Target Compensation HTTP surface, mounted at /compensation.
 
-Generic PayDefinition governance and Driver rate assignment authoring for the
-target model. These routes are not used by payroll runtime or by the current
-frontend; legacy PayItems, CDPI and DriverRates remain the operational path.
+Company-owned PayDefinition governance, Branch applicability and Driver rate
+assignment authoring. Since P4a these routes are the operational authority for
+PayDefinitions, their Branch configuration and ordinary PerUnit rates; the
+Settings Pay Items and Pay Rates pages call them.
+
+Boundaries that remain: Status-only legacy rates stay on their temporary path
+until P5, and payroll period layout and calculation are held (new period creation
+answers TARGET_PAYROLL_LAYOUT_NOT_READY) until P4b.
 """
 
 from datetime import date

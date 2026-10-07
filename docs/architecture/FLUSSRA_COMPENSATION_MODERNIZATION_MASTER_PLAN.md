@@ -3,7 +3,7 @@
 **Status:** APPROVED TARGET ARCHITECTURE — P4a is the current implementation work unit
 **Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
-**Current baseline:** Post-G0 accepted `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` (PR #45 merge); Alembic head `0081`. Historical earlier baseline: `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`, with P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`
+**Current baseline:** `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c` (PR #47 merge, P3c closed); Alembic head `0083` before P4a. Historical post-G0 baseline: `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` (PR #45 merge), head `0081`. Historical earlier baseline: `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`, with P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`
 **Execution state:** P2c, Phase 2, P3a (PR #30), G0 (G0.1–G0.6, PR #34 through PR #45) P3b (PR #46, `main @ edcf871f59d0616e194a8e752d9b6ba23f42b8a2`, migration head `0082`) and P3c (PR #47, `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c`, migration head `0083`) are closed; P4a — Generic PayDefinition / Branch Configuration authority cutover — is the current implementation work unit and advances the migration head from `0083` to `0084`
 
 > This document records the approved target architecture. P4a is the current implementation unit; P4b and later units have not started.

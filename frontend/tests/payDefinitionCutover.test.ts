@@ -40,3 +40,44 @@ test('compensationApi talks only to the /compensation namespace', () => {
     assert.ok(path.startsWith('/compensation/'), `unexpected API path ${path}`);
   }
 });
+
+function functionBody(source: string, signature: RegExp): string {
+  const start = source.search(signature);
+  assert.ok(start >= 0, `missing ${signature}`);
+  const open = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  throw new Error('unbalanced function body');
+}
+
+test('Pay Rates saves target rates one PayDefinition row at a time with no multi-row action', () => {
+  assert.doesNotMatch(payRatesPage, /Save & Approve \$\{/);
+  assert.doesNotMatch(payRatesPage, /dirtyCount|saveRates\(|enterEditMode|dirtyKeys/);
+  const body = functionBody(payRatesPage, /async function saveTargetRow\(/);
+  assert.doesNotMatch(body, /\bfor\s*\(|\.forEach\(|\.map\(|Promise\.all/);
+  assert.equal((body.match(/createAssignment\(/g) ?? []).length, 1);
+  assert.doesNotMatch(body, /rates\/batch/);
+  assert.match(payRatesPage, /Save as Pending/);
+  assert.match(payRatesPage, /Save & Approve/);
+  assert.match(payRatesPage, /cancelTargetEdit/);
+});
+
+test('A failed approval keeps the saved Pending change visible and recoverable', () => {
+  const body = functionBody(payRatesPage, /async function saveTargetRow\(/);
+  assert.match(body, /saved as Pending, but approval failed/);
+  assert.match(body, /refreshTargetRows\(driverId\)/);
+  assert.match(body, /Pending Changes/);
+});
+
+test('Status rates keep an independent temporary batch action and never touch target assignments', () => {
+  const body = functionBody(payRatesPage, /async function saveStatusRates\(/);
+  assert.match(body, /rates\/batch/);
+  assert.doesNotMatch(body, /createAssignment|replaceAssignmentValues|approveAssignment/);
+  assert.match(payRatesPage, /Edit Status Rates/);
+});

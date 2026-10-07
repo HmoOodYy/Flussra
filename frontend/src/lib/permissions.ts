@@ -289,13 +289,15 @@ export function canManageSettingsAdmin(user: UserProfile): boolean {
  *   1. Full settings admin — canonical company-scoped setup.manage
  *      (canManageSettingsAdmin).
  *   2. Any user with payitems.edit somewhere — needed to browse and request
- *      items.  This broad discovery check uses canonical authority, but actual
+ *      items — or setup.manage for at least one Branch, which the backend accepts
+ *      for that Branch's applicability configuration.  This broad discovery check
+ *      uses canonical authority, but actual
  *      branch/company PayDefinition browsing and actions are governed by the scoped
  *      helpers below (canManagePayDefinitionsForBranch, canGovernPayDefinitionsCompanyWide).
  */
 export function canViewDailyPayItems(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
-  return canManageSettingsAdmin(user) || hasPayItemsEdit(user);
+  return canManageSettingsAdmin(user) || hasPayItemsEdit(user) || hasBranchSetupManage(user);
 }
 
 // ── Payroll Setup policy helpers ────────────────────────────────────────────────
@@ -422,6 +424,15 @@ export function hasPayItemsEdit(user: UserProfile | null | undefined): boolean {
 }
 
 /**
+ * True when the user holds setup.manage in any assignment (company-wide or for one
+ * Branch). Discovery only: it never proves company scope or any specific Branch.
+ */
+export function hasBranchSetupManage(user: UserProfile | null | undefined): boolean {
+  if (!user) return false;
+  return _hasAnyAuthorityPermission(user, ['setup.manage']);
+}
+
+/**
  * True when the user holds payitems.edit for the given branch — via a company-wide
  * grant (applies everywhere) or a grant scoped to that specific branch.
  */
@@ -456,15 +467,19 @@ export function canCreatePayDefinitionDirectly(
 }
 
 /**
- * Edit a PayDefinition's applicability in one Branch: payitems.edit for that
- * branch or company-wide setup.manage. Mirrors backend branch_config permission.
+ * Edit a PayDefinition's applicability in one Branch: payitems.edit OR setup.manage
+ * for that concrete Branch (a company-wide grant applies everywhere, a SpecificBranch
+ * grant only to its own Branch). Mirrors backend branch_config permission.
  */
 export function canConfigureBranchPayDefinitions(
   user: UserProfile | null | undefined,
   branchId: number,
 ): boolean {
   if (!user) return false;
-  return canManagePayDefinitionsForBranch(user, branchId) || canManageSettingsAdmin(user);
+  return (
+    canManagePayDefinitionsForBranch(user, branchId) ||
+    hasAuthorityPermission(user.authority, 'setup.manage', branchId)
+  );
 }
 
 /** Apply a PayDefinition's applicability across several Branches at once. */

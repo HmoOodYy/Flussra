@@ -145,11 +145,16 @@ export function PayRatesPage() {
   const [statusMatrix, setStatusMatrix] = useState<StatusRateMatrix | null>(null);
 
   // ── Edit state ─────────────────────────────────────────────────────────────
-  const [editMode, setEditMode] = useState(false);
-  const [editRows, setEditRows] = useState<Record<string, EditRow>>({});
-  const [originalValues, setOriginalValues] = useState<Record<string, EditRow>>({});
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState('');
+  // Pay Item rates are edited and saved one RateDefinition (row) at a time.
+  const [targetDrafts, setTargetDrafts] = useState<Record<number, EditRow>>({});
+  const [targetSavingId, setTargetSavingId] = useState<number | null>(null);
+  const [targetErrors, setTargetErrors] = useState<Record<number, string>>({});
+  // Status pay rates keep their temporary batch path (until P5), separately.
+  const [statusEditMode, setStatusEditMode] = useState(false);
+  const [statusDrafts, setStatusDrafts] = useState<Record<string, EditRow>>({});
+  const [statusOriginal, setStatusOriginal] = useState<Record<string, EditRow>>({});
+  const [statusSaving, setStatusSaving] = useState(false);
+  const [statusSaveError, setStatusSaveError] = useState('');
 
   // ── Pending actions ────────────────────────────────────────────────────────
   const [actioningId, setActioningId] = useState<number | null>(null);
@@ -237,8 +242,6 @@ export function PayRatesPage() {
     setRowsError('');
     setRows([]);
     setStatusMatrix(null);
-    setEditMode(false);
-    setEditRows({});
     try {
       setRows(await listDriverPayRates(driverId));
     } catch (err) {
@@ -304,7 +307,12 @@ export function PayRatesPage() {
       setHistoryRows([]);
       setHistoryLoaded(false);
       setPendingActionError('');
-      setSaveError('');
+      setTargetDrafts({});
+      setTargetErrors({});
+      setStatusEditMode(false);
+      setStatusDrafts({});
+      setStatusOriginal({});
+      setStatusSaveError('');
       setPayRules([]);
       setPayRulesLoaded(false);
       setPayRulesError('');
@@ -351,102 +359,157 @@ export function PayRatesPage() {
   const selectedDriver = drivers.find((d) => d.driver_id === selectedDriverId) ?? null;
 
   // ── Edit helpers ───────────────────────────────────────────────────────────
-  const targetKey = (row: DriverPayRateRow) => `t:${row.rate_definition_id}`;
   const statusKey = (group: StatusRateGroup) => `s:${group.status_rate_column_id}`;
 
-  function enterEditMode() {
-    const initial: Record<string, EditRow> = {};
-    for (const row of rows) {
-      initial[targetKey(row)] = { amount: row.current?.amount ?? '', effective_from: today() };
+  function cancelAllEdits() {
+    setTargetDrafts({});
+    setTargetErrors({});
+    setStatusEditMode(false);
+    setStatusDrafts({});
+    setStatusOriginal({});
+    setStatusSaveError('');
+  }
+
+  function startTargetEdit(row: DriverPayRateRow) {
+    setTargetErrors((prev) => { const next = { ...prev }; delete next[row.rate_definition_id]; return next; });
+    setTargetDrafts((prev) => ({
+      ...prev,
+      [row.rate_definition_id]: {
+        amount: row.pending?.amount ?? row.current?.amount ?? '',
+        effective_from: row.pending?.effective_from ?? today(),
+      },
+    }));
+  }
+
+  function cancelTargetEdit(rateDefinitionId: number) {
+    setTargetDrafts((prev) => { const next = { ...prev }; delete next[rateDefinitionId]; return next; });
+    setTargetErrors((prev) => { const next = { ...prev }; delete next[rateDefinitionId]; return next; });
+  }
+
+  function setTargetField(rateDefinitionId: number, field: keyof EditRow, value: string) {
+    setTargetDrafts((prev) => ({ ...prev, [rateDefinitionId]: { ...prev[rateDefinitionId], [field]: value } }));
+  }
+
+  /** Refresh the Driver's target rate state without blanking the page. */
+  async function refreshTargetRows(driverId: number) {
+    try {
+      setRows(await listDriverPayRates(driverId));
+      setHistoryLoaded(false);
+    } catch (err) {
+      setRowsError(apiError(err));
     }
+  }
+
+  /**
+   * Save ONE Pay Item rate as one complete assignment, optionally approving it.
+   * The backend has no multi-row transaction, so exactly one RateDefinition is
+   * mutated per action. A Pending assignment that survives an approval failure
+   * stays visible and recoverable (Pending Changes tab).
+   */
+  async function saveTargetRow(row: DriverPayRateRow, approve: boolean) {
+    const id = row.rate_definition_id;
+    const draft = targetDrafts[id];
+    if (!selectedDriverId || !draft || draft.amount === '') return;
+    const driverId = selectedDriverId;
+    setTargetSavingId(id);
+    setTargetErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    let phase: 'save' | 'approve' = 'save';
+    try {
+      let assignmentId: number;
+      if (row.pending) {
+        assignmentId = row.pending.driver_rate_assignment_id;
+        if (row.pending.effective_from !== draft.effective_from) {
+          await updateAssignment(assignmentId, { effective_from: draft.effective_from });
+        }
+      } else {
+        const created = await createAssignment({
+          driver_id: driverId, rate_definition_id: id, effective_from: draft.effective_from,
+        });
+        assignmentId = created.driver_rate_assignment_id;
+      }
+      await replaceAssignmentValues(assignmentId, [{
+        rate_component_definition_id: row.rate_component_definition_id, amount: draft.amount,
+      }]);
+      if (approve) {
+        phase = 'approve';
+        await approveAssignment(assignmentId);
+      }
+      cancelTargetEdit(id);
+    } catch (err) {
+      if (phase === 'approve') {
+        setTargetErrors((prev) => ({
+          ...prev,
+          [id]: `${row.definition_name}: the change was saved as Pending, but approval failed — ` +
+            `${apiError(err)} It remains under Pending Changes and can be approved or discarded there.`,
+        }));
+        setTargetDrafts((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      } else {
+        setTargetErrors((prev) => ({ ...prev, [id]: `${row.definition_name}: ${apiError(err)}` }));
+      }
+    } finally {
+      await refreshTargetRows(driverId);
+      setTargetSavingId(null);
+    }
+  }
+
+  // ── Status pay rates: temporary batch path until P5 ────────────────────────
+  function startStatusEdit() {
+    const initial: Record<string, EditRow> = {};
     for (const group of statusMatrix?.groups ?? []) {
       initial[statusKey(group)] = { amount: group.current_rate?.amount ?? '', effective_from: today() };
     }
-    setEditRows(initial);
-    setOriginalValues(initial);
-    setEditMode(true);
-    setSaveError('');
+    setStatusDrafts(initial);
+    setStatusOriginal(initial);
+    setStatusEditMode(true);
+    setStatusSaveError('');
   }
 
-  function cancelEdit() {
-    setEditMode(false);
-    setEditRows({});
-    setOriginalValues({});
-    setSaveError('');
+  function cancelStatusEdit() {
+    setStatusEditMode(false);
+    setStatusDrafts({});
+    setStatusOriginal({});
+    setStatusSaveError('');
   }
 
-  function isDirty(key: string): boolean {
-    const cur = editRows[key];
-    const orig = originalValues[key];
+  function isStatusDirty(key: string): boolean {
+    const cur = statusDrafts[key];
+    const orig = statusOriginal[key];
     if (!cur || !orig) return false;
     return cur.amount !== orig.amount || cur.effective_from !== orig.effective_from;
   }
 
-  const dirtyKeys = Object.keys(editRows).filter((k) => isDirty(k) && editRows[k].amount !== '');
-  const dirtyCount = dirtyKeys.length;
+  const dirtyStatusKeys = Object.keys(statusDrafts).filter((k) => isStatusDirty(k) && statusDrafts[k].amount !== '');
 
-  function setEditField(key: string, field: keyof EditRow, value: string) {
-    setEditRows((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
+  function setStatusField(key: string, field: keyof EditRow, value: string) {
+    setStatusDrafts((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
   }
 
-  /** Save each changed Pay Item rate as one complete assignment, optionally approving it. */
-  async function saveRates(approve: boolean) {
+  async function saveStatusRates() {
     if (!selectedDriverId) return;
-    setSaving(true);
-    setSaveError('');
     const driverId = selectedDriverId;
+    setStatusSaving(true);
+    setStatusSaveError('');
     try {
-      for (const row of rows) {
-        const key = targetKey(row);
-        if (!dirtyKeys.includes(key)) continue;
-        const edit = editRows[key];
-        try {
-          let assignmentId: number;
-          if (row.pending) {
-            assignmentId = row.pending.driver_rate_assignment_id;
-            if (row.pending.effective_from !== edit.effective_from) {
-              await updateAssignment(assignmentId, { effective_from: edit.effective_from });
-            }
-          } else {
-            const created = await createAssignment({
-              driver_id: driverId, rate_definition_id: row.rate_definition_id,
-              effective_from: edit.effective_from,
-            });
-            assignmentId = created.driver_rate_assignment_id;
-          }
-          await replaceAssignmentValues(assignmentId, [{
-            rate_component_definition_id: row.rate_component_definition_id, amount: edit.amount,
-          }]);
-          if (approve) await approveAssignment(assignmentId);
-        } catch (err) {
-          throw new Error(`${row.definition_name}: ${apiError(err)}`, { cause: err });
-        }
+      const statusChanges = (statusMatrix?.groups ?? []).filter((g) => dirtyStatusKeys.includes(statusKey(g)));
+      const dates = new Set(statusChanges.map((g) => statusDrafts[statusKey(g)].effective_from));
+      if (dates.size > 1) {
+        throw new Error('All changed Status pay rates must share one effective date.');
       }
-
-      const statusChanges = (statusMatrix?.groups ?? []).filter((g) => dirtyKeys.includes(statusKey(g)));
-      if (statusChanges.length > 0) {
-        const dates = new Set(statusChanges.map((g) => editRows[statusKey(g)].effective_from));
-        if (dates.size > 1) {
-          throw new Error('All changed Status pay rates must share one effective date.');
-        }
-        await apiClient.post(`/payroll/drivers/${driverId}/rates/batch`, {
-          effective_from: [...dates][0],
-          changes: statusChanges.map((g) => ({
-            status_rate_column_id: g.status_rate_column_id,
-            rate_type_id: g.rate_type_id,
-            amount: editRows[statusKey(g)].amount,
-          })),
-        });
-      }
-      setEditMode(false);
-      setEditRows({});
-      setOriginalValues({});
-      await reloadAll(driverId);
+      await apiClient.post(`/payroll/drivers/${driverId}/rates/batch`, {
+        effective_from: [...dates][0],
+        changes: statusChanges.map((g) => ({
+          status_rate_column_id: g.status_rate_column_id,
+          rate_type_id: g.rate_type_id,
+          amount: statusDrafts[statusKey(g)].amount,
+        })),
+      });
+      cancelStatusEdit();
+      await loadRates(driverId);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : apiError(err));
-      await reloadAll(driverId);
+      setStatusSaveError(err instanceof Error ? err.message : apiError(err));
+      await loadRates(driverId);
     } finally {
-      setSaving(false);
+      setStatusSaving(false);
     }
   }
 
@@ -657,30 +720,24 @@ export function PayRatesPage() {
                     </div>
                   </div>
                   <div className={styles.dActions}>
-                    {canEditMatrix && !editMode && activeTab === 'current' && (
-                      <button className={styles.btnPrimary} onClick={enterEditMode}>Edit Rates</button>
-                    )}
-                    {editMode && (
-                      <button className={styles.btnSecondary} onClick={cancelEdit}>Cancel</button>
-                    )}
                   </div>
                 </div>
               </div>
 
               <div className={styles.tabs}>
                 <button className={`${styles.tab} ${activeTab === 'current' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('current'); if (editMode) cancelEdit(); }}>Current Rates</button>
+                  onClick={() => { setActiveTab('current'); cancelAllEdits(); }}>Current Rates</button>
                 <button className={`${styles.tab} ${activeTab === 'pending' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('pending'); if (editMode) cancelEdit(); }}>
+                  onClick={() => { setActiveTab('pending'); cancelAllEdits(); }}>
                   Pending Changes
                   {pendingCount > 0 && (
                     <span className={`${styles.tabCount} ${styles.tabCountWarn}`}>{pendingCount}</span>
                   )}
                 </button>
                 <button className={`${styles.tab} ${activeTab === 'history' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('history'); if (editMode) cancelEdit(); }}>History</button>
+                  onClick={() => { setActiveTab('history'); cancelAllEdits(); }}>History</button>
                 <button className={`${styles.tab} ${activeTab === 'pay-rules' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('pay-rules'); if (editMode) cancelEdit(); }}>Pay Rules</button>
+                  onClick={() => { setActiveTab('pay-rules'); cancelAllEdits(); }}>Pay Rules</button>
               </div>
 
               <div className={styles.tabPanel}>
@@ -691,19 +748,22 @@ export function PayRatesPage() {
                       <div className={styles.sectionHead}>
                         <span className={styles.sectionTitle}>Pay Item Rates</span>
                       </div>
-                      {saveError && (
-                        <div className={styles.errBanner} style={{ margin: '0.75rem 1.25rem 0' }}>{saveError}</div>
-                      )}
                       {rows.length > 0 ? (
                         <table className={styles.rateTable}>
                           <thead>
-                            <tr><th>Pay Item</th><th>Amount</th><th>Effective From</th><th>Status</th></tr>
+                            <tr>
+                              <th>Pay Item</th><th>Amount</th><th>Effective From</th><th>Status</th>
+                              {canEditMatrix && <th>Actions</th>}
+                            </tr>
                           </thead>
                           <tbody>
                             {rows.map((row) => {
-                              const key = targetKey(row);
+                              const id = row.rate_definition_id;
+                              const draft = targetDrafts[id];
+                              const editing = draft !== undefined;
+                              const busy = targetSavingId === id;
                               return (
-                                <tr key={row.rate_definition_id}>
+                                <tr key={id}>
                                   <td>
                                     <strong>{row.definition_name}</strong>
                                     <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{row.definition_code}</div>
@@ -712,14 +772,17 @@ export function PayRatesPage() {
                                         Next: {fmtAmount(row.future.amount, row.unit, currencyCode, currencyDigits)} from {row.future.effective_from}
                                       </div>
                                     )}
+                                    {targetErrors[id] && (
+                                      <div className={styles.actionErr} style={{ marginTop: '0.35rem' }}>{targetErrors[id]}</div>
+                                    )}
                                   </td>
                                   <td>
-                                    {editMode ? (
+                                    {editing ? (
                                       <input
                                         className={styles.editInput}
                                         type="number" step="0.0001" min="0" placeholder="0.0000"
-                                        value={editRows[key]?.amount ?? ''}
-                                        onChange={(e) => setEditField(key, 'amount', e.target.value)}
+                                        value={draft.amount}
+                                        onChange={(e) => setTargetField(id, 'amount', e.target.value)}
                                       />
                                     ) : row.current ? (
                                       fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits)
@@ -728,23 +791,52 @@ export function PayRatesPage() {
                                     )}
                                   </td>
                                   <td>
-                                    {editMode ? (
+                                    {editing ? (
                                       <input
                                         className={styles.editDateInput} type="date"
-                                        value={editRows[key]?.effective_from ?? today()}
-                                        onChange={(e) => setEditField(key, 'effective_from', e.target.value)}
+                                        value={draft.effective_from}
+                                        onChange={(e) => setTargetField(id, 'effective_from', e.target.value)}
                                       />
                                     ) : row.current ? row.current.effective_from : '—'}
                                   </td>
                                   <td>
-                                    {row.pending && !editMode && (
+                                    {row.pending && !editing && (
                                       <span className={styles.pendingBadge} style={{ marginRight: '0.4rem' }}>Pending</span>
                                     )}
-                                    {!editMode && (row.current
+                                    {!editing && (row.current
                                       ? <span className={styles.okIcon}>&#10003;</span>
                                       : <span className={styles.missingIcon}>&#9888;</span>)}
-                                    {editMode && isDirty(key) && <span className={styles.pendingBadge}>Edited</span>}
+                                    {editing && <span className={styles.pendingBadge}>Editing</span>}
                                   </td>
+                                  {canEditMatrix && (
+                                    <td>
+                                      {editing ? (
+                                        <div className={styles.actionBtns}>
+                                          <button className={styles.btnApprove}
+                                            disabled={busy || targetSavingId != null || draft.amount === ''}
+                                            onClick={() => void saveTargetRow(row, true)}>
+                                            {busy ? 'Saving…' : 'Save & Approve'}
+                                          </button>
+                                          <button className={styles.btnSecondary}
+                                            disabled={busy || targetSavingId != null || draft.amount === ''}
+                                            onClick={() => void saveTargetRow(row, false)}>
+                                            Save as Pending
+                                          </button>
+                                          <button className={styles.btnSecondary}
+                                            disabled={busy}
+                                            onClick={() => cancelTargetEdit(id)}>
+                                            Cancel
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <button className={styles.btnSecondary}
+                                          disabled={targetSavingId != null}
+                                          onClick={() => startTargetEdit(row)}>
+                                          Edit rate
+                                        </button>
+                                      )}
+                                    </td>
+                                  )}
                                 </tr>
                               );
                             })}
@@ -764,7 +856,15 @@ export function PayRatesPage() {
                       <div className={styles.section}>
                         <div className={styles.sectionHead}>
                           <span className={styles.sectionTitle}>Status Pay Rates</span>
+                          {canEditMatrix && !statusEditMode && (
+                            <button className={styles.btnSecondary} onClick={startStatusEdit}>
+                              Edit Status Rates
+                            </button>
+                          )}
                         </div>
+                        {statusSaveError && (
+                          <div className={styles.errBanner} style={{ margin: '0.75rem 1.25rem 0' }}>{statusSaveError}</div>
+                        )}
                         <table className={styles.rateTable}>
                           <thead>
                             <tr><th>Rate</th><th>Amount</th><th>Effective From</th><th>Status</th></tr>
@@ -776,12 +876,12 @@ export function PayRatesPage() {
                                 <tr key={g.group_key}>
                                   <td><strong>{g.rate_name}</strong></td>
                                   <td>
-                                    {editMode ? (
+                                    {statusEditMode ? (
                                       <input
                                         className={styles.editInput}
                                         type="number" step="0.0001" min="0" placeholder="0.0000"
-                                        value={editRows[key]?.amount ?? ''}
-                                        onChange={(e) => setEditField(key, 'amount', e.target.value)}
+                                        value={statusDrafts[key]?.amount ?? ''}
+                                        onChange={(e) => setStatusField(key, 'amount', e.target.value)}
                                       />
                                     ) : g.current_rate ? (
                                       fmtAmount(g.current_rate.amount, g.unit_name, currencyCode, currencyDigits)
@@ -790,42 +890,42 @@ export function PayRatesPage() {
                                     )}
                                   </td>
                                   <td>
-                                    {editMode ? (
+                                    {statusEditMode ? (
                                       <input
                                         className={styles.editDateInput} type="date"
-                                        value={editRows[key]?.effective_from ?? today()}
-                                        onChange={(e) => setEditField(key, 'effective_from', e.target.value)}
+                                        value={statusDrafts[key]?.effective_from ?? today()}
+                                        onChange={(e) => setStatusField(key, 'effective_from', e.target.value)}
                                       />
                                     ) : g.current_rate ? g.current_rate.effective_from : '—'}
                                   </td>
                                   <td>
-                                    {g.pending_rate && !editMode && (
+                                    {g.pending_rate && !statusEditMode && (
                                       <span className={styles.pendingBadge} style={{ marginRight: '0.4rem' }}>Pending</span>
                                     )}
-                                    {!editMode && (g.current_rate
+                                    {!statusEditMode && (g.current_rate
                                       ? <span className={styles.okIcon}>&#10003;</span>
                                       : <span className={styles.missingIcon}>&#9888;</span>)}
-                                    {editMode && isDirty(key) && <span className={styles.pendingBadge}>Edited</span>}
+                                    {statusEditMode && isStatusDirty(key) && <span className={styles.pendingBadge}>Edited</span>}
                                   </td>
                                 </tr>
                               );
                             })}
                           </tbody>
                         </table>
-                      </div>
-                    )}
-
-                    {editMode && (
-                      <div className={styles.saveBar}>
-                        <button className={styles.btnPrimary} onClick={() => void saveRates(true)}
-                          disabled={saving || dirtyCount === 0}>
-                          {saving ? 'Saving...' : `Save & Approve ${dirtyCount} Change${dirtyCount !== 1 ? 's' : ''}`}
-                        </button>
-                        <button className={styles.btnSecondary} onClick={() => void saveRates(false)}
-                          disabled={saving || dirtyCount === 0}>
-                          Save as Pending
-                        </button>
-                        <button className={styles.btnSecondary} onClick={cancelEdit}>Cancel</button>
+                        {statusEditMode && (
+                          <div className={styles.saveBar}>
+                            <button className={styles.btnPrimary} onClick={() => void saveStatusRates()}
+                              disabled={statusSaving || dirtyStatusKeys.length === 0}>
+                              {statusSaving ? 'Saving...' : `Save ${dirtyStatusKeys.length} Status Rate Change${dirtyStatusKeys.length !== 1 ? 's' : ''}`}
+                            </button>
+                            <button className={styles.btnSecondary} onClick={cancelStatusEdit} disabled={statusSaving}>
+                              Cancel
+                            </button>
+                            <span style={{ fontSize: '0.74rem', color: '#6b7280' }}>
+                              Status rates are saved together on the temporary Status rate path, separately from Pay Item rates.
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </>
