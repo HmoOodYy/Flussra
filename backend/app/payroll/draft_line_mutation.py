@@ -70,7 +70,8 @@ def _require_usable_definition(definition: PeriodDefinition | None) -> PeriodDef
                 "was created and cannot be used for new entries."
             ),
         )
-    if not is_method_operational(definition.calculation_method):
+    if not is_method_operational(
+        definition.calculation_method, definition.calculation_method_version):
         raise HTTPException(
             status_code=409,
             detail={

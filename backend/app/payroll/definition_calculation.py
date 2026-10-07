@@ -10,9 +10,11 @@ DriverRateAssignment with ALL of its component values. It never receives a singl
 scalar rate, so a method that needs several components (OrdinalTier) attaches here
 without changing the resolver contract, the period snapshot or any consumer.
 
-Method dispatch:
-  PerUnit      -> implemented (quantity * the one scalar component, via the CP-4A kernel)
-  OrdinalTier  -> not operational yet: fails closed with METHOD_NOT_READY
+Method dispatch is keyed by the FROZEN (method, version) pair of the period
+definition, never by the method name alone and never by live PayDefinition metadata:
+  ("PerUnit", 1)  -> implemented (quantity * the one scalar component, via the CP-4A kernel)
+  ("OrdinalTier", any) and any unregistered pair -> not operational: fails closed with
+  METHOD_NOT_READY. An unknown or future version of PerUnit never runs the V1 algorithm.
 
 Missing, zero and invalid are distinct:
   no authoritative assignment               -> MISSING_RATE
@@ -100,14 +102,15 @@ def _calculate_per_unit(
     )
 
 
-# Future methods attach here, not in the consumers.
+# Future methods and versions attach here, not in the consumers.
 _CALCULATORS = {
-    "PerUnit": _calculate_per_unit,
+    ("PerUnit", 1): _calculate_per_unit,
 }
 
 
-def is_method_operational(calculation_method: str) -> bool:
-    return calculation_method in _CALCULATORS
+def is_method_operational(calculation_method: str, calculation_method_version: int) -> bool:
+    """True only for a registered frozen (method, version) pair."""
+    return (calculation_method, calculation_method_version) in _CALCULATORS
 
 
 def calculate_definition_input(
@@ -116,10 +119,15 @@ def calculate_definition_input(
     quantity: Decimal,
 ) -> DefinitionCalculation:
     """Calculate one source quantity against the complete resolved schedule."""
-    calculator = _CALCULATORS.get(definition.calculation_method)
+    calculator = _CALCULATORS.get(
+        (definition.calculation_method, definition.calculation_method_version))
     if calculator is None:
         return DefinitionCalculation(CalculationStatus.METHOD_NOT_READY)
     return calculator(resolved, quantity)
+
+
+# DraftLines.Quantity is NUMERIC(18,4): at most 14 integer digits.
+_QUANTITY_LIMIT = Decimal("100000000000000")
 
 
 def quantity_error(input_type: str, quantity: Decimal) -> str | None:
@@ -128,8 +136,12 @@ def quantity_error(input_type: str, quantity: Decimal) -> str | None:
     Returns an error message, or None when the quantity is acceptable. Zero is a
     valid quantity for either type.
     """
+    if not quantity.is_finite():
+        return "Quantity must be a finite number."
     if quantity < 0:
         return "Quantity must not be negative."
+    if quantity >= _QUANTITY_LIMIT:
+        return "Quantity is too large."
     if input_type == "WholeNumber" and quantity != quantity.to_integral_value():
         return "This item requires a whole number quantity."
     return None

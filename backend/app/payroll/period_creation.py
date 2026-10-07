@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.branch_compensation_config_concurrency import lock_branch_compensation_config
 from app.config import get_settings
 from app.core.service import (
     _check_branch_access,
@@ -437,22 +438,33 @@ async def _create_period_definition_rows(
     applicable to the Branch and gets no row. Zero rows is a valid layout; there is no
     fallback to any catalog or default activation.
 
-    Lock order (all inside the creator's transaction, after the Branch workflow lock):
-      1. RateDefinition structure locks, in ascending RateDefinitionID order. This is
-         the same first lock every target writer takes, so retirement, structural
-         mutation and assignment writers serialize with the snapshot deterministically
-         and no path takes PayDefinition before RateDefinition.
-      2. A single INSERT ... SELECT reads definitions, status and the applicable
-         Branch configuration version from one statement snapshot, so the layout is
-         never torn. A concurrent Branch configuration change is ordered wholly before
-         or wholly after that snapshot and cannot split it. (The foreign key to the
-         configuration row may make the INSERT wait for an in-flight configuration
-         writer; the layout is still exactly the state the statement read.)
-      3. The structural lock is set on every referenced RateDefinition, making the
+    Coherence contract. The whole layout is one authority state, read by ONE statement:
+
+      1. The creator already holds the Branch workflow lock and the Branch
+         compensation-config lock (taken by ``create_period_from_candidate`` before any
+         read). Every Branch applicability writer takes the same config lock first, so a
+         configuration change of any definition of this Branch is ordered wholly before
+         or wholly after this creation. READ COMMITTED re-reads after lock waits are
+         what the workflow lock's own checks rely on, which is why the creation is not
+         run at REPEATABLE READ (its snapshot would predate those waits).
+      2. RateDefinition structure locks are taken in ascending RateDefinitionID order
+         for the candidate definitions. This is the first lock every target
+         RateDefinition writer takes (retirement, structural mutation, assignment
+         authoring), so those writers serialize with the snapshot deterministically.
+      3. One unrestricted INSERT ... SELECT reads definitions, status and the applicable
+         Branch configuration version from a single statement snapshot. The statement is
+         NOT restricted to the candidate list: restricting it to ids read by an earlier
+         statement would let the layout be the product of two different moments. The
+         candidate list is only the lock set, and every inserted row must belong to it
+         (activation only happens under the config lock and retirement is monotonic, so
+         the inserted set can only be a subset); anything else rolls the creation back.
+         The foreign keys may make the INSERT wait for an in-flight writer, but the
+         layout is still exactly the state the statement read.
+      4. The structural lock is set on every referenced RateDefinition, making the
          topology the period relies on immutable.
 
-    An ACTIVE definition whose calculation method is not operational fails the whole
-    creation (nothing is persisted: the caller's transaction rolls back).
+    An ACTIVE definition whose frozen (method, version) is not operational fails the
+    whole creation (nothing is persisted: the caller's transaction rolls back).
     """
     candidate_ids = (await db.execute(
         text("""
@@ -504,17 +516,23 @@ async def _create_period_definition_rows(
             LEFT JOIN payroll.paydefinitionprovenance prov
                    ON prov.paydefinitionid = pd.paydefinitionid
             WHERE  pd.companyid = :cid AND pd.status = 'Active'
-              AND  rd.ratedefinitionid = ANY(:rate_definition_ids)
             RETURNING ratedefinitionid, isactiveinperiod, calculationmethodsnapshot,
-                      definitioncodesnapshot
+                      calculationmethodversionsnapshot, definitioncodesnapshot
         """),
-        {"period_id": period_id, "cid": company_id, "bid": branch_id, "start": start_date,
-         "rate_definition_ids": [int(r) for r in candidate_ids]},
+        {"period_id": period_id, "cid": company_id, "bid": branch_id, "start": start_date},
     )).mappings().all()
+
+    unlocked = {int(r["ratedefinitionid"]) for r in inserted} - {int(c) for c in candidate_ids}
+    if unlocked:
+        _cp1c_error(
+            "CANDIDATE_STALE",
+            "Payroll authority changed while the period layout was being frozen.",
+        )
 
     not_ready = sorted(
         r["definitioncodesnapshot"] for r in inserted
-        if r["isactiveinperiod"] and not is_method_operational(r["calculationmethodsnapshot"])
+        if r["isactiveinperiod"] and not is_method_operational(
+            r["calculationmethodsnapshot"], int(r["calculationmethodversionsnapshot"]))
     )
     if not_ready:
         _cp1c_error(
@@ -791,6 +809,10 @@ async def create_period_from_candidate(
 
     # Acquire branch advisory lock (transaction-level)
     await _acquire_branch_workflow_lock(company_id, branch_id, db)
+    # Second lock, always after the workflow lock: orders every Branch applicability
+    # writer wholly before or wholly after this creation (see
+    # app.branch_compensation_config_concurrency for the global lock order).
+    await lock_branch_compensation_config(company_id, branch_id, db)
 
     # Replay check: if this hash already exists, return the existing period
     existing_row = (await db.execute(

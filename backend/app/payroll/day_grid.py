@@ -595,7 +595,7 @@ async def get_day_grid(
             )
             for column in columns
         ],
-        gross_total=None if _is_draft else str(gross_total.quantize(Decimal("0.01"))),
+        gross_total=None if _is_draft else str(gross_total),
         needs_attention=needs_attention,
         financials_available=not _is_draft,
     )
@@ -711,7 +711,8 @@ async def save_day_grid(
                         f"'{key}' is not an active pay definition column for this period."
                     ),
                 )
-            if not is_method_operational(definition.calculation_method):
+            if not is_method_operational(
+                definition.calculation_method, definition.calculation_method_version):
                 raise HTTPException(
                     status_code=409,
                     detail={

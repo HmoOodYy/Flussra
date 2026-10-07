@@ -10,7 +10,6 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from app.compensation import definitions
-from app.compensation.branch_config import apply_config
 from app.payroll.period_creation import create_period_from_candidate
 from app.payroll.schemas import PeriodCreationRequest
 from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401 - register fixtures
@@ -379,34 +378,6 @@ async def test_creation_waits_for_a_structural_writer_holding_the_rate_definitio
     assert await _structure_locked(p3c_engine, definition["rate_definition_id"])
 
 
-async def test_creation_freezes_the_configuration_it_read_even_if_a_change_commits_meanwhile(
-    p3c_client, p3c_engine, tenant,
-):
-    """A Branch configuration change in flight is ordered AFTER the snapshot: creation may
-    wait for the configuration row, but the layout is exactly the state it read."""
-    definition = await create_definition(p3c_client, tenant, definition_code="CONFIGURED")
-    grant_applicability(tenant, definition, tenant.branch_a)
-    await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
-    key = await _candidate_key(p3c_client, tenant, tenant.branch_a)
-    operation = await _create_with(p3c_engine, tenant, key)
-
-    async with p3c_engine.connect() as holder:
-        async with holder.begin():
-            await apply_config(
-                holder, company_id=tenant.company_id, branch_id=tenant.branch_a,
-                pay_definition_id=definition["pay_definition_id"], user_id=tenant.owner,
-                is_active=False, notes=None, effective_from=date.today())
-            task, _ = await _blocked_with_pid(p3c_engine, operation)
-    created = await task
-    assert not isinstance(created, Exception), created
-    async with p3c_engine.connect() as conn:
-        frozen = (await conn.execute(text("""
-            SELECT definitioncodesnapshot, isactiveinperiod, sourcebranchconfigeffectiveto
-            FROM payroll.payrollperioddefinitions WHERE payrollperiodid = :p
-        """), {"p": created.payroll_period_id})).all()
-    assert [tuple(row) for row in frozen] == [("CONFIGURED", True, None)]
-
-
 async def _run(engine, operation):
     try:
         async with engine.begin() as conn:
@@ -456,3 +427,52 @@ async def test_concurrent_creation_and_retirement_never_deadlock(
         assert "RACE_TWO" in codes
         assert codes in (["RACE", "RACE_TWO"], ["RACE_TWO"])
 
+
+
+async def _set_method_version(engine, definition: dict, tenant, version: int) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            INSERT INTO payroll.paydefinitionprovenance
+                (paydefinitionid, companyid, creationmode, createdbyuserid,
+                 calculationmethodversion)
+            VALUES (:pd, :cid, 'DirectCreate', :uid, :version)
+            ON CONFLICT (paydefinitionid)
+            DO UPDATE SET calculationmethodversion = EXCLUDED.calculationmethodversion
+        """), {"pd": definition["pay_definition_id"], "cid": tenant.company_id,
+               "uid": tenant.owner, "version": version})
+
+
+async def test_an_active_definition_with_an_unsupported_method_version_fails_creation_closed(
+    p3c_client, p3c_engine, tenant,
+):
+    """PerUnit is only operational at the version the algorithm exists for."""
+    definition = await _direct_definition(p3c_engine, tenant, method="PerUnit", active=True)
+    await _set_method_version(p3c_engine, definition, tenant, 2)
+    await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
+    key = await _candidate_key(p3c_client, tenant, tenant.branch_a)
+    response = await p3c_client.post(
+        f"/payroll/branches/{tenant.branch_a}/period-creations",
+        json={"candidate_key": key}, headers=tenant.admin)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "CALCULATION_METHOD_NOT_READY"
+    async with p3c_engine.connect() as conn:
+        persisted = (await conn.execute(text("""
+            SELECT (SELECT count(*) FROM payroll.payrollperiods WHERE branchid = :b),
+                   (SELECT count(*) FROM payroll.payrollperioddefinitions WHERE branchid = :b)
+        """), {"b": tenant.branch_a})).one()
+    assert tuple(persisted) == (0, 0)
+
+
+async def test_an_inactive_definition_with_an_unsupported_version_is_frozen_with_its_version(
+    p3c_client, p3c_engine, tenant,
+):
+    definition = await _direct_definition(p3c_engine, tenant, method="PerUnit", active=False)
+    await _set_method_version(p3c_engine, definition, tenant, 2)
+    await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
+    period = await create_period(p3c_client, tenant, tenant.branch_a)
+    async with p3c_engine.connect() as conn:
+        frozen = (await conn.execute(text("""
+            SELECT calculationmethodsnapshot, calculationmethodversionsnapshot, isactiveinperiod
+            FROM payroll.payrollperioddefinitions WHERE payrollperiodid = :p
+        """), {"p": period["payroll_period_id"]})).one()
+    assert tuple(frozen) == ("PerUnit", 2, False)

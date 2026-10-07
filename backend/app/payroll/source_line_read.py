@@ -62,6 +62,12 @@ _LINE_SELECT = """
 
 
 def _line_row_to_summary(r: Any) -> DraftLineSummary:
+    # An ordinary target row (PayrollPeriodDefinitionID set) stores no authoritative money
+    # and no review flag: the stored RateAmount/CalculatedAmount/NeedsManagerReview columns
+    # are never surfaced for it. Live enrichment supplies the derived values, and no scalar
+    # rate field exists for the target contract (a schedule may have several components).
+    # Status/internal compatibility rows keep their temporary stored behavior.
+    is_target = r["payrollperioddefinitionid"] is not None
     return DraftLineSummary(
         draft_line_id=r["draftlineid"],
         period_id=r["payrollperiodid"],
@@ -78,11 +84,11 @@ def _line_row_to_summary(r: Any) -> DraftLineSummary:
         calculation_method=r["calculationmethodsnapshot"],
         line_type=r["linetype"],
         quantity=r["quantity"],
-        rate_amount=r["rateamount"],
-        calculated_amount=r["calculatedamount"],
+        rate_amount=None if is_target else r["rateamount"],
+        calculated_amount=None if is_target else r["calculatedamount"],
         source_type=r["sourcetype"],
         status=r["status"],
-        needs_manager_review=r["needsmanagerreview"],
+        needs_manager_review=False if is_target else r["needsmanagerreview"],
         notes=r["notes"],
         added_by_user_id=r["addedbyuserid"],
         added_at_utc=r["addedatutc"],
@@ -138,7 +144,7 @@ async def get_period_lines(
     # these are financial and must not be visible until the period is promoted to Open.
     if period.status == "Draft":
         conditions.append("dl.sourcetype != 'System'")
-        conditions.append("dl.linetype != 'STATUS_PAYMENT'")
+        conditions.append("dl.linetype IS DISTINCT FROM 'STATUS_PAYMENT'")
 
     if driver_id is not None:
         conditions.append("dl.driverid = :driver_id")

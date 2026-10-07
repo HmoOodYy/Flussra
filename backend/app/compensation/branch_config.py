@@ -19,6 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.policy import require_non_driver_subject
+from app.branch_compensation_config_concurrency import lock_branch_compensation_config
 from app.compensation.audit import write_audit
 from app.compensation.errors import compensation_error
 from app.compensation.schemas import (
@@ -146,6 +147,7 @@ async def activate_for_requesting_branch(
     user_id: int,
 ) -> None:
     """Activate a newly approved PayDefinition for the Branch that requested it."""
+    await lock_branch_compensation_config(company_id, branch_id, db)
     today = await _company_today(company_id, db)
     effective_from, _ = await resolve_activation_date(company_id, branch_id, None, today, db)
     await apply_config(
@@ -186,7 +188,12 @@ async def apply_config(
     db: AsyncConnection, *, company_id: int, branch_id: int, pay_definition_id: int,
     user_id: int, is_active: bool, notes: str | None, effective_from: date,
 ) -> tuple[str, int]:
-    """Write one branch's configuration for a PayDefinition with full versioning."""
+    """Write one branch's configuration for a PayDefinition with full versioning.
+
+    Callers hold the Branch compensation-config lock before any PayDefinition row lock;
+    taking it here as well keeps any future caller inside the same authority.
+    """
+    await lock_branch_compensation_config(company_id, branch_id, db)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"branch-pay-definition-config:{company_id}:{branch_id}:{pay_definition_id}"},
@@ -389,6 +396,10 @@ async def update_branch_config(
 ) -> BranchPayDefinitionState:
     await _check_any_permission(company_id, user_id, branch_id, _CONFIG_EDIT, db)
     await _require_branch_in_company(company_id, branch_id, db)
+    # The Branch compensation-config lock is the first lock: it orders this writer wholly
+    # before or after a period layout snapshot, and precedes the PayDefinition row lock
+    # (retirement holds that row lock while waiting on nothing that needs this one).
+    await lock_branch_compensation_config(company_id, branch_id, db)
     definition = await _lock_definition(company_id, pay_definition_id, db)
     _require_activatable(definition, data.is_active)
 
@@ -409,8 +420,6 @@ async def bulk_update_branch_config(
     db: AsyncConnection,
 ) -> BulkBranchConfigResult:
     await _check_any_permission(company_id, user_id, None, _CONFIG_EDIT, db)
-    definition = await _lock_definition(company_id, pay_definition_id, db)
-    _require_activatable(definition, data.is_active)
 
     if data.target == BranchConfigTarget.AllBranches:
         rows = (await db.execute(
@@ -431,6 +440,13 @@ async def bulk_update_branch_config(
         if missing:
             raise compensation_error(
                 "BRANCH_NOT_FOUND", f"Branch ID(s) not found in this company: {missing}", 422)
+
+    # Branch compensation-config locks first, in ascending BranchID order, before the
+    # PayDefinition row lock: concurrent bulk writers and period creators cannot cycle.
+    for row in rows:
+        await lock_branch_compensation_config(company_id, row["branchid"], db)
+    definition = await _lock_definition(company_id, pay_definition_id, db)
+    _require_activatable(definition, data.is_active)
 
     today = await _company_today(company_id, db)
     validated: list[tuple[dict, date]] = []
