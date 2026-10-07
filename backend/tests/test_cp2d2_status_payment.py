@@ -840,14 +840,14 @@ class TestDriverPayRatesMatrix:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_batch_save_pay_item_path_unchanged(
+    async def test_batch_save_pay_item_path_is_retired(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp2d2_driver_id: int,
         direct_db: AsyncConnection,
     ):
-        """PayItem batch save path still works — status columns don't regress it."""
+        """The legacy batch writer no longer accepts a PayItem change."""
         # Find an active PayItem+RateType pair for PAYTEST
         pi_row = (await direct_db.execute(
             _text("""
@@ -878,7 +878,8 @@ class TestDriverPayRatesMatrix:
                 ],
             },
         )
-        assert resp.status_code == 200, resp.text
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
 
 
 # ---------------------------------------------------------------------------

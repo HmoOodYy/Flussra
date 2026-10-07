@@ -2300,68 +2300,9 @@ async def batch_save_rates(
             # StatusRateColumn RateTypes are company-owned or system â€” ownership already
             # enforced by trg_src_ratetype_owner trigger; skip redundant check here.
         else:
-            # ---- PayItem validation path ----
-            await _require_status_owned_rate_type(change.rate_type_id, company_id, db)
-            # Exact pay_item_id + rate_type_id mapping check
-            map_result = await db.execute(
-                text("""
-                    SELECT
-                        pi.payitemid,
-                        pi.ratebehavior,
-                        pi.isdefaultbranchactive
-                    FROM payroll.payitemratetypemap pirm
-                    JOIN payroll.payitems  pi ON pi.payitemid    = pirm.payitemid
-                    JOIN payroll.ratetypes rt ON rt.ratetypeid   = pirm.ratetypeid
-                                             AND rt.isactive      = TRUE
-                    WHERE pirm.payitemid  = :piid
-                      AND pirm.ratetypeid = :rtid
-                      AND pirm.status     = 'Active'
-                      AND pi.status       != 'Retired'
-                      AND pi.requiresrate = TRUE
-                      AND (pi.companyid IS NULL OR pi.companyid = :cid)
-                    LIMIT 1
-                """),
-                {
-                    "piid":           change.pay_item_id,
-                    "rtid":           change.rate_type_id,
-                    "cid":            company_id,
-                },
-            )
-            map_row = map_result.mappings().first()
-
-            if map_row is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"pay_item_id={change.pay_item_id} is not actively mapped to "
-                        f"rate_type_id={change.rate_type_id} for this company. "
-                        "Verify the PayItem â†’ RateType mapping is Active."
-                    ),
-                )
-
-            # Phase 4B.3 â€” defense-in-depth: validate RateType ownership
-            await _assert_rate_type_allowed_for_company(db, company_id, change.rate_type_id)
-
-            is_branch_active = bool(map_row["isdefaultbranchactive"])
-            if not is_branch_active:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"pay_item_id={change.pay_item_id} is not active for this driver's branch "
-                        f"as of {data.effective_from}."
-                    ),
-                )
-
-            rate_behavior: str = map_row["ratebehavior"] or "PerUnit"
-            if rate_behavior in _TIERED_BEHAVIORS or rate_behavior == "Block":
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"pay_item_id={change.pay_item_id} uses '{rate_behavior}' behavior "
-                        "which requires tier or block configuration. "
-                        "Use the individual rate endpoint to save this rate."
-                    ),
-                )
+            # The PayItem branch of the legacy batch writer ended with the P4a cutover:
+            # ordinary rates are authored only through target DriverRateAssignments.
+            raise _ordinary_rate_authoring_retired()
 
     # Step 7 â€” write: create or update PendingApproval rows
     # All validation passed â€” now write inside the same transaction.

@@ -140,6 +140,46 @@ async def test_status_pay_rates_still_use_the_temporary_status_only_path(
     assert voided.status_code in (200, 204), voided.text
 
 
+async def test_status_owned_rate_type_cannot_carry_a_pay_item_change_through_batch(
+    session_client, auth_token, created_driver_id, direct_db,
+):
+    """A real Status-column RateType must not open the retired PayItem batch branch."""
+    headers = _auth(auth_token)
+    branch_id = (await direct_db.execute(
+        text("SELECT branchid FROM core.drivers WHERE driverid = :d"),
+        {"d": created_driver_id})).scalar_one()
+    rate_type_id = (await _status_rate_column(session_client, auth_token, branch_id))["rate_type_id"]
+    pay_item_id = (await direct_db.execute(text("""
+        SELECT pi.payitemid
+        FROM   payroll.payitems pi
+        JOIN   payroll.payitemratetypemap m ON m.payitemid = pi.payitemid AND m.status = 'Active'
+        WHERE  pi.requiresrate AND pi.status <> 'Retired' AND pi.companyid IS NULL
+        LIMIT 1
+    """))).scalar_one()
+    # Make the pair look valid to the old PayItem validation: map the Status RateType.
+    await direct_db.execute(text("""
+        INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
+        VALUES (:p, :r, FALSE, 'Active') ON CONFLICT DO NOTHING
+    """), {"p": pay_item_id, "r": rate_type_id})
+    try:
+        response = await session_client.post(
+            f"/payroll/drivers/{created_driver_id}/rates/batch", headers=headers,
+            json={"effective_from": "2088-04-01",
+                  "changes": [{"pay_item_id": pay_item_id, "rate_type_id": rate_type_id,
+                               "amount": "7"}]})
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
+        written = (await direct_db.execute(text("""
+            SELECT count(*) FROM payroll.driverrates
+            WHERE driverid = :d AND ratetypeid = :r
+        """), {"d": created_driver_id, "r": rate_type_id})).scalar_one()
+        assert written == 0
+    finally:
+        await direct_db.execute(text(
+            "DELETE FROM payroll.payitemratetypemap WHERE payitemid = :p AND ratetypeid = :r"),
+            {"p": pay_item_id, "r": rate_type_id})
+
+
 async def test_ordinary_authoring_still_works_on_the_target_path(
     session_client, auth_token, hq_branch_id, created_driver_id,
 ):
