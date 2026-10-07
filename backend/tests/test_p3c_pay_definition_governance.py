@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import psycopg2
 import pytest
 from psycopg2 import errors
 
@@ -401,10 +402,13 @@ async def test_request_events_are_append_only(p3c_client, tenant, cur):
         cur.execute(
             "DELETE FROM payroll.paydefinitionrequestevents "
             "WHERE paydefinitionrequestid = %s", (draft["request_id"],))
-    with pytest.raises(errors.RestrictViolation):
+    # The driver reports an ON DELETE RESTRICT failure as either a restrict or a
+    # foreign-key violation depending on version; the constraint name is the invariant.
+    with pytest.raises(psycopg2.IntegrityError) as blocked:
         cur.execute(
             "DELETE FROM payroll.paydefinitionrequests WHERE paydefinitionrequestid = %s",
             (draft["request_id"],))
+    assert blocked.value.diag.constraint_name == "fk_paydefinitionrequestevents_request"
 
 
 async def test_provenance_is_immutable(p3c_client, tenant, cur):
@@ -457,8 +461,6 @@ def _orphan_definition(cur, tenant) -> int:
 
 
 async def test_provenance_requires_a_matching_approved_request(p3c_client, tenant, p3b_dsn):
-    import psycopg2
-
     draft = (await _draft(p3c_client, tenant)).json()
     conn = psycopg2.connect(client_encoding="utf-8", **p3b_dsn)
     try:
