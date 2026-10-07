@@ -47,6 +47,8 @@ from tests.ownership import (
     retire_branch_periods_directly,
 )
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

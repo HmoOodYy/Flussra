@@ -11,11 +11,9 @@ input is assembled from fragments rather than written literally.
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import text
 
 from tests import db_state
-from tests.builders.owned_scope import create_owned_branch
 from tests.db_state import (
     FINAL_LINE_IMMUTABLE_TRIGGER,
     FINAL_LINE_INSERT_GUC,
@@ -408,47 +406,8 @@ async def test_terminal_state_names_every_mutable_period_by_id_and_status(direct
         for period_id in mutable.values():
             await delete_period_and_children(direct_db, period_id)
 
-
-# ---------------------------------------------------------------------------
-# Seeded PAYTEST activation must not depend on the shadowable `paytest_branch_id`
 # ---------------------------------------------------------------------------
 
-@pytest_asyncio.fixture(scope="session")
-async def paytest_branch_id(session_db_conn) -> int:
-    """Deliberately shadows the shared name with a fresh, un-activated owned branch,
-    as many modules do. If session-autouse activation resolved this name it would
-    activate pay items here instead of on the canonical seeded PAYTEST branch."""
-    return await create_owned_branch(session_db_conn, "ISO", "Isolation shadow branch")
-
-
-async def _active_pay_item_codes(client, token: str, branch_id: int) -> set[str]:
-    resp = await client.get(
-        f"/settings/branches/{branch_id}/pay-items", headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200, resp.text
-    return {item["pay_item_code"] for item in resp.json() if item["is_active"]}
-
-
-async def test_activation_targets_the_seeded_branch_when_a_module_shadows_paytest_branch_id(
-    session_client, auth_token, seeded_paytest_branch_id, paytest_branch_id,
-):
-    assert paytest_branch_id != seeded_paytest_branch_id, "this module must shadow the name"
-    seeded = await _active_pay_item_codes(session_client, auth_token, seeded_paytest_branch_id)
-    assert {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS", "HOURS", "MILES"} <= seeded
-    assert "OVERNIGHT" not in await _active_pay_item_codes(
-        session_client, auth_token, paytest_branch_id,
-    ), "session activation leaked onto a module-owned branch"
-
-
-def test_activation_fixture_depends_on_the_seeded_fixture_never_the_shadowable_one(request):
-    manager = request._fixturemanager
-    for name in ("activate_paytest_system_items", "paytest_driver_id"):
-        argnames = manager.getfixturedefs(name, request.node)[-1].argnames
-        assert "seeded_paytest_branch_id" in argnames, name
-        assert "paytest_branch_id" not in argnames, name
-
-
-# ---------------------------------------------------------------------------
 # Retirement must not orphan review state
 # ---------------------------------------------------------------------------
 

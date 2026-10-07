@@ -32,6 +32,8 @@ from sqlalchemy import text as _text
 from tests.db_state import PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER, suspended_test_triggers
 from tests.seed_helpers import attach_cdpi_owner
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # p4b_env fixture
 # ---------------------------------------------------------------------------
@@ -99,12 +101,9 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     """), {"piid": pi_a_id, "rtid": rt_a_custom_id})
     await attach_cdpi_owner(direct_db, item_id=pi_a_id, rate_type_id=rt_a_custom_id)
 
-    await direct_db.execute(_text("""
-        INSERT INTO payroll.branchpayitemconfig
-            (companyid, branchid, payitemid, isactive, effectivefrom)
-        VALUES (:cid, :bid, :piid, TRUE, '2000-01-01')
-        ON CONFLICT DO NOTHING
-    """), {"cid": cid_a, "bid": bid_a, "piid": pi_a_id})
+    await direct_db.execute(_text(
+        "UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"
+    ), {"piid": pi_a_id})
 
     # ── Company A driver ─────────────────────────────────────────────────────
     await direct_db.execute(_text(
@@ -268,13 +267,10 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     """), {"piid": pi_b_id, "rtid": rt_b_own_id})
     await attach_cdpi_owner(direct_db, item_id=pi_b_id, rate_type_id=rt_b_own_id)
 
-    # Activate Company B's PayItem on Branch B
-    await direct_db.execute(_text("""
-        INSERT INTO payroll.branchpayitemconfig
-            (companyid, branchid, payitemid, isactive, effectivefrom)
-        VALUES (:cid, :bid, :piid, TRUE, '2000-01-01')
-        ON CONFLICT DO NOTHING
-    """), {"cid": cid_b, "bid": bid_b, "piid": pi_b_id})
+    # Activate Company B's PayItem
+    await direct_db.execute(_text(
+        "UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"
+    ), {"piid": pi_b_id})
 
     yield {
         "cid_a":          cid_a,
@@ -645,7 +641,6 @@ async def test_t5_same_company_custom_rate_type_works(
     """
     Company A admin creates a DriverRate using Company A's own custom RateType (CPI_P4B_RT).
     Must succeed 201.
-    The rate matrix for Company A's driver must include the custom rate type.
     """
     token_a      = p4b_env["auth_a"]
     rt_a_id      = p4b_env["rt_a_custom_id"]
@@ -664,21 +659,6 @@ async def test_t5_same_company_custom_rate_type_works(
     await direct_db.execute(_text(
         "DELETE FROM payroll.driverrates WHERE driverrateid = :rid"
     ), {"rid": rate_id})
-
-    # Rate matrix for Company A's driver must include CPI_P4B_RT
-    resp_matrix = await client.get(
-        f"/payroll/drivers/{drv_a_id}/rate-matrix",
-        params={"as_of": "2059-06-01"},
-        headers=_auth(token_a),
-    )
-    assert resp_matrix.status_code == 200, (
-        f"Rate matrix must return 200, got {resp_matrix.status_code}: {resp_matrix.text}"
-    )
-    groups = resp_matrix.json().get("groups", [])
-    rt_ids_in_matrix = {g["rate_type_id"] for g in groups}
-    assert rt_a_id in rt_ids_in_matrix, (
-        f"Company A's custom RateType {rt_a_id} must appear in Company A's rate matrix"
-    )
 
 
 # ===========================================================================

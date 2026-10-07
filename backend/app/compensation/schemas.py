@@ -308,3 +308,104 @@ class ResolvedCompensation(BaseModel):
         if self.rate_shape != "Scalar" or len(self.components) != 1:
             raise ValueError("Resolved compensation is not a single scalar component.")
         return self.components[0].amount
+
+
+class BranchConfigVersion(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    config_id: int
+    is_active: bool
+    notes: str | None = None
+    effective_from: date
+    effective_to: date | None = None
+    created_at_utc: datetime
+
+
+class BranchPayDefinitionState(BaseModel):
+    """A Company PayDefinition as seen from one Branch."""
+
+    pay_definition_id: int
+    definition_code: str
+    definition_name: str
+    input_type: str
+    unit: str | None = None
+    calculation_method: str
+    definition_status: str
+    rate_definition_id: int | None = None
+    is_configured: bool
+    is_active: bool
+    notes: str | None = None
+    current_config: BranchConfigVersion | None = None
+    pending_config: BranchConfigVersion | None = None
+    has_open_periods: bool = False
+
+
+class BranchConfigUpdate(BaseModel):
+    is_active: bool
+    effective_from: date | None = None
+    notes: str | None = None
+
+
+class BranchConfigTarget(StrEnum):
+    AllBranches = "AllBranches"
+    SelectedBranches = "SelectedBranches"
+
+
+class BulkBranchConfigUpdate(BaseModel):
+    target: BranchConfigTarget
+    branch_ids: list[int] | None = None
+    is_active: bool
+    effective_from: date | None = None
+    notes: str | None = None
+
+    @field_validator("branch_ids")
+    @classmethod
+    def _distinct(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("branch_ids must be distinct")
+        return value
+
+    def model_post_init(self, __context: object) -> None:
+        if self.target == BranchConfigTarget.SelectedBranches and not self.branch_ids:
+            raise ValueError("branch_ids is required for SelectedBranches")
+        if self.target == BranchConfigTarget.AllBranches and self.branch_ids:
+            raise ValueError("branch_ids must be omitted for AllBranches")
+
+
+class BulkBranchConfigBranchResult(BaseModel):
+    branch_id: int
+    branch_name: str
+    status: str
+    config_id: int
+    effective_from: date
+
+
+class BulkBranchConfigResult(BaseModel):
+    pay_definition_id: int
+    target: BranchConfigTarget
+    requested_branch_count: int
+    updated_branch_count: int
+    results: list[BulkBranchConfigBranchResult]
+
+
+class AssignmentBrief(BaseModel):
+    driver_rate_assignment_id: int
+    status: str
+    effective_from: date
+    effective_to: date | None = None
+    amount: Decimal | None = None
+
+
+class DriverPayRateRow(BaseModel):
+    """One branch-applicable PayDefinition and a Driver's scalar rate state for it."""
+
+    pay_definition_id: int
+    definition_code: str
+    definition_name: str
+    input_type: str
+    unit: str | None = None
+    rate_definition_id: int
+    rate_component_definition_id: int
+    current: AssignmentBrief | None = None
+    future: AssignmentBrief | None = None
+    pending: AssignmentBrief | None = None

@@ -34,6 +34,8 @@ from tests.builders.company import create_branch
 from tests.builders.payroll import create_period_from_candidate, get_period_candidates
 from tests.builders.payroll_setup import create_published_setup_assignment
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 
 @pytest_asyncio.fixture
 async def trust_branch_id(db_conn, session_client, auth_token) -> int:

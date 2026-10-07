@@ -46,6 +46,8 @@ from tests.builders.payroll import create_period_from_candidate, get_period_cand
 from tests.builders.payroll_setup import create_published_setup_assignment
 from tests.seed_helpers import attach_cdpi_owner_by_code
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -283,7 +285,7 @@ class TestCp2cPayItemSnapshot:
     # ------------------------------------------------------------------ #
 
     def test_s03_alembic_head(self):
-        """S03: Alembic migration chain is linear and head is 0083."""
+        """S03: Alembic migration chain is linear and head is 0084."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -295,7 +297,7 @@ class TestCp2cPayItemSnapshot:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0083" in lines[0], f"Expected head 0083, got: {lines[0]}"
+        assert "0084" in lines[0], f"Expected head 0084, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # S04 — Indexes exist
@@ -495,23 +497,15 @@ class TestCp2cPayItemSnapshot:
         rows_before = await _snap_rows(direct_db, pid)
         assert rows_before
 
-        # Disable HOURS in BranchPayItemConfig for this branch
+        # Disable HOURS after period creation
         hours_row = (await direct_db.execute(
-            _text("""
-                SELECT payitemid FROM payroll.payitems
-                WHERE payitemcode = 'HOURS' AND companyid IS NULL
-            """)
+            _text("SELECT payitemid FROM payroll.payitems "
+                  "WHERE payitemcode = 'HOURS' AND companyid IS NULL")
         )).mappings().first()
         if hours_row:
             await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.branchpayitemconfig
-                        (companyid, branchid, payitemid, isactive, effectivefrom)
-                    VALUES
-                        (:cid, :bid, :piid, FALSE, CURRENT_DATE)
-                    ON CONFLICT DO NOTHING
-                """),
-                {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": hours_row["payitemid"]},
+                _text("UPDATE payroll.payitems SET isdefaultbranchactive = FALSE WHERE payitemid = :piid"),
+                {"piid": hours_row["payitemid"]},
             )
 
         rows_after = await _snap_rows(direct_db, pid)
@@ -521,12 +515,8 @@ class TestCp2cPayItemSnapshot:
         # Restore
         if hours_row:
             await direct_db.execute(
-                _text("""
-                    DELETE FROM payroll.branchpayitemconfig
-                    WHERE companyid = :cid AND branchid = :bid AND payitemid = :piid
-                      AND isactive = FALSE
-                """),
-                {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": hours_row["payitemid"]},
+                _text("UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"),
+                {"piid": hours_row["payitemid"]},
             )
 
         await _clean(direct_db, snap_branch_id)
@@ -923,20 +913,8 @@ class TestCp2cPayItemSnapshot:
         # uix_BranchPayItemConfig_OpenVersion covers the open case), then insert
         # a fresh inactive row.
         await direct_db.execute(
-            _text("""
-                DELETE FROM payroll.branchpayitemconfig
-                WHERE companyid = :cid AND branchid = :bid AND payitemid = :piid
-                  AND effectiveto IS NULL
-            """),
-            {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": miles_row["payitemid"]},
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.branchpayitemconfig
-                    (companyid, branchid, payitemid, isactive, effectivefrom)
-                VALUES (:cid, :bid, :piid, FALSE, '2094-01-01')
-            """),
-            {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": miles_row["payitemid"]},
+            _text("UPDATE payroll.payitems SET isdefaultbranchactive = FALSE WHERE payitemid = :piid"),
+            {"piid": miles_row["payitemid"]},
         )
 
         await _setup(direct_db, snap_branch_id)
@@ -958,82 +936,10 @@ class TestCp2cPayItemSnapshot:
 
         # Restore
         await direct_db.execute(
-            _text("DELETE FROM payroll.branchpayitemconfig "
-                  "WHERE companyid = :cid AND branchid = :bid AND payitemid = :piid"),
-            {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": miles_row["payitemid"]},
+            _text("UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"),
+            {"piid": miles_row["payitemid"]},
         )
         await _clean(direct_db, snap_branch_id)
-
-    # ------------------------------------------------------------------ #
-    # S23 — delete_custom_pay_item retires when snapshot rows exist
-    # ------------------------------------------------------------------ #
-
-    @pytest.mark.asyncio
-    async def test_s23_delete_custom_item_retires_when_snapshot_exists(
-        self, client, auth_token, direct_db, snap_branch_id
-    ):
-        """S23: delete_custom_pay_item routes to retire when PayrollPeriodPayItems rows reference the item."""
-        await _clean(direct_db, snap_branch_id)
-
-        # Insert a custom pay item directly into the DB (bypass CDPI workflow for test isolation).
-        item_id = (await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payitems
-                    (companyid, payitemcode, payitemname, category, datatype,
-                     itemscope, ratebehavior, status, sortorder,
-                     appearsinpayrollentry, appearsinledger, appearsinreports,
-                     requiresrate, issystemstandard, isdefaultbranchactive)
-                VALUES
-                    (:cid, 'SNAP_CUSTOM_2094', 'Snapshot Custom 2094', 'Custom', 'Number',
-                     'Daily', 'PerUnit', 'Active', 500,
-                     FALSE, TRUE, TRUE, FALSE, FALSE, TRUE)
-                ON CONFLICT DO NOTHING
-                RETURNING payitemid
-            """),
-            {"cid": _COMPANY_ID},
-        )).scalar_one()
-        await attach_cdpi_owner_by_code(direct_db, company_id=_COMPANY_ID, code="SNAP_CUSTOM_2094")
-
-        # Create a period (will snapshot the new custom item)
-        await _setup(direct_db, snap_branch_id)
-        candidates = await get_period_candidates(client, auth_token, snap_branch_id)
-        key = candidates["selected"]["candidate_key"]
-        period = await create_period_from_candidate(client, auth_token, snap_branch_id, key)
-        pid = period["payroll_period_id"]
-
-        # Verify item is in snapshot (should be auto-snapshotted at period creation)
-        snap_check = (await direct_db.execute(
-            _text("SELECT 1 FROM payroll.payrollperiodpayitems "
-                  "WHERE payrollperiodid = :pid AND payitemcode = 'SNAP_CUSTOM_2094'"),
-            {"pid": pid},
-        )).first()
-        assert snap_check is not None, "Custom item not snapshotted"
-
-        # Delete the custom item — it is retired
-        r_del = await client.delete(
-            f"/settings/pay-items/{item_id}",
-            headers=_auth(auth_token),
-        )
-        assert r_del.status_code in (200, 204), f"delete failed: {r_del.text}"
-        result = r_del.json() if r_del.status_code == 200 else {}
-        assert result.get("status") == "Retired", (
-            f"Expected 'Retired', got {result.get('status')!r}"
-        )
-
-        # Snapshot row should still exist
-        snap_after = (await direct_db.execute(
-            _text("SELECT 1 FROM payroll.payrollperiodpayitems "
-                  "WHERE payrollperiodid = :pid AND payitemcode = 'SNAP_CUSTOM_2094'"),
-            {"pid": pid},
-        )).first()
-        assert snap_after is not None, "Snapshot row was removed on retire — it should persist"
-
-        await _clean(direct_db, snap_branch_id)
-        # Clean up the custom item (now retired; physical delete blocked by snapshot rows)
-        await direct_db.execute(
-            _text("UPDATE payroll.payitems SET status = 'Retired' WHERE payitemcode = 'SNAP_CUSTOM_2094' AND companyid = :cid"),
-            {"cid": _COMPANY_ID},
-        )
 
     # ------------------------------------------------------------------ #
     # S24 — Snapshot ON CONFLICT DO NOTHING (replay-safe)
@@ -1484,20 +1390,8 @@ class TestCp2cPayItemSnapshot:
             pytest.skip("MILES system item not seeded")
 
         await direct_db.execute(
-            _text("""
-                DELETE FROM payroll.branchpayitemconfig
-                WHERE companyid = :cid AND branchid = :bid AND payitemid = :piid
-                  AND effectiveto IS NULL
-            """),
-            {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": miles_row["payitemid"]},
-        )
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.branchpayitemconfig
-                    (companyid, branchid, payitemid, isactive, effectivefrom)
-                VALUES (:cid, :bid, :piid, FALSE, '2094-01-01')
-            """),
-            {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": miles_row["payitemid"]},
+            _text("UPDATE payroll.payitems SET isdefaultbranchactive = FALSE WHERE payitemid = :piid"),
+            {"piid": miles_row["payitemid"]},
         )
         await direct_db.commit()
 
@@ -1540,11 +1434,10 @@ class TestCp2cPayItemSnapshot:
             f"Expected 422 for inactive-snapshot code, got {r_save.status_code}: {r_save.text}"
         )
 
-        # Restore BranchPayItemConfig
+        # Restore
         await direct_db.execute(
-            _text("DELETE FROM payroll.branchpayitemconfig "
-                  "WHERE companyid = :cid AND branchid = :bid AND payitemid = :piid"),
-            {"cid": _COMPANY_ID, "bid": snap_branch_id, "piid": miles_row["payitemid"]},
+            _text("UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"),
+            {"piid": miles_row["payitemid"]},
         )
         await _clean(direct_db, snap_branch_id)
 

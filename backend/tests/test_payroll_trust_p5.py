@@ -24,6 +24,8 @@ from sqlalchemy import text as _text
 
 from tests.builders.compensation import create_approved_rate
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Year slots -- distinct from Phase 3C (2043-2051) and each other
 # ---------------------------------------------------------------------------

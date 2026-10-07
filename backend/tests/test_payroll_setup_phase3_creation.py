@@ -30,6 +30,8 @@ from app.payroll_setup.payroll_policy import (
 from app.payroll_setup.resolver import resolve_payroll_setup_version
 from tests.builders.company import create_branch
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 
 @pytest_asyncio.fixture
 async def period_creation_db(test_database_url):

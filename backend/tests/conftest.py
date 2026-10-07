@@ -25,6 +25,7 @@ import pytest_asyncio
 import testing.postgresql
 from fastapi import FastAPI
 from httpx import ASGITransport
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from tests.db_state import (
@@ -441,6 +442,9 @@ async def test_app(test_engine) -> FastAPI:
     real_app = create_app()
     real_app.state.engine = test_engine
 
+    from tests import legacy_shim
+    legacy_shim.install(real_app)
+
     async def _override_get_db() -> AsyncGenerator[AsyncConnection, None]:
         async with test_engine.begin() as conn:
             yield conn
@@ -824,75 +828,58 @@ async def branch_user_token(session_client: httpx.AsyncClient) -> str:
     return resp.json()["access_token"]
 
 
-async def _activate_branch_items(
-    session_client,
-    auth_token: str,
-    branch_id: int,
-    codes_to_activate: set,
-    *,
-    force: bool = False,
-) -> None:
-    """
-    Helper: activate a set of pay items by code on a specific branch.
+_LEGACY_PATCHERS: list = []
 
-    When force=True, PATCH is sent even if the item already reports is_active=True.
-    This is required for items with IsDefaultBranchActive=TRUE: they report
-    is_active=True without having a BranchPayItemConfig row.  The rate matrix
-    uses an INNER JOIN on BranchPayItemConfig, so items without an explicit row
-    do NOT appear in the matrix.  Sending the PATCH creates the config row.
 
-    Idempotent — safe to call more than once (ON CONFLICT DO NOTHING in service).
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Lift the legacy-authority retirement gates for ``pre_cutover_legacy`` tests.
+
+    Marked modules characterize the legacy compensation runtime that still exists
+    until it is removed. They need fixture state that the retired writers used to
+    create, so the retirement gates are replaced in-process, and the retired branch
+    pay-item activation route is emulated, for those tests only. Doing this in the
+    runtest hook (before any fixture of any scope is built) covers session and module
+    fixtures. The production gates are never configurable at runtime.
     """
-    items_resp = await session_client.get(
-        f"/settings/branches/{branch_id}/pay-items",
-        headers={"Authorization": f"Bearer {auth_token}"},
-    )
-    assert items_resp.status_code == 200, f"pay-items lookup failed: {items_resp.text}"
-    for item in items_resp.json():
-        if item["pay_item_code"] in codes_to_activate:
-            if force or not item.get("is_active", True):
-                await session_client.patch(
-                    f"/settings/branches/{branch_id}/pay-items/{item['pay_item_id']}",
-                    json={"is_active": True},
-                    headers={"Authorization": f"Bearer {auth_token}"},
-                )
+    if item.get_closest_marker("pre_cutover_legacy") is None:
+        return
+    from app.payroll import period_creation, rates
+    from tests import legacy_shim
+
+    async def _allow_rate_type(*_args, **_kwargs) -> None:
+        return None
+
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(period_creation, "_require_target_payroll_layout", lambda: None)
+    patcher.setattr(rates, "_require_status_owned_rate_type", _allow_rate_type)
+    patcher.setattr(rates, "_require_rate_copy_available", lambda: None)
+    legacy_shim.set_enabled(True)
+    _LEGACY_PATCHERS.append(patcher)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    from tests import legacy_shim
+
+    while _LEGACY_PATCHERS:
+        _LEGACY_PATCHERS.pop().undo()
+    legacy_shim.set_enabled(False)
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
-async def activate_paytest_system_items(
-    session_client: httpx.AsyncClient,
-    auth_token: str,
-    seeded_paytest_branch_id: int,
-) -> None:
+async def activate_paytest_system_items(session_db_conn) -> None:
+    """Make the legacy Daily system items default-active for pre-cutover test periods.
+
+    Branch applicability is now keyed by PayDefinition, so the legacy period
+    snapshot used by pre-cutover characterization tests resolves activation from
+    PayItems.IsDefaultBranchActive alone. Called once per test session.
     """
-    Activate system pay items on the PAYTEST branch so that tests using
-    'Overnight', 'Wait', 'PTO', etc. pass the branch-activation check.
-
-    HOURS and MILES are force-activated even though IsDefaultBranchActive=TRUE
-    so that explicit BranchPayItemConfig rows exist.  These rows are required
-    by the rate matrix (INNER JOIN on BranchPayItemConfig) to show HOURLY and
-    MILEAGE for PAYTEST drivers.
-
-    Called once per test session (autouse + session scope).
-    """
-    await _activate_branch_items(
-        session_client, auth_token, seeded_paytest_branch_id,
-        {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS"},
-    )
-    # Force-activate so BranchPayItemConfig rows are created for matrix queries
-    await _activate_branch_items(
-        session_client, auth_token, seeded_paytest_branch_id,
-        {"HOURS", "MILES"},
-        force=True,
-    )
-
-
-    # NOTE: HQ branch is intentionally NOT force-activated here.
-    # test_settings_payitems::test_hours_default_active asserts that HOURS on HQ
-    # has is_using_default=True (no explicit BranchPayItemConfig row).  Creating
-    # an explicit row would break that test.  Tests that need the rate matrix for
-    # HQ drivers should use paytest_driver_id (PAYTEST branch) which is activated
-    # above, or query pay_item_id from the settings API rather than the matrix.
+    await session_db_conn.execute(text("""
+        UPDATE payroll.payitems SET isdefaultbranchactive = TRUE
+        WHERE companyid IS NULL
+          AND payitemcode IN ('OVERNIGHT', 'WAIT_TIME', 'PALLETS', 'SILOS', 'HOURS', 'MILES')
+    """))
 
 
 @pytest_asyncio.fixture

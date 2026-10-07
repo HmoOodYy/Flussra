@@ -39,6 +39,8 @@ from tests.builders.company import create_branch
 from tests.builders.payroll import create_period_from_candidate, get_period_candidates
 from tests.builders.payroll_setup import create_published_setup_assignment
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -295,7 +297,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0083."""
+        """D02: Migration chain is linear and head is 0084."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -307,7 +309,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0083" in lines[0], f"Expected head 0083, got: {lines[0]}"
+        assert "0084" in lines[0], f"Expected head 0084, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows

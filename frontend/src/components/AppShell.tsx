@@ -58,7 +58,7 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
   if (canManageSettingsAdmin(user))
     settingsItems.push({ to: '/settings/status-keys', label: 'Status Keys', icon: <KeyIcon />, end: false });
   if (canViewSettings(user) || canViewDailyPayItems(user))
-    settingsItems.push({ to: '/settings/pay-items', label: 'Daily Pay Items', icon: <TagIcon />, end: false });
+    settingsItems.push({ to: '/settings/pay-items', label: 'Pay Items', icon: <TagIcon />, end: false });
   if (canViewSettings(user))
     settingsItems.push({ to: '/settings/roles', label: 'Roles & Permissions', icon: <ShieldIcon />, end: false });
   if (canAccessCompanyBranches(user))
@@ -76,7 +76,7 @@ function usePageTitle(): string {
   if (pathname.startsWith('/settings/company-branches')) return 'Company & Branches';
   if (pathname.startsWith('/settings/payroll'))          return 'Payroll Policies';
   if (pathname.startsWith('/settings/status-keys'))      return 'Status Keys';
-  if (pathname.startsWith('/settings/pay-items'))        return 'Daily Pay Items';
+  if (pathname.startsWith('/settings/pay-items'))        return 'Pay Items';
   if (pathname.startsWith('/settings/roles'))            return 'Roles & Permissions';
   if (pathname.startsWith('/people/pay-rates'))          return 'Drivers Pay Rate';
   if (pathname.startsWith('/people'))                    return 'People & Access';

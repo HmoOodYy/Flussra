@@ -20,15 +20,17 @@ import datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.builders.owned_scope import (
-    activate_paytest_equivalent_items,
     create_owned_branch,
     create_owned_driver,
 )
+
+pytestmark = pytest.mark.pre_cutover_legacy
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -36,7 +38,6 @@ async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
     """Module-owned branch standing in for PAYTEST: this module's workflow state
     (periods it submits, approves or leaves behind) never reaches another module."""
     branch_id = await create_owned_branch(session_db_conn, "M13", "M13C owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 

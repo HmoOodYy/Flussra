@@ -2,22 +2,38 @@
  * PayRatesPage — /people/pay-rates
  *
  * Two-panel layout:
- *  Left : filterable driver list (with bulk summary badges)
+ *  Left : filterable driver list
  *  Right: selected driver panel with tabs
  *         Current Rates | Pending Changes | History | Pay Rules
+ *
+ * Ordinary PayDefinition rates are target DriverRateAssignments. The Status pay
+ * rate section below them still uses the temporary Status-only rate path until
+ * Status compensation is cut over.
  */
 import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
+import {
+  approveAssignment,
+  createAssignment,
+  discardAssignment,
+  listAssignmentHistory,
+  listDriverPayRates,
+  replaceAssignmentValues,
+  updateAssignment,
+  voidAssignment,
+} from '../../../lib/compensationApi';
 import { useAuth } from '../../../store/authStore';
-import { canEditPayRates, canManageSettingsAdmin } from '../../../lib/permissions';
+import { canEditPayRates } from '../../../lib/permissions';
 import { formatMoney, formatRate } from '../../../lib/money';
 import type { DriverSummary, Branch } from '../../../types/core';
+import type { AssignmentSummary, DriverPayRateRow } from '../../../types/compensation';
 import styles from './PayRatesPage.module.css';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface RateMatrixCurrentRate {
+/** A Status pay rate (temporary Status-only rate path). */
+interface StatusRate {
   driver_rate_id: number;
   amount: string;
   effective_from: string;
@@ -25,65 +41,23 @@ interface RateMatrixCurrentRate {
   status: string;
 }
 
-interface RateMatrixGroup {
+interface StatusRateGroup {
   group_key: string;
-  pay_item_id: number;
-  pay_item_name: string;
-  rate_behavior: string;
+  status_rate_column_id: number;
   rate_type_id: number;
-  rate_code: string;
   rate_name: string;
   unit_name: string;
-  current_rate: RateMatrixCurrentRate | null;
-  pending_rate: RateMatrixCurrentRate | null;
-  is_required: boolean;
+  current_rate: StatusRate | null;
+  pending_rate: StatusRate | null;
   is_missing: boolean;
-  pay_item_effective_from: string | null;
 }
 
-interface DriverRateMatrix {
+interface StatusRateMatrix {
   driver_id: number;
-  driver_name: string;
-  driver_code: string | null;
-  branch_id: number;
-  branch_name: string;
-  as_of: string;
-  groups: RateMatrixGroup[];
-}
-
-/** One rate record — used for pending list and history list */
-interface DriverRateRecord {
-  driver_rate_id: number;
-  driver_id: number;
-  rate_type_id: number;
-  rate_code: string;
-  rate_name: string;
-  unit_name: string;
-  amount: string;
-  effective_from: string;
-  effective_to: string | null;
-  status: string;
-  notes: string | null;
-  created_at_utc: string;
-  approved_at_utc: string | null;
-}
-
-/** Summary badge counts returned by /rates/summary */
-interface DriverRatesSummary {
-  driver_id: number;
-  pending_count: number;
-  future_approved_count: number;
-  missing_required_count: number | null;
+  groups: StatusRateGroup[];
 }
 
 interface EditRow {
-  pay_item_id: number;
-  rate_type_id: number;
-  amount: string;
-  effective_from: string;
-}
-
-interface OriginalValues {
   amount: string;
   effective_from: string;
 }
@@ -103,16 +77,9 @@ interface DriverPayRule {
   created_at_utc: string;
 }
 
-/** Result from copy-from endpoint */
-interface CopyRatesResult {
-  target_driver_id: number;
-  source_driver_id: number;
-  effective_from: string;
-  allow_self_approval: boolean;
-  rates_copied: number;
-  rates_approved: number;
-  rates_pending: number;
-  pay_rules_copied: number;
+interface HistoryRow extends AssignmentSummary {
+  definition_name: string;
+  unit: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -120,6 +87,9 @@ interface CopyRatesResult {
 function apiError(err: unknown): string {
   const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   if (typeof d === 'string' && d.trim()) return d;
+  if (d && typeof d === 'object' && typeof (d as { message?: unknown }).message === 'string') {
+    return (d as { message: string }).message;
+  }
   if (Array.isArray(d) && d.length > 0) {
     const first = d[0];
     if (first?.msg) return first.msg;
@@ -127,8 +97,10 @@ function apiError(err: unknown): string {
   return 'An unexpected error occurred.';
 }
 
-function fmtAmount(amount: string, unitName: string, code: string | null, digits: number | null): string {
-  return `${formatRate(amount, code, digits)}/${unitName}`;
+function fmtAmount(amount: string | null, unit: string | null, code: string | null, digits: number | null): string {
+  if (amount === null) return '—';
+  const text = formatRate(amount, code, digits);
+  return unit ? `${text}/${unit}` : text;
 }
 
 function today(): string {
@@ -137,16 +109,12 @@ function today(): string {
 
 function statusBadgeClass(status: string): string {
   switch (status) {
-    case 'Approved':        return styles.badgeApproved;
-    case 'Superseded':      return styles.badgeSuperseded;
-    case 'PendingApproval': return styles.badgePending;
-    case 'Voided':          return styles.badgeVoided;
-    default:                return styles.statusBadge;
+    case 'Approved':   return styles.badgeApproved;
+    case 'Superseded': return styles.badgeSuperseded;
+    case 'Pending':    return styles.badgePending;
+    case 'Voided':     return styles.badgeVoided;
+    default:           return styles.statusBadge;
   }
-}
-
-function isFutureApproved(row: DriverRateRecord): boolean {
-  return row.status === 'Approved' && row.effective_from > today();
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -164,41 +132,39 @@ export function PayRatesPage() {
   const [branchFilter, setBranchFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('Active');
 
-  // ── Selected driver — initialised from URL on first render ────────────────
   const initialDriverId = searchParams.get('driverId')
     ? parseInt(searchParams.get('driverId')!, 10)
     : null;
   const [selectedDriverId, setSelectedDriverId] = useState<number | null>(initialDriverId);
-
-  // ── Tab state ──────────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<ActiveTab>('current');
 
-  // ── Current Rates (matrix) state ───────────────────────────────────────────
-  const [matrix, setMatrix] = useState<DriverRateMatrix | null>(null);
-  const [loadingMatrix, setLoadingMatrix] = useState(false);
-  const [matrixError, setMatrixError] = useState('');
+  // ── Target rates ───────────────────────────────────────────────────────────
+  const [rows, setRows] = useState<DriverPayRateRow[]>([]);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [rowsError, setRowsError] = useState('');
+  const [statusMatrix, setStatusMatrix] = useState<StatusRateMatrix | null>(null);
 
   // ── Edit state ─────────────────────────────────────────────────────────────
   const [editMode, setEditMode] = useState(false);
   const [editRows, setEditRows] = useState<Record<string, EditRow>>({});
-  const [originalValues, setOriginalValues] = useState<Record<string, OriginalValues>>({});
+  const [originalValues, setOriginalValues] = useState<Record<string, EditRow>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
 
-  // ── Pending Changes state ──────────────────────────────────────────────────
-  const [pendingRates, setPendingRates] = useState<DriverRateRecord[]>([]);
-  const [loadingPending, setLoadingPending] = useState(false);
-  const [actioningRateId, setActioningRateId] = useState<number | null>(null);
+  // ── Pending actions ────────────────────────────────────────────────────────
+  const [actioningId, setActioningId] = useState<number | null>(null);
   const [pendingActionError, setPendingActionError] = useState('');
 
-  // ── History state ──────────────────────────────────────────────────────────
-  const [historyRows, setHistoryRows] = useState<DriverRateRecord[]>([]);
+  // ── History ────────────────────────────────────────────────────────────────
+  const [historyRows, setHistoryRows] = useState<HistoryRow[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [voidTarget, setVoidTarget] = useState<HistoryRow | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidError, setVoidError] = useState('');
+  const [voiding, setVoiding] = useState(false);
 
-  // ── Summary badges ─────────────────────────────────────────────────────────
-  const [summary, setSummary] = useState<DriverRatesSummary | null>(null);
-
+  // ── Pay Rules state ────────────────────────────────────────────────────────
   // ── Pay Rules state ────────────────────────────────────────────────────────
   const [payRules, setPayRules] = useState<DriverPayRule[]>([]);
   const [loadingPayRules, setLoadingPayRules] = useState(false);
@@ -216,19 +182,6 @@ export function PayRatesPage() {
   const [savingRule, setSavingRule] = useState(false);
   const [ruleFormError, setRuleFormError] = useState('');
 
-  // ── Copy Rates state ───────────────────────────────────────────────────────
-  const [copyModalOpen, setCopyModalOpen] = useState(false);
-  const [copySourceDriverId, setCopySourceDriverId] = useState<number | null>(null);
-  const [copyEffectiveFrom, setCopyEffectiveFrom] = useState(today());
-  const [copyIncludeRules, setCopyIncludeRules] = useState(false);
-  const [copying, setCopying] = useState(false);
-  const [copyError, setCopyError] = useState('');
-  const [copyResult, setCopyResult] = useState<CopyRatesResult | null>(null);
-
-  // ── Bulk driver summary badges ─────────────────────────────────────────────
-  const [bulkSummary, setBulkSummary] = useState<Record<number, DriverRatesSummary>>({});
-
-  // ── No-driver-profile state ────────────────────────────────────────────────
   const [noProfile, setNoProfile] = useState(false);
 
   // ── driverUserId lookup (runs once on mount if param present) ─────────────
@@ -261,8 +214,6 @@ export function PayRatesPage() {
       try {
         const res = await apiClient.get('/core/drivers', { params: { company_id: user.company_id } });
         setDrivers(res.data as DriverSummary[]);
-        // Load bulk summary badges in the background after drivers are available
-        void loadBulkSummary();
       } catch {
         // silent
       } finally {
@@ -280,59 +231,26 @@ export function PayRatesPage() {
       .catch(() => {});
   }, [user?.company_id]);
 
-  // ── Load matrix ────────────────────────────────────────────────────────────
-  const loadMatrix = useCallback(async (driverId: number) => {
-    setLoadingMatrix(true);
-    setMatrixError('');
-    setMatrix(null);
+  // ── Load target rates + Status pay rates ───────────────────────────────────
+  const loadRates = useCallback(async (driverId: number) => {
+    setLoadingRows(true);
+    setRowsError('');
+    setRows([]);
+    setStatusMatrix(null);
     setEditMode(false);
     setEditRows({});
     try {
-      const res = await apiClient.get(`/payroll/drivers/${driverId}/rate-matrix`);
-      setMatrix(res.data as DriverRateMatrix);
+      setRows(await listDriverPayRates(driverId));
     } catch (err) {
-      setMatrixError(apiError(err));
-    } finally {
-      setLoadingMatrix(false);
+      setRowsError(apiError(err));
     }
-  }, []);
-
-  // ── Load pending rates ─────────────────────────────────────────────────────
-  const loadPending = useCallback(async (driverId: number) => {
-    setLoadingPending(true);
-    setPendingActionError('');
     try {
-      const res = await apiClient.get(`/payroll/drivers/${driverId}/rates/pending`);
-      setPendingRates(res.data as DriverRateRecord[]);
+      const res = await apiClient.get(`/payroll/drivers/${driverId}/rate-matrix`);
+      setStatusMatrix(res.data as StatusRateMatrix);
     } catch {
-      setPendingRates([]);
+      setStatusMatrix(null);
     } finally {
-      setLoadingPending(false);
-    }
-  }, []);
-
-  // ── Load history ───────────────────────────────────────────────────────────
-  const loadHistory = useCallback(async (driverId: number) => {
-    setLoadingHistory(true);
-    try {
-      const res = await apiClient.get(`/payroll/drivers/${driverId}/rates/history`);
-      setHistoryRows(res.data as DriverRateRecord[]);
-      setHistoryLoaded(true);
-    } catch {
-      setHistoryRows([]);
-      setHistoryLoaded(true);
-    } finally {
-      setLoadingHistory(false);
-    }
-  }, []);
-
-  // ── Load summary ───────────────────────────────────────────────────────────
-  const loadSummary = useCallback(async (driverId: number) => {
-    try {
-      const res = await apiClient.get(`/payroll/drivers/${driverId}/rates/summary`);
-      setSummary(res.data as DriverRatesSummary);
-    } catch {
-      setSummary(null);
+      setLoadingRows(false);
     }
   }, []);
 
@@ -353,85 +271,63 @@ export function PayRatesPage() {
     }
   }, []);
 
-  // ── Load bulk summary for driver list badges ───────────────────────────────
-  // Not wrapped in useCallback — stable API call with no component dependencies.
-  async function loadBulkSummary() {
+  const loadHistory = useCallback(async (driverId: number, current: DriverPayRateRow[]) => {
+    setLoadingHistory(true);
     try {
-      const res = await apiClient.get('/payroll/drivers/rates-summary');
-      const list = res.data as DriverRatesSummary[];
-      const map: Record<number, DriverRatesSummary> = {};
-      for (const s of list) map[s.driver_id] = s;
-      setBulkSummary(map);
+      const lists = await Promise.all(current.map(async (row) => {
+        const items = await listAssignmentHistory(driverId, row.rate_definition_id);
+        return items.map((item) => ({
+          ...item, definition_name: row.definition_name, unit: row.unit,
+        }));
+      }));
+      setHistoryRows(lists.flat().sort((a, b) => b.effective_from.localeCompare(a.effective_from)));
     } catch {
-      // Bulk summary badges are non-critical — fail silently
+      setHistoryRows([]);
+    } finally {
+      setHistoryLoaded(true);
+      setLoadingHistory(false);
     }
-  }
+  }, []);
 
-  // ── Reload all driver data (after an action) ───────────────────────────────
   const reloadAll = useCallback(async (driverId: number) => {
-    await Promise.all([
-      loadMatrix(driverId),
-      loadPending(driverId),
-      loadSummary(driverId),
-      ...(historyLoaded ? [loadHistory(driverId)] : []),
-      ...(payRulesLoaded ? [loadPayRules(driverId)] : []),
-    ]);
-    void loadBulkSummary();
-  }, [loadMatrix, loadPending, loadSummary, loadHistory, historyLoaded,
-      loadPayRules, payRulesLoaded]);
+    await loadRates(driverId);
+    setHistoryLoaded(false);
+    if (payRulesLoaded) await loadPayRules(driverId);
+  }, [loadRates, loadPayRules, payRulesLoaded]);
 
-  // ── When selected driver changes: reset state + load matrix/pending/summary ─
+  // ── When selected driver changes: reset state + load ──────────────────────
   useEffect(() => {
     if (selectedDriverId == null) return;
     let cancelled = false;
-
     void (async () => {
-      // Reset all driver-specific state before fetching
-      if (!cancelled) {
-        setMatrix(null);
-        setPendingRates([]);
-        setHistoryRows([]);
-        setHistoryLoaded(false);
-        setSummary(null);
-        setEditMode(false);
-        setEditRows({});
-        setMatrixError('');
-        setPendingActionError('');
-        setPayRules([]);
-        setPayRulesLoaded(false);
-        setPayRulesError('');
-        setRuleForm(null);
-        setRuleFormError('');
-        setCopyResult(null);
-        setCopyError('');
-        setCopyModalOpen(false);
-      }
       if (cancelled) return;
-      await Promise.all([
-        loadMatrix(selectedDriverId),
-        loadPending(selectedDriverId),
-        loadSummary(selectedDriverId),
-      ]);
+      setHistoryRows([]);
+      setHistoryLoaded(false);
+      setPendingActionError('');
+      setSaveError('');
+      setPayRules([]);
+      setPayRulesLoaded(false);
+      setPayRulesError('');
+      setRuleForm(null);
+      setRuleFormError('');
+      await loadRates(selectedDriverId);
     })();
-
     return () => { cancelled = true; };
-  }, [selectedDriverId, loadMatrix, loadPending, loadSummary]);
+  }, [selectedDriverId, loadRates]);
 
-  // ── Load history lazily when History tab is first opened ──────────────────
+  // ── Lazy tabs ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (activeTab !== 'history' || selectedDriverId == null || historyLoaded || loadingHistory) return;
+    if (activeTab !== 'history' || selectedDriverId == null || historyLoaded || loadingHistory || loadingRows) return;
     const driverId = selectedDriverId;
-    void (async () => { await loadHistory(driverId); })();
-  }, [activeTab, selectedDriverId, historyLoaded, loadingHistory, loadHistory]);
+    void (async () => { await loadHistory(driverId, rows); })();
+  }, [activeTab, selectedDriverId, historyLoaded, loadingHistory, loadingRows, rows, loadHistory]);
 
-  // ── Load pay rules lazily when Pay Rules tab is first opened ──────────────
   useEffect(() => {
     if (activeTab !== 'pay-rules' || selectedDriverId == null || payRulesLoaded || loadingPayRules) return;
     const driverId = selectedDriverId;
     void (async () => { await loadPayRules(driverId); })();
   }, [activeTab, selectedDriverId, payRulesLoaded, loadingPayRules, loadPayRules]);
 
-  // ── Select driver ──────────────────────────────────────────────────────────
   function selectDriver(driverId: number) {
     setSelectedDriverId(driverId);
     setActiveTab('current');
@@ -441,7 +337,6 @@ export function PayRatesPage() {
     setNoProfile(false);
   }
 
-  // ── Filter drivers ─────────────────────────────────────────────────────────
   const filteredDrivers = drivers.filter((d) => {
     const q = search.toLowerCase();
     const matchSearch =
@@ -453,24 +348,22 @@ export function PayRatesPage() {
     return matchSearch && matchBranch && matchStatus;
   });
 
+  const selectedDriver = drivers.find((d) => d.driver_id === selectedDriverId) ?? null;
+
   // ── Edit helpers ───────────────────────────────────────────────────────────
-  function groupKey(g: RateMatrixGroup): string {
-    return g.group_key ?? `${g.pay_item_id}:${g.rate_type_id}`;
-  }
+  const targetKey = (row: DriverPayRateRow) => `t:${row.rate_definition_id}`;
+  const statusKey = (group: StatusRateGroup) => `s:${group.status_rate_column_id}`;
 
   function enterEditMode() {
-    if (!matrix) return;
     const initial: Record<string, EditRow> = {};
-    const originals: Record<string, OriginalValues> = {};
-    for (const g of matrix.groups) {
-      const key = groupKey(g);
-      const amount = g.current_rate?.amount ?? '';
-      const effectiveFrom = today();
-      initial[key] = { pay_item_id: g.pay_item_id, rate_type_id: g.rate_type_id, amount, effective_from: effectiveFrom };
-      originals[key] = { amount, effective_from: effectiveFrom };
+    for (const row of rows) {
+      initial[targetKey(row)] = { amount: row.current?.amount ?? '', effective_from: today() };
+    }
+    for (const group of statusMatrix?.groups ?? []) {
+      initial[statusKey(group)] = { amount: group.current_rate?.amount ?? '', effective_from: today() };
     }
     setEditRows(initial);
-    setOriginalValues(originals);
+    setOriginalValues(initial);
     setEditMode(true);
     setSaveError('');
   }
@@ -489,78 +382,106 @@ export function PayRatesPage() {
     return cur.amount !== orig.amount || cur.effective_from !== orig.effective_from;
   }
 
-  const dirtyCount = Object.keys(editRows).filter((k) => isDirty(k)).length;
+  const dirtyKeys = Object.keys(editRows).filter((k) => isDirty(k) && editRows[k].amount !== '');
+  const dirtyCount = dirtyKeys.length;
 
-  async function saveRates() {
-    if (!matrix) return;
+  function setEditField(key: string, field: keyof EditRow, value: string) {
+    setEditRows((prev) => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
+  }
+
+  /** Save each changed Pay Item rate as one complete assignment, optionally approving it. */
+  async function saveRates(approve: boolean) {
+    if (!selectedDriverId) return;
     setSaving(true);
     setSaveError('');
+    const driverId = selectedDriverId;
     try {
-      const dirtyRows = Object.entries(editRows).filter(([key, row]) => {
-        if (!isDirty(key)) return false;
-        if (!row.amount || parseFloat(row.amount) <= 0) return false;
-        return true;
-      });
-      if (dirtyRows.length === 0) return;
-
-      const effectiveDates = new Set(dirtyRows.map(([, row]) => row.effective_from));
-      if (effectiveDates.size > 1) {
-        setSaveError(
-          'All changed rates must have the same effective date for a batch save. ' +
-          'Please set the same effective date on all changed rows, then try again.'
-        );
-        return;
+      for (const row of rows) {
+        const key = targetKey(row);
+        if (!dirtyKeys.includes(key)) continue;
+        const edit = editRows[key];
+        try {
+          let assignmentId: number;
+          if (row.pending) {
+            assignmentId = row.pending.driver_rate_assignment_id;
+            if (row.pending.effective_from !== edit.effective_from) {
+              await updateAssignment(assignmentId, { effective_from: edit.effective_from });
+            }
+          } else {
+            const created = await createAssignment({
+              driver_id: driverId, rate_definition_id: row.rate_definition_id,
+              effective_from: edit.effective_from,
+            });
+            assignmentId = created.driver_rate_assignment_id;
+          }
+          await replaceAssignmentValues(assignmentId, [{
+            rate_component_definition_id: row.rate_component_definition_id, amount: edit.amount,
+          }]);
+          if (approve) await approveAssignment(assignmentId);
+        } catch (err) {
+          throw new Error(`${row.definition_name}: ${apiError(err)}`, { cause: err });
+        }
       }
 
-      const effectiveFrom = dirtyRows[0][1].effective_from;
-      const changes = dirtyRows.map(([, row]) => ({
-        pay_item_id: row.pay_item_id,
-        rate_type_id: row.rate_type_id,
-        amount: row.amount,
-      }));
-
-      await apiClient.post(
-        `/payroll/drivers/${matrix.driver_id}/rates/batch`,
-        { effective_from: effectiveFrom, changes }
-      );
-
+      const statusChanges = (statusMatrix?.groups ?? []).filter((g) => dirtyKeys.includes(statusKey(g)));
+      if (statusChanges.length > 0) {
+        const dates = new Set(statusChanges.map((g) => editRows[statusKey(g)].effective_from));
+        if (dates.size > 1) {
+          throw new Error('All changed Status pay rates must share one effective date.');
+        }
+        await apiClient.post(`/payroll/drivers/${driverId}/rates/batch`, {
+          effective_from: [...dates][0],
+          changes: statusChanges.map((g) => ({
+            status_rate_column_id: g.status_rate_column_id,
+            rate_type_id: g.rate_type_id,
+            amount: editRows[statusKey(g)].amount,
+          })),
+        });
+      }
       setEditMode(false);
       setEditRows({});
       setOriginalValues({});
-      await reloadAll(matrix.driver_id);
+      await reloadAll(driverId);
     } catch (err) {
-      setSaveError(apiError(err));
+      setSaveError(err instanceof Error ? err.message : apiError(err));
+      await reloadAll(driverId);
     } finally {
       setSaving(false);
     }
   }
 
   // ── Pending actions ────────────────────────────────────────────────────────
-  async function approveRate(rateId: number) {
+  async function runPendingAction(id: number, action: () => Promise<unknown>) {
     if (!selectedDriverId) return;
-    setActioningRateId(rateId);
+    setActioningId(id);
     setPendingActionError('');
     try {
-      await apiClient.post(`/payroll/rates/${rateId}/approve`);
+      await action();
       await reloadAll(selectedDriverId);
     } catch (err) {
       setPendingActionError(apiError(err));
     } finally {
-      setActioningRateId(null);
+      setActioningId(null);
     }
   }
 
-  async function voidRate(rateId: number) {
-    if (!selectedDriverId) return;
-    setActioningRateId(rateId);
-    setPendingActionError('');
+  async function executeVoid() {
+    if (!voidTarget || !selectedDriverId) return;
+    if (!voidReason.trim()) {
+      setVoidError('A reason is required.');
+      return;
+    }
+    setVoiding(true);
+    setVoidError('');
     try {
-      await apiClient.delete(`/payroll/rates/${rateId}`);
+      await voidAssignment(voidTarget.driver_rate_assignment_id, voidReason.trim());
+      setVoidTarget(null);
+      setVoidReason('');
       await reloadAll(selectedDriverId);
     } catch (err) {
-      setPendingActionError(apiError(err));
+      setVoidError(apiError(err));
     } finally {
-      setActioningRateId(null);
+      setVoiding(false);
     }
   }
 
@@ -619,51 +540,27 @@ export function PayRatesPage() {
     }
   }
 
-  // ── Copy rates from driver ─────────────────────────────────────────────────
-  async function copyFromDriver() {
-    if (!selectedDriverId || !copySourceDriverId) return;
-    setCopying(true);
-    setCopyError('');
-    setCopyResult(null);
-    try {
-      const res = await apiClient.post(
-        `/payroll/drivers/${selectedDriverId}/rates/copy-from/${copySourceDriverId}`,
-        { effective_from: copyEffectiveFrom, include_pay_rules: copyIncludeRules }
-      );
-      setCopyResult(res.data as CopyRatesResult);
-      await reloadAll(selectedDriverId);
-    } catch (err) {
-      setCopyError(apiError(err));
-    } finally {
-      setCopying(false);
-    }
-  }
-
-  // ── Derived counts ─────────────────────────────────────────────────────────
-  const missingCount = summary?.missing_required_count
-    ?? (matrix?.groups.filter((g) => g.is_missing).length ?? 0);
-  const pendingCount = summary?.pending_count ?? pendingRates.length;
-  const futureCount  = summary?.future_approved_count ?? 0;
-
-  // ── Derived permissions — branch-aware, keyed off the selected driver ─────
-  const canEditMatrix = user && matrix ? canEditPayRates(user, matrix.branch_id) : false;
-  const copySourceDriver = drivers.find((d) => d.driver_id === copySourceDriverId);
-  const canCopyRates =
-    canEditMatrix && !!copySourceDriver && !!user && canEditPayRates(user, copySourceDriver.branch_id);
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const currencyCode = user?.currency_code ?? null;
+  const currencyDigits = user?.currency_minor_unit_digits ?? null;
+  const missingCount = rows.filter((r) => r.current === null).length;
+  const pendingRows = rows.filter((r) => r.pending !== null);
+  const statusPending = (statusMatrix?.groups ?? []).filter((g) => g.pending_rate !== null);
+  const pendingCount = pendingRows.length + statusPending.length;
+  const futureCount = rows.filter((r) => r.future !== null).length;
+  const canEditMatrix = user && selectedDriver ? canEditPayRates(user, selectedDriver.branch_id) : false;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className={styles.page}>
-      {/* Header */}
       <div className={styles.header}>
         <div>
           <p className={styles.title}>Pay Rates</p>
-          <p className={styles.sub}>Configure driver pay rates by rate type.</p>
+          <p className={styles.sub}>Set each driver&apos;s rate for the pay items active in their branch.</p>
         </div>
       </div>
 
       <div className={styles.body}>
-        {/* Left panel */}
         <div className={styles.left}>
           <div className={styles.filters}>
             <input
@@ -706,21 +603,6 @@ export function PayRatesPage() {
                     <div className={styles.itemMeta}>
                       {d.driver_code ?? 'No code'} &middot; {d.branch_name}
                     </div>
-                    {/* Bulk summary badges */}
-                    {bulkSummary[d.driver_id] && (
-                      <div className={styles.listBadgeRow}>
-                        {(bulkSummary[d.driver_id].pending_count ?? 0) > 0 && (
-                          <span className={styles.listBadgePending}>
-                            {bulkSummary[d.driver_id].pending_count} pending
-                          </span>
-                        )}
-                        {(bulkSummary[d.driver_id].future_approved_count ?? 0) > 0 && (
-                          <span className={styles.listBadgeFuture}>
-                            {bulkSummary[d.driver_id].future_approved_count} future
-                          </span>
-                        )}
-                      </div>
-                    )}
                   </div>
                   <span className={d.driver_status === 'Active' ? styles.okChip : styles.statusBadge}>
                     {d.driver_status}
@@ -735,16 +617,10 @@ export function PayRatesPage() {
           </div>
         </div>
 
-        {/* Right panel */}
         <div className={styles.right}>
           {noProfile ? (
             <div className={styles.emptyRight}>
               <div className={styles.emptyRightCard}>
-                <div className={styles.emptyRightIcon}>
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5">
-                    <circle cx="12" cy="8" r="4" /><path d="M6 20v-2a6 6 0 0 1 12 0v2" />
-                  </svg>
-                </div>
                 <p className={styles.emptyRightTitle}>No driver profile</p>
                 <p className={styles.emptyRightMsg}>This user does not have a driver profile yet.</p>
                 <Link to="/people" style={{ fontSize: '0.83rem', color: '#6366f1' }}>Back to People</Link>
@@ -753,189 +629,100 @@ export function PayRatesPage() {
           ) : selectedDriverId == null ? (
             <div className={styles.emptyRight}>
               <div className={styles.emptyRightCard}>
-                <div className={styles.emptyRightIcon}>
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="1.5">
-                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                    <circle cx="9" cy="7" r="4" />
-                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                  </svg>
-                </div>
                 <p className={styles.emptyRightTitle}>Select a driver</p>
                 <p className={styles.emptyRightMsg}>
                   Choose a driver from the list to view and manage their pay rates.
                 </p>
               </div>
             </div>
-          ) : loadingMatrix && !matrix ? (
+          ) : loadingRows && rows.length === 0 && !statusMatrix ? (
             <div className={styles.loading}>Loading rates...</div>
-          ) : matrixError && !matrix ? (
+          ) : rowsError ? (
             <div className={styles.detail}>
-              <div className={styles.errBanner}>{matrixError}</div>
+              <div className={styles.errBanner}>{rowsError}</div>
             </div>
-          ) : matrix ? (
+          ) : (
             <div className={styles.detailTabbed}>
-              {/* Driver header card */}
               <div className={styles.dHeaderCard} style={{ marginBottom: '0.75rem' }}>
                 <div className={styles.dHeaderTop}>
                   <div>
-                    <p className={styles.dName}>{matrix.driver_name}</p>
+                    <p className={styles.dName}>{selectedDriver?.full_name ?? `Driver ${selectedDriverId}`}</p>
                     <p className={styles.dMeta}>
-                      {matrix.driver_code ?? 'No code'} &middot; {matrix.branch_name}
+                      {selectedDriver?.driver_code ?? 'No code'} &middot; {selectedDriver?.branch_name ?? ''}
                     </p>
-                    {/* Summary badges */}
                     <div className={styles.summaryBadges}>
-                      {missingCount > 0 && (
-                        <span className={styles.missingChip}>{missingCount} missing</span>
-                      )}
-                      {pendingCount > 0 && (
-                        <span className={styles.pendingBadge}>{pendingCount} pending</span>
-                      )}
-                      {futureCount > 0 && (
-                        <span className={styles.futureBadge}>{futureCount} future approved</span>
-                      )}
+                      {missingCount > 0 && <span className={styles.missingChip}>{missingCount} missing</span>}
+                      {pendingCount > 0 && <span className={styles.pendingBadge}>{pendingCount} pending</span>}
+                      {futureCount > 0 && <span className={styles.futureBadge}>{futureCount} future approved</span>}
                     </div>
                   </div>
                   <div className={styles.dActions}>
                     {canEditMatrix && !editMode && activeTab === 'current' && (
-                      <button className={styles.btnPrimary} onClick={enterEditMode}>
-                        Edit Rates
-                      </button>
-                    )}
-                    {canEditMatrix && !editMode && (
-                      <button
-                        className={styles.btnSecondary}
-                        onClick={() => {
-                          setCopyModalOpen(true);
-                          setCopySourceDriverId(null);
-                          setCopyEffectiveFrom(today());
-                          setCopyIncludeRules(false);
-                          setCopyError('');
-                          setCopyResult(null);
-                        }}
-                      >
-                        Copy from…
-                      </button>
+                      <button className={styles.btnPrimary} onClick={enterEditMode}>Edit Rates</button>
                     )}
                     {editMode && (
-                      <button className={styles.btnSecondary} onClick={cancelEdit}>
-                        Cancel
-                      </button>
+                      <button className={styles.btnSecondary} onClick={cancelEdit}>Cancel</button>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Tab navigation */}
               <div className={styles.tabs}>
-                <button
-                  className={`${styles.tab} ${activeTab === 'current' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('current'); if (editMode) cancelEdit(); }}
-                >
-                  Current Rates
-                </button>
-                <button
-                  className={`${styles.tab} ${activeTab === 'pending' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('pending'); if (editMode) cancelEdit(); }}
-                >
+                <button className={`${styles.tab} ${activeTab === 'current' ? styles.tabActive : ''}`}
+                  onClick={() => { setActiveTab('current'); if (editMode) cancelEdit(); }}>Current Rates</button>
+                <button className={`${styles.tab} ${activeTab === 'pending' ? styles.tabActive : ''}`}
+                  onClick={() => { setActiveTab('pending'); if (editMode) cancelEdit(); }}>
                   Pending Changes
                   {pendingCount > 0 && (
-                    <span className={`${styles.tabCount} ${styles.tabCountWarn}`}>
-                      {pendingCount}
-                    </span>
+                    <span className={`${styles.tabCount} ${styles.tabCountWarn}`}>{pendingCount}</span>
                   )}
                 </button>
-                <button
-                  className={`${styles.tab} ${activeTab === 'history' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('history'); if (editMode) cancelEdit(); }}
-                >
-                  History
-                </button>
-                <button
-                  className={`${styles.tab} ${activeTab === 'pay-rules' ? styles.tabActive : ''}`}
-                  onClick={() => { setActiveTab('pay-rules'); if (editMode) cancelEdit(); }}
-                >
-                  Pay Rules
-                </button>
+                <button className={`${styles.tab} ${activeTab === 'history' ? styles.tabActive : ''}`}
+                  onClick={() => { setActiveTab('history'); if (editMode) cancelEdit(); }}>History</button>
+                <button className={`${styles.tab} ${activeTab === 'pay-rules' ? styles.tabActive : ''}`}
+                  onClick={() => { setActiveTab('pay-rules'); if (editMode) cancelEdit(); }}>Pay Rules</button>
               </div>
 
-              {/* Tab panels */}
               <div className={styles.tabPanel}>
 
-                {/* ── Current Rates tab ─────────────────────────────────── */}
                 {activeTab === 'current' && (
                   <>
-                    {/* Future approved notice */}
-                    {futureCount > 0 && !editMode && (
-                      <div className={styles.section}>
-                        <div className={styles.sectionHead}>
-                          <span className={styles.sectionTitle}>Future Approved Rates</span>
-                          <span className={styles.futureBadge}>{futureCount} scheduled</span>
-                        </div>
-                        <FutureApprovedPanel driverId={matrix.driver_id} />
+                    <div className={styles.section}>
+                      <div className={styles.sectionHead}>
+                        <span className={styles.sectionTitle}>Pay Item Rates</span>
                       </div>
-                    )}
-
-                    {/* Required rates matrix */}
-                    {matrix.groups.length > 0 ? (
-                      <div className={styles.section}>
-                        <div className={styles.sectionHead}>
-                          <span className={styles.sectionTitle}>Required Rates</span>
-                        </div>
-                        {saveError && (
-                          <div className={styles.errBanner} style={{ margin: '0.75rem 1.25rem 0' }}>
-                            {saveError}
-                          </div>
-                        )}
+                      {saveError && (
+                        <div className={styles.errBanner} style={{ margin: '0.75rem 1.25rem 0' }}>{saveError}</div>
+                      )}
+                      {rows.length > 0 ? (
                         <table className={styles.rateTable}>
                           <thead>
-                            <tr>
-                              <th>Rate</th>
-                              <th>Amount</th>
-                              <th>Effective From</th>
-                              <th>Status</th>
-                            </tr>
+                            <tr><th>Pay Item</th><th>Amount</th><th>Effective From</th><th>Status</th></tr>
                           </thead>
                           <tbody>
-                            {matrix.groups.map((g) => {
-                              const gKey = groupKey(g);
+                            {rows.map((row) => {
+                              const key = targetKey(row);
                               return (
-                                <tr key={gKey}>
+                                <tr key={row.rate_definition_id}>
                                   <td>
-                                    <strong>{g.rate_name}</strong>
-                                    <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{g.pay_item_name}</div>
-                                    {g.pay_item_effective_from && g.pay_item_effective_from > new Date().toISOString().slice(0, 10) && (
+                                    <strong>{row.definition_name}</strong>
+                                    <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{row.definition_code}</div>
+                                    {row.future && (
                                       <div style={{ fontSize: '0.72rem', color: '#d97706', marginTop: '2px' }}>
-                                        Payroll active from {new Date(g.pay_item_effective_from + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                                        Next: {fmtAmount(row.future.amount, row.unit, currencyCode, currencyDigits)} from {row.future.effective_from}
                                       </div>
-                                    )}
-                                    {g.rate_behavior !== 'Flat' && (
-                                      <span className={styles.advancedBadge} title={`Rate behavior: ${g.rate_behavior}`}>
-                                        {g.rate_behavior === 'Block' ? 'Block' :
-                                         g.rate_behavior === 'OrdinalTier' ? 'Tiered' :
-                                         g.rate_behavior === 'RangeBracket' ? 'Bracket' :
-                                         g.rate_behavior === 'RangeProgressive' ? 'Progressive' : 'Advanced'}
-                                      </span>
                                     )}
                                   </td>
                                   <td>
                                     {editMode ? (
                                       <input
                                         className={styles.editInput}
-                                        type="number"
-                                        step="0.0001"
-                                        min="0"
-                                        placeholder="0.0000"
-                                        value={editRows[gKey]?.amount ?? ''}
-                                        onChange={(e) =>
-                                          setEditRows((prev) => ({
-                                            ...prev,
-                                            [gKey]: { ...prev[gKey], amount: e.target.value },
-                                          }))
-                                        }
+                                        type="number" step="0.0001" min="0" placeholder="0.0000"
+                                        value={editRows[key]?.amount ?? ''}
+                                        onChange={(e) => setEditField(key, 'amount', e.target.value)}
                                       />
-                                    ) : g.current_rate ? (
-                                      fmtAmount(g.current_rate.amount, g.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)
+                                    ) : row.current ? (
+                                      fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits)
                                     ) : (
                                       <span className={styles.missingText}>No rate set</span>
                                     )}
@@ -943,145 +730,190 @@ export function PayRatesPage() {
                                   <td>
                                     {editMode ? (
                                       <input
-                                        className={styles.editDateInput}
-                                        type="date"
-                                        value={editRows[gKey]?.effective_from ?? today()}
-                                        onChange={(e) =>
-                                          setEditRows((prev) => ({
-                                            ...prev,
-                                            [gKey]: { ...prev[gKey], effective_from: e.target.value },
-                                          }))
-                                        }
+                                        className={styles.editDateInput} type="date"
+                                        value={editRows[key]?.effective_from ?? today()}
+                                        onChange={(e) => setEditField(key, 'effective_from', e.target.value)}
                                       />
-                                    ) : g.current_rate ? (
-                                      g.current_rate.effective_from
-                                    ) : (
-                                      '—'
-                                    )}
+                                    ) : row.current ? row.current.effective_from : '—'}
                                   </td>
                                   <td>
-                                    {g.pending_rate && !editMode && (
-                                      <span className={styles.pendingBadge} style={{ marginRight: '0.4rem' }}>
-                                        Pending
-                                      </span>
+                                    {row.pending && !editMode && (
+                                      <span className={styles.pendingBadge} style={{ marginRight: '0.4rem' }}>Pending</span>
                                     )}
-                                    {!editMode && (
-                                      g.current_rate ? (
-                                        <span className={styles.okIcon}>&#10003;</span>
-                                      ) : (
-                                        <span className={styles.missingIcon}>&#9888;</span>
-                                      )
-                                    )}
-                                    {editMode && isDirty(gKey) && (
-                                      <span className={styles.pendingBadge}>Edited</span>
-                                    )}
+                                    {!editMode && (row.current
+                                      ? <span className={styles.okIcon}>&#10003;</span>
+                                      : <span className={styles.missingIcon}>&#9888;</span>)}
+                                    {editMode && isDirty(key) && <span className={styles.pendingBadge}>Edited</span>}
                                   </td>
                                 </tr>
                               );
                             })}
                           </tbody>
                         </table>
-
-                        {editMode && (
-                          <div className={styles.saveBar}>
-                            <button
-                              className={styles.btnPrimary}
-                              onClick={saveRates}
-                              disabled={saving || dirtyCount === 0}
-                            >
-                              {saving ? 'Saving...' : `Save ${dirtyCount} Change${dirtyCount !== 1 ? 's' : ''}`}
-                            </button>
-                            <button className={styles.btnSecondary} onClick={cancelEdit}>
-                              Cancel
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className={styles.section}>
+                      ) : (
                         <div className={styles.emptySection}>
-                          <p>This branch has no active rate items configured for driver rates.</p>
-                          {user !== null && canManageSettingsAdmin(user) ? (
-                            <p className={styles.emptySectionHint}>
-                              Go to <strong>Settings &gt; Pay Items</strong> to enable rate items for this branch.
-                            </p>
-                          ) : (
-                            <p className={styles.emptySectionHint}>
-                              Ask an admin to enable rate items for this branch.
-                            </p>
-                          )}
+                          <p>This branch has no active pay items that need a rate.</p>
+                          <p className={styles.emptySectionHint}>
+                            Pay items are activated per branch under <strong>Settings &gt; Pay Items</strong>.
+                          </p>
                         </div>
+                      )}
+                    </div>
+
+                    {(statusMatrix?.groups.length ?? 0) > 0 && (
+                      <div className={styles.section}>
+                        <div className={styles.sectionHead}>
+                          <span className={styles.sectionTitle}>Status Pay Rates</span>
+                        </div>
+                        <table className={styles.rateTable}>
+                          <thead>
+                            <tr><th>Rate</th><th>Amount</th><th>Effective From</th><th>Status</th></tr>
+                          </thead>
+                          <tbody>
+                            {statusMatrix!.groups.map((g) => {
+                              const key = statusKey(g);
+                              return (
+                                <tr key={g.group_key}>
+                                  <td><strong>{g.rate_name}</strong></td>
+                                  <td>
+                                    {editMode ? (
+                                      <input
+                                        className={styles.editInput}
+                                        type="number" step="0.0001" min="0" placeholder="0.0000"
+                                        value={editRows[key]?.amount ?? ''}
+                                        onChange={(e) => setEditField(key, 'amount', e.target.value)}
+                                      />
+                                    ) : g.current_rate ? (
+                                      fmtAmount(g.current_rate.amount, g.unit_name, currencyCode, currencyDigits)
+                                    ) : (
+                                      <span className={styles.missingText}>No rate set</span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    {editMode ? (
+                                      <input
+                                        className={styles.editDateInput} type="date"
+                                        value={editRows[key]?.effective_from ?? today()}
+                                        onChange={(e) => setEditField(key, 'effective_from', e.target.value)}
+                                      />
+                                    ) : g.current_rate ? g.current_rate.effective_from : '—'}
+                                  </td>
+                                  <td>
+                                    {g.pending_rate && !editMode && (
+                                      <span className={styles.pendingBadge} style={{ marginRight: '0.4rem' }}>Pending</span>
+                                    )}
+                                    {!editMode && (g.current_rate
+                                      ? <span className={styles.okIcon}>&#10003;</span>
+                                      : <span className={styles.missingIcon}>&#9888;</span>)}
+                                    {editMode && isDirty(key) && <span className={styles.pendingBadge}>Edited</span>}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {editMode && (
+                      <div className={styles.saveBar}>
+                        <button className={styles.btnPrimary} onClick={() => void saveRates(true)}
+                          disabled={saving || dirtyCount === 0}>
+                          {saving ? 'Saving...' : `Save & Approve ${dirtyCount} Change${dirtyCount !== 1 ? 's' : ''}`}
+                        </button>
+                        <button className={styles.btnSecondary} onClick={() => void saveRates(false)}
+                          disabled={saving || dirtyCount === 0}>
+                          Save as Pending
+                        </button>
+                        <button className={styles.btnSecondary} onClick={cancelEdit}>Cancel</button>
                       </div>
                     )}
                   </>
                 )}
 
-                {/* ── Pending Changes tab ───────────────────────────────── */}
                 {activeTab === 'pending' && (
                   <div className={styles.section}>
                     <div className={styles.sectionHead}>
                       <span className={styles.sectionTitle}>Pending Changes</span>
                     </div>
-                    {pendingActionError && (
-                      <div className={styles.actionErr}>{pendingActionError}</div>
-                    )}
-                    {loadingPending ? (
-                      <div className={styles.loading}>Loading pending rates...</div>
-                    ) : pendingRates.length === 0 ? (
-                      <div className={styles.emptySection}>
-                        No pending rate changes for this driver.
-                      </div>
+                    {pendingActionError && <div className={styles.actionErr}>{pendingActionError}</div>}
+                    {pendingCount === 0 ? (
+                      <div className={styles.emptySection}>No pending rate changes for this driver.</div>
                     ) : (
                       <table className={styles.rateTable}>
                         <thead>
                           <tr>
-                            <th>Rate Type</th>
-                            <th>Current</th>
-                            <th>Pending Amount</th>
-                            <th>Effective From</th>
+                            <th>Pay Item</th><th>Current</th><th>Pending Amount</th><th>Effective From</th>
                             {canEditMatrix && <th>Actions</th>}
                           </tr>
                         </thead>
                         <tbody>
-                          {pendingRates.map((r) => {
-                            // Look up current approved rate from matrix
-                            const matrixGroup = matrix.groups.find(
-                              (g) => g.rate_type_id === r.rate_type_id
-                            );
-                            const currentAmount = matrixGroup?.current_rate?.amount;
-                            const busy = actioningRateId === r.driver_rate_id;
+                          {pendingRows.map((row) => {
+                            const pending = row.pending!;
+                            const busy = actioningId === pending.driver_rate_assignment_id;
                             return (
-                              <tr key={r.driver_rate_id}>
+                              <tr key={pending.driver_rate_assignment_id}>
+                                <td><strong>{row.definition_name}</strong></td>
                                 <td>
-                                  <strong>{r.rate_name}</strong>
-                                  {r.notes && (
-                                    <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.notes}</div>
-                                  )}
-                                </td>
-                                <td>
-                                  {currentAmount
-                                    ? fmtAmount(currentAmount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)
+                                  {row.current
+                                    ? fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits)
                                     : <span className={styles.missingText}>No current rate</span>}
                                 </td>
                                 <td>
-                                  <strong>{fmtAmount(r.amount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)}</strong>
+                                  {pending.amount === null
+                                    ? <span className={styles.missingText}>Not set</span>
+                                    : <strong>{fmtAmount(pending.amount, row.unit, currencyCode, currencyDigits)}</strong>}
                                 </td>
-                                <td>{r.effective_from}</td>
+                                <td>{pending.effective_from}</td>
                                 {canEditMatrix && (
                                   <td>
                                     <div className={styles.actionBtns}>
-                                      <button
-                                        className={styles.btnApprove}
-                                        disabled={busy || actioningRateId != null}
-                                        onClick={() => void approveRate(r.driver_rate_id)}
-                                      >
+                                      <button className={styles.btnApprove}
+                                        disabled={busy || actioningId != null || pending.amount === null}
+                                        onClick={() => void runPendingAction(
+                                          pending.driver_rate_assignment_id,
+                                          () => approveAssignment(pending.driver_rate_assignment_id))}>
                                         {busy ? '…' : 'Approve'}
                                       </button>
-                                      <button
-                                        className={styles.btnVoid}
-                                        disabled={busy || actioningRateId != null}
-                                        onClick={() => void voidRate(r.driver_rate_id)}
-                                      >
+                                      <button className={styles.btnVoid}
+                                        disabled={busy || actioningId != null}
+                                        onClick={() => void runPendingAction(
+                                          pending.driver_rate_assignment_id,
+                                          () => discardAssignment(pending.driver_rate_assignment_id))}>
+                                        {busy ? '…' : 'Discard'}
+                                      </button>
+                                    </div>
+                                  </td>
+                                )}
+                              </tr>
+                            );
+                          })}
+                          {statusPending.map((g) => {
+                            const rate = g.pending_rate!;
+                            const busy = actioningId === rate.driver_rate_id;
+                            return (
+                              <tr key={`s${rate.driver_rate_id}`}>
+                                <td><strong>{g.rate_name}</strong> <span className={styles.statusBadge}>Status pay</span></td>
+                                <td>
+                                  {g.current_rate
+                                    ? fmtAmount(g.current_rate.amount, g.unit_name, currencyCode, currencyDigits)
+                                    : <span className={styles.missingText}>No current rate</span>}
+                                </td>
+                                <td><strong>{fmtAmount(rate.amount, g.unit_name, currencyCode, currencyDigits)}</strong></td>
+                                <td>{rate.effective_from}</td>
+                                {canEditMatrix && (
+                                  <td>
+                                    <div className={styles.actionBtns}>
+                                      <button className={styles.btnApprove} disabled={busy || actioningId != null}
+                                        onClick={() => void runPendingAction(
+                                          rate.driver_rate_id,
+                                          () => apiClient.post(`/payroll/rates/${rate.driver_rate_id}/approve`))}>
+                                        {busy ? '…' : 'Approve'}
+                                      </button>
+                                      <button className={styles.btnVoid} disabled={busy || actioningId != null}
+                                        onClick={() => void runPendingAction(
+                                          rate.driver_rate_id,
+                                          () => apiClient.delete(`/payroll/rates/${rate.driver_rate_id}`))}>
                                         {busy ? '…' : 'Void'}
                                       </button>
                                     </div>
@@ -1096,7 +928,6 @@ export function PayRatesPage() {
                   </div>
                 )}
 
-                {/* ── History tab ───────────────────────────────────────── */}
                 {activeTab === 'history' && (
                   <div className={styles.section}>
                     <div className={styles.sectionHead}>
@@ -1105,40 +936,37 @@ export function PayRatesPage() {
                     {loadingHistory ? (
                       <div className={styles.loading}>Loading history...</div>
                     ) : historyRows.length === 0 ? (
-                      <div className={styles.emptySection}>
-                        No rate history for this driver.
-                      </div>
+                      <div className={styles.emptySection}>No rate history for this driver.</div>
                     ) : (
                       <table className={styles.rateTable}>
                         <thead>
                           <tr>
-                            <th>Rate Type</th>
-                            <th>Amount</th>
-                            <th>Effective</th>
-                            <th>Status</th>
+                            <th>Pay Item</th><th>Amount</th><th>Effective</th><th>Status</th>
+                            {canEditMatrix && <th>Actions</th>}
                           </tr>
                         </thead>
                         <tbody>
                           {historyRows.map((r) => (
-                            <tr key={r.driver_rate_id}>
+                            <tr key={r.driver_rate_assignment_id}>
                               <td>
-                                <strong>{r.rate_name}</strong>
-                                {r.notes && (
-                                  <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.notes}</div>
+                                <strong>{r.definition_name}</strong>
+                                {r.void_reason && (
+                                  <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.void_reason}</div>
                                 )}
                               </td>
-                              <td>{fmtAmount(r.amount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)}</td>
-                              <td>
-                                {r.effective_from}
-                                {r.effective_to ? ` – ${r.effective_to}` : ''}
-                              </td>
-                              <td>
-                                {isFutureApproved(r) ? (
-                                  <span className={styles.badgeFuture}>Future Approved</span>
-                                ) : (
-                                  <span className={statusBadgeClass(r.status)}>{r.status}</span>
-                                )}
-                              </td>
+                              <td>{fmtAmount(r.values[0]?.amount ?? null, r.unit, currencyCode, currencyDigits)}</td>
+                              <td>{r.effective_from}{r.effective_to ? ` – ${r.effective_to}` : ''}</td>
+                              <td><span className={statusBadgeClass(r.status)}>{r.status}</span></td>
+                              {canEditMatrix && (
+                                <td>
+                                  {(r.status === 'Approved' || r.status === 'Superseded') && (
+                                    <button className={styles.btnVoid}
+                                      onClick={() => { setVoidTarget(r); setVoidReason(''); setVoidError(''); }}>
+                                      Void
+                                    </button>
+                                  )}
+                                </td>
+                              )}
                             </tr>
                           ))}
                         </tbody>
@@ -1403,131 +1231,35 @@ export function PayRatesPage() {
 
               </div>
 
-              {/* ── Copy Rates modal ────────────────────────────────────── */}
-              {copyModalOpen && (
-                <div className={styles.modalOverlay} onClick={() => setCopyModalOpen(false)}>
-                  <div className={styles.modal} onClick={e => e.stopPropagation()}>
+              {voidTarget && (
+                <div className={styles.modalOverlay} onClick={() => { if (!voiding) setVoidTarget(null); }}>
+                  <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
                     <div className={styles.modalHead}>
-                      <strong>Copy rates from another driver</strong>
-                      <button className={styles.modalClose} onClick={() => setCopyModalOpen(false)}>✕</button>
+                      <strong>Void rate</strong>
+                      <button className={styles.modalClose} onClick={() => setVoidTarget(null)} disabled={voiding}>✕</button>
                     </div>
                     <div className={styles.modalBody}>
                       <p className={styles.modalDesc}>
-                        Copies current <strong>Approved</strong> rates from the selected source driver
-                        to <strong>{matrix.driver_name}</strong>. Only rates valid for this driver&apos;s
-                        branch are copied.
+                        Voiding the {voidTarget.status} rate for <strong>{voidTarget.definition_name}</strong>{' '}
+                        ({voidTarget.effective_from}) removes it from rate resolution. It is kept as history.
                       </p>
-
-                      <label className={styles.formLabel}>Source driver</label>
-                      <select
-                        className={styles.sel}
-                        value={copySourceDriverId ?? ''}
-                        onChange={e => setCopySourceDriverId(e.target.value ? Number(e.target.value) : null)}
-                      >
-                        <option value="">— Select a driver —</option>
-                        {drivers
-                          .filter(d => d.driver_id !== matrix.driver_id)
-                          .map(d => (
-                            <option key={d.driver_id} value={d.driver_id}>
-                              {d.full_name} ({d.driver_code ?? 'no code'}) · {d.branch_name}
-                            </option>
-                          ))}
-                      </select>
-
-                      <label className={styles.formLabel} style={{ marginTop: '0.75rem' }}>Effective from</label>
-                      <input
-                        type="date"
-                        className={styles.editDateInput}
-                        value={copyEffectiveFrom}
-                        onChange={e => setCopyEffectiveFrom(e.target.value)}
-                      />
-
-                      <label className={styles.formCheckLabel} style={{ marginTop: '0.75rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={copyIncludeRules}
-                          onChange={e => setCopyIncludeRules(e.target.checked)}
-                        />
-                        &nbsp;Include MinimumPay / MaximumPay rules
-                      </label>
-
-                      {copyError && <div className={styles.actionErr}>{copyError}</div>}
-
-                      {copyResult && (
-                        <div className={styles.copySuccess}>
-                          ✓ Copied {copyResult.rates_copied} rate{copyResult.rates_copied !== 1 ? 's' : ''}
-                          {copyResult.rates_approved > 0 && ` (${copyResult.rates_approved} approved)`}
-                          {copyResult.rates_pending > 0 && ` (${copyResult.rates_pending} pending approval)`}
-                          {copyResult.pay_rules_copied > 0 && `, ${copyResult.pay_rules_copied} rule${copyResult.pay_rules_copied !== 1 ? 's' : ''}`}
-                        </div>
-                      )}
+                      <label className={styles.formLabel} htmlFor="void-reason">Reason</label>
+                      <input id="void-reason" className={styles.editInput} style={{ width: '100%' }} type="text"
+                        value={voidReason} onChange={(e) => setVoidReason(e.target.value)} disabled={voiding} />
+                      {voidError && <div className={styles.actionErr}>{voidError}</div>}
                     </div>
                     <div className={styles.modalFoot}>
-                      <button
-                        className={styles.btnPrimary}
-                        disabled={!copySourceDriverId || !copyEffectiveFrom || copying || !canCopyRates}
-                        onClick={() => void copyFromDriver()}
-                      >
-                        {copying ? 'Copying…' : 'Copy Rates'}
-                      </button>
-                      <button className={styles.btnSecondary} onClick={() => setCopyModalOpen(false)}>
-                        {copyResult ? 'Close' : 'Cancel'}
-                      </button>
+                      <button className={styles.btnPrimary} disabled={voiding || !voidReason.trim()}
+                        onClick={() => void executeVoid()}>{voiding ? 'Voiding…' : 'Void Rate'}</button>
+                      <button className={styles.btnSecondary} onClick={() => setVoidTarget(null)} disabled={voiding}>Cancel</button>
                     </div>
                   </div>
                 </div>
               )}
             </div>
-          ) : null}
+          )}
         </div>
       </div>
     </div>
-  );
-}
-
-// ── Future Approved Panel ─────────────────────────────────────────────────────
-
-/**
- * Loads the driver's history and shows only future-dated Approved rates.
- * Used in the Current Rates tab when futureCount > 0.
- */
-function FutureApprovedPanel({ driverId }: { driverId: number }) {
-  const { user } = useAuth();
-  const [rows, setRows] = useState<DriverRateRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    void apiClient
-      .get(`/payroll/drivers/${driverId}/rates/history`)
-      .then((res) => {
-        const data = res.data as DriverRateRecord[];
-        setRows(data.filter(isFutureApproved));
-      })
-      .catch(() => setRows([]))
-      .finally(() => setLoading(false));
-  }, [driverId]);
-
-  if (loading) return <div className={styles.loading}>Loading...</div>;
-  if (rows.length === 0) return null;
-
-  return (
-    <table className={styles.rateTable}>
-      <thead>
-        <tr>
-          <th>Rate Type</th>
-          <th>Amount</th>
-          <th>Effective From</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.driver_rate_id}>
-            <td><strong>{r.rate_name}</strong></td>
-            <td>{fmtAmount(r.amount, r.unit_name, user?.currency_code ?? null, user?.currency_minor_unit_digits ?? null)}</td>
-            <td>{r.effective_from}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
   );
 }

@@ -16,6 +16,8 @@ import pytest
 from tests.access_test_helpers import create_neutral_test_user
 from tests.builders.workforce import create_driver_employee_record
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

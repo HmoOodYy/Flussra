@@ -51,6 +51,8 @@ from sqlalchemy import text as _text
 from tests.access_test_helpers import create_neutral_test_user
 from tests.ownership import CleanupRunner, delete_driver_and_residue, delete_period_and_children
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 _PERIOD_CODE_PREFIX = "P4CP4B-"
 PERIOD_START = "2199-02-03"
 PERIOD_END = "2199-02-09"

@@ -11,7 +11,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response
 
-from app.compensation import assignments, definitions, resolver
+from app.compensation import assignments, branch_config, definitions, resolver
 from app.compensation.errors import CompensationOwnershipError, compensation_error
 from app.compensation.guards import load_company_driver_branch, require_rate_read
 from app.compensation.schemas import (
@@ -20,6 +20,12 @@ from app.compensation.schemas import (
     AssignmentUpdate,
     AssignmentValuesReplace,
     AssignmentVoid,
+    BranchConfigUpdate,
+    BranchConfigVersion,
+    BranchPayDefinitionState,
+    BulkBranchConfigResult,
+    BulkBranchConfigUpdate,
+    DriverPayRateRow,
     DriverRateSummaryItem,
     PayDefinitionDirectCreate,
     PayDefinitionRequestCreate,
@@ -135,9 +141,12 @@ async def create_pay_definition(
 
 @router.get("/pay-definitions", response_model=list[PayDefinitionSummary],
             summary="List Company PayDefinitions")
-async def list_pay_definitions(token: TokenDep, db: DbDep) -> list[PayDefinitionSummary]:
+async def list_pay_definitions(
+    token: TokenDep, db: DbDep, include_retired: bool = Query(True),
+) -> list[PayDefinitionSummary]:
     company_id, user_id = _ids(token)
-    return await definitions.list_definitions(company_id, user_id, db)
+    return await definitions.list_definitions(
+        company_id, user_id, db, include_retired=include_retired)
 
 
 @router.get("/pay-definitions/{pay_definition_id}", response_model=PayDefinitionSummary,
@@ -147,6 +156,63 @@ async def get_pay_definition(
 ) -> PayDefinitionSummary:
     company_id, user_id = _ids(token)
     return await definitions.get_definition(company_id, user_id, pay_definition_id, db)
+
+
+@router.post("/pay-definitions/{pay_definition_id}/retire", response_model=PayDefinitionSummary,
+             summary="Retire a Company PayDefinition without deleting any history")
+async def retire_pay_definition(
+    token: TokenDep, db: DbDep, pay_definition_id: int,
+) -> PayDefinitionSummary:
+    company_id, user_id = _ids(token)
+    return await definitions.retire_definition(company_id, user_id, pay_definition_id, db)
+
+
+# ---------------------------------------------------------------------------
+# Branch applicability
+# ---------------------------------------------------------------------------
+
+@router.get("/branches/{branch_id}/pay-definitions",
+            response_model=list[BranchPayDefinitionState],
+            summary="Company PayDefinitions with their applicability to one Branch")
+async def list_branch_pay_definitions(
+    token: TokenDep, db: DbDep, branch_id: int,
+) -> list[BranchPayDefinitionState]:
+    company_id, user_id = _ids(token)
+    return await branch_config.list_branch_definitions(company_id, user_id, branch_id, db)
+
+
+@router.patch("/branches/{branch_id}/pay-definitions/{pay_definition_id}",
+              response_model=BranchPayDefinitionState,
+              summary="Set a PayDefinition's applicability to one Branch")
+async def update_branch_pay_definition(
+    token: TokenDep, db: DbDep, branch_id: int, pay_definition_id: int,
+    body: BranchConfigUpdate,
+) -> BranchPayDefinitionState:
+    company_id, user_id = _ids(token)
+    return await branch_config.update_branch_config(
+        company_id, user_id, branch_id, pay_definition_id, body, db)
+
+
+@router.get("/branches/{branch_id}/pay-definitions/{pay_definition_id}/history",
+            response_model=list[BranchConfigVersion],
+            summary="Applicability version history of a PayDefinition in one Branch")
+async def branch_pay_definition_history(
+    token: TokenDep, db: DbDep, branch_id: int, pay_definition_id: int,
+) -> list[BranchConfigVersion]:
+    company_id, user_id = _ids(token)
+    return await branch_config.config_history(
+        company_id, user_id, branch_id, pay_definition_id, db)
+
+
+@router.patch("/pay-definitions/{pay_definition_id}/branch-config",
+              response_model=BulkBranchConfigResult,
+              summary="Set a PayDefinition's applicability across several Branches atomically")
+async def bulk_update_branch_pay_definition(
+    token: TokenDep, db: DbDep, pay_definition_id: int, body: BulkBranchConfigUpdate,
+) -> BulkBranchConfigResult:
+    company_id, user_id = _ids(token)
+    return await branch_config.bulk_update_branch_config(
+        company_id, user_id, pay_definition_id, body, db)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +279,15 @@ async def discard_assignment(token: TokenDep, db: DbDep, assignment_id: int) -> 
     company_id, user_id = _ids(token)
     await assignments.discard(company_id, user_id, assignment_id, db)
     return Response(status_code=204)
+
+
+@router.get("/drivers/{driver_id}/pay-rates", response_model=list[DriverPayRateRow],
+            summary="Branch-applicable PayDefinitions and the Driver's scalar rate state")
+async def driver_pay_rates(
+    token: TokenDep, db: DbDep, driver_id: int, as_of: date | None = Query(None),
+) -> list[DriverPayRateRow]:
+    company_id, user_id = _ids(token)
+    return await assignments.driver_pay_rates(company_id, user_id, driver_id, as_of, db)
 
 
 @router.get("/drivers/{driver_id}/rate-definitions/{rate_definition_id}/assignments",

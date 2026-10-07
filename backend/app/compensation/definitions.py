@@ -19,6 +19,8 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.policy import require_non_driver_subject
+from app.compensation.audit import write_audit
+from app.compensation.branch_config import apply_config
 from app.compensation.errors import compensation_error, translate_database_error
 from app.compensation.guards import (
     require_definition_branch_edit,
@@ -475,6 +477,12 @@ async def _approve_request(
          "submitter": row["submitted_by_user_id"], "submitted_at": row["submitted_at_utc"],
          "uid": user_id, "gv": GOVERNANCE_SCHEMA_VERSION, "mv": CALCULATION_METHOD_VERSION},
     )
+    today = (await db.execute(
+        text("SELECT core.fn_CompanyToday(:cid)"), {"cid": company_id})).scalar_one()
+    await apply_config(
+        db, company_id=company_id, branch_id=row["requesting_branch_id"],
+        pay_definition_id=pay_definition_id, user_id=user_id, is_active=True, notes=None,
+        effective_from=today)
     await _insert_event(
         db, request_id, "Approved", "PendingCompanyApproval", "Approved", user_id,
         revision, data.reason)
@@ -599,12 +607,46 @@ async def get_definition(
 
 
 async def list_definitions(
-    company_id: int, user_id: int, db: AsyncConnection,
+    company_id: int, user_id: int, db: AsyncConnection, *, include_retired: bool = True,
 ) -> list[PayDefinitionSummary]:
     await require_definition_company_read(company_id, user_id, db)
     ids = (await db.execute(
         text("SELECT paydefinitionid FROM payroll.paydefinitions "
-             "WHERE companyid = :cid ORDER BY paydefinitionid"),
-        {"cid": company_id},
+             "WHERE companyid = :cid AND (:include_retired OR status <> 'Retired') "
+             "ORDER BY lower(definitionname), definitioncode, paydefinitionid"),
+        {"cid": company_id, "include_retired": include_retired},
     )).scalars().all()
     return [await _load_definition(company_id, int(i), db) for i in ids]
+
+
+async def retire_definition(
+    company_id: int, user_id: int, pay_definition_id: int, db: AsyncConnection,
+) -> PayDefinitionSummary:
+    """Retire a PayDefinition. Nothing is deleted: structure, provenance, rate
+    assignments and branch configuration history are preserved."""
+    await require_definition_company_edit(company_id, user_id, db)
+    row = (await db.execute(
+        text("""
+            SELECT status FROM payroll.paydefinitions
+            WHERE  paydefinitionid = :pid AND companyid = :cid
+            FOR UPDATE
+        """),
+        {"pid": pay_definition_id, "cid": company_id},
+    )).mappings().first()
+    if row is None:
+        raise compensation_error("DEFINITION_NOT_FOUND", "PayDefinition not found.", 404)
+    if row["status"] != "Retired":
+        await db.execute(
+            text("""
+                UPDATE payroll.paydefinitions
+                SET    status = 'Retired', updatedbyuserid = :uid, updatedatutc = now()
+                WHERE  paydefinitionid = :pid
+            """),
+            {"uid": user_id, "pid": pay_definition_id},
+        )
+        await write_audit(
+            db, company_id=company_id, branch_id=None, user_id=user_id,
+            action_code="PAY_DEFINITION_RETIRED", entity_name="PayDefinitions",
+            entity_id=str(pay_definition_id), old_value={"status": row["status"]},
+            new_value={"status": "Retired"})
+    return await _load_definition(company_id, pay_definition_id, db)

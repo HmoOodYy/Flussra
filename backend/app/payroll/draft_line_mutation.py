@@ -122,10 +122,10 @@ async def _validate_line_type(
           2. Informational-only items (DailyStatus, DailyNote) accepted without
              any DB checks — they have no PayItems catalog row.
           3. CP-2C: if period_id is supplied and PayrollPeriodPayItems rows exist,
-             validate against the snapshot instead of live BranchPayItemConfig.
+             validate against the snapshot instead of the live default flag.
           4. DB lookup — both system and custom.
           5. Retired / non-Daily-scope guards.
-          6. Branch activation (BranchPayItemConfig LEFT JOIN + COALESCE fallback).
+          6. Branch activation (PayItems.IsDefaultBranchActive).
           7. Rate-type mapping (from PayItemRateTypeMap).
 
     Raises HTTP 422 for any invalid condition.
@@ -144,7 +144,7 @@ async def _validate_line_type(
 
     # ── 3. CP-2C: snapshot-first validation ───────────────────────────── #
     # When period_id is provided and PayrollPeriodPayItems rows exist, validate
-    # against the frozen snapshot rather than live BranchPayItemConfig.
+    # against the frozen snapshot rather than the live default flag.
     if period_id is not None:
         snap_result = await db.execute(
             text("""
@@ -257,32 +257,8 @@ async def _validate_line_type(
             ),
         )
 
-    # ── 5. Branch activation — LEFT JOIN + COALESCE fallback ──────────── #
-    cfg_result = await db.execute(
-        text("""
-            SELECT isactive
-            FROM   payroll.branchpayitemconfig
-            WHERE  payitemid      = :piid
-              AND  companyid      = :cid
-              AND  branchid       = :bid
-              AND  effectivefrom <= :dt
-              AND  (effectiveto IS NULL OR effectiveto >= :dt)
-            ORDER BY effectivefrom DESC
-            LIMIT 1
-        """),
-        {
-            "piid": pi_row["payitemid"],
-            "cid":  company_id,
-            "bid":  branch_id,
-            "dt":   as_of_date,
-        },
-    )
-    cfg_row = cfg_result.mappings().first()
-
-    if cfg_row is not None:
-        is_active = bool(cfg_row["isactive"])
-    else:
-        is_active = bool(pi_row["isdefaultbranchactive"])
+    # ── 5. Branch activation — legacy items use the PayItems default flag ── #
+    is_active = bool(pi_row["isdefaultbranchactive"])
 
     if not is_active:
         raise HTTPException(

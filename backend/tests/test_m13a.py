@@ -26,7 +26,10 @@ import uuid
 from decimal import Decimal
 
 import httpx
+import pytest
 import pytest_asyncio
+
+pytestmark = pytest.mark.pre_cutover_legacy
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -382,42 +385,6 @@ class TestM13aValidation:
         )
         assert resp.status_code == 422
         assert "not active" in resp.json()["detail"].lower()
-
-    async def test_retired_custom_item_rejected(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        m13_open_period: dict, paytest_driver_id: int,
-        db_conn,
-    ):
-        """
-        A retired custom item code → 422 'retired'.
-
-        A fresh item is seeded and retired so the test is self-contained.
-        """
-        from tests.seed_helpers import seed_cdpi_item
-
-        item_id = await seed_cdpi_item(
-            db_conn,
-            code="M13A_RETD",
-            name="Retire Me (M13 test)",
-            unit="Unit",
-            category="Count",
-        )
-
-        del_resp = await session_client.delete(
-            f"/settings/pay-items/{item_id}", headers=auth(auth_token)
-        )
-        assert del_resp.json()["status"] == "Retired"
-
-        # Now try to use the retired code as a line type
-        pid = m13_open_period["payroll_period_id"]
-        resp = await session_client.post(
-            f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                  "line_type": "M13A_RETD", "quantity": "1.00"},
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "retired" in resp.json()["detail"].lower()
 
     async def test_work_date_used_for_active_check(
         self, session_client: httpx.AsyncClient, auth_token: str,
@@ -1267,167 +1234,7 @@ class TestM13bRegressionFixes:
 
     # ── Issue 7: update with retired/inactive custom item fails ──────────── #
 
-    async def test_update_line_with_retired_item_fails_clearly(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        m13_open_period: dict, paytest_branch_id: int, paytest_driver_id: int,
-        m13_daily_item: dict, m13_no_rates, db_conn,
-    ):
-        """
-        After a custom pay item is retired, updating a draft line that uses
-        it must return 422 ('retired') rather than silently succeeding.
-
-        Issue 6 fix: the activation PATCH now correctly uses paytest_branch_id
-        (not paytest_driver_id, which is a driver ID, not a branch ID).
-        Issue 4 fix: all updates (quantity, notes, status) trigger revalidation.
-        """
-        from tests.seed_helpers import seed_cdpi_item
-
-        pid = m13_open_period["payroll_period_id"]
-
-        # Seed a fresh item to retire (avoid touching session-scoped M13A_STOP).
-        retire_id = await seed_cdpi_item(
-            db_conn,
-            code="M13A_RETIRE2",
-            name="Retire Me 2 (M13 test)",
-            unit="Unit",
-            category="Count",
-        )
-
-        # Issue 6 fix: use paytest_branch_id (branch ID), not paytest_driver_id.
-        act_resp = await session_client.patch(
-            f"/settings/branches/{paytest_branch_id}/pay-items/{retire_id}",
-            json={"is_active": True}, headers=auth(auth_token),
-        )
-        assert act_resp.status_code == 200, (
-            f"Activate M13A_RETIRE2 on PAYTEST failed: {act_resp.text}"
-        )
-
-        # Add a line using the newly activated item.
-        add_resp = await session_client.post(
-            f"/payroll/periods/{pid}/lines",
-            json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                  "line_type": "M13A_RETIRE2", "quantity": "2.00"},
-            headers=auth(auth_token),
-        )
-        assert add_resp.status_code == 201, (
-            f"Add line using M13A_RETIRE2 failed: {add_resp.text}"
-        )
-        line_id = add_resp.json()["draft_line_id"]
-
-        # Retire M13A_RETIRE2 through the lifecycle endpoint.
-        del_resp = await session_client.delete(
-            f"/settings/pay-items/{retire_id}", headers=auth(auth_token)
-        )
-        assert del_resp.json()["status"] == "Retired"
-
-        # Verify item is now Retired.
-        get_resp = await session_client.get(
-            f"/settings/pay-items/{retire_id}", headers=auth(auth_token)
-        )
-        assert get_resp.json()["status"] == "Retired"
-
-        # Quantity update → must fail with 422 'retired'
-        qty_resp = await session_client.patch(
-            f"/payroll/periods/{pid}/lines/{line_id}",
-            json={"quantity": "5.00"},
-            headers=auth(auth_token),
-        )
-        assert qty_resp.status_code == 422
-        assert "retired" in qty_resp.json()["detail"].lower()
-
-        # Notes-only update → must ALSO fail with 422 (Issue 4: all updates revalidate)
-        notes_resp = await session_client.patch(
-            f"/payroll/periods/{pid}/lines/{line_id}",
-            json={"notes": "just a note"},
-            headers=auth(auth_token),
-        )
-        assert notes_resp.status_code == 422, (
-            "Notes-only update on a line with a retired item should fail "
-            f"(got {notes_resp.status_code}: {notes_resp.text})"
-        )
-        assert "retired" in notes_resp.json()["detail"].lower()
-
     # ── Issue 5+8: custom item with PayItemRateTypeMap calculates correctly ─ #
-
-    async def test_custom_perunit_item_with_rate_map_calculates(
-        self, session_client: httpx.AsyncClient, auth_token: str,
-        m13_open_period: dict, paytest_driver_id: int, paytest_branch_id: int,
-        paytest_rate_type_id: int, db_conn,
-    ):
-        """
-        A custom Daily PerUnit item with a PayItemRateTypeMap entry and an
-        approved driver rate for that rate type produces a correct calculatedamount.
-
-        Flow:
-          1. Seed custom item M13A_MAPPED (PerUnit, Daily)
-          2. Activate it on PAYTEST
-          3. Map rate type HOURLY to the item (PayItemRateTypeMap)
-          4. Approve an HOURLY driver rate $25.00 (effective from 2032-01-01)
-          5. Add a draft line: qty=4 → calculatedamount must be 4 × 25 = 100.0000
-        """
-        from tests.seed_helpers import seed_cdpi_item
-        await _void_all_rates(session_client, auth_token)
-        item_id = None
-        try:
-            # 1. Seed custom item
-            item_id = await seed_cdpi_item(
-                db_conn,
-                code="M13A_MAPPED",
-                name="Mapped Stop (M13 test)",
-                unit="Stop",
-                category="Count",
-            )
-
-            # 2. Activate on PAYTEST
-            act_resp = await session_client.patch(
-                f"/settings/branches/{paytest_branch_id}/pay-items/{item_id}",
-                json={"is_active": True},
-                headers=auth(auth_token),
-            )
-            assert act_resp.status_code == 200, f"activate: {act_resp.text}"
-
-            # 3. Map rate type HOURLY (the structure CDPI creation produces)
-            from tests.seed_helpers import map_rate_type_to_item
-            await map_rate_type_to_item(
-                db_conn, item_id=item_id, rate_type_id=paytest_rate_type_id
-            )
-
-            # 4. Approve driver rate $25.00 effective 2032-01-01
-            rate_resp = await session_client.post(
-                "/payroll/rates",
-                json={"driver_id": paytest_driver_id,
-                      "rate_type_id": paytest_rate_type_id,
-                      "amount": "25.00", "effective_from": "2032-01-01"},
-                headers=auth(auth_token),
-            )
-            assert rate_resp.status_code == 201
-            rate_id = rate_resp.json()["driver_rate_id"]
-            approve_resp = await session_client.post(
-                f"/payroll/rates/{rate_id}/approve", headers=auth(auth_token)
-            )
-            assert approve_resp.status_code == 200
-
-            # 5. Add draft line: qty=4 → 4 × 25 = 100.00
-            pid = m13_open_period["payroll_period_id"]
-            line_resp = await session_client.post(
-                f"/payroll/periods/{pid}/lines",
-                json={"driver_id": paytest_driver_id, "work_date": "2032-03-07",
-                      "line_type": "M13A_MAPPED", "quantity": "4.00"},
-                headers=auth(auth_token),
-            )
-            assert line_resp.status_code == 201, f"line add: {line_resp.text}"
-            body = line_resp.json()
-            assert body["calculated_amount"] is not None, "calculatedamount should not be NULL"
-            assert Decimal(str(body["calculated_amount"])) == Decimal("100.0000")
-            assert body["needs_manager_review"] is False
-
-        finally:
-            await _void_all_rates(session_client, auth_token)
-            if item_id is not None:
-                cleanup = await session_client.delete(
-                    f"/settings/pay-items/{item_id}", headers=auth(auth_token)
-                )
-                assert cleanup.status_code == 200, cleanup.text
 
     # ── Issue 3: prevent silent zero finalization ─────────────────────────── #
 

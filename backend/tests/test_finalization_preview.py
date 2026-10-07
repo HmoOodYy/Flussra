@@ -32,6 +32,8 @@ from tests.builders.access import (
     get_company_role_id,
 )
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_branch_id(session_db_conn) -> int:

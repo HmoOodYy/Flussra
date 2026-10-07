@@ -34,12 +34,14 @@ from app.compensation.guards import (
     require_rate_read,
 )
 from app.compensation.schemas import (
+    AssignmentBrief,
     AssignmentCreate,
     AssignmentSummary,
     AssignmentUpdate,
     AssignmentValue,
     AssignmentValuesReplace,
     AssignmentVoid,
+    DriverPayRateRow,
     DriverRateSummaryItem,
 )
 from app.payroll.guards import _check_not_in_finalized_period
@@ -492,3 +494,80 @@ async def driver_summary(
     )).mappings().all()
     return [DriverRateSummaryItem.model_validate(dict(row)) for row in rows]
 
+
+
+async def driver_pay_rates(
+    company_id: int, user_id: int, driver_id: int, as_of: date | None, db: AsyncConnection,
+) -> list[DriverPayRateRow]:
+    """Branch-applicable scalar PayDefinitions and the Driver's rate state for each.
+
+    A definition is listed when it is Active and its Branch configuration is
+    active on the reference date. Rates are configuration only; nothing is
+    calculated here.
+    """
+    branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
+    await require_rate_read(company_id, user_id, branch_id, db)
+    reference = as_of or (await db.execute(
+        text("SELECT core.fn_CompanyToday(:cid)"), {"cid": company_id})).scalar_one()
+
+    definitions = (await db.execute(
+        text("""
+            SELECT pd.paydefinitionid AS pay_definition_id, pd.definitioncode AS definition_code,
+                   pd.definitionname AS definition_name, pd.inputtype AS input_type,
+                   pd.unit AS unit, rd.ratedefinitionid AS rate_definition_id,
+                   c.ratecomponentdefinitionid AS rate_component_definition_id
+            FROM   payroll.paydefinitions pd
+            JOIN   payroll.ratedefinitions rd
+                   ON rd.paydefinitionid = pd.paydefinitionid AND rd.shape = 'Scalar'
+            JOIN   payroll.ratecomponentdefinitions c
+                   ON c.ratedefinitionid = rd.ratedefinitionid AND c.sequenceno = 1
+            WHERE  pd.companyid = :cid AND pd.status = 'Active'
+              AND  EXISTS (
+                       SELECT 1 FROM payroll.branchpayitemconfig bpic
+                       WHERE  bpic.companyid = :cid AND bpic.branchid = :bid
+                         AND  bpic.paydefinitionid = pd.paydefinitionid
+                         AND  bpic.isactive
+                         AND  bpic.effectivefrom <= :asof
+                         AND  (bpic.effectiveto IS NULL OR bpic.effectiveto >= :asof))
+            ORDER  BY lower(pd.definitionname), pd.definitioncode, pd.paydefinitionid
+        """),
+        {"cid": company_id, "bid": branch_id, "asof": reference},
+    )).mappings().all()
+    if not definitions:
+        return []
+
+    assignment_rows = (await db.execute(
+        text("""
+            SELECT a.ratedefinitionid AS rate_definition_id,
+                   a.driverrateassignmentid AS driver_rate_assignment_id, a.status,
+                   a.effectivefrom AS effective_from, a.effectiveto AS effective_to,
+                   v.amount AS amount
+            FROM   payroll.driverrateassignments a
+            LEFT JOIN payroll.driverratevalues v
+                   ON v.driverrateassignmentid = a.driverrateassignmentid
+            WHERE  a.companyid = :cid AND a.driverid = :did
+              AND  a.ratedefinitionid = ANY(:rids) AND a.status <> 'Voided'
+            ORDER  BY a.effectivefrom, a.driverrateassignmentid
+        """),
+        {"cid": company_id, "did": driver_id,
+         "rids": [d["rate_definition_id"] for d in definitions]},
+    )).mappings().all()
+    by_definition: dict[int, list[AssignmentBrief]] = {}
+    for row in assignment_rows:
+        by_definition.setdefault(row["rate_definition_id"], []).append(
+            AssignmentBrief.model_validate(
+                {key: row[key] for key in AssignmentBrief.model_fields}))
+
+    result = []
+    for definition in definitions:
+        briefs = by_definition.get(definition["rate_definition_id"], [])
+        current = next(
+            (b for b in briefs
+             if b.status in ("Approved", "Superseded") and b.effective_from <= reference
+             and (b.effective_to is None or b.effective_to >= reference)), None)
+        future = next(
+            (b for b in briefs if b.status == "Approved" and b.effective_from > reference), None)
+        pending = next((b for b in briefs if b.status == "Pending"), None)
+        result.append(DriverPayRateRow(
+            **dict(definition), current=current, future=future, pending=pending))
+    return result

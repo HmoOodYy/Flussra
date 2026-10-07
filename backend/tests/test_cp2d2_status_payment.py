@@ -27,7 +27,9 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+from tests.builders.owned_scope import create_owned_branch
+
+pytestmark = pytest.mark.pre_cutover_legacy
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -225,7 +227,6 @@ async def cp2d2_branch_id(
 ) -> int:
     """Module-owned branch: this module recycles its Open slot on every test."""
     branch_id = await create_owned_branch(session_db_conn, "C2D2", "CP2D2 owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 

@@ -8,7 +8,6 @@ from fastapi.responses import JSONResponse
 
 from app.admin.router import router as admin_router
 from app.auth.router import router as auth_router
-from app.cdpi.router import router as cdpi_router
 from app.compensation.router import router as compensation_router
 from app.config import get_settings
 from app.core.router import router as core_router
@@ -111,6 +110,5 @@ def create_app() -> FastAPI:
         transfer_router, prefix="/driver-transfers", tags=["DriverTransfer"]
     )
     app.include_router(workforce_router, prefix="/workforce", tags=["Workforce"])
-    app.include_router(cdpi_router, prefix="/settings/cdpi", tags=["CDPI"])
     app.include_router(compensation_router, prefix="/compensation", tags=["Compensation"])
     return app

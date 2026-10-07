@@ -31,6 +31,8 @@ from sqlalchemy import text
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 from tests.seed_helpers import attach_cdpi_owner
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1264,15 +1266,10 @@ class TestStaleRetirementRace:
         pid = await _create_open_period(direct_db, paytest_branch_id)
 
         try:
-            # Activate the custom item on the branch so API validation passes.
+            # Activate the custom item so API validation passes.
             await direct_db.execute(
-                text("""
-                    INSERT INTO payroll.branchpayitemconfig
-                        (payitemid, companyid, branchid, isactive, effectivefrom, createdbyuserid)
-                    VALUES (:iid, :cid, :bid, TRUE, '2000-01-01', :uid)
-                    ON CONFLICT DO NOTHING
-                """),
-                {"iid": iid, "cid": cid, "bid": paytest_branch_id, "uid": uid},
+                text("UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :iid"),
+                {"iid": iid},
             )
 
             lock_held    = threading.Event()  # psycopg2 thread holds PayItem FOR UPDATE

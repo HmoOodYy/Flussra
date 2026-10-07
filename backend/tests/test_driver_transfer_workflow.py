@@ -38,7 +38,6 @@ from sqlalchemy import text as _text
 
 from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.builders.owned_scope import (
-    activate_paytest_equivalent_items,
     create_owned_branch,
 )
 from tests.builders.workforce import create_driver_employee_record
@@ -50,7 +49,6 @@ async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
     """Module-owned branch standing in for PAYTEST: this module's workflow state
     (periods it submits, approves or leaves behind) never reaches another module."""
     branch_id = await create_owned_branch(session_db_conn, "DTW", "DTW owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 

@@ -39,6 +39,8 @@ from app.payroll.calculation.per_unit import (
 )
 from app.payroll.service import _compute_calculated_amount
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # 1. Pure-core tests (no database)
 # ---------------------------------------------------------------------------

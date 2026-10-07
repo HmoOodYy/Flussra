@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -38,6 +39,8 @@ from app.payroll_setup.payroll_policy import (
     publish_version,
 )
 from tests.builders.company import create_branch
+
+pytestmark = pytest.mark.pre_cutover_legacy
 
 # ---------------------------------------------------------------------------
 # Module-level helpers

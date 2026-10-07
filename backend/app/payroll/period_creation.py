@@ -61,6 +61,17 @@ def _cp1c_error(code: str, message: str, http_status: int = 409) -> None:
 # Helper: slot matrix
 # ---------------------------------------------------------------------------
 
+def _require_target_payroll_layout() -> None:
+    """Fail closed: new periods cannot be created until the creator snapshots the
+    target PayDefinition layout. Branch applicability is keyed by PayDefinition, so
+    the legacy PayItem snapshot is no longer a valid layout source."""
+    _cp1c_error(
+        "TARGET_PAYROLL_LAYOUT_NOT_READY",
+        "New payroll periods cannot be created yet: the period layout is not available "
+        "from the PayDefinition configuration.",
+    )
+
+
 def _check_slot_matrix(
     mode: str,
     periods: list[dict],
@@ -431,8 +442,9 @@ async def _create_period_pay_item_rows(
     Insert one PayrollPeriodPayItems row per non-Retired PayItem (system +
     company custom) as of start_date.
 
-    Branch activation is resolved from BranchPayItemConfig using start_date.
-    The catalog admits only Daily operational PayItems and the two
+    Legacy layout source, unreachable while _require_target_payroll_layout holds
+    period creation: Branch configuration is keyed by PayDefinition, so activation
+    here falls back to the PayItem default flag. The catalog admits only Daily operational PayItems and the two
     system-generated Period output identities (SYS_MIN_TOPUP / SYS_MAX_CAP);
     all of them are snapshotted so the period carries a frozen output layout.
     DailyStatus / DailyNote pseudo-lines are excluded (no PayItems catalog row).
@@ -460,21 +472,15 @@ async def _create_period_pay_item_rows(
                 pi.status,
                 pi.sortorder,
                 pi.isdefaultbranchactive,
-                bpic.isactive          AS cfg_isactive,
-                bpic.effectivefrom     AS cfg_effectivefrom,
-                bpic.configid          AS cfg_configid
+                CAST(NULL AS BOOLEAN)  AS cfg_isactive,
+                CAST(NULL AS DATE)     AS cfg_effectivefrom,
+                CAST(NULL AS INTEGER)  AS cfg_configid
             FROM payroll.payitems pi
-            LEFT JOIN payroll.branchpayitemconfig bpic
-                   ON bpic.payitemid      = pi.payitemid
-                  AND bpic.companyid      = :cid
-                  AND bpic.branchid       = :bid
-                  AND bpic.effectivefrom <= :dt
-                  AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
             WHERE (pi.companyid IS NULL OR pi.companyid = :cid)
               AND pi.status != 'Retired'
             ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
         """),
-        {"cid": company_id, "bid": branch_id, "dt": start_date},
+        {"cid": company_id},
     )
     rows = items_result.mappings().all()
     if not rows:
@@ -824,6 +830,8 @@ async def create_period_from_candidate(
             end_date=existing_row["enddate"],
             status=existing_row["status"],
         )
+
+    _require_target_payroll_layout()
 
     # Re-read branch under lock
     branch_row = (await db.execute(

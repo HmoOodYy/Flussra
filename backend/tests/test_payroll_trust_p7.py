@@ -11,6 +11,8 @@ from sqlalchemy.exc import IntegrityError
 
 from tests.builders.compensation import create_approved_rate
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Year slots
 # ---------------------------------------------------------------------------

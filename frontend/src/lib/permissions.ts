@@ -283,15 +283,15 @@ export function canManageSettingsAdmin(user: UserProfile): boolean {
 }
 
 /**
- * True when the user should be able to reach the Daily Pay Items page.
+ * True when the user should be able to reach the Pay Items page.
  *
  * Two paths:
  *   1. Full settings admin — canonical company-scoped setup.manage
  *      (canManageSettingsAdmin).
- *   2. Any user with payitems.edit somewhere — needed to browse CDPI-approved
+ *   2. Any user with payitems.edit somewhere — needed to browse and request
  *      items.  This broad discovery check uses canonical authority, but actual
- *      branch/company CDPI browsing and actions are governed by the scoped
- *      helpers below (canManageCdpiForBranch, canReviewCdpiCompanyWide).
+ *      branch/company PayDefinition browsing and actions are governed by the scoped
+ *      helpers below (canManagePayDefinitionsForBranch, canGovernPayDefinitionsCompanyWide).
  */
 export function canViewDailyPayItems(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
@@ -399,9 +399,9 @@ export function canEditTransfers(user: UserProfile, branchId: number): boolean {
   return hasAuthorityPermission(user.authority, 'drivers.edit', branchId);
 }
 
-// ── CDPI (Custom Daily Pay Item) helpers ──────────────────────────────────────
+// ── PayDefinition governance helpers ──────────────────────────────────────────
 //
-// Mirror backend authorization rules from app/cdpi/guards.py.
+// Mirror backend authorization rules from app/compensation/guards.py.
 // Backend remains the authoritative security boundary — these helpers drive
 // UI visibility only.  A 403 from the backend is always authoritative.
 //
@@ -413,8 +413,8 @@ export function canEditTransfers(user: UserProfile, branchId: number): boolean {
  *
  * IMPORTANT: this broad discovery predicate does NOT prove which assignment
  * scope holds the permission.  Do NOT use it alone to grant branch-scoped or
- * company-scoped CDPI actions; use canManageCdpiForBranch or
- * canReviewCdpiCompanyWide instead.
+ * company-scoped PayDefinition actions; use canManagePayDefinitionsForBranch or
+ * canGovernPayDefinitionsCompanyWide instead.
  */
 export function hasPayItemsEdit(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
@@ -425,7 +425,7 @@ export function hasPayItemsEdit(user: UserProfile | null | undefined): boolean {
  * True when the user holds payitems.edit for the given branch — via a company-wide
  * grant (applies everywhere) or a grant scoped to that specific branch.
  */
-export function canManageCdpiForBranch(
+export function canManagePayDefinitionsForBranch(
   user: UserProfile | null | undefined,
   branchId: number,
 ): boolean {
@@ -436,9 +436,9 @@ export function canManageCdpiForBranch(
 /**
  * True when the user holds a company-wide payitems.edit grant.
  *
- * Gates: company review queue (approve / return / reject), direct company item creation.
+ * Gates: company review queue (approve / return / reject), direct creation and retirement.
  */
-export function canReviewCdpiCompanyWide(
+export function canGovernPayDefinitionsCompanyWide(
   user: UserProfile | null | undefined,
 ): boolean {
   if (!user) return false;
@@ -446,11 +446,31 @@ export function canReviewCdpiCompanyWide(
 }
 
 /**
- * True when the user can directly create CDPI company items (bypassing the
- * request workflow).  Same gate as canReviewCdpiCompanyWide.
+ * True when the user can directly create Company PayDefinitions (bypassing the
+ * request workflow).  Same gate as canGovernPayDefinitionsCompanyWide.
  */
-export function canDirectCreateCdpiCompanyItem(
+export function canCreatePayDefinitionDirectly(
   user: UserProfile | null | undefined,
 ): boolean {
-  return canReviewCdpiCompanyWide(user);
+  return canGovernPayDefinitionsCompanyWide(user);
+}
+
+/**
+ * Edit a PayDefinition's applicability in one Branch: payitems.edit for that
+ * branch or company-wide setup.manage. Mirrors backend branch_config permission.
+ */
+export function canConfigureBranchPayDefinitions(
+  user: UserProfile | null | undefined,
+  branchId: number,
+): boolean {
+  if (!user) return false;
+  return canManagePayDefinitionsForBranch(user, branchId) || canManageSettingsAdmin(user);
+}
+
+/** Apply a PayDefinition's applicability across several Branches at once. */
+export function canConfigureAllBranchPayDefinitions(
+  user: UserProfile | null | undefined,
+): boolean {
+  if (!user) return false;
+  return canGovernPayDefinitionsCompanyWide(user) || canManageSettingsAdmin(user);
 }

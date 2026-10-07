@@ -28,6 +28,8 @@ from tests.builders.access import create_user_with_role_token, get_company_role_
 from tests.db_state import allow_final_line_insert
 from tests.seed_helpers import attach_cdpi_owner
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 _SECURITY_COUNTER = itertools.count(1)
 _REPORT_PATHS = ("drivers", "period-work", "period-pay", "mixed")
 
@@ -1379,10 +1381,9 @@ async def test_pay_item_columns_frozen_and_scoped_to_active_reportable_daily(
         RETURNING payitemid
     """), {"code": f"C13A{marker}".upper()})).scalar_one())
     await attach_cdpi_owner(direct_db, item_id=custom_pay_item_id)
-    await direct_db.execute(text("""
-        INSERT INTO payroll.branchpayitemconfig (companyid, branchid, payitemid, isactive, effectivefrom, createdbyuserid)
-        VALUES (1, :branch_id, :pay_item_id, TRUE, '2099-01-01', 1)
-    """), {"branch_id": paytest_branch_id, "pay_item_id": custom_pay_item_id})
+    await direct_db.execute(text(
+        "UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :pay_item_id"
+    ), {"pay_item_id": custom_pay_item_id})
     await direct_db.commit()
     period_id = await _insert_http_period(direct_db, paytest_branch_id, "Draft")
     report = await _report(session_client, auth_token, period_id, "drivers")

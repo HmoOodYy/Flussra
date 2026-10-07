@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   canEditPayRates,
-  canManageCdpiForBranch,
+  canManagePayDefinitionsForBranch,
   canViewCurrentPayroll,
   canViewDailyPayItems,
   canViewFinalizedLibrary,
@@ -164,5 +164,5 @@ test('page visibility: branch discovery does not widen concrete-branch actions',
   assert.equal(canViewPayRates(user), true);
   assert.equal(canEditPayRates(user, 20), false);
   assert.equal(canViewDailyPayItems(user), true);
-  assert.equal(canManageCdpiForBranch(user, 20), false);
+  assert.equal(canManagePayDefinitionsForBranch(user, 20), false);
 });
