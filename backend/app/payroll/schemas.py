@@ -117,7 +117,7 @@ class PeriodStatusChange(BaseModel):
 # Stage B4-21.
 # ---------------------------------------------------------------------------
 
-_VALID_SOURCE_TYPES   = {"Manual", "Import", "System"}
+_VALID_SOURCE_TYPES   = {"Manual", "Import"}
 _VALID_LINE_STATUSES  = {"Active", "NeedsReview", "Rejected", "Void"}
 
 # Periods must be in one of these statuses to accept new/modified entries.
@@ -140,16 +140,32 @@ _WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived"
 
 
 class DraftLineSummary(BaseModel):
+    """One source row.
+
+    Ordinary PayDefinition rows carry ``payroll_period_definition_id`` (their identity)
+    and no ``line_type``. Their money is never stored: ``calculated_amount`` and
+    ``needs_manager_review`` are DERIVED live from the effective DriverRateAssignment
+    when the row is read (and are NULL / False where a read does not derive them).
+    Temporary Status/internal compatibility rows carry ``line_type`` instead.
+    """
     draft_line_id: int
     period_id: int
     branch_id: int
     driver_id: int
     driver_name: str
     work_date: date
-    line_type: str
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    definition_code: str | None = None
+    definition_name: str | None = None
+    input_type: str | None = None
+    unit: str | None = None
+    calculation_method: str | None = None
+    line_type: str | None = None
     quantity: Decimal
     rate_amount: Decimal | None = None
     calculated_amount: Decimal | None = None
+    calculation_status: str | None = None
     source_type: str
     status: str
     needs_manager_review: bool
@@ -159,12 +175,14 @@ class DraftLineSummary(BaseModel):
 
 
 class DriverPeriodSummary(BaseModel):
-    """Aggregated totals per driver × line_type for one period."""
+    """Aggregated live totals per driver x period definition for one period."""
     driver_id: int
     driver_name: str
     period_id: int
     period_name: str
-    line_type: str
+    payroll_period_definition_id: int | None = None
+    definition_code: str | None = None
+    definition_name: str | None = None
     total_quantity: Decimal
     total_calculated_amount: Decimal
     line_count: int
@@ -172,26 +190,18 @@ class DriverPeriodSummary(BaseModel):
 
 
 class DraftLineCreate(BaseModel):
+    """Ordinary target source input: a quantity against a period definition.
+
+    Money is never an input: a rate, an amount or a review flag is rejected.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     driver_id: int
     work_date: date
-    line_type: str
+    payroll_period_definition_id: int
     quantity: Decimal = Decimal("0")
-    rate_amount: Decimal | None = None
     notes: str | None = None
     source_type: str = "Manual"
-    needs_manager_review: bool = False
-
-    @field_validator("line_type")
-    @classmethod
-    def line_type_non_empty(cls, v: str) -> str:
-        """
-        Basic sanity check only — actual validation is PayItems-driven in the
-        service layer (add_draft_line calls _validate_line_type).
-        """
-        v = v.strip()
-        if not v:
-            raise ValueError("line_type must not be blank")
-        return v
 
     @field_validator("source_type")
     @classmethod
@@ -212,11 +222,11 @@ class DraftLineCreate(BaseModel):
 
 class DraftLineUpdate(BaseModel):
     """All fields optional — only supplied (non-None) fields are changed."""
+    model_config = ConfigDict(extra="forbid")
+
     quantity: Decimal | None = None
-    rate_amount: Decimal | None = None
     notes: str | None = None
     status: str | None = None
-    needs_manager_review: bool | None = None
 
     @field_validator("quantity")
     @classmethod
@@ -952,10 +962,17 @@ class PeriodEligibleDriversResponse(BaseModel):
 
 
 class DayGridColumn(BaseModel):
-    pay_item_code: str
+    """One ordinary column of the grid: a period definition, keyed by its identity.
+
+    Code and name are display metadata only; they never route a save.
+    """
+    payroll_period_definition_id: int
+    pay_definition_id: int
+    definition_code: str
     label: str
-    rate_behavior: str
-    is_time: bool
+    input_type: str
+    unit: str | None = None
+    calculation_method: str
 
 
 class DayGridStatusKey(BaseModel):
@@ -971,6 +988,7 @@ class DayGridLineValue(BaseModel):
     quantity: str | None = None
     calculated_amount: str | None = None
     needs_manager_review: bool = False
+    calculation_status: str | None = None
 
 
 # Shared {state, reason_code} availability shape -- also used by the P6A
@@ -988,7 +1006,13 @@ class DayGridRow(BaseModel):
     status_label: str | None = None
     is_off: bool = False
     notes: str | None = None
+    # Keyed by str(payroll_period_definition_id).
     values: dict[str, DayGridLineValue] = {}
+
+
+class DayGridQuantityTotal(BaseModel):
+    payroll_period_definition_id: int
+    quantity: str
 
 
 class DayGridSummary(BaseModel):
@@ -996,8 +1020,7 @@ class DayGridSummary(BaseModel):
     worked: int
     pto: int
     off: int
-    total_hours: str
-    total_miles: str
+    quantity_totals: list[DayGridQuantityTotal] = []
     gross_total: str | None = None   # CP-2F: None for Draft (Prepared) periods — financials not available
     needs_attention: int
     financials_available: bool = True  # CP-2F: False for Draft periods
@@ -1030,6 +1053,7 @@ class DayGridResponse(BaseModel):
 
 class DayGridSaveRow(BaseModel):
     driver_id: int
+    # Keyed by str(payroll_period_definition_id); never by code or name.
     values: dict[str, str] = {}
     status_key: str | None = None
     notes: str | None = None
@@ -1222,9 +1246,12 @@ class CalculationPreviewLine(BaseModel):
     """One virtual financial line contributing to a driver's CP-4B total."""
     source_type: str                       # "DraftLine" | "StatusEntryState" | "BonusEvent"
     source_id: str | None
-    line_type: str
+    line_type: str | None = None           # Status / system lines only
     work_date: date | None
-    pay_item_id: int | None = None
+    payroll_period_definition_id: int | None = None   # ordinary PayDefinition lines
+    pay_definition_id: int | None = None
+    definition_name: str | None = None                # display only
+    calculation_status: str | None = None
     rate_column_id: int | None = None      # StatusRateColumnID for Status lines only
     driver_id: int
     quantity: Decimal | None
@@ -1496,19 +1523,23 @@ class ReportMetadata(BaseModel):
 
 
 class ReportColumn(BaseModel):
-    pay_item_id: int
+    """One frozen period definition column. Code and label are display metadata."""
+    payroll_period_definition_id: int
     code: str
     label: str
-    category: str
-    data_type: str
+    input_type: str
     unit: str | None = None
-    scope: str
     sort_order: int
 
 
-class PayItemAmount(BaseModel):
-    pay_item_id: int
+class DefinitionAmount(BaseModel):
+    payroll_period_definition_id: int
     amount: Decimal
+
+
+class DefinitionQuantity(BaseModel):
+    payroll_period_definition_id: int
+    quantity: Decimal
 
 
 class ReportWorkSection(BaseModel):
@@ -1525,7 +1556,7 @@ class ReportPaySection(BaseModel):
     bonus_total: Decimal
     total_pay: Decimal
     gross_pay: Decimal
-    pay_item_amounts: list[PayItemAmount] = []
+    definition_amounts: list[DefinitionAmount] = []
     driver_code: str | None = None
     driver_name: str | None = None
     financial_lines: list[dict] = []
@@ -1543,11 +1574,11 @@ class ReportDriver(BaseModel):
 class CalculationReportResponse(BaseModel):
     metadata: ReportMetadata
     columns: list[ReportColumn] = []
-    pay_item_columns: list[ReportColumn] = []
+    definition_columns: list[ReportColumn] = []
     drivers: list[ReportDriver] = []
-    work_totals: dict[str, Decimal] = {}
+    work_totals: list[DefinitionQuantity] = []
     pay_totals: dict[str, Decimal] | None = None
-    pay_item_totals: list[PayItemAmount] | None = None
+    definition_totals: list[DefinitionAmount] | None = None
 
 
 class DriversReportResponse(CalculationReportResponse):
@@ -1644,11 +1675,11 @@ class FinalizedReportMetadata(BaseModel):
 class FinalizedCalculationReportResponse(BaseModel):
     metadata: FinalizedReportMetadata
     columns: list[ReportColumn] = []
-    pay_item_columns: list[ReportColumn] = []
+    definition_columns: list[ReportColumn] = []
     drivers: list[ReportDriver] = []
-    work_totals: dict[str, Decimal] = {}
+    work_totals: list[DefinitionQuantity] = []
     pay_totals: dict[str, Decimal] | None = None
-    pay_item_totals: list[PayItemAmount] | None = None
+    definition_totals: list[DefinitionAmount] | None = None
 
 
 class FinalizedOffStatusEntry(BaseModel):

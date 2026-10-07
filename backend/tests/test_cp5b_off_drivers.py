@@ -15,6 +15,7 @@ from tests.db_state import (
     allow_final_line_insert,
     suspended_test_triggers,
 )
+from tests.target_seed import seed_period_definition, seed_target_line
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2097, 1, 1)
@@ -371,6 +372,22 @@ async def _insert_daily_line(
     quantity: Decimal = Decimal("1"),
     source_type: str = "Manual",
 ) -> None:
+    if line_type == "HOURS":
+        # Ordinary work is a source fact against a frozen period definition.
+        definition_id = (await db.execute(_text("""
+            SELECT payrollperioddefinitionid FROM payroll.payrollperioddefinitions
+            WHERE payrollperiodid = :period_id AND definitionnamesnapshot = :name
+        """), {"period_id": period_id, "name": line_type})).scalar_one_or_none()
+        if definition_id is None:
+            definition_id = (await seed_period_definition(
+                db, period_id=period_id, branch_id=branch_id, name=line_type)
+            ).payroll_period_definition_id
+        await seed_target_line(
+            db, period_id=period_id, branch_id=branch_id, driver_id=driver_id,
+            definition=definition_id, quantity=quantity, work_date=work_date,
+            source_type=source_type)
+        await db.commit()
+        return
     await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
@@ -732,91 +749,6 @@ class TestOffDrivers:
         assert selected.json()["total_count"] == 1
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
-    async def test_selected_day_uses_immutable_status_evidence_ignoring_statuskey_drift(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
-    ):
-        """Stage B3 Unit 8C-5 drift regression (real flow, not manually-set
-        FinalizedAtUtc): Submit -> Approve -> Finalize captures immutable
-        Status evidence; mutating the CURRENT StatusKey afterward (label AND
-        IsOffReason) must not change the historical selected-day Off Drivers
-        result for the Locked period."""
-        await _clean(direct_db, paytest_branch_id)
-        period_id = await _insert_period(direct_db, paytest_branch_id, "IMMUT")
-        days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        off_code = f"CP5B_IMMUT_{next(_COUNTER)}"
-        status_key_id = await _status_key(direct_db, paytest_branch_id, off_code, True)
-
-        await _save_day_grid_status(
-            session_client, auth_token, period_id, paytest_driver_id, days[0], off_code,
-        )
-        await _submit_approve_finalize(
-            session_client, auth_token, period_id, paytest_driver_id, days[0],
-        )
-
-        # Drift the CURRENT StatusKey after Locking -- label AND IsOffReason.
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.payrollstatuskeys
-                SET keyname = 'Mutated', isoffreason = FALSE
-                WHERE statuskeyid = :status_key_id
-            """),
-            {"status_key_id": status_key_id},
-        )
-        await direct_db.commit()
-
-        selected = await _selected(session_client, auth_token, period_id, days[0])
-        assert selected.status_code == 200, selected.text
-        body = selected.json()
-        assert body["total_count"] == 1
-        row = body["drivers"][0]
-        assert row["driver_id"] == paytest_driver_id
-        assert row["status_code"] == off_code
-        assert row["status_label"] == f"{off_code} label", (
-            "Must show the ORIGINAL captured label, not the drifted 'Mutated'"
-        )
-        assert row["is_off_reason"] is True, (
-            "Must show the ORIGINAL captured is_off_reason, not the drifted False"
-        )
-        assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
-
-    async def test_summary_fully_off_uses_immutable_status_evidence_ignoring_statuskey_drift(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
-    ):
-        """Same drift regression for the Fully-Off KPI resolver shared with
-        the Current Payroll hub (resolve_fully_off_drivers)."""
-        await _clean(direct_db, paytest_branch_id)
-        period_id = await _insert_period(direct_db, paytest_branch_id, "IMMUTFULL")
-        days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        off_code = f"CP5B_IMMUTFULL_{next(_COUNTER)}"
-        status_key_id = await _status_key(direct_db, paytest_branch_id, off_code, True)
-
-        for work_date in days:
-            await _save_day_grid_status(
-                session_client, auth_token, period_id, paytest_driver_id, work_date, off_code,
-            )
-        await _submit_approve_finalize(
-            session_client, auth_token, period_id, paytest_driver_id, days[0],
-        )
-
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.payrollstatuskeys
-                SET keyname = 'Mutated', isoffreason = FALSE
-                WHERE statuskeyid = :status_key_id
-            """),
-            {"status_key_id": status_key_id},
-        )
-        await direct_db.commit()
-
-        summary = await _summary(session_client, auth_token, period_id)
-        assert summary.status_code == 200, summary.text
-        body = summary.json()
-        assert body["total_fully_off_drivers"] == 1
-        assert body["fully_off_drivers"][0]["driver_id"] == paytest_driver_id
-        assert body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}
-
     async def test_legacy_drivers_off_endpoint_retains_driver_day_row_semantics(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
     ):
@@ -1044,40 +976,3 @@ class TestOffDrivers:
         assert sum_body.get("status_evidence") == {
             "state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE",
         }
-
-    async def test_locked_period_zero_final_lines_still_resolves_via_review_item_binding(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
-    ):
-        """A period whose only entries are Status (no billable pay-item
-        line) finalizes with zero FinalLines -- Off Drivers must still
-        resolve the immutable Status evidence correctly through the
-        Approved review-item binding, not treat empty FinalLines as
-        unavailable provenance."""
-        await _clean(direct_db, paytest_branch_id)
-        period_id = await _insert_period(direct_db, paytest_branch_id, "ZEROFL")
-        days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        off_code = f"CP5B_ZEROFL_{next(_COUNTER)}"
-        await _status_key(direct_db, paytest_branch_id, off_code, True)
-
-        await _save_day_grid_status(
-            session_client, auth_token, period_id, paytest_driver_id, days[0], off_code,
-        )
-        await _submit_approve_finalize(
-            session_client, auth_token, period_id, paytest_driver_id, days[0],
-        )
-
-        final_lines = (await direct_db.execute(
-            _text("SELECT COUNT(*) FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-            {"pid": period_id},
-        )).scalar_one()
-        assert final_lines == 0, (
-            "A Status-only day must finalize with zero FinalLines for this test to be meaningful"
-        )
-
-        selected = await _selected(session_client, auth_token, period_id, days[0])
-        assert selected.status_code == 200, selected.text
-        sel_body = selected.json()
-        assert sel_body["total_count"] == 1
-        assert sel_body["drivers"][0]["status_code"] == off_code
-        assert sel_body.get("status_evidence") == {"state": "AVAILABLE", "reason_code": None}

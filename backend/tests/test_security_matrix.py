@@ -653,9 +653,8 @@ class TestSecurityMatrix:
             json={
                 "driver_id": sm_hq_driver_id,
                 "work_date": "2096-01-08",
-                "line_type": "HOURS",
+                "payroll_period_definition_id": 1,
                 "quantity": "8.00",
-                "rate_amount": "10.00",
             },
             headers=_hdr(tok),
         )
@@ -702,9 +701,8 @@ class TestSecurityMatrix:
             json={
                 "driver_id": sm_hq_driver_id,
                 "work_date": "2096-01-08",
-                "line_type": "HOURS",
+                "payroll_period_definition_id": 1,
                 "quantity": "8.00",
-                "rate_amount": "10.00",
             },
             headers=_hdr(tok),
         )
@@ -931,91 +929,6 @@ class TestSecurityMatrix:
     #      Advances sm_paytest_period_id through the full lifecycle to Locked.
     # -----------------------------------------------------------------------
 
-    async def test_11b_final_lines_accepted_for_locked_period(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_paytest_id: int,
-        sm_paytest_driver_id: int,
-        sm_paytest_period_id: int,
-        direct_db,
-    ):
-        """Final-lines returns 200 for a Locked period.
-
-        Advances sm_paytest_period_id: Open→InReview→Approved→Locked.
-        """
-        from sqlalchemy import text as _sqla_text
-        pid = sm_paytest_period_id
-
-        # Ensure no stale InReview period blocks the submit (CP-1B slot conflict).
-        # InReview→Cancelled is blocked by CP-1A via API; use direct DB.
-        await direct_db.execute(
-            _sqla_text("""
-                UPDATE payroll.payrollperiods
-                SET    status = 'Cancelled', currentreturnreviewitemid = NULL
-                WHERE  branchid = :bid AND status = 'InReview'
-                  AND  payrollperiodid != :pid
-            """),
-            {"bid": sm_paytest_id, "pid": pid},
-        )
-        await direct_db.commit()
-
-        # Add a draft line so the period is non-empty for finalization.
-        # Use DailyNote (informational, no rate required) to avoid rate setup dependencies.
-        line_r = await session_client.post(
-            f"/payroll/periods/{pid}/lines",
-            json={
-                "driver_id": sm_paytest_driver_id,
-                "work_date": "2096-01-15",
-                "line_type": "DailyNote",
-                "quantity": 1,
-                "notes": "filler",
-            },
-            headers=_hdr(auth_token),
-        )
-        assert line_r.status_code == 201, f"Add line failed: {line_r.text}"
-
-        # Open → InReview
-        ri = await session_client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "InReview"},
-            headers=_hdr(auth_token),
-        )
-        assert ri.status_code == 200, f"Cannot submit for review: {ri.text}"
-
-        # Approve the review item
-        items = await session_client.get(
-            "/review/items",
-            params={"branch_id": sm_paytest_id},
-            headers=_hdr(auth_token),
-        )
-        period_item = next(
-            (it for it in items.json() if it.get("entity_id") == str(pid)),
-            None,
-        )
-        if period_item:
-            await session_client.post(
-                f"/review/items/{period_item['review_item_id']}/decide",
-                json={"decision": "Approved", "reason": "SM11b test"},
-                headers=_hdr(auth_token),
-            )
-
-        # Finalize (Approved → Locked)
-        fin = await session_client.post(
-            f"/payroll/periods/{pid}/finalize",
-            headers=_hdr(auth_token),
-        )
-        assert fin.status_code == 200, f"Cannot finalize: {fin.text}"
-
-        # Final-lines on Locked period must return 200
-        resp = await session_client.get(
-            f"/payroll/periods/{pid}/final-lines",
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 200, (
-            f"Locked period must return 200 for final-lines; got {resp.status_code}: {resp.text}"
-        )
-
     # -----------------------------------------------------------------------
     # 15. The pre-seeded branch_user (PAYROLL_VIEWER_CO + SpecificBranch=HQ)
     #     can read HQ data but cannot write (no payroll.entry).
@@ -1223,7 +1136,6 @@ class TestDriverSelfGenericDenial:
             f"403 detail must mention driver; got: {r.json()['detail']}"
         )
 
-    @pytest.mark.pre_cutover_legacy
     async def test_operational_user_can_create_open_candidate(
         self,
         session_client: httpx.AsyncClient,

@@ -26,13 +26,6 @@ from app.payroll.schemas import (
 
 _FINALIZED_STATUSES = ("Locked", "Archived")
 
-_NON_WORK_DAILY_LINE_TYPES = (
-    "DailyStatus",
-    "DailyNote",
-    "STATUS_PAYMENT",
-    "STATUS_PAY",
-)
-
 
 @dataclass(frozen=True)
 class _DriverIdentity:
@@ -342,17 +335,14 @@ async def _status_entries(
 
 
 async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> set[tuple[int, date]]:
-    """Use PayItem snapshot classification, never financial totals, to identify work."""
+    """Ordinary source against an active period definition identifies work, never money."""
     rows = (await db.execute(
-        text(f"""
+        text("""
             SELECT DISTINCT dl.driverid, dl.workdate
             FROM payroll.payrolldraftlines dl
-            LEFT JOIN payroll.payrollperiodpayitems pppi
-              ON pppi.payrollperiodid = dl.payrollperiodid
-             AND pppi.payitemcode = dl.linetype
-            LEFT JOIN payroll.payitems pi
-              ON pi.payitemcode = dl.linetype
-             AND (pi.companyid IS NULL OR pi.companyid = dl.companyid)
+            JOIN payroll.payrollperioddefinitions ppd
+              ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
+             AND ppd.payrollperiodid = dl.payrollperiodid
             WHERE dl.payrollperiodid = :period_id
               AND dl.companyid = :company_id
               AND dl.branchid = :branch_id
@@ -362,10 +352,7 @@ async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> se
               AND dl.quantity IS NOT NULL
               AND dl.quantity <> 0
               AND dl.sourcetype <> 'System'
-              AND dl.linetype NOT IN ({', '.join(repr(code) for code in _NON_WORK_DAILY_LINE_TYPES)})
-              AND COALESCE(pppi.itemscope, pi.itemscope) = 'Daily'
-              AND COALESCE(pppi.appearsinpayrollentry, pi.appearsinpayrollentry, FALSE) = TRUE
-              AND COALESCE(pppi.isactiveinperiod, pi.status <> 'Retired', FALSE) = TRUE
+              AND ppd.isactiveinperiod = TRUE
         """),
         {
             "period_id": _period_id(period),

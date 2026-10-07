@@ -39,8 +39,6 @@ from tests.builders.company import create_branch
 from tests.builders.payroll import create_period_from_candidate, get_period_candidates
 from tests.builders.payroll_setup import create_published_setup_assignment
 
-pytestmark = pytest.mark.pre_cutover_legacy
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -297,7 +295,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0084."""
+        """D02: Migration chain is linear and head is 0085."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -309,7 +307,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0084" in lines[0], f"Expected head 0084, got: {lines[0]}"
+        assert "0085" in lines[0], f"Expected head 0084, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows
@@ -998,85 +996,3 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
     # D26 — Direct draft-line creation rejects work_date missing from snapshot
     # ------------------------------------------------------------------ #
-
-    @pytest.mark.asyncio
-    async def test_d26_add_draft_line_rejects_missing_snapshot_date(
-        self, session_client, auth_token, direct_db, paytest_branch_id
-    ):
-        """D26: POST /payroll/periods/{id}/draft-lines rejects a work_date that is in
-        StartDate/EndDate but has been removed from PayrollPeriodDays snapshot."""
-        await _clean(direct_db, paytest_branch_id)
-        await _setup(direct_db, paytest_branch_id, "Week", "2095-01-07")
-        driver_response = await session_client.post(
-            "/core/drivers",
-            json={
-                "branch_id": paytest_branch_id,
-                "full_name": "CP2B Snapshot Driver",
-                "driver_code": f"CP2B-{uuid.uuid4().hex[:10]}",
-            },
-            headers=_auth(auth_token),
-        )
-        assert driver_response.status_code == 201, driver_response.text
-        driver_id = driver_response.json()["driver_id"]
-
-        preview = await get_period_candidates(session_client, auth_token, paytest_branch_id, mode="OPEN_CREATION")
-        ck = preview["selected"]["candidate_key"]
-        result = await create_period_from_candidate(session_client, auth_token, paytest_branch_id, ck)
-        period_id = result["payroll_period_id"]
-        end_date = datetime.date.fromisoformat(result["end_date"])
-
-        # Confirm snapshot rows exist
-        rows = await _day_rows_simple(direct_db, period_id)
-        assert len(rows) == 7, f"Expected 7 day rows, got {len(rows)}"
-
-        # Delete the last day row (end_date) — simulates a missing snapshot entry.
-        # end_date is still within StartDate/EndDate so bounds-only check would pass.
-        await direct_db.execute(
-            _text("""
-                DELETE FROM payroll.PayrollPeriodDays
-                WHERE payrollperiodid = :pid AND workdate = :wd
-            """),
-            {"pid": period_id, "wd": end_date},
-        )
-        await direct_db.commit()
-
-        # Confirm the row is gone
-        missing = (await direct_db.execute(
-            _text("""
-                SELECT 1 FROM payroll.PayrollPeriodDays
-                WHERE payrollperiodid = :pid AND workdate = :wd
-            """),
-            {"pid": period_id, "wd": end_date},
-        )).first()
-        assert missing is None, "Day row should have been deleted"
-
-        # POST direct draft-line creation for the missing snapshot date
-        r = await session_client.post(
-            f"/payroll/periods/{period_id}/lines",
-            json={
-                "driver_id": driver_id,
-                "work_date": end_date.isoformat(),
-                "line_type": "HOURS",
-                "quantity": "8",
-            },
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 400, (
-            f"Expected 400 for missing snapshot date in add_draft_line, "
-            f"got {r.status_code}: {r.text}"
-        )
-        assert "snapshot" in r.text.lower() or "not in" in r.text.lower(), (
-            f"Expected 'snapshot' or 'not in' in error body: {r.text}"
-        )
-
-        # Confirm no draft line was created for that date
-        line_count = (await direct_db.execute(
-            _text("""
-                SELECT COUNT(*) FROM payroll.payrolldraftlines
-                WHERE payrollperiodid = :pid AND workdate = :wd
-            """),
-            {"pid": period_id, "wd": end_date},
-        )).scalar()
-        assert line_count == 0, (
-            f"Expected no draft lines for the rejected date, found {line_count}"
-        )

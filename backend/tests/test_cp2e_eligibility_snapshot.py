@@ -32,8 +32,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 
-pytestmark = pytest.mark.pre_cutover_legacy
-
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------

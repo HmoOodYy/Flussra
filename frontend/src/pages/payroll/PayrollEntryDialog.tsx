@@ -17,6 +17,7 @@ import type {
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
 import { canEntryPayroll } from '../../lib/permissions';
+import { columnKey, quantityInputProps, quantityTotalViews } from './dayGridModel';
 import { formatGrossTotal } from './grossDisplay';
 import styles from './PayrollEntryDialog.module.css';
 
@@ -151,11 +152,11 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
     };
   }
 
-  function handleCellChange(driverId: number, code: string, value: string) {
+  function handleCellChange(driverId: number, key: string, value: string) {
     setDirtyRows((prev) => {
       const m = new Map(prev);
       const existing = m.get(driverId) ?? buildSaveRowFromGrid(driverId);
-      m.set(driverId, { ...existing, values: { ...existing.values, [code]: value } });
+      m.set(driverId, { ...existing, values: { ...existing.values, [key]: value } });
       return m;
     });
   }
@@ -178,10 +179,10 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
     });
   }
 
-  function getCellValue(row: DayGridRow, code: string): string {
+  function getCellValue(row: DayGridRow, key: string): string {
     const dirty = dirtyRows.get(row.driver_id);
-    if (dirty) return dirty.values[code] ?? '';
-    return row.values[code]?.quantity ?? '';
+    if (dirty) return dirty.values[key] ?? '';
+    return row.values[key]?.quantity ?? '';
   }
 
   function getStatusValue(row: DayGridRow): string {
@@ -305,14 +306,14 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                 <span className={styles.summaryLabel}>Off:</span>
                 <span className={styles.summaryValue}>{grid.summary.off}</span>
               </span>
-              <span className={styles.summaryItem}>
-                <span className={styles.summaryLabel}>Hours:</span>
-                <span className={styles.summaryValue}>{grid.summary.total_hours}</span>
-              </span>
-              <span className={styles.summaryItem}>
-                <span className={styles.summaryLabel}>Miles:</span>
-                <span className={styles.summaryValue}>{grid.summary.total_miles}</span>
-              </span>
+              {quantityTotalViews(grid.columns, grid.summary).map((total) => (
+                <span className={styles.summaryItem} key={total.key}>
+                  <span className={styles.summaryLabel}>{total.label}:</span>
+                  <span className={styles.summaryValue}>
+                    {total.quantity}{total.unit ? ` ${total.unit}` : ''}
+                  </span>
+                </span>
+              ))}
               <span className={styles.summaryItem}>
                 <span className={styles.summaryLabel}>Gross:</span>
                 <span className={styles.summaryValue}>{formatGrossTotal(grid.summary.gross_total)}</span>
@@ -340,7 +341,10 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                     <th className={styles.driverCol}>Driver</th>
                     <th>Status</th>
                     {grid.columns.map((col) => (
-                      <th key={col.pay_item_code}>{col.label}</th>
+                      <th key={columnKey(col)}>
+                        {col.label}
+                        {col.unit && <small> ({col.unit})</small>}
+                      </th>
                     ))}
                     <th>Notes</th>
                   </tr>
@@ -371,24 +375,26 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                           </select>
                         </td>
                         {grid.columns.map((col) => {
-                          const val = row.values[col.pay_item_code];
+                          const key = columnKey(col);
+                          const val = row.values[key];
                           const nmr = val?.needs_manager_review ?? false;
+                          const inputProps = quantityInputProps(col);
                           return (
-                            <td key={col.pay_item_code}>
+                            <td key={key}>
                               {nmr && (
-                                <span className={styles.attentionIcon} title="Needs manager review">
+                                <span className={styles.attentionIcon} title="Needs attention: rate unresolved">
                                   &#9888;
                                 </span>
                               )}
                               <input
                                 className={styles.qtyInput}
                                 type="number"
-                                step="0.01"
-                                min="0"
-                                value={getCellValue(row, col.pay_item_code)}
+                                step={inputProps.step}
+                                min={inputProps.min}
+                                value={getCellValue(row, key)}
                                 disabled={!canEdit}
                                 onChange={(e) =>
-                                  handleCellChange(row.driver_id, col.pay_item_code, e.target.value)
+                                  handleCellChange(row.driver_id, key, e.target.value)
                                 }
                               />
                             </td>

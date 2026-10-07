@@ -29,8 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.builders.owned_scope import create_owned_branch
 
-pytestmark = pytest.mark.pre_cutover_legacy
-
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -1114,46 +1112,6 @@ class TestSourceSnapshot:
         assert snap.get("rate_code") == "STATUS_PAY"
         assert snap.get("formula") == "HoursValue * DriverRate.Amount"
 
-    @pytest.mark.asyncio
-    async def test_legacy_approved_without_snapshot_fails_closed(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        direct_db: AsyncConnection,
-        cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
-        cp2d2_src_col_id: int,
-    ):
-        """A legacy direct-Approved Status period cannot bypass CP-4F authority."""
-        start, end = _week_2097()
-        pid = await _open_period_db(direct_db, cp2d2_branch_id, start, end)
-        code = f"FINSNAP{start.strftime('%Y%m%d')}"
-        await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code,
-                                     hours=8.0, status_rate_column_id=cp2d2_src_col_id)
-        await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 25.0, start)
-
-        await client.post(
-            f"/payroll/periods/{pid}/day-grid",
-            headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
-        )
-
-        await direct_db.execute(
-            _text("UPDATE payroll.payrollperiods SET status = 'Approved' WHERE payrollperiodid = :pid"),
-            {"pid": pid},
-        )
-        await direct_db.commit()
-
-        # Finalize (Approved → Locked)
-        fin_resp = await client.post(
-            f"/payroll/periods/{pid}/finalize",
-            headers=_auth(auth_token),
-        )
-        assert fin_resp.status_code == 422, fin_resp.text
-        assert "APPROVED_SNAPSHOT_NOT_FOUND_FOR_FINALIZATION" in fin_resp.json()["detail"]
-
-
 # ---------------------------------------------------------------------------
 # Tests: Manual edit guards
 # ---------------------------------------------------------------------------
@@ -1201,7 +1159,7 @@ class TestManualEditGuards:
             json={"quantity": 99},
         )
         assert upd.status_code == 422
-        assert "managed automatically" in upd.text.lower() or "status payment" in upd.text.lower()
+        assert "managed from the day grid" in upd.text.lower()
 
     @pytest.mark.asyncio
     async def test_manual_void_blocked(
@@ -1237,7 +1195,7 @@ class TestManualEditGuards:
             headers=_auth(auth_token),
         )
         assert void_resp.status_code == 422
-        assert "managed automatically" in void_resp.text.lower() or "status payment" in void_resp.text.lower()
+        assert "managed from the day grid" in void_resp.text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1507,15 +1465,10 @@ class TestResolveBehaviorDbMembership:
                     "effective_from": "2097-01-01",
                 },
             )
-            assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
-            # Must NOT be the status-payment branch guard message
-            assert "status-payment" not in resp.text.lower(), (
-                "Orphan SRC_ type incorrectly treated as status-payment"
-            )
-            # Should be the PayItemRateTypeMap resolution failure
-            assert "rate behavior" in resp.text.lower() or "pay item" in resp.text.lower(), (
-                f"Unexpected 422 message: {resp.text}"
-            )
+            # An orphan SRC_-prefixed type is not Status-owned, so the legacy rate path
+            # refuses it outright: ordinary rates are authored on target assignments.
+            assert resp.status_code == 409, f"Expected 409, got {resp.status_code}: {resp.text}"
+            assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.ratetypes WHERE ratetypeid = :rtid"),

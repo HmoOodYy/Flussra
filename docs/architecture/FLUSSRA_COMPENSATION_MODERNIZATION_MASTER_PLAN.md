@@ -1,12 +1,12 @@
 # Flussra Compensation Architecture Modernization — Master Implementation Plan
 
-**Status:** APPROVED TARGET ARCHITECTURE — P4a is the current implementation work unit
+**Status:** APPROVED TARGET ARCHITECTURE — P4b is the current implementation work unit
 **Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
-**Current baseline:** `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c` (PR #47 merge, P3c closed); Alembic head `0083` before P4a. Historical post-G0 baseline: `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` (PR #45 merge), head `0081`. Historical earlier baseline: `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`, with P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`
-**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (G0.1–G0.6, PR #34 through PR #45) P3b (PR #46, `main @ edcf871f59d0616e194a8e752d9b6ba23f42b8a2`, migration head `0082`) and P3c (PR #47, `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c`, migration head `0083`) are closed; P4a — Generic PayDefinition / Branch Configuration authority cutover — is the current implementation work unit and advances the migration head from `0083` to `0084`
+**Current baseline:** `main @ 83234d46b5ab357c1e7062d77aff4e4ad3d9e711` (PR #48 merge, P4a closed); Alembic head `0084` before P4b. Previous baseline: `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c` (PR #47 merge, P3c closed), head `0083`. Historical post-G0 baseline: `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` (PR #45 merge), head `0081`. Historical earlier baseline: `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`, with P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`
+**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (G0.1–G0.6, PR #34 through PR #45) P3b (PR #46, `main @ edcf871f59d0616e194a8e752d9b6ba23f42b8a2`, migration head `0082`) and P3c (PR #47, `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c`, migration head `0083`) are closed; P4a — Generic PayDefinition / Branch Configuration authority cutover — closed via PR #48 (`main @ 83234d46b5ab357c1e7062d77aff4e4ad3d9e711`, migration head `0084`); P4b — Target Period Definition Runtime + PerUnit Cutover — is the current implementation work unit and advances the migration head from `0084` to `0085`
 
-> This document records the approved target architecture. P4a is the current implementation unit; P4b and later units have not started.
+> This document records the approved target architecture. P4a is closed; P4b is the current implementation unit; P4c and later units have not started.
 
 > **Naming note:** The Unified Refoundation Execution Plan controls work-unit boundaries and order. The internal phase labels in §12–§13 below (for example "P3A Core target schema" and "P3B Evidence-v2 schema foundation") are not Unified work-unit identifiers. The core target schema described under §13 "P3A" is delivered by the Unified P3b work unit; evidence structures are sequenced by the Unified plan's later units.
 
@@ -14,7 +14,7 @@
 
 ## 0. Resume Protocol — Read This First When Work Restarts
 
-P4a is the current implementation unit. Before each later work unit starts, the implementation lead performs a read-only drift review:
+P4b is the current implementation unit. Before each later work unit starts, the implementation lead performs a read-only drift review:
 
 1. Fetch current `main` and record the new SHA.
 2. Compare changes since the current approved baseline recorded above.
@@ -1742,7 +1742,7 @@ The implementation lead may **not** reinterpret:
 
 # 20. Implementation Must Remain Deferred Until Explicitly Started
 
-This plan is a target and dependency reference. P2c, Phase 2, P3a, G0, P3b and P3c are closed. P4a is the current implementation work unit; later phases remain subject to their stated dependencies and review gates.
+This plan is a target and dependency reference. P2c, Phase 2, P3a, G0, P3b, P3c and P4a are closed. P4b is the current implementation work unit; later phases remain subject to their stated dependencies and review gates.
 
 No implementation should begin merely because this document exists.
 

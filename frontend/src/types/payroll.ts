@@ -202,11 +202,18 @@ export interface CurrentPayrollHub {
 // CP-1 — Day Grid types
 // ---------------------------------------------------------------------------
 
+/**
+ * One ordinary Day Grid column: a frozen period definition. `payroll_period_definition_id`
+ * is the identity (value keys and save keys); code and label are display metadata only.
+ */
 export interface DayGridColumn {
-  pay_item_code: string;
+  payroll_period_definition_id: number;
+  pay_definition_id: number;
+  definition_code: string;
   label: string;
-  rate_behavior: string;
-  is_time: boolean;
+  input_type: 'Decimal' | 'WholeNumber';
+  unit: string | null;
+  calculation_method: string;
 }
 
 export interface DayGridStatusKey {
@@ -220,8 +227,10 @@ export interface DayGridStatusKey {
 export interface DayGridLineValue {
   line_id: number | null;
   quantity: string | null;
+  /** Derived live from the effective rate; never a stored amount. */
   calculated_amount: string | null;
   needs_manager_review: boolean;
+  calculation_status: string | null;
 }
 
 export interface DayGridRow {
@@ -232,7 +241,13 @@ export interface DayGridRow {
   status_label: string | null;
   is_off: boolean;
   notes: string | null;
+  /** Keyed by String(payroll_period_definition_id). */
   values: Record<string, DayGridLineValue>;
+}
+
+export interface DayGridQuantityTotal {
+  payroll_period_definition_id: number;
+  quantity: string;
 }
 
 export interface DayGridSummary {
@@ -240,8 +255,7 @@ export interface DayGridSummary {
   worked: number;
   pto: number;
   off: number;
-  total_hours: string;
-  total_miles: string;
+  quantity_totals: DayGridQuantityTotal[];
   // CP-2F: null and financials_available=false for Draft (Prepared) periods —
   // financial truth is not authoritative until the period leaves Draft.
   gross_total: string | null;
@@ -278,6 +292,7 @@ export interface DayGridResponse {
 
 export interface DayGridSaveRow {
   driver_id: number;
+  /** Keyed by String(payroll_period_definition_id), never by code or name. */
   values: Record<string, string>;
   status_key: string | null;
   notes: string | null;
@@ -524,13 +539,11 @@ export interface ReportMetadata {
 }
 
 export interface ReportColumn {
-  pay_item_id: number;
+  payroll_period_definition_id: number;
   code: string;
   label: string;
-  category: string;
-  data_type: string;
+  input_type: string;
   unit: string | null;
-  scope: string;
   sort_order: number;
 }
 
@@ -540,9 +553,14 @@ export interface ReportWorkSection {
   status_summaries: Record<string, unknown>[];
 }
 
-export interface PayItemAmount {
-  pay_item_id: number;
+export interface DefinitionAmount {
+  payroll_period_definition_id: number;
   amount: string;
+}
+
+export interface DefinitionQuantity {
+  payroll_period_definition_id: number;
+  quantity: string;
 }
 
 export interface ReportPaySection {
@@ -553,7 +571,7 @@ export interface ReportPaySection {
   bonus_total: string;
   total_pay: string;
   gross_pay: string;
-  pay_item_amounts: PayItemAmount[];
+  definition_amounts: DefinitionAmount[];
   driver_code: string | null;
   driver_name: string | null;
   financial_lines: Record<string, unknown>[];
@@ -571,11 +589,11 @@ export interface ReportDriver {
 export interface CalculationReportResponse {
   metadata: ReportMetadata;
   columns: ReportColumn[];
-  pay_item_columns: ReportColumn[];
+  definition_columns: ReportColumn[];
   drivers: ReportDriver[];
-  work_totals: Record<string, string>;
+  work_totals: DefinitionQuantity[];
   pay_totals: Record<string, string> | null;
-  pay_item_totals: PayItemAmount[] | null;
+  definition_totals: DefinitionAmount[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -660,11 +678,11 @@ export interface FinalizedReportMetadata {
 export interface FinalizedCalculationReportResponse {
   metadata: FinalizedReportMetadata;
   columns: ReportColumn[];
-  pay_item_columns: ReportColumn[];
+  definition_columns: ReportColumn[];
   drivers: ReportDriver[];
-  work_totals: Record<string, string>;
+  work_totals: DefinitionQuantity[];
   pay_totals: Record<string, string> | null;
-  pay_item_totals: PayItemAmount[] | null;
+  definition_totals: DefinitionAmount[] | null;
 }
 
 export type FinalizedReportView = CalculationReportView;
@@ -866,9 +884,13 @@ export interface FinalizedAuditResponse {
 export interface CalculationPreviewLine {
   source_type: string;
   source_id: string | null;
-  line_type: string;
+  /** Status / system lines only; ordinary lines carry payroll_period_definition_id. */
+  line_type: string | null;
   work_date: string | null;
-  pay_item_id: number | null;
+  payroll_period_definition_id: number | null;
+  pay_definition_id: number | null;
+  definition_name: string | null;
+  calculation_status: string | null;
   rate_column_id: number | null;
   driver_id: number;
   quantity: string | null;

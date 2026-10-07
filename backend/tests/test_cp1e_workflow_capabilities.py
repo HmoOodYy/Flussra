@@ -535,14 +535,15 @@ class TestPeriodCapabilities:
     async def test_b01_open_submit_allowed_no_blockers(
         self, session_client, auth_token, paytest_branch_id, direct_db,
     ):
-        """B01: Open with no blockers → can_submit_for_review allowed."""
+        """B01: Open with no blockers → submit is held until target evidence exists (P4c)."""
         await _clean(direct_db, paytest_branch_id)
         s, e = _week()
         pid = await _insert_period(direct_db, paytest_branch_id, "Open", s, e, "B01")
         resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
         b = _branch_entry(resp.json(), paytest_branch_id)
         cap = b["capabilities"]["periods"][str(pid)]["can_submit_for_review"]
-        assert cap["allowed"] is True
+        assert cap["allowed"] is False
+        assert cap["reason_code"] == "TARGET_PAYROLL_EVIDENCE_NOT_READY"
 
     @pytest.mark.asyncio
     async def test_b02_open_submit_blocked_by_inreview(
@@ -594,14 +595,15 @@ class TestPeriodCapabilities:
     async def test_b05_returned_can_resubmit(
         self, session_client, auth_token, paytest_branch_id, direct_db,
     ):
-        """B05: Returned with no InReview → can_resubmit_returned allowed."""
+        """B05: Returned with no InReview → resubmission is held until target evidence exists."""
         await _clean(direct_db, paytest_branch_id)
         s, e = _week()
         rpid, _ = await _insert_returned(direct_db, paytest_branch_id, s, e, "B05")
         resp = await _get_workflow(session_client, auth_token, paytest_branch_id)
         b = _branch_entry(resp.json(), paytest_branch_id)
         cap = b["capabilities"]["periods"][str(rpid)]["can_resubmit_returned"]
-        assert cap["allowed"] is True
+        assert cap["allowed"] is False
+        assert cap["reason_code"] == "TARGET_PAYROLL_EVIDENCE_NOT_READY"
 
     @pytest.mark.asyncio
     async def test_b06_returned_resubmit_blocked_by_inreview(

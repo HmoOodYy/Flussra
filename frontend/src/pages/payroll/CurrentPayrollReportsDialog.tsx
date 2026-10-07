@@ -7,6 +7,7 @@ import type {
 } from '../../types/payroll';
 import { buildPeriodPayTable } from './periodPayTable';
 import { PeriodPayMatrix } from './PeriodPayMatrix';
+import { WorkTotals } from './WorkTotals';
 import styles from './CurrentPayrollReportsDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
@@ -107,8 +108,7 @@ function RecordTable({
 
 const WORK_COLUMNS = [
   { key: 'work_date', label: 'Date' },
-  { key: 'line_type', label: 'Work item' },
-  { key: 'pay_item_id', label: 'Pay item' },
+  { key: 'definition_name', label: 'Pay definition' },
   { key: 'quantity', label: 'Quantity', quantity: true },
   { key: 'line_scope', label: 'Scope' },
 ] as const;
@@ -129,7 +129,7 @@ const STATUS_SUMMARY_COLUMNS = [
 
 const FINANCIAL_LINE_COLUMNS = [
   { key: 'source_type', label: 'Source' },
-  { key: 'line_type', label: 'Line' },
+  { key: 'line', label: 'Line' },
   { key: 'work_date', label: 'Date' },
   { key: 'quantity', label: 'Quantity', quantity: true },
   { key: 'resolved_rate_amount', label: 'Rate', money: true },
@@ -222,7 +222,7 @@ function PaySection({ driver, code, digits }: { driver: ReportDriver; code: stri
         {fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{formatMoney(value, code, digits)}</dd></div>)}
       </dl>
       <h5>Financial lines</h5>
-      <RecordTable rows={pay.financial_lines} columns={FINANCIAL_LINE_COLUMNS} code={code} digits={digits} />
+      <RecordTable rows={pay.financial_lines.map((l) => ({ ...l, line: l.definition_name ?? l.line_type }))} columns={FINANCIAL_LINE_COLUMNS} code={code} digits={digits} />
     </section>
   );
 }
@@ -300,7 +300,7 @@ function ReportBody({ report, view }: { report: CalculationReportResponse; view:
         <section className={styles.section}>
           <h3>Period Pay</h3>
           <PeriodPayMatrix
-            table={buildPeriodPayTable(report.pay_item_columns, report.drivers, report.pay_item_totals, report.pay_totals)}
+            table={buildPeriodPayTable(report.definition_columns, report.drivers, report.definition_totals, report.pay_totals)}
             formatCell={(value) => periodPayCell(value, code, digits)}
             emptyState={<EmptyReport>No driver records are currently available.</EmptyReport>}
           />
@@ -308,14 +308,14 @@ function ReportBody({ report, view }: { report: CalculationReportResponse; view:
       ) : (
         <>
           <section className={styles.totals}>
-            <Dictionary title="Work totals" values={report.work_totals} money={false} code={code} digits={digits} />
+            <WorkTotals totals={report.work_totals} columns={report.columns} className={styles.dictionary} />
             {(view === 'drivers' || view === 'mixed') && <Dictionary title="Pay totals" values={report.pay_totals} money code={code} digits={digits} />}
           </section>
 
           {report.columns.length > 0 && (
             <div className={styles.columns} aria-label="Report columns">
               <span>Report columns</span>
-              {report.columns.map((column) => <span key={column.pay_item_id}>{column.label} <small>({column.code})</small></span>)}
+              {report.columns.map((column) => <span key={column.payroll_period_definition_id}>{column.label} <small>({column.code})</small></span>)}
             </div>
           )}
 

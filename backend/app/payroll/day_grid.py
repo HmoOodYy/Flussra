@@ -1,58 +1,34 @@
 """
 Day Grid — the daily driver/day entry grid for a single work date.
 
-Extracted from app.payroll.service (Stage B4-16) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
 Owns one REST resource end to end, GET and POST on
 /payroll/periods/{period_id}/day-grid:
 
-  - get_day_grid       read model: assembles columns, status keys, driver
-                       rows, canonical entry-state values and the summary
-                       tallies into a DayGridResponse. Strictly read-only:
-                       no writes, no locks, no mutation of any kind.
-  - save_day_grid      batch write orchestrator: validates the whole payload
-                       before any DML (all-or-nothing), then acquires locks,
-                       drives Draft-line mutation, writes its own DailyStatus/
-                       DailyNote rows, upserts canonical entry state, syncs
-                       Status Payment, and returns get_day_grid's refreshed
-                       response.
-  - _canonical_aliases Day-Grid-private canonical/legacy line-type alias
-                       lookup for existing-row discovery (save path only).
-  - _parse_quantity    Day-Grid-private save-payload quantity parser; raises
-                       422 before any DB write so the batch stays atomic.
+  - get_day_grid       read model: assembles the columns, status keys, driver rows,
+                       canonical entry-state values and the summary tallies into a
+                       DayGridResponse. Strictly read-only.
+  - save_day_grid      batch write orchestrator: validates the whole payload before
+                       any DML (all-or-nothing), then acquires locks, drives source-line
+                       mutation, writes its own DailyStatus/DailyNote rows, upserts
+                       canonical entry state, syncs Status Payment, and returns
+                       get_day_grid's refreshed response.
+  - _parse_quantity    save-payload quantity parser; raises 422 before any DB write so
+                       the batch stays atomic.
 
-Read and write are deliberately kept in one module rather than split: they
-serve the same REST resource, share the same DayGridResponse contract (the
-save path's return value IS the read path's output), and share the same
-private policy for the DRIVER role guard, period loading, WorkDate validation,
-canonical line-type vocabulary and snapshot-first daily-column discovery.
-Splitting them would add a day_grid_write -> day_grid_read edge that fires on
-every save without removing any real coupling.
+Columns are the period's ACTIVE definitions (app.payroll.period_definitions) and both
+the response values and the save payload are keyed by PayrollPeriodDefinitionID. A
+definition's code and name are display metadata only: they never route a save, classify
+a total or select a rate. Money shown here is derived live
+(app.payroll.live_source_calculation); no stored amount is read.
 
-The DailyStatus/DailyNote INSERT/UPDATE/void SQL inside save_day_grid is
-Day-Grid-owned write policy, not Draft-line CRUD: it is deliberately NOT
-routed through app.payroll.draft_line_mutation. Only the ordinary pay-item
-values go through add_draft_line/update_draft_line/void_draft_line.
-
-This module owns no domain it consumes. Draft-line mutation, Day Entry State,
-Status Payment Sync, Period-Day Calendar, pay-item snapshot storage, the two
-lock primitives and line audit all remain owned by their own modules and are
-imported here. Drivers Off (app.payroll.off_drivers), Calculation
-(app.payroll.period_calculation), Lifecycle (app.payroll.period_lifecycle)
-and Finalization (app.payroll.finalization) are owned by their own modules
-and are not referenced here at all.
+The DailyStatus/DailyNote INSERT/UPDATE/void SQL inside save_day_grid is Day-Grid-owned
+write policy, deliberately NOT routed through app.payroll.draft_line_mutation. Only the
+ordinary pay-definition quantities go through add_draft_line/update_draft_line/
+void_draft_line.
 
 Transaction ownership is above this module: app.dependencies.get_db opens
-`async with engine.begin()`, so every write here — this module's own SQL, the
-nested Draft-line mutations, the entry-state upsert, the Status Payment sync
-and every audit row — shares the caller's ambient transaction. This module
-starts no transaction and never commits or rolls back; a failure anywhere
-unwinds the whole request.
-
-app.payroll.router calls get_day_grid/save_day_grid directly. No
-app.payroll.service facade is retained for them: after this stage service.py
-has no remaining caller of either.
+`async with engine.begin()`, so every write here shares the caller's ambient
+transaction; a failure anywhere unwinds the whole request.
 """
 from datetime import date
 from decimal import Decimal
@@ -75,6 +51,7 @@ from app.payroll.day_entry_state import (
     _upsert_entry_state,
     _validate_status_key,
 )
+from app.payroll.definition_calculation import is_method_operational, quantity_error
 from app.payroll.draft_line_mutation import (
     add_draft_line,
     update_draft_line,
@@ -87,23 +64,17 @@ from app.payroll.eligibility import (
     _period_has_driver_eligibility_snapshot,
 )
 from app.payroll.line_audit import _write_line_audit
-from app.payroll.line_type_vocabulary import (
-    _INFORMATIONAL_ONLY,
-    _LEGACY_TO_CANONICAL,
-)
+from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.mutation_lock import _lock_period_for_mutation
-from app.payroll.pay_item_write_lock import _lock_pay_item_for_source_write
 from app.payroll.period_day_calendar import _validate_period_work_date
-from app.payroll.period_pay_item_snapshot import (
-    _get_period_pay_item_snapshot,
-    _period_has_pay_item_snapshot,
-)
+from app.payroll.period_definitions import list_period_definitions
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import (
     SOURCE_ENTRY_STATUSES,
     DayGridColumn,
     DayGridLineValue,
     DayGridPeriod,
+    DayGridQuantityTotal,
     DayGridResponse,
     DayGridRow,
     DayGridSaveRequest,
@@ -118,19 +89,7 @@ from app.payroll.status_payment_sync import _sync_status_payment_for_entry_state
 # CP-1 — Day Grid
 # ===========================================================================
 
-def _canonical_aliases(canonical_code: str) -> list[str]:
-    """
-    Return the canonical code plus all legacy aliases that map to it.
-
-    Example: _canonical_aliases("HOURS") -> ["HOURS", "Hours"]
-    Used in DB lookups so we find legacy rows ("Hours") when the caller sends
-    the canonical code ("HOURS").
-    """
-    legacy = [k for k, v in _LEGACY_TO_CANONICAL.items() if v == canonical_code]
-    return [canonical_code] + legacy
-
-
-def _parse_quantity(raw: str | None, code: str) -> "Decimal | None":
+def _parse_quantity(raw: str | None, label: str) -> "Decimal | None":
     """
     Parse a quantity string from the day-grid save payload.
 
@@ -150,7 +109,7 @@ def _parse_quantity(raw: str | None, code: str) -> "Decimal | None":
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Invalid quantity '{raw}' for pay item {code}. "
+                f"Invalid quantity '{raw}' for {label}. "
                 "Must be a number (e.g. '8', '8.5')."
             ),
         )
@@ -200,50 +159,22 @@ async def get_day_grid(
 
     branch_id = period.branch_id
 
-    # ── Load active Daily columns for the branch ─────────────────────────── #
-    # CP-2C: use snapshot when period has PayrollPeriodPayItems rows (post-0053
-    # periods); fall back to the live PayItems default-activation flag for legacy periods.
-    # Use _period_has_pay_item_snapshot to distinguish "post-0053 period with
-    # zero active Daily items" from "legacy period with no snapshot" — both
-    # would produce an empty snap_cols list, but only the latter should fall back.
-    columns: list[DayGridColumn] = []
-    if await _period_has_pay_item_snapshot(period.payroll_period_id, db):
-        snap_cols = await _get_period_pay_item_snapshot(
-            period.payroll_period_id, company_id, db, scope="Daily", active_only=True,
+    # ── Columns: the period's ACTIVE definitions, in their frozen order ───── #
+    period_definitions = await list_period_definitions(
+        period.payroll_period_id, company_id, db, active_only=True,
+    )
+    columns: list[DayGridColumn] = [
+        DayGridColumn(
+            payroll_period_definition_id=d.payroll_period_definition_id,
+            pay_definition_id=d.pay_definition_id,
+            definition_code=d.code,
+            label=d.name,
+            input_type=d.input_type,
+            unit=d.unit,
+            calculation_method=d.calculation_method,
         )
-        for row in snap_cols:
-            code = row["payitemcode"]
-            if code in _INFORMATIONAL_ONLY:
-                continue
-            columns.append(DayGridColumn(
-                pay_item_code=code,
-                label=row["displaylabel"] or row["payitemname"] or code,
-                rate_behavior=row["ratebehavior"] or "None",
-                is_time=(code in ("HOURS", "WAIT_TIME")) or (row["datatype"] == "Time"),
-            ))
-    else:
-        cols_result = await db.execute(
-            text("""
-                SELECT pi.payitemcode, pi.payitemname, pi.ratebehavior, pi.datatype
-                FROM   payroll.payitems pi
-                WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
-                  AND  pi.itemscope  = 'Daily'
-                  AND  pi.status    != 'Retired'
-                  AND  pi.isdefaultbranchactive = TRUE
-                ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
-            """),
-            {"cid": company_id},
-        )
-        for row in cols_result.mappings().all():
-            code = row["payitemcode"]
-            if code in _INFORMATIONAL_ONLY:
-                continue
-            columns.append(DayGridColumn(
-                pay_item_code=code,
-                label=row["payitemname"] or code,
-                rate_behavior=row["ratebehavior"] or "None",
-                is_time=(code in ("HOURS", "WAIT_TIME")) or (row["datatype"] == "Time"),
-            ))
+        for d in period_definitions
+    ]
 
     # ── Load status keys for the branch ──────────────────────────────────── #
     sk_result = await db.execute(
@@ -389,8 +320,8 @@ async def get_day_grid(
         dl_result = await db.execute(
             text(f"""
                 SELECT dl.draftlineid, dl.driverid, dl.linetype,
-                       dl.quantity, dl.calculatedamount, dl.needsmanagerreview,
-                       dl.notes, dl.status
+                       dl.payrollperioddefinitionid,
+                       dl.quantity, dl.notes, dl.status
                 FROM   payroll.payrolldraftlines dl
                 WHERE  dl.payrollperiodid = :pid
                   AND  dl.workdate        = :dt
@@ -492,11 +423,21 @@ async def get_day_grid(
             }
         _status_evidence_unavailable = _status_evidence_state["state"] == "UNAVAILABLE"
 
+    # ── Live money for the ordinary lines of this date ────────────────────── #
+    # Draft (Prepared) periods are source-only: no money is derived or shown.
+    column_ids = {c.payroll_period_definition_id for c in columns}
+    live_by_line: dict[int, Any] = {}
+    if period.status != "Draft" and driver_ids:
+        live_by_line = {
+            line.draft_line_id: line
+            for line in await load_live_source_lines(
+                period_id, company_id, db, driver_ids=driver_ids, work_date=work_date,
+            )
+        }
+
     # ── Build rows ────────────────────────────────────────────────────────── #
-    col_codes = {c.pay_item_code for c in columns}
     rows: list[DayGridRow] = []
-    total_hours = Decimal("0")
-    total_miles = Decimal("0")
+    quantity_totals: dict[int, Decimal] = {}
     gross_total = Decimal("0")
     needs_attention = 0
     worked_count = 0
@@ -546,7 +487,6 @@ async def get_day_grid(
 
         for line in drv_lines:
             lt = line["linetype"]
-            canonical = _LEGACY_TO_CANONICAL.get(lt, lt)
 
             if lt == "DailyStatus":
                 if ces_row is None and not _is_finalized_period:
@@ -562,24 +502,29 @@ async def get_day_grid(
                     notes_text = line["notes"]
                 continue
 
-            if canonical in col_codes:
+            ppd_id = line["payrollperioddefinitionid"]
+            if ppd_id is not None and ppd_id in column_ids:
                 qty = line["quantity"]
-                calc = line["calculatedamount"]
-                nmr = bool(line["needsmanagerreview"])
-                values[canonical] = DayGridLineValue(
+                live = live_by_line.get(line["draftlineid"])
+                calc = live.calculation if live is not None else None
+                attention = calc.needs_attention if calc is not None else False
+                values[str(ppd_id)] = DayGridLineValue(
                     line_id=line["draftlineid"],
                     quantity=str(qty) if qty is not None else None,
-                    calculated_amount=str(calc) if calc is not None else None,
-                    needs_manager_review=nmr,
+                    calculated_amount=(
+                        str(calc.amount) if calc is not None and calc.amount is not None else None
+                    ),
+                    needs_manager_review=attention,
+                    calculation_status=calc.status.value if calc is not None else None,
                 )
-                if nmr:
+                if attention:
                     needs_attention += 1
-                if canonical == "HOURS" and qty:
-                    total_hours += Decimal(str(qty))
-                if canonical == "MILES" and qty:
-                    total_miles += Decimal(str(qty))
-                if calc:
-                    gross_total += Decimal(str(calc))
+                if qty:
+                    quantity_totals[ppd_id] = (
+                        quantity_totals.get(ppd_id, Decimal("0")) + Decimal(str(qty))
+                    )
+                if calc is not None and calc.amount is not None:
+                    gross_total += calc.amount
 
         # Legacy path: resolve label/is_off from status_key_map when no canonical row.
         if not _is_finalized_period and ces_row is None and status_key_code:
@@ -642,8 +587,14 @@ async def get_day_grid(
         worked=worked_count,
         pto=pto_count,
         off=off_count,
-        total_hours=str(total_hours.quantize(Decimal("0.01"))),
-        total_miles=str(total_miles.quantize(Decimal("0.01"))),
+        quantity_totals=[
+            DayGridQuantityTotal(
+                payroll_period_definition_id=column.payroll_period_definition_id,
+                quantity=str(quantity_totals.get(
+                    column.payroll_period_definition_id, Decimal("0"))),
+            )
+            for column in columns
+        ],
         gross_total=None if _is_draft else str(gross_total.quantize(Decimal("0.01"))),
         needs_attention=needs_attention,
         financials_available=not _is_draft,
@@ -716,36 +667,12 @@ async def save_day_grid(
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     branch_id = period.branch_id
 
-    # ── Load active Daily columns for this branch/date ───────────────────── #
-    # CP-2C: snapshot-first. Post-0053 periods use PayrollPeriodPayItems;
-    # legacy periods fall back to the live PayItems default-activation flag.
-    # Use _period_has_pay_item_snapshot so a post-0053 period with zero active
-    # Daily rows doesn't fall back to live config (an empty active set is the
-    # correct answer — no codes should pass the validate step).
-    if await _period_has_pay_item_snapshot(period.payroll_period_id, db):
-        snap_active = await _get_period_pay_item_snapshot(
-            period.payroll_period_id, company_id, db, scope="Daily", active_only=True,
-        )
-        active_col_codes: set[str] = {
-            _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])
-            for r in snap_active
-        }
-    else:
-        _active_cols_result = await db.execute(
-            text("""
-                SELECT pi.payitemcode
-                FROM   payroll.payitems pi
-                WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
-                  AND  pi.itemscope  = 'Daily'
-                  AND  pi.status    != 'Retired'
-                  AND  pi.isdefaultbranchactive = TRUE
-            """),
-            {"cid": company_id},
-        )
-        active_col_codes: set[str] = {
-            _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])
-            for r in _active_cols_result.mappings().all()
-        }
+    # ── Active definitions: the only identities a save may name ──────────── #
+    active_definitions = {
+        d.payroll_period_definition_id: d
+        for d in await list_period_definitions(
+            period.payroll_period_id, company_id, db, active_only=True)
+    }
 
     # ── Phase 1: validate ALL inputs before any DB writes ────────────────── #
     # P1 #2: strict quantity parsing (non-numeric → 422 before writes)
@@ -769,20 +696,37 @@ async def save_day_grid(
                 detail=f"Driver {driver_id} is not eligible for this branch or work date.",
             )
 
-        # P1 #2: parse all quantities; reject unknown or branch-inactive codes
-        # before any writes so the batch is rejected atomically.
-        parsed_values: dict[str, Decimal | None] = {}
-        for pay_item_code, raw_val in save_row.values.items():
-            canonical = _LEGACY_TO_CANONICAL.get(pay_item_code, pay_item_code)
-            if canonical not in active_col_codes:
+        # Parse and validate every quantity before any write so the batch is
+        # rejected atomically. A key is a PayrollPeriodDefinitionID, never a code.
+        parsed_values: dict[int, Decimal | None] = {}
+        for key, raw_val in save_row.values.items():
+            try:
+                definition = active_definitions.get(int(key))
+            except (TypeError, ValueError):
+                definition = None
+            if definition is None:
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"Pay item '{canonical}' is not an active daily column "
-                        "for this period branch and date."
+                        f"'{key}' is not an active pay definition column for this period."
                     ),
                 )
-            parsed_values[canonical] = _parse_quantity(raw_val, canonical)
+            if not is_method_operational(definition.calculation_method):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "CALCULATION_METHOD_NOT_READY",
+                        "message": f"'{definition.name}' uses a calculation method that "
+                                   "is not operational yet.",
+                    },
+                )
+            quantity = _parse_quantity(raw_val, definition.name)
+            if quantity is not None:
+                problem = quantity_error(definition.input_type, quantity)
+                if problem is not None:
+                    raise HTTPException(
+                        status_code=422, detail=f"{definition.name}: {problem}")
+            parsed_values[definition.payroll_period_definition_id] = quantity
 
         # P1 #3: validate status key — raises 422 for invalid/inactive.
         # Returns the full key row (with limit fields) or None when clearing.
@@ -815,31 +759,8 @@ async def save_day_grid(
         parsed_rows.append((save_row, driver_id, parsed_values, validated_status_key, key_row))
 
     # ── Phase 2: execute DB writes (all validations passed) ──────────────── #
-    # CP-0A lock ordering: pre-lock ALL distinct custom PayItems in the batch in
-    # sorted (deterministic) order BEFORE acquiring the Period lock.
-    #
-    # Without batch pre-locking, a multi-item transaction can interleave:
-    #   save_day_grid: PayItem A → Period → (tries) PayItem B
-    #   deletion:      PayItem B → (tries) Period
-    # → deadlock.
-    #
-    # With batch pre-locking the order is always:
-    #   PayItem codes (sorted) → Period
-    # which matches the deletion path (PayItem → Period), so no deadlock is possible.
-    #
-    # Re-locking an already-held row in the same transaction is a no-op in
-    # PostgreSQL, so the per-line calls inside add_draft_line / update_draft_line
-    # are safe duplicates of these batch locks.
-    all_canonical_codes: set[str] = set()
-    for _, _, pv, _, _ in parsed_rows:
-        all_canonical_codes.update(pv.keys())
-    all_canonical_codes.discard("DailyStatus")
-    all_canonical_codes.discard("DailyNote")
-    for code in sorted(all_canonical_codes):
-        await _lock_pay_item_for_source_write(code, company_id, db, period_id=period.payroll_period_id)
-
     # Period source-mutation lock (also rechecks the Period is still editable).
-    # It is taken after the PayItem locks and before the Status limit check, so
+    # It is taken before the Status limit check, so
     # the count-then-write below is serialized per Period and no longer relies
     # on any Company-level lock.
     await _lock_period_for_mutation(period_id, company_id, db)
@@ -875,41 +796,25 @@ async def save_day_grid(
 
     for save_row, driver_id, parsed_values, validated_status_key, key_row in parsed_rows:
 
-        # ── Pay item lines ────────────────────────────────────────────────── #
-        for canonical, qty in parsed_values.items():
+        # ── Ordinary pay lines, by period definition ─────────────────────── #
+        for ppd_id, qty in parsed_values.items():
             # Treat None (empty/blank) as zero (clear)
             effective_qty: Decimal = qty if qty is not None else Decimal("0")
 
-            # P1 #5: look for existing line using canonical + all legacy aliases
-            aliases = _canonical_aliases(canonical)
-            lt_keys = {f"lt{i}": v for i, v in enumerate(aliases)}
-            lt_in_clause = ", ".join(f":{k}" for k in lt_keys)
             existing_result = await db.execute(
-                text(f"""
-                    SELECT draftlineid, linetype FROM payroll.payrolldraftlines
+                text("""
+                    SELECT draftlineid FROM payroll.payrolldraftlines
                     WHERE  payrollperiodid = :pid
                       AND  workdate        = :dt
                       AND  driverid        = :did
-                      AND  linetype        IN ({lt_in_clause})
+                      AND  payrollperioddefinitionid = :ppd
                       AND  status         != 'Void'
                 """),
-                {"pid": period_id, "dt": work_date, "did": driver_id, **lt_keys},
+                {"pid": period_id, "dt": work_date, "did": driver_id, "ppd": ppd_id},
             )
-            existing_rows = existing_result.mappings().all()
-
-            # P1 #5: detect duplicates (both "Hours" and "HOURS" rows exist)
-            if len(existing_rows) > 1:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Duplicate payroll lines found for '{canonical}' "
-                        f"(driver {driver_id}, {work_date}). Contact admin to resolve."
-                    ),
-                )
-            existing = existing_rows[0] if existing_rows else None
+            existing = existing_result.mappings().first()
 
             if effective_qty == 0 and existing:
-                # P1 #4: route void through void_draft_line to write audit
                 await void_draft_line(
                     period_id=period_id,
                     draft_line_id=existing["draftlineid"],
@@ -918,10 +823,8 @@ async def save_day_grid(
                     db=db,
                 )
             elif effective_qty == 0 and not existing:
-                # Skip: don't create zero rows
-                continue
-            elif effective_qty != 0 and not existing:
-                # Create new line via add_draft_line (writes audit)
+                continue  # don't create zero rows
+            elif not existing:
                 await add_draft_line(
                     period_id=period_id,
                     company_id=company_id,
@@ -929,14 +832,13 @@ async def save_day_grid(
                     data=DraftLineCreate(
                         driver_id=driver_id,
                         work_date=work_date,
-                        line_type=canonical,
+                        payroll_period_definition_id=ppd_id,
                         quantity=effective_qty,
                         source_type="Manual",
                     ),
                     db=db,
                 )
             else:
-                # Update existing line qty (writes audit)
                 await update_draft_line(
                     period_id=period_id,
                     draft_line_id=existing["draftlineid"],
