@@ -202,7 +202,7 @@ async def get_day_grid(
 
     # ── Load active Daily columns for the branch ─────────────────────────── #
     # CP-2C: use snapshot when period has PayrollPeriodPayItems rows (post-0053
-    # periods); fall back to live BranchPayItemConfig query for legacy periods.
+    # periods); fall back to the live PayItems default-activation flag for legacy periods.
     # Use _period_has_pay_item_snapshot to distinguish "post-0053 period with
     # zero active Daily items" from "legacy period with no snapshot" — both
     # would produce an empty snap_cols list, but only the latter should fall back.
@@ -226,19 +226,13 @@ async def get_day_grid(
             text("""
                 SELECT pi.payitemcode, pi.payitemname, pi.ratebehavior, pi.datatype
                 FROM   payroll.payitems pi
-                LEFT JOIN payroll.branchpayitemconfig bpic
-                       ON bpic.payitemid  = pi.payitemid
-                      AND bpic.companyid  = :cid
-                      AND bpic.branchid   = :bid
-                      AND bpic.effectivefrom <= :dt
-                      AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
                 WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
                   AND  pi.itemscope  = 'Daily'
                   AND  pi.status    != 'Retired'
-                  AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+                  AND  pi.isdefaultbranchactive = TRUE
                 ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
             """),
-            {"cid": company_id, "bid": branch_id, "dt": work_date},
+            {"cid": company_id},
         )
         for row in cols_result.mappings().all():
             code = row["payitemcode"]
@@ -724,7 +718,7 @@ async def save_day_grid(
 
     # ── Load active Daily columns for this branch/date ───────────────────── #
     # CP-2C: snapshot-first. Post-0053 periods use PayrollPeriodPayItems;
-    # legacy periods fall back to live BranchPayItemConfig.
+    # legacy periods fall back to the live PayItems default-activation flag.
     # Use _period_has_pay_item_snapshot so a post-0053 period with zero active
     # Daily rows doesn't fall back to live config (an empty active set is the
     # correct answer — no codes should pass the validate step).
@@ -741,18 +735,12 @@ async def save_day_grid(
             text("""
                 SELECT pi.payitemcode
                 FROM   payroll.payitems pi
-                LEFT JOIN payroll.branchpayitemconfig bpic
-                       ON bpic.payitemid  = pi.payitemid
-                      AND bpic.companyid  = :cid
-                      AND bpic.branchid   = :bid
-                      AND bpic.effectivefrom <= :dt
-                      AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :dt)
                 WHERE  (pi.companyid IS NULL OR pi.companyid = :cid)
                   AND  pi.itemscope  = 'Daily'
                   AND  pi.status    != 'Retired'
-                  AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+                  AND  pi.isdefaultbranchactive = TRUE
             """),
-            {"cid": company_id, "bid": branch_id, "dt": work_date},
+            {"cid": company_id},
         )
         active_col_codes: set[str] = {
             _LEGACY_TO_CANONICAL.get(r["payitemcode"], r["payitemcode"])

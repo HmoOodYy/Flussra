@@ -22,7 +22,7 @@ pytestmark = pytest.mark.asyncio
 
 LEGACY_TABLES = (
     "ratetypes", "payitemratetypemap", "payitemrateslots", "payitems",
-    "branchpayitemconfig", "driverrates", "cdpidefinitions", "cdpirequests",
+    "driverrates", "cdpidefinitions", "cdpirequests",
 )
 
 
@@ -96,11 +96,18 @@ async def test_direct_create_builds_one_scalar_structure_and_provenance(p3c_clie
 
 async def test_creation_adds_no_legacy_routing_identities(p3c_client, tenant, cur):
     before = _legacy_counts(cur)
+    cur.execute("SELECT count(*) FROM payroll.branchpayitemconfig")
+    config_rows = cur.fetchone()[0]
     await create_definition(p3c_client, tenant)
     submitted = await _submitted(p3c_client, tenant)
     approved = await _decide(p3c_client, tenant, submitted, "Approve")
     assert approved.status_code == 200, approved.text
     assert _legacy_counts(cur) == before
+    cur.execute("""
+        SELECT count(*), count(payitemid)
+        FROM payroll.branchpayitemconfig
+    """)
+    assert cur.fetchone() == (config_rows + 1, 0)
 
 
 async def test_company_is_valid_with_zero_pay_definitions(p3c_client, tenant):

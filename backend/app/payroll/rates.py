@@ -227,6 +227,52 @@ async def _is_status_rate_type(rate_type_id: int, db: AsyncConnection) -> bool:
     return row is not None
 
 
+def _ordinary_rate_authoring_retired() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "ORDINARY_RATE_AUTHORING_RETIRED",
+            "message": (
+                "Ordinary PayDefinition rates are authored through "
+                "/compensation/driver-rate-assignments. The legacy rate path remains "
+                "available only for Status pay rates."
+            ),
+        },
+    )
+
+
+async def _require_status_owned_rate_type(
+    rate_type_id: int, company_id: int, db: AsyncConnection,
+) -> None:
+    """Legacy rate writers accept only RateTypes owned by a Status rate column.
+
+    Ordinary PayDefinition compensation has a single authoring authority, the
+    target DriverRateAssignment lifecycle, so a RateType that no active Status
+    rate column of this Company uses is rejected before any write.
+    """
+    owned = (await db.execute(
+        text("""
+            SELECT 1 FROM payroll.statusratecolumns
+            WHERE ratetypeid = :rtid AND companyid = :cid AND isactive = TRUE
+            LIMIT 1
+        """),
+        {"rtid": rate_type_id, "cid": company_id},
+    )).first()
+    if owned is None:
+        raise _ordinary_rate_authoring_retired()
+
+
+def _require_rate_copy_available() -> None:
+    """Rate copy is owned by the target transfer/copy work; the legacy copy is closed."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "RATE_COPY_UNAVAILABLE",
+            "message": "Copying rates is not available until target rate copy is delivered.",
+        },
+    )
+
+
 async def _assert_status_rate_type_for_branch(
     rate_type_id: int,
     company_id: int,
@@ -1010,6 +1056,8 @@ async def create_rate(
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
+    await _require_status_owned_rate_type(data.rate_type_id, company_id, db)
+
     # Validate rate type: existence, activity, and company scope (closes P0 cross-company leak).
     await _assert_rate_type_allowed_for_company(db, company_id, data.rate_type_id)
 
@@ -1020,28 +1068,17 @@ async def create_rate(
     # Fix 8: When this rate type is mapped to pay items (via PayItemRateTypeMap),
     # validate that at least one of those pay items is active for this branch.
     # Mirrors the activation logic in _validate_line_type:
-    #   1. Explicit BranchPayItemConfig row â†’ use isactive from that row.
-    #   2. No config row â†’ fall back to PayItems.IsDefaultBranchActive.
+    # Legacy pay-item activation is PayItems.IsDefaultBranchActive.
     # If the rate type has no PayItemRateTypeMap entries (e.g. Fixed-behavior OVERNIGHT),
     # the branch check is skipped â€” the rate type itself is valid, just not PerUnit-mapped.
     branch_rt_result = await db.execute(
         text("""
             SELECT
                 pi.payitemid,
-                pi.isdefaultbranchactive,
-                bpic.isactive AS cfg_isactive
+                pi.isdefaultbranchactive
             FROM payroll.payitems pi
             JOIN payroll.payitemratetypemap pirm ON pirm.payitemid = pi.payitemid
               AND pirm.ratetypeid = :rtid AND pirm.status = 'Active'
-            LEFT JOIN LATERAL (
-                SELECT cfg.isactive
-                FROM payroll.branchpayitemconfig cfg
-                WHERE cfg.payitemid = pi.payitemid
-                  AND cfg.companyid = :cid AND cfg.branchid = :bid
-                  AND (cfg.effectiveto IS NULL OR cfg.effectiveto >= :effective_from)
-                ORDER BY cfg.effectivefrom DESC, cfg.configid DESC
-                LIMIT 1
-            ) bpic ON TRUE
             WHERE pi.status != 'Retired'
               AND pi.requiresrate = TRUE
               AND (pi.companyid IS NULL OR pi.companyid = :cid)
@@ -1049,17 +1086,13 @@ async def create_rate(
         {
             "rtid": data.rate_type_id,
             "cid": company_id,
-            "bid": driver_branch_id,
-            "effective_from": data.effective_from,
         },
     )
     branch_rt_rows = branch_rt_result.mappings().all()
     if branch_rt_rows:
         # A RateType may map to multiple PayItems; any eligible active mapping permits it.
         if not any(
-            bool(row["cfg_isactive"])
-            if row["cfg_isactive"] is not None
-            else bool(row["isdefaultbranchactive"])
+            bool(row["isdefaultbranchactive"])
             for row in branch_rt_rows
         ):
             raise HTTPException(
@@ -1205,6 +1238,8 @@ async def update_rate(
 
     # Generic rate administration is available only to non-DRIVER subjects.
     await _require_non_driver_rate_subject(company_id, user_id, db)
+
+    await _require_status_owned_rate_type(rate.rate_type_id, company_id, db)
 
     # Defensive cross-company scope guard: reject contaminated rows that reference
     # another company's RateType (e.g. created before P0 was closed).
@@ -1613,6 +1648,8 @@ async def approve_rate(
     # Step 1.34 — generic rate administration is denied to DRIVER subjects.
     await _require_non_driver_rate_subject(company_id, user_id, db)
 
+    await _require_status_owned_rate_type(rate.rate_type_id, company_id, db)
+
     # Step 1.36 â€” Defensive cross-company scope guard: reject contaminated rows
     # (e.g. created before P0 was closed) that reference another company's RateType.
     await _assert_rate_type_allowed_for_company(db, company_id, rate.rate_type_id)
@@ -1790,6 +1827,8 @@ async def void_rate(
 
     # Generic rate administration is available only to non-DRIVER subjects.
     await _require_non_driver_rate_subject(company_id, user_id, db)
+
+    await _require_status_owned_rate_type(rate.rate_type_id, company_id, db)
 
     # Phase 12B â€” advisory lock for Approved / Superseded void path.
     #
@@ -1987,13 +2026,11 @@ async def get_driver_rate_matrix(
     db: AsyncConnection,
 ) -> DriverRateMatrix:
     """
-    Return the full rate matrix for a driver as-of a given date.
+    Return the Status pay rate matrix for a driver as-of a given date.
 
-    Steps:
-      1. Get driver + branch info.
-      2. Get active pay items for the branch that RequiresRate=TRUE.
-      3. For each pay item / rate type combination, look up the current
-         Approved rate and any PendingApproval rate.
+    Ordinary PayDefinition rates are not part of this legacy matrix; they are read
+    through the target Compensation pay-rates endpoint. Only the Branch's active
+    StatusRateColumn groups are returned until Status compensation is cut over.
     """
     # Step 1 â€” driver + branch
     drv_result = await db.execute(
@@ -2029,124 +2066,9 @@ async def get_driver_rate_matrix(
     # which rejects ambiguous overlapping active assignments rather than trusting latest row.
     await _require_non_driver_rate_subject(company_id, user_id, db)
 
-    # Step 2 â€” active pay items for this branch.
-    # Uses LEFT JOIN on BranchPayItemConfig so that system items with
-    # IsDefaultBranchActive=TRUE appear even when no explicit config row exists for
-    # this branch.  Explicit config rows (IsActive=FALSE) override the default.
-    items_result = await db.execute(
-        text("""
-            SELECT pi.payitemid,
-                   pi.payitemname,
-                   pi.ratebehavior,
-                   rt.ratetypeid,
-                   rt.ratecode,
-                   rt.ratename,
-                   rt.unitname,
-                   bpic.effectivefrom AS pay_item_effective_from
-            FROM   payroll.payitems pi
-            JOIN   payroll.payitemratetypemap pirm
-                   ON pirm.payitemid = pi.payitemid AND pirm.status = 'Active'
-            JOIN   payroll.ratetypes rt
-                   ON rt.ratetypeid = pirm.ratetypeid AND rt.isactive = TRUE
-            LEFT JOIN payroll.branchpayitemconfig bpic
-                   ON bpic.payitemid   = pi.payitemid
-                  AND bpic.companyid   = :company_id
-                  AND bpic.branchid    = :branch_id
-                  AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :as_of)
-            WHERE  pi.status       != 'Retired'
-              AND  pi.requiresrate  = TRUE
-              AND  (pi.companyid IS NULL OR pi.companyid = :company_id)
-              AND  COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
-              -- Phase 4C: structural RateType ownership via RateTypes.CompanyID.
-              -- Only show system types (companyid IS NULL) or own-company types.
-              AND (rt.companyid IS NULL OR rt.companyid = :company_id)
-            ORDER BY pi.sortorder, pi.payitemname
-        """),
-        {"company_id": company_id, "branch_id": branch_id, "as_of": as_of_date},
-    )
-    items = items_result.mappings().all()
-
     groups: list[RateMatrixGroup] = []
-    for row in items:
-        rate_type_id: int = row["ratetypeid"]
 
-        # Step 3a â€” current approved/superseded rate (Fix 6: include Superseded for historical as_of)
-        approved_result = await db.execute(
-            text("""
-                SELECT driverrateid, amount, effectivefrom, effectiveto, status
-                FROM   payroll.driverrates
-                WHERE  driverid       = :did
-                  AND  companyid      = :cid
-                  AND  ratetypeid     = :rtid
-                  AND  status         IN ('Approved', 'Superseded')
-                  AND  effectivefrom <= :as_of
-                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            """),
-            {"did": driver_id, "cid": company_id, "rtid": rate_type_id, "as_of": as_of_date},
-        )
-        approved_row = approved_result.mappings().first()
-
-        # Step 3b â€” pending rate
-        pending_result = await db.execute(
-            text("""
-                SELECT driverrateid, amount, effectivefrom, effectiveto, status
-                FROM   payroll.driverrates
-                WHERE  driverid   = :did
-                  AND  companyid  = :cid
-                  AND  ratetypeid = :rtid
-                  AND  status     = 'PendingApproval'
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            """),
-            {"did": driver_id, "cid": company_id, "rtid": rate_type_id},
-        )
-        pending_row = pending_result.mappings().first()
-
-        current_rate = (
-            RateMatrixCurrentRate(
-                driver_rate_id=approved_row["driverrateid"],
-                amount=Decimal(str(approved_row["amount"])),
-                effective_from=approved_row["effectivefrom"],
-                effective_to=approved_row["effectiveto"],
-                status=approved_row["status"],
-            )
-            if approved_row else None
-        )
-        pending_rate = (
-            RateMatrixCurrentRate(
-                driver_rate_id=pending_row["driverrateid"],
-                amount=Decimal(str(pending_row["amount"])),
-                effective_from=pending_row["effectivefrom"],
-                effective_to=pending_row["effectiveto"],
-                status=pending_row["status"],
-            )
-            if pending_row else None
-        )
-
-        pay_item_id: int = row["payitemid"]
-        groups.append(
-            RateMatrixGroup(
-                group_key=f"{pay_item_id}:{rate_type_id}",
-                rate_source="PayItem",
-                pay_item_id=pay_item_id,
-                pay_item_name=row["payitemname"],
-                rate_behavior=row["ratebehavior"],
-                status_rate_column_id=None,
-                rate_type_id=rate_type_id,
-                rate_code=row["ratecode"],
-                rate_name=row["ratename"],
-                unit_name=row["unitname"],
-                current_rate=current_rate,
-                pending_rate=pending_rate,
-                is_required=True,
-                is_missing=(current_rate is None),
-                pay_item_effective_from=row["pay_item_effective_from"],
-            )
-        )
-
-    # Step 4 â€” StatusRateColumn groups for the branch.
+    # StatusRateColumn groups for the branch (ordinary PayDefinition rates are target-only).
     # Each active StatusRateColumn produces a separate rate group so the
     # driver can have a STATUS_PAY (or custom SRC_) rate set here.
     src_result = await db.execute(
@@ -2378,77 +2300,9 @@ async def batch_save_rates(
             # StatusRateColumn RateTypes are company-owned or system â€” ownership already
             # enforced by trg_src_ratetype_owner trigger; skip redundant check here.
         else:
-            # ---- PayItem validation path ----
-            # Exact pay_item_id + rate_type_id mapping check
-            map_result = await db.execute(
-                text("""
-                    SELECT
-                        pi.payitemid,
-                        pi.ratebehavior,
-                        pi.isdefaultbranchactive,
-                        bpic.isactive AS cfg_isactive
-                    FROM payroll.payitemratetypemap pirm
-                    JOIN payroll.payitems  pi ON pi.payitemid    = pirm.payitemid
-                    JOIN payroll.ratetypes rt ON rt.ratetypeid   = pirm.ratetypeid
-                                             AND rt.isactive      = TRUE
-                    LEFT JOIN payroll.branchpayitemconfig bpic
-                           ON bpic.payitemid  = pi.payitemid
-                          AND bpic.companyid  = :cid
-                          AND bpic.branchid   = :bid
-                          AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= CAST(:effective_from AS date))
-                    WHERE pirm.payitemid  = :piid
-                      AND pirm.ratetypeid = :rtid
-                      AND pirm.status     = 'Active'
-                      AND pi.status       != 'Retired'
-                      AND pi.requiresrate = TRUE
-                      AND (pi.companyid IS NULL OR pi.companyid = :cid)
-                    ORDER BY bpic.effectivefrom DESC NULLS LAST
-                    LIMIT 1
-                """),
-                {
-                    "piid":           change.pay_item_id,
-                    "rtid":           change.rate_type_id,
-                    "cid":            company_id,
-                    "bid":            driver_branch_id,
-                    "effective_from": data.effective_from,
-                },
-            )
-            map_row = map_result.mappings().first()
-
-            if map_row is None:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"pay_item_id={change.pay_item_id} is not actively mapped to "
-                        f"rate_type_id={change.rate_type_id} for this company. "
-                        "Verify the PayItem â†’ RateType mapping is Active."
-                    ),
-                )
-
-            # Phase 4B.3 â€” defense-in-depth: validate RateType ownership
-            await _assert_rate_type_allowed_for_company(db, company_id, change.rate_type_id)
-
-            cfg = map_row["cfg_isactive"]
-            is_branch_active = bool(cfg) if cfg is not None else bool(map_row["isdefaultbranchactive"])
-            if not is_branch_active:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"pay_item_id={change.pay_item_id} is not active for this driver's branch "
-                        f"as of {data.effective_from}."
-                    ),
-                )
-
-            rate_behavior: str = map_row["ratebehavior"] or "PerUnit"
-            if rate_behavior in _TIERED_BEHAVIORS or rate_behavior == "Block":
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"pay_item_id={change.pay_item_id} uses '{rate_behavior}' behavior "
-                        "which requires tier or block configuration. "
-                        "Use the individual rate endpoint to save this rate."
-                    ),
-                )
+            # The PayItem branch of the legacy batch writer ended with the P4a cutover:
+            # ordinary rates are authored only through target DriverRateAssignments.
+            raise _ordinary_rate_authoring_retired()
 
     # Step 7 â€” write: create or update PendingApproval rows
     # All validation passed â€” now write inside the same transaction.
@@ -2619,10 +2473,9 @@ async def get_driver_rates_summary(
     - missing_required_count: required matrix slots with no current Approved/Superseded rate
 
     missing_required_count uses the same INNER JOIN logic as get_driver_rate_matrix
-    (BranchPayItemConfig INNER JOIN) so items with only IsDefaultBranchActive=TRUE
-    and no explicit config row are NOT counted as required.
+    (PayItems.IsDefaultBranchActive).
     """
-    branch_id = await _check_driver_read_access(driver_id, company_id, user_id, db)
+    await _check_driver_read_access(driver_id, company_id, user_id, db)
 
     # Counts from driverrates
     counts_result = await db.execute(
@@ -2644,9 +2497,7 @@ async def get_driver_rates_summary(
     pending_count: int       = int(counts_row["pending_count"] or 0)
     future_approved_count: int = int(counts_row["future_approved_count"] or 0)
 
-    # Missing required count â€” mirrors matrix logic exactly (LEFT JOIN + COALESCE
-    # fallback so that system items with IsDefaultBranchActive=TRUE are counted
-    # even when no explicit BranchPayItemConfig row exists for this branch).
+    # Missing required count â€” mirrors the matrix logic (PayItems.IsDefaultBranchActive).
     missing_result = await db.execute(
         text("""
             SELECT
@@ -2657,12 +2508,6 @@ async def get_driver_rates_summary(
                  ON pirm.payitemid = pi.payitemid AND pirm.status = 'Active'
             JOIN payroll.ratetypes rt
                  ON rt.ratetypeid = pirm.ratetypeid AND rt.isactive = TRUE
-            LEFT JOIN payroll.branchpayitemconfig bpic
-                 ON bpic.payitemid    = pi.payitemid
-                AND bpic.companyid   = :cid
-                AND bpic.branchid    = :bid
-                AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= CURRENT_DATE)
-                AND bpic.effectivefrom <= CURRENT_DATE
             LEFT JOIN LATERAL (
                 SELECT driverrateid FROM payroll.driverrates
                 WHERE  driverid      = :did
@@ -2677,9 +2522,9 @@ async def get_driver_rates_summary(
             WHERE pi.status      != 'Retired'
               AND pi.requiresrate = TRUE
               AND (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+              AND pi.isdefaultbranchactive = TRUE
         """),
-        {"did": driver_id, "cid": company_id, "bid": branch_id},
+        {"did": driver_id, "cid": company_id},
     )
     missing_row = missing_result.mappings().first()
     if missing_row is not None:
@@ -2876,6 +2721,7 @@ async def copy_driver_rates(
       are not copied (this is safe â€” the new rate row is a simple Flat rate).
     """
     await _require_non_driver_rate_subject(company_id, user_id, db)
+    _require_rate_copy_available()
 
     # Verify both drivers exist in this company
     src_result = await db.execute(
@@ -2993,18 +2839,12 @@ async def copy_driver_rates(
                                      AND pi.requiresrate = TRUE
             JOIN payroll.ratetypes rt ON rt.ratetypeid   = pirm.ratetypeid
                                      AND rt.isactive      = TRUE
-            LEFT JOIN payroll.branchpayitemconfig bpic
-                                 ON bpic.payitemid    = pi.payitemid
-                                AND bpic.companyid    = :cid
-                                AND bpic.branchid     = :bid
-                                AND bpic.effectivefrom <= :eff_from
-                                AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :eff_from)
             WHERE pirm.status    = 'Active'
               AND pirm.ratetypeid IN ({in_clause})
               AND (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND COALESCE(bpic.isactive, pi.isdefaultbranchactive) = TRUE
+              AND pi.isdefaultbranchactive = TRUE
         """),
-        {"cid": company_id, "bid": target_branch_id, "eff_from": data.effective_from, **in_params},
+        {"cid": company_id, **in_params},
     )
     valid_rate_type_ids = {r["ratetypeid"] for r in valid_result.mappings().all()}
 

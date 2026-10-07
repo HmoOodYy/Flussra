@@ -42,6 +42,8 @@ from sqlalchemy import text as _text
 from app.payroll.service import _compute_calculated_amount
 from tests.builders.compensation import create_approved_rate
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Module-level constants (2091 dates — isolated from other test modules)
 # ---------------------------------------------------------------------------

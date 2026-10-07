@@ -33,6 +33,8 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 _COMPANY_ID = 1
 
 
@@ -345,7 +347,7 @@ class TestSystemItemsCompanyIsNull:
 
 class TestBranchInactiveRejected:
     """
-    An item explicitly deactivated for a branch via BranchPayItemConfig must
+    A legacy item that is not default-active must
     be rejected (422) regardless of whether the canonical code or legacy
     display name is used.
     """
@@ -361,53 +363,22 @@ class TestBranchInactiveRejected:
         direct_db,
     ):
         """
-        Explicitly deactivate LOADS on PAYTEST for this test.
+        Deactivate LOADS for this test.
         POSTing "LOADS" must return 422 while override is in place.
         Restore in finally so other tests see the item as active.
         """
         from sqlalchemy import text as _text
 
-        eff_from = date(2000, 1, 1)
-        # Get company_id for PAYTEST
-        company_row = (await direct_db.execute(
-            _text("SELECT companyid FROM core.branches WHERE branchid = :bid"),
-            {"bid": paytest_branch_id},
-        )).mappings().first()
-        cid = int(company_row["companyid"])
-
-        # Get payitemid for LOADS
         item_row = (await direct_db.execute(
-            _text("SELECT payitemid FROM payroll.payitems WHERE payitemcode='LOADS' AND companyid IS NULL"),
+            _text("SELECT payitemid, isdefaultbranchactive FROM payroll.payitems "
+                  "WHERE payitemcode='LOADS' AND companyid IS NULL"),
         )).mappings().first()
         piid = int(item_row["payitemid"])
-
-        # Read current open-row state
-        existing = (await direct_db.execute(
-            _text("""
-                SELECT configid, isactive FROM payroll.branchpayitemconfig
-                WHERE companyid=:c AND branchid=:b AND payitemid=:p AND effectiveto IS NULL
-            """),
-            {"c": cid, "b": paytest_branch_id, "p": piid},
-        )).mappings().first()
-
-        if existing:
-            prev_active = bool(existing["isactive"])
-            cfg_id = int(existing["configid"])
-            await direct_db.execute(
-                _text("UPDATE payroll.branchpayitemconfig SET isactive=FALSE WHERE configid=:cid"),
-                {"cid": cfg_id},
-            )
-        else:
-            cfg_id = None
-            prev_active = None
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.branchpayitemconfig
-                        (companyid, branchid, payitemid, isactive, effectivefrom, effectiveto)
-                    VALUES (:c, :b, :p, FALSE, :ef, NULL)
-                """),
-                {"c": cid, "b": paytest_branch_id, "p": piid, "ef": eff_from},
-            )
+        prev_active = bool(item_row["isdefaultbranchactive"])
+        await direct_db.execute(
+            _text("UPDATE payroll.payitems SET isdefaultbranchactive=FALSE WHERE payitemid=:p"),
+            {"p": piid},
+        )
 
         try:
             period = await _open_period(direct_db, paytest_branch_id, "2080-05-05", "2080-05-11")
@@ -428,19 +399,10 @@ class TestBranchInactiveRejected:
                 f"Deactivated 'Loads' (legacy) must also be rejected; got {sc2}: {body2}"
             )
         finally:
-            if cfg_id is not None:
-                await direct_db.execute(
-                    _text("UPDATE payroll.branchpayitemconfig SET isactive=:ia WHERE configid=:cid"),
-                    {"ia": prev_active, "cid": cfg_id},
-                )
-            else:
-                await direct_db.execute(
-                    _text("""
-                        DELETE FROM payroll.branchpayitemconfig
-                        WHERE companyid=:c AND branchid=:b AND payitemid=:p AND effectivefrom=:ef
-                    """),
-                    {"c": cid, "b": paytest_branch_id, "p": piid, "ef": eff_from},
-                )
+            await direct_db.execute(
+                _text("UPDATE payroll.payitems SET isdefaultbranchactive=:ia WHERE payitemid=:p"),
+                {"ia": prev_active, "p": piid},
+            )
 
 
 # ---------------------------------------------------------------------------

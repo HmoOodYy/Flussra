@@ -27,7 +27,9 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+from tests.builders.owned_scope import create_owned_branch
+
+pytestmark = pytest.mark.pre_cutover_legacy
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -225,7 +227,6 @@ async def cp2d2_branch_id(
 ) -> int:
     """Module-owned branch: this module recycles its Open slot on every test."""
     branch_id = await create_owned_branch(session_db_conn, "C2D2", "CP2D2 owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 
@@ -839,14 +840,14 @@ class TestDriverPayRatesMatrix:
         assert resp.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_batch_save_pay_item_path_unchanged(
+    async def test_batch_save_pay_item_path_is_retired(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp2d2_driver_id: int,
         direct_db: AsyncConnection,
     ):
-        """PayItem batch save path still works — status columns don't regress it."""
+        """The legacy batch writer no longer accepts a PayItem change."""
         # Find an active PayItem+RateType pair for PAYTEST
         pi_row = (await direct_db.execute(
             _text("""
@@ -877,7 +878,8 @@ class TestDriverPayRatesMatrix:
                 ],
             },
         )
-        assert resp.status_code == 200, resp.text
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
 
 
 # ---------------------------------------------------------------------------

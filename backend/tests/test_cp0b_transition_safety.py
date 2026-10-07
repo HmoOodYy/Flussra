@@ -39,7 +39,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+from tests.builders.owned_scope import create_owned_branch
 from tests.ownership import retire_branch_periods_directly
 
 
@@ -47,7 +47,6 @@ from tests.ownership import retire_branch_periods_directly
 async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
     """Module-owned branch standing in for PAYTEST."""
     branch_id = await create_owned_branch(session_db_conn, "C0B", "CP0B owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 

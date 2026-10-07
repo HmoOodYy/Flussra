@@ -35,6 +35,8 @@ import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 from sqlalchemy import text as _text
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_branch_id(session_db_conn) -> int:

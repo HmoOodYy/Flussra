@@ -25,11 +25,11 @@ employees.manage      — create Employee / Driver profile (Workforce)
 payroll.approve_rate  — approve / void a rate (approve_rate / void_rate)
 """
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
 from tests.builders.owned_scope import (
-    activate_paytest_equivalent_items,
     create_owned_branch,
     create_owned_driver,
 )
@@ -40,7 +40,6 @@ async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
     """Module-owned branch standing in for PAYTEST: this module's workflow state
     (periods it submits, approves or leaves behind) never reaches another module."""
     branch_id = await create_owned_branch(session_db_conn, "BAC", "Branch access owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 
@@ -227,6 +226,7 @@ class TestPermissionDenial:
         assert resp.status_code == 403
         assert "permission" in resp.json()["detail"].lower()
 
+    @pytest.mark.pre_cutover_legacy
     async def test_viewer_cannot_approve_rate(
         self,
         session_client: httpx.AsyncClient,

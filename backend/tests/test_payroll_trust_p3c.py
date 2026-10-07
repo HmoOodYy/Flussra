@@ -31,6 +31,8 @@ from sqlalchemy import text as _text
 from tests.builders.compensation import create_approved_rate
 from tests.builders.workforce import create_driver_employee
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Year constants — one per test to avoid locked-period conflicts
 # ---------------------------------------------------------------------------

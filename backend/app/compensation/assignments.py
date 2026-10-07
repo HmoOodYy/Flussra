@@ -27,6 +27,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
+from app.compensation.branch_config import require_definition_applicable
 from app.compensation.errors import compensation_error, translate_database_error
 from app.compensation.guards import (
     load_company_driver_branch,
@@ -34,12 +35,14 @@ from app.compensation.guards import (
     require_rate_read,
 )
 from app.compensation.schemas import (
+    AssignmentBrief,
     AssignmentCreate,
     AssignmentSummary,
     AssignmentUpdate,
     AssignmentValue,
     AssignmentValuesReplace,
     AssignmentVoid,
+    DriverPayRateRow,
     DriverRateSummaryItem,
 )
 from app.payroll.guards import _check_not_in_finalized_period
@@ -178,6 +181,21 @@ async def _authorable_rate_definition(
     return dict(row)
 
 
+async def _require_authoring_authority(
+    company_id: int, rate_definition_id: int, branch_id: int, effective_from: date,
+    db: AsyncConnection,
+) -> None:
+    """Revalidate PayDefinition status and Branch applicability for a target write.
+
+    The caller holds the RateDefinition structural lock. PayDefinition retirement
+    takes that same lock before touching the PayDefinition, so the status read here
+    cannot change underneath the caller until it ends.
+    """
+    definition = await _authorable_rate_definition(company_id, rate_definition_id, db)
+    await require_definition_applicable(
+        company_id, branch_id, definition["paydefinitionid"], effective_from, db)
+
+
 def _validate_window(effective_from: date, effective_to: date | None) -> None:
     if effective_to is not None and effective_to < effective_from:
         raise compensation_error(
@@ -193,6 +211,8 @@ async def create_pending(
     _validate_window(data.effective_from, data.effective_to)
 
     await lock_rate_definition_structure(data.rate_definition_id, db)
+    await _require_authoring_authority(
+        company_id, data.rate_definition_id, branch_id, data.effective_from, db)
     try:
         assignment_id = (await db.execute(
             text("""
@@ -241,6 +261,9 @@ async def update_pending(
         else row["effective_to"]
     notes = data.notes if "notes" in data.model_fields_set else row["notes"]
     _validate_window(effective_from, effective_to)
+    if effective_from != row["effective_from"]:
+        await _require_authoring_authority(
+            company_id, row["rate_definition_id"], row["branch_id"], effective_from, db)
     try:
         await db.execute(
             text("""
@@ -318,6 +341,8 @@ async def approve(
 ) -> AssignmentSummary:
     row = await _lock_monetary_pending_assignment(
         company_id, user_id, assignment_id, "approved", db)
+    await _require_authoring_authority(
+        company_id, row["rate_definition_id"], row["branch_id"], row["effective_from"], db)
     await _check_not_in_finalized_period(
         company_id, row["branch_id"], row["effective_from"], db, label="rate")
 
@@ -492,3 +517,80 @@ async def driver_summary(
     )).mappings().all()
     return [DriverRateSummaryItem.model_validate(dict(row)) for row in rows]
 
+
+
+async def driver_pay_rates(
+    company_id: int, user_id: int, driver_id: int, as_of: date | None, db: AsyncConnection,
+) -> list[DriverPayRateRow]:
+    """Branch-applicable scalar PayDefinitions and the Driver's rate state for each.
+
+    A definition is listed when it is Active and its Branch configuration is
+    active on the reference date. Rates are configuration only; nothing is
+    calculated here.
+    """
+    branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
+    await require_rate_read(company_id, user_id, branch_id, db)
+    reference = as_of or (await db.execute(
+        text("SELECT core.fn_CompanyToday(:cid)"), {"cid": company_id})).scalar_one()
+
+    definitions = (await db.execute(
+        text("""
+            SELECT pd.paydefinitionid AS pay_definition_id, pd.definitioncode AS definition_code,
+                   pd.definitionname AS definition_name, pd.inputtype AS input_type,
+                   pd.unit AS unit, rd.ratedefinitionid AS rate_definition_id,
+                   c.ratecomponentdefinitionid AS rate_component_definition_id
+            FROM   payroll.paydefinitions pd
+            JOIN   payroll.ratedefinitions rd
+                   ON rd.paydefinitionid = pd.paydefinitionid AND rd.shape = 'Scalar'
+            JOIN   payroll.ratecomponentdefinitions c
+                   ON c.ratedefinitionid = rd.ratedefinitionid AND c.sequenceno = 1
+            WHERE  pd.companyid = :cid AND pd.status = 'Active'
+              AND  EXISTS (
+                       SELECT 1 FROM payroll.branchpayitemconfig bpic
+                       WHERE  bpic.companyid = :cid AND bpic.branchid = :bid
+                         AND  bpic.paydefinitionid = pd.paydefinitionid
+                         AND  bpic.isactive
+                         AND  bpic.effectivefrom <= :asof
+                         AND  (bpic.effectiveto IS NULL OR bpic.effectiveto >= :asof))
+            ORDER  BY lower(pd.definitionname), pd.definitioncode, pd.paydefinitionid
+        """),
+        {"cid": company_id, "bid": branch_id, "asof": reference},
+    )).mappings().all()
+    if not definitions:
+        return []
+
+    assignment_rows = (await db.execute(
+        text("""
+            SELECT a.ratedefinitionid AS rate_definition_id,
+                   a.driverrateassignmentid AS driver_rate_assignment_id, a.status,
+                   a.effectivefrom AS effective_from, a.effectiveto AS effective_to,
+                   v.amount AS amount
+            FROM   payroll.driverrateassignments a
+            LEFT JOIN payroll.driverratevalues v
+                   ON v.driverrateassignmentid = a.driverrateassignmentid
+            WHERE  a.companyid = :cid AND a.driverid = :did
+              AND  a.ratedefinitionid = ANY(:rids) AND a.status <> 'Voided'
+            ORDER  BY a.effectivefrom, a.driverrateassignmentid
+        """),
+        {"cid": company_id, "did": driver_id,
+         "rids": [d["rate_definition_id"] for d in definitions]},
+    )).mappings().all()
+    by_definition: dict[int, list[AssignmentBrief]] = {}
+    for row in assignment_rows:
+        by_definition.setdefault(row["rate_definition_id"], []).append(
+            AssignmentBrief.model_validate(
+                {key: row[key] for key in AssignmentBrief.model_fields}))
+
+    result = []
+    for definition in definitions:
+        briefs = by_definition.get(definition["rate_definition_id"], [])
+        current = next(
+            (b for b in briefs
+             if b.status in ("Approved", "Superseded") and b.effective_from <= reference
+             and (b.effective_to is None or b.effective_to >= reference)), None)
+        future = next(
+            (b for b in briefs if b.status == "Approved" and b.effective_from > reference), None)
+        pending = next((b for b in briefs if b.status == "Pending"), None)
+        result.append(DriverPayRateRow(
+            **dict(definition), current=current, future=future, pending=pending))
+    return result

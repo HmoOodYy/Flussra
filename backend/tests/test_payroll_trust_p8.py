@@ -25,6 +25,8 @@ from sqlalchemy import text as _text
 from tests.builders.compensation import create_approved_rate
 from tests.seed_helpers import attach_cdpi_owner
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Year slots / URL templates
 # ---------------------------------------------------------------------------

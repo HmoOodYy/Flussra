@@ -31,6 +31,8 @@ from sqlalchemy import text as _sqla_text
 from app.payroll import finalization as payroll_service
 from tests.ownership import cancel_active_branch_periods, retire_branch_periods_directly
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_branch_id(session_db_conn) -> int:

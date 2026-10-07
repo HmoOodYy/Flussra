@@ -18,10 +18,13 @@ the owned branch.
 from uuid import uuid4
 
 import httpx
+import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
 from tests.ownership import cancel_active_branch_periods, retire_branch_periods_directly
+
+pytestmark = pytest.mark.pre_cutover_legacy
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (copied pattern from test_payroll.py)
@@ -60,34 +63,6 @@ async def paytest_driver_id(
     )
     assert resp.status_code == 201, f"Entry driver seed failed: {resp.text}"
     return resp.json()["driver_id"]
-
-
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def entry_items_activated(
-    session_client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
-) -> None:
-    """Activate, on this module's owned branch, the pay items its line types need.
-
-    The shared `activate_paytest_system_items` fixture activates items on whichever
-    `paytest_branch_id` the first requesting module resolves, so an owned branch can
-    never rely on it.
-    """
-    headers = auth(auth_token)
-    items = await session_client.get(
-        f"/settings/branches/{paytest_branch_id}/pay-items", headers=headers,
-    )
-    assert items.status_code == 200, items.text
-    wanted = {"OVERNIGHT", "WAIT_TIME", "PALLETS", "SILOS", "HOURS", "MILES"}
-    for item in items.json():
-        if item["pay_item_code"] in wanted:
-            activated = await session_client.patch(
-                f"/settings/branches/{paytest_branch_id}/pay-items/{item['pay_item_id']}",
-                json={"is_active": True},
-                headers=headers,
-            )
-            assert activated.status_code == 200, (
-                f"activating {item['pay_item_code']} failed: {activated.text}"
-            )
 
 
 # ---------------------------------------------------------------------------

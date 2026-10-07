@@ -43,7 +43,7 @@ from app.payroll_setup.payroll_policy import (
     publish_version,
 )
 from tests.builders.access import create_user_with_role_token
-from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+from tests.builders.owned_scope import create_owned_branch
 
 # ---------------------------------------------------------------------------
 # Unique username counter — keeps each test's users separate
@@ -268,7 +268,6 @@ async def sm_paytest_id(
 ) -> int:
     """Module-owned stand-in for the PAYTEST branch (Open periods are recycled here)."""
     branch_id = await create_owned_branch(session_db_conn, "SM", "Security matrix owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 
@@ -1224,6 +1223,7 @@ class TestDriverSelfGenericDenial:
             f"403 detail must mention driver; got: {r.json()['detail']}"
         )
 
+    @pytest.mark.pre_cutover_legacy
     async def test_operational_user_can_create_open_candidate(
         self,
         session_client: httpx.AsyncClient,

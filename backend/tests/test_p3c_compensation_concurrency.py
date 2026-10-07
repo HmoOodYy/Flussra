@@ -20,6 +20,7 @@ from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
     authored_assignment,
     create_definition,
     create_pending,
+    grant_applicability,
     p3c_application,
     p3c_database_engine,
     p3c_http_client,
@@ -114,6 +115,7 @@ def _code(result) -> str:
 
 async def test_concurrent_pending_creation_for_one_identity_admits_one(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
+    grant_applicability(tenant, definition, tenant.branch_a)
     body = {"driver_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
             "effective_from": "2026-01-01"}
     results = await asyncio.gather(
@@ -211,6 +213,8 @@ async def test_successor_approval_serializes_with_voiding_the_current_schedule(
 async def test_unrelated_rate_definitions_do_not_contend(p3c_client, p3c_engine, tenant):
     first = await create_definition(p3c_client, tenant)
     second = await create_definition(p3c_client, tenant)
+    grant_applicability(tenant, first, tenant.branch_a)
+    grant_applicability(tenant, second, tenant.branch_a)
 
     async def create_other(conn):
         return await assignments.create_pending(
@@ -234,6 +238,7 @@ async def test_unrelated_rate_definitions_do_not_contend(p3c_client, p3c_engine,
 
 async def test_same_definition_drivers_serialize_without_failing(p3c_client, p3c_engine, tenant):
     definition = await create_definition(p3c_client, tenant)
+    grant_applicability(tenant, definition, tenant.branch_a)
 
     async def create_second(conn):
         return await assignments.create_pending(

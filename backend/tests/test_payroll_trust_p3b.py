@@ -32,6 +32,8 @@ from sqlalchemy import text as _text
 from tests.builders.compensation import create_approved_rate
 from tests.db_state import allow_final_line_insert
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_branch_id(session_db_conn) -> int:

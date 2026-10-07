@@ -76,7 +76,7 @@ def test_0082_state_upgrades_to_0083_without_touching_it(governance_database):
     assert upgraded.returncode == 0, upgraded.stderr
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0083",)
+        assert cur.fetchone() == ("0084",)
         assert _governance_tables(cur) == GOVERNANCE_TABLES
         for table in GOVERNANCE_TABLES:
             cur.execute(sql.SQL("SELECT count(*) FROM payroll.{}").format(sql.Identifier(table)))
@@ -109,7 +109,7 @@ def test_downgrade_removes_empty_governance_tables_and_refuses_when_rows_exist(
     governance_database,
 ):
     env, dsn = governance_database
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0083").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended,

@@ -24,7 +24,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.builders.owned_scope import activate_paytest_equivalent_items, create_owned_branch
+from tests.builders.owned_scope import create_owned_branch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -180,7 +180,6 @@ async def m16_branch_id(
     """Module-owned branch: M16 recycles its workflow slot every test, so it must
     never share one with another module."""
     branch_id = await create_owned_branch(session_db_conn, "M16", "M16 owned branch")
-    await activate_paytest_equivalent_items(session_client, auth_token, branch_id)
     return branch_id
 
 

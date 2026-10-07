@@ -39,6 +39,8 @@ from app.payroll_setup.payroll_policy import (
     withdraw_assignment,
 )
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

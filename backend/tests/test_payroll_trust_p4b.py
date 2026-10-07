@@ -32,6 +32,8 @@ from sqlalchemy import text as _text
 from tests.db_state import PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER, suspended_test_triggers
 from tests.seed_helpers import attach_cdpi_owner
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # p4b_env fixture
 # ---------------------------------------------------------------------------
@@ -99,12 +101,9 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     """), {"piid": pi_a_id, "rtid": rt_a_custom_id})
     await attach_cdpi_owner(direct_db, item_id=pi_a_id, rate_type_id=rt_a_custom_id)
 
-    await direct_db.execute(_text("""
-        INSERT INTO payroll.branchpayitemconfig
-            (companyid, branchid, payitemid, isactive, effectivefrom)
-        VALUES (:cid, :bid, :piid, TRUE, '2000-01-01')
-        ON CONFLICT DO NOTHING
-    """), {"cid": cid_a, "bid": bid_a, "piid": pi_a_id})
+    await direct_db.execute(_text(
+        "UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"
+    ), {"piid": pi_a_id})
 
     # ── Company A driver ─────────────────────────────────────────────────────
     await direct_db.execute(_text(
@@ -268,13 +267,10 @@ async def p4b_env(direct_db, client: httpx.AsyncClient, auth_token: str):
     """), {"piid": pi_b_id, "rtid": rt_b_own_id})
     await attach_cdpi_owner(direct_db, item_id=pi_b_id, rate_type_id=rt_b_own_id)
 
-    # Activate Company B's PayItem on Branch B
-    await direct_db.execute(_text("""
-        INSERT INTO payroll.branchpayitemconfig
-            (companyid, branchid, payitemid, isactive, effectivefrom)
-        VALUES (:cid, :bid, :piid, TRUE, '2000-01-01')
-        ON CONFLICT DO NOTHING
-    """), {"cid": cid_b, "bid": bid_b, "piid": pi_b_id})
+    # Activate Company B's PayItem
+    await direct_db.execute(_text(
+        "UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"
+    ), {"piid": pi_b_id})
 
     yield {
         "cid_a":          cid_a,
@@ -491,7 +487,8 @@ async def test_t3_mixed_mapping_contaminated_db_blocked(
       - create_rate with that RateType for Company B → 422
       - approve_rate contaminated row → 422, status unchanged
       - update_rate contaminated row → 422, amount unchanged
-      - batch_save with Company B PayItem + Company A RateType → 422, no partial write
+      - batch_save with Company B PayItem + Company A RateType → 409
+        ORDINARY_RATE_AUTHORING_RETIRED (the PayItem batch branch ended with P4a), no write
     """
     token_b  = await _get_token_b(client)
     rt_a_id  = p4b_env["rt_a_custom_id"]
@@ -550,7 +547,7 @@ async def test_t3_mixed_mapping_contaminated_db_blocked(
         ), {"rid": contaminated_rate_id})).mappings().first()
         assert Decimal(str(amt_row["amount"])) == Decimal("50.00")
 
-        # (d) batch_save — must reject, no partial write
+        # (d) batch_save — the PayItem branch is retired outright, nothing is written
         resp = await client.post(
             f"/payroll/drivers/{drv_b_id}/rates/batch",
             json={
@@ -561,10 +558,10 @@ async def test_t3_mixed_mapping_contaminated_db_blocked(
             },
             headers=_auth(token_b),
         )
-        assert resp.status_code == 422, (
-            f"batch_save must reject cross-company custom RateType, "
-            f"got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 409, (
+            f"batch_save PayItem path must be retired, got {resp.status_code}: {resp.text}"
         )
+        assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
         batch_row = (await direct_db.execute(_text("""
             SELECT 1 FROM payroll.driverrates
             WHERE driverid = :did AND ratetypeid = :rtid
@@ -645,7 +642,6 @@ async def test_t5_same_company_custom_rate_type_works(
     """
     Company A admin creates a DriverRate using Company A's own custom RateType (CPI_P4B_RT).
     Must succeed 201.
-    The rate matrix for Company A's driver must include the custom rate type.
     """
     token_a      = p4b_env["auth_a"]
     rt_a_id      = p4b_env["rt_a_custom_id"]
@@ -664,21 +660,6 @@ async def test_t5_same_company_custom_rate_type_works(
     await direct_db.execute(_text(
         "DELETE FROM payroll.driverrates WHERE driverrateid = :rid"
     ), {"rid": rate_id})
-
-    # Rate matrix for Company A's driver must include CPI_P4B_RT
-    resp_matrix = await client.get(
-        f"/payroll/drivers/{drv_a_id}/rate-matrix",
-        params={"as_of": "2059-06-01"},
-        headers=_auth(token_a),
-    )
-    assert resp_matrix.status_code == 200, (
-        f"Rate matrix must return 200, got {resp_matrix.status_code}: {resp_matrix.text}"
-    )
-    groups = resp_matrix.json().get("groups", [])
-    rt_ids_in_matrix = {g["rate_type_id"] for g in groups}
-    assert rt_a_id in rt_ids_in_matrix, (
-        f"Company A's custom RateType {rt_a_id} must appear in Company A's rate matrix"
-    )
 
 
 # ===========================================================================
@@ -818,18 +799,21 @@ async def test_t8_rate_matrix_does_not_include_foreign_custom_rate_type(
 
 
 # ===========================================================================
-# T9 — Batch save rejects cross-company custom RateType precisely (422)
+# T9 — The PayItem batch path is retired before any cross-company RateType validation
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_t9_batch_save_rejects_cross_company_rate_type_precisely(
+async def test_t9_batch_pay_item_path_is_retired_before_cross_company_rate_validation(
     p4b_env, client: httpx.AsyncClient, direct_db
 ):
     """
     Company B calls POST /payroll/drivers/{driver_b_id}/rates/batch
-    with Company A's custom PayItem + Company A's custom RateType.
-    Must return exactly 422 (not 404, not 200).
-    No DriverRate row must be created.
+    with Company A's custom PayItem + Company A's custom RateType and no
+    status_rate_column_id.
+
+    After P4a the PayItem branch of the legacy batch writer is rejected before any
+    PayItem mapping or RateType ownership validation: 409
+    ORDINARY_RATE_AUTHORING_RETIRED. No DriverRate row must be created.
     """
     token_b  = await _get_token_b(client)
     rt_a_id  = p4b_env["rt_a_custom_id"]
@@ -846,10 +830,10 @@ async def test_t9_batch_save_rejects_cross_company_rate_type_precisely(
         },
         headers=_auth(token_b),
     )
-    assert resp.status_code == 422, (
-        f"Batch save must return 422 for cross-company custom RateType, "
-        f"got {resp.status_code}: {resp.text}"
+    assert resp.status_code == 409, (
+        f"The PayItem batch path must be retired, got {resp.status_code}: {resp.text}"
     )
+    assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
 
     # No rate row must be created
     row = (await direct_db.execute(_text("""
@@ -921,7 +905,7 @@ async def test_t12_rate_types_endpoint_hides_unmapped_cpi_types(
 
 
 # ===========================================================================
-# T13 — batch_save_rates rejects contaminated mapping (AllowSelfApproval=false)
+# T13 — contaminated mapping never reaches the retired PayItem batch path (AllowSelfApproval=false)
 # ===========================================================================
 
 @pytest.mark.asyncio
@@ -931,8 +915,8 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
     """
     Direct-DB inserts a contaminated PayItemRateTypeMap:
         Company B's PayItem → Company A's CPI_ RateType.
-    batch_save_rates must reject the request with 422 via defense-in-depth
-    (_assert_rate_type_allowed_for_company called per change).
+    After P4a the PayItem branch of batch_save_rates is rejected outright with 409
+    ORDINARY_RATE_AUTHORING_RETIRED, so the contaminated mapping is never evaluated.
     No DriverRate row must be created.
     """
     cid_b    = p4b_env["cid_b"]
@@ -949,7 +933,7 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
         ), {"cid": cid_b})
 
         # Insert the contaminated mapping bypassing the Phase 4C DB trigger (simulates DBA attack).
-        # Service-layer defense-in-depth (structural CompanyID check) must still catch this.
+        # The retired PayItem batch path must refuse the request without evaluating it.
         await _bypass_trigger_insert_map(direct_db, pi_b_id, rt_a_id)
 
         resp = await client.post(
@@ -962,10 +946,10 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
             },
             headers=_auth(token_b),
         )
-        assert resp.status_code == 422, (
-            f"batch_save must return 422 for contaminated mapping, "
-            f"got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 409, (
+            f"batch_save PayItem path must be retired, got {resp.status_code}: {resp.text}"
         )
+        assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
 
         # No DriverRate row must be written
         row = (await direct_db.execute(_text("""

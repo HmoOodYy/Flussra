@@ -27,6 +27,8 @@ from tests.builders.access import (
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 from tests.ownership import cancel_active_branch_periods, retire_branch_periods_directly
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -3092,137 +3094,7 @@ class TestPayItemEffectiveDateBoundaries:
 
     # ── Test 2: EffectiveFrom +1 → absent on first day, present from second ─ #
 
-    @pytest.mark.asyncio
-    async def test_effective_from_after_start_date_absent_on_first_day(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        elig_period: dict,
-        paytest_branch_id: int,
-        session_db_conn,
-    ):
-        """
-        BranchPayItemConfig.EffectiveFrom = 2082-06-22 (> period.start_date).
-        work_date=2082-06-21 → item NOT in columns.
-        work_date=2082-06-22 → item IN columns.
-        """
-        pid = elig_period["payroll_period_id"]
-        item = await _create_test_pay_item(
-            session_db_conn,
-            "P3B Test Item EffFrom PlusOne",
-        )
-        iid = item["pay_item_id"]
-        try:
-            await _configure_branch_pay_item(
-                session_client, auth_token, paytest_branch_id, iid,
-                is_active=True,
-                effective_from="2082-06-22",
-            )
-
-            # Day before effective_from → must be absent
-            r1 = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": "2082-06-21"},
-                headers=auth(auth_token),
-            )
-            assert r1.status_code == 200, r1.text
-            codes1 = {c["pay_item_code"] for c in r1.json()["columns"]}
-            assert item["pay_item_code"] not in codes1, (
-                f"Pay item with effectivefrom=2082-06-22 must be absent on "
-                f"work_date=2082-06-21. Columns: {codes1}"
-            )
-
-            # On effective_from → must be present
-            r2 = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": "2082-06-22"},
-                headers=auth(auth_token),
-            )
-            assert r2.status_code == 200, r2.text
-            codes2 = {c["pay_item_code"] for c in r2.json()["columns"]}
-            assert item["pay_item_code"] in codes2, (
-                f"Pay item with effectivefrom=2082-06-22 must appear on "
-                f"work_date=2082-06-22 (inclusive). Columns: {codes2}"
-            )
-        finally:
-            await _delete_test_pay_item(session_client, auth_token, iid)
-
     # ── Test 3: EffectiveTo inclusive boundary ───────────────────────────── #
-
-    @pytest.mark.asyncio
-    async def test_effective_to_inclusive_boundary(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        elig_period: dict,
-        paytest_branch_id: int,
-        direct_db,
-        session_db_conn,
-    ):
-        """
-        BranchPayItemConfig.EffectiveFrom=2082-06-21, EffectiveTo=2082-06-23.
-        The query filter is (effectiveto IS NULL OR effectiveto >= :dt).
-        work_date=2082-06-23 → item IN columns (effectiveto = work_date, inclusive).
-        work_date=2082-06-24 → item NOT in columns (effectiveto < work_date).
-        """
-        from sqlalchemy import text as _text
-
-        pid = elig_period["payroll_period_id"]
-        item = await _create_test_pay_item(
-            session_db_conn,
-            "P3B Test Item EffTo Inclusive",
-        )
-        iid = item["pay_item_id"]
-        try:
-            # First configure with open EffectiveTo (the API doesn't let us
-            # set EffectiveTo directly).  Then close it via direct_db.
-            await _configure_branch_pay_item(
-                session_client, auth_token, paytest_branch_id, iid,
-                is_active=True,
-                effective_from="2082-06-21",
-            )
-
-            # Close the row: set EffectiveTo=2082-06-23 directly in DB.
-            # The unique-open-row constraint won't be violated because we're
-            # setting EffectiveTo (closing the row).
-            await direct_db.execute(
-                _text("""
-                    UPDATE payroll.branchpayitemconfig
-                    SET    effectiveto = '2082-06-23'
-                    WHERE  payitemid   = :iid
-                      AND  branchid    = :bid
-                      AND  effectiveto IS NULL
-                """),
-                {"iid": iid, "bid": paytest_branch_id},
-            )
-
-            # On effective_to (last active day) → must appear
-            r1 = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": "2082-06-23"},
-                headers=auth(auth_token),
-            )
-            assert r1.status_code == 200, r1.text
-            codes1 = {c["pay_item_code"] for c in r1.json()["columns"]}
-            assert item["pay_item_code"] in codes1, (
-                f"Item with effectiveto=2082-06-23 must appear on work_date=2082-06-23 "
-                f"(inclusive). Columns: {codes1}"
-            )
-
-            # Day after effective_to → must be absent
-            r2 = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": "2082-06-24"},
-                headers=auth(auth_token),
-            )
-            assert r2.status_code == 200, r2.text
-            codes2 = {c["pay_item_code"] for c in r2.json()["columns"]}
-            assert item["pay_item_code"] not in codes2, (
-                f"Item with effectiveto=2082-06-23 must be absent on work_date=2082-06-24. "
-                f"Columns: {codes2}"
-            )
-        finally:
-            await _delete_test_pay_item(session_client, auth_token, iid)
 
     # ── Test 4: IsActive=False → item never appears ──────────────────────── #
 
@@ -3270,139 +3142,7 @@ class TestPayItemEffectiveDateBoundaries:
 
     # ── Test 6: Branch isolation — item configured for HQ not on PAYTEST ─── #
 
-    @pytest.mark.asyncio
-    async def test_branch_isolation_pay_item_config(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        elig_period: dict,
-        paytest_branch_id: int,
-        hq_branch_id: int,
-        session_db_conn,
-    ):
-        """
-        A custom Daily item configured ONLY for HQ (is_active=True on HQ,
-        no config row for PAYTEST) must not appear in the PAYTEST day-grid
-        because its IsDefaultBranchActive=FALSE (custom items start inactive
-        on all branches).
-
-        Confirm that configuring it for HQ does NOT activate it on PAYTEST.
-        """
-        pid = elig_period["payroll_period_id"]
-        item = await _create_test_pay_item(
-            session_db_conn,
-            "P3B Test Item HQ Only",
-        )
-        iid = item["pay_item_id"]
-        try:
-            # Activate on HQ only
-            await _configure_branch_pay_item(
-                session_client, auth_token, hq_branch_id, iid,
-                is_active=True,
-                effective_from="2082-06-21",
-            )
-            # Do NOT configure for PAYTEST
-
-            # PAYTEST day-grid → item must be absent
-            r = await session_client.get(
-                f"/payroll/periods/{pid}/day-grid",
-                params={"work_date": "2082-06-21"},
-                headers=auth(auth_token),
-            )
-            assert r.status_code == 200, r.text
-            codes = {c["pay_item_code"] for c in r.json()["columns"]}
-            assert item["pay_item_code"] not in codes, (
-                f"Item configured for HQ only must not appear in PAYTEST columns. "
-                f"Columns: {codes}"
-            )
-        finally:
-            await _delete_test_pay_item(session_client, auth_token, iid)
-
     # ── Test 7: Rate-matrix EffectiveFrom boundary ───────────────────────── #
-
-    @pytest.mark.asyncio
-    async def test_rate_matrix_effective_from_boundary(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_branch_id: int,
-        paytest_driver_id: int,
-        session_db_conn,
-    ):
-        """
-        Custom Daily item with EffectiveFrom=2082-06-22.
-        Rate-matrix as_of=2082-06-21 → item NOT in matrix groups.
-        Rate-matrix as_of=2082-06-22 → item IN matrix groups.
-
-        The rate matrix uses get_driver_rate_matrix which INNER JOINs on
-        PayItemRateTypeMap.  Before Phase 3E (Fix 3E-A), custom PerUnit items
-        had no PayItemRateTypeMap entry and were therefore invisible in the
-        matrix.  Phase 3E now auto-creates a RateType + PayItemRateTypeMap row
-        on pay-item creation.
-
-        Phase 3C behavior: the rate matrix intentionally shows items even when
-        their BranchPayItemConfig.EffectiveFrom is in the future, so that pay
-        rate managers can set rates ahead of time.  The pay_item_effective_from
-        field is surfaced on each group so the UI can display "active from" info.
-
-        Therefore, after Phase 3E a freshly-created custom item (with a future
-        effective_from) WILL appear in the rate matrix even before its
-        effective_from date.
-        """
-        # Create a custom Daily item
-        item = await _create_test_pay_item(
-            session_db_conn,
-            "P3B Test Rate Matrix EffFrom",
-        )
-        iid = item["pay_item_id"]
-        try:
-            # Configure for PAYTEST with effective_from=2082-06-22
-            await _configure_branch_pay_item(
-                session_client, auth_token, paytest_branch_id, iid,
-                is_active=True,
-                effective_from="2082-06-22",
-            )
-
-            # as_of before effective_from
-            r1 = await session_client.get(
-                f"/payroll/drivers/{paytest_driver_id}/rate-matrix",
-                params={"as_of": "2082-06-21"},
-                headers=auth(auth_token),
-            )
-            assert r1.status_code == 200, r1.text
-            group_names_before = {
-                g["pay_item_name"]
-                for g in r1.json().get("groups", [])
-            }
-            item_name = item["pay_item_name"]
-
-            # as_of on effective_from
-            r2 = await session_client.get(
-                f"/payroll/drivers/{paytest_driver_id}/rate-matrix",
-                params={"as_of": "2082-06-22"},
-                headers=auth(auth_token),
-            )
-            assert r2.status_code == 200, r2.text
-            group_names_on = {
-                g["pay_item_name"]
-                for g in r2.json().get("groups", [])
-            }
-
-            # Phase 3C + 3E combined behavior: the rate matrix shows items
-            # regardless of effective_from (so managers can pre-set rates).
-            # Phase 3E ensures the item has a PayItemRateTypeMap entry, so it
-            # now appears in both the before and on-date queries.
-            assert item_name in group_names_before, (
-                f"Phase 3C: item must appear in matrix even before effective_from "
-                f"(for pre-setting rates). Not found in: {group_names_before}"
-            )
-            assert item_name in group_names_on, (
-                f"Item must appear in matrix on its effective_from date. "
-                f"Not found in groups: {group_names_on}"
-            )
-
-        finally:
-            await _delete_test_pay_item(session_client, auth_token, iid)
 
     # ── Test 8: Rate-matrix branch isolation ─────────────────────────────── #
 
@@ -3549,31 +3289,16 @@ async def _seed_payitem(
 
 
 async def _activate_for_branch(db, *, pay_item_id: int, company_id: int, branch_id: int) -> None:
-    """Create a BranchPayItemConfig row with isactive=TRUE (replaces any existing row)."""
+    """Activate a legacy pay item through its default-activation flag."""
     from sqlalchemy import text as _text
     await db.execute(
-        _text("""
-            DELETE FROM payroll.branchpayitemconfig
-            WHERE payitemid = :pid AND companyid = :cid AND branchid = :bid
-        """),
-        {"cid": company_id, "bid": branch_id, "pid": pay_item_id},
-    )
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.branchpayitemconfig
-                (companyid, branchid, payitemid, isactive, effectivefrom)
-            VALUES (:cid, :bid, :pid, TRUE, '2000-01-01')
-        """),
-        {"cid": company_id, "bid": branch_id, "pid": pay_item_id},
+        _text("UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :pid"),
+        {"pid": pay_item_id},
     )
 
 
 async def _delete_cdpi_item(db, *, pay_item_id: int) -> None:
     from sqlalchemy import text as _text
-    await db.execute(
-        _text("DELETE FROM payroll.branchpayitemconfig WHERE payitemid = :pid"),
-        {"pid": pay_item_id},
-    )
     await db.execute(
         _text("DELETE FROM payroll.cdpidefinitions WHERE payitemid = :pid"),
         {"pid": pay_item_id},

@@ -13,6 +13,8 @@ import httpx
 import pytest
 from sqlalchemy import text as _text
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -642,71 +644,6 @@ class TestCopyRatesAllOrNothing:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["rates_copied"] >= 1
-
-    @pytest.mark.asyncio
-    async def test_copy_rejects_invalid_branch_mapping(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_branch_id: int,
-    ):
-        """
-        When the source driver has a rate whose rate type is NOT configured
-        for the target driver's branch, the copy must fail with 422.
-
-        Strategy: create source on PAYTEST (which has MILEAGE configured).
-        Create target on HQ branch (branch_id=1). If HQ does NOT have MILEAGE
-        configured, copy should fail.
-
-        If HQ DOES have MILEAGE, the test is inconclusive (skip, not fail).
-        The control case (same branch) is the reliable positive test.
-        """
-        import random
-
-        hq_branch_id = 1
-        src_id = await _make_driver(session_client, auth_token, paytest_branch_id, f"XBRANCH-SRC-{random.randint(100,999)}")
-        tgt_id = await _make_driver(session_client, auth_token, hq_branch_id, f"XBRANCH-TGT-{random.randint(100,999)}")
-
-        # Create + approve a MILEAGE rate on source (PAYTEST branch has MILEAGE configured)
-        rt_resp = await session_client.get("/payroll/rate-types", headers=auth(auth_token))
-        mileage = next((r for r in rt_resp.json() if r["rate_code"] == "MILEAGE"), None)
-        if mileage is None:
-            pytest.skip("MILEAGE rate type not found")
-
-        cr = await session_client.post(
-            "/payroll/rates",
-            json={"driver_id": src_id, "rate_type_id": mileage["rate_type_id"],
-                  "amount": "5.00", "effective_from": "2079-01-01"},
-            headers=auth(auth_token),
-        )
-        if cr.status_code != 201:
-            pytest.skip(f"Source rate creation failed: {cr.text}")
-        await session_client.post(f"/payroll/rates/{cr.json()['driver_rate_id']}/approve", headers=auth(auth_token))
-
-        # Check if HQ branch has MILEAGE configured — if yes, skip (not a useful test)
-        matrix_resp = await session_client.get(
-            f"/payroll/drivers/{tgt_id}/rate-matrix",
-            params={"as_of": date.today().isoformat()},
-            headers=auth(auth_token),
-        )
-        if matrix_resp.status_code == 200:
-            hq_rate_codes = {g["rate_code"] for g in matrix_resp.json().get("groups", [])}
-            if "MILEAGE" in hq_rate_codes:
-                pytest.skip("HQ branch has MILEAGE configured; cross-branch test not meaningful here")
-
-        copy_resp = await session_client.post(
-            f"/payroll/drivers/{tgt_id}/rates/copy-from/{src_id}",
-            json={"effective_from": "2079-06-01"},
-            headers=auth(auth_token),
-        )
-        assert copy_resp.status_code == 422, (
-            f"Expected 422 when copying to branch without the rate type configured, "
-            f"got {copy_resp.status_code}: {copy_resp.text}"
-        )
-        detail = copy_resp.json().get("detail", "")
-        assert "not configured" in detail.lower() or "branch" in detail.lower(), (
-            f"Error message should mention branch/config: {detail}"
-        )
 
     @pytest.mark.asyncio
     async def test_copy_rejects_means_no_rates_created(

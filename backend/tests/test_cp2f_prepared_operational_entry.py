@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from tests.db_state import PERIOD_STATUS_REVERT_TRIGGER, suspended_test_triggers
 from tests.seed_helpers import attach_cdpi_owner
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Constants / helpers
 # ---------------------------------------------------------------------------
@@ -1262,14 +1264,10 @@ class TestDraftDirectDraftLineAPI:
         pi_id = pi_row["payitemid"]
         await attach_cdpi_owner(direct_db, item_id=pi_id)
 
-        # Activate for the test branch (branchpayitemconfig)
+        # Activate the item (legacy default activation)
         await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.branchpayitemconfig
-                    (payitemid, companyid, branchid, isactive, effectivefrom, createdbyuserid)
-                VALUES (:piid, 1, :bid, TRUE, '2000-01-01', 1)
-            """),
-            {"piid": pi_id, "bid": branch_id},
+            _text("UPDATE payroll.payitems SET isdefaultbranchactive = TRUE WHERE payitemid = :piid"),
+            {"piid": pi_id},
         )
         await direct_db.commit()
 

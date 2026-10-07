@@ -74,6 +74,7 @@ class Tenant:
     branch_user: int
     viewer: int
     no_permissions: int
+    dsn: dict | None = None
 
     def headers(self, user_id: int) -> dict[str, str]:
         from app.auth.security import create_access_token
@@ -137,6 +138,7 @@ def build_tenant(dsn: dict, *, currency: str | None = "USD") -> Tenant:
                 branch_user=_user(cur, company_id, full, "SpecificBranch", branch_a),
                 viewer=_user(cur, company_id, read, "AllCompanyBranches", None),
                 no_permissions=_user(cur, company_id, none, "AllCompanyBranches", None),
+                dsn=dsn,
             )
     finally:
         conn.close()
@@ -165,11 +167,55 @@ async def create_definition(client: httpx.AsyncClient, tenant: Tenant, **overrid
     return response.json()
 
 
+def grant_applicability(
+    tenant: Tenant, definition: dict, branch_id: int, *,
+    effective_from: str = "2000-01-01", active: bool = True,
+) -> None:
+    """Test setup: set a PayDefinition's single BranchPayItemConfig version directly."""
+    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM payroll.branchpayitemconfig
+                WHERE companyid = %s AND branchid = %s AND paydefinitionid = %s
+            """, (tenant.company_id, branch_id, definition["pay_definition_id"]))
+            cur.execute("""
+                INSERT INTO payroll.branchpayitemconfig
+                    (companyid, branchid, paydefinitionid, isactive, effectivefrom)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (tenant.company_id, branch_id, definition["pay_definition_id"], active,
+                  effective_from))
+    finally:
+        conn.close()
+
+
+def _ensure_applicable(tenant: Tenant, definition: dict, driver_id: int) -> None:
+    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT branchid FROM core.drivers WHERE driverid = %s", (driver_id,))
+            branch_id = cur.fetchone()[0]
+            cur.execute("""
+                SELECT 1 FROM payroll.branchpayitemconfig
+                WHERE companyid = %s AND branchid = %s AND paydefinitionid = %s
+            """, (tenant.company_id, branch_id, definition["pay_definition_id"]))
+            exists = cur.fetchone() is not None
+    finally:
+        conn.close()
+    if not exists:
+        grant_applicability(tenant, definition, branch_id)
+
+
 async def create_pending(
     client: httpx.AsyncClient, tenant: Tenant, definition: dict, *,
     driver_id: int | None = None, effective_from: str = "2026-01-01",
     effective_to: str | None = None, headers: dict | None = None,
+    applicable: bool = True,
 ) -> dict:
+    if applicable:
+        _ensure_applicable(tenant, definition, driver_id or tenant.driver_a)
     response = await client.post(
         "/compensation/driver-rate-assignments",
         json={"driver_id": driver_id or tenant.driver_a,

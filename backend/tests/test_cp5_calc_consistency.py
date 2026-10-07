@@ -30,6 +30,8 @@ from sqlalchemy import text as _text
 from tests.builders.compensation import create_approved_rate
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------

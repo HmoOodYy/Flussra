@@ -24,6 +24,8 @@ import pytest_asyncio
 import sqlalchemy.exc
 from sqlalchemy import text as _text
 
+pytestmark = pytest.mark.pre_cutover_legacy
+
 # ---------------------------------------------------------------------------
 # Year slots
 # ---------------------------------------------------------------------------
