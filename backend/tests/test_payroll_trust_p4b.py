@@ -487,7 +487,8 @@ async def test_t3_mixed_mapping_contaminated_db_blocked(
       - create_rate with that RateType for Company B → 422
       - approve_rate contaminated row → 422, status unchanged
       - update_rate contaminated row → 422, amount unchanged
-      - batch_save with Company B PayItem + Company A RateType → 422, no partial write
+      - batch_save with Company B PayItem + Company A RateType → 409
+        ORDINARY_RATE_AUTHORING_RETIRED (the PayItem batch branch ended with P4a), no write
     """
     token_b  = await _get_token_b(client)
     rt_a_id  = p4b_env["rt_a_custom_id"]
@@ -546,7 +547,7 @@ async def test_t3_mixed_mapping_contaminated_db_blocked(
         ), {"rid": contaminated_rate_id})).mappings().first()
         assert Decimal(str(amt_row["amount"])) == Decimal("50.00")
 
-        # (d) batch_save — must reject, no partial write
+        # (d) batch_save — the PayItem branch is retired outright, nothing is written
         resp = await client.post(
             f"/payroll/drivers/{drv_b_id}/rates/batch",
             json={
@@ -557,10 +558,10 @@ async def test_t3_mixed_mapping_contaminated_db_blocked(
             },
             headers=_auth(token_b),
         )
-        assert resp.status_code == 422, (
-            f"batch_save must reject cross-company custom RateType, "
-            f"got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 409, (
+            f"batch_save PayItem path must be retired, got {resp.status_code}: {resp.text}"
         )
+        assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
         batch_row = (await direct_db.execute(_text("""
             SELECT 1 FROM payroll.driverrates
             WHERE driverid = :did AND ratetypeid = :rtid
@@ -798,18 +799,21 @@ async def test_t8_rate_matrix_does_not_include_foreign_custom_rate_type(
 
 
 # ===========================================================================
-# T9 — Batch save rejects cross-company custom RateType precisely (422)
+# T9 — The PayItem batch path is retired before any cross-company RateType validation
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_t9_batch_save_rejects_cross_company_rate_type_precisely(
+async def test_t9_batch_pay_item_path_is_retired_before_cross_company_rate_validation(
     p4b_env, client: httpx.AsyncClient, direct_db
 ):
     """
     Company B calls POST /payroll/drivers/{driver_b_id}/rates/batch
-    with Company A's custom PayItem + Company A's custom RateType.
-    Must return exactly 422 (not 404, not 200).
-    No DriverRate row must be created.
+    with Company A's custom PayItem + Company A's custom RateType and no
+    status_rate_column_id.
+
+    After P4a the PayItem branch of the legacy batch writer is rejected before any
+    PayItem mapping or RateType ownership validation: 409
+    ORDINARY_RATE_AUTHORING_RETIRED. No DriverRate row must be created.
     """
     token_b  = await _get_token_b(client)
     rt_a_id  = p4b_env["rt_a_custom_id"]
@@ -826,10 +830,10 @@ async def test_t9_batch_save_rejects_cross_company_rate_type_precisely(
         },
         headers=_auth(token_b),
     )
-    assert resp.status_code == 422, (
-        f"Batch save must return 422 for cross-company custom RateType, "
-        f"got {resp.status_code}: {resp.text}"
+    assert resp.status_code == 409, (
+        f"The PayItem batch path must be retired, got {resp.status_code}: {resp.text}"
     )
+    assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
 
     # No rate row must be created
     row = (await direct_db.execute(_text("""
@@ -901,7 +905,7 @@ async def test_t12_rate_types_endpoint_hides_unmapped_cpi_types(
 
 
 # ===========================================================================
-# T13 — batch_save_rates rejects contaminated mapping (AllowSelfApproval=false)
+# T13 — contaminated mapping never reaches the retired PayItem batch path (AllowSelfApproval=false)
 # ===========================================================================
 
 @pytest.mark.asyncio
@@ -911,8 +915,8 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
     """
     Direct-DB inserts a contaminated PayItemRateTypeMap:
         Company B's PayItem → Company A's CPI_ RateType.
-    batch_save_rates must reject the request with 422 via defense-in-depth
-    (_assert_rate_type_allowed_for_company called per change).
+    After P4a the PayItem branch of batch_save_rates is rejected outright with 409
+    ORDINARY_RATE_AUTHORING_RETIRED, so the contaminated mapping is never evaluated.
     No DriverRate row must be created.
     """
     cid_b    = p4b_env["cid_b"]
@@ -929,7 +933,7 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
         ), {"cid": cid_b})
 
         # Insert the contaminated mapping bypassing the Phase 4C DB trigger (simulates DBA attack).
-        # Service-layer defense-in-depth (structural CompanyID check) must still catch this.
+        # The retired PayItem batch path must refuse the request without evaluating it.
         await _bypass_trigger_insert_map(direct_db, pi_b_id, rt_a_id)
 
         resp = await client.post(
@@ -942,10 +946,10 @@ async def test_t13_batch_save_rejects_contaminated_mapping(
             },
             headers=_auth(token_b),
         )
-        assert resp.status_code == 422, (
-            f"batch_save must return 422 for contaminated mapping, "
-            f"got {resp.status_code}: {resp.text}"
+        assert resp.status_code == 409, (
+            f"batch_save PayItem path must be retired, got {resp.status_code}: {resp.text}"
         )
+        assert resp.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
 
         # No DriverRate row must be written
         row = (await direct_db.execute(_text("""
