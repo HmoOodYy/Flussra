@@ -9,6 +9,11 @@ Lock order for every writer (mirrors the database triggers):
 2. Company monetary guard, before any monetary value write or approval;
 3. the assignment row and its dependent value rows.
 
+Monetary mutations (value replacement and approval) authorize the caller from
+an unlocked pre-read first, so an unauthorized caller never reaches the Company
+currency state, and re-validate the assignment after taking its row lock.
+Non-monetary mutations lock the RateDefinition and then the assignment row.
+
 The database enforces ownership, non-overlap, complete-set approval and the
 structural lock; this layer adds permissions, the currency gate, successor
 supersession and stable errors without duplicating those invariants.
@@ -95,6 +100,28 @@ async def _lock_and_load(
     pre = await _load_assignment_row(company_id, assignment_id, db)
     await lock_rate_definition_structure(pre["rate_definition_id"], db)
     return await _load_assignment_row(company_id, assignment_id, db, for_update=True)
+
+
+async def _lock_monetary_pending_assignment(
+    company_id: int, user_id: int, assignment_id: int, action: str, db: AsyncConnection,
+) -> dict:
+    """Authorize, then lock RateDefinition -> Company monetary guard -> assignment row.
+
+    Returns the locked Pending assignment row for a monetary mutation.
+    """
+    pre = await _load_assignment_row(company_id, assignment_id, db)
+    await require_rate_edit(company_id, user_id, pre["branch_id"], db)
+    _require_pending(pre, action)
+
+    await lock_rate_definition_structure(pre["rate_definition_id"], db)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
+
+    row = await _load_assignment_row(company_id, assignment_id, db, for_update=True)
+    if row["rate_definition_id"] != pre["rate_definition_id"]:
+        raise compensation_error(
+            "ASSIGNMENT_CHANGED", "The assignment changed during the request.", 409)
+    _require_pending(row, action)
+    return row
 
 
 async def _load_values(
@@ -234,9 +261,8 @@ async def replace_values(
     company_id: int, user_id: int, assignment_id: int, data: AssignmentValuesReplace,
     db: AsyncConnection,
 ) -> AssignmentSummary:
-    row = await _lock_and_load(company_id, assignment_id, db)
-    await require_rate_edit(company_id, user_id, row["branch_id"], db)
-    _require_pending(row, "edited")
+    row = await _lock_monetary_pending_assignment(
+        company_id, user_id, assignment_id, "edited", db)
 
     components = {
         value.rate_component_definition_id
@@ -252,7 +278,6 @@ async def replace_values(
             "UNKNOWN_COMPONENT",
             "A value references a component outside this rate definition.", 422)
 
-    await lock_and_get_company_currency_for_monetary_write(company_id, db)
     try:
         await db.execute(
             text("""
@@ -291,11 +316,8 @@ async def replace_values(
 async def approve(
     company_id: int, user_id: int, assignment_id: int, db: AsyncConnection,
 ) -> AssignmentSummary:
-    row = await _lock_and_load(company_id, assignment_id, db)
-    await require_rate_edit(company_id, user_id, row["branch_id"], db)
-    _require_pending(row, "approved")
-
-    await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    row = await _lock_monetary_pending_assignment(
+        company_id, user_id, assignment_id, "approved", db)
     await _check_not_in_finalized_period(
         company_id, row["branch_id"], row["effective_from"], db, label="rate")
 

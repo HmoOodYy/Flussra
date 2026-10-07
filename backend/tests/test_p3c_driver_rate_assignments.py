@@ -560,6 +560,34 @@ async def test_read_only_and_unpermissioned_users_cannot_mutate_or_read(p3c_clie
         headers=nobody)).status_code == 403
 
 
+@pytest.mark.parametrize("actor", ["viewer", "no_permissions", "foreign_branch_user"])
+async def test_unauthorized_monetary_mutations_never_disclose_currency_state(
+    p3c_client, unconfigured_tenant, actor,
+):
+    """Authorization precedes the Company currency guard, so a caller without
+    authority gets 403 rather than COMPANY_CURRENCY_REQUIRED."""
+    tenant = unconfigured_tenant
+    definition = await create_definition(p3c_client, tenant)
+    pending = await create_pending(
+        p3c_client, tenant, definition, driver_id=tenant.driver_b)
+    user = {"viewer": tenant.viewer, "no_permissions": tenant.no_permissions,
+            "foreign_branch_user": tenant.branch_user}[actor]
+    headers = tenant.headers(user)
+
+    values = await p3c_client.put(
+        f"{BASE}/{_id(pending)}/values", headers=headers,
+        json={"values": [{"rate_component_definition_id":
+                          definition["components"][0]["rate_component_definition_id"],
+                          "amount": "5"}]})
+    approval = await p3c_client.post(f"{BASE}/{_id(pending)}/approve", headers=headers)
+    for response in (values, approval):
+        assert response.status_code == 403, response.text
+        assert "COMPANY_CURRENCY_REQUIRED" not in response.text
+
+    owner_values = await set_scalar_value(p3c_client, tenant, pending, definition, "5")
+    assert owner_values.json()["detail"]["code"] == "COMPANY_CURRENCY_REQUIRED"
+
+
 async def test_driver_self_accounts_are_denied_generic_compensation_administration(
     session_client, auth_token, hq_branch_id,
 ):

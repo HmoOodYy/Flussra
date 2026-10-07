@@ -47,6 +47,11 @@ async def _run(engine, operation, pids):
 
 async def _blocked(engine, operation) -> asyncio.Task:
     """Start a transaction that must wait on a lock held by the caller."""
+    task, _ = await _blocked_with_pid(engine, operation)
+    return task
+
+
+async def _blocked_with_pid(engine, operation) -> tuple[asyncio.Task, int]:
     pids: list[int] = []
     task = asyncio.create_task(_run(engine, operation, pids))
     async with engine.connect() as observer:
@@ -56,7 +61,7 @@ async def _blocked(engine, operation) -> asyncio.Task:
                     text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
                     {"pid": pids[0]})).scalar_one_or_none()
                 if wait == "Lock":
-                    return task
+                    return task, pids[0]
             if task.done():
                 raise AssertionError(f"operation finished instead of waiting: {task.result()!r}")
             await asyncio.sleep(0.02)
@@ -321,3 +326,56 @@ async def test_currency_change_in_flight_holds_back_an_approval_then_approves_un
     async with p3c_engine.begin() as conn:
         with pytest.raises(Exception, match="COMPANY_CURRENCY_CHANGE_BLOCKED"):
             await _change_currency(tenant, "USD")(conn)
+
+
+# ---------------------------------------------------------------------------
+# Monetary lock acquisition order
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("operation_name", ["replace_values", "approve"])
+async def test_monetary_mutations_lock_rate_definition_then_company_then_assignment(
+    p3c_client, p3c_engine, tenant, operation_name,
+):
+    """B takes the RateDefinition lock, waits on the Company guard, and has not locked
+    the assignment row yet."""
+    definition = await create_definition(p3c_client, tenant)
+    pending = await _filled_pending(p3c_client, tenant, definition, "10")
+
+    async def operation(conn):
+        if operation_name == "approve":
+            return await assignments.approve(tenant.company_id, tenant.owner, _id(pending), conn)
+        return await assignments.replace_values(
+            tenant.company_id, tenant.owner, _id(pending), _values(definition, "11"), conn)
+
+    async with p3c_engine.connect() as company_holder:
+        async with company_holder.begin():
+            holder_pid = (await company_holder.execute(
+                text("SELECT pg_backend_pid()"))).scalar_one()
+            await company_holder.execute(
+                text("SELECT companyid FROM core.companies WHERE companyid = :cid "
+                     "FOR NO KEY UPDATE"), {"cid": tenant.company_id})
+
+            task, waiter_pid = await _blocked_with_pid(p3c_engine, operation)
+            async with p3c_engine.connect() as observer:
+                blockers = (await observer.execute(
+                    text("SELECT pg_blocking_pids(:pid)"), {"pid": waiter_pid})).scalar_one()
+            assert blockers == [holder_pid]
+
+            # The assignment row is still free: the operation has not locked it.
+            async with p3c_engine.begin() as probe:
+                await probe.execute(
+                    text("SELECT 1 FROM payroll.driverrateassignments "
+                         "WHERE driverrateassignmentid = :aid FOR UPDATE NOWAIT"),
+                    {"aid": _id(pending)})
+
+            # The RateDefinition structural lock is already held by the operation.
+            with pytest.raises(Exception, match="could not obtain lock"):
+                async with p3c_engine.begin() as probe:
+                    await probe.execute(
+                        text("SELECT 1 FROM payroll.ratedefinitions "
+                             "WHERE ratedefinitionid = :rid FOR NO KEY UPDATE NOWAIT"),
+                        {"rid": definition["rate_definition_id"]})
+    result = await task
+    assert not isinstance(result, Exception), result
+    expected = "Approved" if operation_name == "approve" else "Pending"
+    assert await _status(p3c_engine, pending) == expected
