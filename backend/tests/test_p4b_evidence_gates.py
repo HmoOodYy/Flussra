@@ -14,6 +14,7 @@ from tests.p4b_fixtures import (
     assign_weekly_setup,
     build_payroll_tenant,
     create_period,
+    force_status,
     rated_definition,
 )
 
@@ -54,27 +55,6 @@ def _counts(tenant, period_id: int) -> dict:
         "lines": scalar("SELECT count(*) FROM payroll.payrolldraftlines "
                         "WHERE payrollperiodid = %s", period_id),
     }
-
-
-def _force_status(tenant, period_id: int, status: str) -> None:
-    """Put a period in a workflow state without running its (not yet available) path."""
-    _query(tenant, "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER USER")
-    try:
-        pointer = None
-        if status == "Returned":
-            pointer = _query(tenant, """
-                INSERT INTO review.managerreviewitems
-                    (companyid, branchid, requesttype, entityschema, entityname, entityid,
-                     title, status)
-                SELECT companyid, branchid, 'PeriodApproval', 'payroll', 'PayrollPeriods',
-                       payrollperiodid::text, 'forced', 'Rejected'
-                FROM payroll.payrollperiods WHERE payrollperiodid = %s
-                RETURNING reviewitemid""", (period_id,))[0][0]
-        _query(tenant, "UPDATE payroll.payrollperiods SET status = %s, "
-                       "currentreturnreviewitemid = %s WHERE payrollperiodid = %s",
-               (status, pointer, period_id))
-    finally:
-        _query(tenant, "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER USER")
 
 
 async def _open_period_with_source(client, engine, tenant) -> dict:
@@ -135,7 +115,7 @@ async def test_resubmit_is_refused_without_touching_the_returned_period(
 ):
     period = await _open_period_with_source(p3c_client, p3c_engine, tenant)
     period_id = period["payroll_period_id"]
-    _force_status(tenant, period_id, "Returned")
+    force_status(tenant, period_id, "Returned")
     before = _counts(tenant, period_id)
     assert before["status"] == "Returned"
 
@@ -154,7 +134,7 @@ async def test_finalize_and_its_preview_are_refused_without_a_financial_write(
 ):
     period = await _open_period_with_source(p3c_client, p3c_engine, tenant)
     period_id = period["payroll_period_id"]
-    _force_status(tenant, period_id, "Approved")
+    force_status(tenant, period_id, "Approved")
     before = _counts(tenant, period_id)
     assert before["status"] == "Approved"
 
