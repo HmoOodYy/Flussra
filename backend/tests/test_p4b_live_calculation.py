@@ -6,7 +6,9 @@ from decimal import Decimal
 
 import psycopg2
 import pytest
+from sqlalchemy import text
 
+from tests.db_state import TriggerIdentity, suspended_test_triggers
 from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401 - register fixtures
 from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
     p3c_application,
@@ -22,6 +24,13 @@ from tests.p4b_fixtures import (
 )
 
 pytestmark = pytest.mark.asyncio
+
+PAY_DEFINITION_PROVENANCE_IMMUTABLE = TriggerIdentity(
+    "payroll", "paydefinitionprovenance", "trg_paydefinitionprovenance_immutable"
+)
+PERIOD_DEFINITION_IMMUTABLE = TriggerIdentity(
+    "payroll", "payrollperioddefinitions", "trg_payrollperioddefinitions_immutable"
+)
 
 
 @pytest.fixture(name="tenant")
@@ -301,16 +310,6 @@ async def test_the_day_grid_gross_is_the_exact_live_aggregate_not_a_rounded_one(
 # The frozen method version controls dispatch
 # ---------------------------------------------------------------------------
 
-def _execute(tenant, sql: str, params=()) -> None:
-    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
-    conn.autocommit = True
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-    finally:
-        conn.close()
-
-
 async def test_the_frozen_version_not_live_metadata_controls_calculation_and_entry(
     p3c_client, p3c_engine, tenant,
 ):
@@ -321,27 +320,25 @@ async def test_the_frozen_version_not_live_metadata_controls_calculation_and_ent
     assert (await _save(p3c_client, tenant, period, {str(ppd): "8"})).status_code == 200
 
     # Live metadata moves on to a version nobody has frozen: the period is unaffected.
-    _execute(tenant, "ALTER TABLE payroll.paydefinitionprovenance DISABLE TRIGGER USER")
-    try:
-        _execute(tenant, "UPDATE payroll.paydefinitionprovenance "
-                         "SET calculationmethodversion = 2 WHERE paydefinitionid = %s",
-                 (definition["pay_definition_id"],))
-    finally:
-        _execute(tenant, "ALTER TABLE payroll.paydefinitionprovenance ENABLE TRIGGER USER")
+    async with p3c_engine.begin() as conn:
+        async with suspended_test_triggers(conn, (PAY_DEFINITION_PROVENANCE_IMMUTABLE,)):
+            await conn.execute(
+                text("UPDATE payroll.paydefinitionprovenance "
+                     "SET calculationmethodversion = 2 WHERE paydefinitionid = :pay_definition_id"),
+                {"pay_definition_id": definition["pay_definition_id"]},
+            )
     cell = _cell(await _grid(p3c_client, tenant, period), ppd, tenant.driver_a)
     assert Decimal(cell["calculated_amount"]) == Decimal("200")
     assert cell["calculation_status"] == "Calculated"
 
     # An unsupported FROZEN version fails closed everywhere: V1 is never executed.
-    _execute(tenant, "ALTER TABLE payroll.payrollperioddefinitions "
-                     "DISABLE TRIGGER trg_PayrollPeriodDefinitions_Immutable")
-    try:
-        _execute(tenant, "UPDATE payroll.payrollperioddefinitions "
-                         "SET calculationmethodversionsnapshot = 2 WHERE payrollperiodid = %s",
-                 (period_id,))
-    finally:
-        _execute(tenant, "ALTER TABLE payroll.payrollperioddefinitions "
-                         "ENABLE TRIGGER trg_PayrollPeriodDefinitions_Immutable")
+    async with p3c_engine.begin() as conn:
+        async with suspended_test_triggers(conn, (PERIOD_DEFINITION_IMMUTABLE,)):
+            await conn.execute(
+                text("UPDATE payroll.payrollperioddefinitions "
+                     "SET calculationmethodversionsnapshot = 2 WHERE payrollperiodid = :period_id"),
+                {"period_id": period_id},
+            )
 
     grid = await _grid(p3c_client, tenant, period)
     cell = _cell(grid, ppd, tenant.driver_a)
