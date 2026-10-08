@@ -163,7 +163,6 @@ def money(value) -> Decimal:
 # ---------------------------------------------------------------------------
 # Workflow helpers shared by the P4b contract tests
 # ---------------------------------------------------------------------------
-
 def _sql(tenant: Tenant, statement: str, params=()):
     conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
     conn.autocommit = True
@@ -200,28 +199,24 @@ def make_user(
 
 
 def force_status(tenant: Tenant, period_id: int, status: str) -> None:
-    """Put a period in a workflow state without running its path (test setup only).
+    """Put a non-final period in a workflow state without running its path (test setup only).
 
-    A Returned period gets the review item its pointer requires. The row guards are
-    disabled for the statement only.
+    A Returned period gets the review item its pointer requires. The production status
+    guard permits these non-final test transitions, so no trigger suspension is needed.
     """
-    _sql(tenant, "ALTER TABLE payroll.payrollperiods DISABLE TRIGGER USER")
-    try:
-        pointer = None
-        if status == "Returned":
-            pointer = _sql(tenant, """
-                INSERT INTO review.managerreviewitems
-                    (companyid, branchid, requesttype, entityschema, entityname, entityid,
-                     title, status)
-                SELECT companyid, branchid, 'PeriodApproval', 'payroll', 'PayrollPeriods',
-                       payrollperiodid::text, 'forced', 'Rejected'
-                FROM payroll.payrollperiods WHERE payrollperiodid = %s
-                RETURNING reviewitemid""", (period_id,))[0][0]
-        _sql(tenant, "UPDATE payroll.payrollperiods SET status = %s, "
-                     "currentreturnreviewitemid = %s WHERE payrollperiodid = %s",
-             (status, pointer, period_id))
-    finally:
-        _sql(tenant, "ALTER TABLE payroll.payrollperiods ENABLE TRIGGER USER")
+    pointer = None
+    if status == "Returned":
+        pointer = _sql(tenant, """
+            INSERT INTO review.managerreviewitems
+                (companyid, branchid, requesttype, entityschema, entityname, entityid,
+                 title, status)
+            SELECT companyid, branchid, 'PeriodApproval', 'payroll', 'PayrollPeriods',
+                   payrollperiodid::text, 'forced', 'Rejected'
+            FROM payroll.payrollperiods WHERE payrollperiodid = %s
+            RETURNING reviewitemid""", (period_id,))[0][0]
+    _sql(tenant, "UPDATE payroll.payrollperiods SET status = %s, "
+                 "currentreturnreviewitemid = %s WHERE payrollperiodid = %s",
+         (status, pointer, period_id))
 
 
 def add_inreview_item(tenant: Tenant, period_id: int, *, requested_by: int | None = None) -> int:
