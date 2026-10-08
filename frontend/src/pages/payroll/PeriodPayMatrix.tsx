@@ -22,12 +22,12 @@ export function PeriodPayMatrix({ table, emptyState, formatCell }: PeriodPayMatr
   if (table.rows.length === 0) return <>{emptyState}</>;
   return (
     <div className={styles.periodPayWrap}>
-      <table className={styles.periodPayTable} aria-label="Period Pay by Daily Pay Item">
+      <table className={styles.periodPayTable} aria-label="Period Pay by pay definition">
         <thead>
           <tr>
             <th scope="col" className={styles.periodPayDriverCol}>Driver</th>
             {table.columns.map((column) => (
-              <th scope="col" key={column.pay_item_id}>
+              <th scope="col" key={column.payroll_period_definition_id}>
                 {column.label}
                 <small>{column.code}{column.unit ? ` · ${column.unit}` : ''}</small>
               </th>
@@ -48,7 +48,7 @@ export function PeriodPayMatrix({ table, emptyState, formatCell }: PeriodPayMatr
                 {row.driver_code && <span>{row.driver_code}</span>}
               </th>
               {row.items.map((item) => (
-                <td key={item.pay_item_id} className={styles.numeric}>{formatCell(item.amount)}</td>
+                <td key={item.payroll_period_definition_id} className={styles.numeric}>{formatCell(item.amount)}</td>
               ))}
               <td className={styles.numeric}>{formatCell(row.status_pay)}</td>
               <td className={styles.numeric}>{formatCell(row.gross_pay)}</td>
@@ -63,7 +63,7 @@ export function PeriodPayMatrix({ table, emptyState, formatCell }: PeriodPayMatr
           <tr className={styles.periodPayFooterRow}>
             <th scope="row" className={styles.periodPayDriverCol}>TOTAL</th>
             {table.footer.items.map((item) => (
-              <td key={item.pay_item_id} className={styles.numeric}>{formatCell(item.amount)}</td>
+              <td key={item.payroll_period_definition_id} className={styles.numeric}>{formatCell(item.amount)}</td>
             ))}
             <td className={styles.numeric}>{formatCell(table.footer.status_pay)}</td>
             <td className={styles.numeric}>{formatCell(table.footer.gross_pay)}</td>

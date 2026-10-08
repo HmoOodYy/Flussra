@@ -25,7 +25,6 @@ employees.manage      — create Employee / Driver profile (Workforce)
 payroll.approve_rate  — approve / void a rate (approve_rate / void_rate)
 """
 import httpx
-import pytest
 import pytest_asyncio
 from sqlalchemy import text as _sqla_text
 
@@ -225,68 +224,6 @@ class TestPermissionDenial:
         )
         assert resp.status_code == 403
         assert "permission" in resp.json()["detail"].lower()
-
-    @pytest.mark.pre_cutover_legacy
-    async def test_viewer_cannot_approve_rate(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        branch_user_token: str,
-        created_driver_id: int,
-        paytest_rate_type_id: int,
-    ):
-        """
-        Admin creates a PendingApproval rate for the HQ driver (created_driver_id).
-
-        Positive test (read):
-          branch_user CAN read the rate — it is on HQ which they have access to.
-
-        Negative test (approve):
-          branch_user CANNOT approve — lacks payroll.approve_rate → 403.
-
-        Cleanup: admin voids the rate (admin has payroll.approve_rate).
-        """
-        headers_admin = auth(auth_token)
-
-        # Admin creates a PendingApproval rate for an HQ driver
-        r = await session_client.post(
-            "/payroll/rates",
-            json={
-                "driver_id":      created_driver_id,
-                "rate_type_id":   paytest_rate_type_id,
-                "amount":         "12.50",
-                "effective_from": "2045-06-01",
-            },
-            headers=headers_admin,
-        )
-        assert r.status_code == 201, f"Rate creation failed: {r.text}"
-        rate_id = r.json()["driver_rate_id"]
-
-        try:
-            # Fix 2: branch_user now also requires payrates.view to read rates.
-            # PAYROLL_VIEWER has no payrates.* permissions → 403 on read too.
-            read_resp = await session_client.get(
-                f"/payroll/rates/{rate_id}",
-                headers=auth(branch_user_token),
-            )
-            assert read_resp.status_code == 403, (
-                f"branch_user lacks payrates.view — expected 403, got {read_resp.status_code}: {read_resp.text}"
-            )
-
-            # Negative: branch_user CANNOT approve — lacks payrates.edit → 403
-            approve_resp = await session_client.post(
-                f"/payroll/rates/{rate_id}/approve",
-                headers=auth(branch_user_token),
-            )
-            assert approve_resp.status_code == 403
-            assert "permission" in approve_resp.json()["detail"].lower()
-
-        finally:
-            # Cleanup: admin voids the rate so it doesn't linger
-            await session_client.delete(
-                f"/payroll/rates/{rate_id}",
-                headers=headers_admin,
-            )
 
     async def test_viewer_cannot_change_period_status(
         self,

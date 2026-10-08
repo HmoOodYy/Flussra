@@ -20,6 +20,7 @@ from app.core.service import (
 )
 from app.payroll import report_read_model, status_evidence
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
+from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
@@ -323,26 +324,9 @@ async def _originating_snapshot(
 
 
 async def _columns(period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
-    """Read frozen period metadata only; finalized reads never fall back to current PayItems."""
-    rows = (await db.execute(text("""
-        SELECT payitemid, payitemcode, payitemname, displaylabel, category,
-               datatype, unit, itemscope, sortorder
-        FROM payroll.payrollperiodpayitems
-        WHERE payrollperiodid = :period_id AND companyid = :company_id
-          AND branchid = :branch_id AND appearsinreports = TRUE
-        ORDER BY sortorder, payitemcode, payitemid
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().all()
-    if not rows:
-        return [], _availability("UNAVAILABLE", "PERIOD_PAY_ITEM_SNAPSHOT_UNAVAILABLE")
-    return [{
-        "pay_item_id": int(row["payitemid"]), "code": row["payitemcode"],
-        "label": row["displaylabel"] or row["payitemname"], "category": row["category"],
-        "data_type": row["datatype"], "unit": row["unit"], "scope": row["itemscope"],
-        "sort_order": row["sortorder"],
-    } for row in rows], _availability("AVAILABLE")
+    """Read the frozen period definition layout only; never current PayDefinitions."""
+    columns = await report_read_model._columns(period, db)
+    return columns, _availability("AVAILABLE")
 
 
 async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
@@ -424,7 +408,7 @@ async def _finalized_off_status_availability(
     for table, reason_code in (
         ("payroll.payrollperioddays", "PERIOD_CALENDAR_UNAVAILABLE"),
         ("payroll.payrollperiodeligibilitysnapshots", "ELIGIBILITY_SNAPSHOT_UNAVAILABLE"),
-        ("payroll.payrollperiodpayitems", "PERIOD_PAY_ITEM_SNAPSHOT_UNAVAILABLE"),
+        ("payroll.payrollperioddefinitions", "PERIOD_DEFINITION_SNAPSHOT_UNAVAILABLE"),
     ):
         exists = (await db.execute(text(f"""
             SELECT 1
@@ -508,7 +492,7 @@ async def _finalized_used_rate_definitions(
         SELECT d.payrollcalculationsnapshotusedratedefinitionid, d.driverid,
                dt.drivernamesnapshot, dt.drivercodesnapshot,
                d.evidencekind, d.sourcetypesnapshot, d.payitemid,
-               pppi.payitemcode, COALESCE(pppi.displaylabel, pppi.payitemname) AS payitemlabel,
+               NULL::varchar AS payitemcode, NULL::varchar AS payitemlabel,
                d.ratetypeid, d.ratetypecodesnapshot, d.ratetypenamesnapshot, d.unitnamesnapshot,
                d.driverrateid, d.driverpayruleid, d.ratebehaviorsnapshot, d.rateamountsnapshot,
                d.effectivefromsnapshot, d.effectivetosnapshot, d.ratestatussnapshot,
@@ -520,10 +504,6 @@ async def _finalized_used_rate_definitions(
         LEFT JOIN payroll.payrollcalculationdrivertotals dt
           ON dt.payrollcalculationsnapshotid = d.payrollcalculationsnapshotid
          AND dt.companyid = d.companyid AND dt.branchid = d.branchid AND dt.driverid = d.driverid
-        LEFT JOIN payroll.payrollperiodpayitems pppi
-          ON pppi.payrollperiodid = d.payrollperiodid
-         AND pppi.companyid = d.companyid AND pppi.branchid = d.branchid
-         AND pppi.payitemid = d.payitemid
         WHERE d.payrollcalculationsnapshotid = :snapshot_id
           AND d.companyid = :company_id AND d.branchid = :branch_id
           AND d.payrollperiodid = :period_id
@@ -605,12 +585,15 @@ async def _finalized_bonus_evidence(
     } for row in rows], _availability("EMPTY" if not rows else "AVAILABLE")
 
 
-def _work_totals(work_rows: list[dict[str, Any]]) -> dict[str, Decimal]:
-    totals: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+def _work_totals(work_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    totals: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     for row in work_rows:
         if row["quantity"] is not None:
-            totals[str(row["line_type"])] += Decimal(str(row["quantity"]))
-    return dict(totals)
+            totals[int(row["payroll_period_definition_id"])] += Decimal(str(row["quantity"]))
+    return [
+        {"payroll_period_definition_id": definition_id, "quantity": quantity}
+        for definition_id, quantity in sorted(totals.items())
+    ]
 
 
 def _pay_totals(totals: dict[int, dict[str, Any]]) -> dict[str, Decimal]:
@@ -630,6 +613,7 @@ async def build_overview(
     *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
 ) -> dict[str, Any]:
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
+    require_target_payroll_evidence()
     financial_summary = await _financial_summary(period, db)
     snapshot, provenance = await _originating_snapshot(period, db)
     off_status_availability = await _finalized_off_status_availability(
@@ -687,24 +671,18 @@ async def build_finalized_report(
     if report_type not in _REPORT_TYPES:
         raise _unavailable("FINALIZED_REPORT_VIEW_UNAVAILABLE", "Unknown finalized report view.")
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
+    require_target_payroll_evidence()
     columns, columns_availability = await _columns(period, db)
-    pay_item_columns = await report_read_model._pay_item_columns(period, db)
-    pay_item_column_ids = [c["pay_item_id"] for c in pay_item_columns]
+    definition_columns = await report_read_model._definition_columns(period, db)
+    definition_column_ids = [c["payroll_period_definition_id"] for c in definition_columns]
     final_lines, financial_totals = await _final_lines(period, db)
-    per_driver_pay_items: dict[int, dict[int, Decimal]] = {}
-    pay_item_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in pay_item_column_ids}
+    per_driver_definitions: dict[int, dict[int, Decimal]] = {}
+    definition_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in definition_column_ids}
     # Period Work is operational (quantities/Status), not financial, and must
     # stay independent of the per-Pay-Item financial integrity invariant.
     if report_type != "period-work":
-        # A missing frozen Daily Pay Item layout (pre-CP-2C period) must fail
-        # explicitly rather than silently reporting zero columns as if this
-        # were a legitimate modern period with no active Daily items.
-        if not await report_read_model._period_has_pay_item_snapshot(int(period["payrollperiodid"]), db):
-            raise _unavailable(
-                "REPORT_PAY_ITEM_LAYOUT_UNAVAILABLE",
-                "this period has no frozen Daily Pay Item layout; per-item financial reporting is unavailable.",
-            )
-        per_driver_pay_items, pay_item_total_map = report_read_model._pay_item_amounts(final_lines, pay_item_column_ids)
+        per_driver_definitions, definition_total_map = report_read_model._definition_amounts(
+            final_lines, definition_column_ids)
     snapshot, provenance = await _originating_snapshot(period, db)
     frozen_drivers: dict[int, dict[str, Any]] = {}
     work_rows: list[dict[str, Any]] = []
@@ -745,7 +723,7 @@ async def build_finalized_report(
         total = financial_totals.get(driver_id)
         pay = None
         if total is not None:
-            item_amounts = per_driver_pay_items.get(driver_id, {})
+            item_amounts = per_driver_definitions.get(driver_id, {})
             gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
                 **total,
@@ -753,9 +731,10 @@ async def build_finalized_report(
                 # Period Work never carries per-item money: an empty list
                 # here means "not computed for this view", never a verified
                 # zero for every column.
-                "pay_item_amounts": [] if report_type == "period-work" else [
-                    {"pay_item_id": cid, "amount": item_amounts.get(cid, Decimal("0"))}
-                    for cid in pay_item_column_ids
+                "definition_amounts": [] if report_type == "period-work" else [
+                    {"payroll_period_definition_id": cid,
+                     "amount": item_amounts.get(cid, Decimal("0"))}
+                    for cid in definition_column_ids
                 ],
                 "financial_lines": by_driver_lines[driver_id],
             }
@@ -789,11 +768,12 @@ async def build_finalized_report(
             },
             "generated_at_utc": datetime.now(UTC),
         },
-        "columns": columns, "pay_item_columns": pay_item_columns, "drivers": result_drivers,
+        "columns": columns, "definition_columns": definition_columns, "drivers": result_drivers,
         "work_totals": _work_totals(work_rows), "pay_totals": _pay_totals(financial_totals),
-        "pay_item_totals": None if report_type == "period-work" else [
-            {"pay_item_id": cid, "amount": pay_item_total_map.get(cid, Decimal("0"))}
-            for cid in pay_item_column_ids
+        "definition_totals": None if report_type == "period-work" else [
+            {"payroll_period_definition_id": cid,
+             "amount": definition_total_map.get(cid, Decimal("0"))}
+            for cid in definition_column_ids
         ],
     }
 
@@ -890,38 +870,8 @@ async def _finalized_status_entries(
 async def _finalized_normal_work_pairs(
     period: dict[str, Any], snapshot_id: int, db: AsyncConnection,
 ) -> tuple[set[tuple[int, date]] | None, dict[str, str | None]]:
-    pay_item_snapshot = (await db.execute(text("""
-        SELECT 1
-        FROM payroll.payrollperiodpayitems
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-        LIMIT 1
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).first()
-    if pay_item_snapshot is None:
-        return None, _availability("UNAVAILABLE", "PERIOD_PAY_ITEM_SNAPSHOT_UNAVAILABLE")
-    rows = (await db.execute(text("""
-        SELECT DISTINCT dt.driverid, sl.workdate
-        FROM payroll.payrollcalculationsnapshotlines sl
-        JOIN payroll.payrollcalculationdrivertotals dt
-          ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
-        JOIN payroll.payrollperiodpayitems pppi
-          ON pppi.payrollperiodid = :period_id
-         AND pppi.companyid = :company_id AND pppi.branchid = :branch_id
-         AND (pppi.payitemid = sl.payitemid OR pppi.payitemcode = sl.linetype)
-        WHERE dt.payrollcalculationsnapshotid = :snapshot_id
-          AND dt.companyid = :company_id AND dt.branchid = :branch_id
-          AND sl.sourcetype = 'DraftLine' AND sl.linescope = 'Daily'
-          AND sl.workdate IS NOT NULL AND sl.quantity IS NOT NULL AND sl.quantity <> 0
-          AND sl.linetype NOT IN ('DailyStatus', 'DailyNote', 'STATUS_PAYMENT', 'STATUS_PAY')
-          AND pppi.itemscope = 'Daily' AND pppi.appearsinpayrollentry = TRUE
-          AND pppi.isactiveinperiod = TRUE
-    """), {
-        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-    })).mappings().all()
-    return {(int(row["driverid"]), row["workdate"]) for row in rows}, _availability("AVAILABLE")
+    """Frozen normal-work classification needs target calculation evidence."""
+    return None, _availability("UNAVAILABLE", "TARGET_PAYROLL_EVIDENCE_NOT_READY")
 
 
 async def build_finalized_off_drivers(
@@ -929,6 +879,7 @@ async def build_finalized_off_drivers(
 ) -> dict[str, Any]:
     """Build P6B's full-period immutable Off/Status source projection."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
+    require_target_payroll_evidence()
     snapshot, provenance = await _originating_snapshot(period, db)
     statuses, status_availability = await _finalized_status_entries(snapshot, period, db)
     calendar_days, calendar_availability = await _finalized_scheduled_work_days(period, db)
@@ -1012,6 +963,7 @@ async def build_finalized_rates_used(
 ) -> dict[str, Any]:
     """Build P6C's immutable used-rate/rule and Bonus evidence projection."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
+    require_target_payroll_evidence()
     snapshot, provenance = await _originating_snapshot(period, db)
     definitions, rate_availability = await _finalized_used_rate_definitions(
         period, snapshot, provenance, db,
@@ -1090,6 +1042,7 @@ async def build_finalized_audit(
 ) -> dict[str, Any]:
     """Build P6D's lazy immutable change chronology and revision grouping."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
+    require_target_payroll_evidence()
     await _check_permission(company_id, user_id, int(period["branchid"]), "ledger.audit.view", db)
     snapshot, provenance = await _originating_snapshot(period, db)
     availability = await _audit_domain_availability(period, db)

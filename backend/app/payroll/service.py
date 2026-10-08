@@ -8,10 +8,6 @@ business logic, SQL, or FastAPI routes of its own.
 
 # Compatibility for test_cp2a_schedule_versioning.py, test_cp5c_reports.py,
 # test_lg1_cdpi_ledger.py, and test_p6a/b/c/d_finalized_*.py.
-# Compatibility for test_cp4a_perunit_core.py and
-# test_phase4_characterization_slice1.py.
-from app.payroll.draft_line_calculation import _compute_calculated_amount  # noqa: F401
-
 # Compatibility for test_cp2e_eligibility_snapshot.py.
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_workdate_via_snapshot,  # noqa: F401
@@ -57,9 +53,6 @@ from app.payroll.period_calculation import (
     _LiveCalculationPacket,  # noqa: F401
     _validate_period_can_finalize,  # noqa: F401
     get_calculation_preview,  # noqa: F401
-)
-from app.payroll.period_creation import (
-    _create_period_pay_item_rows,  # noqa: F401
 )
 
 # Compatibility for test_cp4d_submit_snapshot_capture.py,

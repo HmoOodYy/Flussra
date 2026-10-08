@@ -644,7 +644,6 @@ async def _compute_setup_warnings(
       BRANCH_NO_PAYROLL_SETTINGS      → setup.manage / settings.manage only
       OPEN_PERIOD_NEEDS_MANAGER_REVIEW → payroll.entry / payroll.finalize (has_payroll)
       DRIVERS_NO_APPROVED_RATE      → payrates.view/edit (has_rates) or setup.manage (has_setup)
-      PAY_ITEM_MISSING_RATE_TYPE_MAP → setup.manage / settings.manage only
     """
     warnings: list[SetupWarning] = []
 
@@ -723,9 +722,9 @@ async def _compute_setup_warnings(
                   {_and(bf_d)}
                   AND  NOT EXISTS (
                       SELECT 1
-                      FROM   payroll.driverrates dr
-                      WHERE  dr.driverid  = d.driverid
-                        AND  dr.status    = 'Approved'
+                      FROM   payroll.driverrateassignments a
+                      WHERE  a.driverid = d.driverid
+                        AND  a.status   = 'Approved'
                   )
                 GROUP  BY d.branchid, b.branchname
             """),
@@ -742,40 +741,6 @@ async def _compute_setup_warnings(
                 branch_id=row["branchid"],
                 branch_name=row["branchname"],
                 count=row["cnt"],
-            ))
-
-    # W4: PAY_ITEM_MISSING_RATE_TYPE_MAP — setup admins only (they fix pay item config)
-    if has_setup:
-        result = await db.execute(
-            text("""
-                SELECT pi.payitemid, pi.payitemcode, pi.payitemname
-                FROM   payroll.payitems pi
-                WHERE  pi.status         = 'Active'
-                  AND  pi.itemscope      = 'Daily'
-                  AND  pi.requiresrate   = TRUE
-                  AND  (pi.companyid IS NULL OR pi.companyid = :company_id)
-                  AND  NOT EXISTS (
-                      SELECT 1
-                      FROM   payroll.payitemratetypemap m
-                      WHERE  m.payitemid = pi.payitemid
-                        AND  m.status    = 'Active'
-                  )
-            """),
-            {"company_id": company_id},
-        )
-        missing_map_rows = result.mappings().all()
-        if missing_map_rows:
-            names = ", ".join(r["payitemcode"] for r in missing_map_rows)
-            warnings.append(SetupWarning(
-                code="PAY_ITEM_MISSING_RATE_TYPE_MAP",
-                severity="Warning",
-                message=(
-                    f"{len(missing_map_rows)} active Daily rate-requiring pay item(s) "
-                    f"have no rate type mapping: {names}."
-                ),
-                branch_id=None,
-                branch_name=None,
-                count=len(missing_map_rows),
             ))
 
     return warnings

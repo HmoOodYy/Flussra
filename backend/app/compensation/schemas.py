@@ -283,6 +283,7 @@ class DriverRateSummaryItem(BaseModel):
 
 class ResolvedComponent(BaseModel):
     rate_component_definition_id: int
+    shape: str | None = None
     sequence_no: int
     ordinal_from: int | None = None
     ordinal_to: int | None = None

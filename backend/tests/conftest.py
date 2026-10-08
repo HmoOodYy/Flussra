@@ -442,9 +442,6 @@ async def test_app(test_engine) -> FastAPI:
     real_app = create_app()
     real_app.state.engine = test_engine
 
-    from tests import legacy_shim
-    legacy_shim.install(real_app)
-
     async def _override_get_db() -> AsyncGenerator[AsyncConnection, None]:
         async with test_engine.begin() as conn:
             yield conn
@@ -644,7 +641,6 @@ async def owned_driver_id(
     direct_db,
 ) -> int:
     """Create and remove a test-owned Driver used by isolated rule scenarios."""
-    from sqlalchemy import text
 
     marker = uuid4().hex
     created = await session_client.post(
@@ -718,7 +714,6 @@ async def owned_driver_id(
 @pytest_asyncio.fixture
 async def owned_branch_id(direct_db) -> int:
     """Create a function-owned branch and require its business graph to be removed."""
-    from sqlalchemy import text
 
     marker = uuid4().hex
     branch_id = (await direct_db.execute(
@@ -826,60 +821,6 @@ async def branch_user_token(session_client: httpx.AsyncClient) -> str:
     })
     assert resp.status_code == 200, f"Branch user auth failed: {resp.text}"
     return resp.json()["access_token"]
-
-
-_LEGACY_PATCHERS: list = []
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_runtest_setup(item):
-    """Lift the legacy-authority retirement gates for ``pre_cutover_legacy`` tests.
-
-    Marked modules characterize the legacy compensation runtime that still exists
-    until it is removed. They need fixture state that the retired writers used to
-    create, so the retirement gates are replaced in-process, and the retired branch
-    pay-item activation route is emulated, for those tests only. Doing this in the
-    runtest hook (before any fixture of any scope is built) covers session and module
-    fixtures. The production gates are never configurable at runtime.
-    """
-    if item.get_closest_marker("pre_cutover_legacy") is None:
-        return
-    from app.payroll import period_creation, rates
-    from tests import legacy_shim
-
-    async def _allow_rate_type(*_args, **_kwargs) -> None:
-        return None
-
-    patcher = pytest.MonkeyPatch()
-    patcher.setattr(period_creation, "_require_target_payroll_layout", lambda: None)
-    patcher.setattr(rates, "_require_status_owned_rate_type", _allow_rate_type)
-    patcher.setattr(rates, "_require_rate_copy_available", lambda: None)
-    legacy_shim.set_enabled(True)
-    _LEGACY_PATCHERS.append(patcher)
-
-
-@pytest.hookimpl(trylast=True)
-def pytest_runtest_teardown(item, nextitem):
-    from tests import legacy_shim
-
-    while _LEGACY_PATCHERS:
-        _LEGACY_PATCHERS.pop().undo()
-    legacy_shim.set_enabled(False)
-
-
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def activate_paytest_system_items(session_db_conn) -> None:
-    """Make the legacy Daily system items default-active for pre-cutover test periods.
-
-    Branch applicability is now keyed by PayDefinition, so the legacy period
-    snapshot used by pre-cutover characterization tests resolves activation from
-    PayItems.IsDefaultBranchActive alone. Called once per test session.
-    """
-    await session_db_conn.execute(text("""
-        UPDATE payroll.payitems SET isdefaultbranchactive = TRUE
-        WHERE companyid IS NULL
-          AND payitemcode IN ('OVERNIGHT', 'WAIT_TIME', 'PALLETS', 'SILOS', 'HOURS', 'MILES')
-    """))
 
 
 @pytest_asyncio.fixture

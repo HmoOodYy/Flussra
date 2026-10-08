@@ -51,7 +51,7 @@ def test_phase1_alembic_upgrade_paths(pg_instance, starting_revision):
         with psycopg2.connect(**check_dsn) as check:
             with check.cursor() as cursor:
                 cursor.execute("SELECT version_num FROM alembic_version")
-                assert cursor.fetchone() == ("0084",)
+                assert cursor.fetchone() == ("0085",)
                 cursor.execute("SELECT COUNT(*) FROM payroll.PayrollSetups")
                 assert cursor.fetchone() == (0,)
                 cursor.execute(

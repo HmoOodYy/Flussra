@@ -13,8 +13,6 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-pytestmark = pytest.mark.pre_cutover_legacy
-
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}

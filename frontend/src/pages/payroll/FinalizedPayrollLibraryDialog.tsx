@@ -14,6 +14,7 @@ import type {
 } from '../../types/payroll';
 import { buildPeriodPayTable } from './periodPayTable';
 import { PeriodPayMatrix } from './PeriodPayMatrix';
+import { WorkTotals } from './WorkTotals';
 import styles from './FinalizedPayrollLibraryDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 
@@ -133,8 +134,7 @@ function Dictionary({
 
 const WORK_COLUMNS = [
   { key: 'work_date', label: 'Date' },
-  { key: 'line_type', label: 'Work item' },
-  { key: 'pay_item_id', label: 'Pay item' },
+  { key: 'definition_name', label: 'Pay definition' },
   { key: 'quantity', label: 'Quantity' },
   { key: 'line_scope', label: 'Scope' },
 ] as const;
@@ -148,7 +148,7 @@ const STATUS_COLUMNS = [
 
 const FINANCIAL_COLUMNS = [
   { key: 'source_type', label: 'Source' },
-  { key: 'line_type', label: 'Line' },
+  { key: 'line', label: 'Line' },
   { key: 'work_date', label: 'Date' },
   { key: 'quantity', label: 'Quantity' },
   { key: 'resolved_rate_amount', label: 'Rate' },
@@ -244,7 +244,7 @@ function DriverReport({
                 ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{formatMoney(value, code, digits)}</dd></div>)}
               </dl>
               <h5>Financial lines</h5>
-              <RecordTable rows={driver.pay.financial_lines} columns={FINANCIAL_COLUMNS} moneyKeys={['resolved_rate_amount', 'calculated_amount']} code={code} digits={digits} emptyText="No financial lines are available." />
+              <RecordTable rows={driver.pay.financial_lines.map((l) => ({ ...l, line: l.definition_name ?? l.line_type }))} columns={FINANCIAL_COLUMNS} moneyKeys={['resolved_rate_amount', 'calculated_amount']} code={code} digits={digits} emptyText="No financial lines are available." />
             </>
           )}
         </section>
@@ -289,7 +289,7 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
         <section className={styles.section}>
           <h3>Period Pay</h3>
           <PeriodPayMatrix
-            table={buildPeriodPayTable(report.pay_item_columns, report.drivers, report.pay_item_totals, report.pay_totals)}
+            table={buildPeriodPayTable(report.definition_columns, report.drivers, report.definition_totals, report.pay_totals)}
             formatCell={(value) => periodPayCell(value, code, digits)}
             emptyState={<StateMessage>No driver records are available.</StateMessage>}
           />
@@ -297,13 +297,13 @@ function ReportBody({ report, view }: { report: FinalizedCalculationReportRespon
       ) : (
         <>
           <section className={styles.totals}>
-            {showWork && <Dictionary title="Work totals" values={report.work_totals} />}
+            {showWork && <WorkTotals totals={report.work_totals} columns={report.columns} className={styles.dictionary} />}
             {showPay && <Dictionary title="Pay totals" values={report.pay_totals} money code={code} digits={digits} />}
           </section>
           {report.columns.length > 0 && (
             <section className={styles.columns}>
               <h3>Report columns</h3>
-              <div>{report.columns.map((column) => <span key={column.pay_item_id}>{column.label} <small>({column.code})</small></span>)}</div>
+              <div>{report.columns.map((column) => <span key={column.payroll_period_definition_id}>{column.label} <small>({column.code})</small></span>)}</div>
             </section>
           )}
           <section className={styles.section}>

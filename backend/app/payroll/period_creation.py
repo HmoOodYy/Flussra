@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.branch_compensation_config_concurrency import lock_branch_compensation_config
 from app.config import get_settings
 from app.core.service import (
     _check_branch_access,
@@ -27,6 +28,7 @@ from app.core.service import (
     _require_not_driver_role,
 )
 from app.payroll.audit_evidence import initialize_period_audit_evidence_coverage
+from app.payroll.definition_calculation import is_method_operational
 from app.payroll.eligibility import _create_period_driver_eligibility_rows
 from app.payroll.schemas import (
     CandidateNavigationInfo,
@@ -39,6 +41,7 @@ from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 from app.payroll_setup.audit import write_policy_audit
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.resolver import Authority, resolve_payroll_setup_version
+from app.rate_definition_concurrency import lock_rate_definition_structure
 
 # ---------------------------------------------------------------------------
 # CP-1C: Branch-locked candidate-based period creation
@@ -60,17 +63,6 @@ def _cp1c_error(code: str, message: str, http_status: int = 409) -> None:
 # ---------------------------------------------------------------------------
 # Helper: slot matrix
 # ---------------------------------------------------------------------------
-
-def _require_target_payroll_layout() -> None:
-    """Fail closed: new periods cannot be created until the creator snapshots the
-    target PayDefinition layout. Branch applicability is keyed by PayDefinition, so
-    the legacy PayItem snapshot is no longer a valid layout source."""
-    _cp1c_error(
-        "TARGET_PAYROLL_LAYOUT_NOT_READY",
-        "New payroll periods cannot be created yet: the period layout is not available "
-        "from the PayDefinition configuration.",
-    )
-
 
 def _check_slot_matrix(
     mode: str,
@@ -428,118 +420,136 @@ async def _create_period_day_rows(
 
 
 # ---------------------------------------------------------------------------
-# CP-2C: Period pay-item layout snapshot helpers
+# Target period definition snapshot
 # ---------------------------------------------------------------------------
 
-async def _create_period_pay_item_rows(
+async def _create_period_definition_rows(
     period_id: int,
     company_id: int,
     branch_id: int,
     start_date: date,
     db: AsyncConnection,
 ) -> None:
-    """
-    Insert one PayrollPeriodPayItems row per non-Retired PayItem (system +
-    company custom) as of start_date.
+    """Freeze the period's PayDefinition layout.
 
-    Legacy layout source, unreachable while _require_target_payroll_layout holds
-    period creation: Branch configuration is keyed by PayDefinition, so activation
-    here falls back to the PayItem default flag. The catalog admits only Daily operational PayItems and the two
-    system-generated Period output identities (SYS_MIN_TOPUP / SYS_MAX_CAP);
-    all of them are snapshotted so the period carries a frozen output layout.
-    DailyStatus / DailyNote pseudo-lines are excluded (no PayItems catalog row).
+    One row per Company PayDefinition that is Active and has a BranchPayItemConfig
+    version applicable to the Branch on ``start_date`` (an explicitly inactive version
+    is frozen as inactive). A PayDefinition with no applicable version is not
+    applicable to the Branch and gets no row. Zero rows is a valid layout; there is no
+    fallback to any catalog or default activation.
 
-    Called once at period creation; rows are immutable afterward.
+    Coherence contract. The whole layout is one authority state, read by ONE statement:
+
+      1. The creator already holds the Branch workflow lock and the Branch
+         compensation-config lock (taken by ``create_period_from_candidate`` before any
+         read). Every Branch applicability writer takes the same config lock first, so a
+         configuration change of any definition of this Branch is ordered wholly before
+         or wholly after this creation. READ COMMITTED re-reads after lock waits are
+         what the workflow lock's own checks rely on, which is why the creation is not
+         run at REPEATABLE READ (its snapshot would predate those waits).
+      2. RateDefinition structure locks are taken in ascending RateDefinitionID order
+         for the candidate definitions. This is the first lock every target
+         RateDefinition writer takes (retirement, structural mutation, assignment
+         authoring), so those writers serialize with the snapshot deterministically.
+      3. One unrestricted INSERT ... SELECT reads definitions, status and the applicable
+         Branch configuration version from a single statement snapshot. The statement is
+         NOT restricted to the candidate list: restricting it to ids read by an earlier
+         statement would let the layout be the product of two different moments. The
+         candidate list is only the lock set, and every inserted row must belong to it
+         (activation only happens under the config lock and retirement is monotonic, so
+         the inserted set can only be a subset); anything else rolls the creation back.
+         The foreign keys may make the INSERT wait for an in-flight writer, but the
+         layout is still exactly the state the statement read.
+      4. The structural lock is set on every referenced RateDefinition, making the
+         topology the period relies on immutable.
+
+    An ACTIVE definition whose frozen (method, version) is not operational fails the
+    whole creation (nothing is persisted: the caller's transaction rolls back).
     """
-    items_result = await db.execute(
+    candidate_ids = (await db.execute(
         text("""
-            SELECT
-                pi.payitemid,
-                pi.payitemcode,
-                pi.payitemname,
-                pi.displaylabel,
-                pi.category,
-                pi.datatype,
-                pi.unit,
-                pi.itemscope,
-                pi.ratebehavior,
-                pi.appearsinpayrollentry,
-                pi.appearsinledger,
-                pi.appearsinreports,
-                pi.requiresrate,
-                pi.issystemstandard,
-                (pi.companyid IS NOT NULL) AS iscustom,
-                pi.status,
-                pi.sortorder,
-                pi.isdefaultbranchactive,
-                CAST(NULL AS BOOLEAN)  AS cfg_isactive,
-                CAST(NULL AS DATE)     AS cfg_effectivefrom,
-                CAST(NULL AS INTEGER)  AS cfg_configid
-            FROM payroll.payitems pi
-            WHERE (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND pi.status != 'Retired'
-            ORDER BY pi.sortorder NULLS LAST, pi.payitemcode
+            SELECT rd.ratedefinitionid
+            FROM   payroll.paydefinitions pd
+            JOIN   payroll.ratedefinitions rd ON rd.paydefinitionid = pd.paydefinitionid
+            WHERE  pd.companyid = :cid AND pd.status = 'Active'
+              AND  EXISTS (
+                       SELECT 1 FROM payroll.branchpayitemconfig bpic
+                       WHERE  bpic.companyid = pd.companyid AND bpic.branchid = :bid
+                         AND  bpic.paydefinitionid = pd.paydefinitionid
+                         AND  bpic.effectivefrom <= :start
+                         AND  (bpic.effectiveto IS NULL OR bpic.effectiveto >= :start))
+            ORDER  BY rd.ratedefinitionid
         """),
-        {"cid": company_id},
-    )
-    rows = items_result.mappings().all()
-    if not rows:
+        {"cid": company_id, "bid": branch_id, "start": start_date},
+    )).scalars().all()
+    if not candidate_ids:
         return
 
-    for r in rows:
-        is_active_in_period = bool(
-            r["cfg_isactive"] if r["cfg_isactive"] is not None else r["isdefaultbranchactive"]
+    for rate_definition_id in candidate_ids:
+        await lock_rate_definition_structure(int(rate_definition_id), db)
+
+    inserted = (await db.execute(
+        text("""
+            INSERT INTO payroll.payrollperioddefinitions
+                (payrollperiodid, companyid, branchid, paydefinitionid, ratedefinitionid,
+                 definitioncodesnapshot, definitionnamesnapshot, inputtypesnapshot,
+                 unitsnapshot, calculationmethodsnapshot, calculationmethodversionsnapshot,
+                 rateshapesnapshot, definitionstatusatsnapshot, isactiveinperiod, sortorder,
+                 sourcebranchconfigid, sourcebranchconfigeffectivefrom,
+                 sourcebranchconfigeffectiveto)
+            SELECT :period_id, pd.companyid, :bid, pd.paydefinitionid, rd.ratedefinitionid,
+                   pd.definitioncode, pd.definitionname, pd.inputtype,
+                   pd.unit, pd.calculationmethod,
+                   COALESCE(prov.calculationmethodversion, 1),
+                   rd.shape, pd.status, bpic.isactive,
+                   (row_number() OVER (
+                        ORDER BY lower(pd.definitionname), pd.definitioncode, pd.paydefinitionid
+                   ) - 1)::integer,
+                   bpic.configid, bpic.effectivefrom, bpic.effectiveto
+            FROM   payroll.paydefinitions pd
+            JOIN   payroll.ratedefinitions rd ON rd.paydefinitionid = pd.paydefinitionid
+            JOIN   payroll.branchpayitemconfig bpic
+                   ON  bpic.companyid = pd.companyid AND bpic.branchid = :bid
+                   AND bpic.paydefinitionid = pd.paydefinitionid
+                   AND bpic.effectivefrom <= :start
+                   AND (bpic.effectiveto IS NULL OR bpic.effectiveto >= :start)
+            LEFT JOIN payroll.paydefinitionprovenance prov
+                   ON prov.paydefinitionid = pd.paydefinitionid
+            WHERE  pd.companyid = :cid AND pd.status = 'Active'
+            RETURNING ratedefinitionid, isactiveinperiod, calculationmethodsnapshot,
+                      calculationmethodversionsnapshot, definitioncodesnapshot
+        """),
+        {"period_id": period_id, "cid": company_id, "bid": branch_id, "start": start_date},
+    )).mappings().all()
+
+    unlocked = {int(r["ratedefinitionid"]) for r in inserted} - {int(c) for c in candidate_ids}
+    if unlocked:
+        _cp1c_error(
+            "CANDIDATE_STALE",
+            "Payroll authority changed while the period layout was being frozen.",
         )
-        await db.execute(
-            text("""
-                INSERT INTO payroll.payrollperiodpayitems
-                    (payrollperiodid, companyid, branchid, payitemid,
-                     payitemcode, payitemname, displaylabel,
-                     category, datatype, unit,
-                     itemscope, ratebehavior,
-                     appearsinpayrollentry, appearsinledger, appearsinreports,
-                     requiresrate, issystemstandard, iscustom,
-                     payitemstatusatsnapshot, isactiveinperiod, sortorder,
-                     snapshoteffectivefrom, sourcebranchpayitemconfigid,
-                     createdatutc)
-                VALUES
-                    (:period_id, :cid, :bid, :payitemid,
-                     :payitemcode, :payitemname, :displaylabel,
-                     :category, :datatype, :unit,
-                     :itemscope, :ratebehavior,
-                     :appearsinpayrollentry, :appearsinledger, :appearsinreports,
-                     :requiresrate, :issystemstandard, :iscustom,
-                     :payitemstatus, :isactiveinperiod, :sortorder,
-                     :snapshoteffectivefrom, :sourceconfigid,
-                     NOW())
-                ON CONFLICT (payrollperiodid, payitemid) DO NOTHING
-            """),
-            {
-                "period_id":             period_id,
-                "cid":                   company_id,
-                "bid":                   branch_id,
-                "payitemid":             r["payitemid"],
-                "payitemcode":           r["payitemcode"],
-                "payitemname":           r["payitemname"],
-                "displaylabel":          r["displaylabel"],
-                "category":              r["category"],
-                "datatype":              r["datatype"],
-                "unit":                  r["unit"],
-                "itemscope":             r["itemscope"],
-                "ratebehavior":          r["ratebehavior"],
-                "appearsinpayrollentry": r["appearsinpayrollentry"],
-                "appearsinledger":       r["appearsinledger"],
-                "appearsinreports":      r["appearsinreports"],
-                "requiresrate":          r["requiresrate"],
-                "issystemstandard":      r["issystemstandard"],
-                "iscustom":              bool(r["iscustom"]),
-                "payitemstatus":         r["status"],
-                "isactiveinperiod":      is_active_in_period,
-                "sortorder":             r["sortorder"] if r["sortorder"] is not None else 0,
-                "snapshoteffectivefrom": r["cfg_effectivefrom"],
-                "sourceconfigid":        r["cfg_configid"],
-            },
+
+    not_ready = sorted(
+        r["definitioncodesnapshot"] for r in inserted
+        if r["isactiveinperiod"] and not is_method_operational(
+            r["calculationmethodsnapshot"], int(r["calculationmethodversionsnapshot"]))
+    )
+    if not_ready:
+        _cp1c_error(
+            "CALCULATION_METHOD_NOT_READY",
+            "A PayDefinition that is active for this Branch uses a calculation method "
+            "that is not operational yet, so the period cannot be created: "
+            + ", ".join(not_ready) + ".",
         )
+
+    await db.execute(
+        text("""
+            UPDATE payroll.ratedefinitions
+            SET    structurelockedatutc = NOW()
+            WHERE  ratedefinitionid = ANY(:ids) AND structurelockedatutc IS NULL
+        """),
+        {"ids": [int(r["ratedefinitionid"]) for r in inserted]},
+    )
 
 
 def _period_end(frequency: str, start: date, interval_days: int | None) -> date:
@@ -799,6 +809,10 @@ async def create_period_from_candidate(
 
     # Acquire branch advisory lock (transaction-level)
     await _acquire_branch_workflow_lock(company_id, branch_id, db)
+    # Second lock, always after the workflow lock: orders every Branch applicability
+    # writer wholly before or wholly after this creation (see
+    # app.branch_compensation_config_concurrency for the global lock order).
+    await lock_branch_compensation_config(company_id, branch_id, db)
 
     # Replay check: if this hash already exists, return the existing period
     existing_row = (await db.execute(
@@ -830,8 +844,6 @@ async def create_period_from_candidate(
             end_date=existing_row["enddate"],
             status=existing_row["status"],
         )
-
-    _require_target_payroll_layout()
 
     # Re-read branch under lock
     branch_row = (await db.execute(
@@ -1000,8 +1012,8 @@ async def create_period_from_candidate(
         computed_start, computed_end, authority.schedule.normal_days_off_mask, db,
     )
 
-    # CP-2C: create period pay-item layout snapshot.
-    await _create_period_pay_item_rows(
+    # Freeze the target PayDefinition layout (zero rows is a valid layout).
+    await _create_period_definition_rows(
         new_period_id, company_id, branch_id, computed_start, db,
     )
 

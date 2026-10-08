@@ -29,8 +29,6 @@ from tests.builders.access import create_user_with_role_token, get_company_role_
 from tests.builders.company import create_branch
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
 
-pytestmark = pytest.mark.pre_cutover_legacy
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -28,8 +28,6 @@ from app.payroll_setup.payroll_policy import (
     reassign_setup,
 )
 
-pytestmark = pytest.mark.pre_cutover_legacy
-
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATIONS = _ROOT / "migrations" / "sql"
 _ANCHOR = date(2090, 1, 1)

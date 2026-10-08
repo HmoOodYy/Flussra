@@ -75,11 +75,11 @@ from app.company_currency import lock_and_get_company_currency_for_monetary_writ
 from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
+from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_calculation import (
     _build_live_calculation_packet,
     _capture_calculation_snapshot,
-    _refresh_draft_calculations,
 )
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import _VALID_TRANSITIONS, PeriodStatusChange, PeriodSummary
@@ -201,6 +201,11 @@ async def change_period_status(
     if required_perm:
         await _check_permission(company_id, user_id, existing.branch_id, required_perm, db)
 
+    # P4c gate: submitting freezes target calculation evidence, which does not exist yet.
+    # Refuse before any lock, snapshot, review item or status transition.
+    if change.status == "InReview":
+        require_target_payroll_evidence()
+
     # M16: Open → InReview pre-submission guards + auto-create PeriodApproval review item.
     #
     # The review item is created inside this same transaction so that if any guard
@@ -317,18 +322,6 @@ async def change_period_status(
             currency=currency,
         )
 
-        # Auto-refresh: re-compute calculatedamount + needsmanagerreview for all
-        # rate-dependent draft lines using the currently approved effective-dated
-        # rates.  This ensures that backdated approved rates added since lines
-        # were entered are reflected BEFORE the submit guards run, so the user
-        # does not need to manually touch each line to trigger recalculation.
-        await _refresh_draft_calculations(
-            period_id=period_id,
-            company_id=company_id,
-            db=db,
-            currency=currency,
-        )
-
         # Guard 1: empty period — refuse to submit a period with no payroll data.
         # Count DraftLines + Active BonusEvents (bonus data lives in PayrollBonusEvents).
         empty_result = await db.execute(
@@ -354,77 +347,7 @@ async def change_period_status(
                 ),
             )
 
-        # Guard 2: unresolved NeedsManagerReview lines.
-        unresolved_result = await db.execute(
-            text("""
-                SELECT COUNT(*) AS cnt
-                FROM   payroll.payrolldraftlines
-                WHERE  payrollperiodid    = :pid
-                  AND  companyid          = :cid
-                  AND  status            != 'Void'
-                  AND  needsmanagerreview  = TRUE
-            """),
-            {"pid": period_id, "cid": company_id},
-        )
-        unresolved_count = int(unresolved_result.scalar_one())
-        if unresolved_count > 0:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Cannot submit: {unresolved_count} draft line(s) still require "
-                    f"manager review (calculatedamount unresolved or manually flagged). "
-                    f"Resolve all flagged lines before submitting for review."
-                ),
-            )
-
-        # Guard 3: zero-calc unresolved lines (same check as finalization).
-        # CP-0: EXISTS subqueries now match system items (companyid IS NULL) as well as
-        # custom items (companyid = dl.companyid) so that new rows storing canonical
-        # PayItemCodes ("HOURS") are caught alongside legacy rows ("Hours").
-        zero_calc_result = await db.execute(
-            text("""
-                SELECT COUNT(*) AS cnt
-                FROM   payroll.payrolldraftlines dl
-                WHERE  dl.payrollperiodid    = :pid
-                  AND  dl.companyid          = :cid
-                  AND  dl.status            != 'Void'
-                  AND  dl.needsmanagerreview  = FALSE
-                  AND  dl.calculatedamount   IS NULL
-                  AND  (
-                    EXISTS (
-                        SELECT 1 FROM payroll.payitems pi
-                        WHERE  pi.payitemcode  = dl.linetype
-                          AND  (pi.companyid IS NULL OR pi.companyid = dl.companyid)
-                          AND  pi.ratebehavior IN (
-                              'OrdinalTier', 'RangeBracket',
-                              'RangeProgressive', 'Block'
-                          )
-                    )
-                    OR
-                    (
-                        dl.rateamount IS NULL
-                        AND EXISTS (
-                            SELECT 1 FROM payroll.payitems pi
-                            WHERE  pi.payitemcode  = dl.linetype
-                              AND  (pi.companyid IS NULL OR pi.companyid = dl.companyid)
-                              AND  pi.ratebehavior = 'PerUnit'
-                        )
-                    )
-                  )
-            """),
-            {"pid": period_id, "cid": company_id},
-        )
-        zero_calc_count = int(zero_calc_result.scalar_one())
-        if zero_calc_count > 0:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Cannot submit: {zero_calc_count} rate-dependent draft line(s) have no "
-                    f"resolved calculation amount. Fix or void these lines before submitting."
-                ),
-            )
-
-        # Guard 4: duplicate Pending review item.
+        # Guard 2: duplicate Pending review item.
         # Block only if a Pending item exists — EditRequested/Rejected items are historical.
         dup_result = await db.execute(
             text("""
@@ -667,14 +590,6 @@ async def change_period_status(
                 db=db,
                 currency=currency,
             )
-            # CP-2F: refresh daily calculations for Draft-era source lines now that
-            # the period is Open and approved rates can be looked up.
-            await _refresh_draft_calculations(
-                period_id=_eligible_draft["payrollperiodid"],
-                company_id=company_id,
-                db=db,
-                currency=currency,
-            )
     else:
         # CP-0B: All non-Open→InReview transitions use an expected-status predicate
         # so that a stale request whose pre-flight read is now out of date cannot
@@ -831,6 +746,11 @@ async def resubmit_period(
 
     # Permission gate: resubmission requires payroll.entry.
     await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
+
+    # P4c gate: resubmitting freezes target calculation evidence, which does not exist
+    # yet. Refuse before any lock, snapshot, review item or status transition.
+    require_target_payroll_evidence()
+
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
     # ── Step 3: acquire branch advisory lock, then period row lock ───────── #
@@ -874,14 +794,6 @@ async def resubmit_period(
         currency=currency,
     )
 
-    # Refresh draft calculations so the guards see current rates.
-    await _refresh_draft_calculations(
-        period_id=period_id,
-        company_id=company_id,
-        db=db,
-        currency=currency,
-    )
-
     # Guard 1: empty period.
     # Count DraftLines + Active BonusEvents.
     empty_result = await db.execute(
@@ -907,74 +819,7 @@ async def resubmit_period(
             ),
         )
 
-    # Guard 2: unresolved NeedsManagerReview lines.
-    unresolved_result = await db.execute(
-        text("""
-            SELECT COUNT(*) AS cnt
-            FROM   payroll.payrolldraftlines
-            WHERE  payrollperiodid    = :pid
-              AND  companyid          = :cid
-              AND  status            != 'Void'
-              AND  needsmanagerreview  = TRUE
-        """),
-        {"pid": period_id, "cid": company_id},
-    )
-    unresolved_count = int(unresolved_result.scalar_one())
-    if unresolved_count > 0:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Cannot resubmit: {unresolved_count} draft line(s) still require "
-                f"manager review (calculatedamount unresolved or manually flagged). "
-                f"Resolve all flagged lines before resubmitting."
-            ),
-        )
-
-    # Guard 3: zero-calc unresolved lines.
-    zero_calc_result = await db.execute(
-        text("""
-            SELECT COUNT(*) AS cnt
-            FROM   payroll.payrolldraftlines dl
-            WHERE  dl.payrollperiodid    = :pid
-              AND  dl.companyid          = :cid
-              AND  dl.status            != 'Void'
-              AND  dl.needsmanagerreview  = FALSE
-              AND  dl.calculatedamount   IS NULL
-              AND  (
-                EXISTS (
-                    SELECT 1 FROM payroll.payitems pi
-                    WHERE  pi.payitemcode  = dl.linetype
-                      AND  (pi.companyid IS NULL OR pi.companyid = dl.companyid)
-                      AND  pi.ratebehavior IN (
-                          'OrdinalTier', 'RangeBracket',
-                          'RangeProgressive', 'Block'
-                      )
-                )
-                OR
-                (
-                    dl.rateamount IS NULL
-                    AND EXISTS (
-                        SELECT 1 FROM payroll.payitems pi
-                        WHERE  pi.payitemcode  = dl.linetype
-                          AND  (pi.companyid IS NULL OR pi.companyid = dl.companyid)
-                          AND  pi.ratebehavior = 'PerUnit'
-                    )
-                )
-              )
-        """),
-        {"pid": period_id, "cid": company_id},
-    )
-    zero_calc_count = int(zero_calc_result.scalar_one())
-    if zero_calc_count > 0:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Cannot resubmit: {zero_calc_count} rate-dependent draft line(s) have no "
-                f"resolved calculation amount. Fix or void these lines before resubmitting."
-            ),
-        )
-
-    # Guard 4: duplicate Pending review item.
+    # Guard 2: duplicate Pending review item.
     dup_result = await db.execute(
         text("""
             SELECT reviewitemid FROM review.managerreviewitems

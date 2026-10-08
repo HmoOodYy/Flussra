@@ -5,22 +5,22 @@
  * financial contract.
  *
  * This module is presentation-only. It aligns backend-supplied values by
- * PayItemID and exposes backend fixed/footer totals verbatim. It never
+ * PayrollPeriodDefinitionID and exposes backend fixed/footer totals verbatim. It never
  * computes, sums, or derives a monetary value — every money field here is
  * either a backend string passed through unchanged or `null` when the
  * backend contract did not supply one.
  */
-import type { PayItemAmount, ReportColumn, ReportDriver } from '../../types/payroll';
+import type { DefinitionAmount, ReportColumn, ReportDriver } from '../../types/payroll';
 
 export interface PeriodPayColumn {
-  pay_item_id: number;
+  payroll_period_definition_id: number;
   label: string;
   code: string;
   unit: string | null;
 }
 
 export interface PeriodPayCell {
-  pay_item_id: number;
+  payroll_period_definition_id: number;
   /** Backend amount string, or null when the backend did not supply one for this column. */
   amount: string | null;
 }
@@ -57,22 +57,25 @@ export function driverLabel(driver: { driver_id: number; driver_name: string | n
   return driver.driver_name ?? `Driver #${driver.driver_id}`;
 }
 
-function lookupAmount(amounts: PayItemAmount[] | null | undefined, payItemId: number): string | null {
-  return amounts?.find((entry) => entry.pay_item_id === payItemId)?.amount ?? null;
+function lookupAmount(amounts: DefinitionAmount[] | null | undefined, definitionId: number): string | null {
+  return amounts?.find((entry) => entry.payroll_period_definition_id === definitionId)?.amount ?? null;
 }
 
-function alignItems(columns: readonly PeriodPayColumn[], amounts: PayItemAmount[] | null | undefined): PeriodPayCell[] {
-  return columns.map((column) => ({ pay_item_id: column.pay_item_id, amount: lookupAmount(amounts, column.pay_item_id) }));
+function alignItems(columns: readonly PeriodPayColumn[], amounts: DefinitionAmount[] | null | undefined): PeriodPayCell[] {
+  return columns.map((column) => ({
+    payroll_period_definition_id: column.payroll_period_definition_id,
+    amount: lookupAmount(amounts, column.payroll_period_definition_id),
+  }));
 }
 
 export function buildPeriodPayTable(
   reportColumns: ReportColumn[],
   drivers: ReportDriver[],
-  payItemTotals: PayItemAmount[] | null,
+  definitionTotals: DefinitionAmount[] | null,
   payTotals: Record<string, string> | null,
 ): PeriodPayTableModel {
   const columns: PeriodPayColumn[] = reportColumns.map((column) => ({
-    pay_item_id: column.pay_item_id,
+    payroll_period_definition_id: column.payroll_period_definition_id,
     label: column.label,
     code: column.code,
     unit: column.unit,
@@ -84,7 +87,7 @@ export function buildPeriodPayTable(
       driver_id: driver.driver_id,
       driver_label: driverLabel(driver),
       driver_code: driver.driver_code,
-      items: alignItems(columns, pay?.pay_item_amounts),
+      items: alignItems(columns, pay?.definition_amounts),
       status_pay: pay?.status_pay ?? null,
       gross_pay: pay?.gross_pay ?? null,
       minimum_adjustment: pay?.minimum_adjustment ?? null,
@@ -95,7 +98,7 @@ export function buildPeriodPayTable(
   });
 
   const footer: PeriodPayFooter = {
-    items: alignItems(columns, payItemTotals),
+    items: alignItems(columns, definitionTotals),
     status_pay: payTotals?.status_pay ?? null,
     gross_pay: payTotals?.gross_pay ?? null,
     minimum_adjustment: payTotals?.minimum_adjustment ?? null,

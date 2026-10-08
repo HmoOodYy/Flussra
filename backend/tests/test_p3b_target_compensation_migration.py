@@ -66,7 +66,7 @@ def test_alembic_has_a_single_head():
     )
     assert result.returncode == 0, result.stderr
     heads = [line for line in result.stdout.splitlines() if "(head)" in line]
-    assert len(heads) == 1 and heads[0].startswith("0084"), result.stdout
+    assert len(heads) == 1 and heads[0].startswith("0085"), result.stdout
 
 
 def test_0081_with_legacy_state_upgrades_to_0082_without_touching_it(p3b_migration_database):
@@ -138,7 +138,7 @@ def test_fresh_database_upgrades_to_head_with_the_target_schema(p3b_migration_da
     assert upgraded.returncode == 0, upgraded.stderr
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0084",)
+        assert cur.fetchone() == ("0085",)
         assert _target_tables(cur) == TARGET_TABLES
         cur.execute("""
             SELECT count(*) FROM pg_trigger t

@@ -76,7 +76,7 @@ def test_0082_state_upgrades_to_0083_without_touching_it(governance_database):
     assert upgraded.returncode == 0, upgraded.stderr
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0084",)
+        assert cur.fetchone() == ("0085",)
         assert _governance_tables(cur) == GOVERNANCE_TABLES
         for table in GOVERNANCE_TABLES:
             cur.execute(sql.SQL("SELECT count(*) FROM payroll.{}").format(sql.Identifier(table)))

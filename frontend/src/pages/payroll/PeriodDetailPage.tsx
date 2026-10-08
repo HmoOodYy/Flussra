@@ -12,6 +12,7 @@ import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/pa
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
 import { canEntryPayroll } from '../../lib/permissions';
+import { columnKey, quantityInputProps, quantityTotalViews } from './dayGridModel';
 import { formatGrossTotal } from './grossDisplay';
 import styles from './PeriodDetailPage.module.css';
 
@@ -110,35 +111,12 @@ export function PeriodDetailPage() {
   async function handleSave() {
     if (dirtyRows.size === 0 || !grid || !selectedDate) return;
 
-    // Normalize time-column values to decimal strings before sending to backend.
-    // If any value is invalid, block the save and surface the error.
-    const timeCodes = new Set(
-      grid.columns.filter((c) => c.is_time).map((c) => c.pay_item_code),
-    );
-    const normalizedRows: DayGridSaveRow[] = [];
-    for (const row of dirtyRows.values()) {
-      const normalizedValues: Record<string, string> = { ...row.values };
-      for (const [code, val] of Object.entries(row.values)) {
-        if (!timeCodes.has(code)) continue;
-        if (val === '') continue;
-        const parsed = parseTimeInput(val);
-        if (parsed === null) {
-          setSaveError(
-            `"${val}" is not a valid time. Use formats like 1.5, 1:30, 1h 30m, or 90m.`,
-          );
-          return;
-        }
-        normalizedValues[code] = parsed;
-      }
-      normalizedRows.push({ ...row, values: normalizedValues });
-    }
-
     setSaving(true);
     setSaveError(null);
     try {
       const resp = await saveDayGrid(numericPeriodId, {
         work_date: selectedDate,
-        rows: normalizedRows,
+        rows: Array.from(dirtyRows.values()),
       });
       setGrid(resp);
       setDirtyRows(new Map());
@@ -159,63 +137,6 @@ export function PeriodDetailPage() {
     }
   }
 
-  // ── Time-format parser ──────────────────────────────────────────────────── //
-  // Returns the decimal-hours string on success, or null if the input is invalid.
-  // Empty string returns empty string (clears the cell).
-  function parseTimeInput(v: string): string | null {
-    const s = v.trim();
-    if (!s) return '';
-
-    // Plain decimal / integer — must be non-negative
-    if (/^\d*\.?\d+$/.test(s)) {
-      const n = parseFloat(s);
-      return n >= 0 ? s : null;
-    }
-
-    // H:MM or H:MM:SS — minutes and seconds must each be 0–59
-    const colonMatch = /^(\d+):(\d{1,2})(?::(\d{1,2}))?$/.exec(s);
-    if (colonMatch) {
-      const h = parseInt(colonMatch[1], 10);
-      const m = parseInt(colonMatch[2], 10);
-      const sec = colonMatch[3] !== undefined ? parseInt(colonMatch[3], 10) : 0;
-      if (m > 59 || sec > 59) return null;
-      const total = h + m / 60 + sec / 3600;
-      return String(Math.round(total * 1_000_000) / 1_000_000);
-    }
-
-    // Word format: "1h 30m", "1hr 30min", "1 hour 30 minutes", "90m", "30mins", …
-    // Hours: h | hr | hrs | hour | hours
-    // Minutes: m | min | mins | minute | minutes
-    // Minutes may exceed 59 (e.g. "90m" = 1.5 h); this is deliberate.
-    const hmMatch =
-      /^(?:(\d+)\s*(?:hours|hour|hrs|hr|h))?(?:\s*(\d+)\s*(?:minutes|minute|mins|min|m))?$/i.exec(s);
-    if (hmMatch && (hmMatch[1] || hmMatch[2])) {
-      const h = parseInt(hmMatch[1] ?? '0', 10);
-      const m = parseInt(hmMatch[2] ?? '0', 10);
-      const total = h + m / 60;
-      return String(Math.round(total * 1_000_000) / 1_000_000);
-    }
-
-    return null;
-  }
-
-  function handleTimeCellBlur(driverId: number, code: string, raw: string) {
-    const parsed = parseTimeInput(raw);
-    if (parsed === null) {
-      // Invalid — revert to the last saved server value and surface the error
-      const serverVal =
-        grid?.rows.find((r) => r.driver_id === driverId)?.values[code]?.quantity ?? '';
-      handleCellChange(driverId, code, serverVal);
-      setSaveError(
-        `"${raw}" is not a valid time. Use formats like 1.5, 1:30, 1h 30m, or 90m.`,
-      );
-      return;
-    }
-    if (parsed !== raw) {
-      handleCellChange(driverId, code, parsed);
-    }
-  }
-
   // ── Cell change helpers ─────────────────────────────────────────────────── //
   function buildSaveRowFromGrid(driverId: number): DayGridSaveRow {
     const row = grid?.rows.find((r) => r.driver_id === driverId);
@@ -229,11 +150,11 @@ export function PeriodDetailPage() {
     };
   }
 
-  function handleCellChange(driverId: number, code: string, value: string) {
+  function handleCellChange(driverId: number, key: string, value: string) {
     setDirtyRows((prev) => {
       const m = new Map(prev);
       const existing = m.get(driverId) ?? buildSaveRowFromGrid(driverId);
-      m.set(driverId, { ...existing, values: { ...existing.values, [code]: value } });
+      m.set(driverId, { ...existing, values: { ...existing.values, [key]: value } });
       return m;
     });
   }
@@ -256,10 +177,10 @@ export function PeriodDetailPage() {
     });
   }
 
-  function getCellValue(row: DayGridRow, code: string): string {
+  function getCellValue(row: DayGridRow, key: string): string {
     const dirty = dirtyRows.get(row.driver_id);
-    if (dirty) return dirty.values[code] ?? '';
-    return row.values[code]?.quantity ?? '';
+    if (dirty) return dirty.values[key] ?? '';
+    return row.values[key]?.quantity ?? '';
   }
 
   function getStatusValue(row: DayGridRow): string {
@@ -375,14 +296,14 @@ export function PeriodDetailPage() {
           <span className={styles.summaryLabel}>Off:</span>
           <span className={styles.summaryValue}>{summary.off}</span>
         </div>
-        <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>Hours:</span>
-          <span className={styles.summaryValue}>{summary.total_hours}</span>
-        </div>
-        <div className={styles.summaryItem}>
-          <span className={styles.summaryLabel}>Miles:</span>
-          <span className={styles.summaryValue}>{summary.total_miles}</span>
-        </div>
+        {quantityTotalViews(columns, summary).map((total) => (
+          <div className={styles.summaryItem} key={total.key}>
+            <span className={styles.summaryLabel}>{total.label}:</span>
+            <span className={styles.summaryValue}>
+              {total.quantity}{total.unit ? ` ${total.unit}` : ''}
+            </span>
+          </div>
+        ))}
         <div className={styles.summaryItem}>
           <span className={styles.summaryLabel}>Gross:</span>
           <span className={styles.summaryValue}>{summary.financials_available
@@ -409,7 +330,7 @@ export function PeriodDetailPage() {
                 <th className={styles.driverCol}>Driver</th>
                 <th>Status</th>
                 {columns.map((col) => (
-                  <th key={col.pay_item_code}>{col.label}</th>
+                  <th key={columnKey(col)}>{col.label}{col.unit && <small> ({col.unit})</small>}</th>
                 ))}
                 <th>Notes</th>
               </tr>
@@ -457,44 +378,26 @@ export function PeriodDetailPage() {
                       )}
                     </td>
                     {columns.map((col) => {
-                      const val = row.values[col.pay_item_code];
+                      const key = columnKey(col);
+                      const val = row.values[key];
                       const nmr = val?.needs_manager_review ?? false;
-                      const cellVal = getCellValue(row, col.pay_item_code);
+                      const inputProps = quantityInputProps(col);
                       return (
-                        <td key={col.pay_item_code}>
+                        <td key={key}>
                           {nmr && (
-                            <span className={styles.attentionIcon} title="Needs manager review">
+                            <span className={styles.attentionIcon} title="Needs attention: rate unresolved">
                               &#9888;
                             </span>
                           )}
-                          {col.is_time ? (
-                            <input
-                              className={styles.qtyInput}
-                              type="text"
-                              inputMode="decimal"
-                              placeholder="e.g. 1:30"
-                              value={cellVal}
-                              disabled={!canEdit}
-                              onChange={(e) =>
-                                handleCellChange(row.driver_id, col.pay_item_code, e.target.value)
-                              }
-                              onBlur={(e) =>
-                                handleTimeCellBlur(row.driver_id, col.pay_item_code, e.target.value)
-                              }
-                            />
-                          ) : (
-                            <input
-                              className={styles.qtyInput}
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={cellVal}
-                              disabled={!canEdit}
-                              onChange={(e) =>
-                                handleCellChange(row.driver_id, col.pay_item_code, e.target.value)
-                              }
-                            />
-                          )}
+                          <input
+                            className={styles.qtyInput}
+                            type="number"
+                            step={inputProps.step}
+                            min={inputProps.min}
+                            value={getCellValue(row, key)}
+                            disabled={!canEdit}
+                            onChange={(e) => handleCellChange(row.driver_id, key, e.target.value)}
+                          />
                         </td>
                       );
                     })}

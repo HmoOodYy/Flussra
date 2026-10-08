@@ -116,7 +116,9 @@ def _user(cur, company_id: int, role_id: int, scope: str, branch_id: int | None)
     return user_id
 
 
-def build_tenant(dsn: dict, *, currency: str | None = "USD") -> Tenant:
+def build_tenant(
+    dsn: dict, *, currency: str | None = "USD", permissions: list[str] | None = None,
+) -> Tenant:
     conn = psycopg2.connect(client_encoding="utf-8", **dsn)
     conn.autocommit = True
     try:
@@ -124,7 +126,7 @@ def build_tenant(dsn: dict, *, currency: str | None = "USD") -> Tenant:
             company_id = make_company(cur, currency)
             branch_a = make_branch(cur, company_id, is_default=True)
             branch_b = make_branch(cur, company_id)
-            full = _role(cur, company_id, "P3C_FULL", PERMISSIONS)
+            full = _role(cur, company_id, "P3C_FULL", permissions or PERMISSIONS)
             read = _role(cur, company_id, "P3C_READ", ["payitems.view", "payrates.view"])
             none = _role(cur, company_id, "P3C_NONE", [])
             return Tenant(

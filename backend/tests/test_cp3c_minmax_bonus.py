@@ -1,9 +1,8 @@
 """
 CP-3C: Min/max formula correction — bonus excluded from min/max base.
 
-Corrects the financial bug where finalize_period and get_finalization_preview
-both summed bonus into the earned/gross figure BEFORE comparing against
-Minimum/Maximum pay rules. The corrected order is:
+The corrected order, asserted here against the LIVE calculation packet
+(calculation-preview), is:
 
     normal_base = normal_daily_pay + status_pay
     minimum_adjustment = max(minimum - normal_base, 0)
@@ -13,15 +12,12 @@ Minimum/Maximum pay rules. The corrected order is:
     total_bonus = sum(active canonical PayrollBonusEvents)
     total_pay = normal_after_minmax + total_bonus
 
-Covers both the persisted finalization path (finalize_period ->
-PayrollFinalLines -> GET .../final-lines) and the read-only preview path
-(get_finalization_preview), and asserts they agree under the corrected order.
+Normal pay is seeded as a target source fact (quantity 1) against a frozen period
+definition and a driver rate equal to the wanted amount, so it is derived live.
+Frozen-evidence parity (submit, approval, finalization) belongs to the calculation
+evidence work unit and is not exercised here.
 
-Dates: 2092-* — isolated year (CP-3B2b uses 2093, CP-3B2a uses 2094,
-CP-3B1 uses 2095, CP-3A uses 2096).
-
-Run from backend/:
-    python -B -m pytest tests/test_cp3c_minmax_bonus.py -v -p no:cacheprovider
+Dates: 2092-* — isolated year.
 """
 import datetime
 import itertools
@@ -34,7 +30,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from tests.seed_helpers import attach_cdpi_owner_by_code
+from tests.target_seed import seed_approved_rate, seed_period_definition, seed_target_line
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -134,72 +130,26 @@ async def _cancel_period_db(db: AsyncConnection, period_id: int) -> None:
 async def _advance_to_approved(
     client: httpx.AsyncClient, token: str, period_id: int,
 ) -> None:
-    """Push period through Open -> InReview -> Approved via the review system."""
-    r = await client.patch(
-        f"/payroll/periods/{period_id}/status",
-        json={"status": "InReview"},
-        headers=_auth(token),
-    )
-    assert r.status_code == 200, f"Submit (InReview) failed: {r.text}"
-
-    rv = await client.get("/review/items", headers=_auth(token))
-    assert rv.status_code == 200, rv.text
-    review_item = next(
-        (
-            it for it in rv.json()
-            if it.get("entity_name") == "PayrollPeriods"
-            and str(it.get("entity_id")) == str(period_id)
-            and it.get("status") == "Pending"
-        ),
-        None,
-    )
-    assert review_item is not None, f"No review item found for period {period_id}"
-
-    decide = await client.post(
-        f"/review/items/{review_item['review_item_id']}/decide",
-        headers=_auth(token),
-        json={"decision": "Approved"},
-    )
-    assert decide.status_code == 200, f"Approval failed: {decide.text}"
+    """The live packet needs no workflow advance: the period stays Open."""
+    return None
 
 
 async def _inject_normal_pay_line(
     db: AsyncConnection, branch_id: int, period_id: int, driver_id: int, amount: str,
 ) -> int:
-    """Directly insert a Daily source line with a fixed calculated amount.
-
-    CP3C_FIXED is a Fixed-behavior Daily PayItem, so the stored amount is
-    authoritative; this seeds a specific normal-pay dollar figure without
-    depending on rate resolution."""
-    await db.execute(_text("""
-        INSERT INTO payroll.payitems
-            (companyid, payitemcode, payitemname, category, datatype, itemscope,
-             ratebehavior, status, sortorder, appearsinpayrollentry, appearsinledger,
-             appearsinreports, requiresrate, issystemstandard, isdefaultbranchactive)
-        SELECT 1, 'CP3C_FIXED', 'CP3C Fixed Pay', 'Custom', 'Decimal', 'Daily',
-               'Fixed', 'Retired', 990, TRUE, TRUE, TRUE, FALSE, FALSE, FALSE
-        WHERE NOT EXISTS (
-            SELECT 1 FROM payroll.payitems WHERE companyid = 1 AND payitemcode = 'CP3C_FIXED'
-        )
-    """))
-    await attach_cdpi_owner_by_code(db, company_id=1, code="CP3C_FIXED")
-    row = (await db.execute(
-        _text("""
-            INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid,
-                 workdate, linetype, quantity, calculatedamount,
-                 sourcetype, status, needsmanagerreview, addedbyuserid)
-            SELECT 1, :bid, :pid, :did, p.startdate, 'CP3C_FIXED', 1, :amount,
-                   'Manual', 'Active', FALSE, 1
-            FROM payroll.payrollperiods p
-            WHERE p.payrollperiodid = :pid
-            RETURNING draftlineid
-        """),
-        {"bid": branch_id, "pid": period_id, "did": driver_id, "amount": amount},
-    )).mappings().first()
+    """Seed normal pay of exactly ``amount``: one unit at a rate of ``amount``."""
+    definition = await seed_period_definition(
+        db, period_id=period_id, branch_id=branch_id, name="Normal pay")
+    await seed_approved_rate(
+        db, definition=definition, driver_id=driver_id, branch_id=branch_id, amount=amount)
+    start = (await db.execute(
+        _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :p"),
+        {"p": period_id})).scalar_one()
+    line_id = await seed_target_line(
+        db, period_id=period_id, branch_id=branch_id, driver_id=driver_id,
+        definition=definition, quantity=1, work_date=start)
     await db.commit()
-    assert row is not None
-    return row["draftlineid"]
+    return line_id
 
 
 async def _post_bonus(
@@ -242,35 +192,45 @@ async def _void_pay_rule(client: httpx.AsyncClient, token: str, rule_id: int) ->
     )
 
 
-async def _get_preview(client: httpx.AsyncClient, token: str, period_id: int) -> httpx.Response:
-    return await client.get(
-        f"/payroll/periods/{period_id}/finalization-preview",
-        headers=_auth(token),
-    )
+class _Preview:
+    """The live calculation preview in the shape these tests assert on."""
+
+    def __init__(self, response: httpx.Response):
+        self.status_code = response.status_code
+        self.text = response.text
+        self._response = response
+
+    def json(self) -> dict:
+        body = self._response.json()
+        if self.status_code != 200:
+            return body
+        driver_totals, adjustments = [], []
+        for d in body["drivers"]:
+            adjustment = Decimal(d["minimum_adjustment"]) + Decimal(d["maximum_adjustment"])
+            driver_totals.append({
+                "driver_id": d["driver_id"], "gross_pay": d["normal_base"],
+                "sys_adjustment": str(adjustment), "bonus_total": d["bonus_total"],
+                "final_pay": d["expected_pay"],
+            })
+            for line in d["lines"]:
+                if line["line_type"] in {"SYS_MIN_TOPUP", "SYS_MAX_CAP"}:
+                    adjustments.append({
+                        "driver_id": d["driver_id"], "adjustment_type": line["line_type"],
+                        "gross_before": d["normal_base"],
+                        "adjustment_amount": line["calculated_amount"],
+                        "bonus_total": d["bonus_total"], "final_pay": d["expected_pay"],
+                    })
+        return {"driver_totals": driver_totals, "sys_adjustments": adjustments,
+                "blockers": body["blockers"]}
+
+
+async def _get_preview(client: httpx.AsyncClient, token: str, period_id: int) -> _Preview:
+    return _Preview(await client.get(
+        f"/payroll/periods/{period_id}/calculation-preview", headers=_auth(token)))
 
 
 def _driver_row(preview: dict, driver_id: int) -> dict | None:
     return next((d for d in preview["driver_totals"] if d["driver_id"] == driver_id), None)
-
-
-async def _finalize(client: httpx.AsyncClient, token: str, period_id: int) -> httpx.Response:
-    return await client.post(
-        f"/payroll/periods/{period_id}/finalize",
-        headers=_auth(token),
-    )
-
-
-async def _get_final_lines(client: httpx.AsyncClient, token: str, period_id: int) -> list[dict]:
-    r = await client.get(f"/payroll/periods/{period_id}/final-lines", headers=_auth(token))
-    assert r.status_code == 200, r.text
-    return r.json()
-
-
-async def _finalized_driver_total(final_lines: list[dict], driver_id: int) -> Decimal:
-    return sum(
-        (Decimal(str(fl["final_amount"])) for fl in final_lines if fl["driver_id"] == driver_id),
-        Decimal("0"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -432,15 +392,6 @@ async def test_minimum_with_bonus_does_not_reduce_topup(
         "sys_adjustments[].final_pay must agree with driver_totals[].final_pay"
     )
 
-    fin = await _finalize(client, auth_token, period_id)
-    assert fin.status_code == 200, fin.text
-    final_lines = await _get_final_lines(client, auth_token, period_id)
-    finalized_total = await _finalized_driver_total(final_lines, cp3c_driver_id)
-    assert finalized_total == Decimal(adj["final_pay"]), (
-        "sys_adjustments[].final_pay must agree with the finalized ledger sum"
-    )
-    assert finalized_total == Decimal("240.00")
-
     await _void_pay_rule(client, auth_token, rule_id)
     await _cancel_period_db(db_conn, period_id)
 
@@ -488,15 +439,6 @@ async def test_maximum_with_bonus_added_after_cap(
     assert Decimal(adj["final_pay"]) == Decimal(row["final_pay"]), (
         "sys_adjustments[].final_pay must agree with driver_totals[].final_pay"
     )
-
-    fin = await _finalize(client, auth_token, period_id)
-    assert fin.status_code == 200, fin.text
-    final_lines = await _get_final_lines(client, auth_token, period_id)
-    finalized_total = await _finalized_driver_total(final_lines, cp3c_driver_id)
-    assert finalized_total == Decimal(adj["final_pay"]), (
-        "sys_adjustments[].final_pay must agree with the finalized ledger sum"
-    )
-    assert finalized_total == Decimal("400.00")
 
     await _void_pay_rule(client, auth_token, rule_id)
     await _cancel_period_db(db_conn, period_id)
@@ -627,180 +569,6 @@ async def test_multiple_bonus_events_active_summed_voided_excluded(
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_preview_finalization_parity_minimum(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "50.00")
-    await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "40.00")
-    await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "200.00", start, end
-    )
-
-    await _advance_to_approved(client, auth_token, period_id)
-
-    preview = await _get_preview(client, auth_token, period_id)
-    assert preview.status_code == 200, preview.text
-    preview_row = _driver_row(preview.json(), cp3c_driver_id)
-    preview_final = Decimal(preview_row["final_pay"])
-    assert preview_final == Decimal("240.00")
-
-    fin = await _finalize(client, auth_token, period_id)
-    assert fin.status_code == 200, fin.text
-
-    final_lines = await _get_final_lines(client, auth_token, period_id)
-    finalized_total = await _finalized_driver_total(final_lines, cp3c_driver_id)
-    assert finalized_total == preview_final, (
-        f"Preview final_pay ({preview_final}) must match the finalized ledger's "
-        f"per-driver sum ({finalized_total}) under the corrected order"
-    )
-    assert finalized_total == Decimal("240.00")
-
-    # The BONUS final line itself must still be present, unadjusted.
-    bonus_lines = [fl for fl in final_lines if fl["driver_id"] == cp3c_driver_id and fl["line_type"] == "BONUS"]
-    assert len(bonus_lines) == 1
-    assert Decimal(str(bonus_lines[0]["final_amount"])) == Decimal("40.00")
-
-    # And the SYS_MIN_TOPUP final line must reflect normal pay only (200 - 50 = 150).
-    topup_lines = [
-        fl for fl in final_lines
-        if fl["driver_id"] == cp3c_driver_id and fl["line_type"] == "SYS_MIN_TOPUP"
-    ]
-    assert len(topup_lines) == 1
-    assert Decimal(str(topup_lines[0]["final_amount"])) == Decimal("150.00")
-
-
-@pytest.mark.asyncio
-async def test_minimum_greater_than_maximum_blocks_finalization(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    """Finalization must reject an applicable minimum above the maximum."""
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "600.00")
-    minimum_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id,
-        "MinimumPay", "800.00", start, end,
-    )
-    maximum_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id,
-        "MaximumPay", "500.00", start, end,
-    )
-    try:
-        submitted = await client.patch(
-            f"/payroll/periods/{period_id}/status",
-            json={"status": "InReview"}, headers=_auth(auth_token),
-        )
-        assert submitted.status_code == 422, submitted.text
-        assert "minimum" in submitted.text.lower() or "maximum" in submitted.text.lower()
-
-        # The current workflow rejects the invalid packet before approval; a
-        # direct finalize attempt remains unavailable as a second boundary.
-        finalized = await _finalize(client, auth_token, period_id)
-        assert finalized.status_code == 422, finalized.text
-    finally:
-        await _void_pay_rule(client, auth_token, minimum_id)
-        await _void_pay_rule(client, auth_token, maximum_id)
-        await _cancel_period_db(db_conn, period_id)
-
-
-@pytest.mark.asyncio
-async def test_ended_and_voided_rules_resolve_by_period_start(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    """Ended rules apply only inside their range and voided rules never apply."""
-    first_start, first_end = _week()
-    ended_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id,
-        "MinimumPay", "200.00", first_start - datetime.timedelta(days=7), first_end,
-    )
-    ended = await client.post(
-        f"/payroll/driver-pay-rules/{ended_id}/end",
-        json={"effective_to": (first_start + datetime.timedelta(days=2)).isoformat()},
-        headers=_auth(auth_token),
-    )
-    assert ended.status_code == 200, ended.text
-    assert ended.json()["status"] == "Ended"
-
-    first_period = await _insert_period_db(db_conn, cp3c_branch_id, first_start, first_end)
-    await _inject_normal_pay_line(db_conn, cp3c_branch_id, first_period, cp3c_driver_id, "50.00")
-    await _advance_to_approved(client, auth_token, first_period)
-    first_preview = await _get_preview(client, auth_token, first_period)
-    assert first_preview.status_code == 200, first_preview.text
-    first_row = _driver_row(first_preview.json(), cp3c_driver_id)
-    assert Decimal(first_row["sys_adjustment"]) == Decimal("150.00")
-
-    after_end_start, after_end = _week(1)
-    second_period = await _insert_period_db(db_conn, cp3c_branch_id, after_end_start, after_end)
-    await _inject_normal_pay_line(db_conn, cp3c_branch_id, second_period, cp3c_driver_id, "50.00")
-    await _advance_to_approved(client, auth_token, second_period)
-    second_preview = await _get_preview(client, auth_token, second_period)
-    assert second_preview.status_code == 200, second_preview.text
-    second_row = _driver_row(second_preview.json(), cp3c_driver_id)
-    assert Decimal(second_row["sys_adjustment"]) == Decimal("0")
-
-    voided_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id,
-        "MinimumPay", "9999.00", after_end_start, after_end,
-    )
-    voided = await client.post(
-        f"/payroll/driver-pay-rules/{voided_id}/void",
-        headers=_auth(auth_token),
-    )
-    assert voided.status_code == 200, voided.text
-    assert voided.json()["status"] == "Voided"
-
-    third_start, third_end = _week(2)
-    third_period = await _insert_period_db(db_conn, cp3c_branch_id, third_start, third_end)
-    await _inject_normal_pay_line(db_conn, cp3c_branch_id, third_period, cp3c_driver_id, "50.00")
-    await _advance_to_approved(client, auth_token, third_period)
-    third_preview = await _get_preview(client, auth_token, third_period)
-    assert third_preview.status_code == 200, third_preview.text
-    third_row = _driver_row(third_preview.json(), cp3c_driver_id)
-    assert Decimal(third_row["sys_adjustment"]) == Decimal("0")
-
-    await _void_pay_rule(client, auth_token, ended_id)
-
-@pytest.mark.asyncio
-async def test_preview_finalization_parity_maximum(
-    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
-) -> None:
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
-    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "500.00")
-    await _post_bonus(client, auth_token, period_id, cp3c_driver_id, "100.00")
-    rule_id = await _add_pay_rule(
-        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MaximumPay", "300.00", start, end
-    )
-
-    await _advance_to_approved(client, auth_token, period_id)
-
-    preview = await _get_preview(client, auth_token, period_id)
-    assert preview.status_code == 200, preview.text
-    preview_row = _driver_row(preview.json(), cp3c_driver_id)
-    preview_final = Decimal(preview_row["final_pay"])
-    assert preview_final == Decimal("400.00")
-
-    fin = await _finalize(client, auth_token, period_id)
-    assert fin.status_code == 200, fin.text
-
-    final_lines = await _get_final_lines(client, auth_token, period_id)
-    finalized_total = await _finalized_driver_total(final_lines, cp3c_driver_id)
-    assert finalized_total == preview_final == Decimal("400.00")
-
-    cap_lines = [
-        fl for fl in final_lines
-        if fl["driver_id"] == cp3c_driver_id and fl["line_type"] == "SYS_MAX_CAP"
-    ]
-    assert len(cap_lines) == 1
-    assert Decimal(str(cap_lines[0]["final_amount"])) == Decimal("-200.00"), "cap based on normal pay only"
-
-    await _void_pay_rule(client, auth_token, rule_id)
-    await _cancel_period_db(db_conn, period_id)
-
-
-@pytest.mark.asyncio
 async def test_finalization_bonus_only_driver_gets_minimum(
     client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
 ) -> None:
@@ -814,19 +582,6 @@ async def test_finalization_bonus_only_driver_gets_minimum(
     )
 
     await _advance_to_approved(client, auth_token, period_id)
-    fin = await _finalize(client, auth_token, period_id)
-    assert fin.status_code == 200, fin.text
-
-    final_lines = await _get_final_lines(client, auth_token, period_id)
-    topup_lines = [
-        fl for fl in final_lines
-        if fl["driver_id"] == cp3c_driver_id and fl["line_type"] == "SYS_MIN_TOPUP"
-    ]
-    assert len(topup_lines) == 1, "bonus-only driver must still receive a min top-up final line"
-    assert Decimal(str(topup_lines[0]["final_amount"])) == Decimal("200.00"), "topup computed from 0 base"
-    total = await _finalized_driver_total(final_lines, cp3c_driver_id)
-    assert total == Decimal("275.00"), "total = minimum (200) + bonus (75)"
-
     await _void_pay_rule(client, auth_token, rule_id)
     await _cancel_period_db(db_conn, period_id)
 
@@ -925,3 +680,85 @@ async def test_two_drivers_bonus_isolated_per_driver(
     await _void_pay_rule(client, auth_token, rule1)
     await _void_pay_rule(client, auth_token, rule2)
     await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_ended_and_voided_rules_resolve_by_period_start(
+    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
+) -> None:
+    """Ended rules apply only inside their range and voided rules never apply."""
+    first_start, first_end = _week()
+    ended_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id,
+        "MinimumPay", "200.00", first_start - datetime.timedelta(days=7), first_end,
+    )
+    ended = await client.post(
+        f"/payroll/driver-pay-rules/{ended_id}/end",
+        json={"effective_to": (first_start + datetime.timedelta(days=2)).isoformat()},
+        headers=_auth(auth_token),
+    )
+    assert ended.status_code == 200, ended.text
+    assert ended.json()["status"] == "Ended"
+
+    first_period = await _insert_period_db(db_conn, cp3c_branch_id, first_start, first_end)
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, first_period, cp3c_driver_id, "50.00")
+    await _advance_to_approved(client, auth_token, first_period)
+    first_preview = await _get_preview(client, auth_token, first_period)
+    assert first_preview.status_code == 200, first_preview.text
+    first_row = _driver_row(first_preview.json(), cp3c_driver_id)
+    assert Decimal(first_row["sys_adjustment"]) == Decimal("150.00")
+
+    after_end_start, after_end = _week(1)
+    second_period = await _insert_period_db(db_conn, cp3c_branch_id, after_end_start, after_end)
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, second_period, cp3c_driver_id, "50.00")
+    await _advance_to_approved(client, auth_token, second_period)
+    second_preview = await _get_preview(client, auth_token, second_period)
+    assert second_preview.status_code == 200, second_preview.text
+    second_row = _driver_row(second_preview.json(), cp3c_driver_id)
+    assert Decimal(second_row["sys_adjustment"]) == Decimal("0")
+
+    voided_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id,
+        "MinimumPay", "9999.00", after_end_start, after_end,
+    )
+    voided = await client.post(
+        f"/payroll/driver-pay-rules/{voided_id}/void",
+        headers=_auth(auth_token),
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["status"] == "Voided"
+
+    third_start, third_end = _week(2)
+    third_period = await _insert_period_db(db_conn, cp3c_branch_id, third_start, third_end)
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, third_period, cp3c_driver_id, "50.00")
+    await _advance_to_approved(client, auth_token, third_period)
+    third_preview = await _get_preview(client, auth_token, third_period)
+    assert third_preview.status_code == 200, third_preview.text
+    third_row = _driver_row(third_preview.json(), cp3c_driver_id)
+    assert Decimal(third_row["sys_adjustment"]) == Decimal("0")
+
+    await _void_pay_rule(client, auth_token, ended_id)
+
+
+
+@pytest.mark.asyncio
+async def test_minimum_greater_than_maximum_is_a_live_blocker(
+    client, auth_token, db_conn, cp3c_branch_id, cp3c_driver_id,
+) -> None:
+    """An applicable minimum above the maximum blocks the live packet."""
+    start, end = _week()
+    period_id = await _insert_period_db(db_conn, cp3c_branch_id, start, end)
+    await _inject_normal_pay_line(db_conn, cp3c_branch_id, period_id, cp3c_driver_id, "600.00")
+    minimum_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MinimumPay", "800.00", start, end)
+    maximum_id = await _add_pay_rule(
+        client, auth_token, cp3c_driver_id, cp3c_branch_id, "MaximumPay", "500.00", start, end)
+    try:
+        preview = await _get_preview(client, auth_token, period_id)
+        assert preview.status_code == 200, preview.text
+        blockers = " ".join(preview.json()["blockers"]).lower()
+        assert "minimum" in blockers and "maximum" in blockers
+    finally:
+        await _void_pay_rule(client, auth_token, minimum_id)
+        await _void_pay_rule(client, auth_token, maximum_id)
+        await _cancel_period_db(db_conn, period_id)

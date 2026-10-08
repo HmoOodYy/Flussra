@@ -24,7 +24,7 @@ function lineLabel(line: CalculationPreviewLine): string {
   if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
   if (line.source_type === 'StatusEntryState') return 'Status payment';
   if (line.source_type === 'BonusEvent') return 'Bonus event';
-  return line.line_type;
+  return line.definition_name ?? line.line_type ?? 'Pay line';
 }
 
 function errorDetail(error: unknown, fallback: string): string {

@@ -13,10 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.payroll import current_hub
 from tests.access_test_helpers import create_neutral_test_user
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.target_seed import seed_period_definition, seed_target_line
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2096, 1, 1)
 _SECURITY_COUNTER = itertools.count(1)
+
+
+_ORDINARY_ITEMS = {"HOURS", "MILES", "LOADS", "PALLETS"}
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -216,6 +220,22 @@ async def _insert_daily_line(
             _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :period_id"),
             {"period_id": period_id},
         )).scalar_one()
+    if line_type in _ORDINARY_ITEMS:
+        # Ordinary work is a source fact against a frozen period definition.
+        definition_id = (await db.execute(_text("""
+            SELECT payrollperioddefinitionid FROM payroll.payrollperioddefinitions
+            WHERE payrollperiodid = :period_id AND definitionnamesnapshot = :name
+        """), {"period_id": period_id, "name": line_type})).scalar_one_or_none()
+        if definition_id is None:
+            definition_id = (await seed_period_definition(
+                db, period_id=period_id, branch_id=branch_id, name=line_type)
+            ).payroll_period_definition_id
+        await seed_target_line(
+            db, period_id=period_id, branch_id=branch_id, driver_id=driver_id,
+            definition=definition_id, quantity=quantity, work_date=work_date,
+            source_type=source_type)
+        await db.commit()
+        return
     await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines

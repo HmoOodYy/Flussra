@@ -223,11 +223,14 @@ class _ScriptedConnection:
 
 async def test_an_impossible_multi_match_fails_closed():
     db = _ScriptedConnection(
-        [{"branchid": 1}],
-        [{"shape": "Scalar", "paydefinitionid": 1, "calculationmethod": "PerUnit"}],
-        [{"driverrateassignmentid": 1, "status": "Approved",
+        [{"driverid": 1, "branchid": 1}],
+        [{"ratedefinitionid": 1, "shape": "Scalar", "paydefinitionid": 1,
+          "calculationmethod": "PerUnit"}],
+        [{"driverid": 1, "ratedefinitionid": 1, "workdate": date(2026, 2, 1),
+          "driverrateassignmentid": 1, "status": "Approved",
           "effectivefrom": date(2026, 1, 1), "effectiveto": None},
-         {"driverrateassignmentid": 2, "status": "Superseded",
+         {"driverid": 1, "ratedefinitionid": 1, "workdate": date(2026, 2, 1),
+          "driverrateassignmentid": 2, "status": "Superseded",
           "effectivefrom": date(2026, 1, 1), "effectiveto": date(2026, 12, 31)}],
     )
     with pytest.raises(CompensationIntegrityError):

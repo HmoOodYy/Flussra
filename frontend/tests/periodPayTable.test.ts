@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildPeriodPayTable, driverLabel } from '../src/pages/payroll/periodPayTable.ts';
-import type { PayItemAmount, ReportColumn, ReportDriver, ReportPaySection } from '../src/types/payroll.ts';
+import type { DefinitionAmount, ReportColumn, ReportDriver, ReportPaySection } from '../src/types/payroll.ts';
 
 function makeColumn(overrides: Partial<ReportColumn> = {}): ReportColumn {
   return {
-    pay_item_id: 1, code: 'HOURS', label: 'Hours', category: 'Work',
-    data_type: 'Decimal', unit: 'Hour', scope: 'Daily', sort_order: 1,
+    payroll_period_definition_id: 1, code: 'ITEM_ONE', label: 'Item One',
+    input_type: 'Decimal', unit: 'Hour', sort_order: 1,
     ...overrides,
   };
 }
@@ -16,7 +16,7 @@ function makePay(overrides: Partial<ReportPaySection> = {}): ReportPaySection {
   return {
     daily_pay: '0.00', status_pay: '0.00', minimum_adjustment: '0.00',
     maximum_adjustment: '0.00', bonus_total: '0.00', total_pay: '0.00', gross_pay: '0.00',
-    pay_item_amounts: [], driver_code: null, driver_name: null, financial_lines: [],
+    definition_amounts: [], driver_code: null, driver_name: null, financial_lines: [],
     ...overrides,
   };
 }
@@ -32,37 +32,37 @@ function makeDriver(overrides: Partial<ReportDriver> = {}): ReportDriver {
 
 // ── 1. Dynamic column order ─────────────────────────────────────────────────
 
-test('buildPeriodPayTable: preserves backend pay_item_columns order exactly, no frontend alphabetical sorting', () => {
+test('buildPeriodPayTable: preserves backend definition_columns order exactly, no frontend alphabetical sorting', () => {
   const columns = [
-    makeColumn({ pay_item_id: 30, code: 'ZEBRA', label: 'Zebra Item', sort_order: 1 }),
-    makeColumn({ pay_item_id: 10, code: 'ALPHA', label: 'Alpha Item', sort_order: 2 }),
+    makeColumn({ payroll_period_definition_id: 30, code: 'ZEBRA', label: 'Zebra Item', sort_order: 1 }),
+    makeColumn({ payroll_period_definition_id: 10, code: 'ALPHA', label: 'Alpha Item', sort_order: 2 }),
   ];
   const table = buildPeriodPayTable(columns, [], null, null);
-  assert.deepEqual(table.columns.map((c) => c.pay_item_id), [30, 10]);
+  assert.deepEqual(table.columns.map((c) => c.payroll_period_definition_id), [30, 10]);
   assert.deepEqual(table.columns.map((c) => c.label), ['Zebra Item', 'Alpha Item']);
 });
 
-// ── 2. PayItemID mapping ────────────────────────────────────────────────────
+// ── 2. PayrollPeriodDefinitionID mapping ────────────────────────────────────────────────────
 
-test('buildPeriodPayTable: aligns amounts by pay_item_id, not by array position or code', () => {
-  const columns = [makeColumn({ pay_item_id: 10, code: 'A' }), makeColumn({ pay_item_id: 20, code: 'B' })];
-  const amounts: PayItemAmount[] = [
-    { pay_item_id: 20, amount: '50.00' }, // deliberately supplied out of column order
-    { pay_item_id: 10, amount: '15.00' },
+test('buildPeriodPayTable: aligns amounts by payroll_period_definition_id, not by array position or code', () => {
+  const columns = [makeColumn({ payroll_period_definition_id: 10, code: 'A' }), makeColumn({ payroll_period_definition_id: 20, code: 'B' })];
+  const amounts: DefinitionAmount[] = [
+    { payroll_period_definition_id: 20, amount: '50.00' }, // deliberately supplied out of column order
+    { payroll_period_definition_id: 10, amount: '15.00' },
   ];
-  const driver = makeDriver({ pay: makePay({ pay_item_amounts: amounts }) });
+  const driver = makeDriver({ pay: makePay({ definition_amounts: amounts }) });
   const [row] = buildPeriodPayTable(columns, [driver], null, null).rows;
   assert.deepEqual(row.items, [
-    { pay_item_id: 10, amount: '15.00' },
-    { pay_item_id: 20, amount: '50.00' },
+    { payroll_period_definition_id: 10, amount: '15.00' },
+    { payroll_period_definition_id: 20, amount: '50.00' },
   ]);
 });
 
 // ── 3. Custom Daily Pay Item ────────────────────────────────────────────────
 
-test('buildPeriodPayTable: an arbitrary custom Daily Pay Item renders with no hard-coded name', () => {
-  const columns = [makeColumn({ pay_item_id: 777, code: 'CDPI9F3A1B', label: 'Night Differential Bonus Pool' })];
-  const driver = makeDriver({ pay: makePay({ pay_item_amounts: [{ pay_item_id: 777, amount: '42.00' }] }) });
+test('buildPeriodPayTable: an arbitrary arbitrary pay definition renders with no hard-coded name', () => {
+  const columns = [makeColumn({ payroll_period_definition_id: 777, code: 'CDPI9F3A1B', label: 'Night Differential Bonus Pool' })];
+  const driver = makeDriver({ pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 777, amount: '42.00' }] }) });
   const table = buildPeriodPayTable(columns, [driver], null, null);
   assert.equal(table.columns[0].label, 'Night Differential Bonus Pool');
   assert.equal(table.columns[0].code, 'CDPI9F3A1B');
@@ -72,8 +72,8 @@ test('buildPeriodPayTable: an arbitrary custom Daily Pay Item renders with no ha
 // ── 4. Dense zero ────────────────────────────────────────────────────────────
 
 test('buildPeriodPayTable: a real backend "0" amount is preserved, not treated as missing', () => {
-  const columns = [makeColumn({ pay_item_id: 10 })];
-  const driver = makeDriver({ pay: makePay({ pay_item_amounts: [{ pay_item_id: 10, amount: '0.00' }] }) });
+  const columns = [makeColumn({ payroll_period_definition_id: 10 })];
+  const driver = makeDriver({ pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '0.00' }] }) });
   const [row] = buildPeriodPayTable(columns, [driver], null, null).rows;
   assert.equal(row.items[0].amount, '0.00');
   assert.notEqual(row.items[0].amount, null);
@@ -81,9 +81,9 @@ test('buildPeriodPayTable: a real backend "0" amount is preserved, not treated a
 
 // ── 5. Missing amount defense ───────────────────────────────────────────────
 
-test('buildPeriodPayTable: a column with no matching PayItemAmount maps to null, never a manufactured zero', () => {
-  const columns = [makeColumn({ pay_item_id: 10 }), makeColumn({ pay_item_id: 20 })];
-  const driver = makeDriver({ pay: makePay({ pay_item_amounts: [{ pay_item_id: 10, amount: '5.00' }] }) });
+test('buildPeriodPayTable: a column with no matching DefinitionAmount maps to null, never a manufactured zero', () => {
+  const columns = [makeColumn({ payroll_period_definition_id: 10 }), makeColumn({ payroll_period_definition_id: 20 })];
+  const driver = makeDriver({ pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '5.00' }] }) });
   const [row] = buildPeriodPayTable(columns, [driver], null, null).rows;
   assert.equal(row.items[0].amount, '5.00');
   assert.equal(row.items[1].amount, null);
@@ -108,20 +108,20 @@ test('buildPeriodPayTable: row carries driver_code separately from the display l
 
 // ── 7. Footer ─────────────────────────────────────────────────────────────
 
-test('buildPeriodPayTable: footer item totals come from pay_item_totals, aligned by id, never summed from rows', () => {
-  const columns = [makeColumn({ pay_item_id: 10 }), makeColumn({ pay_item_id: 20 })];
+test('buildPeriodPayTable: footer item totals come from definition_totals, aligned by id, never summed from rows', () => {
+  const columns = [makeColumn({ payroll_period_definition_id: 10 }), makeColumn({ payroll_period_definition_id: 20 })];
   const drivers = [
-    makeDriver({ driver_id: 1, pay: makePay({ pay_item_amounts: [{ pay_item_id: 10, amount: '5.00' }, { pay_item_id: 20, amount: '3.00' }] }) }),
-    makeDriver({ driver_id: 2, pay: makePay({ pay_item_amounts: [{ pay_item_id: 10, amount: '7.00' }, { pay_item_id: 20, amount: '1.00' }] }) }),
+    makeDriver({ driver_id: 1, pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '5.00' }, { payroll_period_definition_id: 20, amount: '3.00' }] }) }),
+    makeDriver({ driver_id: 2, pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '7.00' }, { payroll_period_definition_id: 20, amount: '1.00' }] }) }),
   ];
   // Deliberately NOT the row sum (12.00 / 4.00) -- proves the footer reads
   // the backend total verbatim rather than deriving it from the rows above.
-  const payItemTotals: PayItemAmount[] = [{ pay_item_id: 20, amount: '999.00' }, { pay_item_id: 10, amount: '888.00' }];
+  const payItemTotals: DefinitionAmount[] = [{ payroll_period_definition_id: 20, amount: '999.00' }, { payroll_period_definition_id: 10, amount: '888.00' }];
   const payTotals = { status_pay: '1.00', gross_pay: '2.00', minimum_adjustment: '3.00', maximum_adjustment: '-4.00', bonus_total: '5.00', total_pay: '6.00' };
   const table = buildPeriodPayTable(columns, drivers, payItemTotals, payTotals);
   assert.deepEqual(table.footer.items, [
-    { pay_item_id: 10, amount: '888.00' },
-    { pay_item_id: 20, amount: '999.00' },
+    { payroll_period_definition_id: 10, amount: '888.00' },
+    { payroll_period_definition_id: 20, amount: '999.00' },
   ]);
   assert.equal(table.footer.status_pay, '1.00');
   assert.equal(table.footer.gross_pay, '2.00');
@@ -131,14 +131,14 @@ test('buildPeriodPayTable: footer item totals come from pay_item_totals, aligned
   assert.equal(table.footer.total_pay, '6.00');
 });
 
-test('buildPeriodPayTable: a footer column missing from pay_item_totals is null, never a manufactured zero', () => {
-  const columns = [makeColumn({ pay_item_id: 10 })];
+test('buildPeriodPayTable: a footer column missing from definition_totals is null, never a manufactured zero', () => {
+  const columns = [makeColumn({ payroll_period_definition_id: 10 })];
   const table = buildPeriodPayTable(columns, [], [], null);
   assert.equal(table.footer.items[0].amount, null);
 });
 
-test('buildPeriodPayTable: footer values are null when pay_item_totals/pay_totals are null (financials unavailable)', () => {
-  const columns = [makeColumn({ pay_item_id: 10 })];
+test('buildPeriodPayTable: footer values are null when definition_totals/pay_totals are null (financials unavailable)', () => {
+  const columns = [makeColumn({ payroll_period_definition_id: 10 })];
   const table = buildPeriodPayTable(columns, [], null, null);
   assert.equal(table.footer.items[0].amount, null);
   assert.equal(table.footer.total_pay, null);
@@ -155,10 +155,10 @@ test('buildPeriodPayTable: a negative maximum_adjustment is preserved exactly fr
 // ── 9. driver.pay == null ────────────────────────────────────────────────────
 
 test('buildPeriodPayTable: driver.pay == null renders every fixed and item value as null, never a fabricated zero', () => {
-  const columns = [makeColumn({ pay_item_id: 10 })];
+  const columns = [makeColumn({ payroll_period_definition_id: 10 })];
   const driver = makeDriver({ pay: null });
   const [row] = buildPeriodPayTable(columns, [driver], null, null).rows;
-  assert.deepEqual(row.items, [{ pay_item_id: 10, amount: null }]);
+  assert.deepEqual(row.items, [{ payroll_period_definition_id: 10, amount: null }]);
   assert.equal(row.status_pay, null);
   assert.equal(row.gross_pay, null);
   assert.equal(row.minimum_adjustment, null);

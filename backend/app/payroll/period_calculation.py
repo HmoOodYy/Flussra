@@ -1,74 +1,30 @@
 """
-Period Calculation + Snapshot — the payroll domain's single owner of:
+Period Calculation + Snapshot — the payroll domain's owner of:
 
-  A. Draft calculated-value refresh policy (_refresh_draft_calculations)
-  B. The read-only preview twin of that refresh
-     (_compute_draft_line_preview_amounts)
-  C. Live authoritative Calculation packet construction
+  A. Live authoritative Calculation packet construction
      (_build_live_calculation_packet) and its packet types
-     (_CalculationPacketLine, _CalculationPacketDriverTotal,
-     _LiveCalculationPacket)
-  D. The CP-4B calculation preview API (get_calculation_preview)
-  E. Calculation-only source/finalizability validation
-     (_validate_period_can_finalize, _validate_legacy_status_canonicalized)
-  F. The canonical Active BonusEvent selection used by live Calculation and
-     Reporting (_load_active_bonus_events)
-  G. Immutable Calculation snapshot capture (_capture_calculation_snapshot)
-     and its report evidence / hash-projection helpers
-     (_load_report_evidence, _packet_driver_totals_for_hash)
+     (_CalculationPacketLine, _CalculationPacketDriverTotal, _LiveCalculationPacket)
+  B. The CP-4B calculation preview API (get_calculation_preview)
+  C. Structural source validation (_validate_period_can_finalize,
+     _validate_legacy_status_canonicalized)
+  D. The canonical Active BonusEvent selection used by live Calculation and Reporting
+     (_load_active_bonus_events)
+  E. Immutable Calculation snapshot capture (_capture_calculation_snapshot) and its
+     report evidence / hash-projection helpers. Snapshot capture belongs to the
+     calculation-evidence work unit: while target evidence is not delivered the
+     lifecycle refuses to reach it (app.payroll.evidence_gate).
 
-Extracted from app.payroll.service (Stage B4-17) as a dependency-closed leaf
-module — no behavior change, pure relocation. A fresh B4-17 discovery proved
-the transitive service.py-local closure of these 14 symbols is empty: this
-module depends only on already-extracted true owners (app.payroll.eligibility,
-app.payroll.guards, app.payroll.draft_line_calculation,
-app.payroll.line_type_vocabulary, app.payroll.period_read,
-app.payroll.schemas, app.payroll.snapshot_hash,
-app.payroll.status_payment_sync, app.payroll.immutable_evidence,
-app.payroll.calculation.per_unit, app.core.service) and never imports
-app.payroll.service.
-
-This module is intentionally NOT split into separate live/snapshot modules:
-_LiveCalculationPacket is the direct input contract to snapshot capture, the
-three packet types are shared by live construction, hash projection and
-capture, _refresh_draft_calculations/_compute_draft_line_preview_amounts are
-an intentional write/read policy pair that must not drift apart, and
-Lifecycle (app.payroll.period_lifecycle) invokes build-then-capture as one
-transactionally-coherent operation.
-
-Distinct from app.payroll.calculation (the CP-4A pure PerUnit calculation
-core, per_unit.py only) — that package is intentionally the pure
-calculation-core namespace; this module is the DB-heavy period-level
-orchestration that consumes it.
-
-`_validate_period_can_finalize` lives here despite its name and its
-"Phase 7: Shared finalization validator" banner (preserved unchanged below):
-fresh discovery proved its only production caller is
-_build_live_calculation_packet, and neither finalize_period nor
-get_finalization_preview call it. Its banner's claim of being "used by both"
-is pre-existing documentation drift from an earlier snapshot-based
-finalization rework and is relocated as-is, not corrected, per this stage's
-structural-extraction-only scope.
-
-Transaction ownership is above this module. Every function here receives an
-ambient AsyncConnection and opens no transaction, commits nothing, and rolls
-back nothing. _capture_calculation_snapshot assumes its caller (Lifecycle)
-already owns the period/workflow locks and is intentionally non-idempotent —
-each call inserts a new immutable snapshot row set; repeat-call protection is
-the caller's responsibility.
+Ordinary PayDefinition earnings are derived LIVE: each source line is resolved and
+calculated through app.payroll.live_source_calculation and the method-owned boundary
+in app.payroll.definition_calculation. No ordinary amount is read from a stored column.
+Status pay remains on its temporary Status-only path; Bonus is BonusEvent; minimum/
+maximum is DriverPayRule.
 
 Preview is read-only by construction: get_calculation_preview ->
-_build_live_calculation_packet -> _compute_draft_line_preview_amounts emits
-no INSERT/UPDATE/DELETE. Only _refresh_draft_calculations (Lifecycle-invoked,
-never Calculation-preview-invoked) mutates payroll.payrolldraftlines.
+_build_live_calculation_packet emits no INSERT/UPDATE/DELETE.
 
-Finalization (finalize_period, get_finalization_preview, and their approved-
-snapshot helpers, in app.payroll.finalization) and Lifecycle
-(change_period_status, resubmit_period, and their transaction/audit helpers,
-in app.payroll.period_lifecycle) are dependency-disjoint from this module.
-Lifecycle imports _refresh_draft_calculations, _build_live_calculation_packet,
-and _capture_calculation_snapshot directly from this module; those three
-bindings are load-bearing there, not merely test compatibility.
+Transaction ownership is above this module: every function receives an ambient
+AsyncConnection, opens no transaction, commits nothing and rolls back nothing.
 """
 from __future__ import annotations
 
@@ -84,11 +40,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import CompanyCurrency, get_company_currency
 from app.core.service import _check_any_permission, _require_not_driver_role
-from app.payroll.calculation.per_unit import PER_UNIT_CALCULATION_VERSION
-from app.payroll.draft_line_calculation import _compute_calculated_amount
+from app.payroll.definition_calculation import CalculationStatus
 from app.payroll.eligibility import _period_has_driver_eligibility_snapshot
 from app.payroll.immutable_evidence import capture_snapshot_used_rate_definitions
-from app.payroll.line_type_vocabulary import _LEGACY_TO_CANONICAL, _LineTypeInfo
+from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
 from app.payroll.snapshot_hash import (
@@ -100,171 +55,11 @@ from app.payroll.snapshot_hash import (
     canonical_json,
 )
 from app.payroll.status_payment_sync import (
-    _STATUS_PAYMENT_PROJECTION_SQL,
     _resolve_live_status_payment_lines,
 )
 
 if TYPE_CHECKING:
     from app.payroll.schemas import CalculationPreviewResponse
-
-_RATE_DEPENDENT_BEHAVIORS = frozenset(
-    {"PerUnit", "OrdinalTier", "RangeBracket", "RangeProgressive", "Block"}
-)
-
-
-async def _refresh_draft_calculations(
-    period_id: int,
-    company_id: int,
-    db: AsyncConnection,
-    currency: CompanyCurrency,
-) -> int:
-    """
-    Automatically re-compute calculatedamount + needsmanagerreview for every
-    non-void, rate-dependent draft line in a period using the currently
-    approved effective-dated rates for each line's work_date.
-
-    Called automatically at:
-      • Open → InReview (before submit guards) so newly approved backdated
-        rates are reflected before blocking checks run.
-      • finalize_period (after the period is confirmed Approved, before
-        blocker guards) so finalization uses the most current rates.
-
-    Only touches PerUnit / OrdinalTier / RangeBracket / RangeProgressive /
-    Block lines.  Fixed and None lines are left unchanged — their
-    calculatedamount is not rate-derived.
-
-    Returns the count of lines whose stored values were updated.
-    """
-    # Step 1: fetch all non-void, non-informational draft lines for the period.
-    lines_result = await db.execute(
-        text("""
-            SELECT draftlineid, driverid, linetype, workdate,
-                   quantity, rateamount, calculatedamount, needsmanagerreview
-            FROM   payroll.payrolldraftlines
-            WHERE  payrollperiodid = :pid
-              AND  companyid       = :cid
-              AND  status         != 'Void'
-              AND  linetype       NOT IN ('DailyStatus', 'DailyNote')
-        """),
-        {"pid": period_id, "cid": company_id},
-    )
-    rows = list(lines_result.mappings().all())
-    if not rows:
-        return 0
-
-    # Step 2: for each unique canonical line type, fetch ratebehavior + rate_code
-    # once and cache.  Avoids per-line round-trips for the metadata lookup.
-    lt_info_cache: dict[str, _LineTypeInfo | None] = {}
-
-    async def _get_lt_info(canonical: str) -> _LineTypeInfo | None:
-        if canonical in lt_info_cache:
-            return lt_info_cache[canonical]
-        pi_result = await db.execute(
-            text("""
-                SELECT pi.ratebehavior,
-                       (
-                           SELECT rt.ratecode
-                           FROM   payroll.payitemratetypemap pirtm
-                           JOIN   payroll.ratetypes rt ON rt.ratetypeid = pirtm.ratetypeid
-                           WHERE  pirtm.payitemid = pi.payitemid
-                             AND  pirtm.status    = 'Active'
-                             AND  rt.isactive     = TRUE
-                           ORDER BY pirtm.isprimary DESC
-                           LIMIT 1
-                       ) AS rate_code
-                FROM   payroll.payitems pi
-                WHERE  pi.payitemcode = :code
-                  AND  (pi.companyid IS NULL OR pi.companyid = :cid)
-                  AND  pi.status    != 'Retired'
-                LIMIT 1
-            """),
-            {"code": canonical, "cid": company_id},
-        )
-        pi_row = pi_result.mappings().first()
-        if pi_row is None:
-            lt_info_cache[canonical] = None
-            return None
-        info = _LineTypeInfo(
-            rate_behavior=pi_row["ratebehavior"],
-            rate_code=pi_row["rate_code"],
-        )
-        lt_info_cache[canonical] = info
-        return info
-
-    # Step 3: for each line, recompute and update if values changed.
-    refresh_count = 0
-    for row in rows:
-        canonical = _LEGACY_TO_CANONICAL.get(row["linetype"], row["linetype"])
-        lt_info = await _get_lt_info(canonical)
-        if lt_info is None:
-            continue  # unknown/retired item — leave as-is
-        if lt_info.rate_behavior not in _RATE_DEPENDENT_BEHAVIORS:
-            continue  # Fixed / None — not rate-dependent
-
-        as_of: date = row["workdate"]
-        qty = Decimal(str(row["quantity"])) if row["quantity"] is not None else Decimal("0")
-        rate_ovr = (
-            Decimal(str(row["rateamount"])) if row["rateamount"] is not None else None
-        )
-
-        _cr = await _compute_calculated_amount(
-            rate_behavior=lt_info.rate_behavior,
-            rate_code=lt_info.rate_code,
-            quantity=qty,
-            rate_amount_override=rate_ovr,
-            driver_id=row["driverid"],
-            company_id=company_id,
-            as_of_date=as_of,
-            db=db,
-        )
-        new_calc, new_review = _cr.calculated_amount, _cr.needs_manager_review
-
-        old_calc = (
-            Decimal(str(row["calculatedamount"]))
-            if row["calculatedamount"] is not None
-            else None
-        )
-        old_review = bool(row["needsmanagerreview"])
-        old_rate_ovr = (
-            Decimal(str(row["rateamount"])) if row["rateamount"] is not None else None
-        )
-
-        # Guard: respect manager-controlled NMR flags.
-        #
-        # Two cases where we DO NOT auto-clear needsmanagerreview:
-        #   a) NMR=True AND calc IS NOT NULL:
-        #      The line already has a computed amount; the manager manually
-        #      flagged it for human review.  The refresh must not overrule that.
-        #   b) NMR=True AND rate_amount IS NOT NULL (but calc IS NULL):
-        #      A manual rate override was supplied.  Finalization will use
-        #      COALESCE(calc, qty * rate_amount), so the line is resolvable.
-        #      The manager's flag is still deliberate — leave it alone.
-        #
-        # We DO refresh when:
-        #   NMR=True AND calc IS NULL AND rate_amount IS NULL:
-        #      Truly unresolved — no approved rate was found at entry time.
-        #      A rate may now exist (backdated approval); re-compute and,
-        #      if resolved, auto-clear NMR so submission is no longer blocked.
-        #   NMR=False (regardless of calc state):
-        #      Normal line — calc may have become stale if the approved rate
-        #      changed since the line was entered.  Re-compute to stay current.
-        if old_review and (old_calc is not None or old_rate_ovr is not None):
-            continue  # manager-flagged with a resolvable path — do not touch
-
-        if new_calc != old_calc or new_review != old_review:
-            await db.execute(
-                text("""
-                    UPDATE payroll.payrolldraftlines
-                    SET    calculatedamount   = :calc,
-                           needsmanagerreview = :review
-                    WHERE  draftlineid = :lid
-                """),
-                {"calc": new_calc, "review": new_review, "lid": row["draftlineid"]},
-            )
-            refresh_count += 1
-
-    return refresh_count
-
 
 # ---------------------------------------------------------------------------
 # Phase 7: Shared finalization validator
@@ -281,83 +76,77 @@ async def _validate_period_can_finalize(
     db: AsyncConnection,
 ) -> list[str]:
     """
-    Run shared pre-finalization checks used by both finalize_period and
-    get_finalization_preview.  Returns a list of human-readable blocker
-    strings (empty list = no blockers found).
+    Structural source blockers shared by the live calculation packet and the
+    finalization paths. Returns human-readable blocker strings (empty = none).
 
-    Checks (in order):
-      1. Duplicate active Daily draft lines for the same (driver, date, type).
-      2. Driver eligibility for Daily lines (per-date window).
-      3. Contaminated/foreign RateType used by any rate-driven draft line.
-      4. Rate-dependent draft lines with no PayItem rate-type mapping.
+    Checks:
+      1. Duplicate active source lines for one (driver, date, period definition).
+      2. Driver eligibility for the line's work date.
 
-    The messages are intentionally kept identical to the strings previously
-    raised as individual HTTPException 422 details in finalize_period so that
-    existing test assertions (e.g. "duplicate" in detail.lower()) continue to
-    pass unchanged.
+    Rate and calculation problems are NOT checked here: they are derived live per
+    line and surface as that line's calculation status.
     """
     blockers: list[str] = []
 
-    # ── 1. Duplicate active Daily draft lines ─────────────────────────────────
-    dup_result = await db.execute(
+    # ── 1. Duplicate active source lines ──────────────────────────────────────
+    dup_rows = (await db.execute(
         text("""
-            SELECT driverid, workdate, linetype, COUNT(*) AS cnt
+            SELECT driverid, workdate, payrollperioddefinitionid, COUNT(*) AS cnt
             FROM   payroll.payrolldraftlines
             WHERE  payrollperiodid = :period_id
               AND  companyid       = :company_id
               AND  status         != 'Void'
-            GROUP BY driverid, workdate, linetype
+              AND  payrollperioddefinitionid IS NOT NULL
+            GROUP BY driverid, workdate, payrollperioddefinitionid
             HAVING COUNT(*) > 1
             LIMIT 5
         """),
         {"period_id": period_id, "company_id": company_id},
-    )
-    dup_rows = dup_result.mappings().all()
+    )).mappings().all()
     if dup_rows:
         examples = "; ".join(
-            f"driver {r['driverid']} {r['workdate']} {r['linetype']} ×{r['cnt']}"
+            f"driver {r['driverid']} {r['workdate']} definition "
+            f"{r['payrollperioddefinitionid']} x{r['cnt']}"
             for r in dup_rows
         )
         blockers.append(
-            f"Cannot finalize: duplicate active Daily draft lines detected "
+            f"Cannot finalize: duplicate active source lines detected "
             f"({examples}). Void the extra lines before finalizing."
         )
 
-    # ── 2. Driver eligibility — Daily lines ───────────────────────────────────
-    # CP-2E: use snapshot-based eligibility for snapshotted periods to correctly
-    # handle IncludedByExistingData, TerminatedHistorical, and Transferred drivers.
-    # Legacy live-query path retained for periods without a snapshot.
-    _has_snapshot = await _period_has_driver_eligibility_snapshot(period_id, db)
-    if _has_snapshot:
-        elig_daily_result = await db.execute(
+    # ── 2. Driver eligibility ─────────────────────────────────────────────────
+    # A source line proves existing source on its exact date; the frozen eligibility
+    # snapshot passes a driver that is in it at all. Periods without the snapshot
+    # marker use the live roster rules.
+    if await _period_has_driver_eligibility_snapshot(period_id, db):
+        elig_rows = (await db.execute(
             text("""
-                SELECT dl.draftlineid, dl.driverid, dl.workdate, dl.linetype
+                SELECT dl.draftlineid, dl.driverid, dl.workdate
                 FROM   payroll.payrolldraftlines dl
                 WHERE  dl.payrollperiodid = :period_id
                   AND  dl.companyid       = :company_id
                   AND  dl.status         != 'Void'
+                  AND  dl.payrollperioddefinitionid IS NOT NULL
                   AND  NOT EXISTS (
                            SELECT 1
                            FROM   payroll.payrollperioddrivereligibility ppde
                            WHERE  ppde.payrollperiodid = dl.payrollperiodid
                              AND  ppde.driverid        = dl.driverid
                              AND  ppde.iseligibleforperiod = TRUE
-                             -- CP-2E: a DraftLine that already exists proves existing source
-                             -- on that exact date for any reason code (including generated-row
-                             -- drivers outside their date window). Pass if in snapshot at all.
                        )
                 LIMIT 5
             """),
             {"period_id": period_id, "company_id": company_id},
-        )
+        )).mappings().all()
     else:
-        elig_daily_result = await db.execute(
+        elig_rows = (await db.execute(
             text("""
-                SELECT dl.draftlineid, dl.driverid, dl.workdate, dl.linetype
+                SELECT dl.draftlineid, dl.driverid, dl.workdate
                 FROM   payroll.payrolldraftlines dl
                 WHERE  dl.payrollperiodid = :period_id
                   AND  dl.companyid       = :company_id
                   AND  dl.status         != 'Void'
+                  AND  dl.payrollperioddefinitionid IS NOT NULL
                   AND  NOT EXISTS (
                            SELECT 1
                            FROM   core.drivers   d
@@ -380,215 +169,35 @@ async def _validate_period_can_finalize(
                 LIMIT 5
             """),
             {"period_id": period_id, "company_id": company_id, "branch_id": branch_id},
-        )
-    elig_daily_rows = elig_daily_result.mappings().all()
-    if elig_daily_rows:
-        examples = "; ".join(
-            f"driver {r['driverid']} {r['workdate']} {r['linetype']}"
-            for r in elig_daily_rows
-        )
+        )).mappings().all()
+    if elig_rows:
+        examples = "; ".join(f"driver {r['driverid']} {r['workdate']}" for r in elig_rows)
         blockers.append(
-            f"Cannot finalize: {len(elig_daily_rows)} Daily draft line(s) reference "
+            f"Cannot finalize: {len(elig_rows)} source line(s) reference "
             f"driver/date combinations that are no longer eligible "
             f"({examples}). Void these lines before finalizing."
-        )
-
-    # ── 3. Contaminated / foreign RateType ────────────────────────────────────
-    # (unchanged from Phase 7)
-    contaminated_result = await db.execute(
-        text("""
-            SELECT COUNT(DISTINCT rt.ratetypeid) AS cnt
-            FROM   payroll.payrolldraftlines dl
-            JOIN   payroll.payitems pi
-                   ON pi.payitemcode = dl.linetype
-                  AND (pi.companyid IS NULL OR pi.companyid = :company_id)
-                  AND pi.status      != 'Retired'
-                  AND pi.requiresrate = TRUE
-            JOIN   payroll.payitemratetypemap pirm
-                   ON pirm.payitemid = pi.payitemid AND pirm.status = 'Active'
-            JOIN   payroll.ratetypes rt
-                   ON rt.ratetypeid = pirm.ratetypeid AND rt.isactive = TRUE
-            WHERE  dl.payrollperiodid = :period_id
-              AND  dl.companyid       = :company_id
-              AND  dl.status         != 'Void'
-              AND NOT (rt.companyid IS NULL OR rt.companyid = :company_id)
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-    contaminated_count = int(contaminated_result.scalar_one())
-    if contaminated_count > 0:
-        blockers.append(
-            f"Cannot finalize: {contaminated_count} rate type(s) used by draft lines "
-            "in this period are not valid for this company (foreign-owned, contaminated, "
-            "or orphaned). Investigate and void or correct the affected draft lines."
-        )
-
-    # ── 4. Unresolvable rate type mapping (Phase 8 — fail-closed) ────────────
-    # Finds non-void, rate-dependent draft lines whose PayItem has no active
-    # PayItemRateTypeMap entry.  These lines cannot be correctly calculated
-    # because their rate_code is unknown — the rate behavior is unresolvable.
-    # NOTE: such lines will also be caught by the NMR blocker (Blocker 2 in
-    # preview / Step 1.8 in finalize) because _compute_calculated_amount
-    # returns NMR=True when rate_code is None.  This check provides the
-    # specific "configure the mapping" message that the generic NMR message
-    # does not.
-    unresolvable_result = await db.execute(
-        text("""
-            SELECT dl.draftlineid, dl.linetype, pi.ratebehavior
-            FROM   payroll.payrolldraftlines dl
-            JOIN   payroll.payitems pi
-                   ON pi.payitemcode = dl.linetype
-                  AND (pi.companyid IS NULL OR pi.companyid = :company_id)
-                  AND pi.status     != 'Retired'
-            WHERE  dl.payrollperiodid = :period_id
-              AND  dl.companyid       = :company_id
-              AND  dl.status         != 'Void'
-              AND  pi.ratebehavior   IN ('PerUnit', 'OrdinalTier',
-                                         'RangeBracket', 'RangeProgressive', 'Block')
-              AND  NOT EXISTS (
-                       SELECT 1
-                       FROM   payroll.payitemratetypemap pirtm
-                       JOIN   payroll.ratetypes rt
-                              ON rt.ratetypeid = pirtm.ratetypeid
-                       WHERE  pirtm.payitemid = pi.payitemid
-                         AND  pirtm.status    = 'Active'
-                         AND  rt.isactive     = TRUE
-                   )
-            LIMIT 5
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-    unresolvable_rows = unresolvable_result.mappings().all()
-    if unresolvable_rows:
-        examples = "; ".join(
-            f"line {r['draftlineid']} ({r['linetype']}, {r['ratebehavior']})"
-            for r in unresolvable_rows
-        )
-        cnt = len(unresolvable_rows)
-        blockers.append(
-            f"Cannot finalize: {cnt} rate-dependent draft line(s) have no pay item "
-            f"rate type mapping configured ({examples}). "
-            "Rate behavior could not be resolved — configure the pay item rate mapping "
-            "or void these lines before finalizing."
         )
 
     return blockers
 
 
 # ---------------------------------------------------------------------------
-# CP-3A / CP-5 — Virtual rate refresh helper (read-only)
-# ---------------------------------------------------------------------------
-
-async def _compute_draft_line_preview_amounts(
-    period_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> dict[int, tuple[Decimal | None, bool]]:
-    """
-    Read-only virtual equivalent of _refresh_draft_calculations.
-
-    Computes what (calculatedamount, needsmanagerreview) WOULD be after a
-    real refresh for every rate-dependent draft line that passes the
-    manager-NMR guard — without writing anything to the database.
-
-    Returns {draftlineid: (refreshed_calc, refreshed_review)} for each
-    eligible line.  Lines excluded by the manager-NMR guard are absent from
-    the dict; callers must fall back to the stored values for those.
-
-    Guarantees:
-      • No UPDATE / INSERT / DELETE is executed.
-      • Safe to call on any period status — purely read-only.
-    """
-    lines_result = await db.execute(
-        text("""
-            SELECT draftlineid, driverid, linetype, workdate,
-                   quantity, rateamount, calculatedamount, needsmanagerreview
-            FROM   payroll.payrolldraftlines
-            WHERE  payrollperiodid = :pid
-              AND  companyid       = :cid
-              AND  status         != 'Void'
-              AND  linetype       NOT IN ('DailyStatus', 'DailyNote')
-        """),
-        {"pid": period_id, "cid": company_id},
-    )
-    rows = list(lines_result.mappings().all())
-    if not rows:
-        return {}
-
-    lt_info_cache: dict[str, _LineTypeInfo | None] = {}
-
-    async def _get_lt_info(canonical: str) -> _LineTypeInfo | None:
-        if canonical in lt_info_cache:
-            return lt_info_cache[canonical]
-        pi_result = await db.execute(
-            text("""
-                SELECT pi.ratebehavior,
-                       (
-                           SELECT rt.ratecode
-                           FROM   payroll.payitemratetypemap pirtm
-                           JOIN   payroll.ratetypes rt ON rt.ratetypeid = pirtm.ratetypeid
-                           WHERE  pirtm.payitemid = pi.payitemid
-                             AND  pirtm.status    = 'Active'
-                             AND  rt.isactive     = TRUE
-                           ORDER BY pirtm.isprimary DESC
-                           LIMIT 1
-                       ) AS rate_code
-                FROM   payroll.payitems pi
-                WHERE  pi.payitemcode = :code
-                  AND  (pi.companyid IS NULL OR pi.companyid = :cid)
-                  AND  pi.status    != 'Retired'
-                LIMIT 1
-            """),
-            {"code": canonical, "cid": company_id},
-        )
-        pi_row = pi_result.mappings().first()
-        if pi_row is None:
-            lt_info_cache[canonical] = None
-            return None
-        info = _LineTypeInfo(
-            rate_behavior=pi_row["ratebehavior"],
-            rate_code=pi_row["rate_code"],
-        )
-        lt_info_cache[canonical] = info
-        return info
-
-    result: dict[int, tuple[Decimal | None, bool]] = {}
-    for row in rows:
-        canonical = _LEGACY_TO_CANONICAL.get(row["linetype"], row["linetype"])
-        lt_info = await _get_lt_info(canonical)
-        if lt_info is None or lt_info.rate_behavior not in _RATE_DEPENDENT_BEHAVIORS:
-            continue  # not rate-dependent — stored value is authoritative
-
-        old_calc     = Decimal(str(row["calculatedamount"])) if row["calculatedamount"] is not None else None
-        old_review   = bool(row["needsmanagerreview"])
-        old_rate_ovr = Decimal(str(row["rateamount"])) if row["rateamount"] is not None else None
-
-        # Same manager-NMR guard as _refresh_draft_calculations:
-        # skip if NMR=True AND (calc IS NOT NULL OR rate_amount IS NOT NULL)
-        if old_review and (old_calc is not None or old_rate_ovr is not None):
-            continue  # manager-flagged with a resolvable path — honour stored values
-
-        as_of: date = row["workdate"]
-        qty = Decimal(str(row["quantity"])) if row["quantity"] is not None else Decimal("0")
-
-        _cr_prev = await _compute_calculated_amount(
-            rate_behavior=lt_info.rate_behavior,
-            rate_code=lt_info.rate_code,
-            quantity=qty,
-            rate_amount_override=old_rate_ovr,
-            driver_id=row["driverid"],
-            company_id=company_id,
-            as_of_date=as_of,
-            db=db,
-        )
-        result[int(row["draftlineid"])] = _cr_prev
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # CP-4B — Open/Returned live read-only calculation preview
 # ---------------------------------------------------------------------------
+
+
+_CALCULATION_BLOCKER_REASONS: dict[CalculationStatus, str] = {
+    CalculationStatus.MISSING_RATE: (
+        "No effective rate is assigned to this driver for this pay definition on the "
+        "work date."
+    ),
+    CalculationStatus.INCOMPLETE_RATE: (
+        "The effective rate assignment is missing a required value."
+    ),
+    CalculationStatus.METHOD_NOT_READY: (
+        "This pay definition uses a calculation method that is not operational yet."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -597,7 +206,7 @@ class _CalculationPacketLine:
 
     source_type: str
     source_id: str | None
-    line_type: str
+    line_type: str | None
     line_scope: str | None
     work_date: date | None
     driver_id: int
@@ -606,6 +215,10 @@ class _CalculationPacketLine:
     calculated_amount: Decimal | None
     needs_manager_review: bool
     blocker_reason: str | None
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    definition_name: str | None = None
+    calculation_status: str | None = None
     pay_item_id: int | None = None
     rate_column_id: int | None = None
     rate_type_id: int | None = None
@@ -888,52 +501,9 @@ async def _build_live_calculation_packet(
         db=db,
     ))
 
-    # ── Daily lines: virtual (unpersisted) rate refresh, exactly like
-    # get_finalization_preview — but excluding the persisted
-    # STATUS_PAYMENT/STATUS_PAY compatibility projection, since Status is
-    # supplied live/canonically below.
-    refreshed_calcs = await _compute_draft_line_preview_amounts(
-        period_id, company_id, db
-    )
-
-    lines_result = await db.execute(
-        text(f"""
-            SELECT
-                dl.draftlineid,
-                dl.driverid,
-                d.drivercode,
-                pi.payitemid,
-                e.fullname          AS drivername,
-                dl.workdate,
-                dl.linetype,
-                dl.quantity,
-                dl.rateamount,
-                dl.calculatedamount,
-                dl.needsmanagerreview,
-                dl.sourcetype,
-                dl.sourceid
-            FROM   payroll.payrolldraftlines dl
-            LEFT JOIN core.drivers   d ON d.driverid   = dl.driverid
-            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
-            LEFT JOIN LATERAL (
-                SELECT pi.payitemid
-                FROM payroll.payitems pi
-                WHERE pi.payitemcode = dl.linetype
-                  AND (pi.companyid IS NULL OR pi.companyid = dl.companyid)
-                ORDER BY CASE WHEN pi.companyid = dl.companyid THEN 0 ELSE 1 END
-                LIMIT 1
-            ) pi ON TRUE
-            WHERE  dl.payrollperiodid = :period_id
-              AND  dl.companyid       = :company_id
-              AND  dl.status         != 'Void'
-              AND  dl.linetype       NOT IN ('DailyStatus', 'DailyNote')
-              AND  NOT {_STATUS_PAYMENT_PROJECTION_SQL}
-            ORDER BY dl.driverid, dl.workdate, dl.draftlineid
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-    raw_lines = lines_result.mappings().fetchall()
-
+    # ── Ordinary daily lines: live, derived from the effective DriverRateAssignment
+    # (never from a stored column). The persisted STATUS_PAYMENT/STATUS_PAY
+    # compatibility projection is not a target ordinary line and is excluded.
     driver_names: dict[int, str | None] = {}
     driver_codes: dict[int, str | None] = {}
     driver_daily: dict[int, Decimal] = {}
@@ -942,86 +512,47 @@ async def _build_live_calculation_packet(
     driver_line_nmr: dict[int, bool] = {}
     driver_lines: dict[int, list[_CalculationPacketLine]] = {}
 
-    stale_count = 0
-    for r in raw_lines:
-        lid = int(r["draftlineid"])
-        drv = int(r["driverid"])
-        driver_names.setdefault(drv, r["drivername"])
-        driver_codes.setdefault(drv, r["drivercode"])
+    for line in await load_live_source_lines(period_id, company_id, db):
+        drv = line.driver_id
         driver_lines.setdefault(drv, [])
-
-        stored_calc = Decimal(str(r["calculatedamount"])) if r["calculatedamount"] is not None else None
-        qty = Decimal(str(r["quantity"])) if r["quantity"] is not None else Decimal("0")
-        rate = Decimal(str(r["rateamount"])) if r["rateamount"] is not None else None
-
-        if lid in refreshed_calcs:
-            _cr = refreshed_calcs[lid]
-            effective_calc = _cr.calculated_amount
-            effective_nmr = _cr.needs_manager_review
-            resolved_rate = _cr.resolved_rate_amount
-            if effective_calc != stored_calc:
-                stale_count += 1
-        else:
-            effective_calc = stored_calc
-            effective_nmr = bool(r["needsmanagerreview"])
-            resolved_rate = rate
-
-        if effective_nmr:
+        calc = line.calculation
+        if calc.needs_attention:
             driver_line_nmr[drv] = True
+        amount = calc.amount if calc.amount is not None else Decimal("0")
+        driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amount
 
-        amt = effective_calc if effective_calc is not None else qty * (rate if rate is not None else Decimal("0"))
-
-        driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amt
-
+        definition = line.definition
         driver_lines[drv].append(_CalculationPacketLine(
-            source_type=r["sourcetype"] or "DraftLine",
-            source_id=r["sourceid"],
-            line_type=r["linetype"],
+            source_type="DraftLine",
+            source_id=str(line.draft_line_id),
+            line_type=None,
             line_scope="Daily",
-            work_date=r["workdate"],
+            work_date=line.work_date,
             driver_id=drv,
-            quantity=qty,
-            resolved_rate_amount=resolved_rate,
-            calculated_amount=effective_calc,
-            needs_manager_review=effective_nmr,
-            blocker_reason=(
-                "Calculated amount unresolved or manually flagged for manager review."
-                if effective_nmr else None
-            ),
-            rate_type_id=(
-                _cr.rate_type_id if lid in refreshed_calcs else None
-            ),
-            pay_item_id=(int(r["payitemid"]) if r["payitemid"] is not None else None),
-            driver_rate_id=(
-                _cr.driver_rate_id if lid in refreshed_calcs else None
-            ),
+            quantity=line.quantity,
+            resolved_rate_amount=None,
+            calculated_amount=calc.amount,
+            needs_manager_review=calc.needs_attention,
+            blocker_reason=_CALCULATION_BLOCKER_REASONS.get(calc.status),
+            payroll_period_definition_id=definition.payroll_period_definition_id,
+            pay_definition_id=definition.pay_definition_id,
+            definition_name=definition.name,
+            calculation_status=calc.status.value,
             source_evidence={
-                "DraftLineID": lid,
-                "StoredSourceType": r["sourcetype"],
-                "StoredSourceID": r["sourceid"],
-                "StoredCalculatedAmount": stored_calc,
-                "StoredRateAmount": rate,
-                "RateBehavior": (
-                    _cr.rate_behavior if lid in refreshed_calcs else "Stored"
-                ),
-                "PerUnitCalculationVersion": (
-                    PER_UNIT_CALCULATION_VERSION
-                    if lid in refreshed_calcs and _cr.rate_behavior == "PerUnit"
-                    else None
-                ),
+                "DraftLineID": line.draft_line_id,
+                "PayrollPeriodDefinitionID": definition.payroll_period_definition_id,
+                "PayDefinitionID": definition.pay_definition_id,
+                "RateDefinitionID": definition.rate_definition_id,
+                "CalculationMethod": definition.calculation_method,
+                "CalculationMethodVersion": definition.calculation_method_version,
+                "CalculationStatus": calc.status.value,
+                "DriverRateAssignmentID": calc.driver_rate_assignment_id,
+                "CalculationVersion": calc.calculation_version,
             },
             snapshot_source_type="DraftLine",
-            snapshot_source_id=str(lid),
-            # Preserve CP-4B's historical public NULL CalculatedAmount while
-            # freezing the actual fallback amount used in the packet total.
-            snapshot_calculated_amount=amt,
+            snapshot_source_id=str(line.draft_line_id),
+            snapshot_calculated_amount=amount,
         ))
-
-    if stale_count > 0:
-        warnings.append(
-            f"{stale_count} line(s) had stale stored calculations. "
-            f"Preview amounts reflect the latest effective-dated rates."
-        )
 
     # ── Canonical live Status-derived pay (CP-4B) — never the stored
     # STATUS_PAYMENT/STATUS_PAY projection, which was already excluded above.
@@ -1356,7 +887,10 @@ async def get_calculation_preview(
                         source_id=line.source_id,
                         line_type=line.line_type,
                         work_date=line.work_date,
-                        pay_item_id=line.pay_item_id,
+                        payroll_period_definition_id=line.payroll_period_definition_id,
+                        pay_definition_id=line.pay_definition_id,
+                        definition_name=line.definition_name,
+                        calculation_status=line.calculation_status,
                         rate_column_id=line.rate_column_id,
                         driver_id=line.driver_id,
                         quantity=line.quantity,

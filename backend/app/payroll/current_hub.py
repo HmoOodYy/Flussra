@@ -18,6 +18,7 @@ from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
     _period_has_driver_eligibility_snapshot,
 )
+from app.payroll.evidence_gate import EVIDENCE_NOT_READY_MESSAGE, TARGET_PAYROLL_EVIDENCE_NOT_READY
 from app.payroll.period_creation import _check_slot_matrix
 from app.payroll.schemas import (
     BranchWorkflowCapabilities,
@@ -41,12 +42,6 @@ from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.resolver import resolve_payroll_setup_version
 
 _TOP_DRIVER_LIMIT = 5
-_NON_WORK_DAILY_LINE_TYPES = (
-    "DailyStatus",
-    "DailyNote",
-    "STATUS_PAYMENT",
-    "STATUS_PAY",
-)
 
 
 async def _eligible_driver_ids(
@@ -156,12 +151,9 @@ async def _period_metrics(
         text(f"""
             SELECT DISTINCT dl.driverid, dl.workdate
             FROM payroll.payrolldraftlines dl
-            LEFT JOIN payroll.payrollperiodpayitems pppi
-                   ON pppi.payrollperiodid = dl.payrollperiodid
-                  AND pppi.payitemcode = dl.linetype
-            LEFT JOIN payroll.payitems pi
-                   ON pi.payitemcode = dl.linetype
-                  AND (pi.companyid IS NULL OR pi.companyid = dl.companyid)
+            JOIN payroll.payrollperioddefinitions ppd
+                   ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
+                  AND ppd.payrollperiodid = dl.payrollperiodid
             LEFT JOIN core.drivers d ON d.driverid = dl.driverid
             LEFT JOIN core.employees e ON e.employeeid = d.employeeid
             WHERE dl.payrollperiodid = :period_id
@@ -174,10 +166,7 @@ async def _period_metrics(
               AND dl.quantity IS NOT NULL
               AND dl.quantity <> 0
               AND dl.sourcetype <> 'System'
-              AND dl.linetype NOT IN ({', '.join(repr(code) for code in _NON_WORK_DAILY_LINE_TYPES)})
-              AND COALESCE(pppi.itemscope, pi.itemscope) = 'Daily'
-              AND COALESCE(pppi.appearsinpayrollentry, pi.appearsinpayrollentry, FALSE) = TRUE
-              AND COALESCE(pppi.isactiveinperiod, pi.status <> 'Retired', FALSE) = TRUE
+              AND ppd.isactiveinperiod = TRUE
               {legacy_date_eligibility}
         """),
         {
@@ -560,7 +549,8 @@ def _build_branch_entry(
         elif draft_promotion_conflict:
             cs = _denied("DRAFT_PROMOTION_CONFLICT", "Draft period is not adjacent to this Open period.")
         else:
-            cs = _cap(True)
+            # The backend refuses every submit until target calculation evidence exists.
+            cs = _denied(TARGET_PAYROLL_EVIDENCE_NOT_READY, EVIDENCE_NOT_READY_MESSAGE)
 
         # can_resubmit_returned
         if st != "Returned":
@@ -570,7 +560,7 @@ def _build_branch_entry(
         elif inreview_row:
             cr = _denied("INREVIEW_SLOT_OCCUPIED", "Another period is already in review.")
         else:
-            cr = _cap(True)
+            cr = _denied(TARGET_PAYROLL_EVIDENCE_NOT_READY, EVIDENCE_NOT_READY_MESSAGE)
 
         # can_view_review
         if st == "InReview":

@@ -1,64 +1,50 @@
 """
-SOURCE-domain audit-evidence adapter — translates source-line mutations into
-the generic P6D immutable audit-evidence system.
+SOURCE-domain audit-evidence adapter — translates ordinary source-line mutations
+into the generic P6D immutable audit-evidence system.
 
-Extracted from app.payroll.service (Stage B4-11D) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-_capture_source_evidence is the SOURCE adapter used by Draft CRUD: it resolves the relevant PayItemID from the period/pay-item
-relationship, then calls app.payroll.audit_evidence.capture_period_audit_evidence
+_capture_source_evidence records the stable TARGET context of a mutation
+(PayrollPeriodDefinitionID, PayDefinitionID, RateDefinitionID) in the evidence
+states. It never fabricates a legacy PayItemID: ordinary PayDefinition source has
+no PayItem identity. It calls app.payroll.audit_evidence.capture_period_audit_evidence
 with domain="SOURCE", source_entity_type="PayrollDraftLines", and
-required_permission_code="payroll.entry", preserving the
-SOURCE_CREATED / SOURCE_UPDATED / SOURCE_VOIDED evidence semantics.
+required_permission_code="payroll.entry".
 
-work_date is intentional domain data supplied by the caller (the source
-line's real work date), not module policy.
-
-app.payroll.audit_evidence is deliberately generic infrastructure — existing
-domains (Bonus, Review, Status Note) each call capture_period_audit_evidence
-with their own domain-specific adapter or call site rather than through a
-shared SOURCE-aware wrapper. This module is the SOURCE domain's own adapter,
-following that same pattern; it must not be folded into audit_evidence.py,
-which would blur that module's generic, domain-neutral responsibility.
-
-Dependency direction is one-way: source_evidence.py -> audit_evidence.py.
-audit_evidence.py has no dependency on this module, and this module has no
-dependency on app.payroll.service.
-
-Used by Draft-line CRUD (add_draft_line, update_draft_line,
-void_draft_line, in app.payroll.draft_line_mutation).
+app.payroll.audit_evidence is deliberately generic infrastructure; this module is the
+SOURCE domain's own adapter and must not be folded into it. Dependency direction is
+one-way: source_evidence.py -> audit_evidence.py.
 """
 from datetime import date
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll.audit_evidence import capture_period_audit_evidence
+from app.payroll.definition_calculation import PeriodDefinition
+
+
+def definition_context(definition: PeriodDefinition) -> dict[str, Any]:
+    """The stable target identity carried by every ordinary source mutation."""
+    return {
+        "payroll_period_definition_id": definition.payroll_period_definition_id,
+        "pay_definition_id": definition.pay_definition_id,
+        "rate_definition_id": definition.rate_definition_id,
+    }
 
 
 async def _capture_source_evidence(
     *, company_id: int, branch_id: int, period_id: int, user_id: int,
     line_id: int, action_code: str, db: AsyncConnection,
     before_state: dict[str, Any] | None, after_state: dict[str, Any] | None,
-    driver_id: int | None, work_date: date, line_type: str,
+    driver_id: int | None, work_date: date, definition: PeriodDefinition,
 ) -> None:
-    """Capture one non-compatibility DraftLine mutation for P6D."""
-    pay_item_id = (await db.execute(text("""
-        SELECT payitemid
-        FROM payroll.payrollperiodpayitems
-        WHERE companyid = :company_id AND branchid = :branch_id
-          AND payrollperiodid = :period_id AND payitemcode = :line_type
-        LIMIT 1
-    """), {
-        "company_id": company_id, "branch_id": branch_id,
-        "period_id": period_id, "line_type": line_type,
-    })).scalar_one_or_none()
+    """Capture one ordinary source mutation for P6D with its target identity."""
+    context = definition_context(definition)
     await capture_period_audit_evidence(
         company_id=company_id, branch_id=branch_id, period_id=period_id,
         domain="SOURCE", action_code=action_code,
         source_entity_type="PayrollDraftLines", source_entity_id=line_id,
         user_id=user_id, required_permission_code="payroll.entry", db=db,
-        before_state=before_state, after_state=after_state, driver_id=driver_id,
-        work_date=work_date, pay_item_id=pay_item_id,
+        before_state=None if before_state is None else {**context, **before_state},
+        after_state=None if after_state is None else {**context, **after_state},
+        driver_id=driver_id, work_date=work_date, pay_item_id=None,
     )
