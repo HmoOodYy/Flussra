@@ -533,7 +533,7 @@ async def get_day_grid(
                 sk_label = sk_obj.label
                 is_off = bool(sk_obj.is_off_reason)
 
-        # Stage B3 Unit 8C-3: for Locked/Archived, override whatever the
+        # For Locked/Archived, override whatever the
         # blocks above computed (they are guarded off above, but this stays
         # authoritative even if that guarding is ever loosened) -- Status
         # meaning comes only from immutable snapshot evidence for this
@@ -551,7 +551,7 @@ async def get_day_grid(
                 sk_label = None
                 is_off = False
 
-        # Stage B3 Unit 8C-3 follow-up: when the overall Status evidence for
+        # When the overall Status evidence for
         # this Locked/Archived period is UNAVAILABLE, every row's is_off
         # above is a default (False), not a historical fact -- tallying it
         # into worked/off would silently present an unknown historical

@@ -1,21 +1,9 @@
 """
-Settings domain service — company profile, branch administration,
-branch payroll setup, and payroll status keys.
+Company profile, Branch administration, and Status configuration.
 
-Security model:
-  - Reading company profile: any authenticated user in this company.
-  - Reading branches / payroll setup / status keys: branch-scoped.
-  - All writes require AllCompanyBranches scope (_ensure_company_admin).
-
-Audit logging:
-  - All writes emit events to audit.auditlog inside the same transaction.
-  - A failure in _write_settings_audit rolls back the primary write too.
-
-Race safety:
-  - update_branch, set_default_branch, and update_status_key use
-    SELECT … FOR UPDATE to prevent concurrent modifications.
-
-All database access is raw parameterised SQL via sqlalchemy.text().
+Branch creation can assign the Company default Payroll Setup in the same
+transaction. Company/Setup locking must remain ordered with the policy writers.
+Operational Branch metrics retain their independent fallback behavior.
 """
 import json
 import random as _random

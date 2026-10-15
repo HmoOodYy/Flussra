@@ -454,7 +454,7 @@ async def create_driver_employee(
     db: AsyncConnection,
     driver_code: str | None = None,
 ) -> EmployeeDetail:
-    """Canonical Employee+first-profile creation used by Core and temporary Admin adapters."""
+    """Create an Employee with a first Driver profile through the Workforce lifecycle."""
     return await create_employee(
         company_id,
         user_id,
@@ -997,7 +997,7 @@ async def find_employee_driver_profile(
     employee_id: int,
     db: AsyncConnection,
 ) -> dict[str, Any] | None:
-    """Return current, else nearest pending, profile for the temporary Admin adapter."""
+    """Return the current Driver profile, or the nearest pending profile if absent."""
     business_date = await company_today(company_id, db)
     current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
     profile_id = current["driverid"] if current else None

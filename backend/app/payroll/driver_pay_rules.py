@@ -1,10 +1,5 @@
 """
-Driver Pay Rules (Minimum / Maximum Pay) — M15.
-
-Extracted from app.payroll.service (Stage B4-2B) as a dependency-closed
-domain module — no behavior change, pure relocation. Depends only on the
-neutral app.payroll.guards leaf (Stage B4-2A) for shared access checks, not
-on app.payroll.service.
+Driver MinimumPay/MaximumPay rule administration and audit.
 """
 import json
 from datetime import date

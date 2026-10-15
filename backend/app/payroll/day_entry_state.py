@@ -1,38 +1,7 @@
 """
-Day Entry State — canonical per-driver/per-work-date entry-state behavior.
+Canonical driver/day Status and note state, StatusKey validation, usage limits, and mutation evidence.
 
-Extracted from app.payroll.service (Stage B4-13A) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-Owns the canonical payroll.payrollperioddriverdayentrystate row:
-  - _validate_status_key / _resolve_status_key_id: StatusKey lookup/validation
-    against payroll.payrollstatuskeys.
-  - _upsert_entry_state / _void_entry_state_field: canonical entry-state
-    upsert and field-clear behavior, including the STATUS_NOTE immutable
-    evidence this mutation emits directly via capture_period_audit_evidence.
-  - _enforce_status_key_limits: the four optional StatusKey usage limits
-    (per-period, per-driver, across-drivers, per-day) enforced during
-    save_day_grid batches.
-
-_canonical_aliases and _parse_quantity were evaluated for this stage and
-excluded: both are save_day_grid-only input-normalization helpers (legacy
-line-type alias resolution for pay-item DraftLine lookups, and day-grid
-quantity-string parsing) with zero coupling to the entry-state table, no
-StatusKey involvement, and no audit evidence of their own. They are
-Day-Grid-owned, in app.payroll.day_grid.
-
-Genuinely shared by two domains, each now in its own module —
-Draft-line CRUD (add_draft_line, update_draft_line, void_draft_line, in
-app.payroll.draft_line_mutation) and Day Grid (save_day_grid, in
-app.payroll.day_grid) — neither of which is more entitled to own it than the
-other. This module owns only canonical entry-state read/validate/write
-behavior; it is distinct from Status Payment Sync
-(_sync_status_payment_for_entry_state, _refresh_status_payment_lines,
-_resolve_live_status_payment_lines, _calculate_status_payment_amount,
-_LiveStatusLine, _STATUS_PAYMENT_PROJECTION_SQL), which derives STATUS_PAYMENT
-draft lines FROM the canonical state this module owns and lives in
-app.payroll.status_payment_sync. It contains no Day Grid orchestration, no
-Draft CRUD line-write logic, and no status-payment derivation.
+Status payment derivation belongs to status_payment_sync; Day Grid orchestrates entry batches.
 """
 from datetime import date
 from typing import Any

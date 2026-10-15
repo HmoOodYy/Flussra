@@ -1,25 +1,7 @@
 """
-Payroll driver eligibility helpers.
+Payroll Driver eligibility validation, period snapshots, and eligible-driver reads.
 
-Extracted from app.payroll.service (Stage B4-1) as a dependency-closed leaf
-module — no behavior change, pure relocation. Two of these symbols
-(_period_has_driver_eligibility_snapshot, _is_snapshot_row_eligible_for_workdate)
-are consumed directly by app.payroll.current_hub, app.payroll.off_drivers,
-and app.payroll.finalized_library_read_model (retargeted off the
-app.payroll.service compatibility facade in Stage B4-22).
-
-Stage B4-21 moved get_period_eligible_drivers here from app.payroll.service —
-pure relocation, no behavior change. This module already owned the table its
-primary (snapshot) branch reads, payroll.payrollperioddrivereligibility, via
-_period_has_driver_eligibility_snapshot/_create_period_driver_eligibility_rows
-above, and this module's own _assert_driver_eligible_for_period docstring
-already documented parity with get_period_eligible_drivers's Bonus
-eligibility list — table ownership, not physical adjacency, is why it moved
-here rather than to period_read.py or off_drivers.py. This
-is the one symbol in the B4 residue that costs this module its status as a
-zero-app-dependency leaf: it now imports app.core.service (permission/role
-guards) and app.payroll.period_read (the period access gate), verified to
-introduce no import cycle in either direction.
+Snapshot-aware checks retain the historical fallback for periods without an eligibility snapshot.
 """
 from datetime import UTC, date, datetime
 

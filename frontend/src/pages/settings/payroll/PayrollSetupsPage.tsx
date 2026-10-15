@@ -1,24 +1,7 @@
 /**
- * Company Payroll Policies page (Phase 6 U5a/U5b/U5c foundation + Unit A
- * terminology/UX pass + master-detail redesign Step 1 + Step 2).
- *
- * This file is the SHELL: header, tabs, the Policies tab's master (policy
- * list, now with search/filter and its own pinned "+ Add policy" footer) +
- * a detail column, the create-policy modal, and the Branch
- * Assignments tab mount.
- *
- * Everything that used to render in the detail column (company default,
- * selected-policy fields/actions, "Next steps", drafts list, publish panel,
- * policy-updates table, assigned-branches table, and their confirms/modals)
- * lives in PolicyDetailPanel.tsx. Step 3A mounts it with only the header +
- * Policy details section visible; the lower sections stay parked behind its
- * showLowerSections prop until their own steps.
- *
- * Step 2 replaces the master pane's flat status-badge list with a
- * search/filter list driven by policyMasterView.ts's derived usage state
- * (Active/Inactive/Archived — never the raw setup.status) and moves policy
- * creation into the pane's own pinned footer; the page-level header create
- * button is gone (the Welcome empty-state create button is unchanged).
+ * Payroll Policy list, selection, creation, and Branch Assignments shell.
+ * PolicyDetailPanel owns the selected policy's details and version actions.
+ * The list uses derived usage state rather than raw setup.status.
  *
  * Never constructs a JS Date object or reads the wall clock — every date
  * shown here is an ISO string from the backend, rendered as-is or through
@@ -404,7 +387,7 @@ export function PayrollSetupsPage() {
               )}
             </div>
 
-            {/* DETAIL — Step 3A: header + policy details only (lower sections stay parked) */}
+            {/* Selected policy details and version planning */}
             <section
               className={styles.setupsDetailPane}
               aria-label="Policy details"

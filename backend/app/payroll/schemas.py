@@ -45,9 +45,9 @@ class PeriodSummary(BaseModel):
 
 # Transitions that can be performed via PATCH /periods/{id}/status.
 # Approved → Locked is intentionally excluded here — that path goes through
-# POST /periods/{id}/finalize (Milestone 5) which also creates PayrollFinalLines.
+# POST /periods/{id}/finalize. Financial transitions remain subject to the evidence gate.
 _VALID_TRANSITIONS: dict[str, set[str]] = {
-    "Draft":    {"Cancelled"},           # CP-1D: Draft→Open removed; submit path handles promotion atomically
+    "Draft":    {"Cancelled"},
     "Open":     {"InReview", "Cancelled"},
     # CP-1A: InReview has no PATCH exits.
     #   Approved    → period Approved  (via POST /review/items/{id}/decide)
@@ -109,33 +109,20 @@ class PeriodStatusChange(BaseModel):
 # Draft line schemas
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# M13a note: _VALID_LINE_TYPES (the old hardcoded set) has been removed.
-# Line-type validation is now done using PayItems-driven logic. See
-# payroll/draft_line_mutation.py — _validate_line_type(). The legacy
-# _SYSTEM_LINE_TYPES constant this note used to reference was deleted in
-# Stage B4-21.
-# ---------------------------------------------------------------------------
-
 _VALID_SOURCE_TYPES   = {"Manual", "Import"}
 _VALID_LINE_STATUSES  = {"Active", "NeedsReview", "Rejected", "Void"}
 
-# Periods must be in one of these statuses to accept new/modified entries.
-# CP-0A: Open is the primary editable status.
-# CP-1A: Returned is also editable — corrections must be possible before resubmission.
-# InReview and all other statuses are read-only for operational data.
+# Financial entry accepts Open and Returned periods; ordinary source entry also
+# permits Draft through SOURCE_ENTRY_STATUSES below.
 ENTRY_ALLOWED_STATUSES = {"Open", "Returned"}
 
-# CP-2F: Draft (Prepared) allows operational source-entry only — not financial paths.
+# Draft (Prepared) allows operational source-entry only — not financial paths.
 # Use SOURCE_ENTRY_STATUSES for day-grid save and daily-source DraftLine guards only.
 # Do NOT use this constant for Bonus or any financial line creation.
 SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}
 
-# CP-0A: Periods frozen to all source mutations.
-# InReview is now included: once a period enters review it must not be
-# mutated.  Open is the only editable status.
-# Relocated from app.payroll.service (Stage B4-11E) — no behavior change.
-# Invariant on current code: _WRITE_BLOCKED_STATUSES == _ALL_STATUSES - ENTRY_ALLOWED_STATUSES.
+# Statuses outside financial-entry editability. Ordinary source mutations use
+# SOURCE_ENTRY_STATUSES to permit Prepared (Draft) entry as well.
 _WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived", "Cancelled"}
 
 

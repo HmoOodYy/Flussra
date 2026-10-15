@@ -737,7 +737,7 @@ async def test_single_void_invalidates_summary_revision(
 @pytest.mark.asyncio
 async def test_write_line_audit_without_correlation_id_unchanged(db_conn: AsyncConnection) -> None:
     """Existing calls (no correlation_id) still work exactly as before."""
-    from app.payroll.service import _write_line_audit
+    from app.payroll.line_audit import _write_line_audit
 
     await _write_line_audit(
         db_conn,
@@ -766,7 +766,7 @@ async def test_write_line_audit_without_correlation_id_unchanged(db_conn: AsyncC
 @pytest.mark.asyncio
 async def test_write_line_audit_with_correlation_id_persisted(db_conn: AsyncConnection) -> None:
     """Supplying correlation_id stores exactly that value."""
-    from app.payroll.service import _write_line_audit
+    from app.payroll.line_audit import _write_line_audit
 
     correlation_id = str(uuid.uuid4())
     await _write_line_audit(

@@ -1,35 +1,9 @@
 """
-Canonical Bonus Event domain — CRUD, transactional batch apply, and the
-zero-inclusive bonus summary.
+Bonus event mutations, idempotent batch application, and zero-inclusive summaries.
 
-Extracted from app.payroll.service (Stage B4-8) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-Bonus canonical source is payroll.PayrollBonusEvents — the sole Bonus
-authority. apply_bonus_batch retains its bespoke
-inline "SELECT ... FOR UPDATE" period lock (deliberately NOT
-_lock_period_for_mutation): idempotent replay must still succeed on a period
-that has since become Locked/Archived, which _lock_period_for_mutation's
-editability check would reject.
-
-_load_active_bonus_events and get_period_eligible_drivers are NOT part of
-this module — _load_active_bonus_events is owned by
-app.payroll.period_calculation and get_period_eligible_drivers by
-app.payroll.eligibility. _load_active_bonus_events
-is consumed by Calculation, Reporting, and report_read_model.py, not by
-Bonus CRUD/domain ownership. get_period_eligible_drivers (the Bonus driver
-picker) is owned by app.payroll.eligibility.
-
-Every private helper here (_get_bonus_event_by_id, _increment_bonus_data_revision,
-_bonus_batch_canonical_payload, _bonus_batch_request_hash,
-_get_bonus_events_in_order, _bonus_summary_driver_create_eligible) has zero
-callers outside this module — no facade needed for any of them.
-
-The six public functions (list_bonus_events, create_bonus_event,
-update_bonus_event, void_bonus_event, apply_bonus_batch, get_bonus_summary)
-have exactly one remaining caller each: router.py, which imports and calls
-this module directly. No production or internal service.py caller remains
-for any of them, so no service.py facade is kept for any Bonus symbol.
+PayrollBonusEvents is the Bonus source of truth. Batch replay uses a period row
+lock without the usual editability guard so an exact replay still succeeds after
+the period becomes Locked or Archived.
 """
 import hashlib
 import json

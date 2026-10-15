@@ -1,24 +1,9 @@
 """
-Pure PerUnit calculation core (CP-4A).
+Pure Decimal PerUnit calculation.
 
-Behavior-preserving extraction of the current authoritative PerUnit formula
-out of `app.payroll.service._compute_calculated_amount`:
-
-    calculated_amount = (quantity * resolved_rate_amount).quantize(
-        Decimal("0.0001"), rounding=ROUND_HALF_EVEN
-    )
-
-This module is intentionally standard-library only. It contains no database
-access, SQL, permissions, audit, persistence, workflow, HTTP/request
-handling, or dry_run logic -- it accepts already-resolved typed Decimal
-inputs and returns a deterministic typed result. Rate resolution,
-eligibility, source lookups, and orchestration remain the caller's
-responsibility, unchanged.
-
-Only the current PerUnit RateBehavior is represented here. Fixed,
-None, the CalculatedAmount-null fallback, and the dormant M13c
-legacy methods (OrdinalTier, RangeBracket, RangeProgressive, Block) are out
-of scope for this module and remain unchanged in their current call sites.
+The completed quantity-times-rate product is quantized once to four decimal
+places with ROUND_HALF_EVEN. Rate resolution, eligibility, workflow, and
+persistence remain the caller's responsibility.
 """
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal

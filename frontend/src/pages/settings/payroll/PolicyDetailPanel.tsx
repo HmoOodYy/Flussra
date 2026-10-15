@@ -1,23 +1,6 @@
 /**
- * Policy detail content for the company-owned Payroll Policies page
- * (Phase 6 — master-detail redesign, Step 1 extraction).
- *
- * This holds ALL of the business/API logic that used to render in
- * PayrollSetupsPage.tsx's detail column: the company-default card, the
- * selected policy's fields + actions (edit/mark-default/archive), the
- * "Next steps" guide, the draft schedules list + draft editor modal, the
- * publish panel mount, the read-only policy-updates table, the assigned-
- * branches table, and their confirms/modals.
- *
- * Since Step 3A the page mounts this component with only the header +
- * "Policy details" section visible. Every lower section (Next steps/archive,
- * Draft schedules, Publish, Policy updates, Assigned branches) stays here,
- * fully wired and type-checked, behind the `showLowerSections` prop (default
- * false) until its own step mounts it.
- *
- * Moved, not rewritten: every handler/state/derivation below is the same
- * logic that lived in the shell, adapted only where crossing the component
- * boundary requires it (documented inline where that happens).
+ * Selected Payroll Policy details, actions, Version Planning, and Timeline.
+ * Additional lower sections remain controlled by showLowerSections.
  *
  * Never constructs a JS Date object or reads the wall clock — every date
  * shown here is an ISO string from the backend, rendered as-is or through

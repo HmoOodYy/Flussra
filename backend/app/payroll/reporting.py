@@ -1,4 +1,6 @@
-"""Read-only financial authority selection for future Current Payroll reports."""
+"""
+Read-only financial authority selection for Current Payroll reports.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass

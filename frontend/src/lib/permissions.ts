@@ -5,8 +5,6 @@
  * render decisions.  Backend remains the authoritative security boundary —
  * hiding a nav link does NOT replace a backend 403.
  *
- * Permission codes are sourced from backend app/payroll/service.py,
- * app/review/router.py, and app/admin/service.py.
  */
 import type { UserProfile } from '../store/authStore';
 import {

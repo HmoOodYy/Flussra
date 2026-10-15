@@ -1,59 +1,14 @@
 """
-Payroll Finalization — the payroll domain's single owner of:
+Approved-snapshot validation, FinalLines projection, and finalization preview.
 
-  A. Finalization-specific audit writing (_write_finalization_audit)
-  B. Finalization-specific error construction (_snapshot_finalization_error)
-  C. Approved-snapshot loading for Finalization (_load_approved_snapshot_packet)
-  D. Approved-snapshot reconciliation (_reconcile_approved_snapshot_packet)
-  E. Snapshot line provenance extraction (_snapshot_line_draft_line_id,
-     _snapshot_line_provenance)
-  F. Immutable snapshot -> FinalLines projection
-     (_project_approved_snapshot_final_lines)
-  G. Finalization execution (finalize_period)
-  H. Finalization preview (get_finalization_preview)
+Finalization and its preview remain refused by the target evidence gate.
+The retained implementation uses the snapshot bound to the Approved
+PeriodApproval, never a latest-snapshot guess or recalculated live money.
+Missing provenance is not reconstructed from mutable Status or Bonus data.
 
-Extracted from app.payroll.service (Stage B4-19) as a dependency-closed leaf
-module — no behavior change, pure relocation. A fresh B4-19 discovery proved
-the transitive service.py-local closure of these 9 symbols is empty: this
-module depends only on already-extracted true owners (app.core.service,
-app.payroll.guards, app.payroll.immutable_evidence, app.payroll.period_read,
-app.payroll.schemas, app.payroll.workflow_lock) and never imports
-app.payroll.service.
-
-Finalization uses an already-approved immutable Calculation snapshot as its
-sole authority. It does NOT rebuild live payroll: it never calls
-app.payroll.period_calculation._build_live_calculation_packet, never calls
-app.payroll.period_calculation._refresh_draft_calculations, and never
-captures a new Calculation snapshot (app.payroll.period_calculation._capture_calculation_snapshot).
-It reads and projects an already-approved snapshot captured earlier by
-Submit/Resubmit (app.payroll.period_lifecycle) — this module has zero
-dependency on either app.payroll.period_calculation or
-app.payroll.period_lifecycle, confirmed fresh by this stage's discovery.
-
-The approved snapshot is resolved through the approved review/PeriodApproval
-evidence binding (_load_approved_snapshot_packet), not merely "the latest
-snapshot" — company, branch, period, and approval-linkage checks all remain
-exactly as they were in service.py. Missing-snapshot and provenance-mismatch
-behavior is unchanged. No historical immutable field is ever reconstructed
-from mutable current tables (Status, Bonus, or otherwise) — that boundary is
-enforced upstream, at capture time, by app.payroll.period_calculation, and
-this module's read-only projection never attempts to fill a gap itself.
-
-finalize_period and get_finalization_preview intentionally do NOT share a
-redesigned implementation in this stage — they were structurally relocated
-exactly as they existed in app.payroll.service, including their independent
-approved-snapshot loading and reconciliation call sites. get_finalization_preview
-remains strictly read-only: it performs no Finalization audit write, no
-FinalLines INSERT, and no status transition.
-
-Transaction ownership is above this module. finalize_period and
-get_finalization_preview receive an ambient AsyncConnection and open no
-transaction of their own, commit nothing, and roll back nothing explicitly
-— the request-level transaction is owned by the existing DB dependency
-(app.dependencies.get_db). _write_finalization_audit is called after the
-FinalLines projection and the period-status UPDATE inside finalize_period,
-in the same ambient transaction, so a failure there rolls back the entire
-finalization atomically.
+The preview is read-only. Finalization projects lines, updates period status,
+and writes its audit in the caller's transaction, so an audit failure rolls
+back the entire operation.
 """
 from __future__ import annotations
 

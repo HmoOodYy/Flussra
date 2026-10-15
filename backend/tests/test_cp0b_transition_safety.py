@@ -431,11 +431,7 @@ class TestStaleTransitionRejection:
         Pre-flight reads Open; psycopg2 commits Open→InReview before the
         UPDATE; UPDATE WHERE status='Open' → 0 rows → 409.
         """
-        # Stage B4-18: get_period_by_id is called by change_period_status,
-        # which now lives in app.payroll.period_lifecycle and resolves it as
-        # a bare name through that module's own globals — patching
-        # app.payroll.service's compatibility re-export no longer
-        # intercepts it.
+        # Patch get_period_by_id where change_period_status resolves it.
         import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
@@ -495,11 +491,7 @@ class TestStaleTransitionRejection:
         Prevents a duplicate-archive scenario where two concurrent PATCH requests
         both observe Locked and the second silently overwrites the Archived status.
         """
-        # Stage B4-18: get_period_by_id is called by change_period_status,
-        # which now lives in app.payroll.period_lifecycle and resolves it as
-        # a bare name through that module's own globals — patching
-        # app.payroll.service's compatibility re-export no longer
-        # intercepts it.
+        # Patch get_period_by_id where change_period_status resolves it.
         import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
@@ -592,11 +584,7 @@ class TestOpenToInReviewAlreadySafe:
         Pre-flight reads Open; psycopg2 commits Open→Cancelled before the
         UPDATE; UPDATE WHERE status='Open' → 0 rows → 422 (existing behaviour).
         """
-        # Stage B4-18: get_period_by_id is called by change_period_status,
-        # which now lives in app.payroll.period_lifecycle and resolves it as
-        # a bare name through that module's own globals — patching
-        # app.payroll.service's compatibility re-export no longer
-        # intercepts it.
+        # Patch get_period_by_id where change_period_status resolves it.
         import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)

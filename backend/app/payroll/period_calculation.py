@@ -435,54 +435,25 @@ async def _build_live_calculation_packet(
     db: AsyncConnection,
 ) -> _LiveCalculationPacket:
     """
-    Read-only, live provisional expected-income breakdown for an Open or
-    Returned period, calculated from CURRENT effective source/config data.
+    Assemble live financial results without writes, audit, or projection refresh.
 
-    Distinct from `get_finalization_preview` above (Approved-only, mirrors
-    exactly what `finalize_period` will write): this is a live preview for
-    the two lifecycle statuses that still allow correction/entry. It is
-    never a submitted snapshot -- InReview/Approved/Locked/Archived/
-    Cancelled all remain out of scope (see the CP-4C+ future snapshot
-    contract for those).
+    Ordinary source money comes from load_live_source_lines and its frozen-method
+    calculation boundary. Status pay resolves current rates from canonical day
+    selections, never the stored compatibility projection, to avoid stale money
+    and double counting. Minimum/maximum adjustments exclude Active Bonus events
+    from their base; Bonus is added afterward.
 
-    Absolute read-only guarantee: no INSERT/UPDATE/DELETE, no audit write,
-    no period/source/derived-state mutation of any kind. Does not call
-    `_refresh_draft_calculations`, `_sync_status_payment_for_entry_state`,
-    `_refresh_status_payment_lines`, or `finalize_period`.
-
-    Reuses, unchanged:
-      - `_compute_draft_line_preview_amounts` -> `_compute_calculated_amount`
-        -> CP-4A's `calculate_per_unit` for daily PerUnit lines (and the
-        existing Fixed/None dispatch for the rest);
-      - the canonical PayrollBonusEvents Active-only read;
-      - the CP-3C minimum/maximum-then-bonus ordering.
-
-    Adds, new to CP-4B:
-      - `_resolve_live_status_payment_lines`, which reads the canonical
-        `PayrollPeriodDriverDayEntryState.StatusKeyID` selection directly
-        and resolves the CURRENT applicable DriverRate live -- the stored
-        STATUS_PAYMENT/STATUS_PAY compatibility-projection DraftLine is
-        excluded from the stored-line aggregation below and is never used
-        as live truth, so a stale projection can never be double-counted.
-
-    Driver inclusion is financial-source-driven only (a driver with a
-    current daily line, a canonical selected Status, or an Active bonus
-    event) -- not a full eligible-driver roster.
+    Include only Drivers with ordinary source, live Status pay, or Active Bonus
+    events, not the full eligible roster. Lifecycle/read callers select when
+    this live packet is appropriate; it is not immutable approval evidence.
     """
     period_id = period.payroll_period_id
 
     blockers: list[str] = []
     warnings: list[str] = []
 
-    # ── CP-4B fix (P1): shared structural blockers (duplicate active
-    # Daily lines, driver eligibility violations, contaminated/foreign
-    # RateType references, unresolvable rate mapping) — the SAME read-only
-    # checks enforced by finalize_period / get_finalization_preview. These
-    # checks are structural, not Approved-specific (none of them reference
-    # period.status), so they apply directly and unmodified to Open/Returned
-    # periods. Surfacing them here prevents a preview from looking
-    # financially complete (has_blockers=false) while a structural condition
-    # that would block finalize_period is silently present.
+    # Surface source, eligibility, and rate-mapping blockers in the live packet
+    # so an incomplete calculation cannot appear financially ready.
     blockers.extend(await _validate_period_can_finalize(
         period_id=period_id,
         company_id=company_id,

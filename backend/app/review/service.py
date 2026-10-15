@@ -2,7 +2,7 @@
 Review domain service — manager review items and decisions.
 
 Security model:
-  - Reading items requires only branch access (no specific permission).
+  - Reading items requires branch access and a qualifying payroll or review permission.
   - Creating an item requires the ``payroll.entry`` permission on that branch.
   - Deciding on an item (approve / reject / comment) requires the
     ``review.decide`` permission on that branch.
@@ -20,10 +20,8 @@ Race condition safety:
     This holds a row-level exclusive lock for the transaction duration,
     so two concurrent decisions cannot both pass the status check.
 
-Entity fields (entity_schema, entity_name, entity_id) are free-form
-polymorphic metadata — the same pattern as audit.AuditLog.  They are NOT
-validated against actual tables; the review item's own branch_id is the
-authoritative scope boundary.
+Generic review items carry polymorphic entity metadata. PeriodApproval decisions
+additionally validate the exact linked period, scope, and immutable snapshot.
 
 Self-approval policy:
   - Whether the same user who created/submitted a review item may also record
@@ -32,16 +30,10 @@ Self-approval policy:
     by the original submitter are blocked with HTTP 422.
   - Comment decisions are always permitted regardless of this policy.
 
-Review workflow integration status (as of M7):
-  - This module is a review *foundation queue*, not a full payroll-approval
-    workflow.  Approving or rejecting a review item does NOT automatically
-    update any linked payroll period status.  Payroll period status transitions
-    are controlled exclusively by PATCH /payroll/periods/{id}/status and
-    POST /payroll/periods/{id}/finalize.
-  - The payroll period endpoint blocks InReview → Approved while pending review
-    items exist for the branch, but the review service itself does not write
-    back to payroll.PayrollPeriods.  A future milestone may wire these together
-    once the workflow policy decisions are made.
+Substantive PeriodApproval decisions atomically update the linked InReview
+period: Approved becomes Approved; Rejected or EditRequested becomes Returned.
+Manual PeriodApproval creation is refused. New target payroll submissions remain
+blocked by app.payroll.evidence_gate until immutable target evidence is available.
 
 All database access is raw parameterised SQL via sqlalchemy.text().
 """
@@ -70,7 +62,7 @@ from app.payroll.audit_evidence import (
     link_audit_evidence_to_snapshot,
 )
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
-from app.payroll.period_lifecycle import _write_period_status_audit  # M16, CP-1D
+from app.payroll.period_lifecycle import _write_period_status_audit
 from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
@@ -1049,13 +1041,11 @@ async def decide_review_item(
                 db=db,
             )
 
-    # M16: PeriodApproval write-back.
-    #
     # When a substantive decision is made on a PeriodApproval review item, the
     # linked payroll period status is updated atomically in the same transaction:
     #   Approved       → period Approved
-    #   Rejected       → period Open
-    #   EditRequested  → period Open  (reviewer wants corrections; period returns to entry)
+    #   Rejected       → period Returned
+    #   EditRequested  → period Returned
     #   Comment        → no change
     #
     # The period UPDATE uses "WHERE status = 'InReview' RETURNING" (atomic claim)
@@ -1067,21 +1057,18 @@ async def decide_review_item(
     #   - period exists in the same company
     #   - period's branch matches the review item's branch
     #   - entity_schema / entity_name match exactly
-    # These checks prevent a forged review item (created before the manual-creation
-    # block was added) from writing back to an unrelated period.
+    # These checks prevent a forged or historical review item from writing back
+    # to an unrelated period.
     # Driver-role block (belt-and-suspenders — _require_not_driver_role at the
     # top of decide_review_item already covers this, but kept explicit here).
     await _require_not_driver_role(company_id, user_id, db)
 
     if data.decision != "Comment" and row.get("requesttype") == "PeriodApproval":
-        # CP-4E validates the immutable ReviewItem-linked packet before any
-        # decision write.  Approval deliberately performs no live financial
-        # validation or calculation: CP-4D already froze that packet at submit.
+        # The linked immutable packet was validated before the decision write.
+        # Approval must not recalculate money from mutable live sources.
         assert period_context is not None
         period_id = int(period_context["period_id"])
 
-        # Map decision → new period status
-        # CP-1A: Rejected and EditRequested now return to Returned (not Open).
         if data.decision == "Approved":
             new_period_status = "Approved"
         else:

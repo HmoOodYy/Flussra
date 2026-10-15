@@ -1,65 +1,16 @@
 """
-Period Lifecycle — the payroll domain's single owner of:
+Period transitions, submit/resubmit orchestration, and period-status audit.
 
-  A. Status transition permission mapping (_TRANSITION_PERMISSIONS)
-  B. Period-status audit writing (_PERIOD_AUDIT_REASONS, _write_period_status_audit)
-  C. Submit transaction-isolation setup (_set_submit_transaction_isolation)
-  D. InReview slot protection (_is_inreview_slot_violation,
-     _check_inreview_slot_available)
-  F. Submit orchestration (change_period_status)
-  G. Resubmission orchestration (resubmit_period)
+Target submission and resubmission remain refused by the evidence gate.
+Retained submission logic consumes Calculation and Status Payment operations;
+Review owns approval decisions and Finalization owns approved-snapshot projection.
 
-Extracted from app.payroll.service (Stage B4-18) as a dependency-closed leaf
-module — no behavior change, pure relocation. A fresh B4-18 discovery proved
-the transitive service.py-local closure of these 10 symbols is empty: this
-module depends only on already-extracted true owners
-(app.payroll.period_calculation, app.payroll.status_payment_sync,
-app.payroll.period_read, app.payroll.eligibility, app.payroll.guards,
-app.payroll.workflow_lock, app.payroll.audit_evidence,
-app.payroll.immutable_evidence, app.payroll.schemas, app.core.service) and
-never imports app.payroll.service.
+Callers own the ambient transaction and whole-transaction retry policy.
+_set_submit_transaction_isolation must issue the first SQL statement on a
+submitting connection so REPEATABLE READ applies before any authority is read.
 
-This module owns period status transition policy, submit/resubmit
-orchestration, InReview slot protection, submit transaction-isolation
-behavior, and period-status audit writing. Whole-transaction retry policy
-and SQLSTATE translation are owned by app.db.transaction_retry. It does NOT
-own Calculation, Calculation snapshot capture, Status Payment implementation,
-Finalization, Period creation, Day Grid, Draft mutation, Review approval
-behavior, or Drivers Off — those stay with their existing owners and are
-consumed here only through imports.
-
-The architecture direction is one-way:
-
-    Period Lifecycle -> Period Calculation, Status Payment Sync, Period Read,
-                         and other established leaf owners
-
-Calculation is consumed directly from app.payroll.period_calculation
-(_refresh_draft_calculations, _build_live_calculation_packet,
-_capture_calculation_snapshot) — Lifecycle does not rebuild Calculation
-policy, copy packet code, or copy snapshot code. Status Payment is consumed
-directly from app.payroll.status_payment_sync
-(_refresh_status_payment_lines) — Lifecycle does not duplicate Status
-Payment logic.
-
-Finalization (finalize_period, get_finalization_preview, and their approved-
-snapshot helpers) lives in app.payroll.finalization — proven dependency-
-disjoint from this module by the B4-17 discovery, reconfirmed unchanged by
-this stage. Review approval behavior remains owned by app.review.service,
-which imports _write_period_status_audit directly from this module as of
-this stage (previously via app.payroll.service).
-
-Transaction ownership is above this module. change_period_status and
-resubmit_period receive an ambient AsyncConnection and open no transaction
-of their own, commit nothing, and roll back nothing explicitly — the request-
-level transaction is owned by the existing DB dependency
-(app.dependencies.get_db). _set_submit_transaction_isolation issues exactly
-one SQL statement (SET TRANSACTION ISOLATION LEVEL REPEATABLE READ) and must
-be the first statement on the connection for a submitting request; both
-callers preserve that ordering unchanged from their pre-extraction form.
-
-The InReview slot protection here relies on a DB-enforced partial unique
-index as the concurrency authority; _check_inreview_slot_available is a
-friendly pre-check only, not a replacement for that race protection.
+The partial unique index is the concurrency authority for the InReview slot;
+_check_inreview_slot_available provides a friendly pre-check only.
 """
 from __future__ import annotations
 

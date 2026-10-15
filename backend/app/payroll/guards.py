@@ -1,17 +1,5 @@
 """
-Shared payroll access/guard helpers.
-
-Extracted from app.payroll.service (Stage B4-2A) as a dependency-closed leaf
-module — no behavior change, pure relocation. These four functions were
-proven, by caller audit, to be genuinely shared by at least the Rates and
-Driver Pay Rules domains (several are also called directly from Lifecycle,
-Finalization, Calculation, Day Grid, and Current Payroll Hub code) rather
-than owned by any single domain. This module exists to
-remove that incorrect ownership from service.py so both Rates and a future
-Driver Pay Rules module can depend on a neutral leaf instead of importing
-app.payroll.service.
-
-Do not add unrelated helpers here. This is not a general utilities module.
+Shared payroll access and finalized-period guards.
 """
 from datetime import date
 
@@ -47,7 +35,7 @@ async def _check_not_in_finalized_period(
     period for the same company and branch.
 
     Called before approving or auto-approving a rate (label="rate") or creating/
-    copying a pay rule (label="pay rule") so that payroll history cannot be
+    updating a pay rule (label="pay rule") so that payroll history cannot be
     retroactively altered inside finalized pay periods.
     """
     result = await db.execute(
@@ -84,10 +72,9 @@ async def _check_driver_read_access(
     Shared security gate for all driver-scoped rate read endpoints
     (pending, history, summary).
 
-    Performs:
-      1. Driver lookup — 404 if not in this company.
-      2. Permission check with driver's branch_id — 403 if no payrates.* permission.
-      3. DRIVER/Self ceiling — generic rate administration is denied.
+    Rejects DRIVER subjects before looking up the Driver in the Company.
+    Then requires payrates.view, payrates.edit, settings.manage, or setup.manage
+    on the Driver's branch.
 
     Returns the driver's branch_id on success.
 

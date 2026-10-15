@@ -472,10 +472,8 @@ async def get_selected_day_off_drivers(
 # Legacy period-wide Drivers Off (GET /periods/{id}/drivers-off)
 # ---------------------------------------------------------------------------
 #
-# Stage B4-22 moved _finalized_drivers_off_entries and get_drivers_off here
-# from app.payroll.service — pure relocation, no behavior change. This is
-# the LEGACY period-wide surface (all work dates, DailyStatus-driven for
-# non-finalized periods), not the canonical CP-5B surface above (Fully-Off
+# This is the legacy period-wide surface (all work dates, DailyStatus-driven
+# for non-finalized periods), distinct from the surface above (Fully-Off
 # KPI + selected-day, EntryState-first). The two contracts are deliberately
 # NOT unified: get_drivers_off reads legacy DailyStatus DraftLines + live
 # PayrollStatusKeys + a DailyNote join for Draft/Open/InReview/Returned/

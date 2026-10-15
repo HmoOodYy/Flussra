@@ -1,16 +1,9 @@
 """
 Admin domain service — Users, Roles, Permissions.
 
-Design rules
-------------
-- All endpoints require AllCompanyBranches scope (_ensure_admin gate).
-- All writes emit an audit row inside the same transaction so that a
-  rollback on _write_admin_audit also rolls back the primary write.
-- _write_admin_audit is a module-level function so tests can monkeypatch
-  it to verify full-rollback behaviour.
-- Internal read helpers (_get_user_by_id_internal, _fetch_role_assignments)
-  bypass the scope check so that post-write reads don't re-execute the
-  guard query.
+Account and role mutations share their caller's transaction with audit writes.
+Internal post-write reads avoid repeating authorization already checked by the
+owning operation. Ownership transfer retains its explicit disabled-owner path.
 """
 import json
 import random

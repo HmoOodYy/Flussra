@@ -1,28 +1,8 @@
 """
-Period source-mutation status lock.
+Lock a period row and recheck source-entry editability before mutation.
 
-Extracted from app.payroll.service (Stage B4-5A) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-_lock_period_for_mutation is a concurrency-safety/status-validity guard: it
-acquires a FOR UPDATE row lock on the target period and verifies the period
-is still in an editable status before a source mutation (draft line, period
-pay line, bonus event, or day-grid save) proceeds. It is distinct from
-app.payroll.workflow_lock._acquire_branch_workflow_lock, which is a
-branch-level advisory lock used for period-workflow operations (creation,
-resubmission, status change, finalization) — a different granularity and a
-different concern (branch-wide serialization vs. this period's own
-editability). The two must not be merged.
-
-Genuinely shared by three domains, each now in its own module — Draft-line
-CRUD (app.payroll.draft_line_mutation), Bonus (app.payroll.bonus), and Day
-Grid (app.payroll.day_grid) — none of which is more entitled to own it than
-the others. app.payroll.service
-retains a plain imported binding purely for legacy test compatibility
-(test_cp0a_mutation_status_guard.py, which reassigns it directly — a
-resolution-sensitive patch); it has no production callers of its own.
-
-Do not add unrelated helpers here. This is not a general utilities module.
+This FOR UPDATE guard is separate from the branch-level workflow advisory lock.
+The caller owns the ambient transaction and retains the row lock until it ends.
 """
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -37,15 +17,15 @@ async def _lock_period_for_mutation(
     db: AsyncConnection,
 ) -> None:
     """
-    CP-0A/CP-1A: Lock the PayrollPeriods row FOR UPDATE and verify it is still
-    in an editable status (Open or Returned).
+    Lock the PayrollPeriods row FOR UPDATE and recheck SOURCE_ENTRY_STATUSES
+    (Draft, Open, or Returned).
 
     Must be called immediately before the first DML write in every source
     mutation path.  The lock ensures that a concurrent status transition
     cannot commit after this mutation has already passed the upfront status
     check but before it writes.
 
-    Raises HTTP 409 Conflict when the current status is not Open or Returned.
+    Raises HTTP 409 Conflict when the period is missing or no longer source-editable.
     """
     result = await db.execute(
         text(
@@ -57,8 +37,6 @@ async def _lock_period_for_mutation(
     )
     row = result.mappings().first()
     current_status = row["status"] if row else "unknown"
-    # CP-2F: Draft (Prepared) is also editable for operational source-entry paths.
-    # SOURCE_ENTRY_STATUSES = {"Draft", "Open", "Returned"}
     if current_status not in SOURCE_ENTRY_STATUSES:
         raise HTTPException(
             status_code=409,

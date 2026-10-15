@@ -1,18 +1,7 @@
 """
-Ledger read — final (locked) lines for a payroll period.
+Read locked or archived PayrollFinalLines through the operational payroll permission contract.
 
-Extracted from app.payroll.service (Stage B4-9.5) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-This is the row-level Ledger contract: it reads the authoritative
-payroll.payrollfinallines table directly, gated on period status
-(Locked/Archived only) and payroll.view / payroll.entry / payroll.finalize
-permission. It is deliberately NOT the same responsibility as
-app.payroll.finalized_library_read_model, which owns the P6 finalized-library
-evidence/report sections (ledger.view permission, snapshot-provenance
-envelopes, section availability state). Both modules independently read
-payroll.payrollfinallines for their own distinct projections; that is not
-evidence they share ownership.
+This differs from finalized_library_read_model, whose evidence/report sections use ledger.view and snapshot provenance.
 """
 from typing import Any
 
@@ -85,7 +74,7 @@ async def get_final_lines(
             ),
         )
 
-    # ── Payroll read permission — view or finalize role required ───────────────── #
+    # ── Payroll read permission — view, entry, or finalize required ───────────────── #
     await _check_any_permission(
         company_id, user_id, period.branch_id,
         ["payroll.view", "payroll.entry", "payroll.finalize"],
