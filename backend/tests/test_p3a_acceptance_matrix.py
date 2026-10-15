@@ -13,7 +13,9 @@ from app.company_currency import get_company_currency
 from app.payroll import finalized_library_read_model, report_read_model, status_payment_sync
 from app.payroll import rates as rates_service
 from app.payroll.schemas import DriverRateCreate
-from app.settings import service as settings_service
+from app.settings import audit as settings_audit
+from app.settings import company
+from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
 
 
@@ -41,9 +43,9 @@ async def test_each_durable_monetary_state_locks_company_currency(
     async def allow(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(settings_service, "_ensure_company_admin", allow)
-    monkeypatch.setattr(settings_service, "check_branch_access", allow)
-    monkeypatch.setattr(settings_service, "_write_settings_audit", allow)
+    monkeypatch.setattr(settings_security, "ensure_company_admin", allow)
+    monkeypatch.setattr(company, "check_branch_access", allow)
+    monkeypatch.setattr(settings_audit, "write_settings_audit", allow)
 
     async with test_engine.connect() as db:
         tx = await db.begin()
@@ -72,7 +74,7 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 RETURNING payrollperiodid
             """), {"cid": company_id, "bid": branch_id, "code": f"P3AP_{marker}"})).scalar_one())
             rate_type_id = int((await db.execute(text("SELECT ratetypeid FROM payroll.ratetypes ORDER BY ratetypeid LIMIT 1"))).scalar_one())
-            await settings_service.update_company_profile(
+            await company.update_company_profile(
                 company_id, 1, CompanyUpdate(company_name="P3a acceptance", currency_code="USD"), db,
             )
 
@@ -143,14 +145,14 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 """), params)).scalar_one())
 
             with pytest.raises(HTTPException) as blocked:
-                await settings_service.update_company_profile(
+                await company.update_company_profile(
                     company_id, 1, CompanyUpdate(company_name="P3a acceptance", currency_code="EUR"), db,
                 )
             assert blocked.value.detail["code"] == "COMPANY_CURRENCY_CHANGE_BLOCKED"
             if cleanup_sql is not None:
                 await db.execute(text(cleanup_sql), {"id": row_id, "uid": 1})
                 with pytest.raises(HTTPException) as still_blocked:
-                    await settings_service.update_company_profile(
+                    await company.update_company_profile(
                         company_id, 1, CompanyUpdate(company_name="P3a acceptance", currency_code="EUR"), db,
                     )
                 assert still_blocked.value.detail["code"] == "COMPANY_CURRENCY_CHANGE_BLOCKED"
@@ -163,7 +165,7 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
     async def allow(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(settings_service, "check_branch_access", allow)
+    monkeypatch.setattr(company, "check_branch_access", allow)
     async with test_engine.connect() as db:
         tx = await db.begin()
         try:
@@ -175,7 +177,7 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
             period_id = int((await db.execute(text("INSERT INTO payroll.payrollperiods(companyid,branchid,status,periodcode,periodname,periodtype,startdate,enddate) VALUES (:c,:b,'Open',:p,'P3a invalid','Week',DATE '2099-01-01',DATE '2099-01-07') RETURNING payrollperiodid"), {"c": cid, "b": bid, "p": f"P3AIP_{marker}"})).scalar_one())
             await db.execute(text("INSERT INTO payroll.payrolldraftlines(companyid,branchid,payrollperiodid,driverid,workdate,linetype,rateamount,sourcetype,sourceid) VALUES (:c,:b,:p,:d,DATE '2099-01-01','OTHER',10,'P3a',:s)"), {"c":cid,"b":bid,"p":period_id,"d":did,"s":marker})
             with pytest.raises(HTTPException) as profile_error:
-                await settings_service.get_company_profile(cid, 1, db)
+                await company.get_company_profile(cid, 1, db)
             assert profile_error.value.detail["code"] == "COMPANY_CURRENCY_INVARIANT_VIOLATION"
             with pytest.raises(HTTPException) as read_error:
                 await get_company_currency(cid, db)

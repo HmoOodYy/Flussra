@@ -258,7 +258,7 @@ async def cp2d2_src_col_id(
     session_db_conn: AsyncConnection,
 ) -> int:
     """Return the default STATUS_PAY StatusRateColumn for the PAYTEST branch."""
-    # The default should be seeded by _ensure_default_status_rate_column_for_branch
+    # The default should be seeded by status_rate_columns.ensure_default_status_rate_column_for_branch
     # (called from create_branch) or by the migration seed. Try DB first.
     existing = (await session_db_conn.execute(
         _text("""
