@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
 from app.access.policy import require_non_driver_subject
 from app.compensation.audit import write_audit
 from app.compensation.branch_config import activate_for_requesting_branch
@@ -40,7 +41,6 @@ from app.compensation.schemas import (
     PayDefinitionSummary,
     RateComponentSummary,
 )
-from app.core.service import _check_branch_access
 from app.rate_definition_concurrency import lock_rate_definition_structure
 
 GOVERNANCE_SCHEMA_VERSION = 1
@@ -125,7 +125,7 @@ async def _insert_event(
 async def _require_visible_branch(
     company_id: int, user_id: int, branch_id: int, db: AsyncConnection,
 ) -> None:
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise compensation_error(
             "BRANCH_ACCESS_DENIED",
@@ -168,7 +168,7 @@ async def list_requests(
     status_filter: str | None = None, branch_id: int | None = None,
 ) -> list[PayDefinitionRequestSummary]:
     await require_non_driver_subject(company_id, user_id, db)
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     where = ["r.companyid = :cid"]
     params: dict = {"cid": company_id}
     if not can_see_all:

@@ -9,7 +9,9 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _build_in_clause, _check_any_permission, _require_not_driver_role
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
+from app.db.sql import build_in_clause
 from app.payroll.period_read import get_period_by_id
 
 # ---------------------------------------------------------------------------
@@ -74,7 +76,7 @@ async def _lifecycle_eligible_driver_ids(
     """Return Drivers whose current lifecycle windows still allow new source."""
     if not driver_ids:
         return set()
-    in_clause, in_params = _build_in_clause(driver_ids, "lifecycle_driver")
+    in_clause, in_params = build_in_clause(driver_ids, "lifecycle_driver")
     result = await db.execute(
         text(f"""
             SELECT d.DriverID
@@ -587,7 +589,7 @@ async def get_period_eligible_drivers(
     payroll.view OR payroll.entry permission is required.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
@@ -598,7 +600,7 @@ async def get_period_eligible_drivers(
             detail="Period eligible drivers are not available for Prepared (Draft) periods.",
         )
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
 

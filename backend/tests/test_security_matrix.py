@@ -431,7 +431,7 @@ class TestSecurityMatrix:
         """Driver role + SpecificBranch is blocked from period list.
 
         This is the critical gap: _get_driver_self_own_driver_id missed DRIVER+SpecificBranch.
-        _require_not_driver_role catches it by checking rolecode='DRIVER'.
+        require_non_driver_subject catches it by checking rolecode='DRIVER'.
         """
         tok = await _make_driver_self_user(
             session_client, auth_token, sm_driver_role_id, sm_hq_id
@@ -1000,7 +1000,7 @@ class TestSecurityMatrix:
 
 class TestDriverSelfGenericDenial:
     """
-    Verify that _require_not_driver_role catches legacy sec.userbranchroles rows
+    Verify that require_non_driver_subject catches legacy sec.userbranchroles rows
     where companyroleId IS NULL and scopetype = 'Self'.
 
     These rows cannot be created via the API (the API always sets a companyroleId),

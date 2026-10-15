@@ -44,19 +44,15 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_any_permission, check_permission, has_any_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import (
     frozen_currency,
     lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
-from app.core.service import (
-    _build_in_clause,
-    _check_any_permission,
-    _check_branch_access,
-    _check_permission,
-    _has_any_permission,
-    _require_not_driver_role,
-)
+from app.db.sql import build_in_clause
 from app.payroll.audit_evidence import (
     capture_period_audit_evidence,
     link_audit_evidence_to_snapshot,
@@ -345,14 +341,14 @@ async def _require_review_read_access(
     user_id: int,
     branch_id: int,
 ) -> None:
-    await _require_not_driver_role(company_id, user_id, db)
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this branch.",
         )
-    await _check_any_permission(company_id, user_id, branch_id, _REVIEW_READ_PERMISSIONS, db)
+    await check_any_permission(company_id, user_id, branch_id, _REVIEW_READ_PERMISSIONS, db)
 
 
 # ---------------------------------------------------------------------------
@@ -380,18 +376,18 @@ async def get_review_items(
     not see until finalization.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     # ── Review read permission — any payroll or review-decide role required ───── #
     _REVIEW_READ_PERMS = ["payroll.view", "payroll.entry", "payroll.finalize", "review.decide"]
     if can_see_all:
-        await _check_any_permission(company_id, user_id, None, _REVIEW_READ_PERMS, db)
+        await check_any_permission(company_id, user_id, None, _REVIEW_READ_PERMS, db)
     else:
         permitted_branches = [
             bid for bid in branch_ids
-            if await _has_any_permission(company_id, user_id, bid, _REVIEW_READ_PERMS, db)
+            if await has_any_permission(company_id, user_id, bid, _REVIEW_READ_PERMS, db)
         ]
         if not permitted_branches:
             raise HTTPException(
@@ -420,7 +416,7 @@ async def get_review_items(
     elif not can_see_all:
         if not branch_ids:
             return []  # user has no branch access at all
-        in_clause, in_params = _build_in_clause(branch_ids, "bid")
+        in_clause, in_params = build_in_clause(branch_ids, "bid")
         filters.append(f"m.branchid IN ({in_clause})")
         params.update(in_params)
 
@@ -454,7 +450,7 @@ async def get_review_item_by_id(
     Enforces branch access. DRIVER/Self users are blocked (CP-6 security).
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     result = await db.execute(
         text(f"""
@@ -473,7 +469,7 @@ async def get_review_item_by_id(
         )
 
     # Branch access check.
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and row["branchid"] not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -481,7 +477,7 @@ async def get_review_item_by_id(
         )
 
     # ── Review read permission gate ──────────────────────────────────────────── #
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, row["branchid"],
         ["payroll.view", "payroll.entry", "payroll.finalize", "review.decide"],
         db,
@@ -643,7 +639,7 @@ async def create_review_item(
     the decide_review_item() write-back against any InReview period.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # Block manual creation of PeriodApproval items.
     if data.request_type == "PeriodApproval":
@@ -658,7 +654,7 @@ async def create_review_item(
         )
 
     # Branch access check.
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and data.branch_id not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -680,7 +676,7 @@ async def create_review_item(
         )
 
     # Permission gate: creating a review item requires payroll.entry.
-    await _check_permission(company_id, user_id, data.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, data.branch_id, "payroll.entry", db)
 
     result = await db.execute(
         text("""
@@ -756,7 +752,7 @@ async def decide_review_item(
     Raises 422 if the item is already in a terminal status (not Pending / EditRequested).
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # CP-1D: For PeriodApproval substantive decisions, the branch advisory lock must
     # be acquired AFTER auth checks but BEFORE the FOR UPDATE row lock.
@@ -789,7 +785,7 @@ async def decide_review_item(
     _pre_branch_id = int(_pre_row["branchid"])
 
     # Step 2: Branch access check (uses pre-read branchid, no lock held).
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and _pre_branch_id not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -798,7 +794,7 @@ async def decide_review_item(
 
     # Step 3: Permission check (uses pre-read branchid, no lock held).
     # Comments skip the branch lock below but still require review.decide.
-    await _check_permission(company_id, user_id, _pre_branch_id, "review.decide", db)
+    await check_permission(company_id, user_id, _pre_branch_id, "review.decide", db)
 
     approval_currency = None
     if _pre_row.get("requesttype") == "PeriodApproval" and data.decision == "Approved":
@@ -1059,9 +1055,9 @@ async def decide_review_item(
     #   - entity_schema / entity_name match exactly
     # These checks prevent a forged or historical review item from writing back
     # to an unrelated period.
-    # Driver-role block (belt-and-suspenders — _require_not_driver_role at the
+    # Driver-role block (belt-and-suspenders — require_non_driver_subject at the
     # top of decide_review_item already covers this, but kept explicit here).
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     if data.decision != "Comment" and row.get("requesttype") == "PeriodApproval":
         # The linked immutable packet was validated before the decision write.

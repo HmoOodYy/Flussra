@@ -38,8 +38,9 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import CompanyCurrency, get_company_currency
-from app.core.service import _check_any_permission, _require_not_driver_role
 from app.payroll.definition_calculation import CalculationStatus
 from app.payroll.eligibility import _period_has_driver_eligibility_snapshot
 from app.payroll.immutable_evidence import capture_snapshot_used_rate_definitions
@@ -811,7 +812,7 @@ async def get_calculation_preview(
         CalculationPreviewResponse,
     )
 
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status not in ENTRY_ALLOWED_STATUSES:
         raise HTTPException(
@@ -821,7 +822,7 @@ async def get_calculation_preview(
                 f"Current status: '{period.status}'."
             ),
         )
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
     )
     packet = await _build_live_calculation_packet(period, company_id, db)

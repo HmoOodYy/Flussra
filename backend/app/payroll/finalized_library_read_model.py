@@ -11,13 +11,11 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency
-from app.core.service import (
-    _build_in_clause,
-    _check_branch_access,
-    _check_permission,
-    _require_not_driver_role,
-)
+from app.db.sql import build_in_clause
 from app.payroll import report_read_model, status_evidence
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 from app.payroll.evidence_gate import require_target_payroll_evidence
@@ -73,7 +71,7 @@ async def _approved_currencies(periods: list[dict[str, Any]], db: AsyncConnectio
     if not periods:
         return {}
     period_ids = [int(period["period_id"]) for period in periods]
-    period_clause, period_params = _build_in_clause(period_ids, "currency_period")
+    period_clause, period_params = build_in_clause(period_ids, "currency_period")
     final_rows = (await db.execute(text(f"""
         SELECT payrollperiodid AS period_id,
                COUNT(*) AS row_count,
@@ -89,7 +87,7 @@ async def _approved_currencies(periods: list[dict[str, Any]], db: AsyncConnectio
     missing_ids = [period_id for period_id in period_ids if period_id not in by_final_period]
     approved_by_period: dict[int, Any] = {}
     if missing_ids:
-        missing_clause, missing_params = _build_in_clause(missing_ids, "approved_currency_period")
+        missing_clause, missing_params = build_in_clause(missing_ids, "approved_currency_period")
         approved_rows = (await db.execute(text(f"""
             SELECT s.payrollperiodid AS period_id,
                    COUNT(*) AS row_count,
@@ -136,8 +134,8 @@ async def list_finalized_periods(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """List only finalized periods visible through the ledger permission."""
-    await _require_not_driver_role(company_id, user_id, db)
-    can_see_all, accessible_branch_ids = await _check_branch_access(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
+    can_see_all, accessible_branch_ids = await check_branch_access(company_id, user_id, db)
 
     if period_status is not None and period_status not in _FINALIZED_STATUSES:
         raise HTTPException(
@@ -164,7 +162,7 @@ async def list_finalized_periods(
     if not candidate_branch_ids:
         raise HTTPException(status_code=403, detail="No accessible branch for finalized payroll.")
 
-    candidate_clause, candidate_params = _build_in_clause(candidate_branch_ids, "candidate_branch")
+    candidate_clause, candidate_params = build_in_clause(candidate_branch_ids, "candidate_branch")
     permission_rows = (await db.execute(text(f"""
         SELECT b.branchid
         FROM core.branches b
@@ -186,7 +184,7 @@ async def list_finalized_periods(
             detail="You do not have ledger.view permission on an accessible branch.",
         )
 
-    branch_clause, branch_params = _build_in_clause(permitted_branch_ids, "finalized_branch")
+    branch_clause, branch_params = build_in_clause(permitted_branch_ids, "finalized_branch")
     conditions = [
         "p.companyid = :company_id",
         f"p.branchid IN ({branch_clause})",
@@ -231,7 +229,7 @@ async def _period_context(
     *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
 ) -> dict[str, Any]:
     """Authorize a finalized-library request before loading child data."""
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     row = (await db.execute(text("""
         SELECT p.payrollperiodid, p.companyid, p.branchid, p.status, p.periodcode,
                p.periodname, p.periodtype, p.startdate, p.enddate, p.lockedatutc,
@@ -242,10 +240,10 @@ async def _period_context(
     """), {"period_id": period_id, "company_id": company_id})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Payroll period not found.")
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and int(row["branchid"]) not in branch_ids:
         raise HTTPException(status_code=403, detail="Access denied to this period's branch.")
-    await _check_permission(company_id, user_id, int(row["branchid"]), "ledger.view", db)
+    await check_permission(company_id, user_id, int(row["branchid"]), "ledger.view", db)
     if str(row["status"]) not in _FINALIZED_STATUSES:
         raise _unavailable(
             "FINALIZED_LIBRARY_UNAVAILABLE",
@@ -1043,7 +1041,7 @@ async def build_finalized_audit(
     """Build P6D's lazy immutable change chronology and revision grouping."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
     require_target_payroll_evidence()
-    await _check_permission(company_id, user_id, int(period["branchid"]), "ledger.audit.view", db)
+    await check_permission(company_id, user_id, int(period["branchid"]), "ledger.audit.view", db)
     snapshot, provenance = await _originating_snapshot(period, db)
     availability = await _audit_domain_availability(period, db)
 

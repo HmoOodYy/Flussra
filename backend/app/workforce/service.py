@@ -9,7 +9,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_branch_access, _check_permission
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
 from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 from app.workforce.projection import (
@@ -80,7 +81,7 @@ async def _require_branch_write(
     branch_id: int,
     db: AsyncConnection,
 ) -> None:
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(status_code=403, detail="Access denied to the target branch.")
     result = await db.execute(
@@ -89,7 +90,7 @@ async def _require_branch_write(
     )
     if result.first() is None:
         raise HTTPException(status_code=422, detail="Branch does not belong to this company.")
-    await _check_permission(company_id, user_id, branch_id, "employees.manage", db)
+    await check_permission(company_id, user_id, branch_id, "employees.manage", db)
 
 
 async def _readable_employee_branches(
@@ -98,15 +99,15 @@ async def _readable_employee_branches(
     db: AsyncConnection,
     branch_id: int | None,
 ) -> tuple[bool, list[int]]:
-    can_see_all, accessible = await _check_branch_access(company_id, user_id, db)
+    can_see_all, accessible = await check_branch_access(company_id, user_id, db)
     if branch_id is not None:
         if not can_see_all and branch_id not in accessible:
             raise HTTPException(status_code=403, detail="Access denied to the requested branch.")
-        await _check_permission(company_id, user_id, branch_id, "employees.view", db)
+        await check_permission(company_id, user_id, branch_id, "employees.view", db)
         return can_see_all, [branch_id]
 
     if can_see_all:
-        await _check_permission(company_id, user_id, None, "employees.view", db)
+        await check_permission(company_id, user_id, None, "employees.view", db)
         return True, []
 
     permitted: list[int] = []
@@ -282,7 +283,7 @@ async def get_employee(
     if require_view:
         await _readable_employee_branches(company_id, user_id, db, visible_branch)
     else:
-        can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+        can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
         if not can_see_all and visible_branch not in branch_ids:
             raise HTTPException(status_code=403, detail="Access denied to the Employee branch.")
     await sync_employee_branch_projection(company_id, employee_id, business_date, db)

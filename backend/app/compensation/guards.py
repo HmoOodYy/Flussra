@@ -8,9 +8,9 @@ Every guard denies DRIVER/Self subjects through the shared permission helpers.
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission, check_permission
 from app.access.policy import require_non_driver_subject
 from app.compensation.errors import compensation_error
-from app.core.service import _check_any_permission, _check_permission
 
 _DEFINITION_EDIT = "payitems.edit"
 _DEFINITION_READ = ["payitems.view", "payitems.edit", "settings.manage", "setup.manage"]
@@ -22,32 +22,32 @@ async def require_definition_branch_edit(
     company_id: int, user_id: int, branch_id: int, db: AsyncConnection,
 ) -> None:
     """Branch-scoped request actions: draft, edit, submit and copy."""
-    await _check_permission(company_id, user_id, branch_id, _DEFINITION_EDIT, db)
+    await check_permission(company_id, user_id, branch_id, _DEFINITION_EDIT, db)
 
 
 async def require_definition_company_edit(
     company_id: int, user_id: int, db: AsyncConnection,
 ) -> None:
     """Company-wide actions: decide and direct creation (AllCompanyBranches scope)."""
-    await _check_permission(company_id, user_id, None, _DEFINITION_EDIT, db)
+    await check_permission(company_id, user_id, None, _DEFINITION_EDIT, db)
 
 
 async def require_definition_company_read(
     company_id: int, user_id: int, db: AsyncConnection,
 ) -> None:
-    await _check_any_permission(company_id, user_id, None, _DEFINITION_READ, db)
+    await check_any_permission(company_id, user_id, None, _DEFINITION_READ, db)
 
 
 async def require_rate_edit(
     company_id: int, user_id: int, branch_id: int, db: AsyncConnection,
 ) -> None:
-    await _check_any_permission(company_id, user_id, branch_id, _RATE_EDIT, db)
+    await check_any_permission(company_id, user_id, branch_id, _RATE_EDIT, db)
 
 
 async def require_rate_read(
     company_id: int, user_id: int, branch_id: int, db: AsyncConnection,
 ) -> None:
-    await _check_any_permission(company_id, user_id, branch_id, _RATE_READ, db)
+    await check_any_permission(company_id, user_id, branch_id, _RATE_READ, db)
 
 
 async def load_company_driver_branch(

@@ -22,8 +22,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
 from app.payroll.evidence_gate import require_target_payroll_evidence
@@ -150,7 +151,7 @@ async def change_period_status(
     # Action-level permission gate: each transition requires a specific code.
     required_perm = _TRANSITION_PERMISSIONS.get((existing.status, change.status))
     if required_perm:
-        await _check_permission(company_id, user_id, existing.branch_id, required_perm, db)
+        await check_permission(company_id, user_id, existing.branch_id, required_perm, db)
 
     # P4c gate: submitting freezes target calculation evidence, which does not exist yet.
     # Refuse before any lock, snapshot, review item or status transition.
@@ -679,7 +680,7 @@ async def resubmit_period(
     await _set_submit_transaction_isolation(db)
 
     # ── Step 1: DRIVER/Self guard ────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # ── Step 2: load period (access check) ───────────────────────────────── #
     existing = await get_period_by_id(company_id, user_id, period_id, db)
@@ -696,7 +697,7 @@ async def resubmit_period(
         )
 
     # Permission gate: resubmission requires payroll.entry.
-    await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
 
     # P4c gate: resubmitting freezes target calculation evidence, which does not exist
     # yet. Refuse before any lock, snapshot, review item or status transition.

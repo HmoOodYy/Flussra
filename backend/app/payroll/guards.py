@@ -7,8 +7,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
-from app.core.service import _check_any_permission
 
 
 async def _require_non_driver_rate_subject(
@@ -78,8 +78,8 @@ async def _check_driver_read_access(
 
     Returns the driver's branch_id on success.
 
-    Note: explicit _check_branch_access is not called separately because
-    _check_any_permission with the driver's actual branch_id is sufficient
+    Note: explicit check_branch_access is not called separately because
+    check_any_permission with the driver's actual branch_id is sufficient
     to enforce branch scope (fn_UserHasPermission returns FALSE for
     SpecificBranch users on a different branch).
     """
@@ -92,7 +92,7 @@ async def _check_driver_read_access(
     if drv_row is None:
         raise HTTPException(status_code=404, detail="Driver not found.")
     branch_id: int = drv_row["branchid"]
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )

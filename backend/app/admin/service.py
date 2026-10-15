@@ -14,6 +14,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
 from app.admin.schemas import (
     CompanyRole,
@@ -38,7 +40,6 @@ from app.admin.schemas import (
     UserUpdate,
 )
 from app.auth.security import hash_password
-from app.core.service import _check_any_permission, _check_branch_access
 from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 
@@ -2764,7 +2765,7 @@ async def get_user_driver_info(
     """
     await require_non_driver_subject(company_id, caller_user_id, db)
     # Rule 1 — permission gate
-    await _check_any_permission(
+    await check_any_permission(
         company_id, caller_user_id, None,
         ["users.view", "payrates.view", "payrates.edit", "settings.manage", "setup.manage"],
         db,
@@ -2799,8 +2800,8 @@ async def get_user_driver_info(
 
     # Rule 3 — SpecificBranch scope: verify caller can see the driver's branch
     if row["branchid"] is not None:
-        # _check_branch_access returns (can_see_all, branch_ids)
-        can_see_all, caller_branches = await _check_branch_access(company_id, caller_user_id, db)
+        # check_branch_access returns (can_see_all, branch_ids)
+        can_see_all, caller_branches = await check_branch_access(company_id, caller_user_id, db)
         if not can_see_all and row["branchid"] not in caller_branches:
             raise HTTPException(
                 status_code=403,

@@ -20,12 +20,13 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import (
     frozen_currency,
     lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
-from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
@@ -288,11 +289,11 @@ async def _project_approved_snapshot_final_lines(
 
 async def finalize_period(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> PeriodSummary:
     """Project the exact approved immutable packet into FinalLines and lock the period."""
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
     # P4c gate: finalizing projects frozen target calculation evidence, which does not
     # exist yet. Refuse before any lock, claim or financial write.
     require_target_payroll_evidence()
@@ -348,11 +349,11 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
         FinalizationPreviewResponse,
         FinalizationPreviewSysAdjustment,
     )
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Finalization preview requires an Approved period. Current status: '{period.status}'.")
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
     require_target_payroll_evidence()
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db)
     _reconcile_approved_snapshot_packet(packet)

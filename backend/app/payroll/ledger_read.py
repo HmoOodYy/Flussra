@@ -9,7 +9,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_any_permission, _require_not_driver_role
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import FinalLineSummary
 
@@ -59,7 +60,7 @@ async def get_final_lines(
     Period must be Locked or Archived; draft data is never exposed via this path.
     """
     # ── Driver-role hard-block (Ledger is not the Driver Screen) ────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
@@ -75,7 +76,7 @@ async def get_final_lines(
         )
 
     # ── Payroll read permission — view, entry, or finalize required ───────────────── #
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id,
         ["payroll.view", "payroll.entry", "payroll.finalize"],
         db,

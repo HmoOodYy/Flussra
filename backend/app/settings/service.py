@@ -17,17 +17,15 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_concurrency import lock_company_for_mutation
 from app.company_currency import (
     company_has_durable_monetary_state,
     currency_error,
 )
-from app.core.service import (
-    _build_in_clause,
-    _check_branch_access,
-    _check_permission,
-    _require_not_driver_role,
-)
+from app.db.sql import build_in_clause
 from app.payroll_setup import boundaries
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.locks import lock_company, lock_setups
@@ -150,20 +148,20 @@ async def _ensure_company_admin(
     ``setup.manage`` permission.
 
     Two gates:
-      1. Scope gate — _check_branch_access raises 403 if no access at all;
+      1. Scope gate — check_branch_access raises 403 if no access at all;
          then we verify the scope is company-wide, not just a single branch.
-      2. Permission gate — _check_permission verifies setup.manage is granted.
+      2. Permission gate — check_permission verifies setup.manage is granted.
          branch_id=None means only AllCompanyBranches assignments are matched,
          so SpecificBranch users cannot satisfy this even if they somehow pass
          gate 1 (they won't, but the defense-in-depth is intentional).
     """
-    can_see_all, _ = await _check_branch_access(company_id, user_id, db)
+    can_see_all, _ = await check_branch_access(company_id, user_id, db)
     if not can_see_all:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This action requires company-level (all-branches) access.",
         )
-    await _check_permission(company_id, user_id, None, "setup.manage", db)
+    await check_permission(company_id, user_id, None, "setup.manage", db)
 
 
 async def _ensure_branch_creator(
@@ -171,13 +169,13 @@ async def _ensure_branch_creator(
     *, with_payroll_start: bool, with_default: bool,
 ) -> None:
     """branches.create (company-wide, non-driver); payroll_setup.assign when a first payroll start date is sent; settings-admin (setup.manage via _ensure_company_admin) when the new branch is to become the Company default."""
-    can_see_all, _ = await _check_branch_access(company_id, user_id, db)
+    can_see_all, _ = await check_branch_access(company_id, user_id, db)
     if not can_see_all:
         raise HTTPException(status_code=403, detail="This action requires company-level (all-branches) access.")
-    await _require_not_driver_role(company_id, user_id, db)
-    await _check_permission(company_id, user_id, None, "branches.create", db)
+    await require_non_driver_subject(company_id, user_id, db)
+    await check_permission(company_id, user_id, None, "branches.create", db)
     if with_payroll_start:
-        await _check_permission(company_id, user_id, None, "payroll_setup.assign", db)
+        await check_permission(company_id, user_id, None, "payroll_setup.assign", db)
     if with_default:
         await _ensure_company_admin(company_id, user_id, db)
 
@@ -191,14 +189,14 @@ async def _attach_readiness_reasons(
     if not branches:
         return
     try:
-        await _require_not_driver_role(company_id, user_id, db)
+        await require_non_driver_subject(company_id, user_id, db)
     except HTTPException as exc:
         if exc.status_code == 403:
             return
         raise
     for branch in branches:
         try:
-            await _check_permission(company_id, user_id, branch.branch_id, "payroll.view", db)
+            await check_permission(company_id, user_id, branch.branch_id, "payroll.view", db)
         except HTTPException as exc:
             if exc.status_code == 403:
                 continue
@@ -266,7 +264,7 @@ async def _fetch_branch_metrics(
     if not branch_ids:
         return {}
 
-    in_clause, in_params = _build_in_clause(branch_ids, "bid")
+    in_clause, in_params = build_in_clause(branch_ids, "bid")
     base: dict = {"cid": company_id, **in_params}
     result: dict[int, dict] = {}
 
@@ -408,7 +406,7 @@ async def get_company_profile(
     Any authenticated user in the company can read this.
     """
     # Verifies the user has at least some access to this company.
-    await _check_branch_access(company_id, user_id, db)
+    await check_branch_access(company_id, user_id, db)
 
     result = await db.execute(
         text("""
@@ -608,7 +606,7 @@ async def get_branches(
 
     Company admins see all branches; branch-scoped users see only their own.
     """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     filters = ["companyid = :cid"]
     params: dict = {"cid": company_id}
@@ -616,7 +614,7 @@ async def get_branches(
     if not can_see_all:
         if not branch_ids:
             return []
-        in_clause, in_params = _build_in_clause(branch_ids, "bid")
+        in_clause, in_params = build_in_clause(branch_ids, "bid")
         filters.append(f"branchid IN ({in_clause})")
         params.update(in_params)
 
@@ -648,7 +646,7 @@ async def get_branch_by_id(
     db: AsyncConnection,
 ) -> BranchAdmin:
     """Fetch a single branch with metrics. Enforces branch-level access."""
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1204,7 +1202,7 @@ async def get_status_keys(
     By default returns only active keys; pass include_inactive=True for all.
     Any authenticated user with branch access can read this.
     """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1666,7 +1664,7 @@ async def list_status_rate_columns(
     active_only: bool = True,
 ) -> list[StatusRateColumn]:
     """Return all StatusRateColumns for a branch.  Enforces branch-level access."""
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

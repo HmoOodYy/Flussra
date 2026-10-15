@@ -52,7 +52,7 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
         return None
 
     monkeypatch.setattr(settings_service, "_ensure_company_admin", allow)
-    monkeypatch.setattr(settings_service, "_check_branch_access", allow)
+    monkeypatch.setattr(settings_service, "check_branch_access", allow)
     monkeypatch.setattr(settings_service, "_write_settings_audit", allow)
 
     async with test_engine.connect() as db:

@@ -7,12 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import (
-    _build_in_clause,
-    _check_branch_access,
-    _has_any_permission,
-    _require_not_driver_role,
-)
+from app.access.branch_access import check_branch_access
+from app.access.permissions import has_any_permission
+from app.access.policy import require_non_driver_subject
+from app.db.sql import build_in_clause
 from app.payroll import off_drivers, period_calculation
 from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
@@ -131,7 +129,7 @@ async def _period_metrics(
     # a financial total. Every source must be inside the period bounds. CP-2E
     # periods are additionally filtered through the canonical snapshotted
     # driver-date helper below; the SQL conditions are the legacy day-grid path.
-    in_clause, in_params = _build_in_clause(sorted(eligible_ids), "driver")
+    in_clause, in_params = build_in_clause(sorted(eligible_ids), "driver")
     legacy_date_eligibility = ""
     if snapshot_rows is None:
         legacy_date_eligibility = """
@@ -630,9 +628,9 @@ async def get_current_workflow(
     db: AsyncConnection,
 ) -> CurrentWorkflowResponse:
     # Security: deny generic workflow access to any DRIVER subject.
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
-    can_see_all, allowed_branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, allowed_branch_ids = await check_branch_access(company_id, user_id, db)
 
     # If a specific branch was requested, verify it's accessible
     if branch_id is not None:
@@ -667,7 +665,7 @@ async def get_current_workflow(
             {"cid": company_id},
         )).mappings().all()
     else:
-        in_clause, in_params = _build_in_clause(target_branch_ids, "bid")
+        in_clause, in_params = build_in_clause(target_branch_ids, "bid")
         branch_rows = (await db.execute(
             text(f"""
                 SELECT b.branchid, b.branchname
@@ -694,14 +692,14 @@ async def get_current_workflow(
     # We verify per-branch below when building capabilities, but first ensure user has any access
     any_read = False
     for bid in branch_id_list:
-        if await _has_any_permission(company_id, user_id, bid, _WF_READ_PERMS, db):
+        if await has_any_permission(company_id, user_id, bid, _WF_READ_PERMS, db):
             any_read = True
             break
     if not any_read:
         raise HTTPException(status_code=403, detail="No payroll read permission on any accessible branch.")
 
     # Load all active workflow periods for these branches in one query
-    in_clause2, in_params2 = _build_in_clause(branch_id_list, "bid")
+    in_clause2, in_params2 = build_in_clause(branch_id_list, "bid")
     period_rows = (await db.execute(
         text(f"""
             SELECT payrollperiodid, branchid, periodcode, periodname, periodtype,
@@ -768,7 +766,7 @@ async def get_current_workflow(
         active_periods = periods_by_branch.get(bid, [])
 
         # Per-branch permission checks
-        b_view = await _has_any_permission(company_id, user_id, bid, _WF_READ_PERMS, db)
+        b_view = await has_any_permission(company_id, user_id, bid, _WF_READ_PERMS, db)
         if not b_view:
             # Include branch in response but with denied view capability
             branch_entry = BranchWorkflowEntry(
@@ -787,10 +785,10 @@ async def get_current_workflow(
             result_branches.append(branch_entry)
             continue
 
-        has_view = await _has_any_permission(company_id, user_id, bid, ["payroll.view"], db)
-        has_entry = await _has_any_permission(company_id, user_id, bid, ["payroll.entry"], db)
-        has_finalize = await _has_any_permission(company_id, user_id, bid, ["payroll.finalize"], db)
-        has_period_create = await _has_any_permission(company_id, user_id, bid, ["payroll.period.create"], db)
+        has_view = await has_any_permission(company_id, user_id, bid, ["payroll.view"], db)
+        has_entry = await has_any_permission(company_id, user_id, bid, ["payroll.entry"], db)
+        has_finalize = await has_any_permission(company_id, user_id, bid, ["payroll.finalize"], db)
+        has_period_create = await has_any_permission(company_id, user_id, bid, ["payroll.period.create"], db)
 
         entry = _build_branch_entry(
             branch_id=bid,

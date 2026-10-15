@@ -14,8 +14,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_any_permission
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import _build_in_clause, _check_any_permission, _check_branch_access
+from app.db.sql import build_in_clause
 from app.payroll.guards import (
     _check_driver_read_access,
     _check_not_in_finalized_period,
@@ -648,12 +650,12 @@ async def get_rates(
     offset: int = 0,
 ) -> list[DriverRateSummary]:
     await _require_non_driver_rate_subject(company_id, user_id, db)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     conditions: list[str] = ["dr.companyid = :company_id"]
     params: dict[str, Any] = {"company_id": company_id}
@@ -670,7 +672,7 @@ async def get_rates(
     elif not can_see_all:
         if not branch_ids:
             return []
-        in_clause, in_params = _build_in_clause(branch_ids, "rb")
+        in_clause, in_params = build_in_clause(branch_ids, "rb")
         conditions.append(f"dr.branchid IN ({in_clause})")
         params.update(in_params)
 
@@ -709,7 +711,7 @@ async def get_rate_by_id(
     db: AsyncConnection,
 ) -> DriverRateSummary:
     await _require_non_driver_rate_subject(company_id, user_id, db)
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     rate = await _get_rate_with_tiers(rate_id, company_id, db)
     if not can_see_all and rate.branch_id not in branch_ids:
         raise HTTPException(
@@ -717,7 +719,7 @@ async def get_rate_by_id(
             detail="Access denied to this rate's branch.",
         )
     # Permission gate: reading a rate requires payrates.view or payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -745,7 +747,7 @@ async def create_rate(
     # Reject DRIVER/Self before resolving the target driver or branch.
     await _require_non_driver_rate_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     # Resolve driver â†’ branch
     drv_result = await db.execute(
@@ -764,7 +766,7 @@ async def create_rate(
         )
 
     # Permission gate: creating a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -943,7 +945,7 @@ async def update_rate(
         )
 
     # Permission gate: editing a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1305,7 +1307,7 @@ async def approve_rate(
         )
 
     # Step 1.3 â€” permission gate: approving a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1485,7 +1487,7 @@ async def void_rate(
         )
 
     # Permission gate: voiding a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1616,7 +1618,7 @@ async def resolve_rate_for_date(
     if drv_lookup_row is None:
         # Driver not in this company â€” return None without revealing existence via 403.
         # Permission check still runs (with None branch_id) to gate unauthenticated calls.
-        await _check_any_permission(
+        await check_any_permission(
             company_id, user_id, None,
             ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
         )
@@ -1625,13 +1627,13 @@ async def resolve_rate_for_date(
     driver_branch_id: int = drv_lookup_row["branchid"]
 
     # Step 2 — generic permission gate on the driver's branch.
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
 
     # Step 3 â€” branch-scope gate
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and driver_branch_id not in branch_ids:
         raise HTTPException(
             status_code=403,
@@ -1705,7 +1707,7 @@ async def get_driver_rate_matrix(
     branch_id: int = drv_row["branchid"]
 
     # Permission gate â€” requires payrates.view, payrates.edit, settings.manage, or setup.manage
-    await _check_any_permission(
+    await check_any_permission(
         company_id=company_id,
         user_id=user_id,
         branch_id=branch_id,
@@ -1866,7 +1868,7 @@ async def batch_save_rates(
         seen_rt_ids.add(change.rate_type_id)
 
     # Step 2 â€” driver lookup + branch check
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     drv_result = await db.execute(
         text("""
@@ -1884,7 +1886,7 @@ async def batch_save_rates(
         raise HTTPException(status_code=403, detail="Access denied to this driver's branch.")
 
     # Step 3 â€” permission gate
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -2279,17 +2281,17 @@ async def get_bulk_driver_rates_summary(
     endpoint for the full count on a selected driver.
     """
     await _require_non_driver_rate_subject(company_id, user_id, db)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
-    can_see_all, allowed_branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, allowed_branch_ids = await check_branch_access(company_id, user_id, db)
     drv_q_parts = ["companyid = :cid"]
     drv_params: dict = {"cid": company_id}
     if not can_see_all:
         if not allowed_branch_ids:
             return []
-        in_clause, extra = _build_in_clause(allowed_branch_ids, "bid")
+        in_clause, extra = build_in_clause(allowed_branch_ids, "bid")
         drv_q_parts.append(f"branchid IN ({in_clause})")
         drv_params.update(extra)
     elif branch_id is not None:
@@ -2305,7 +2307,7 @@ async def get_bulk_driver_rates_summary(
     if not accessible_driver_ids:
         return []
 
-    in_clause2, params2 = _build_in_clause(accessible_driver_ids, "did")
+    in_clause2, params2 = build_in_clause(accessible_driver_ids, "did")
 
     counts_result = await db.execute(
         text(f"""

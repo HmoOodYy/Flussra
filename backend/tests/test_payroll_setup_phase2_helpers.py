@@ -30,9 +30,9 @@ class _Result:
 async def test_policy_permission_requires_all_company_access_before_driver_and_permission():
     db = AsyncMock()
     with (
-        patch("app.payroll_setup.security._check_branch_access", new_callable=AsyncMock) as access,
-        patch("app.payroll_setup.security._require_not_driver_role", new_callable=AsyncMock) as driver,
-        patch("app.payroll_setup.security._check_permission", new_callable=AsyncMock) as permission,
+        patch("app.payroll_setup.security.check_branch_access", new_callable=AsyncMock) as access,
+        patch("app.payroll_setup.security.require_non_driver_subject", new_callable=AsyncMock) as driver,
+        patch("app.payroll_setup.security.check_permission", new_callable=AsyncMock) as permission,
     ):
         access.return_value = (True, [])
         await require_policy_permission(3, 8, "payroll_setup.manage", db)
@@ -45,9 +45,9 @@ async def test_policy_permission_requires_all_company_access_before_driver_and_p
 async def test_policy_permission_rejects_branch_scoped_access():
     db = AsyncMock()
     with (
-        patch("app.payroll_setup.security._check_branch_access", new_callable=AsyncMock) as access,
-        patch("app.payroll_setup.security._require_not_driver_role", new_callable=AsyncMock) as driver,
-        patch("app.payroll_setup.security._check_permission", new_callable=AsyncMock) as permission,
+        patch("app.payroll_setup.security.check_branch_access", new_callable=AsyncMock) as access,
+        patch("app.payroll_setup.security.require_non_driver_subject", new_callable=AsyncMock) as driver,
+        patch("app.payroll_setup.security.check_permission", new_callable=AsyncMock) as permission,
     ):
         access.return_value = (False, [11])
         with pytest.raises(HTTPException) as error:

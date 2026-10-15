@@ -42,7 +42,7 @@ async def test_each_durable_monetary_state_locks_company_currency(
         return None
 
     monkeypatch.setattr(settings_service, "_ensure_company_admin", allow)
-    monkeypatch.setattr(settings_service, "_check_branch_access", allow)
+    monkeypatch.setattr(settings_service, "check_branch_access", allow)
     monkeypatch.setattr(settings_service, "_write_settings_audit", allow)
 
     async with test_engine.connect() as db:
@@ -163,7 +163,7 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
     async def allow(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(settings_service, "_check_branch_access", allow)
+    monkeypatch.setattr(settings_service, "check_branch_access", allow)
     async with test_engine.connect() as db:
         tx = await db.begin()
         try:

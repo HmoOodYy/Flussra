@@ -2,7 +2,7 @@
 Dashboard service — read-only aggregation queries for GET /dashboard.
 
 Permission model (Dashboard D1):
-  - DRIVER/Self users are blocked (calls _require_not_driver_role).
+  - DRIVER/Self users are blocked (calls require_non_driver_subject).
   - Any non-driver user with at least one relevant permission on at least one
     accessible branch may call GET /dashboard.
   - The response is divided into sections. Each section is included only when
@@ -31,11 +31,9 @@ from fastapi import status as http_status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import (
-    _check_branch_access,
-    _has_any_permission,
-    _require_not_driver_role,
-)
+from app.access.branch_access import check_branch_access
+from app.access.permissions import has_any_permission
+from app.access.policy import require_non_driver_subject
 from app.dashboard.schemas import (
     ApprovedPeriodItem,
     BranchPeriodSummary,
@@ -86,10 +84,10 @@ async def get_dashboard_summary(
     """Compute and return a permission-aware dashboard snapshot."""
 
     # 1. Block DRIVER accounts from the operational dashboard.
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # 2. Resolve base branch scope.
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     scope = "AllCompanyBranches" if can_see_all else "Branch"
 
     # 3. Determine per-section access.
@@ -342,12 +340,12 @@ async def _get_section_branches(
         → (False, [])          if none
     """
     if can_see_all:
-        has_perm = await _has_any_permission(company_id, user_id, None, perm_codes, db)
+        has_perm = await has_any_permission(company_id, user_id, None, perm_codes, db)
         return (True, []) if has_perm else (False, [])
 
     permitted: list[int] = []
     for bid in branch_ids:
-        if await _has_any_permission(company_id, user_id, bid, perm_codes, db):
+        if await has_any_permission(company_id, user_id, bid, perm_codes, db):
             permitted.append(bid)
     return False, permitted
 

@@ -224,7 +224,7 @@ _SEED_STMTS = [
     """,
     # PAYROLL_VIEWER_CO: non-driver read-only role for branch_user; grants payroll.view
     # so tests can verify that viewers can read but not write operational payroll data.
-    # Must NOT be rolecode='DRIVER' so _require_not_driver_role passes.
+    # Must NOT be rolecode='DRIVER' so require_non_driver_subject passes.
     """
     INSERT INTO sec.companyroles
         (companyid, rolecode, rolename, rolelevel, isdefault, isprotected, iscustom, isactive)
@@ -259,7 +259,7 @@ _SEED_STMTS = [
     """,
     # Branch-limited read-only test user: SpecificBranch scope to HQ only,
     # PAYROLL_VIEWER global role (no write permissions) + PAYROLL_VIEWER_CO company role
-    # (grants payroll.view only — NOT DRIVER so _require_not_driver_role passes).
+    # (grants payroll.view only — NOT DRIVER so require_non_driver_subject passes).
     # Password is the same as admin ("TestPass123!") — only the role and scope differ.
     """
     INSERT INTO sec.users (companyid, username, displayname, passwordhash, isactive, canlogin)

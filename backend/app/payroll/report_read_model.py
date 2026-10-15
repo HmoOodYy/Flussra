@@ -15,8 +15,10 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency, get_company_currency
-from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
 from app.payroll import period_calculation, status_evidence
 from app.payroll.evidence_gate import evidence_not_ready
 from app.payroll.period_definitions import list_period_definition_rows
@@ -73,7 +75,7 @@ async def _period_context(
     *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
 ) -> dict[str, Any]:
     """Authorize reports without requiring operational ``payroll.view``."""
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     row = (await db.execute(text("""
         SELECT p.payrollperiodid, p.companyid, p.branchid, p.status, p.periodcode,
                p.periodname, p.periodtype, p.startdate, p.enddate, b.branchname
@@ -83,10 +85,10 @@ async def _period_context(
     """), {"period_id": period_id, "company_id": company_id})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Payroll period not found.")
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and int(row["branchid"]) not in branch_ids:
         raise HTTPException(status_code=403, detail="Access denied to this period's branch.")
-    await _check_permission(company_id, user_id, int(row["branchid"]), "reports.view", db)
+    await check_permission(company_id, user_id, int(row["branchid"]), "reports.view", db)
     return dict(row)
 
 

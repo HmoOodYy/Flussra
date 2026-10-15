@@ -20,13 +20,11 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.branch_compensation_config_concurrency import lock_branch_compensation_config
 from app.config import get_settings
-from app.core.service import (
-    _check_branch_access,
-    _check_permission,
-    _require_not_driver_role,
-)
 from app.payroll.audit_evidence import initialize_period_audit_evidence_coverage
 from app.payroll.definition_calculation import is_method_operational
 from app.payroll.eligibility import _create_period_driver_eligibility_rows
@@ -626,13 +624,13 @@ async def get_period_candidates(
     db: AsyncConnection,
 ) -> CandidatePreviewResponse:
     # Security checks
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(status_code=403, detail="Access denied to the requested branch.")
 
-    await _check_permission(company_id, user_id, branch_id, "payroll.period.create", db)
+    await check_permission(company_id, user_id, branch_id, "payroll.period.create", db)
 
     # Validate mode
     if mode not in ("OPEN_CREATION", "PREPARED_CREATION"):
@@ -776,13 +774,13 @@ async def create_period_from_candidate(
     db: AsyncConnection,
 ) -> PeriodCreationResponse:
     # Security checks
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise HTTPException(status_code=403, detail="Access denied to the requested branch.")
 
-    await _check_permission(company_id, user_id, branch_id, "payroll.period.create", db)
+    await check_permission(company_id, user_id, branch_id, "payroll.period.create", db)
 
     # Decode and verify candidate key
     payload, candidate_hash = _decode_candidate_key(data.candidate_key)

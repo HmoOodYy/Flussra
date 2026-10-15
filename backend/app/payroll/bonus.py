@@ -15,13 +15,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission, check_permission, has_any_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import (
-    _check_any_permission,
-    _check_permission,
-    _has_any_permission,
-    _require_not_driver_role,
-)
 from app.payroll.audit_evidence import capture_period_audit_evidence
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_period_via_snapshot,
@@ -113,9 +109,9 @@ async def list_bonus_events(
     *,
     driver_id: int | None = None,
 ) -> list[BonusEventResponse]:
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.view", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.view", db)
 
     params: dict = {"period_id": period_id, "company_id": company_id}
     driver_filter = ""
@@ -241,7 +237,7 @@ async def create_bonus_event(
     data: "BonusEventCreate",
     db: AsyncConnection,
 ) -> BonusEventResponse:
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
@@ -253,7 +249,7 @@ async def create_bonus_event(
             ),
         )
 
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     # CP-3A: snapshot-aware period eligibility guard.
     await _assert_driver_eligible_for_period_via_snapshot(
@@ -325,7 +321,7 @@ async def update_bonus_event(
     data: "BonusEventUpdate",
     db: AsyncConnection,
 ) -> BonusEventResponse:
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
@@ -337,7 +333,7 @@ async def update_bonus_event(
             ),
         )
 
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     event = await _get_bonus_event_by_id(bonus_event_id, company_id, db)
     if event.period_id != period_id:
@@ -475,7 +471,7 @@ async def void_bonus_event(
     user_id: int,
     db: AsyncConnection,
 ) -> BonusEventResponse:
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
@@ -487,7 +483,7 @@ async def void_bonus_event(
             ),
         )
 
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     event = await _get_bonus_event_by_id(bonus_event_id, company_id, db)
     if event.period_id != period_id:
@@ -647,9 +643,9 @@ async def apply_bonus_batch(
     Returns (response, is_new): is_new=True for a fresh apply (HTTP 201),
     False for an idempotent replay (HTTP 200).
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     branch_id = period.branch_id
     payload = _bonus_batch_canonical_payload(data.expected_bonus_data_revision, data.items)
@@ -960,7 +956,7 @@ async def get_bonus_summary(
     events for drivers not in the snapshot never expand the roster.  Periods
     without a CP-2E marker get a controlled 422 (no live-roster fallback).
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     # Draft (Prepared) periods have no financial exposure — same rule as the
@@ -971,7 +967,7 @@ async def get_bonus_summary(
             detail="Bonus summary is not available for Prepared (Draft) periods.",
         )
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
 
@@ -1064,7 +1060,7 @@ async def get_bonus_summary(
     period_reason_codes: list[str] = []
     if period.status not in _BONUS_ENTRY_ALLOWED_STATUSES:
         period_reason_codes.append("status_read_only")
-    has_entry = await _has_any_permission(
+    has_entry = await has_any_permission(
         company_id, user_id, period.branch_id, ["payroll.entry"], db
     )
     if not has_entry:
