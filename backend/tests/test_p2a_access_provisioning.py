@@ -326,12 +326,12 @@ async def test_normal_creation_is_atomic_and_creates_access_assignment_only(clie
 
 @pytest.mark.asyncio
 async def test_admin_workforce_audit_failure_rolls_back_account(monkeypatch, client, auth_token, db_conn):
-    from app.admin import service as admin_service
+    from app.admin import audit as admin_audit
 
     async def fail_audit(*args, **kwargs):
         raise RuntimeError("audit test failure")
 
-    monkeypatch.setattr(admin_service, "_write_admin_audit", fail_audit)
+    monkeypatch.setattr(admin_audit, "write_admin_audit", fail_audit)
     payload = user_payload()
     transport = httpx.ASGITransport(app=client._transport.app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as isolated:
@@ -478,7 +478,7 @@ async def test_archived_company_role_rejected_by_all_access_assignment_surfaces(
 
 @pytest.mark.asyncio
 async def test_role_archive_waits_for_inflight_provision_assignment(monkeypatch, client, auth_token, db_conn):
-    from app.admin import service as admin_service
+    from app.admin import assignment_validation
 
     created_role = await client.post("/admin/company-roles", json={"role_name": "P2a Concurrent Role"}, headers=auth(auth_token))
     assert created_role.status_code == 201, created_role.text
@@ -487,7 +487,7 @@ async def test_role_archive_waits_for_inflight_provision_assignment(monkeypatch,
 
     validation_complete = asyncio.Event()
     allow_assignment_to_continue = asyncio.Event()
-    original_validation = admin_service._validate_p2a_assignment
+    original_validation = assignment_validation.validate_company_role_assignment
 
     async def pause_after_validation(company_id, employee_id, assignment, connection):
         result = await original_validation(company_id, employee_id, assignment, connection)
@@ -496,7 +496,7 @@ async def test_role_archive_waits_for_inflight_provision_assignment(monkeypatch,
             await asyncio.wait_for(allow_assignment_to_continue.wait(), timeout=5)
         return result
 
-    monkeypatch.setattr(admin_service, "_validate_p2a_assignment", pause_after_validation)
+    monkeypatch.setattr(assignment_validation, "validate_company_role_assignment", pause_after_validation)
     assignment_task = asyncio.create_task(provision(client, auth_token, staged["user_id"], role_id))
     await asyncio.wait_for(validation_complete.wait(), timeout=5)
     archive_task = asyncio.create_task(client.delete(f"/admin/company-roles/{role_id}", headers=auth(auth_token)))
@@ -661,18 +661,18 @@ async def test_disabled_final_owner_is_staged_by_owner_transfer(client, auth_tok
 
 @pytest.mark.asyncio
 async def test_provision_audit_failure_rolls_back_assignment_and_account_state(monkeypatch, client, auth_token, db_conn):
-    from app.admin import service as admin_service
+    from app.admin import audit as admin_audit
 
     staged = await staged_user(client, auth_token)
     role_id = await company_role(client, auth_token, "PAYROLL_VIEWER_CO")
-    original_writer = admin_service._write_admin_audit
+    original_writer = admin_audit.write_admin_audit
 
     async def fail_provision_audit(*args, **kwargs):
         if kwargs.get("action_code") == "USER_PROVISIONED":
             raise RuntimeError("provision audit failure")
         await original_writer(*args, **kwargs)
 
-    monkeypatch.setattr(admin_service, "_write_admin_audit", fail_provision_audit)
+    monkeypatch.setattr(admin_audit, "write_admin_audit", fail_provision_audit)
     transport = httpx.ASGITransport(app=client._transport.app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as isolated:
         response = await provision(isolated, auth_token, staged["user_id"], role_id, can_login=True)

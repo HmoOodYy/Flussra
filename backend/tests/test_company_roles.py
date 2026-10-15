@@ -405,21 +405,21 @@ class TestRoleRename:
 
     @pytest.mark.asyncio
     async def test_rename_audit_log_written(self, client, auth_token):
-        """_write_admin_audit must be called with COMPANY_ROLE_UPDATED on a successful rename."""
+        """write_admin_audit must be called with COMPANY_ROLE_UPDATED on a successful rename."""
         from unittest.mock import patch
 
-        import app.admin.service as admin_service
+        from app.admin import audit as admin_audit
 
         role = await self._create_role(client, auth_token, "Audit Rename Role")
         audit_calls = []
 
-        original = admin_service._write_admin_audit
+        original = admin_audit.write_admin_audit
 
         async def _capture(*args, **kwargs):
             audit_calls.append(kwargs)
             return await original(*args, **kwargs)
 
-        with patch.object(admin_service, "_write_admin_audit", _capture):
+        with patch.object(admin_audit, "write_admin_audit", _capture):
             resp = await client.patch(
                 f"/admin/company-roles/{role['company_role_id']}",
                 json={"role_name": "Audit Rename Role v2"},
@@ -644,20 +644,20 @@ class TestRoleArchive:
 
     @pytest.mark.asyncio
     async def test_archive_audit_log_written(self, client, auth_token):
-        """_write_admin_audit must be called with COMPANY_ROLE_ARCHIVED on archive."""
+        """write_admin_audit must be called with COMPANY_ROLE_ARCHIVED on archive."""
         from unittest.mock import patch
 
-        import app.admin.service as admin_service
+        from app.admin import audit as admin_audit
 
         role = await self._create_role(client, auth_token, "Audit Archive Role")
         audit_calls = []
-        original = admin_service._write_admin_audit
+        original = admin_audit.write_admin_audit
 
         async def _capture(*args, **kwargs):
             audit_calls.append(kwargs)
             return await original(*args, **kwargs)
 
-        with patch.object(admin_service, "_write_admin_audit", _capture):
+        with patch.object(admin_audit, "write_admin_audit", _capture):
             await client.delete(
                 f"/admin/company-roles/{role['company_role_id']}",
                 headers=auth_headers(auth_token),
@@ -1128,7 +1128,7 @@ class TestPermissionFunctionNewPath:
     @pytest.mark.asyncio
     async def test_admin_can_access_admin_endpoints(self, client, auth_token):
         """
-        All admin endpoints call _ensure_admin() which calls fn_UserHasPermission.
+        User reads retain Admin scope and permission checks backed by fn_UserHasPermission.
         If the new path works, admin user can list users.
         """
         resp = await client.get("/admin/users", headers=auth_headers(auth_token))

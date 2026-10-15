@@ -38,7 +38,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from app.admin import service as admin_service
+from app.admin import audit as admin_audit
 
 
 def auth(token: str) -> dict[str, str]:
@@ -1089,7 +1089,7 @@ class TestAdminAudit:
         auth_token: str,
     ):
         """
-        If _write_admin_audit raises during create_user(), the INSERT into
+        If write_admin_audit raises during create_user(), the INSERT into
         sec.users must roll back.  The username must not exist afterwards.
         """
         unique_name = "audit_rollback_user"
@@ -1097,7 +1097,7 @@ class TestAdminAudit:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on create_user")
 
-        with patch.object(admin_service, "_write_admin_audit", _raise):
+        with patch.object(admin_audit, "write_admin_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on create_user"):
                 await client.post(
                     "/admin/users",
@@ -1126,7 +1126,7 @@ class TestAdminAudit:
         target_user_id: int,
     ):
         """
-        If _write_admin_audit raises during assign_role(), the INSERT into
+        If write_admin_audit raises during assign_role(), the INSERT into
         sec.userbranchroles must roll back.
         """
         # Get a role to assign
@@ -1150,7 +1150,7 @@ class TestAdminAudit:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on assign_role")
 
-        with patch.object(admin_service, "_write_admin_audit", _raise):
+        with patch.object(admin_audit, "write_admin_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on assign_role"):
                 await client.post(
                     f"/admin/users/{target_user_id}/roles",

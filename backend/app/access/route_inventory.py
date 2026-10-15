@@ -16,7 +16,7 @@ class RouteAuthorization:
 
 
 ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
-    'POST /admin/company-owner/transfer': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.service.transfer_company_owner', 'COMPANY', 'DENY', None, None),
+    'POST /admin/company-owner/transfer': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.owner_transfer.transfer_company_owner', 'COMPANY', 'DENY', None, None),
     'GET /admin/company-roles': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'POST /admin/company-roles': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'DELETE /admin/company-roles/{role_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
@@ -28,9 +28,9 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /admin/permissions': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'users.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/roles': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/users': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
-    'POST /admin/users': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.service.create_user', 'COMPANY', 'DENY', None, None),
+    'POST /admin/users': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.users.create_user', 'COMPANY', 'DENY', None, None),
     'GET /admin/users/{user_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
-    'PATCH /admin/users/{user_id}': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.service.update_user', 'COMPANY', 'DENY', None, None),
+    'PATCH /admin/users/{user_id}': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.users.update_user', 'COMPANY', 'DENY', None, None),
     'POST /admin/users/{user_id}/company-role-assignments': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.edit', 'roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'DELETE /admin/users/{user_id}/company-role-assignments/{assignment_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.edit', 'roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/users/{user_id}/driver': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.view', 'payrates.view', 'payrates.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
