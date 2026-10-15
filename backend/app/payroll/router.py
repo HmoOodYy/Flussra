@@ -28,6 +28,7 @@ from app.payroll import (
     period_creation,
     period_lifecycle,
     period_read,
+    rate_reads,
     rates,
     report_read_model,
     source_line_read,
@@ -667,7 +668,7 @@ async def list_rate_types(
     db: DbDep,
     include_inactive: bool = Query(False, description="Include inactive rate types"),
 ) -> list[RateTypeSummary]:
-    return await rates.get_rate_types(
+    return await rate_reads.get_rate_types(
         company_id=int(token["cid"]),
         db=db,
         active_only=not include_inactive,
@@ -692,7 +693,7 @@ async def list_rates(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[DriverRateSummary]:
-    return await rates.get_rates(
+    return await rate_reads.get_rates(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -724,7 +725,7 @@ async def lookup_rate_for_date(
     rate_type_id: int = Query(..., description="Rate type to look up"),
     work_date: date = Query(..., description="Work date (YYYY-MM-DD)"),
 ) -> RateLookupResult:
-    rate = await rates.resolve_rate_for_date(
+    rate = await rate_reads.resolve_rate_for_date(
         driver_id=driver_id,
         rate_type_id=rate_type_id,
         work_date=work_date,
@@ -755,7 +756,7 @@ async def get_rate(
     token: TokenDep,
     db: DbDep,
 ) -> DriverRateSummary:
-    return await rates.get_rate_by_id(
+    return await rate_reads.get_rate_by_id(
         rate_id=rate_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -879,7 +880,7 @@ async def get_driver_rate_matrix(
 ) -> DriverRateMatrix:
     from datetime import date as _date
     effective_date = as_of if as_of is not None else _date.today()
-    return await rates.get_driver_rate_matrix(
+    return await rate_reads.get_driver_rate_matrix(
         driver_id=driver_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -962,7 +963,7 @@ async def get_driver_rates_summary(
     token: TokenDep,
     db: DbDep,
 ) -> DriverRatesSummary:
-    return await rates.get_driver_rates_summary(
+    return await rate_reads.get_driver_rates_summary(
         driver_id=driver_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -991,7 +992,7 @@ async def list_driver_rates_pending(
     token: TokenDep,
     db: DbDep,
 ) -> list[DriverRateSummary]:
-    return await rates.get_driver_rates_pending(
+    return await rate_reads.get_driver_rates_pending(
         driver_id=driver_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1021,7 +1022,7 @@ async def list_driver_rates_history(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[DriverRateSummary]:
-    return await rates.get_driver_rates_history(
+    return await rate_reads.get_driver_rates_history(
         driver_id=driver_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -1058,7 +1059,7 @@ async def get_bulk_driver_rates_summary(
     db: DbDep,
     branch_id: int | None = Query(None, description="Optional branch filter for AllCompanyBranches users"),
 ) -> list[DriverRatesSummary]:
-    return await rates.get_bulk_driver_rates_summary(
+    return await rate_reads.get_bulk_driver_rates_summary(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,

@@ -1,6 +1,5 @@
 """Canonical non-transfer Employee and Driver-profile mutation owner."""
 
-import json
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -11,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
+from app.workforce import audit as workforce_audit
 from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 from app.workforce.projection import (
@@ -28,51 +28,6 @@ from app.workforce.schemas import (
     EmployeeUpdate,
     UserSummary,
 )
-
-_AUDIT_REASONS = {
-    "EMPLOYEE_CREATED": "Workforce Employee created",
-    "EMPLOYEE_UPDATED": "Workforce Employee updated",
-    "DRIVER_PROFILE_CREATED": "Workforce Driver profile created",
-    "DRIVER_PROFILE_UPDATED": "Workforce Driver profile updated",
-    "DRIVER_TRANSFER_COMPLETED": "Workforce Driver transfer completed",
-    "DRIVER_EMPLOYEE_TERMINATED": "Workforce Driver Employee terminated",
-}
-
-
-async def _write_workforce_audit(
-    db: AsyncConnection,
-    *,
-    company_id: int,
-    branch_id: int,
-    actor_user_id: int,
-    action_code: str,
-    entity_name: str,
-    entity_id: int,
-    old_value: dict[str, Any] | None = None,
-    new_value: dict[str, Any] | None = None,
-) -> None:
-    """Write Workforce audit evidence in the caller's transaction."""
-    await db.execute(
-        text("""
-            INSERT INTO audit.AuditLog
-                (CompanyID, BranchID, ActorUserID, ActionCode, EntitySchema,
-                 EntityName, EntityID, OldValueJson, NewValueJson, Reason, SourceType)
-            VALUES
-                (:company_id, :branch_id, :actor_id, :action_code, 'core',
-                 :entity_name, :entity_id, :old_value, :new_value, :reason, 'Application')
-        """),
-        {
-            "company_id": company_id,
-            "branch_id": branch_id,
-            "actor_id": actor_user_id,
-            "action_code": action_code,
-            "entity_name": entity_name,
-            "entity_id": str(entity_id),
-            "old_value": json.dumps(old_value, default=str) if old_value is not None else None,
-            "new_value": json.dumps(new_value, default=str) if new_value is not None else None,
-            "reason": _AUDIT_REASONS[action_code],
-        },
-    )
 
 
 async def _require_branch_write(
@@ -413,7 +368,7 @@ async def _insert_driver_profile(
         },
     )
     driver_id = result.scalar_one()
-    await _write_workforce_audit(
+    await workforce_audit.write_workforce_audit(
         db, company_id=company_id, branch_id=branch_id, actor_user_id=actor_user_id,
         action_code="DRIVER_PROFILE_CREATED", entity_name="Drivers", entity_id=driver_id,
         new_value={"employee_id": employee_id, "branch_id": branch_id,
@@ -430,7 +385,7 @@ async def create_employee(
 ) -> EmployeeDetail:
     try:
         employee_id, employee_key = await _insert_employee(company_id, user_id, data, db)
-        await _write_workforce_audit(
+        await workforce_audit.write_workforce_audit(
             db, company_id=company_id, branch_id=data.branch_id, actor_user_id=user_id,
             action_code="EMPLOYEE_CREATED", entity_name="Employees", entity_id=employee_id,
             new_value={"full_name": data.full_name, "branch_id": data.branch_id,
@@ -599,7 +554,7 @@ async def update_employee(
             text(f"UPDATE core.Employees SET {', '.join(assignments)}, UpdatedAtUtc = NOW() WHERE EmployeeID = :employee_id AND CompanyID = :company_id"),
             params,
         )
-        await _write_workforce_audit(
+        await workforce_audit.write_workforce_audit(
             db, company_id=company_id, branch_id=target_branch, actor_user_id=user_id,
             action_code="EMPLOYEE_UPDATED", entity_name="Employees", entity_id=employee_id,
             old_value={k: old_values.get(columns[k]) for k in new_values}, new_value=new_values,
@@ -860,7 +815,7 @@ async def terminate_driver_employee(
     if data.termination_date <= business_date:
         await sync_employee_branch_projection(company_id, employee_id, data.termination_date, db)
 
-    await _write_workforce_audit(
+    await workforce_audit.write_workforce_audit(
         db,
         company_id=company_id,
         branch_id=branch_id,
@@ -965,7 +920,7 @@ async def update_driver_profile(
             await db.execute(text(f"UPDATE core.Drivers SET {', '.join(assignments)}, UpdatedAtUtc = NOW() WHERE DriverID = :driver_id AND CompanyID = :company_id"), params)
         except IntegrityError as exc:
             raise _conflict_from_integrity(exc) from exc
-        await _write_workforce_audit(
+        await workforce_audit.write_workforce_audit(
             db, company_id=company_id, branch_id=old["branchid"], actor_user_id=user_id,
             action_code="DRIVER_PROFILE_UPDATED", entity_name="Drivers", entity_id=driver_id,
             old_value=old_values, new_value=new_values,

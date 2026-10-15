@@ -51,10 +51,10 @@ from app.transfer.schemas import (
     TargetDecisionRequest,
     TransferListResponse,
 )
+from app.workforce import audit as workforce_audit
 from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 from app.workforce.projection import sync_employee_branch_projection
-from app.workforce.service import _write_workforce_audit
 
 log = logging.getLogger(__name__)
 
@@ -814,7 +814,7 @@ async def complete_driver_transfer(
         company_id, employee_id, today, db,
     )
     projection_changed = new_employee_branch != old_employee_branch
-    await _write_workforce_audit(
+    await workforce_audit.write_workforce_audit(
         db,
         company_id=company_id,
         branch_id=row["sourcebranchid"],

@@ -53,12 +53,12 @@ from app.company_currency import (
     require_matching_snapshot_currency,
 )
 from app.db.sql import build_in_clause
+from app.payroll import period_audit
 from app.payroll.audit_evidence import (
     capture_period_audit_evidence,
     link_audit_evidence_to_snapshot,
 )
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
-from app.payroll.period_lifecycle import _write_period_status_audit
 from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
@@ -1150,7 +1150,7 @@ async def decide_review_item(
             )
 
         # Write the period status-change audit entry (same transaction).
-        await _write_period_status_audit(
+        await period_audit.write_period_status_audit(
             db,
             company_id=company_id,
             branch_id=int(period_row["branchid"]),

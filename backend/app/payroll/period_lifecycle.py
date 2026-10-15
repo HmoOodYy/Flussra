@@ -1,5 +1,5 @@
 """
-Period transitions, submit/resubmit orchestration, and period-status audit.
+Period transitions and submit/resubmit orchestration.
 
 Target submission and resubmission remain refused by the evidence gate.
 Retained submission logic consumes Calculation and Status Payment operations;
@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
+from app.payroll import period_audit
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
 from app.payroll.evidence_gate import require_target_payroll_evidence
@@ -39,7 +40,7 @@ from app.payroll.status_payment_sync import _refresh_status_payment_lines
 from app.payroll.workflow_lock import _acquire_branch_workflow_lock
 
 # ---------------------------------------------------------------------------
-# Period status-change: permission gates and audit
+# Period status-change permission gates
 # ---------------------------------------------------------------------------
 
 # Each (from_status, to_status) pair maps to the permission code the caller
@@ -60,56 +61,6 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     #   Approved exits only via POST /finalize (→ Locked).
     ("Locked",   "Archived"):   "payroll.finalize",
 }
-
-
-_PERIOD_AUDIT_REASONS: dict[str, str] = {
-    "PERIOD_STATUS_CHANGED": "Payroll period status changed",
-}
-
-
-async def _write_period_status_audit(
-    db: AsyncConnection,
-    *,
-    company_id: int,
-    branch_id: int,
-    user_id: int,
-    period_id: int,
-    old_status: str,
-    new_status: str,
-    extra: dict | None = None,
-) -> None:
-    """
-    Insert one row into audit.AuditLog for a period status-change event.
-
-    Module-level so tests can monkeypatch it to verify that the preceding
-    UPDATE rolls back when this raises.
-
-    extra: optional additional fields merged into newvaluejson (e.g. trigger context).
-    """
-    new_val_dict: dict = {"status": new_status}
-    if extra:
-        new_val_dict.update(extra)
-    await db.execute(
-        text("""
-            INSERT INTO audit.auditlog
-                (companyid, branchid, actoruserid, actioncode,
-                 entityschema, entityname, entityid,
-                 oldvaluejson, newvaluejson, reason, sourcetype)
-            VALUES
-                (:cid, :bid, :uid, 'PERIOD_STATUS_CHANGED',
-                 'payroll', 'PayrollPeriods', :eid,
-                 :old_val, :new_val, :reason, 'Application')
-        """),
-        {
-            "cid":     company_id,
-            "bid":     branch_id,
-            "uid":     user_id,
-            "eid":     str(period_id),
-            "old_val": json.dumps({"status": old_status}),
-            "new_val": json.dumps(new_val_dict),
-            "reason":  _PERIOD_AUDIT_REASONS["PERIOD_STATUS_CHANGED"],
-        },
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +461,7 @@ async def change_period_status(
                         "Transaction rolled back. Please refresh and try again."
                     ),
                 )
-            await _write_period_status_audit(
+            await period_audit.write_period_status_audit(
                 db,
                 company_id=company_id,
                 branch_id=existing.branch_id,
@@ -581,7 +532,7 @@ async def change_period_status(
             )
 
     # Audit: write inside the same transaction so a failure rolls back the UPDATE.
-    await _write_period_status_audit(
+    await period_audit.write_period_status_audit(
         db,
         company_id=company_id,
         branch_id=existing.branch_id,
@@ -919,7 +870,7 @@ async def resubmit_period(
         )
 
     # ── Step 7: period status audit ──────────────────────────────────────── #
-    await _write_period_status_audit(
+    await period_audit.write_period_status_audit(
         db,
         company_id=company_id,
         branch_id=existing.branch_id,
