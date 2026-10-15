@@ -27,7 +27,7 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from app.settings import audit as settings_audit
-from app.settings import service as settings_service
+from app.settings import branches
 
 
 def auth(token: str) -> dict[str, str]:
@@ -585,7 +585,7 @@ class TestCreateBranch:
         )
         assert pre.status_code == 201, f"Seed branch failed: {pre.text}"
 
-        with patch.object(settings_service, "_generate_branch_code", _patched_gen):
+        with patch.object(branches, "_generate_branch_code", _patched_gen):
             resp = await client.post(
                 "/settings/branches",
                 json={"branch_name": "Retry Success Branch"},
@@ -616,7 +616,7 @@ class TestCreateBranch:
         )
         assert pre.status_code == 201, f"Seed branch failed: {pre.text}"
 
-        with patch.object(settings_service, "_generate_branch_code", lambda: always_same_code):
+        with patch.object(branches, "_generate_branch_code", lambda: always_same_code):
             resp = await client.post(
                 "/settings/branches",
                 json={"branch_name": "Should Exhaust Retries Branch"},

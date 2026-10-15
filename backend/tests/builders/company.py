@@ -2,8 +2,8 @@
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.settings.branches import create_branch as create_branch_service
 from app.settings.schemas import BranchCreate
-from app.settings.service import create_branch as create_branch_service
 
 
 async def create_branch(

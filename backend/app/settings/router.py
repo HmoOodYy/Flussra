@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
-from app.settings import company, service, status_keys, status_rate_columns
+from app.settings import branch_reads, branches, company, status_keys, status_rate_columns
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
@@ -128,7 +128,7 @@ async def list_branches(
     token: TokenDep,
     db: DbDep,
 ) -> list[BranchAdmin]:
-    return await service.get_branches(
+    return await branch_reads.get_branches(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -161,7 +161,7 @@ async def get_onboarding_options(
     db: DbDep,
     around: date | None = Query(None, description="Reference date; defaults to company-local today"),
 ) -> OnboardingOptionsResponse:
-    return await service.get_onboarding_options(
+    return await branches.get_onboarding_options(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -183,7 +183,7 @@ async def get_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.get_branch_by_id(
+    return await branch_reads.get_branch_by_id(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -218,7 +218,7 @@ async def create_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.create_branch(
+    return await branches.create_branch(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -249,7 +249,7 @@ async def update_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.update_branch(
+    return await branches.update_branch(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -279,7 +279,7 @@ async def set_default_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.set_default_branch(
+    return await branches.set_default_branch(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
