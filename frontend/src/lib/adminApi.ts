@@ -3,6 +3,9 @@ import apiClient from './apiClient';
 import type {
   CompanyRole,
   CompanyRoleAssignmentCreate,
+  CompanyRoleCreate,
+  CompanyRolePermissions,
+  CompanyRoleUser,
   OwnerTransferRequest,
   OwnerTransferResult,
   Permission,
@@ -62,4 +65,29 @@ export function transferCompanyOwner(payload: OwnerTransferRequest): AxiosPromis
   return apiClient.post<OwnerTransferResult>('/admin/company-owner/transfer', payload);
 }
 
+
+
+export function getCompanyRolePermissions(roleId: number): AxiosPromise<CompanyRolePermissions> {
+  return apiClient.get<CompanyRolePermissions>(`/admin/company-roles/${roleId}/permissions`);
+}
+
+export function updateCompanyRolePermissions(roleId: number, payload: { permission_codes: string[] }): AxiosPromise {
+  return apiClient.put(`/admin/company-roles/${roleId}/permissions`, payload);
+}
+
+export function getCompanyRoleUsers(roleId: number): AxiosPromise<CompanyRoleUser[]> {
+  return apiClient.get<CompanyRoleUser[]>(`/admin/company-roles/${roleId}/users`);
+}
+
+export function createCompanyRole(payload: CompanyRoleCreate): AxiosPromise<CompanyRole> {
+  return apiClient.post<CompanyRole>('/admin/company-roles', payload);
+}
+
+export function renameCompanyRole(roleId: number, payload: { role_name: string }): AxiosPromise<CompanyRole> {
+  return apiClient.patch<CompanyRole>(`/admin/company-roles/${roleId}`, payload);
+}
+
+export function deleteCompanyRole(roleId: number): AxiosPromise {
+  return apiClient.delete(`/admin/company-roles/${roleId}`);
+}
 
