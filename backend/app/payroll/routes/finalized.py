@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Query
 
 from app.payroll import (
+    finalized_audit,
     finalized_library_read_model,
     ledger_read,
 )
@@ -135,7 +136,7 @@ async def get_finalized_audit(
     token: TokenDep,
     db: DbDep,
 ) -> FinalizedAuditResponse:
-    return await finalized_library_read_model.build_finalized_audit(
+    return await finalized_audit.build_finalized_audit(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

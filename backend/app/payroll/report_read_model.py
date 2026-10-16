@@ -1,8 +1,8 @@
 """CP-5C read-only calculation-report model.
 
-This module deliberately delegates lifecycle financial authority to RP-1 and
-only adapts the selected packet into report semantics.  It never recalculates
-financial values or mutates payroll state.
+This module owns the live report read flow and delegates shared report projections
+to report_components. It delegates lifecycle financial authority to RP-1 and never
+recalculates financial values or mutates payroll state.
 """
 from __future__ import annotations
 
@@ -19,39 +19,25 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency, get_company_currency
-from app.payroll import bonus, period_calculation, status_evidence
+from app.payroll import bonus, period_calculation
 from app.payroll.evidence_gate import evidence_not_ready
-from app.payroll.period_definitions import list_period_definition_rows
+from app.payroll.report_components import (
+    aggregate_definition_amounts as _definition_amounts,
+)
+from app.payroll.report_components import (
+    load_financial_definition_columns as _definition_columns,
+)
+from app.payroll.report_components import (
+    load_report_columns as _columns,
+)
+from app.payroll.report_components import (
+    report_error as _unavailable,
+)
+from app.payroll.report_components import (
+    summarize_status_entries as _status_summaries,
+)
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 from app.payroll.schemas import PeriodSummary
-
-
-def _unavailable(code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=422, detail=f"{code}: {message}")
-
-
-def classify_final_line_component(row: Any) -> str:
-    """Map one immutable FinalLine to its canonical financial component.
-
-    Every monetary FinalLine must belong to an explicit canonical owner; an
-    unrecognized source fails closed instead of falling into a catch-all.
-    """
-    if row["linetype"] == "SYS_MIN_TOPUP":
-        return "minimum_adjustment"
-    if row["linetype"] == "SYS_MAX_CAP":
-        return "maximum_adjustment"
-    if row["sourcetype"] == "BonusEvent":
-        return "bonus_total"
-    if row["sourcetype"] == "StatusEntryState":
-        return "status_pay"
-    if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
-        return "daily_pay"
-    raise _unavailable(
-        "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
-        "a FinalLine does not belong to a canonical payroll component "
-        f"(sourcetype={row['sourcetype']!r}, linetype={row['linetype']!r}, "
-        f"linescope={row['linescope']!r}).",
-    )
 
 
 async def _final_lines_currency(company_id: int, period_id: int, db: AsyncConnection):
@@ -90,64 +76,6 @@ async def _period_context(
         raise HTTPException(status_code=403, detail="Access denied to this period's branch.")
     await check_permission(company_id, user_id, int(row["branchid"]), "reports.view", db)
     return dict(row)
-
-
-def _definition_column(row) -> dict[str, Any]:
-    return {
-        "payroll_period_definition_id": int(row["payrollperioddefinitionid"]),
-        "code": row["definitioncodesnapshot"],
-        "label": row["definitionnamesnapshot"],
-        "input_type": row["inputtypesnapshot"],
-        "unit": row["unitsnapshot"],
-        "sort_order": int(row["sortorder"]),
-    }
-
-
-async def _columns(period: dict[str, Any], db: AsyncConnection) -> list[dict[str, Any]]:
-    """The period's frozen definition layout (quantity columns). Zero rows is valid."""
-    rows = await list_period_definition_rows(
-        int(period["payrollperiodid"]), int(period["companyid"]), db)
-    return [_definition_column(row) for row in rows]
-
-
-async def _definition_columns(period: dict[str, Any], db: AsyncConnection) -> list[dict[str, Any]]:
-    """Financial columns: the period's ACTIVE frozen definitions only."""
-    rows = await list_period_definition_rows(
-        int(period["payrollperiodid"]), int(period["companyid"]), db, active_only=True)
-    return [_definition_column(row) for row in rows]
-
-
-def _definition_amounts(
-    lines: list[dict[str, Any]],
-    column_ids: list[int],
-) -> tuple[dict[int, dict[int, Decimal]], dict[int, Decimal]]:
-    """Aggregate live Daily source money by frozen period definition column.
-
-    Only sums already-derived line money. Classification uses `snapshot_source_type`
-    (DraftLine/StatusEntryState/BonusEvent/System). A Daily financial line whose
-    PayrollPeriodDefinitionID is not part of the period's active layout is a
-    data-integrity failure, not something to silently drop.
-    """
-    column_id_set = set(column_ids)
-    per_driver: dict[int, dict[int, Decimal]] = defaultdict(dict)
-    totals: dict[int, Decimal] = {cid: Decimal("0") for cid in column_ids}
-    for line in lines:
-        if line["line_scope"] != "Daily" or line["snapshot_source_type"] != "DraftLine":
-            continue
-        driver_id = int(line["driver_id"])
-        definition_id = line.get("payroll_period_definition_id")
-        if definition_id is None or int(definition_id) not in column_id_set:
-            raise _unavailable(
-                "REPORT_DEFINITION_INTEGRITY_ERROR",
-                "a Daily financial line does not carry a PayrollPeriodDefinitionID within "
-                "the period's active definition layout.",
-            )
-        definition_id = int(definition_id)
-        amount = Decimal(str(line["calculated_amount"])) if line["calculated_amount"] is not None else Decimal("0")
-        bucket = per_driver[driver_id]
-        bucket[definition_id] = bucket.get(definition_id, Decimal("0")) + amount
-        totals[definition_id] += amount
-    return dict(per_driver), totals
 
 
 async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
@@ -196,51 +124,6 @@ async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[di
              "label": r["keyname"], "is_off": bool(r["isoffreason"])} for r in rows]
 
 
-async def _snapshot_evidence(snapshot_id: int, period: dict[str, Any], db: AsyncConnection) -> tuple[bool, int | None, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
-    header = (await db.execute(text("""
-        SELECT reportevidenceversion, reportevidencehash, companyid, branchid, payrollperiodid
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-    """), {"snapshot_id": snapshot_id})).mappings().first()
-    if header is None or (
-        int(header["companyid"]) != int(period["companyid"])
-        or int(header["branchid"]) != int(period["branchid"])
-        or int(header["payrollperiodid"]) != int(period["payrollperiodid"])
-    ):
-        raise _unavailable(
-            "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
-            "the finalization provenance does not identify this payroll period's snapshot.",
-        )
-    version = header["reportevidenceversion"]
-    if version is None:
-        return False, None, None, [], []
-    status_rows = await status_evidence.read_status_entries(
-        db,
-        snapshot_id=snapshot_id,
-        company_id=int(header["companyid"]),
-        branch_id=int(header["branchid"]),
-        period_id=int(header["payrollperiodid"]),
-    )
-    statuses = [{
-        "driver_id": row["driver_id"], "work_date": row["work_date"],
-        "status_key_id": row["status_key_id"], "code": row["status_code"],
-        "label": row["status_label"], "is_off": row["is_off_reason"],
-    } for row in status_rows]
-    bonuses = (await db.execute(text("""
-        SELECT payrollbonuseventid, driverid, amount, reason, notes, datarevision,
-               createdbyuserid, creatordisplaynamesnapshot, createdatutc
-        FROM payroll.payrollcalculationsnapshotbonusevents
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-        ORDER BY driverid, payrollbonuseventid
-    """), {"snapshot_id": snapshot_id})).mappings().all()
-    return True, int(version), str(header["reportevidencehash"]), statuses, [
-        {"bonus_event_id": int(r["payrollbonuseventid"]), "driver_id": int(r["driverid"]),
-         "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
-         "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
-         "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]} for r in bonuses
-    ]
-
-
 async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:
     """Return authoritative financial lines and driver totals; never calculate them here."""
     kind = authority.authority_kind
@@ -261,7 +144,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
         # packet's own totals already use. `snapshot_source_type` is added
         # as a separate, additive classification field (DraftLine /
         # StatusEntryState / BonusEvent / System) for internal aggregation
-        # (see _pay_item_amounts); it does not replace source_type.
+        # (see report_components.aggregate_definition_amounts); it does not replace source_type.
         lines = [
             {
                 "driver_id": line.driver_id,
@@ -294,14 +177,6 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
     # Submitted, approved and final authorities freeze calculation evidence, which target
     # payroll does not have yet. They are refused rather than rebuilt from mutable state.
     raise evidence_not_ready()
-
-
-def _status_summaries(statuses: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
-    grouped: dict[int, dict[tuple[str, str, bool], int]] = defaultdict(lambda: defaultdict(int))
-    for status in statuses:
-        grouped[status["driver_id"]][(status["code"], status["label"], status["is_off"])] += 1
-    return {driver_id: [{"code": key[0], "label": key[1], "is_off": key[2], "count": count}
-                        for key, count in values.items()] for driver_id, values in grouped.items()}
 
 
 def _report_totals(
