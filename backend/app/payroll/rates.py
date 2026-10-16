@@ -19,8 +19,8 @@ from app.access.permissions import check_any_permission
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.payroll import rate_reads
 from app.payroll.guards import (
-    _check_not_in_finalized_period,
     _require_non_driver_rate_subject,
+    check_not_in_finalized_period,
 )
 from app.payroll.schemas import (
     BatchRateRequest,
@@ -1095,7 +1095,7 @@ async def approve_rate(
     # refresh step, ensuring finalamount and SourceSnapshot agree.
     # See the Phase 12 comment in finalize_period for the full race description.
     #
-    # Phase 12B fix: _check_not_in_finalized_period is intentionally moved to AFTER
+    # Phase 12B fix: check_not_in_finalized_period is intentionally moved to AFTER
     # the advisory lock.  Running it before the lock creates a TOCTOU window: the
     # guard reads period status (Approved), this request waits for the lock while
     # finalization claims the period (Locked), and when the lock is finally acquired
@@ -1111,7 +1111,7 @@ async def approve_rate(
     # Step 1.35 â€” Backdating guard (re-run under lock for TOCTOU safety).
     # Block approval when effective_from falls inside a Locked or Archived period.
     # Must run AFTER the advisory lock is held so the period-status read is fresh.
-    await _check_not_in_finalized_period(company_id, rate.branch_id, rate.effective_from, db)
+    await check_not_in_finalized_period(company_id, rate.branch_id, rate.effective_from, db)
 
     # Step 1.5 â€” conflict guard (shared helper).
     # Rejects if any Approved rate starts on or after this rate's effective_from.
@@ -1396,7 +1396,7 @@ async def batch_save_rates(
     # Only relevant when we will auto-approve.  PendingApproval rows created when
     # allow_self_approval=False can be approved later â€” the guard runs at that point.
     if allow_self_approval:
-        await _check_not_in_finalized_period(
+        await check_not_in_finalized_period(
             company_id, driver_branch_id, data.effective_from, db
         )
 

@@ -45,7 +45,7 @@ from app.compensation.schemas import (
     DriverPayRateRow,
     DriverRateSummaryItem,
 )
-from app.payroll.guards import _check_not_in_finalized_period
+from app.payroll.guards import check_not_in_finalized_period
 from app.rate_definition_concurrency import lock_rate_definition_structure
 
 _ASSIGNMENT_COLUMNS = """
@@ -343,7 +343,7 @@ async def approve(
         company_id, user_id, assignment_id, "approved", db)
     await _require_authoring_authority(
         company_id, row["rate_definition_id"], row["branch_id"], row["effective_from"], db)
-    await _check_not_in_finalized_period(
+    await check_not_in_finalized_period(
         company_id, row["branch_id"], row["effective_from"], db, label="rate")
 
     values = await _load_values(assignment_id, row["rate_definition_id"], db)

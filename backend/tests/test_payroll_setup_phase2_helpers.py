@@ -67,7 +67,7 @@ async def test_lock_helpers_sort_and_deduplicate_ids():
     await lock_setups(4, [9, 2, 9], db)
     assert [call.args[1]["sid"] for call in db.execute.await_args_list] == [2, 9]
 
-    with patch("app.payroll_setup.locks._acquire_branch_workflow_lock", new_callable=AsyncMock) as lock:
+    with patch("app.payroll_setup.locks.acquire_branch_workflow_lock", new_callable=AsyncMock) as lock:
         await lock_branches(4, [7, 3, 7], db)
         assert [call.args[1] for call in lock.await_args_list] == [3, 7]
 

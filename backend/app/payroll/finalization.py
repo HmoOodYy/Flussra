@@ -35,7 +35,7 @@ from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
 )
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 if TYPE_CHECKING:
     from app.payroll.schemas import FinalizationPreviewResponse
@@ -298,7 +298,7 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     # exist yet. Refuse before any lock, claim or financial write.
     require_target_payroll_evidence()
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
-    await _acquire_branch_workflow_lock(company_id, period.branch_id, db)
+    await acquire_branch_workflow_lock(company_id, period.branch_id, db)
     locked = (await db.execute(text("""
         SELECT payrollperiodid FROM payroll.payrollperiods
         WHERE payrollperiodid = :period_id AND companyid = :cid AND branchid = :bid AND status = 'Approved'

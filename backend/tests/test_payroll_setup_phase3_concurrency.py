@@ -21,7 +21,7 @@ from app.payroll.period_creation import (
     get_period_candidates,
 )
 from app.payroll.schemas import PeriodCreationRequest
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.payroll_policy import (
     assign_setup,
@@ -298,7 +298,7 @@ async def test_policy_mutation_and_candidate_confirmation_obey_lock_order(
         async with db.engine.connect() as confirm_conn:
             confirm_tx = await confirm_conn.begin()
             await _set_lock_timeout(confirm_conn)
-            await _acquire_branch_workflow_lock(
+            await acquire_branch_workflow_lock(
                 db.company_id, db.branch_id, confirm_conn,
             )
             confirm_pid = int((await confirm_conn.execute(

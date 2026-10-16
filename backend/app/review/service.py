@@ -63,7 +63,7 @@ from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
 )
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 from app.review.schemas import (
     _DECIDABLE_STATUSES,
     ReviewDecide,
@@ -803,7 +803,7 @@ async def decide_review_item(
     # Step 4: Branch advisory lock for PeriodApproval substantive decisions.
     # Comments do not mutate payroll slots; they skip the branch lock.
     if _pre_row.get("requesttype") == "PeriodApproval" and data.decision != "Comment":
-        await _acquire_branch_workflow_lock(company_id, _pre_branch_id, db)
+        await acquire_branch_workflow_lock(company_id, _pre_branch_id, db)
 
     # Step 5: Fetch the item with a row-level exclusive lock (FOR UPDATE).
     #

@@ -37,7 +37,7 @@ from app.payroll.period_calculation import (
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import _VALID_TRANSITIONS, PeriodStatusChange, PeriodSummary
 from app.payroll.status_payment_sync import _refresh_status_payment_lines
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 # ---------------------------------------------------------------------------
 # Period status-change permission gates
@@ -119,7 +119,7 @@ async def change_period_status(
         # CP-1D: Acquire branch advisory lock before touching any workflow rows.
         # Same lock used by period creation (CP-1C) and resubmission — ensures all
         # per-branch workflow mutations are fully serialized.
-        await _acquire_branch_workflow_lock(company_id, existing.branch_id, db)
+        await acquire_branch_workflow_lock(company_id, existing.branch_id, db)
 
         # CP-1D: Lock all active workflow rows in a deterministic order to prevent
         # deadlock when two concurrent submits race on the same branch.
@@ -659,7 +659,7 @@ async def resubmit_period(
     # ── Step 3: acquire branch advisory lock, then period row lock ───────── #
     # CP-1D: branch lock must come first (same order as submit and creation) to
     # prevent deadlock when concurrent submit + resubmit race on the same branch.
-    await _acquire_branch_workflow_lock(company_id, existing.branch_id, db)
+    await acquire_branch_workflow_lock(company_id, existing.branch_id, db)
 
     lock_result = await db.execute(
         text(

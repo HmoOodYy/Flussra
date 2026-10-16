@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_concurrency import lock_company_for_mutation
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 
 async def lock_company(company_id: int, db: AsyncConnection) -> None:
@@ -47,4 +47,4 @@ async def lock_branches(
 ) -> None:
     """Acquire existing branch workflow advisory locks in ascending ID order."""
     for branch_id in sorted(set(branch_ids)):
-        await _acquire_branch_workflow_lock(company_id, branch_id, db)
+        await acquire_branch_workflow_lock(company_id, branch_id, db)

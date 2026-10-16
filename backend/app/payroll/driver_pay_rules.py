@@ -14,8 +14,8 @@ from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.payroll.guards import (
     _check_driver_read_access,
-    _check_not_in_finalized_period,
     _require_non_driver_rate_subject,
+    check_not_in_finalized_period,
 )
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
 
@@ -279,7 +279,7 @@ async def create_driver_pay_rule(
 
     # Finalized-period guard: a pay rule must not be created with effective_from
     # inside a Locked or Archived payroll period (same as rates backdating guard).
-    await _check_not_in_finalized_period(
+    await check_not_in_finalized_period(
         company_id, driver_branch_id, data.effective_from, db, label="pay rule"
     )
 

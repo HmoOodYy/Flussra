@@ -1,5 +1,10 @@
 """
-Shared payroll access and finalized-period guards.
+Payroll access and finalized-period guards shared with Compensation.
+
+Internal cross-area contract: ``check_not_in_finalized_period`` performs a
+read-only company/branch/date check and raises HTTP 422 when the effective
+date falls inside a Locked or Archived period (inclusive). It owns no
+authorization, lock, commit, or caller ordering.
 """
 from datetime import date
 
@@ -22,7 +27,7 @@ async def _require_non_driver_rate_subject(
 # Finalized-period guard — shared by approve_rate and batch_save_rates
 # ---------------------------------------------------------------------------
 
-async def _check_not_in_finalized_period(
+async def check_not_in_finalized_period(
     company_id: int,
     branch_id: int,
     effective_from: date,
@@ -31,12 +36,11 @@ async def _check_not_in_finalized_period(
     label: str = "rate",
 ) -> None:
     """
-    Raise HTTP 422 if effective_from falls inside a Locked or Archived payroll
-    period for the same company and branch.
+    Raise HTTP 422 when effective_from falls inside a Locked or Archived period
+    for this company and branch. The date comparison includes both period bounds.
 
-    Called before approving or auto-approving a rate (label="rate") or creating/
-    updating a pay rule (label="pay rule") so that payroll history cannot be
-    retroactively altered inside finalized pay periods.
+    Called for rate approval, batch rate auto-approval, Compensation assignment
+    approval, and pay-rule creation to prevent retroactive finalized changes.
     """
     result = await db.execute(
         text("""

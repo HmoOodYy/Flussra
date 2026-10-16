@@ -35,7 +35,7 @@ from app.payroll.schemas import (
     PeriodCreationRequest,
     PeriodCreationResponse,
 )
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 from app.payroll_setup.audit import write_policy_audit
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.resolver import Authority, resolve_payroll_setup_version
@@ -806,7 +806,7 @@ async def create_period_from_candidate(
         _cp1c_error("INVALID_CANDIDATE_KEY", "Candidate mode and target status disagree.")
 
     # Acquire branch advisory lock (transaction-level)
-    await _acquire_branch_workflow_lock(company_id, branch_id, db)
+    await acquire_branch_workflow_lock(company_id, branch_id, db)
     # Second lock, always after the workflow lock: orders every Branch applicability
     # writer wholly before or wholly after this creation (see
     # app.branch_compensation_config_concurrency for the global lock order).
