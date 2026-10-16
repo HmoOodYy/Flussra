@@ -17,7 +17,10 @@ import {
   canViewSettings,
 } from '../src/lib/permissions.ts';
 
-const peoplePageSource = readFileSync(new URL('../src/pages/people/PeoplePage.tsx', import.meta.url), 'utf8');
+const peopleControllerSource = readFileSync(new URL('../src/pages/people/usePeopleController.ts', import.meta.url), 'utf8');
+const peopleStateSource = readFileSync(new URL('../src/pages/people/peoplePageState.ts', import.meta.url), 'utf8');
+const peopleProvisioningSource = readFileSync(new URL('../src/pages/people/usePeopleProvisioning.ts', import.meta.url), 'utf8');
+const peopleFormControlsSource = readFileSync(new URL('../src/pages/people/PeopleFormControls.tsx', import.meta.url), 'utf8');
 
 // ── Fixture helpers (duplicated from authAuthority.test.ts — see project notes:
 // that file is already oversized, so this suite keeps its own copies) ─────────
@@ -195,24 +198,24 @@ test('canProvisionPeopleAccount requires users.edit and visible role choices', (
     authority: makeAuthority({ company_permissions: ['users.edit', 'roles.view'] }),
   });
   assert.equal(canProvisionPeopleAccount(editorWithRoleVisibility), true);
-  assert.match(peoplePageSource, /if \(!userCanProvisionAccount\) \{\s*dispatch\(\{ type: 'WIZ_STEP', step: 5 \}\);/);
+  assert.match(peopleProvisioningSource, /if \(!userCanProvisionAccount\) \{\s*dispatch\(\{ type: 'WIZ_STEP', step: 5 \}\);/);
 });
 
 test('scope choices give DRIVER only Self and keep ordinary scopes for other roles', () => {
-  assert.match(peoplePageSource, /!isDriverRole && \(\s*<option value="AllCompanyBranches">/);
-  assert.match(peoplePageSource, /!isDriverRole && <option value="SpecificBranch">/);
-  assert.match(peoplePageSource, /isDriverRole && <option value="Self">Self — own current Driver identity<\/option>/);
-  assert.match(peoplePageSource, /DRIVER assignments use Self without a branch/);
+  assert.match(peopleFormControlsSource, /!isDriverRole && \(\s*<option value="AllCompanyBranches">/);
+  assert.match(peopleFormControlsSource, /!isDriverRole && <option value="SpecificBranch">/);
+  assert.match(peopleFormControlsSource, /isDriverRole && <option value="Self">Self — own current Driver identity<\/option>/);
+  assert.match(peopleFormControlsSource, /DRIVER assignments use Self without a branch/);
 });
 
 test('ownership replacement options exclude Driver without removing it from normal role choices', () => {
-  assert.match(peoplePageSource, /ownerTransferRoles = st\.roles\.filter\(r => r\.is_active && r\.role_code !== 'COMPANY_OWNER' && r\.role_code !== 'DRIVER'\)/);
-  assert.match(peoplePageSource, /assignableRoles = st\.roles\.filter\(r => r\.role_code !== 'COMPANY_OWNER' && r\.is_active\)/);
+  assert.match(peopleControllerSource, /ownerTransferRoles = st\.roles\.filter\(r => r\.is_active && r\.role_code !== 'COMPANY_OWNER' && r\.role_code !== 'DRIVER'\)/);
+  assert.match(peopleControllerSource, /assignableRoles = st\.roles\.filter\(r => r\.role_code !== 'COMPANY_OWNER' && r\.is_active\)/);
 });
 
 test('provision failure stays on the staged provisioning step for in-place retry', () => {
-  assert.match(peoplePageSource, /case 'WIZ_PARTIAL': return \{[^\n]*step: 3 \}/);
-  assert.match(peoplePageSource, /Correct the role, scope, or Employee selection and retry; the User will not be recreated/);
+  assert.match(peopleStateSource, /case 'WIZ_PARTIAL': return \{[^\n]*step: 3 \}/);
+  assert.match(readFileSync(new URL('../src/pages/people/PeopleWizard.tsx', import.meta.url), 'utf8'), /Correct the role, scope, or Employee selection and retry; the User will not be recreated/);
 });
 
 // ── Role helpers: view/create/edit/delete stay distinct ─────────────────────
