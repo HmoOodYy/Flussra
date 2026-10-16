@@ -76,21 +76,22 @@ Test files included:
 
 ### 2.3 Evidence anchors
 
+These anchors were revalidated against current production owners. Older implementation scopes, test lists, and commit records elsewhere in this plan describe their historical work and are not current ownership declarations.
+
 | Area | Current source of truth |
 | --- | --- |
-| Period statuses/transitions | `backend/app/payroll/schemas.py:79` |
-| Entry-allowed statuses | `backend/app/payroll/schemas.py:168` |
-| Generic period creation | `backend/app/payroll/service.py:382` |
-| Suggested next-period dates | `backend/app/payroll/service.py:598` |
-| Submission/status transition | `backend/app/payroll/service.py:738` |
-| Finalization | `backend/app/payroll/service.py:2641` |
-| Approved finalization preview | `backend/app/payroll/service.py:3355` |
-| Bonus/period-pay CRUD | `backend/app/payroll/service.py:6022` |
-| Bonus eligible-driver query | `backend/app/payroll/service.py:6310` |
-| Period off-record query | `backend/app/payroll/service.py:8457` |
-| Day-grid read/write | `backend/app/payroll/service.py:8540`, `:8805` |
-| Review decision/writeback | `backend/app/review/service.py:484`, `:634` |
-| Branch payroll setup | `backend/app/settings/service.py:955` |
+| Period statuses/transitions | `backend/app/payroll/schemas/periods.py` (`PeriodStatusChange`, `_VALID_TRANSITIONS`) |
+| Entry-allowed statuses | `backend/app/payroll/schemas/entry.py` (`ENTRY_ALLOWED_STATUSES`, `SOURCE_ENTRY_STATUSES`) |
+| Candidate-based period creation | `backend/app/payroll/period_creation.py` (`create_period_from_candidate`) |
+| Period candidates and date navigation | `backend/app/payroll/period_creation.py` (`get_period_candidates`) |
+| Period status change/resubmission | `backend/app/payroll/period_lifecycle.py` (`change_period_status`, `resubmit_period`) |
+| Finalization and approved preview | `backend/app/payroll/finalization.py` (`finalize_period`, `get_finalization_preview`) |
+| Bonus event/batch operations | `backend/app/payroll/bonus.py` (`create_bonus_event`, `update_bonus_event`, `void_bonus_event`, `apply_bonus_batch`) |
+| Period-eligible driver query | `backend/app/payroll/eligibility.py` (`get_period_eligible_drivers`) |
+| Period Off-driver reads | `backend/app/payroll/off_drivers.py` (`get_drivers_off`, `get_off_drivers_summary`, `get_selected_day_off_drivers`) |
+| Day-grid read/write | `backend/app/payroll/day_grid.py` (`get_day_grid`, `save_day_grid`) |
+| Review decision/writeback | `backend/app/review/service.py` (`decide_review_item`) |
+| Branch setup assignment and onboarding | `backend/app/payroll_setup/payroll_policy.py` (`assign_setup`); `backend/app/settings/branches.py` (`create_branch`) |
 | Initial payroll schema | `migrations/sql/0001_initial_schema.sql` |
 | Locked-ledger database guards | `migrations/versions/0035_locked_ledger_immutability.py` |
 
