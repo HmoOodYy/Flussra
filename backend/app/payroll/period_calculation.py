@@ -7,9 +7,7 @@ Period Calculation + Snapshot — the payroll domain's owner of:
   B. The CP-4B calculation preview API (get_calculation_preview)
   C. Structural source validation (_validate_period_can_finalize,
      _validate_legacy_status_canonicalized)
-  D. The canonical Active BonusEvent selection used by live Calculation and Reporting
-     (_load_active_bonus_events)
-  E. Immutable Calculation snapshot capture (_capture_calculation_snapshot) and its
+  D. Immutable Calculation snapshot capture (_capture_calculation_snapshot) and its
      report evidence / hash-projection helpers. Snapshot capture belongs to the
      calculation-evidence work unit: while target evidence is not delivered the
      lifecycle refuses to reach it (app.payroll.evidence_gate).
@@ -41,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import CompanyCurrency, get_company_currency
+from app.payroll import bonus as payroll_bonus
 from app.payroll.definition_calculation import CalculationStatus
 from app.payroll.eligibility import _period_has_driver_eligibility_snapshot
 from app.payroll.immutable_evidence import capture_snapshot_used_rate_definitions
@@ -259,40 +258,6 @@ class _LiveCalculationPacket:
     total_expected_pay: Decimal
 
 
-async def _load_active_bonus_events(
-    period_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> list[Any]:
-    """Return the canonical Active BonusEvent selection used by CP-4B/CP-4D."""
-    result = await db.execute(
-        text("""
-            SELECT
-                be.payrollbonuseventid,
-                be.driverid,
-                d.drivercode,
-                e.fullname AS drivername,
-                be.amount,
-                be.reason,
-                be.notes,
-                be.datarevision,
-                be.createdbyuserid,
-                creator.displayname AS creatordisplaynamesnapshot,
-                be.createdatutc
-            FROM payroll.payrollbonusevents be
-            LEFT JOIN core.drivers d ON d.driverid = be.driverid
-            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
-            LEFT JOIN sec.users creator ON creator.userid = be.createdbyuserid
-            WHERE be.payrollperiodid = :period_id
-              AND be.companyid = :company_id
-              AND be.status = 'Active'
-            ORDER BY be.driverid, be.payrollbonuseventid
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-    return list(result.mappings().all())
-
-
 async def _load_report_evidence(
     *,
     period: PeriodSummary,
@@ -357,7 +322,7 @@ async def _load_report_evidence(
             "CreatorDisplayNameSnapshot": row["creatordisplaynamesnapshot"],
             "CreatedAtUtc": row["createdatutc"],
         }
-        for row in await _load_active_bonus_events(period.payroll_period_id, company_id, db)
+        for row in await payroll_bonus._load_active_bonus_events(period.payroll_period_id, company_id, db)
     ]
     return status_entries, bonus_events
 
@@ -576,7 +541,7 @@ async def _build_live_calculation_packet(
         ))
 
     # ── Canonical Active bonus (never Voided).
-    for b in await _load_active_bonus_events(period_id, company_id, db):
+    for b in await payroll_bonus._load_active_bonus_events(period_id, company_id, db):
         drv = int(b["driverid"])
         driver_names.setdefault(drv, b["drivername"])
         driver_codes.setdefault(drv, b["drivercode"])

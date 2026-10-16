@@ -19,7 +19,7 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency, get_company_currency
-from app.payroll import period_calculation, status_evidence
+from app.payroll import bonus, period_calculation, status_evidence
 from app.payroll.evidence_gate import evidence_not_ready
 from app.payroll.period_definitions import list_period_definition_rows
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
@@ -359,7 +359,7 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
                     "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
                     "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
                     "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]}
-                   for r in await period_calculation._load_active_bonus_events(int(period["payrollperiodid"]), company_id, db)]
+                   for r in await bonus._load_active_bonus_events(int(period["payrollperiodid"]), company_id, db)]
         evidence_available = True
     summaries = _status_summaries(statuses)
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)

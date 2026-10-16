@@ -1,7 +1,8 @@
 """
-Bonus event mutations, idempotent batch application, and zero-inclusive summaries.
+Active BonusEvent reads, mutations, idempotent batch application, and zero-inclusive summaries.
 
-PayrollBonusEvents is the Bonus source of truth. Batch replay uses a period row
+PayrollBonusEvents is the Bonus source of truth. This module owns the Active-event
+selection shared by live Calculation and LIVE reports. Batch replay uses a period row
 lock without the usual editability guard so an exact replay still succeeds after
 the period becomes Locked or Archived.
 """
@@ -9,6 +10,7 @@ import hashlib
 import json
 import uuid as _uuid
 from decimal import Decimal
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -38,6 +40,41 @@ from app.payroll.schemas import (
     BonusSummaryEvent,
     BonusSummaryResponse,
 )
+
+
+async def _load_active_bonus_events(
+    period_id: "int",
+    company_id: "int",
+    db: "AsyncConnection",
+) -> "list[Any]":
+    """Return Active canonical BonusEvents using the caller's connection."""
+    result = await db.execute(
+        text("""
+            SELECT
+                be.payrollbonuseventid,
+                be.driverid,
+                d.drivercode,
+                e.fullname AS drivername,
+                be.amount,
+                be.reason,
+                be.notes,
+                be.datarevision,
+                be.createdbyuserid,
+                creator.displayname AS creatordisplaynamesnapshot,
+                be.createdatutc
+            FROM payroll.payrollbonusevents be
+            LEFT JOIN core.drivers d ON d.driverid = be.driverid
+            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            LEFT JOIN sec.users creator ON creator.userid = be.createdbyuserid
+            WHERE be.payrollperiodid = :period_id
+              AND be.companyid = :company_id
+              AND be.status = 'Active'
+            ORDER BY be.driverid, be.payrollbonuseventid
+        """),
+        {"period_id": period_id, "company_id": company_id},
+    )
+    return list(result.mappings().all())
+
 
 # ---------------------------------------------------------------------------
 # CP-3A: Canonical Bonus Event CRUD
