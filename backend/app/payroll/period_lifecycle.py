@@ -27,13 +27,11 @@ from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.payroll import period_audit
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
+from app.payroll.calculation_snapshot import _capture_calculation_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
 from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
-from app.payroll.period_calculation import (
-    _build_live_calculation_packet,
-    _capture_calculation_snapshot,
-)
+from app.payroll.period_calculation import _build_live_calculation_packet
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import _VALID_TRANSITIONS, PeriodStatusChange, PeriodSummary
 from app.payroll.status_payment_sync import _refresh_status_payment_lines
