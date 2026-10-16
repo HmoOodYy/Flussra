@@ -83,9 +83,9 @@ async def test_readiness_uses_assignment_and_latest_non_cancelled_period_date(
     async def has_permission(*args, **kwargs):
         return True
 
-    monkeypatch.setattr(current_hub, "_require_not_driver_role", not_driver)
-    monkeypatch.setattr(current_hub, "_check_branch_access", company_access)
-    monkeypatch.setattr(current_hub, "_has_any_permission", has_permission)
+    monkeypatch.setattr(current_hub, "require_non_driver_subject", not_driver)
+    monkeypatch.setattr(current_hub, "check_branch_access", company_access)
+    monkeypatch.setattr(current_hub, "has_any_permission", has_permission)
 
     setup_id = await _published_setup(db)
     await set_default_setup(db.company_id, db.user_id, setup_id, db.db)

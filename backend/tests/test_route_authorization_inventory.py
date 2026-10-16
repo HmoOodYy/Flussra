@@ -137,7 +137,7 @@ def test_inventory_records_match_tricky_route_authority():
         assert (item.permission_mode, item.permission_codes) == (mode, codes)
 
     branch_list = ROUTE_AUTHORIZATION["GET /core/branches"]
-    assert branch_list.special_policy == "app.core.service._check_branch_access"
+    assert branch_list.special_policy == "app.access.branch_access.check_branch_access"
     assert branch_list.none_reason
     assert branch_list.driver_self == "DENY"
 

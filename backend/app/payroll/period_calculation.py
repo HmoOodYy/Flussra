@@ -1,5 +1,5 @@
 """
-Period Calculation + Snapshot — the payroll domain's owner of:
+Live Period Calculation — the payroll domain's owner of:
 
   A. Live authoritative Calculation packet construction
      (_build_live_calculation_packet) and its packet types
@@ -7,12 +7,6 @@ Period Calculation + Snapshot — the payroll domain's owner of:
   B. The CP-4B calculation preview API (get_calculation_preview)
   C. Structural source validation (_validate_period_can_finalize,
      _validate_legacy_status_canonicalized)
-  D. The canonical Active BonusEvent selection used by live Calculation and Reporting
-     (_load_active_bonus_events)
-  E. Immutable Calculation snapshot capture (_capture_calculation_snapshot) and its
-     report evidence / hash-projection helpers. Snapshot capture belongs to the
-     calculation-evidence work unit: while target evidence is not delivered the
-     lifecycle refuses to reach it (app.payroll.evidence_gate).
 
 Ordinary PayDefinition earnings are derived LIVE: each source line is resolved and
 calculated through app.payroll.live_source_calculation and the method-owned boundary
@@ -28,7 +22,6 @@ AsyncConnection, opens no transaction, commits nothing and rolls back nothing.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -38,22 +31,15 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.company_currency import CompanyCurrency, get_company_currency
-from app.core.service import _check_any_permission, _require_not_driver_role
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
+from app.company_currency import get_company_currency
+from app.payroll import bonus as payroll_bonus
 from app.payroll.definition_calculation import CalculationStatus
 from app.payroll.eligibility import _period_has_driver_eligibility_snapshot
-from app.payroll.immutable_evidence import capture_snapshot_used_rate_definitions
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
-from app.payroll.snapshot_hash import (
-    CURRENT_PAYROLL_CALCULATION_VERSION,
-    CURRENT_REPORT_EVIDENCE_VERSION,
-    calculate_report_evidence_hash,
-    calculate_snapshot_hash,
-    calculate_source_config_hash,
-    canonical_json,
-)
 from app.payroll.status_payment_sync import (
     _resolve_live_status_payment_lines,
 )
@@ -258,109 +244,6 @@ class _LiveCalculationPacket:
     total_expected_pay: Decimal
 
 
-async def _load_active_bonus_events(
-    period_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> list[Any]:
-    """Return the canonical Active BonusEvent selection used by CP-4B/CP-4D."""
-    result = await db.execute(
-        text("""
-            SELECT
-                be.payrollbonuseventid,
-                be.driverid,
-                d.drivercode,
-                e.fullname AS drivername,
-                be.amount,
-                be.reason,
-                be.notes,
-                be.datarevision,
-                be.createdbyuserid,
-                creator.displayname AS creatordisplaynamesnapshot,
-                be.createdatutc
-            FROM payroll.payrollbonusevents be
-            LEFT JOIN core.drivers d ON d.driverid = be.driverid
-            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
-            LEFT JOIN sec.users creator ON creator.userid = be.createdbyuserid
-            WHERE be.payrollperiodid = :period_id
-              AND be.companyid = :company_id
-              AND be.status = 'Active'
-            ORDER BY be.driverid, be.payrollbonuseventid
-        """),
-        {"period_id": period_id, "company_id": company_id},
-    )
-    return list(result.mappings().all())
-
-
-async def _load_report_evidence(
-    *,
-    period: PeriodSummary,
-    company_id: int,
-    db: AsyncConnection,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read CP-5C report evidence from the same CP-4D transaction view."""
-    status_result = await db.execute(
-        text("""
-            SELECT
-                ppdes.payrollperioddriverdayentrystateid,
-                ppdes.driverid,
-                ppdes.workdate,
-                ppdes.statuskeyid,
-                sk.statuscode,
-                sk.keyname,
-                sk.isoffreason
-            FROM payroll.payrollperioddriverdayentrystate ppdes
-            JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = ppdes.statuskeyid
-            WHERE ppdes.payrollperiodid = :pid
-              AND ppdes.companyid = :cid
-              AND ppdes.branchid = :bid
-              AND ppdes.isvoided = FALSE
-              AND ppdes.statuskeyid IS NOT NULL
-              AND ppdes.workdate BETWEEN :period_start AND :period_end
-            ORDER BY ppdes.driverid, ppdes.workdate,
-                     ppdes.payrollperioddriverdayentrystateid
-        """),
-        {
-            "pid": period.payroll_period_id,
-            "cid": company_id,
-            "bid": period.branch_id,
-            "period_start": period.start_date,
-            "period_end": period.end_date,
-        },
-    )
-    status_entries = [
-        {
-            "PayrollPeriodDriverDayEntryStateID": int(row["payrollperioddriverdayentrystateid"]),
-            "DriverID": int(row["driverid"]),
-            "WorkDate": row["workdate"],
-            "StatusKeyID": int(row["statuskeyid"]),
-            "StatusCodeSnapshot": row["statuscode"],
-            "StatusLabelSnapshot": row["keyname"],
-            "StatusIsOffReasonSnapshot": bool(row["isoffreason"]),
-        }
-        for row in status_result.mappings().all()
-    ]
-    bonus_events = [
-        {
-            "PayrollBonusEventID": int(row["payrollbonuseventid"]),
-            "DriverID": int(row["driverid"]),
-            "Amount": Decimal(str(row["amount"])),
-            "Reason": row["reason"],
-            "Notes": row["notes"],
-            "DataRevision": int(row["datarevision"]),
-            "CreatedByUserID": (
-                int(row["createdbyuserid"])
-                if row["createdbyuserid"] is not None
-                else None
-            ),
-            "CreatorDisplayNameSnapshot": row["creatordisplaynamesnapshot"],
-            "CreatedAtUtc": row["createdatutc"],
-        }
-        for row in await _load_active_bonus_events(period.payroll_period_id, company_id, db)
-    ]
-    return status_entries, bonus_events
-
-
 async def _validate_legacy_status_canonicalized(
     period: PeriodSummary,
     company_id: int,
@@ -371,19 +254,19 @@ async def _validate_legacy_status_canonicalized(
     DraftLine exists for a driver/day with no corresponding live-selected
     canonical PayrollPeriodDriverDayEntryState row.
 
-    `_load_report_evidence` (the CP-4D immutable Status-evidence reader) reads
-    only canonical entry-state rows with a non-voided StatusKeyID -- it never
-    falls back to DraftLines. Without this guard, such a day would silently
-    capture zero Status evidence while the snapshot still reports a versioned,
-    "complete" ReportEvidenceVersion.
+    `calculation_snapshot._load_report_evidence` reads only canonical
+    entry-state rows with a non-voided StatusKeyID; it never falls back to
+    DraftLines. Without this guard, such a day would silently capture zero
+    Status evidence while the snapshot still reports a versioned, "complete"
+    ReportEvidenceVersion.
 
     A canonical row that exists but only carries NoteText (StatusKeyID NULL --
     e.g. a note-only save on an old period whose legacy Status code was never
     re-entered) does not satisfy this check; the legacy Status is still
     unrepresented. DailyNote-only legacy lines are out of scope: NoteText is
-    never part of the immutable Status evidence contract (`_load_report_evidence`
-    requires `StatusKeyID IS NOT NULL`), so a missing canonical row can never
-    cause a note to disappear from that evidence.
+    never part of the immutable Status evidence contract (the CP-4D snapshot
+    evidence reader requires `StatusKeyID IS NOT NULL`), so a missing canonical
+    row can never cause a note to disappear from that evidence.
 
     Read-only. Returns a blocker list (empty = no gap found).
     """
@@ -435,54 +318,25 @@ async def _build_live_calculation_packet(
     db: AsyncConnection,
 ) -> _LiveCalculationPacket:
     """
-    Read-only, live provisional expected-income breakdown for an Open or
-    Returned period, calculated from CURRENT effective source/config data.
+    Assemble live financial results without writes, audit, or projection refresh.
 
-    Distinct from `get_finalization_preview` above (Approved-only, mirrors
-    exactly what `finalize_period` will write): this is a live preview for
-    the two lifecycle statuses that still allow correction/entry. It is
-    never a submitted snapshot -- InReview/Approved/Locked/Archived/
-    Cancelled all remain out of scope (see the CP-4C+ future snapshot
-    contract for those).
+    Ordinary source money comes from load_live_source_lines and its frozen-method
+    calculation boundary. Status pay resolves current rates from canonical day
+    selections, never the stored compatibility projection, to avoid stale money
+    and double counting. Minimum/maximum adjustments exclude Active Bonus events
+    from their base; Bonus is added afterward.
 
-    Absolute read-only guarantee: no INSERT/UPDATE/DELETE, no audit write,
-    no period/source/derived-state mutation of any kind. Does not call
-    `_refresh_draft_calculations`, `_sync_status_payment_for_entry_state`,
-    `_refresh_status_payment_lines`, or `finalize_period`.
-
-    Reuses, unchanged:
-      - `_compute_draft_line_preview_amounts` -> `_compute_calculated_amount`
-        -> CP-4A's `calculate_per_unit` for daily PerUnit lines (and the
-        existing Fixed/None dispatch for the rest);
-      - the canonical PayrollBonusEvents Active-only read;
-      - the CP-3C minimum/maximum-then-bonus ordering.
-
-    Adds, new to CP-4B:
-      - `_resolve_live_status_payment_lines`, which reads the canonical
-        `PayrollPeriodDriverDayEntryState.StatusKeyID` selection directly
-        and resolves the CURRENT applicable DriverRate live -- the stored
-        STATUS_PAYMENT/STATUS_PAY compatibility-projection DraftLine is
-        excluded from the stored-line aggregation below and is never used
-        as live truth, so a stale projection can never be double-counted.
-
-    Driver inclusion is financial-source-driven only (a driver with a
-    current daily line, a canonical selected Status, or an Active bonus
-    event) -- not a full eligible-driver roster.
+    Include only Drivers with ordinary source, live Status pay, or Active Bonus
+    events, not the full eligible roster. Lifecycle/read callers select when
+    this live packet is appropriate; it is not immutable approval evidence.
     """
     period_id = period.payroll_period_id
 
     blockers: list[str] = []
     warnings: list[str] = []
 
-    # ── CP-4B fix (P1): shared structural blockers (duplicate active
-    # Daily lines, driver eligibility violations, contaminated/foreign
-    # RateType references, unresolvable rate mapping) — the SAME read-only
-    # checks enforced by finalize_period / get_finalization_preview. These
-    # checks are structural, not Approved-specific (none of them reference
-    # period.status), so they apply directly and unmodified to Open/Returned
-    # periods. Surfacing them here prevents a preview from looking
-    # financially complete (has_blockers=false) while a structural condition
-    # that would block finalize_period is silently present.
+    # Surface source, eligibility, and rate-mapping blockers in the live packet
+    # so an incomplete calculation cannot appear financially ready.
     blockers.extend(await _validate_period_can_finalize(
         period_id=period_id,
         company_id=company_id,
@@ -492,7 +346,7 @@ async def _build_live_calculation_packet(
 
     # ── CP-4D completeness guard: a legacy DailyStatus DraftLine with no
     # canonical entry-state row would silently vanish from the immutable
-    # Status evidence captured at Submit/Resubmit (_load_report_evidence
+    # Status evidence captured at Submit/Resubmit (the snapshot evidence reader
     # reads canonical rows only). Block until the day is re-saved through
     # the Day Grid so the Status is canonically represented.
     blockers.extend(await _validate_legacy_status_canonicalized(
@@ -604,7 +458,7 @@ async def _build_live_calculation_packet(
         ))
 
     # ── Canonical Active bonus (never Voided).
-    for b in await _load_active_bonus_events(period_id, company_id, db):
+    for b in await payroll_bonus._load_active_bonus_events(period_id, company_id, db):
         drv = int(b["driverid"])
         driver_names.setdefault(drv, b["drivername"])
         driver_codes.setdefault(drv, b["drivercode"])
@@ -840,7 +694,7 @@ async def get_calculation_preview(
         CalculationPreviewResponse,
     )
 
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status not in ENTRY_ALLOWED_STATUSES:
         raise HTTPException(
@@ -850,7 +704,7 @@ async def get_calculation_preview(
                 f"Current status: '{period.status}'."
             ),
         )
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
     )
     packet = await _build_live_calculation_packet(period, company_id, db)
@@ -906,392 +760,3 @@ async def get_calculation_preview(
         ],
         total_expected_pay=packet.total_expected_pay,
     )
-
-
-def _packet_driver_totals_for_hash(
-    packet: _LiveCalculationPacket,
-) -> list[dict[str, Any]]:
-    """Project the shared live packet into CP-4C's hash contract."""
-    return [
-        {
-            "DriverID": driver.driver_id,
-            "DriverCodeSnapshot": driver.driver_code,
-            "DriverNameSnapshot": driver.driver_name,
-            "DailyPay": driver.daily_pay,
-            "StatusPay": driver.status_pay,
-            "MinimumAdjustment": driver.minimum_adjustment,
-            "MaximumAdjustment": driver.maximum_adjustment,
-            "BonusTotal": driver.bonus_total,
-            "ExpectedPay": driver.expected_pay,
-            "Lines": [
-                {
-                    "SourceType": line.snapshot_source_type or line.source_type,
-                    "SourceID": line.snapshot_source_id if line.snapshot_source_id is not None else line.source_id,
-                    "LineType": line.line_type,
-                    "LineScope": line.line_scope,
-                    "WorkDate": line.work_date,
-                    "PayItemID": line.pay_item_id,
-                    "RateTypeID": line.rate_type_id,
-                    "DriverRateID": line.driver_rate_id,
-                    "BonusEventID": line.bonus_event_id,
-                    "Quantity": line.quantity,
-                    "ResolvedRateAmount": line.resolved_rate_amount,
-                    "CalculatedAmount": (
-                        line.snapshot_calculated_amount
-                        if line.snapshot_calculated_amount is not None
-                        else line.calculated_amount
-                    ),
-                    "SourceEvidenceJSONB": line.source_evidence or {},
-                }
-                for line in driver.lines
-            ],
-        }
-        for driver in packet.drivers
-    ]
-
-
-async def _capture_calculation_snapshot(
-    *,
-    period: PeriodSummary,
-    company_id: int,
-    user_id: int,
-    packet: _LiveCalculationPacket,
-    db: AsyncConnection,
-    context: str,
-    currency: CompanyCurrency,
-) -> int:
-    """Persist one complete immutable CP-4D submission packet.
-
-    The caller already owns the period/workflow locks.  This writer performs no
-    calculation and never uses generated IDs in either hash.
-    """
-    if packet.blockers:
-        raise HTTPException(
-            status_code=422,
-            detail="Cannot submit an incomplete calculation packet: " + "; ".join(packet.blockers),
-        )
-    if any(
-        line.snapshot_calculated_amount is None and line.calculated_amount is None
-        for driver in packet.drivers
-        for line in driver.lines
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="Cannot submit: an authoritative calculation line is unresolved.",
-        )
-
-    status_entries, bonus_events = await _load_report_evidence(
-        period=period,
-        company_id=company_id,
-        db=db,
-    )
-    bonus_events = [
-        {
-            **event,
-            "CurrencyCodeSnapshot": currency.code,
-            "CurrencyMinorUnitDigitsSnapshot": currency.minor_unit_digits,
-        }
-        for event in bonus_events
-    ]
-    snapshot_bonus_lines = sorted(
-        (
-            line.bonus_event_id,
-            line.driver_id,
-            line.snapshot_calculated_amount
-            if line.snapshot_calculated_amount is not None
-            else line.calculated_amount,
-        )
-        for driver in packet.drivers
-        for line in driver.lines
-        if line.source_type == "BonusEvent" and line.bonus_event_id is not None
-    )
-    evidence_bonus_lines = sorted(
-        (event["PayrollBonusEventID"], event["DriverID"], event["Amount"])
-        for event in bonus_events
-    )
-    if snapshot_bonus_lines != evidence_bonus_lines:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Cannot submit: captured Bonus evidence does not reconcile "
-                "with the authoritative calculation packet."
-            ),
-        )
-    report_evidence_hash = calculate_report_evidence_hash(
-        status_entries=status_entries,
-        bonus_events=bonus_events,
-    )
-
-    eligibility_rows = (await db.execute(
-        text("""
-            SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
-                   hiredatesnapshot, terminationdatesnapshot,
-                   drivereffectivefromsnapshot, drivereffectivetosnapshot,
-                   drivercodesnapshot, drivernamesnapshot
-            FROM payroll.payrollperioddrivereligibility
-            WHERE payrollperiodid = :pid AND companyid = :cid AND branchid = :bid
-            ORDER BY driverid
-        """),
-        {"pid": period.payroll_period_id, "cid": company_id, "bid": period.branch_id},
-    )).mappings().all()
-
-    source_config_payload = {
-        "PacketContract": "cp4d-source-config-v2",
-        "CompanyCurrency": {
-            "CurrencyCode": currency.code,
-            "CurrencyMinorUnitDigits": currency.minor_unit_digits,
-        },
-        "PayrollPeriod": {
-            "PayrollPeriodID": period.payroll_period_id,
-            "CompanyID": company_id,
-            "BranchID": period.branch_id,
-            "PeriodCode": period.period_code,
-            "PeriodType": period.period_type,
-            "StartDate": period.start_date,
-            "EndDate": period.end_date,
-        },
-        "Eligibility": [dict(row) for row in eligibility_rows],
-        "Sources": [
-            {
-                "DriverID": driver.driver_id,
-                "Lines": [
-                    {
-                        "SourceType": line.snapshot_source_type or line.source_type,
-                        "SourceID": line.snapshot_source_id if line.snapshot_source_id is not None else line.source_id,
-                        "LineType": line.line_type,
-                        "LineScope": line.line_scope,
-                        "WorkDate": line.work_date,
-                        "Quantity": line.quantity,
-                        "ResolvedRateAmount": line.resolved_rate_amount,
-                        "SourceEvidenceJSONB": line.source_evidence or {},
-                    }
-                    for line in driver.lines
-                ],
-            }
-            for driver in packet.drivers
-        ],
-    }
-    source_config_hash = calculate_source_config_hash(source_config_payload)
-    revision_result = await db.execute(
-        text("""
-            SELECT COALESCE(MAX(revisionnumber), 0) + 1
-            FROM payroll.payrollcalculationsnapshots
-            WHERE payrollperiodid = :pid
-        """),
-        {"pid": period.payroll_period_id},
-    )
-    revision_number = int(revision_result.scalar_one())
-    hash_totals = _packet_driver_totals_for_hash(packet)
-    snapshot_hash = calculate_snapshot_hash(
-        company_id=company_id,
-        branch_id=period.branch_id,
-        payroll_period_id=period.payroll_period_id,
-        revision_number=revision_number,
-        calculation_version=CURRENT_PAYROLL_CALCULATION_VERSION,
-        source_config_hash=source_config_hash,
-        driver_totals=hash_totals,
-    )
-
-    header_result = await db.execute(
-        text("""
-            INSERT INTO payroll.payrollcalculationsnapshots
-                (companyid, branchid, payrollperiodid, revisionnumber,
-                 calculationversion, sourceconfighash, snapshothash,
-                 reportevidenceversion, reportevidencehash,
-                 currencycode, currencyminorunitdigits,
-                 createdbyuserid, totalexpectedpay)
-            VALUES
-                (:cid, :bid, :pid, :revision, :version, :source_hash,
-                 :snapshot_hash, :report_evidence_version, :report_evidence_hash,
-                 :currency_code, :currency_minor,
-                 :uid, :total)
-            RETURNING payrollcalculationsnapshotid
-        """),
-        {
-            "cid": company_id,
-            "bid": period.branch_id,
-            "pid": period.payroll_period_id,
-            "revision": revision_number,
-            "version": CURRENT_PAYROLL_CALCULATION_VERSION,
-            "source_hash": source_config_hash,
-            "snapshot_hash": snapshot_hash,
-            "report_evidence_version": CURRENT_REPORT_EVIDENCE_VERSION,
-            "report_evidence_hash": report_evidence_hash,
-            "currency_code": currency.code,
-            "currency_minor": currency.minor_unit_digits,
-            "uid": user_id,
-            "total": packet.total_expected_pay,
-        },
-    )
-    snapshot_id = int(header_result.scalar_one())
-    snapshot_lines = [
-        {**line, "DriverID": hash_total["DriverID"]}
-        for hash_total in hash_totals
-        for line in hash_total["Lines"]
-    ]
-    used_rate_definition_ids = await capture_snapshot_used_rate_definitions(
-        snapshot_id=snapshot_id,
-        company_id=company_id,
-        branch_id=period.branch_id,
-        period_id=period.payroll_period_id,
-        snapshot_line_rows=snapshot_lines,
-        currency=currency,
-        db=db,
-    )
-    snapshot_line_ordinal = 0
-
-    for driver, hash_total in zip(packet.drivers, hash_totals, strict=True):
-        driver_result = await db.execute(
-            text("""
-                INSERT INTO payroll.payrollcalculationdrivertotals
-                    (payrollcalculationsnapshotid, companyid, branchid, driverid,
-                     drivercodesnapshot, drivernamesnapshot, dailypay, statuspay,
-                     minimumadjustment, maximumadjustment, bonustotal,
-                     expectedpay)
-                VALUES
-                    (:snapshot_id, :cid, :bid, :driver_id, :driver_code, :driver_name,
-                     :daily, :status, :minimum, :maximum, :bonus, :expected)
-                RETURNING payrollcalculationdrivertotalid
-            """),
-            {
-                "snapshot_id": snapshot_id,
-                "cid": company_id,
-                "bid": period.branch_id,
-                "driver_id": driver.driver_id,
-                "driver_code": driver.driver_code,
-                "driver_name": driver.driver_name,
-                "daily": driver.daily_pay,
-                "status": driver.status_pay,
-                "minimum": driver.minimum_adjustment,
-                "maximum": driver.maximum_adjustment,
-                "bonus": driver.bonus_total,
-                "expected": driver.expected_pay,
-            },
-        )
-        driver_total_id = int(driver_result.scalar_one())
-        for line in hash_total["Lines"]:
-            await db.execute(
-                text("""
-                    INSERT INTO payroll.payrollcalculationsnapshotlines
-                        (payrollcalculationdrivertotalid, sourcetype, sourceid,
-                         linetype, linescope, workdate, payitemid, ratetypeid,
-                         driverrateid, bonuseventid, quantity, resolvedrateamount,
-                         calculatedamount, sourceevidencejsonb, usedratedefinitionid)
-                    VALUES
-                        (:driver_total_id, :source_type, :source_id, :line_type,
-                         :line_scope, :work_date, :pay_item_id, :rate_type_id,
-                         :driver_rate_id, :bonus_event_id, :quantity, :resolved_rate,
-                         :calculated_amount, CAST(:evidence AS jsonb), :used_rate_definition_id)
-                """),
-                {
-                    "driver_total_id": driver_total_id,
-                    "source_type": line["SourceType"],
-                    "source_id": line["SourceID"],
-                    "line_type": line["LineType"],
-                    "line_scope": line["LineScope"],
-                    "work_date": line["WorkDate"],
-                    "pay_item_id": line["PayItemID"],
-                    "rate_type_id": line["RateTypeID"],
-                    "driver_rate_id": line["DriverRateID"],
-                    "bonus_event_id": line["BonusEventID"],
-                    "quantity": line["Quantity"],
-                    "resolved_rate": line["ResolvedRateAmount"],
-                    "calculated_amount": line["CalculatedAmount"],
-                    "evidence": canonical_json(line["SourceEvidenceJSONB"]),
-                    "used_rate_definition_id": used_rate_definition_ids.get(snapshot_line_ordinal),
-                },
-            )
-            snapshot_line_ordinal += 1
-
-    for entry in status_entries:
-        await db.execute(
-            text("""
-                INSERT INTO payroll.payrollcalculationsnapshotstatusentries
-                    (payrollcalculationsnapshotid, companyid, branchid,
-                     payrollperiodid, driverid, workdate,
-                     payrollperioddriverdayentrystateid, statuskeyid,
-                     statuscodesnapshot, statuslabelsnapshot,
-                     statusisoffreasonsnapshot)
-                VALUES
-                    (:snapshot_id, :cid, :bid, :pid, :driver_id, :work_date,
-                     :entry_state_id, :status_key_id, :status_code,
-                     :status_label, :status_is_off_reason)
-            """),
-            {
-                "snapshot_id": snapshot_id,
-                "cid": company_id,
-                "bid": period.branch_id,
-                "pid": period.payroll_period_id,
-                "driver_id": entry["DriverID"],
-                "work_date": entry["WorkDate"],
-                "entry_state_id": entry["PayrollPeriodDriverDayEntryStateID"],
-                "status_key_id": entry["StatusKeyID"],
-                "status_code": entry["StatusCodeSnapshot"],
-                "status_label": entry["StatusLabelSnapshot"],
-                "status_is_off_reason": entry["StatusIsOffReasonSnapshot"],
-            },
-        )
-
-    for event in bonus_events:
-        await db.execute(
-            text("""
-                INSERT INTO payroll.payrollcalculationsnapshotbonusevents
-                    (payrollcalculationsnapshotid, companyid, branchid,
-                     payrollperiodid, payrollbonuseventid, driverid, amount,
-                     reason, notes, datarevision, createdbyuserid,
-                     creatordisplaynamesnapshot, createdatutc,
-                     currencycodesnapshot, currencyminorunitdigitssnapshot)
-                VALUES
-                    (:snapshot_id, :cid, :bid, :pid, :bonus_event_id, :driver_id,
-                     :amount, :reason, :notes, :data_revision, :created_by_user_id,
-                     :creator_display_name, :created_at,
-                     :currency_code, :currency_minor)
-            """),
-            {
-                "snapshot_id": snapshot_id,
-                "cid": company_id,
-                "bid": period.branch_id,
-                "pid": period.payroll_period_id,
-                "bonus_event_id": event["PayrollBonusEventID"],
-                "driver_id": event["DriverID"],
-                "amount": event["Amount"],
-                "reason": event["Reason"],
-                "notes": event["Notes"],
-                "data_revision": event["DataRevision"],
-                "created_by_user_id": event["CreatedByUserID"],
-                "creator_display_name": event["CreatorDisplayNameSnapshot"],
-                "created_at": event["CreatedAtUtc"],
-                "currency_code": currency.code,
-                "currency_minor": currency.minor_unit_digits,
-            },
-        )
-
-    await db.execute(
-        text("""
-            INSERT INTO audit.auditlog
-                (companyid, branchid, actoruserid, actioncode,
-                 entityschema, entityname, entityid, newvaluejson, reason, sourcetype)
-            VALUES
-                (:cid, :bid, :uid, 'CALCULATION_SNAPSHOT_CAPTURED',
-                 'payroll', 'PayrollCalculationSnapshots', :snapshot_id, :new_value,
-                 :reason, 'Application')
-        """),
-        {
-            "cid": company_id,
-            "bid": period.branch_id,
-            "uid": user_id,
-            "snapshot_id": str(snapshot_id),
-            "new_value": json.dumps({
-                "payroll_period_id": period.payroll_period_id,
-                "snapshot_id": snapshot_id,
-                "revision_number": revision_number,
-                "source_config_hash": source_config_hash,
-                "snapshot_hash": snapshot_hash,
-                "report_evidence_version": CURRENT_REPORT_EVIDENCE_VERSION,
-                "report_evidence_hash": report_evidence_hash,
-                "context": context,
-            }),
-            "reason": "Immutable calculation snapshot captured for review submission",
-        },
-    )
-    return snapshot_id

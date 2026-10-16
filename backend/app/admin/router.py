@@ -2,14 +2,21 @@
 Admin domain router — /admin/users, /admin/roles, /admin/permissions.
 
 All endpoints require a valid JWT.
-All endpoints require AllCompanyBranches scope — enforced inside the service.
+All endpoints require AllCompanyBranches scope — enforced inside the admin domain modules.
 """
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.admin import service
+from app.admin import (
+    owner_transfer,
+    permissions,
+    role_assignments,
+    roles,
+    user_reads,
+    users,
+)
 from app.admin.schemas import (
     CompanyRole,
     CompanyRoleAssignmentCreate,
@@ -63,7 +70,7 @@ async def list_users(
     db: DbDep,
     include_inactive: bool = Query(False, description="Include inactive (deactivated) users"),
 ) -> list[UserAdmin]:
-    return await service.list_users(
+    return await user_reads.list_users(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -85,7 +92,7 @@ async def get_user(
     token: TokenDep,
     db: DbDep,
 ) -> UserAdmin:
-    return await service.get_user_by_id(
+    return await user_reads.get_user_by_id(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -115,7 +122,7 @@ async def create_user(
     token: TokenDep,
     db: DbDep,
 ) -> UserAdmin:
-    return await service.create_user(
+    return await users.create_user(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         data=body,
@@ -125,19 +132,19 @@ async def create_user(
 
 @router.put("/users/{user_id}/employee-link", response_model=UserAdmin)
 async def link_user_employee(user_id: int, body: UserEmployeeLink, token: TokenDep, db: DbDep) -> UserAdmin:
-    return await service.link_user_employee(
+    return await users.link_user_employee(
         user_id, int(token["cid"]), int(token["sub"]), body.employee_id, db,
     )
 
 
 @router.delete("/users/{user_id}/employee-link", response_model=UserAdmin)
 async def unlink_user_employee(user_id: int, token: TokenDep, db: DbDep) -> UserAdmin:
-    return await service.unlink_user_employee(user_id, int(token["cid"]), int(token["sub"]), db)
+    return await users.unlink_user_employee(user_id, int(token["cid"]), int(token["sub"]), db)
 
 
 @router.post("/users/{user_id}/provision", response_model=UserAdmin)
 async def provision_user(user_id: int, body: UserProvision, token: TokenDep, db: DbDep) -> UserAdmin:
-    return await service.provision_user(user_id, int(token["cid"]), int(token["sub"]), body, db)
+    return await users.provision_user(user_id, int(token["cid"]), int(token["sub"]), body, db)
 
 
 @router.patch(
@@ -165,7 +172,7 @@ async def update_user(
     token: TokenDep,
     db: DbDep,
 ) -> UserAdmin:
-    return await service.update_user(
+    return await users.update_user(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -196,7 +203,7 @@ async def reset_password(
     token: TokenDep,
     db: DbDep,
 ) -> UserAdmin:
-    return await service.reset_password(
+    return await users.reset_password(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -222,7 +229,7 @@ async def get_user_driver(
     token: TokenDep,
     db: DbDep,
 ) -> dict:
-    return await service.get_user_driver_info(
+    return await user_reads.get_user_driver_info(
         user_id=user_id,
         company_id=int(token["cid"]),
         caller_user_id=int(token["sub"]),
@@ -253,7 +260,7 @@ async def list_user_roles(
     token: TokenDep,
     db: DbDep,
 ) -> list[RoleAssignment]:
-    return await service.list_user_roles(
+    return await role_assignments.list_user_roles(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -286,7 +293,7 @@ async def assign_role(
     token: TokenDep,
     db: DbDep,
 ) -> RoleAssignment:
-    return await service.assign_role(
+    return await role_assignments.assign_role(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -317,7 +324,7 @@ async def revoke_role(
     token: TokenDep,
     db: DbDep,
 ) -> RoleAssignment:
-    return await service.revoke_role(
+    return await role_assignments.revoke_role(
         assignment_id=assignment_id,
         target_user_id=user_id,
         company_id=int(token["cid"]),
@@ -345,7 +352,7 @@ async def list_roles(
     token: TokenDep,
     db: DbDep,
 ) -> list[Role]:
-    return await service.list_roles(
+    return await roles.list_roles(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         db=db,
@@ -374,7 +381,7 @@ async def list_permissions(
     db: DbDep,
     ui_only: bool = Query(True, description="Exclude legacy/internal permission codes"),
 ) -> list[Permission]:
-    return await service.list_permissions(
+    return await permissions.list_permissions(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         db=db,
@@ -402,7 +409,7 @@ async def list_company_roles(
     token: TokenDep,
     db: DbDep,
 ) -> list[CompanyRole]:
-    return await service.list_company_roles(
+    return await roles.list_company_roles(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         db=db,
@@ -430,7 +437,7 @@ async def create_company_role(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRole:
-    return await service.create_company_role(
+    return await roles.create_company_role(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         data=body,
@@ -452,7 +459,7 @@ async def get_company_role(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRole:
-    return await service.get_company_role(
+    return await roles.get_company_role(
         company_role_id=role_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -480,7 +487,7 @@ async def update_company_role(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRole:
-    return await service.update_company_role(
+    return await roles.update_company_role(
         company_role_id=role_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -512,7 +519,7 @@ async def delete_company_role(
     token: TokenDep,
     db: DbDep,
 ) -> None:
-    await service.delete_company_role(
+    await roles.delete_company_role(
         company_role_id=role_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -534,7 +541,7 @@ async def get_company_role_permissions(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRolePermissions:
-    return await service.get_company_role_permissions(
+    return await permissions.get_company_role_permissions(
         company_role_id=role_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -562,7 +569,7 @@ async def get_company_role_users(
     token: TokenDep,
     db: DbDep,
 ) -> list[CompanyRoleUser]:
-    return await service.get_company_role_users(
+    return await roles.get_company_role_users(
         company_role_id=role_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -594,7 +601,7 @@ async def get_user_permission_overrides(
     token: TokenDep,
     db: DbDep,
 ) -> list[str]:
-    return await service.get_user_permission_overrides(
+    return await permissions.get_user_permission_overrides(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -627,7 +634,7 @@ async def set_user_permission_overrides(
     token: TokenDep,
     db: DbDep,
 ) -> list[str]:
-    return await service.set_user_permission_overrides(
+    return await permissions.set_user_permission_overrides(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -666,7 +673,7 @@ async def assign_company_role(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRoleAssignmentDetail:
-    return await service.assign_company_role(
+    return await role_assignments.assign_company_role(
         target_user_id=user_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
@@ -697,7 +704,7 @@ async def revoke_company_role_assignment(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRoleAssignmentDetail:
-    return await service.revoke_company_role_assignment(
+    return await role_assignments.revoke_company_role_assignment(
         assignment_id=assignment_id,
         target_user_id=user_id,
         company_id=int(token["cid"]),
@@ -733,7 +740,7 @@ async def transfer_company_owner(
     token: TokenDep,
     db: DbDep,
 ) -> OwnerTransferResult:
-    return await service.transfer_company_owner(
+    return await owner_transfer.transfer_company_owner(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         data=body,
@@ -766,7 +773,7 @@ async def set_company_role_permissions(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyRolePermissions:
-    return await service.set_company_role_permissions(
+    return await permissions.set_company_role_permissions(
         company_role_id=role_id,
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),

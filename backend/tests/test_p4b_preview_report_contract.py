@@ -160,13 +160,30 @@ async def test_an_eligible_driver_without_financial_source_is_not_in_the_preview
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", REPORTS)
-async def test_live_reports_reconcile_with_the_preview(p3c_client, p3c_engine, tenant, name):
+async def test_live_reports_reconcile_with_the_preview(p3c_client, p3c_engine, tenant, name, monkeypatch):
     period, ppd = await _entered(p3c_client, p3c_engine, tenant, "3")
-    await p3c_client.post(
+    created = await p3c_client.post(
         f"/payroll/periods/{period['payroll_period_id']}/bonuses",
         json={"driver_id": tenant.driver_a, "amount": "1.2345"}, headers=tenant.admin)
+    assert created.status_code == 201
+    from app.payroll import bonus
+
+    expected_event_id = created.json()["bonus_event_id"]
+    read_calls = []
+    original_reader = bonus._load_active_bonus_events
+
+    async def recording_reader(period_id, company_id, db):
+        rows = await original_reader(period_id, company_id, db)
+        read_calls.append((db, [row["payrollbonuseventid"] for row in rows]))
+        return rows
+
+    monkeypatch.setattr(bonus, "_load_active_bonus_events", recording_reader)
     preview = (await p3c_client.get(_preview(period), headers=tenant.admin)).json()
     report = (await p3c_client.get(_report(period, name), headers=tenant.admin)).json()
+    if name == "drivers":
+        assert len(read_calls) == 3  # preview, report packet, report evidence on the live path
+        assert read_calls[1][0] is read_calls[2][0]  # packet and evidence share the report connection
+        assert all(ids == [expected_event_id] for _, ids in read_calls)
     assert report["metadata"]["authority_kind"] == "LIVE"
     assert report["metadata"]["financials_available"] is True
     assert [c["payroll_period_definition_id"] for c in report["columns"]] == [ppd]

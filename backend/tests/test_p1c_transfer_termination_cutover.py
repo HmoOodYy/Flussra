@@ -338,6 +338,65 @@ async def test_immediate_transfer_synchronizes_employee_branch_in_completion(
     assert (await resolve_effective_driver_profile(1, employee["employee_id"], today, direct_db))["driverid"] == destination_id
 
 
+@pytest.mark.parametrize("effective_delay", [0, 30], ids=["immediate", "future"])
+@pytest.mark.asyncio
+async def test_transfer_audit_failure_rolls_back_completion(
+    client: httpx.AsyncClient,
+    auth_token: str,
+    paytest_branch_id: int,
+    hq_branch_id: int,
+    direct_db,
+    monkeypatch,
+    effective_delay: int,
+):
+    today = await company_today(direct_db)
+    effective_date = today + timedelta(days=effective_delay)
+    employee = await create_driver_employee(client, auth_token, paytest_branch_id)
+    employee_id = employee["employee_id"]
+    source_id = employee["current_or_pending_driver"]["driver_id"]
+    request = await create_transfer(client, auth_token, source_id, hq_branch_id, effective_date)
+    transfer_id = request["transfer_request_id"]
+    await approve_transfer(client, auth_token, transfer_id)
+    from app.workforce import audit as workforce_audit
+
+    async def fail_audit(*args, **kwargs):
+        raise RuntimeError("forced transfer audit failure")
+
+    monkeypatch.setattr(workforce_audit, "write_workforce_audit", fail_audit)
+    with pytest.raises(RuntimeError, match="forced transfer audit failure"):
+        await client.post(
+            f"/driver-transfers/{transfer_id}/complete",
+            json={},
+            headers=auth(auth_token),
+        )
+
+    source = (await direct_db.execute(text("""
+        SELECT DriverStatus, EffectiveTo, TransferredToDriverID
+        FROM core.Drivers WHERE DriverID = :driver_id
+    """), {"driver_id": source_id})).mappings().one()
+    assert source["driverstatus"] == "Active"
+    assert source["effectiveto"] is None
+    assert source["transferredtodriverid"] is None
+    assert (await direct_db.execute(text(
+        "SELECT BranchID FROM core.Employees WHERE EmployeeID = :employee_id",
+    ), {"employee_id": employee_id})).scalar_one() == paytest_branch_id
+    assert (await direct_db.execute(text(
+        "SELECT COUNT(*) FROM core.Drivers WHERE EmployeeID = :employee_id",
+    ), {"employee_id": employee_id})).scalar_one() == 1
+    transfer = (await direct_db.execute(text("""
+        SELECT Status, NewDriverID, CompletedAtUtc
+        FROM core.DriverTransferRequests WHERE TransferRequestID = :transfer_id
+    """), {"transfer_id": transfer_id})).mappings().one()
+    assert transfer["status"] == "Approved"
+    assert transfer["newdriverid"] is None
+    assert transfer["completedatutc"] is None
+    assert (await direct_db.execute(text(
+        "SELECT COUNT(*) FROM audit.AuditLog "
+        "WHERE EntityName = 'DriverTransferRequests' AND EntityID = :transfer_id "
+        "AND ActionCode = 'DRIVER_TRANSFER_COMPLETED'",
+    ), {"transfer_id": str(transfer_id)})).scalar_one() == 0
+
+
 @pytest.mark.asyncio
 async def test_termination_before_completed_future_transfer_cancels_future_activity_and_keeps_history(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
@@ -683,12 +742,12 @@ async def test_termination_audit_failure_rolls_back_employee_and_driver(
 ):
     today = await company_today(direct_db)
     employee = await create_driver_employee(client, auth_token, hq_branch_id)
-    from app.workforce import service as workforce_service
+    from app.workforce import audit as workforce_audit
 
     async def fail_audit(*args, **kwargs):
         raise RuntimeError("forced P1c audit failure")
 
-    monkeypatch.setattr(workforce_service, "_write_workforce_audit", fail_audit)
+    monkeypatch.setattr(workforce_audit, "write_workforce_audit", fail_audit)
     with pytest.raises(RuntimeError, match="forced P1c audit failure"):
         await client.post(
             f"/workforce/employees/{employee['employee_id']}/terminate",

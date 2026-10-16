@@ -36,12 +36,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.access.policy import is_driver_self_subject, resolve_driver_self_profile
-from app.core.service import (
-    _check_branch_access,
-    _check_permission,
-    _has_any_permission,
-    _require_not_driver_role,
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission, has_any_permission
+from app.access.policy import (
+    is_driver_self_subject,
+    require_non_driver_subject,
+    resolve_driver_self_profile,
 )
 from app.transfer.schemas import (
     CancelRequest,
@@ -51,10 +51,10 @@ from app.transfer.schemas import (
     TargetDecisionRequest,
     TransferListResponse,
 )
+from app.workforce import audit as workforce_audit
 from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 from app.workforce.projection import sync_employee_branch_projection
-from app.workforce.service import _write_workforce_audit
 
 log = logging.getLogger(__name__)
 
@@ -362,17 +362,17 @@ async def _get_accessible_branches_for_transfers(
     This function is for OPERATIONAL users only.  DRIVER/Self users are blocked before
     this is called.
     """
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     if can_see_all:
         # Check drivers.view at company level (branch_id=None → AllCompanyBranches only)
-        await _check_permission(company_id, user_id, None, "drivers.view", db)
+        await check_permission(company_id, user_id, None, "drivers.view", db)
         return True, []
 
     # SpecificBranch: keep only branches where caller has drivers.view or drivers.edit
     allowed: list[int] = []
     for bid in branch_ids:
-        if await _has_any_permission(company_id, user_id, bid, _TRANSFER_READ_PERMS, db):
+        if await has_any_permission(company_id, user_id, bid, _TRANSFER_READ_PERMS, db):
             allowed.append(bid)
 
     if not allowed:
@@ -452,7 +452,7 @@ async def create_driver_transfer_request(
     source_branch_id = int(current["branchid"])
     await _assert_driver_belongs_to_branch(data.driver_id, source_branch_id, company_id, db)
     if not caller_is_driver_self:
-        await _check_permission(company_id, user_id, source_branch_id, "drivers.edit", db)
+        await check_permission(company_id, user_id, source_branch_id, "drivers.edit", db)
 
     tgt_result = await db.execute(
         text("""
@@ -558,7 +558,7 @@ async def approve_source_transfer(
     (target branch returned for revision) so that the Returned status can
     progress without requiring a separate resubmit endpoint.
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
@@ -571,7 +571,7 @@ async def approve_source_transfer(
             ),
         )
 
-    await _check_permission(
+    await check_permission(
         company_id, user_id, row["sourcebranchid"], "drivers.edit", db
     )
 
@@ -610,7 +610,7 @@ async def decide_target_transfer(
     Returned: the request goes back to source branch for revision.
     Source may then re-approve (approve_source accepts Returned).
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
@@ -620,7 +620,7 @@ async def decide_target_transfer(
             detail=f"Request is '{row['status']}', not PendingTargetApproval.",
         )
 
-    await _check_permission(
+    await check_permission(
         company_id, user_id, row["targetbranchid"], "drivers.edit", db
     )
 
@@ -665,7 +665,7 @@ async def complete_driver_transfer(
     db: AsyncConnection,
 ) -> DriverTransferResponse:
     """Complete an approved effective-dated transfer in one transaction."""
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
@@ -676,10 +676,10 @@ async def complete_driver_transfer(
         )
 
     # Require drivers.edit on at least one of the two branches
-    src_ok = await _has_any_permission(
+    src_ok = await has_any_permission(
         company_id, user_id, row["sourcebranchid"], ["drivers.edit"], db
     )
-    tgt_ok = await _has_any_permission(
+    tgt_ok = await has_any_permission(
         company_id, user_id, row["targetbranchid"], ["drivers.edit"], db
     )
 
@@ -814,7 +814,7 @@ async def complete_driver_transfer(
         company_id, employee_id, today, db,
     )
     projection_changed = new_employee_branch != old_employee_branch
-    await _write_workforce_audit(
+    await workforce_audit.write_workforce_audit(
         db,
         company_id=company_id,
         branch_id=row["sourcebranchid"],
@@ -854,7 +854,7 @@ async def cancel_driver_transfer(
     Requires drivers.edit on source or target branch.
     DRIVER/Self users are blocked.
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
@@ -864,10 +864,10 @@ async def cancel_driver_transfer(
             detail=f"Request is already '{row['status']}' and cannot be cancelled.",
         )
 
-    src_ok = await _has_any_permission(
+    src_ok = await has_any_permission(
         company_id, user_id, row["sourcebranchid"], ["drivers.edit"], db
     )
-    tgt_ok = await _has_any_permission(
+    tgt_ok = await has_any_permission(
         company_id, user_id, row["targetbranchid"], ["drivers.edit"], db
     )
 
@@ -921,7 +921,7 @@ async def list_transfer_requests(
     - AllCompanyBranches users with drivers.view see all company requests.
     - An optional branch_id filter further narrows results.
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     can_see_all, allowed_branches = await _get_accessible_branches_for_transfers(
         company_id, user_id, db
@@ -1012,7 +1012,7 @@ async def get_transfer_request(
     Scope: caller must have drivers.view on either the source or target branch
     (or AllCompanyBranches + drivers.view).  DRIVER/Self users are blocked.
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     can_see_all, allowed_branches = await _get_accessible_branches_for_transfers(
         company_id, user_id, db

@@ -1,23 +1,7 @@
 """
-Shared read-only primitives for immutable Status evidence.
+Read immutable Status evidence and resolve its captured availability and approved snapshot provenance.
 
-CP-4D/CP-5C capture immutable per-driver/day Status evidence (StatusKeyID,
-frozen code/label/off-reason) into payroll.PayrollCalculationSnapshotStatusEntries
-at Submit/Resubmit time, versioned via PayrollCalculationSnapshots.ReportEvidenceVersion.
-This module exists only to stop that read pattern from being duplicated --
-it introduces no new evidence, no new state, and no new vocabulary.
-
-Two existing readers each re-implemented the same query with slightly
-different field names and a differently-scoped availability check:
-  - app.payroll.finalized_library_read_model._finalized_status_entries
-  - app.payroll.report_read_model._snapshot_evidence
-Both are migrated to the primitives here (Stage B3 Unit 8C-2). Their
-external return shapes are preserved exactly; only the duplicated SQL and
-availability logic move here.
-
-Leaf module: intentionally imports nothing from app.payroll.service,
-finalized_library_read_model, or report_read_model, so it can be imported by
-all three (and by service.py in the future) without any circular-import risk.
+Readers do not reconstruct historical labels or off-reason meaning from mutable Status configuration.
 """
 from __future__ import annotations
 
@@ -125,23 +109,11 @@ async def resolve_finalized_snapshot(
     Primary selector: the snapshot bound to the period's Approved
     PeriodApproval review item (review.ManagerReviewItems.
     PayrollCalculationSnapshotID). This is deliberately NOT FinalLines
-    provenance (contrast with
-    app.payroll.finalized_library_read_model._originating_snapshot, which
-    resolves Financial/report authority from FinalLines and is left
-    untouched by this Stage B3 Unit 8C-3 change): a period whose only
-    entries were Status (no billable pay-item line) finalizes with zero
-    FinalLines (see app.payroll.service.finalize_period /
-    _project_approved_snapshot_final_lines, which project exactly the
-    approved snapshot's lines -- zero lines in, zero FinalLines out). A
-    FinalLines-based selector would then wrongly report Status evidence as
-    unavailable even though the snapshot and its captured Status entries are
-    completely real and correctly bound. The review-item binding has no such
-    blind spot, because app.payroll.finalization._load_approved_snapshot_packet
-    (the exact function finalize_period itself calls) resolves it the same
-    way, before any FinalLines projection happens or fails to happen -- and
-    it guarantees uniqueness the same way finalize_period does (refusing to
-    finalize when more than one Approved PeriodApproval review item exists
-    for a period).
+    provenance: a valid historical Status snapshot can have no financial
+    lines. Selecting only through FinalLines would incorrectly report its
+    Status evidence as unavailable. The review binding resolves that packet
+    independently of financial line count, using the same uniqueness and
+    scope requirements as finalization._load_approved_snapshot_packet.
 
     When FinalLines do exist, their recorded provenance is cross-checked
     against the review-item-resolved snapshot (id + revision + hash) as a

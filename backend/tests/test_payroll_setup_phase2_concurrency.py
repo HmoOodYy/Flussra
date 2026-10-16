@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.payroll.period_creation import create_period_from_candidate, get_period_candidates
 from app.payroll.schemas import PeriodCreationRequest
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.locks import lock_branches
 from app.payroll_setup.payroll_policy import (
@@ -345,7 +345,7 @@ async def test_reassignment_waits_for_candidate_period_creation_branch_lock(data
     async with db.engine.connect() as creator:
         creator_tx = await creator.begin()
         await _set_lock_timeout(creator)
-        await _acquire_branch_workflow_lock(db.company_id, branch_id, creator)
+        await acquire_branch_workflow_lock(db.company_id, branch_id, creator)
 
         async with db.engine.connect() as reassigner:
             reassign_tx = await reassigner.begin()

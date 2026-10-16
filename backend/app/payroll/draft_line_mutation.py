@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_permission
+from app.access.permissions import check_permission
 from app.payroll.definition_calculation import (
     PeriodDefinition,
     is_method_operational,
@@ -122,7 +122,7 @@ async def add_draft_line(
             ),
         )
 
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     definition = _require_usable_definition(
         await get_period_definition(
@@ -224,7 +224,7 @@ async def update_draft_line(
             detail=f"Cannot modify lines on a period with status '{period.status}'.",
         )
 
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     line = await _get_line_by_id(draft_line_id, company_id, db)
     if line.period_id != period_id:
@@ -307,7 +307,7 @@ async def void_draft_line(
             detail=f"Cannot void lines on a period with status '{period.status}'.",
         )
 
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     line = await _get_line_by_id(draft_line_id, company_id, db)
     if line.period_id != period_id:

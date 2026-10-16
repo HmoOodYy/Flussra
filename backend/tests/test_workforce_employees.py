@@ -399,17 +399,17 @@ async def test_core_driver_patch_rejects_employee_fields_and_allows_driver_field
 async def test_audit_failure_rolls_back_employee_and_initial_profile(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db, monkeypatch,
 ):
-    from app.workforce import service as workforce_service
+    from app.workforce import audit as workforce_audit
 
     full_name = f"Rollback {suffix()}"
-    original = workforce_service._write_workforce_audit
+    original = workforce_audit.write_workforce_audit
 
     async def fail_on_profile(db, **kwargs):
         if kwargs["action_code"] == "DRIVER_PROFILE_CREATED":
             raise RuntimeError("forced Workforce audit failure")
         await original(db, **kwargs)
 
-    monkeypatch.setattr(workforce_service, "_write_workforce_audit", fail_on_profile)
+    monkeypatch.setattr(workforce_audit, "write_workforce_audit", fail_on_profile)
     with pytest.raises(RuntimeError, match="forced Workforce audit failure"):
         await client.post(
             "/workforce/employees",
@@ -429,7 +429,7 @@ async def test_audit_failure_rolls_back_employee_and_initial_profile(
 async def test_profile_insert_conflict_rolls_back_employee_and_audits(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db, monkeypatch,
 ):
-    from app.workforce import service as workforce_service
+    from app.workforce import audit as workforce_audit
 
     driver_code = f"P1B-DUP-{suffix()}"
     existing = await create_employee(
@@ -437,14 +437,14 @@ async def test_profile_insert_conflict_rolls_back_employee_and_audits(
     )
     failed_name = f"Profile conflict {suffix()}"
     audit_calls: list[tuple[str, int]] = []
-    original = workforce_service._write_workforce_audit
+    original = workforce_audit.write_workforce_audit
 
     async def capture_employee_audit(db, **kwargs):
         if kwargs["action_code"] == "EMPLOYEE_CREATED":
             audit_calls.append((kwargs["action_code"], kwargs["entity_id"]))
         await original(db, **kwargs)
 
-    monkeypatch.setattr(workforce_service, "_write_workforce_audit", capture_employee_audit)
+    monkeypatch.setattr(workforce_audit, "write_workforce_audit", capture_employee_audit)
     conflict = await client.post(
         "/workforce/employees",
         json={"branch_id": hq_branch_id, "full_name": failed_name,

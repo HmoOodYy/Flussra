@@ -125,7 +125,7 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
         # the polymorphic (EntitySchema, EntityName, EntityID) convention this
         # module's own Submit/Resubmit calls create (entityschema='payroll',
         # entityname='PayrollPeriods', entityid=str(period_id)), confirmed
-        # against app/payroll/service.py's review-item creation sites.
+        # against app/payroll/period_lifecycle.py's review-item creation sites.
         review_items_subq = (
             "(SELECT reviewitemid FROM review.managerreviewitems "
             "WHERE entityschema = 'payroll' AND entityname = 'PayrollPeriods' "
@@ -271,7 +271,7 @@ async def _insert_approved_review_item(
     db: AsyncConnection, company_id: int, branch_id: int, period_id: int, snapshot_id: int,
 ) -> int:
     """Bind a snapshot to a period the way an Approved PeriodApproval review
-    item does -- the exact selector app.payroll.service._load_approved_snapshot_packet
+    item does -- the exact selector app.payroll.finalization._load_approved_snapshot_packet
     (and therefore finalize_period) trusts, and the one
     status_evidence.resolve_finalized_snapshot mirrors for Locked/Archived
     Day Grid reads (Stage B3 Unit 8C-3)."""

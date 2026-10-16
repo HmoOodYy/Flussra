@@ -1,10 +1,5 @@
 """
-Driver Pay Rules (Minimum / Maximum Pay) — M15.
-
-Extracted from app.payroll.service (Stage B4-2B) as a dependency-closed
-domain module — no behavior change, pure relocation. Depends only on the
-neutral app.payroll.guards leaf (Stage B4-2A) for shared access checks, not
-on app.payroll.service.
+Driver MinimumPay/MaximumPay rule administration and audit.
 """
 import json
 from datetime import date
@@ -14,13 +9,13 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import _check_any_permission
 from app.payroll.guards import (
     _check_driver_read_access,
-    _check_not_in_finalized_period,
     _require_non_driver_rate_subject,
+    check_not_in_finalized_period,
 )
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
 
@@ -245,7 +240,7 @@ async def create_driver_pay_rule(
         raise HTTPException(status_code=404, detail="Driver not found in this company.")
 
     driver_branch_id: int = drv_row["branchid"]
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -284,7 +279,7 @@ async def create_driver_pay_rule(
 
     # Finalized-period guard: a pay rule must not be created with effective_from
     # inside a Locked or Archived payroll period (same as rates backdating guard).
-    await _check_not_in_finalized_period(
+    await check_not_in_finalized_period(
         company_id, driver_branch_id, data.effective_from, db, label="pay rule"
     )
 
@@ -378,7 +373,7 @@ async def get_driver_pay_rule_by_id(
     """Return a single pay rule after the generic DRIVER denial check."""
     await require_non_driver_subject(company_id, user_id, db)
     rule = await _get_rule_by_id_internal(rule_id, company_id, db)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rule.branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -414,7 +409,7 @@ async def end_driver_pay_rule(
             detail=f"Only Active rules can be ended (current status: '{rule.status}').",
         )
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -487,7 +482,7 @@ async def update_driver_pay_rule_notes(
     if rule.status == "Voided":
         raise HTTPException(status_code=422, detail="Cannot update a Voided rule.")
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -542,7 +537,7 @@ async def void_driver_pay_rule(
     if rule.status == "Voided":
         raise HTTPException(status_code=422, detail="Rule is already Voided.")
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )

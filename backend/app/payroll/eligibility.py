@@ -1,25 +1,7 @@
 """
-Payroll driver eligibility helpers.
+Payroll Driver eligibility validation, period snapshots, and eligible-driver reads.
 
-Extracted from app.payroll.service (Stage B4-1) as a dependency-closed leaf
-module — no behavior change, pure relocation. Two of these symbols
-(_period_has_driver_eligibility_snapshot, _is_snapshot_row_eligible_for_workdate)
-are consumed directly by app.payroll.current_hub, app.payroll.off_drivers,
-and app.payroll.finalized_library_read_model (retargeted off the
-app.payroll.service compatibility facade in Stage B4-22).
-
-Stage B4-21 moved get_period_eligible_drivers here from app.payroll.service —
-pure relocation, no behavior change. This module already owned the table its
-primary (snapshot) branch reads, payroll.payrollperioddrivereligibility, via
-_period_has_driver_eligibility_snapshot/_create_period_driver_eligibility_rows
-above, and this module's own _assert_driver_eligible_for_period docstring
-already documented parity with get_period_eligible_drivers's Bonus
-eligibility list — table ownership, not physical adjacency, is why it moved
-here rather than to period_read.py or off_drivers.py. This
-is the one symbol in the B4 residue that costs this module its status as a
-zero-app-dependency leaf: it now imports app.core.service (permission/role
-guards) and app.payroll.period_read (the period access gate), verified to
-introduce no import cycle in either direction.
+Snapshot-aware checks retain the historical fallback for periods without an eligibility snapshot.
 """
 from datetime import UTC, date, datetime
 
@@ -27,7 +9,9 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _build_in_clause, _check_any_permission, _require_not_driver_role
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
+from app.db.sql import build_in_clause
 from app.payroll.period_read import get_period_by_id
 
 # ---------------------------------------------------------------------------
@@ -92,7 +76,7 @@ async def _lifecycle_eligible_driver_ids(
     """Return Drivers whose current lifecycle windows still allow new source."""
     if not driver_ids:
         return set()
-    in_clause, in_params = _build_in_clause(driver_ids, "lifecycle_driver")
+    in_clause, in_params = build_in_clause(driver_ids, "lifecycle_driver")
     result = await db.execute(
         text(f"""
             SELECT d.DriverID
@@ -605,7 +589,7 @@ async def get_period_eligible_drivers(
     payroll.view OR payroll.entry permission is required.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
@@ -616,7 +600,7 @@ async def get_period_eligible_drivers(
             detail="Period eligible drivers are not available for Prepared (Draft) periods.",
         )
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
 

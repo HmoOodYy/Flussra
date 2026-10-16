@@ -280,7 +280,7 @@ async def onboarding_choices(
 ) -> dict:
     """Legal first-payroll onboarding dates for a not-yet-created Branch.
 
-    No authorization here — the caller (settings.service) owns it, matching
+    No authorization here — the caller (settings.branches) owns it, matching
     the authority the create-with-date write requires.
     """
     segments = await terminal_segments(db, setup_id)

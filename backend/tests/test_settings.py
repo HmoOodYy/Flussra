@@ -26,7 +26,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from app.settings import service as settings_service
+from app.settings import audit as settings_audit
+from app.settings import branches
 
 
 def auth(token: str) -> dict[str, str]:
@@ -584,7 +585,7 @@ class TestCreateBranch:
         )
         assert pre.status_code == 201, f"Seed branch failed: {pre.text}"
 
-        with patch.object(settings_service, "_generate_branch_code", _patched_gen):
+        with patch.object(branches, "_generate_branch_code", _patched_gen):
             resp = await client.post(
                 "/settings/branches",
                 json={"branch_name": "Retry Success Branch"},
@@ -615,7 +616,7 @@ class TestCreateBranch:
         )
         assert pre.status_code == 201, f"Seed branch failed: {pre.text}"
 
-        with patch.object(settings_service, "_generate_branch_code", lambda: always_same_code):
+        with patch.object(branches, "_generate_branch_code", lambda: always_same_code):
             resp = await client.post(
                 "/settings/branches",
                 json={"branch_name": "Should Exhaust Retries Branch"},
@@ -882,7 +883,7 @@ class TestSettingsAudit:
         auth_token: str,
     ):
         """
-        When _write_settings_audit raises inside update_company_profile, the
+        When audit.write_settings_audit raises inside update_company_profile, the
         UPDATE to core.companies must roll back — the name must be unchanged.
         """
         # Record the current name.
@@ -893,7 +894,7 @@ class TestSettingsAudit:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on company update")
 
-        with patch.object(settings_service, "_write_settings_audit", _raise):
+        with patch.object(settings_audit, "write_settings_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on company update"):
                 await client.patch(
                     "/settings/company",
@@ -913,7 +914,7 @@ class TestSettingsAudit:
         auth_token: str,
     ):
         """
-        When _write_settings_audit raises inside create_branch, the INSERT into
+        When audit.write_settings_audit raises inside create_branch, the INSERT into
         core.branches must roll back — the branch must not appear in the list.
         """
         branch_name = "Rollback Test Branch Audit"
@@ -921,7 +922,7 @@ class TestSettingsAudit:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on branch create")
 
-        with patch.object(settings_service, "_write_settings_audit", _raise):
+        with patch.object(settings_audit, "write_settings_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on branch create"):
                 await client.post(
                     "/settings/branches",
@@ -942,7 +943,7 @@ class TestSettingsAudit:
         settings_branch_id: int,
     ):
         """
-        When _write_settings_audit raises inside update_branch, the UPDATE to
+        When audit.write_settings_audit raises inside update_branch, the UPDATE to
         core.branches must roll back — the notes must be unchanged.
         """
         before = (
@@ -955,7 +956,7 @@ class TestSettingsAudit:
         async def _raise(*args, **kwargs):
             raise RuntimeError("Simulated audit failure on branch update")
 
-        with patch.object(settings_service, "_write_settings_audit", _raise):
+        with patch.object(settings_audit, "write_settings_audit", _raise):
             with pytest.raises(RuntimeError, match="Simulated audit failure on branch update"):
                 await client.patch(
                     f"/settings/branches/{settings_branch_id}",

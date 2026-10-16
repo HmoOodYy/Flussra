@@ -38,13 +38,10 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission, check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import (
-    _build_in_clause,
-    _check_any_permission,
-    _check_permission,
-    _require_not_driver_role,
-)
+from app.db.sql import build_in_clause
 from app.payroll import status_evidence
 from app.payroll.day_entry_state import (
     _enforce_status_key_limits,
@@ -133,7 +130,7 @@ async def get_day_grid(
     - Status keys: active PayrollStatusKeys for the branch.
     - Rows: all eligible active drivers; populated with existing draft lines.
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # ── Load and access-check the period ─────────────────────────────────── #
     period = await get_period_by_id(company_id, user_id, period_id, db)
@@ -153,7 +150,7 @@ async def get_day_grid(
     )
 
     # ── Permission: payroll.view OR payroll.entry ─────────────────────────── #
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
 
@@ -245,7 +242,7 @@ async def get_day_grid(
         ]
         rescue_driver_ids_on_date: set[int] = set()
         if out_of_window_candidates:
-            in_clause_rescue, in_params_rescue = _build_in_clause(
+            in_clause_rescue, in_params_rescue = build_in_clause(
                 out_of_window_candidates, "rescue"
             )
             rescue_result = await db.execute(
@@ -316,7 +313,7 @@ async def get_day_grid(
     lines_by_driver: dict[int, list[Any]] = {did: [] for did in driver_ids}
 
     if driver_ids:
-        in_clause, in_params = _build_in_clause(driver_ids, "drv")
+        in_clause, in_params = build_in_clause(driver_ids, "drv")
         dl_result = await db.execute(
             text(f"""
                 SELECT dl.draftlineid, dl.driverid, dl.linetype,
@@ -338,7 +335,7 @@ async def get_day_grid(
     # ── CP-2D1: batch-load canonical entry-state rows for this date ───────── #
     canonical_by_driver: dict[int, dict] = {}
     if driver_ids:
-        in_clause_ces, in_params_ces = _build_in_clause(driver_ids, "ces_drv")
+        in_clause_ces, in_params_ces = build_in_clause(driver_ids, "ces_drv")
         ces_result = await db.execute(
             text(f"""
                 SELECT driverid, statuskeyid, notetext,
@@ -369,7 +366,7 @@ async def get_day_grid(
         and row["statuskeyid"] not in status_key_id_map
     }
     if deactivated_sk_ids:
-        in_clause_dk, in_params_dk = _build_in_clause(list(deactivated_sk_ids), "dkid")
+        in_clause_dk, in_params_dk = build_in_clause(list(deactivated_sk_ids), "dkid")
         dk_result = await db.execute(
             text(f"""
                 SELECT statuskeyid, statuscode, keyname, isoffreason
@@ -533,7 +530,7 @@ async def get_day_grid(
                 sk_label = sk_obj.label
                 is_off = bool(sk_obj.is_off_reason)
 
-        # Stage B3 Unit 8C-3: for Locked/Archived, override whatever the
+        # For Locked/Archived, override whatever the
         # blocks above computed (they are guarded off above, but this stays
         # authoritative even if that guarding is ever loosened) -- Status
         # meaning comes only from immutable snapshot evidence for this
@@ -551,7 +548,7 @@ async def get_day_grid(
                 sk_label = None
                 is_off = False
 
-        # Stage B3 Unit 8C-3 follow-up: when the overall Status evidence for
+        # When the overall Status evidence for
         # this Locked/Archived period is UNAVAILABLE, every row's is_off
         # above is a default (False), not a historical fact -- tallying it
         # into worked/off would silently present an unknown historical
@@ -638,7 +635,7 @@ async def save_day_grid(
     All operations share the caller's transaction (no nested BEGIN).
     Returns the refreshed day-grid response.
     """
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # ── Load and access-check the period ─────────────────────────────────── #
     period = await get_period_by_id(company_id, user_id, period_id, db)
@@ -662,7 +659,7 @@ async def save_day_grid(
     )
 
     # ── Permission: payroll.entry ─────────────────────────────────────────── #
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     branch_id = period.branch_id

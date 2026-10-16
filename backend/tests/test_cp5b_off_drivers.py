@@ -555,7 +555,7 @@ async def _insert_approved_review_item(
     db: AsyncConnection, company_id: int, branch_id: int, period_id: int, snapshot_id: int,
 ) -> int:
     """Bind a snapshot to a period the way an Approved PeriodApproval review
-    item does -- the exact selector app.payroll.service._load_approved_snapshot_packet
+    item does -- the exact selector app.payroll.finalization._load_approved_snapshot_packet
     (and therefore finalize_period) trusts, and the one
     status_evidence.resolve_finalized_snapshot mirrors for Locked/Archived
     Off Drivers reads (Stage B3 Unit 8C-5, same rule as Day Grid Unit 8C-3)."""

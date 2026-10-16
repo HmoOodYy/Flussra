@@ -300,7 +300,7 @@ class TestPermissionDenial:
 class TestStaleTokenRejection:
     """
     Verify that a valid JWT for a deactivated user / user with login disabled
-    is rejected at the service layer via _check_branch_access.
+    is rejected at the service layer via check_branch_access.
 
     The JWT is cryptographically valid and not expired, but the DB view now
     filters userisactive=TRUE and canlogin=TRUE, so the user gets 403.

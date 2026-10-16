@@ -3,11 +3,9 @@
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import (
-    _check_branch_access,
-    _check_permission,
-    _require_not_driver_role,
-)
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 
 
 async def require_policy_permission(
@@ -17,11 +15,11 @@ async def require_policy_permission(
     db: AsyncConnection,
 ) -> None:
     """Require active all-company access, a non-driver role, and policy permission."""
-    can_see_all, _ = await _check_branch_access(company_id, user_id, db)
+    can_see_all, _ = await check_branch_access(company_id, user_id, db)
     if not can_see_all:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Payroll Setup policy operations require company-wide branch access.",
         )
-    await _require_not_driver_role(company_id, user_id, db)
-    await _check_permission(company_id, user_id, None, permission_code, db)
+    await require_non_driver_subject(company_id, user_id, db)
+    await check_permission(company_id, user_id, None, permission_code, db)

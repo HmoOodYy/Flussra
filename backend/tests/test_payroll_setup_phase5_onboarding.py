@@ -22,7 +22,8 @@ from app.dependencies import get_db
 from app.main import create_app
 from app.payroll_setup import payroll_policy, readiness
 from app.payroll_setup.errors import PolicyError
-from app.settings import service as settings_service
+from app.settings import audit as settings_audit
+from app.settings import branches
 
 _ROOT = Path(__file__).resolve().parents[2]
 _MIGRATIONS = _ROOT / "migrations" / "sql"
@@ -516,7 +517,7 @@ async def test_branch_onboarding_policy_audit_failure_rolls_back_all_branch_effe
             raise RuntimeError("Phase5 injected BranchAssigned audit failure")
         await original_policy_audit(db, **kwargs)
 
-    original_audit = settings_service._write_settings_audit
+    original_audit = settings_audit.write_settings_audit
     captured_branch_ids: list[str] = []
 
     async def capture_audit(*args, **kwargs):
@@ -525,7 +526,7 @@ async def test_branch_onboarding_policy_audit_failure_rolls_back_all_branch_effe
         await original_audit(*args, **kwargs)
 
     monkeypatch.setattr(payroll_policy, "write_policy_audit", fail_assignment_audit)
-    monkeypatch.setattr(settings_service, "_write_settings_audit", capture_audit)
+    monkeypatch.setattr(settings_audit, "write_settings_audit", capture_audit)
     try:
         with pytest.raises(RuntimeError, match="Phase5 injected BranchAssigned audit failure"):
             await client.post("/settings/branches", headers=_auth(actor), json={
@@ -622,7 +623,7 @@ async def test_onboarding_serializes_with_company_default_change(
     default_lock_attempted = asyncio.Event()
     release = asyncio.Event()
     competitor_pid: list[int] = []
-    original_service_lock = settings_service.lock_company
+    original_service_lock = branches.lock_company
     original_policy_lock = payroll_policy.lock_company
 
     async def pause_after_onboarding_company_lock(company_id, conn):
@@ -637,7 +638,7 @@ async def test_onboarding_serializes_with_company_default_change(
             default_lock_attempted.set()
         await original_policy_lock(company_id, conn)
 
-    monkeypatch.setattr(settings_service, "lock_company", pause_after_onboarding_company_lock)
+    monkeypatch.setattr(branches, "lock_company", pause_after_onboarding_company_lock)
     monkeypatch.setattr(payroll_policy, "lock_company", observe_default_lock)
     onboard = asyncio.create_task(client.post("/settings/branches", headers=_auth(actor), json={
         "branch_name": "P5 default race " + marker[:8], "branch_code": "P5D" + marker[:7],
@@ -694,7 +695,7 @@ async def test_onboarding_serializes_with_version_replacement(
     publish_lock_attempted = asyncio.Event()
     release = asyncio.Event()
     competitor_pid: list[int] = []
-    original_service_locks = settings_service.lock_setups
+    original_service_locks = branches.lock_setups
     original_policy_locks = payroll_policy.lock_setups
 
     async def pause_after_onboarding_setup_lock(company_id, setup_ids, conn):
@@ -709,7 +710,7 @@ async def test_onboarding_serializes_with_version_replacement(
             publish_lock_attempted.set()
         await original_policy_locks(company_id, setup_ids, conn)
 
-    monkeypatch.setattr(settings_service, "lock_setups", pause_after_onboarding_setup_lock)
+    monkeypatch.setattr(branches, "lock_setups", pause_after_onboarding_setup_lock)
     monkeypatch.setattr(payroll_policy, "lock_setups", observe_publish_setup_lock)
     onboard = asyncio.create_task(client.post("/settings/branches", headers=_auth(actor), json={
         "branch_name": "P5 publish race " + marker[:8], "branch_code": "P5V" + marker[:7],
@@ -756,7 +757,7 @@ async def test_onboarding_serializes_with_setup_archive(
     archive_lock_attempted = asyncio.Event()
     release = asyncio.Event()
     competitor_pid: list[int] = []
-    original_service_locks = settings_service.lock_setups
+    original_service_locks = branches.lock_setups
     original_policy_locks = payroll_policy.lock_setups
 
     async def pause_after_onboarding_setup_lock(company_id, setup_ids, conn):
@@ -771,7 +772,7 @@ async def test_onboarding_serializes_with_setup_archive(
             archive_lock_attempted.set()
         await original_policy_locks(company_id, setup_ids, conn)
 
-    monkeypatch.setattr(settings_service, "lock_setups", pause_after_onboarding_setup_lock)
+    monkeypatch.setattr(branches, "lock_setups", pause_after_onboarding_setup_lock)
     monkeypatch.setattr(payroll_policy, "lock_setups", observe_archive_setup_lock)
     onboard = asyncio.create_task(client.post("/settings/branches", headers=_auth(actor), json={
         "branch_name": "P5 archive race " + marker[:8], "branch_code": "P5X" + marker[:7],
@@ -862,7 +863,7 @@ async def test_branch_create_default_requires_settings_admin(
     phase5_onboarding_db, phase5_onboarding_conn,
 ):
     """POST /settings/branches with is_default=true must additionally require
-    settings-admin (_ensure_company_admin), matching the dedicated
+    settings-admin (security.ensure_company_admin), matching the dedicated
     set-default endpoint's authority — branches.create alone must not be able
     to change the Company default indirectly via create.
 

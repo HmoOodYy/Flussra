@@ -1,65 +1,16 @@
 """
-Period Lifecycle — the payroll domain's single owner of:
+Period transitions and submit/resubmit orchestration.
 
-  A. Status transition permission mapping (_TRANSITION_PERMISSIONS)
-  B. Period-status audit writing (_PERIOD_AUDIT_REASONS, _write_period_status_audit)
-  C. Submit transaction-isolation setup (_set_submit_transaction_isolation)
-  D. InReview slot protection (_is_inreview_slot_violation,
-     _check_inreview_slot_available)
-  F. Submit orchestration (change_period_status)
-  G. Resubmission orchestration (resubmit_period)
+Target submission and resubmission remain refused by the evidence gate.
+Retained submission logic consumes Calculation and Status Payment operations;
+Review owns approval decisions and Finalization owns approved-snapshot projection.
 
-Extracted from app.payroll.service (Stage B4-18) as a dependency-closed leaf
-module — no behavior change, pure relocation. A fresh B4-18 discovery proved
-the transitive service.py-local closure of these 10 symbols is empty: this
-module depends only on already-extracted true owners
-(app.payroll.period_calculation, app.payroll.status_payment_sync,
-app.payroll.period_read, app.payroll.eligibility, app.payroll.guards,
-app.payroll.workflow_lock, app.payroll.audit_evidence,
-app.payroll.immutable_evidence, app.payroll.schemas, app.core.service) and
-never imports app.payroll.service.
+Callers own the ambient transaction and whole-transaction retry policy.
+_set_submit_transaction_isolation must issue the first SQL statement on a
+submitting connection so REPEATABLE READ applies before any authority is read.
 
-This module owns period status transition policy, submit/resubmit
-orchestration, InReview slot protection, submit transaction-isolation
-behavior, and period-status audit writing. Whole-transaction retry policy
-and SQLSTATE translation are owned by app.db.transaction_retry. It does NOT
-own Calculation, Calculation snapshot capture, Status Payment implementation,
-Finalization, Period creation, Day Grid, Draft mutation, Review approval
-behavior, or Drivers Off — those stay with their existing owners and are
-consumed here only through imports.
-
-The architecture direction is one-way:
-
-    Period Lifecycle -> Period Calculation, Status Payment Sync, Period Read,
-                         and other established leaf owners
-
-Calculation is consumed directly from app.payroll.period_calculation
-(_refresh_draft_calculations, _build_live_calculation_packet,
-_capture_calculation_snapshot) — Lifecycle does not rebuild Calculation
-policy, copy packet code, or copy snapshot code. Status Payment is consumed
-directly from app.payroll.status_payment_sync
-(_refresh_status_payment_lines) — Lifecycle does not duplicate Status
-Payment logic.
-
-Finalization (finalize_period, get_finalization_preview, and their approved-
-snapshot helpers) lives in app.payroll.finalization — proven dependency-
-disjoint from this module by the B4-17 discovery, reconfirmed unchanged by
-this stage. Review approval behavior remains owned by app.review.service,
-which imports _write_period_status_audit directly from this module as of
-this stage (previously via app.payroll.service).
-
-Transaction ownership is above this module. change_period_status and
-resubmit_period receive an ambient AsyncConnection and open no transaction
-of their own, commit nothing, and roll back nothing explicitly — the request-
-level transaction is owned by the existing DB dependency
-(app.dependencies.get_db). _set_submit_transaction_isolation issues exactly
-one SQL statement (SET TRANSACTION ISOLATION LEVEL REPEATABLE READ) and must
-be the first statement on the connection for a submitting request; both
-callers preserve that ordering unchanged from their pre-extraction form.
-
-The InReview slot protection here relies on a DB-enforced partial unique
-index as the concurrency authority; _check_inreview_slot_available is a
-friendly pre-check only, not a replacement for that race protection.
+The partial unique index is the concurrency authority for the InReview slot;
+_check_inreview_slot_available provides a friendly pre-check only.
 """
 from __future__ import annotations
 
@@ -71,23 +22,23 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import _check_permission, _require_not_driver_role
+from app.payroll import period_audit
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
+from app.payroll.calculation_snapshot import _capture_calculation_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
 from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
-from app.payroll.period_calculation import (
-    _build_live_calculation_packet,
-    _capture_calculation_snapshot,
-)
+from app.payroll.period_calculation import _build_live_calculation_packet
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import _VALID_TRANSITIONS, PeriodStatusChange, PeriodSummary
 from app.payroll.status_payment_sync import _refresh_status_payment_lines
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 # ---------------------------------------------------------------------------
-# Period status-change: permission gates and audit
+# Period status-change permission gates
 # ---------------------------------------------------------------------------
 
 # Each (from_status, to_status) pair maps to the permission code the caller
@@ -108,56 +59,6 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     #   Approved exits only via POST /finalize (→ Locked).
     ("Locked",   "Archived"):   "payroll.finalize",
 }
-
-
-_PERIOD_AUDIT_REASONS: dict[str, str] = {
-    "PERIOD_STATUS_CHANGED": "Payroll period status changed",
-}
-
-
-async def _write_period_status_audit(
-    db: AsyncConnection,
-    *,
-    company_id: int,
-    branch_id: int,
-    user_id: int,
-    period_id: int,
-    old_status: str,
-    new_status: str,
-    extra: dict | None = None,
-) -> None:
-    """
-    Insert one row into audit.AuditLog for a period status-change event.
-
-    Module-level so tests can monkeypatch it to verify that the preceding
-    UPDATE rolls back when this raises.
-
-    extra: optional additional fields merged into newvaluejson (e.g. trigger context).
-    """
-    new_val_dict: dict = {"status": new_status}
-    if extra:
-        new_val_dict.update(extra)
-    await db.execute(
-        text("""
-            INSERT INTO audit.auditlog
-                (companyid, branchid, actoruserid, actioncode,
-                 entityschema, entityname, entityid,
-                 oldvaluejson, newvaluejson, reason, sourcetype)
-            VALUES
-                (:cid, :bid, :uid, 'PERIOD_STATUS_CHANGED',
-                 'payroll', 'PayrollPeriods', :eid,
-                 :old_val, :new_val, :reason, 'Application')
-        """),
-        {
-            "cid":     company_id,
-            "bid":     branch_id,
-            "uid":     user_id,
-            "eid":     str(period_id),
-            "old_val": json.dumps({"status": old_status}),
-            "new_val": json.dumps(new_val_dict),
-            "reason":  _PERIOD_AUDIT_REASONS["PERIOD_STATUS_CHANGED"],
-        },
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +100,7 @@ async def change_period_status(
     # Action-level permission gate: each transition requires a specific code.
     required_perm = _TRANSITION_PERMISSIONS.get((existing.status, change.status))
     if required_perm:
-        await _check_permission(company_id, user_id, existing.branch_id, required_perm, db)
+        await check_permission(company_id, user_id, existing.branch_id, required_perm, db)
 
     # P4c gate: submitting freezes target calculation evidence, which does not exist yet.
     # Refuse before any lock, snapshot, review item or status transition.
@@ -216,7 +117,7 @@ async def change_period_status(
         # CP-1D: Acquire branch advisory lock before touching any workflow rows.
         # Same lock used by period creation (CP-1C) and resubmission — ensures all
         # per-branch workflow mutations are fully serialized.
-        await _acquire_branch_workflow_lock(company_id, existing.branch_id, db)
+        await acquire_branch_workflow_lock(company_id, existing.branch_id, db)
 
         # CP-1D: Lock all active workflow rows in a deterministic order to prevent
         # deadlock when two concurrent submits race on the same branch.
@@ -558,7 +459,7 @@ async def change_period_status(
                         "Transaction rolled back. Please refresh and try again."
                     ),
                 )
-            await _write_period_status_audit(
+            await period_audit.write_period_status_audit(
                 db,
                 company_id=company_id,
                 branch_id=existing.branch_id,
@@ -629,7 +530,7 @@ async def change_period_status(
             )
 
     # Audit: write inside the same transaction so a failure rolls back the UPDATE.
-    await _write_period_status_audit(
+    await period_audit.write_period_status_audit(
         db,
         company_id=company_id,
         branch_id=existing.branch_id,
@@ -728,7 +629,7 @@ async def resubmit_period(
     await _set_submit_transaction_isolation(db)
 
     # ── Step 1: DRIVER/Self guard ────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     # ── Step 2: load period (access check) ───────────────────────────────── #
     existing = await get_period_by_id(company_id, user_id, period_id, db)
@@ -745,7 +646,7 @@ async def resubmit_period(
         )
 
     # Permission gate: resubmission requires payroll.entry.
-    await _check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
+    await check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
 
     # P4c gate: resubmitting freezes target calculation evidence, which does not exist
     # yet. Refuse before any lock, snapshot, review item or status transition.
@@ -756,7 +657,7 @@ async def resubmit_period(
     # ── Step 3: acquire branch advisory lock, then period row lock ───────── #
     # CP-1D: branch lock must come first (same order as submit and creation) to
     # prevent deadlock when concurrent submit + resubmit race on the same branch.
-    await _acquire_branch_workflow_lock(company_id, existing.branch_id, db)
+    await acquire_branch_workflow_lock(company_id, existing.branch_id, db)
 
     lock_result = await db.execute(
         text(
@@ -967,7 +868,7 @@ async def resubmit_period(
         )
 
     # ── Step 7: period status audit ──────────────────────────────────────── #
-    await _write_period_status_audit(
+    await period_audit.write_period_status_audit(
         db,
         company_id=company_id,
         branch_id=existing.branch_id,

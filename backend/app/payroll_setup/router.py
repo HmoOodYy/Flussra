@@ -6,7 +6,9 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_branch_access, _check_permission, _require_not_driver_role
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.dependencies import get_current_user, get_db
 
 from . import boundaries, payroll_policy, reads
@@ -60,7 +62,7 @@ def _version_response(row: dict) -> VersionResponse:
 
 async def _branch_read_access(company_id: int, user_id: int, branch_id: int,
                               db: AsyncConnection) -> None:
-    companywide, branch_ids = await _check_branch_access(company_id, user_id, db)
+    companywide, branch_ids = await check_branch_access(company_id, user_id, db)
     if not companywide and branch_id not in branch_ids:
         from fastapi import HTTPException, status
 
@@ -68,8 +70,8 @@ async def _branch_read_access(company_id: int, user_id: int, branch_id: int,
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Branch is outside the user's access scope.",
         )
-    await _require_not_driver_role(company_id, user_id, db)
-    await _check_permission(company_id, user_id, branch_id, "payroll.view", db)
+    await require_non_driver_subject(company_id, user_id, db)
+    await check_permission(company_id, user_id, branch_id, "payroll.view", db)
 
 
 @router.get("/setups", response_model=list[SetupResponse])

@@ -1,18 +1,7 @@
 """
-Ledger read — final (locked) lines for a payroll period.
+Read locked or archived PayrollFinalLines through the operational payroll permission contract.
 
-Extracted from app.payroll.service (Stage B4-9.5) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-This is the row-level Ledger contract: it reads the authoritative
-payroll.payrollfinallines table directly, gated on period status
-(Locked/Archived only) and payroll.view / payroll.entry / payroll.finalize
-permission. It is deliberately NOT the same responsibility as
-app.payroll.finalized_library_read_model, which owns the P6 finalized-library
-evidence/report sections (ledger.view permission, snapshot-provenance
-envelopes, section availability state). Both modules independently read
-payroll.payrollfinallines for their own distinct projections; that is not
-evidence they share ownership.
+This differs from finalized_library_read_model, whose evidence/report sections use ledger.view and snapshot provenance.
 """
 from typing import Any
 
@@ -20,7 +9,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_any_permission, _require_not_driver_role
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import FinalLineSummary
 
@@ -70,7 +60,7 @@ async def get_final_lines(
     Period must be Locked or Archived; draft data is never exposed via this path.
     """
     # ── Driver-role hard-block (Ledger is not the Driver Screen) ────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
@@ -85,8 +75,8 @@ async def get_final_lines(
             ),
         )
 
-    # ── Payroll read permission — view or finalize role required ───────────────── #
-    await _check_any_permission(
+    # ── Payroll read permission — view, entry, or finalize required ───────────────── #
+    await check_any_permission(
         company_id, user_id, period.branch_id,
         ["payroll.view", "payroll.entry", "payroll.finalize"],
         db,

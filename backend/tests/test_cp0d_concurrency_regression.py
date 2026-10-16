@@ -285,9 +285,8 @@ class TestSourceMutationVsCancellation:
 
         The exercised mutation is a draft-line source add (POST .../lines),
         whose implementation is app.payroll.draft_line_mutation.add_draft_line
-        (Stage B4-14) — it resolves _lock_period_for_mutation from that
-        module's own globals, not app.payroll.service's, so the patch targets
-        app.payroll.draft_line_mutation directly.
+        and resolves _lock_period_for_mutation through that module's globals,
+        so the patch targets app.payroll.draft_line_mutation directly.
         """
         import app.payroll.draft_line_mutation as dlm
         real_lock = dlm._lock_period_for_mutation

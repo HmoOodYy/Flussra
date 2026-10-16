@@ -170,6 +170,38 @@ class TestTransitionPredicates:
         # cleanup via direct DB since Draft can only be Cancelled via PATCH
         await _force_status(direct_db, pid, "Cancelled")
 
+    async def test_period_status_audit_failure_rolls_back_draft_to_cancelled(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        paytest_branch_id: int,
+        direct_db,
+        monkeypatch,
+    ):
+        pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
+        from app.payroll import period_audit
+
+        async def fail_audit(*args, **kwargs):
+            raise RuntimeError("forced period status audit failure")
+
+        monkeypatch.setattr(period_audit, "write_period_status_audit", fail_audit)
+        with pytest.raises(RuntimeError, match="forced period status audit failure"):
+            await client.patch(
+                f"/payroll/periods/{pid}/status",
+                json={"status": "Cancelled"},
+                headers=_auth(auth_token),
+            )
+
+        assert (await direct_db.execute(text(
+            "SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid",
+        ), {"pid": pid})).scalar_one() == "Draft"
+        assert (await direct_db.execute(text(
+            "SELECT COUNT(*) FROM audit.auditlog "
+            "WHERE entityname = 'PayrollPeriods' AND entityid = :pid "
+            "AND actioncode = 'PERIOD_STATUS_CHANGED'",
+        ), {"pid": str(pid)})).scalar_one() == 0
+        await _force_status(direct_db, pid, "Cancelled")
+
     async def test_open_to_cancelled_succeeds(
         self,
         client: httpx.AsyncClient,
@@ -431,11 +463,7 @@ class TestStaleTransitionRejection:
         Pre-flight reads Open; psycopg2 commits Open→InReview before the
         UPDATE; UPDATE WHERE status='Open' → 0 rows → 409.
         """
-        # Stage B4-18: get_period_by_id is called by change_period_status,
-        # which now lives in app.payroll.period_lifecycle and resolves it as
-        # a bare name through that module's own globals — patching
-        # app.payroll.service's compatibility re-export no longer
-        # intercepts it.
+        # Patch get_period_by_id where change_period_status resolves it.
         import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
@@ -495,11 +523,7 @@ class TestStaleTransitionRejection:
         Prevents a duplicate-archive scenario where two concurrent PATCH requests
         both observe Locked and the second silently overwrites the Archived status.
         """
-        # Stage B4-18: get_period_by_id is called by change_period_status,
-        # which now lives in app.payroll.period_lifecycle and resolves it as
-        # a bare name through that module's own globals — patching
-        # app.payroll.service's compatibility re-export no longer
-        # intercepts it.
+        # Patch get_period_by_id where change_period_status resolves it.
         import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
@@ -592,11 +616,7 @@ class TestOpenToInReviewAlreadySafe:
         Pre-flight reads Open; psycopg2 commits Open→Cancelled before the
         UPDATE; UPDATE WHERE status='Open' → 0 rows → 422 (existing behaviour).
         """
-        # Stage B4-18: get_period_by_id is called by change_period_status,
-        # which now lives in app.payroll.period_lifecycle and resolves it as
-        # a bare name through that module's own globals — patching
-        # app.payroll.service's compatibility re-export no longer
-        # intercepts it.
+        # Patch get_period_by_id where change_period_status resolves it.
         import app.payroll.period_lifecycle as svc_payroll
 
         pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)

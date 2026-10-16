@@ -1,30 +1,7 @@
 """
-Draft-line / Bonus-event mutation audit writer.
+Audit-log writer shared by ordinary source mutations, Bonus events, and Day Grid.
 
-Extracted from app.payroll.service (Stage B4-5A) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-_write_line_audit is a pure immutable audit-log writer (INSERT INTO
-audit.auditlog only — no reads, no locking, no status logic). Unlike
-app.payroll.workflow_lock._acquire_branch_workflow_lock or
-app.payroll.mutation_lock._lock_period_for_mutation, it has nothing to do
-with concurrency safety; it is the audit-trail counterpart, a genuinely
-separate responsibility that happens to be invoked by some of the same
-callers.
-
-It already writes audit rows for different entity types (DraftLines,
-BonusEvents — see its own action-code docstring below), so
-it was never owned by a single domain the way _write_rate_audit belongs to
-Rates or _write_pay_rule_audit belongs to Driver Pay Rules. It is genuinely
-shared by three domains, each now in its own module — Draft-line CRUD
-(app.payroll.draft_line_mutation), Bonus (app.payroll.bonus), and Day Grid
-(app.payroll.day_grid) — none of which is more entitled to own it than the
-others. app.payroll.service
-retains a plain imported binding purely for legacy test compatibility
-(test_cp3b2a_bonus_batch_safety.py); it has no production callers of its
-own.
-
-Do not add unrelated helpers here. This is not a general utilities module.
+Writes audit rows in the caller's transaction; it does not validate or lock source state.
 """
 import json
 
@@ -59,7 +36,7 @@ async def _write_line_audit(
     correlation_id: optional UUID string (CP-3B2a).  audit.AuditLog.CorrelationID
     defaults to gen_random_uuid() per row; when correlation_id is supplied,
     this row's CorrelationID is set to that value instead, so every audit row
-    written by one logical operation (e.g. a future bonus batch) can share a
+    written by one logical operation (e.g. a bonus batch) can share a
     single BatchCorrelationID. When not supplied, behavior is unchanged —
     the INSERT omits the column entirely and the table default applies.
 

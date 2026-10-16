@@ -1,28 +1,8 @@
-"""
-Pay Rates â€” rate type catalog, driver rate CRUD, tiers/advanced rate methods
-(OrdinalTier, RangeBracket, RangeProgressive, Block), approval/void lifecycle,
-rate resolution, driver rate matrix, batch save, bulk/pending/history
-summaries, and copy_driver_rates.
+"""DriverRate authoring, lifecycle, batch operations, and compatibility endpoint.
 
-Extracted from app.payroll.service (Stage B4-4B) as a dependency-closed leaf
-module â€” no behavior change, pure relocation. Rates was split across two
-separated regions of service.py (rate CRUD/tiers/approvals, and matrix/batch/
-copy operations); both were relocated here in full, in their original
-relative order.
-
-Depends only on already-extracted/neutral owners: app.core.service (permission/
-branch/SQL helpers), app.payroll.guards (own-driver and finalized-period
-guards), and app.payroll.driver_pay_rules (_write_pay_rule_audit, used only by
-copy_driver_rates's optional include_pay_rules behavior) â€” not on
-app.payroll.service.
-
-copy_driver_rates ownership: its primary purpose, request/response contract
-(CopyRatesRequest/CopyRatesResult), and core logic (rate copying, conflict
-checking, rate audit) are all Rates-domain. The optional include_pay_rules
-sub-feature legitimately depends on Driver Pay Rules' own audit function for
-that one call â€” the same kind of already-precedented cross-domain dependency
-driver_pay_rules.py itself has on guards.py. It is Rates-owned orchestration,
-not orchestration that belongs outside this module.
+Read-only catalog, matrix, and resolution queries live in rate_reads.
+Ordinary PayDefinition rates are authored through app.compensation assignments.
+The legacy rate-copy endpoint remains mounted but refuses copying.
 """
 import json
 from datetime import date
@@ -34,13 +14,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_any_permission
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
-from app.core.service import _build_in_clause, _check_any_permission, _check_branch_access
-from app.payroll.driver_pay_rules import _write_pay_rule_audit
+from app.payroll import rate_reads
 from app.payroll.guards import (
-    _check_driver_read_access,
-    _check_not_in_finalized_period,
     _require_non_driver_rate_subject,
+    check_not_in_finalized_period,
 )
 from app.payroll.schemas import (
     BatchRateRequest,
@@ -48,117 +28,20 @@ from app.payroll.schemas import (
     CopyRatesRequest,
     CopyRatesResult,
     DriverRateCreate,
-    DriverRateMatrix,
-    DriverRatesSummary,
     DriverRateSummary,
     DriverRateUpdate,
     OrdinalTierCreate,
     RangeTierCreate,
-    RateMatrixCurrentRate,
-    RateMatrixGroup,
-    RateTypeSummary,
-    TierSummary,
 )
 
 # ===========================================================================
-# Pay Rates â€” rate type catalog + driver rate matrix
+# Pay Rates â€” authoring, lifecycle, and batch operations
 # ===========================================================================
 
-# M13c: rate behaviors that use DriverRateTiers for calculation.
-# Physically defined near the M13a line-type-validation code in
-# app.payroll.service until Stage B4-4B; genuinely Rates-owned (classifies
-# rate *methods*), not calculation-owned. app.payroll.draft_line_calculation
-# imports it directly from this module for _compute_calculated_amount's
-# dispatch.
+# Rate behaviors backed by DriverRateTiers.
 _TIERED_BEHAVIORS: frozenset[str] = frozenset({"OrdinalTier", "RangeBracket", "RangeProgressive"})
 # Range behaviors (RangeBracket + RangeProgressive) share the same tier input/storage.
 _RANGE_BEHAVIORS: frozenset[str] = frozenset({"RangeBracket", "RangeProgressive"})
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-_RATE_SELECT = """
-    SELECT
-        dr.driverrateid,
-        dr.companyid,
-        dr.branchid,
-        dr.driverid,
-        e.fullname       AS drivername,
-        dr.ratetypeid,
-        rt.ratecode,
-        rt.ratename,
-        rt.unitname,
-        dr.amount,
-        dr.effectivefrom,
-        dr.effectiveto,
-        dr.status,
-        dr.createdbyuserid,
-        dr.createdatutc,
-        dr.approvedbyuserid,
-        dr.approvedatutc,
-        dr.notes,
-        dr.blocksize,
-        dr.roundingrule
-    FROM   payroll.driverrates      dr
-    JOIN   payroll.ratetypes        rt ON rt.ratetypeid  = dr.ratetypeid
-    JOIN   core.drivers              d  ON d.driverid    = dr.driverid
-    JOIN   core.employees            e  ON e.employeeid  = d.employeeid
-"""
-
-
-def _rate_row_to_summary(r: Any) -> DriverRateSummary:
-    return DriverRateSummary(
-        driver_rate_id=r["driverrateid"],
-        company_id=r["companyid"],
-        branch_id=r["branchid"],
-        driver_id=r["driverid"],
-        driver_name=r["drivername"],
-        rate_type_id=r["ratetypeid"],
-        rate_code=r["ratecode"],
-        rate_name=r["ratename"],
-        unit_name=r["unitname"],
-        amount=r["amount"],
-        effective_from=r["effectivefrom"],
-        effective_to=r["effectiveto"],
-        status=r["status"],
-        created_by_user_id=r["createdbyuserid"],
-        created_at_utc=r["createdatutc"],
-        approved_by_user_id=r["approvedbyuserid"],
-        approved_at_utc=r["approvedatutc"],
-        notes=r["notes"],
-        block_size=r["blocksize"],
-        rounding_rule=r["roundingrule"],
-        # tiers are not loaded here (list-endpoint performance).
-        # Use _get_rate_with_tiers() for detail responses.
-    )
-
-
-async def _get_rate_by_id(
-    rate_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> DriverRateSummary:
-    result = await db.execute(
-        text(f"{_RATE_SELECT} WHERE dr.driverrateid = :rid AND dr.companyid = :cid"),
-        {"rid": rate_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Driver rate not found.")
-    return _rate_row_to_summary(row)
-
-
-async def _get_rate_with_tiers(
-    rate_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> DriverRateSummary:
-    """Like _get_rate_by_id but also loads DriverRateTiers into the response."""
-    rate = await _get_rate_by_id(rate_id, company_id, db)
-    tiers = await _load_tiers(rate_id, db)
-    return rate.model_copy(update={"tiers": tiers})
-
 
 # ---------------------------------------------------------------------------
 # M13c: Tier helpers
@@ -366,31 +249,6 @@ async def _resolve_rate_behavior(
             ),
         )
     return row["ratebehavior"]
-
-
-async def _load_tiers(
-    rate_id: int,
-    db: AsyncConnection,
-) -> list[TierSummary]:
-    """Load all DriverRateTiers for a rate, ordered by TierSequence."""
-    result = await db.execute(
-        text("""
-            SELECT tiersequence, fromunit, tounit, tieramount
-            FROM   payroll.driverratetiers
-            WHERE  driverrateid = :rid
-            ORDER  BY tiersequence
-        """),
-        {"rid": rate_id},
-    )
-    return [
-        TierSummary(
-            tier_sequence=r["tiersequence"],
-            from_unit=r["fromunit"],
-            to_unit=r["tounit"],
-            tier_amount=r["tieramount"],
-        )
-        for r in result.mappings().all()
-    ]
 
 
 async def _insert_tiers(
@@ -606,151 +464,6 @@ async def _write_rate_audit(
 
 
 # ---------------------------------------------------------------------------
-# List rate types (reference catalog â€” no branch scope needed)
-# ---------------------------------------------------------------------------
-
-async def get_rate_types(
-    company_id: int,
-    db: AsyncConnection,
-    *,
-    active_only: bool = True,
-) -> list[RateTypeSummary]:
-    """
-    Return rate types visible to the requesting company.
-
-    Phase 4C structural ownership rule:
-      SHOW if:
-        - rt.companyid IS NULL          -- system/global type (usable by all companies)
-        - rt.companyid = company_id     -- own company's custom type
-
-      HIDE everything else:
-        - rt.companyid = other company  -- foreign-owned custom type
-        - rt.isactive = FALSE           -- inactive (when active_only=True)
-
-    This replaces the Phase 4B.4 three-flag PayItemRateTypeMap analysis.
-    The structural column makes the check O(1) and cannot be contaminated
-    by direct-DB PayItemRateTypeMap inserts.
-    """
-    params: dict[str, Any] = {"cid": company_id}
-    active_filter = "AND rt.isactive = TRUE" if active_only else ""
-
-    result = await db.execute(
-        text(f"""
-            SELECT rt.ratetypeid, rt.ratecode, rt.ratename, rt.unitname, rt.isactive
-            FROM   payroll.ratetypes rt
-            WHERE
-              (TRUE {active_filter})
-              -- Phase 4C: structural ownership -- system OR own company
-              AND (rt.companyid IS NULL OR rt.companyid = :cid)
-            ORDER BY rt.ratename
-        """),
-        params,
-    )
-    return [
-        RateTypeSummary(
-            rate_type_id=r["ratetypeid"],
-            rate_code=r["ratecode"],
-            rate_name=r["ratename"],
-            unit_name=r["unitname"],
-            is_active=r["isactive"],
-        )
-        for r in result.mappings().all()
-    ]
-
-
-# ---------------------------------------------------------------------------
-# List driver rates
-# ---------------------------------------------------------------------------
-
-async def get_rates(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-    *,
-    branch_id: int | None = None,
-    driver_id: int | None = None,
-    rate_status: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[DriverRateSummary]:
-    await _require_non_driver_rate_subject(company_id, user_id, db)
-    await _check_any_permission(
-        company_id, user_id, branch_id,
-        ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-    )
-
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-
-    conditions: list[str] = ["dr.companyid = :company_id"]
-    params: dict[str, Any] = {"company_id": company_id}
-
-    # Branch scope
-    if branch_id is not None:
-        if not can_see_all and branch_id not in branch_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to the requested branch.",
-            )
-        conditions.append("dr.branchid = :branch_id")
-        params["branch_id"] = branch_id
-    elif not can_see_all:
-        if not branch_ids:
-            return []
-        in_clause, in_params = _build_in_clause(branch_ids, "rb")
-        conditions.append(f"dr.branchid IN ({in_clause})")
-        params.update(in_params)
-
-    if driver_id is not None:
-        conditions.append("dr.driverid = :driver_id")
-        params["driver_id"] = driver_id
-
-    if rate_status is not None:
-        conditions.append("dr.status = :rate_status")
-        params["rate_status"] = rate_status
-
-    where = " AND ".join(conditions)
-    params["limit"] = limit
-    params["offset"] = offset
-
-    result = await db.execute(
-        text(
-            f"{_RATE_SELECT} "
-            f"WHERE {where} "
-            f"ORDER BY e.fullname, rt.ratename, dr.effectivefrom DESC "
-            f"LIMIT :limit OFFSET :offset"
-        ),
-        params,
-    )
-    return [_rate_row_to_summary(r) for r in result.mappings().all()]
-
-
-# ---------------------------------------------------------------------------
-# Get single rate
-# ---------------------------------------------------------------------------
-
-async def get_rate_by_id(
-    rate_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> DriverRateSummary:
-    await _require_non_driver_rate_subject(company_id, user_id, db)
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    rate = await _get_rate_with_tiers(rate_id, company_id, db)
-    if not can_see_all and rate.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this rate's branch.",
-        )
-    # Permission gate: reading a rate requires payrates.view or payrates.edit (or admin fallbacks)
-    await _check_any_permission(
-        company_id, user_id, rate.branch_id,
-        ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-    )
-    return rate
-
-
-# ---------------------------------------------------------------------------
 # Create rate
 # ---------------------------------------------------------------------------
 
@@ -771,7 +484,7 @@ async def create_rate(
     # Reject DRIVER/Self before resolving the target driver or branch.
     await _require_non_driver_rate_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     # Resolve driver â†’ branch
     drv_result = await db.execute(
@@ -790,7 +503,7 @@ async def create_rate(
         )
 
     # Permission gate: creating a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -804,9 +517,8 @@ async def create_rate(
     # active StatusRateColumns row for this RateType.
     await _assert_status_rate_type_for_branch(data.rate_type_id, company_id, driver_branch_id, db)
 
-    # Fix 8: When this rate type is mapped to pay items (via PayItemRateTypeMap),
+    # When this rate type is mapped to pay items (via PayItemRateTypeMap),
     # validate that at least one of those pay items is active for this branch.
-    # Mirrors the activation logic in _validate_line_type:
     # Legacy pay-item activation is PayItems.IsDefaultBranchActive.
     # If the rate type has no PayItemRateTypeMap entries (e.g. Fixed-behavior OVERNIGHT),
     # the branch check is skipped â€” the rate type itself is valid, just not PerUnit-mapped.
@@ -940,7 +652,7 @@ async def create_rate(
         },
     )
 
-    return await _get_rate_with_tiers(rate_id, company_id, db)
+    return await rate_reads.load_rate_with_tiers(rate_id, company_id, db)
 
 
 # ---------------------------------------------------------------------------
@@ -958,7 +670,7 @@ async def update_rate(
     Partially update a rate.  Only PendingApproval rates may be edited;
     Approved/Superseded/Voided rates are immutable.
     """
-    rate = await get_rate_by_id(rate_id, company_id, user_id, db)
+    rate = await rate_reads.get_rate_by_id(rate_id, company_id, user_id, db)
 
     if rate.status != "PendingApproval":
         raise HTTPException(
@@ -970,7 +682,7 @@ async def update_rate(
         )
 
     # Permission gate: editing a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1129,22 +841,21 @@ async def update_rate(
             },
         )
 
-    return await _get_rate_with_tiers(rate_id, company_id, db)
+    return await rate_reads.load_rate_with_tiers(rate_id, company_id, db)
 
 
 # ---------------------------------------------------------------------------
 # Shared DriverRate lifecycle helpers
 # ---------------------------------------------------------------------------
-# These three helpers centralise the approval/supersession invariants so that
-# approve_rate, batch_save_rates (via approve_rate), and copy_driver_rates all
-# enforce exactly the same rules.
+# Approval and batch save (via approve_rate) share conflict and supersession
+# checks.
 #
 # Invariants enforced together:
 #   1. No future Approved rate for the same company/driver/rate_type may start
 #      on or after the new effective_from (conflict guard).
 #   2. Any existing Approved rate that started BEFORE effective_from is
 #      superseded with EffectiveTo = effective_from - 1 day (supersession).
-#   3. All supersession and void mutations write audit rows inside the same
+#   3. Supersession mutations write audit rows inside the same
 #      transaction.
 # ---------------------------------------------------------------------------
 
@@ -1283,52 +994,6 @@ async def _supersede_current_approved_rates(
     return superseded_ids
 
 
-async def _void_pending_rates_for_rate_type(
-    company_id: int,
-    driver_id: int,
-    rate_type_id: int,
-    changed_by_user_id: int,
-    branch_id: int,
-    db: AsyncConnection,
-) -> list[int]:
-    """
-    Void all PendingApproval rows for this company/driver/rate_type.
-
-    Called *after* all validations pass so that a pre-validation failure leaves
-    no partial state.
-
-    Returns a list of voided DriverRateIDs.
-    Writes RATE_VOIDED audit for each inside the same transaction.
-    """
-    void_result = await db.execute(
-        text("""
-            UPDATE payroll.driverrates
-            SET    status = 'Voided'
-            WHERE  companyid  = :cid
-              AND  driverid   = :did
-              AND  ratetypeid = :rtid
-              AND  status     = 'PendingApproval'
-            RETURNING driverrateid
-        """),
-        {"cid": company_id, "did": driver_id, "rtid": rate_type_id},
-    )
-    voided_ids: list[int] = [row[0] for row in void_result.fetchall()]
-
-    for vid in voided_ids:
-        await _write_rate_audit(
-            db,
-            company_id=company_id,
-            branch_id=branch_id,
-            user_id=changed_by_user_id,
-            rate_id=vid,
-            action_code="RATE_VOIDED",
-            old_value={"status": "PendingApproval"},
-            new_value={"status": "Voided"},
-        )
-
-    return voided_ids
-
-
 # ---------------------------------------------------------------------------
 # Approve rate (PendingApproval â†’ Approved; supersedes prior Approved rate)
 # ---------------------------------------------------------------------------
@@ -1366,9 +1031,9 @@ async def approve_rate(
     """
     # Step 1 â€” access check + friendly guard
     # Use get_rate_by_id (public â€” includes branch scope check) for the access check,
-    # then use the lightweight _get_rate_by_id for subsequent internal operations to
+    # then use the lightweight rate_reads.load_rate_summary for subsequent internal operations to
     # avoid reloading tiers unnecessarily during the approval flow.
-    rate = await get_rate_by_id(rate_id, company_id, user_id, db)
+    rate = await rate_reads.get_rate_by_id(rate_id, company_id, user_id, db)
     if rate.status != "PendingApproval":
         raise HTTPException(
             status_code=422,
@@ -1379,7 +1044,7 @@ async def approve_rate(
         )
 
     # Step 1.3 â€” permission gate: approving a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1403,7 +1068,7 @@ async def approve_rate(
     # directly from the DB or the rate was created before M13c was deployed).
     rate_behavior = await _resolve_rate_behavior(rate.rate_type_id, company_id, db)
     if rate_behavior in _TIERED_BEHAVIORS:
-        tiers = await _load_tiers(rate_id, db)
+        tiers = await rate_reads.load_rate_tiers(rate_id, db)
         if not tiers:
             raise HTTPException(
                 status_code=422,
@@ -1430,7 +1095,7 @@ async def approve_rate(
     # refresh step, ensuring finalamount and SourceSnapshot agree.
     # See the Phase 12 comment in finalize_period for the full race description.
     #
-    # Phase 12B fix: _check_not_in_finalized_period is intentionally moved to AFTER
+    # Phase 12B fix: check_not_in_finalized_period is intentionally moved to AFTER
     # the advisory lock.  Running it before the lock creates a TOCTOU window: the
     # guard reads period status (Approved), this request waits for the lock while
     # finalization claims the period (Locked), and when the lock is finally acquired
@@ -1446,7 +1111,7 @@ async def approve_rate(
     # Step 1.35 â€” Backdating guard (re-run under lock for TOCTOU safety).
     # Block approval when effective_from falls inside a Locked or Archived period.
     # Must run AFTER the advisory lock is held so the period-status read is fresh.
-    await _check_not_in_finalized_period(company_id, rate.branch_id, rate.effective_from, db)
+    await check_not_in_finalized_period(company_id, rate.branch_id, rate.effective_from, db)
 
     # Step 1.5 â€” conflict guard (shared helper).
     # Rejects if any Approved rate starts on or after this rate's effective_from.
@@ -1526,7 +1191,7 @@ async def approve_rate(
     )
 
     # Step 6
-    return await _get_rate_with_tiers(rate_id, company_id, db)
+    return await rate_reads.load_rate_with_tiers(rate_id, company_id, db)
 
 
 # ---------------------------------------------------------------------------
@@ -1550,7 +1215,7 @@ async def void_rate(
 
     Already-Voided rates cannot be voided again.
     """
-    rate = await get_rate_by_id(rate_id, company_id, user_id, db)
+    rate = await rate_reads.get_rate_by_id(rate_id, company_id, user_id, db)
 
     if rate.status == "Voided":
         raise HTTPException(
@@ -1559,7 +1224,7 @@ async def void_rate(
         )
 
     # Permission gate: voiding a rate requires payrates.edit (or admin fallbacks)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, rate.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1569,30 +1234,16 @@ async def void_rate(
 
     await _require_status_owned_rate_type(rate.rate_type_id, company_id, db)
 
-    # Phase 12B â€” advisory lock for Approved / Superseded void path.
-    #
-    # WHY: voiding an Approved or Superseded DriverRate changes the set of rates
-    # visible to finalization's LATERAL rate_sub query.  If finalize_period has
-    # already run _refresh_draft_calculations (step 1.6) using this rate and is
-    # about to INSERT final lines (step 3), a concurrent void would make the LATERAL
-    # return NULL for driverrateid â€” the finalamount would be computed from a rate
-    # that no longer exists in the snapshot.
-    #
-    # Acquire the same transaction-level advisory lock used by finalize_period and
-    # approve_rate before the used-lines check and the status mutation.  This
-    # serialises void against any in-progress finalization for the same branch.
-    #
-    # PendingApproval rates are never referenced by finalised lines (the Phase 5
-    # guard below would have caught that), and they are not visible to the
-    # finalization LATERAL (which filters dr.status IN ('Approved','Superseded')).
-    # The lock is therefore only needed for Approved/Superseded rates.
+    # Serialize Approved/Superseded rate voids with the branch workflow before
+    # checking finalized-line references and mutating the rate. Pending rates
+    # do not take this lock; the reference guard below still applies to all rates.
     if rate.status in ("Approved", "Superseded"):
         await db.execute(
             text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
             {"cid": company_id, "bid": rate.branch_id},
         )
 
-    # Phase 5 guard: block void if this DriverRate is referenced by PayrollFinalLines.
+    # Block void if this DriverRate is referenced by PayrollFinalLines.
     # Runs after ownership validation so cross-company ID probing does not leak info.
     # Runs before mutation and before any audit write.
     # (For Approved/Superseded rates this now also runs under the advisory lock.)
@@ -1665,252 +1316,6 @@ async def void_rate(
     )
 
 
-# ---------------------------------------------------------------------------
-# Resolve the applicable rate for a specific driver, rate type, and work date
-# ---------------------------------------------------------------------------
-
-async def resolve_rate_for_date(
-    driver_id: int,
-    rate_type_id: int,
-    work_date: date,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> "DriverRateSummary | None":
-    """
-    Return the rate row that applies to *driver_id* / *rate_type_id* on *work_date*.
-
-    Both **Approved** and **Superseded** rows are considered.  Superseded rows
-    represent historically-closed rates whose effective date range is still valid
-    for payroll lines whose work date falls inside that range â€” they must not be
-    excluded from the lookup.
-
-    Security:
-      - Requires payrates.view / payrates.edit / settings.manage / setup.manage.
-      - Enforces branch-scope: caller must have access to the driver's branch.
-      - Denies DRIVER/Self subjects from generic rate administration.
-      - Cross-company lookup is impossible (company_id filter on driver lookup).
-
-    Returns None (found=False) when the driver does not exist in this company or
-    no rate covers the requested date.
-    """
-    # Step 1 â€” driver lookup (company-scoped; cross-company driver â†’ None, not 403).
-    # Done first so we have the branch_id for the permission check below.
-    drv_lookup = await db.execute(
-        text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": driver_id, "cid": company_id},
-    )
-    drv_lookup_row = drv_lookup.mappings().first()
-    if drv_lookup_row is None:
-        # Driver not in this company â€” return None without revealing existence via 403.
-        # Permission check still runs (with None branch_id) to gate unauthenticated calls.
-        await _check_any_permission(
-            company_id, user_id, None,
-            ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-        )
-        return None
-
-    driver_branch_id: int = drv_lookup_row["branchid"]
-
-    # Step 2 — generic permission gate on the driver's branch.
-    await _check_any_permission(
-        company_id, user_id, driver_branch_id,
-        ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-    )
-
-    # Step 3 â€” branch-scope gate
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    if not can_see_all and driver_branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied to this driver's branch.",
-        )
-
-    # Step 4 — DRIVER/Self accounts are denied generic rate lookup.
-    await _require_non_driver_rate_subject(company_id, user_id, db)
-
-    result = await db.execute(
-        text(f"""
-            {_RATE_SELECT}
-            WHERE  dr.companyid    = :company_id
-              AND  dr.driverid     = :driver_id
-              AND  dr.ratetypeid   = :rate_type_id
-              AND  dr.status       IN ('Approved', 'Superseded')
-              AND  dr.effectivefrom <= CAST(:work_date AS date)
-              AND  (dr.effectiveto IS NULL OR dr.effectiveto >= CAST(:work_date AS date))
-            ORDER BY dr.effectivefrom DESC, dr.driverrateid DESC
-            LIMIT 1
-        """),
-        {
-            "company_id":    company_id,
-            "driver_id":     driver_id,
-            "rate_type_id":  rate_type_id,
-            "work_date":     work_date,
-        },
-    )
-    row = result.mappings().fetchone()
-    return _rate_row_to_summary(row) if row is not None else None
-
-
-
-# ===========================================================================
-# Driver Rate Matrix (Phase 1)
-# ===========================================================================
-
-async def get_driver_rate_matrix(
-    driver_id: int,
-    company_id: int,
-    user_id: int,
-    as_of_date: date,
-    db: AsyncConnection,
-) -> DriverRateMatrix:
-    """
-    Return the Status pay rate matrix for a driver as-of a given date.
-
-    Ordinary PayDefinition rates are not part of this legacy matrix; they are read
-    through the target Compensation pay-rates endpoint. Only the Branch's active
-    StatusRateColumn groups are returned until Status compensation is cut over.
-    """
-    # Step 1 â€” driver + branch
-    drv_result = await db.execute(
-        text("""
-            SELECT d.driverid, d.drivercode, d.driverstatus,
-                   e.fullname AS drivername,
-                   d.branchid,
-                   b.branchname
-            FROM   core.drivers   d
-            JOIN   core.employees e ON e.employeeid = d.employeeid
-            JOIN   core.branches  b ON b.branchid   = d.branchid
-            WHERE  d.driverid  = :did
-              AND  d.companyid = :cid
-        """),
-        {"did": driver_id, "cid": company_id},
-    )
-    drv_row = drv_result.mappings().first()
-    if drv_row is None:
-        raise HTTPException(status_code=404, detail="Driver not found.")
-
-    branch_id: int = drv_row["branchid"]
-
-    # Permission gate â€” requires payrates.view, payrates.edit, settings.manage, or setup.manage
-    await _check_any_permission(
-        company_id=company_id,
-        user_id=user_id,
-        branch_id=branch_id,
-        permission_codes=["payrates.view", "payrates.edit", "settings.manage", "setup.manage"],
-        db=db,
-    )
-
-    # The matrix is generic rate administration and excludes DRIVER/Self accounts.
-    # which rejects ambiguous overlapping active assignments rather than trusting latest row.
-    await _require_non_driver_rate_subject(company_id, user_id, db)
-
-    groups: list[RateMatrixGroup] = []
-
-    # StatusRateColumn groups for the branch (ordinary PayDefinition rates are target-only).
-    # Each active StatusRateColumn produces a separate rate group so the
-    # driver can have a STATUS_PAY (or custom SRC_) rate set here.
-    src_result = await db.execute(
-        text("""
-            SELECT src.statusratecolumnid, src.columnname,
-                   src.ratetypeid, rt.ratecode, rt.ratename, rt.unitname
-            FROM   payroll.statusratecolumns src
-            JOIN   payroll.ratetypes rt ON rt.ratetypeid = src.ratetypeid
-            WHERE  src.branchid  = :bid
-              AND  src.companyid = :cid
-              AND  src.isactive  = TRUE
-            ORDER BY src.isdefault DESC, src.statusratecolumnid
-        """),
-        {"bid": branch_id, "cid": company_id},
-    )
-    for src_row in src_result.mappings().all():
-        src_rate_type_id: int = src_row["ratetypeid"]
-        src_col_id: int       = src_row["statusratecolumnid"]
-
-        approved_result2 = await db.execute(
-            text("""
-                SELECT driverrateid, amount, effectivefrom, effectiveto, status
-                FROM   payroll.driverrates
-                WHERE  driverid       = :did
-                  AND  companyid      = :cid
-                  AND  ratetypeid     = :rtid
-                  AND  status         IN ('Approved', 'Superseded')
-                  AND  effectivefrom <= :as_of
-                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            """),
-            {"did": driver_id, "cid": company_id, "rtid": src_rate_type_id, "as_of": as_of_date},
-        )
-        src_approved = approved_result2.mappings().first()
-
-        pending_result2 = await db.execute(
-            text("""
-                SELECT driverrateid, amount, effectivefrom, effectiveto, status
-                FROM   payroll.driverrates
-                WHERE  driverid   = :did
-                  AND  companyid  = :cid
-                  AND  ratetypeid = :rtid
-                  AND  status     = 'PendingApproval'
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            """),
-            {"did": driver_id, "cid": company_id, "rtid": src_rate_type_id},
-        )
-        src_pending = pending_result2.mappings().first()
-
-        src_current = (
-            RateMatrixCurrentRate(
-                driver_rate_id=src_approved["driverrateid"],
-                amount=Decimal(str(src_approved["amount"])),
-                effective_from=src_approved["effectivefrom"],
-                effective_to=src_approved["effectiveto"],
-                status=src_approved["status"],
-            )
-            if src_approved else None
-        )
-        src_pending_rate = (
-            RateMatrixCurrentRate(
-                driver_rate_id=src_pending["driverrateid"],
-                amount=Decimal(str(src_pending["amount"])),
-                effective_from=src_pending["effectivefrom"],
-                effective_to=src_pending["effectiveto"],
-                status=src_pending["status"],
-            )
-            if src_pending else None
-        )
-
-        groups.append(
-            RateMatrixGroup(
-                group_key=f"SRC:{src_col_id}:{src_rate_type_id}",
-                rate_source="StatusRateColumn",
-                pay_item_id=None,
-                pay_item_name=None,
-                rate_behavior="PerUnit",
-                status_rate_column_id=src_col_id,
-                rate_type_id=src_rate_type_id,
-                rate_code=src_row["ratecode"],
-                rate_name=src_row["columnname"],
-                unit_name=src_row["unitname"],
-                current_rate=src_current,
-                pending_rate=src_pending_rate,
-                is_required=True,
-                is_missing=(src_current is None),
-                pay_item_effective_from=None,
-            )
-        )
-
-    return DriverRateMatrix(
-        driver_id=driver_id,
-        driver_name=drv_row["drivername"],
-        driver_code=drv_row["drivercode"],
-        branch_id=branch_id,
-        branch_name=drv_row["branchname"],
-        as_of=as_of_date,
-        groups=groups,
-    )
-
-
 # ===========================================================================
 # Batch rate save (Phase 2A)
 # ===========================================================================
@@ -1954,7 +1359,7 @@ async def batch_save_rates(
         seen_rt_ids.add(change.rate_type_id)
 
     # Step 2 â€” driver lookup + branch check
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     drv_result = await db.execute(
         text("""
@@ -1972,7 +1377,7 @@ async def batch_save_rates(
         raise HTTPException(status_code=403, detail="Access denied to this driver's branch.")
 
     # Step 3 â€” permission gate
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, driver_branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
@@ -1991,7 +1396,7 @@ async def batch_save_rates(
     # Only relevant when we will auto-approve.  PendingApproval rows created when
     # allow_self_approval=False can be approved later â€” the guard runs at that point.
     if allow_self_approval:
-        await _check_not_in_finalized_period(
+        await check_not_in_finalized_period(
             company_id, driver_branch_id, data.effective_from, db
         )
 
@@ -2181,7 +1586,7 @@ async def batch_save_rates(
         pending_count = len(all_rate_ids)
 
     # Step 9 â€” fetch final state of all affected rates
-    rate_summaries = [await _get_rate_with_tiers(rid, company_id, db) for rid in all_rate_ids]
+    rate_summaries = [await rate_reads.load_rate_with_tiers(rid, company_id, db) for rid in all_rate_ids]
 
     return BatchRateSaveResult(
         driver_id=driver_id,
@@ -2193,240 +1598,6 @@ async def batch_save_rates(
         pending_count=pending_count,
         rates=rate_summaries,
     )
-
-
-# ===========================================================================
-# Phase 2B â€” driver rate summary / pending / history
-# ===========================================================================
-
-async def get_driver_rates_summary(
-    driver_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> DriverRatesSummary:
-    """
-    Return quick status counts for a driver:
-    - pending_count: PendingApproval rates
-    - future_approved_count: Approved rates with effective_from > today
-    - missing_required_count: required matrix slots with no current Approved/Superseded rate
-
-    missing_required_count uses the same INNER JOIN logic as get_driver_rate_matrix
-    (PayItems.IsDefaultBranchActive).
-    """
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
-
-    # Counts from driverrates
-    counts_result = await db.execute(
-        text("""
-            SELECT
-                SUM(CASE WHEN status = 'PendingApproval' THEN 1 ELSE 0 END)
-                    AS pending_count,
-                SUM(CASE WHEN status = 'Approved'
-                          AND effectivefrom > CURRENT_DATE THEN 1 ELSE 0 END)
-                    AS future_approved_count
-            FROM payroll.driverrates
-            WHERE driverid  = :did
-              AND companyid = :cid
-              AND status IN ('PendingApproval', 'Approved')
-        """),
-        {"did": driver_id, "cid": company_id},
-    )
-    counts_row = counts_result.mappings().first()
-    pending_count: int       = int(counts_row["pending_count"] or 0)
-    future_approved_count: int = int(counts_row["future_approved_count"] or 0)
-
-    # Missing required count â€” mirrors the matrix logic (PayItems.IsDefaultBranchActive).
-    missing_result = await db.execute(
-        text("""
-            SELECT
-                COUNT(*) AS total_required,
-                COUNT(approved.driverrateid) AS with_current_rate
-            FROM payroll.payitems pi
-            JOIN payroll.payitemratetypemap pirm
-                 ON pirm.payitemid = pi.payitemid AND pirm.status = 'Active'
-            JOIN payroll.ratetypes rt
-                 ON rt.ratetypeid = pirm.ratetypeid AND rt.isactive = TRUE
-            LEFT JOIN LATERAL (
-                SELECT driverrateid FROM payroll.driverrates
-                WHERE  driverid      = :did
-                  AND  companyid     = :cid
-                  AND  ratetypeid    = pirm.ratetypeid
-                  AND  status        IN ('Approved', 'Superseded')
-                  AND  effectivefrom <= CURRENT_DATE
-                  AND  (effectiveto IS NULL OR effectiveto >= CURRENT_DATE)
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            ) approved ON TRUE
-            WHERE pi.status      != 'Retired'
-              AND pi.requiresrate = TRUE
-              AND (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND pi.isdefaultbranchactive = TRUE
-        """),
-        {"did": driver_id, "cid": company_id},
-    )
-    missing_row = missing_result.mappings().first()
-    if missing_row is not None:
-        total = int(missing_row["total_required"] or 0)
-        with_rate = int(missing_row["with_current_rate"] or 0)
-        missing_required_count: int | None = max(0, total - with_rate)
-    else:
-        missing_required_count = None
-
-    return DriverRatesSummary(
-        driver_id=driver_id,
-        pending_count=pending_count,
-        future_approved_count=future_approved_count,
-        missing_required_count=missing_required_count,
-    )
-
-
-async def get_driver_rates_pending(
-    driver_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> list[DriverRateSummary]:
-    """
-    Return all PendingApproval rates for a driver, newest first.
-
-    Security: same as get_driver_rates_summary (_check_driver_read_access).
-    Returns 404 if the driver doesn't exist in this company.
-    """
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
-
-    result = await db.execute(
-        text(
-            f"{_RATE_SELECT} "
-            "WHERE dr.driverid  = :did "
-            "  AND dr.companyid = :cid "
-            "  AND dr.status    = 'PendingApproval' "
-            "ORDER BY dr.createdatutc DESC"
-        ),
-        {"did": driver_id, "cid": company_id},
-    )
-    return [_rate_row_to_summary(r) for r in result.mappings().all()]
-
-
-async def get_driver_rates_history(
-    driver_id: int,
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-    limit: int = 200,
-    offset: int = 0,
-) -> list[DriverRateSummary]:
-    """
-    Return the full rate history for a driver across all statuses:
-    Approved, PendingApproval, Superseded, Voided.
-
-    Sorted newest-first: effective_from DESC, created_at_utc DESC.
-    Defaults to 200 rows; callers may paginate via limit/offset.
-
-    Security: same as get_driver_rates_summary (_check_driver_read_access).
-    Returns 404 if the driver doesn't exist in this company.
-    """
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
-
-    result = await db.execute(
-        text(
-            f"{_RATE_SELECT} "
-            "WHERE dr.driverid  = :did "
-            "  AND dr.companyid = :cid "
-            "ORDER BY dr.effectivefrom DESC, dr.createdatutc DESC "
-            "LIMIT :limit OFFSET :offset"
-        ),
-        {"did": driver_id, "cid": company_id, "limit": limit, "offset": offset},
-    )
-    return [_rate_row_to_summary(r) for r in result.mappings().all()]
-
-
-# ---------------------------------------------------------------------------
-# Bulk driver rates summary (Phase 2C â€” D)
-# ---------------------------------------------------------------------------
-
-async def get_bulk_driver_rates_summary(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-    branch_id: int | None = None,
-) -> list[DriverRatesSummary]:
-    """
-    Return DriverRatesSummary for every driver the caller can access.
-
-    Security:
-      - DRIVER/Self users are denied generic rate administration.
-      - SpecificBranch users: only drivers in their assigned branch(es).
-      - AllCompanyBranches users: all company drivers (filtered by branch_id param).
-
-    This is designed for the left-panel badge overlay â€” it must NOT leak driver
-    existence across companies.
-
-    missing_required_count is NOT computed here (it would require N LATERAL subqueries).
-    It is always None in bulk responses; callers may use the single-driver summary
-    endpoint for the full count on a selected driver.
-    """
-    await _require_non_driver_rate_subject(company_id, user_id, db)
-    await _check_any_permission(
-        company_id, user_id, branch_id,
-        ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
-    )
-    can_see_all, allowed_branch_ids = await _check_branch_access(company_id, user_id, db)
-    drv_q_parts = ["companyid = :cid"]
-    drv_params: dict = {"cid": company_id}
-    if not can_see_all:
-        if not allowed_branch_ids:
-            return []
-        in_clause, extra = _build_in_clause(allowed_branch_ids, "bid")
-        drv_q_parts.append(f"branchid IN ({in_clause})")
-        drv_params.update(extra)
-    elif branch_id is not None:
-        drv_q_parts.append("branchid = :filter_bid")
-        drv_params["filter_bid"] = branch_id
-    where = " AND ".join(drv_q_parts)
-    drv_result = await db.execute(
-        text(f"SELECT driverid FROM core.drivers WHERE {where}"),
-        drv_params,
-    )
-    accessible_driver_ids = [r["driverid"] for r in drv_result.mappings().all()]
-
-    if not accessible_driver_ids:
-        return []
-
-    in_clause2, params2 = _build_in_clause(accessible_driver_ids, "did")
-
-    counts_result = await db.execute(
-        text(f"""
-            SELECT
-                driverid,
-                SUM(CASE WHEN status = 'PendingApproval' THEN 1 ELSE 0 END) AS pending_count,
-                SUM(CASE WHEN status = 'Approved'
-                          AND effectivefrom > CURRENT_DATE THEN 1 ELSE 0 END) AS future_approved_count
-            FROM payroll.driverrates
-            WHERE companyid = :cid
-              AND driverid IN ({in_clause2})
-              AND status IN ('PendingApproval', 'Approved')
-            GROUP BY driverid
-        """),
-        {"cid": company_id, **params2},
-    )
-    counts_map: dict[int, dict] = {
-        r["driverid"]: {
-            "pending_count": int(r["pending_count"] or 0),
-            "future_approved_count": int(r["future_approved_count"] or 0),
-        }
-        for r in counts_result.mappings().all()
-    }
-
-    return [
-        DriverRatesSummary(
-            driver_id=did,
-            pending_count=counts_map.get(did, {}).get("pending_count", 0),
-            future_approved_count=counts_map.get(did, {}).get("future_approved_count", 0),
-            missing_required_count=None,
-        )
-        for did in accessible_driver_ids
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2441,418 +1612,6 @@ async def copy_driver_rates(
     data: CopyRatesRequest,
     db: AsyncConnection,
 ) -> CopyRatesResult:
-    """
-    Copy current Approved rates from source_driver to target_driver.
-
-    Rules:
-    - Caller must have payrates.edit on BOTH source and target driver branches.
-    - DRIVER/Self users cannot use this generic administration endpoint.
-    - Same company only (enforced by driver lookup).
-    - Only current Approved rates as-of data.effective_from are copied.
-    - PendingApproval rates are never copied.
-    - Atomic â€” validated before any writes.
-    - Backdating guard applies (same as batch save).
-    - AllowSelfApproval controls whether copied rates auto-approve or become
-      PendingApproval.
-    - include_pay_rules=True copies Active MinimumPay/MaximumPay rules from source;
-      rejected with 422 if target already has an overlapping rule of same type.
-    - Rates with tiered/block structure: only flat amount is copied; tier details
-      are not copied (this is safe â€” the new rate row is a simple Flat rate).
-    """
+    """Reject rate copying while retaining the existing compatibility endpoint."""
     await _require_non_driver_rate_subject(company_id, user_id, db)
     _require_rate_copy_available()
-
-    # Verify both drivers exist in this company
-    src_result = await db.execute(
-        text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": source_driver_id, "cid": company_id},
-    )
-    src_row = src_result.mappings().first()
-    if src_row is None:
-        raise HTTPException(status_code=404, detail="Source driver not found in this company.")
-    source_branch_id: int = src_row["branchid"]
-
-    tgt_result = await db.execute(
-        text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": target_driver_id, "cid": company_id},
-    )
-    tgt_row = tgt_result.mappings().first()
-    if tgt_row is None:
-        raise HTTPException(status_code=404, detail="Target driver not found in this company.")
-    target_branch_id: int = tgt_row["branchid"]
-
-    # Require payrates.edit on both branches
-    await _check_any_permission(
-        company_id, user_id, source_branch_id,
-        ["payrates.edit", "settings.manage", "setup.manage"], db,
-    )
-    await _check_any_permission(
-        company_id, user_id, target_branch_id,
-        ["payrates.edit", "settings.manage", "setup.manage"], db,
-    )
-
-    # AllowSelfApproval
-    settings_result = await db.execute(
-        text("SELECT allowselfapproval FROM core.companies WHERE companyid = :cid"),
-        {"cid": company_id},
-    )
-    settings_row = settings_result.mappings().first()
-    allow_self_approval: bool = bool(settings_row["allowselfapproval"]) if settings_row else True
-
-    # Fetch current Approved rates from source as-of effective_from.
-    # Also fetch:
-    #   - rate_name / rate_code (from ratetypes) for error messages
-    #   - has_tiers: TRUE if at least one row exists in driverratetiers for this rate
-    #   - has_block: TRUE if blocksizecustomunit IS NOT NULL (Block-behavior rates)
-    #
-    # Note: ratebehavior is NOT used here because PerUnit/PerHour/etc. pay items
-    # produce simple flat-amount rate rows (no tiers). Only the actual presence of
-    # tier rows or block metadata on a specific rate row indicates an advanced rate.
-    source_rates_result = await db.execute(
-        text("""
-            SELECT DISTINCT ON (dr.ratetypeid)
-                dr.driverrateid,
-                dr.ratetypeid,
-                dr.amount,
-                rt.ratename,
-                rt.ratecode,
-                (dr.blocksize IS NOT NULL) AS has_block,
-                EXISTS (
-                    SELECT 1 FROM payroll.driverratetiers dt
-                    WHERE dt.driverrateid = dr.driverrateid
-                ) AS has_tiers
-            FROM payroll.driverrates dr
-            JOIN payroll.ratetypes rt ON rt.ratetypeid = dr.ratetypeid
-            WHERE dr.driverid      = :src_did
-              AND dr.companyid     = :cid
-              AND dr.status        = 'Approved'
-              AND dr.effectivefrom <= :eff_from
-              AND (dr.effectiveto IS NULL OR dr.effectiveto >= :eff_from)
-            ORDER BY dr.ratetypeid, dr.effectivefrom DESC
-        """),
-        {"src_did": source_driver_id, "cid": company_id, "eff_from": data.effective_from},
-    )
-    source_rates = source_rates_result.mappings().all()
-
-    if not source_rates:
-        return CopyRatesResult(
-            target_driver_id=target_driver_id,
-            source_driver_id=source_driver_id,
-            effective_from=data.effective_from,
-            allow_self_approval=allow_self_approval,
-            rates_copied=0, rates_approved=0, rates_pending=0, pay_rules_copied=0,
-        )
-
-    # Fix 3 â€” Reject advanced/tier/block rates.
-    # Copying only the flat amount of a tiered or block rate would silently discard
-    # the rate structure that payroll finalization relies on.  Reject the entire
-    # copy request if any source rate has actual tier rows (driverratetiers) or
-    # block metadata (blocksizecustomunit) on the specific rate row.
-    advanced_rate_names = [
-        r["ratename"] or r["ratecode"]
-        for r in source_rates
-        if r["has_tiers"] or r["has_block"]
-    ]
-    if advanced_rate_names:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Advanced/tiered rates cannot be copied: "
-                f"{', '.join(advanced_rate_names)}. "
-                "Copy individual advanced rates manually after the copy, "
-                "or first replace them with flat rates in the source driver."
-            ),
-        )
-
-    # Fix 2 â€” All-or-nothing: every source rate must be valid for the target branch.
-    # Previously invalid rates were silently skipped. Now any mismatch rejects the
-    # entire request so no partial copy occurs.
-    rate_type_ids = [r["ratetypeid"] for r in source_rates]
-    in_clause, in_params = _build_in_clause(rate_type_ids, "rtid")
-    valid_result = await db.execute(
-        text(f"""
-            SELECT DISTINCT pirm.ratetypeid
-            FROM payroll.payitemratetypemap pirm
-            JOIN payroll.payitems  pi ON pi.payitemid    = pirm.payitemid
-                                     AND pi.status       != 'Retired'
-                                     AND pi.requiresrate = TRUE
-            JOIN payroll.ratetypes rt ON rt.ratetypeid   = pirm.ratetypeid
-                                     AND rt.isactive      = TRUE
-            WHERE pirm.status    = 'Active'
-              AND pirm.ratetypeid IN ({in_clause})
-              AND (pi.companyid IS NULL OR pi.companyid = :cid)
-              AND pi.isdefaultbranchactive = TRUE
-        """),
-        {"cid": company_id, **in_params},
-    )
-    valid_rate_type_ids = {r["ratetypeid"] for r in valid_result.mappings().all()}
-
-    # All-or-nothing: any invalid rate type for target branch â†’ reject
-    invalid_rates = [
-        r["ratename"] or r["ratecode"]
-        for r in source_rates
-        if r["ratetypeid"] not in valid_rate_type_ids
-    ]
-    if invalid_rates:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Cannot copy: the following rate type(s) are not configured for the "
-                f"target driver's branch: {', '.join(invalid_rates)}. "
-                "Ensure the target branch has these rate types active "
-                "in its pay item configuration before copying."
-            ),
-        )
-
-    # All source rates are valid for target branch
-    copyable_rates = list(source_rates)
-
-    # â”€â”€ Pre-write conflict validation (ALL checks before ANY mutation) â”€â”€â”€â”€â”€â”€â”€â”€
-    #
-    # For every rate type we are about to copy, verify that the target driver
-    # has no Approved rate starting on or after data.effective_from.  Superseding
-    # such a rate would set its EffectiveTo BEFORE its own EffectiveFrom (invalid
-    # dates), corrupt the effective-date history, and trigger the DB EXCLUDE
-    # constraint with an error rather than a clean 422.
-    #
-    # This mirrors the conflict guard in approve_rate (Step 1.5) and ensures
-    # copy_driver_rates and approve_rate enforce the same lifecycle invariants.
-    # Phase 12 / 12B â€” Finalization atomicity advisory lock (copy path).
-    # copy_driver_rates with allow_self_approval=True directly writes Approved rates
-    # and calls _supersede_current_approved_rates, bypassing approve_rate.  Acquire
-    # the same transaction-level advisory lock as finalize_period and approve_rate so
-    # that this copy path is also serialised against concurrent finalization.
-    #
-    # Phase 12B fix: _check_not_in_finalized_period and _check_no_future_approved_conflict
-    # are intentionally placed AFTER this lock so their guard decisions reflect the
-    # post-lock state of the DB (TOCTOU safety).  Previously these ran before the lock;
-    # a concurrent finalize_period could Lock the period while we waited, making the
-    # guard decisions stale.
-    # The lock is a no-op when allow_self_approval=False (PendingApproval only,
-    # no rate-state change that could affect finalization).
-    await lock_and_get_company_currency_for_monetary_write(company_id, db)
-    if allow_self_approval:
-        await db.execute(
-            text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
-            {"cid": company_id, "bid": target_branch_id},
-        )
-        # Backdating guard â€” run under lock for TOCTOU safety.
-        await _check_not_in_finalized_period(
-            company_id, target_branch_id, data.effective_from, db
-        )
-
-    # â”€â”€ Pre-write conflict validation (ALL checks before ANY mutation) â”€â”€â”€â”€â”€â”€â”€â”€
-    # Phase 12B: moved to after the advisory lock so guard decisions are post-lock.
-    for src_rate in copyable_rates:
-        await _check_no_future_approved_conflict(
-            company_id, target_driver_id, src_rate["ratetypeid"],
-            data.effective_from, db,
-        )
-    # â”€â”€ End pre-write validation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-    rates_approved = 0
-    rates_pending = 0
-    _copy_note = f"Copied from driver {source_driver_id}"
-
-    for src_rate in copyable_rates:
-        rate_type_id = src_rate["ratetypeid"]
-        amount = src_rate["amount"]
-
-        # Void existing PendingApproval rows for this rate type (shared helper).
-        # Must happen BEFORE supersession so the pending rows are cleared first.
-        await _void_pending_rates_for_rate_type(
-            company_id, target_driver_id, rate_type_id, user_id, target_branch_id, db,
-        )
-
-        if allow_self_approval:
-            # Supersede any existing Approved rate that started BEFORE effective_from
-            # (shared helper â€” uses the same CASE/WHERE logic as approve_rate Step 2).
-            # The conflict guard above already ensures no Approved rate starts on
-            # or after effective_from, so this UPDATE is safe.
-            await _supersede_current_approved_rates(
-                company_id, target_driver_id, rate_type_id,
-                data.effective_from, user_id, target_branch_id, db,
-            )
-
-        # Use two separate SQL statements to avoid asyncpg NULL type-inference issues
-        # with nullable TIMESTAMPTZ parameters.
-        if allow_self_approval:
-            insert_result = await db.execute(
-                text("""
-                    INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverid, ratetypeid,
-                         amount, effectivefrom, status,
-                         createdbyuserid, approvedbyuserid, approvedatutc, notes)
-                    VALUES
-                        (:cid, :bid, :did, :rtid,
-                         :amount, :eff_from, 'Approved',
-                         :creator, :creator, NOW(), :notes)
-                    RETURNING driverrateid
-                """),
-                {
-                    "cid": company_id, "bid": target_branch_id, "did": target_driver_id,
-                    "rtid": rate_type_id, "amount": amount, "eff_from": data.effective_from,
-                    "creator": user_id, "notes": _copy_note,
-                },
-            )
-        else:
-            insert_result = await db.execute(
-                text("""
-                    INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverid, ratetypeid,
-                         amount, effectivefrom, status,
-                         createdbyuserid, notes)
-                    VALUES
-                        (:cid, :bid, :did, :rtid,
-                         :amount, :eff_from, 'PendingApproval',
-                         :creator, :notes)
-                    RETURNING driverrateid
-                """),
-                {
-                    "cid": company_id, "bid": target_branch_id, "did": target_driver_id,
-                    "rtid": rate_type_id, "amount": amount, "eff_from": data.effective_from,
-                    "creator": user_id, "notes": _copy_note,
-                },
-            )
-        new_rate_id: int = insert_result.scalar_one()
-        await _write_rate_audit(
-            db,
-            company_id=company_id,
-            branch_id=target_branch_id,
-            user_id=user_id,
-            rate_id=new_rate_id,
-            action_code="RATE_CREATED",
-            new_value={
-                "driver_id":             target_driver_id,
-                "rate_type_id":          rate_type_id,
-                "amount":                str(amount),
-                "effective_from":        str(data.effective_from),
-                "status":                "Approved" if allow_self_approval else "PendingApproval",
-                "copied_from_driver_id": source_driver_id,
-            },
-        )
-
-        if allow_self_approval:
-            rates_approved += 1
-        else:
-            rates_pending += 1
-
-    # Copy pay rules if requested
-    pay_rules_copied = 0
-    if data.include_pay_rules:
-        src_rules_result = await db.execute(
-            text("""
-                SELECT ruletype, amount, effectivefrom, effectiveto, notes
-                FROM   payroll.driverpayrules
-                WHERE  driverid  = :src_did
-                  AND  companyid = :cid
-                  AND  status    = 'Active'
-                ORDER BY ruletype, effectivefrom
-            """),
-            {"src_did": source_driver_id, "cid": company_id},
-        )
-        src_rules = src_rules_result.mappings().all()
-
-        for src_rule in src_rules:
-            # P1 #2 â€” Finalized-period guard for copied pay rules.
-            #
-            # Copied rules use data.effective_from (the request date), NOT the source
-            # driver's historical effectivefrom.  This is consistent with how rates are
-            # copied: all copied data starts from the single request effective_from date.
-            #
-            # Guard behaviour by allow_self_approval value:
-            #   True  â€” the rates backdating guard (earlier in this function) already
-            #           raised 422 for the same date, so this guard is never reached.
-            #           It is kept here for correctness when future callers bypass the
-            #           rates section (e.g. no Approved source rates exist).
-            #   False â€” rates are written as PendingApproval (no backdating guard for
-            #           rates); this guard is the primary protection for pay rules.
-            await _check_not_in_finalized_period(
-                company_id, target_branch_id, data.effective_from, db,
-                label="pay rule",
-            )
-
-            # Overlap check uses data.effective_from; the new rule is open-ended (no
-            # effectiveto) so any existing active/ended rule whose effectiveto is NULL
-            # or >= data.effective_from would conflict.
-            overlap = await db.execute(
-                text("""
-                    SELECT driverpayruleid
-                    FROM   payroll.driverpayrules
-                    WHERE  companyid = :cid
-                      AND  driverid  = :did
-                      AND  ruletype  = :rtype
-                      AND  status    IN ('Active', 'Ended')
-                      AND  (effectiveto IS NULL OR effectiveto >= :eff_from)
-                    LIMIT 1
-                """),
-                {
-                    "cid":      company_id,
-                    "did":      target_driver_id,
-                    "rtype":    src_rule["ruletype"],
-                    "eff_from": data.effective_from,
-                },
-            )
-            if overlap.first() is not None:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Cannot copy {src_rule['ruletype']} rule: target driver already has "
-                        f"an overlapping rule. End the existing rule first."
-                    ),
-                )
-
-            # Insert with request effective_from and open effectiveto.
-            # The source rule's historical effectiveto is not carried over â€” the target
-            # gets a fresh open-ended rule starting at the requested date.
-            rule_insert_result = await db.execute(
-                text("""
-                    INSERT INTO payroll.driverpayrules
-                        (companyid, branchid, driverid, ruletype, amount,
-                         effectivefrom, effectiveto, status, createdbyuserid, notes)
-                    VALUES
-                        (:cid, :bid, :did, :rtype, :amount,
-                         :eff_from, NULL, 'Active', :creator, :notes)
-                    RETURNING driverpayruleid
-                """),
-                {
-                    "cid":      company_id,
-                    "bid":      target_branch_id,
-                    "did":      target_driver_id,
-                    "rtype":    src_rule["ruletype"],
-                    "amount":   src_rule["amount"],
-                    "eff_from": data.effective_from,   # â† request date, not source date
-                    "creator":  user_id,
-                    "notes":    f"Copied from driver {source_driver_id}",
-                },
-            )
-            new_rule_id: int = rule_insert_result.scalar_one()
-            await _write_pay_rule_audit(
-                db,
-                company_id=company_id,
-                branch_id=target_branch_id,
-                user_id=user_id,
-                rule_id=new_rule_id,
-                action_code="DRIVER_PAY_RULE_CREATED",
-                new_value={
-                    "driver_id":             target_driver_id,
-                    "rule_type":             src_rule["ruletype"],
-                    "amount":                str(src_rule["amount"]),
-                    "effective_from":        str(data.effective_from),
-                    "effective_to":          None,
-                    "status":                "Active",
-                    "copied_from_driver_id": source_driver_id,
-                },
-            )
-            pay_rules_copied += 1
-
-    return CopyRatesResult(
-        target_driver_id=target_driver_id,
-        source_driver_id=source_driver_id,
-        effective_from=data.effective_from,
-        allow_self_approval=allow_self_approval,
-        rates_copied=len(copyable_rates),
-        rates_approved=rates_approved,
-        rates_pending=rates_pending,
-        pay_rules_copied=pay_rules_copied,
-    )

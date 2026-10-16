@@ -18,6 +18,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
 from app.branch_compensation_config_concurrency import lock_branch_compensation_config
 from app.compensation.audit import write_audit
@@ -31,7 +33,6 @@ from app.compensation.schemas import (
     BulkBranchConfigResult,
     BulkBranchConfigUpdate,
 )
-from app.core.service import _check_any_permission, _check_branch_access
 
 _CONFIG_EDIT = ["payitems.edit", "setup.manage"]
 
@@ -343,7 +344,7 @@ async def list_branch_definitions(
     company_id: int, user_id: int, branch_id: int, db: AsyncConnection,
 ) -> list[BranchPayDefinitionState]:
     await require_non_driver_subject(company_id, user_id, db)
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise compensation_error(
             "BRANCH_ACCESS_DENIED", "You do not have access to this branch.", 403)
@@ -394,7 +395,7 @@ async def update_branch_config(
     company_id: int, user_id: int, branch_id: int, pay_definition_id: int,
     data: BranchConfigUpdate, db: AsyncConnection,
 ) -> BranchPayDefinitionState:
-    await _check_any_permission(company_id, user_id, branch_id, _CONFIG_EDIT, db)
+    await check_any_permission(company_id, user_id, branch_id, _CONFIG_EDIT, db)
     await _require_branch_in_company(company_id, branch_id, db)
     # The Branch compensation-config lock is the first lock: it orders this writer wholly
     # before or after a period layout snapshot, and precedes the PayDefinition row lock
@@ -419,7 +420,7 @@ async def bulk_update_branch_config(
     company_id: int, user_id: int, pay_definition_id: int, data: BulkBranchConfigUpdate,
     db: AsyncConnection,
 ) -> BulkBranchConfigResult:
-    await _check_any_permission(company_id, user_id, None, _CONFIG_EDIT, db)
+    await check_any_permission(company_id, user_id, None, _CONFIG_EDIT, db)
 
     if data.target == BranchConfigTarget.AllBranches:
         rows = (await db.execute(
@@ -491,7 +492,7 @@ async def config_history(
     company_id: int, user_id: int, branch_id: int, pay_definition_id: int, db: AsyncConnection,
 ) -> list[BranchConfigVersion]:
     await require_non_driver_subject(company_id, user_id, db)
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
     if not can_see_all and branch_id not in branch_ids:
         raise compensation_error(
             "BRANCH_ACCESS_DENIED", "You do not have access to this branch.", 403)

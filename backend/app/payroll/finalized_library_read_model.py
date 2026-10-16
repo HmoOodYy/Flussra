@@ -1,4 +1,7 @@
-"""P6A immutable finalized-payroll overview and calculation-report read model."""
+"""P6A immutable finalized-payroll overview and calculation-report read model.
+
+P6D audit chronology is owned by finalized_audit.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -11,61 +14,36 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.branch_access import check_branch_access
+from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency
-from app.core.service import (
-    _build_in_clause,
-    _check_branch_access,
-    _check_permission,
-    _require_not_driver_role,
-)
-from app.payroll import report_read_model, status_evidence
+from app.db.sql import build_in_clause
+from app.payroll import status_evidence
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 from app.payroll.evidence_gate import require_target_payroll_evidence
-from app.payroll.snapshot_hash import (
-    UnsupportedCalculationVersionError,
-    require_supported_calculation_version,
+from app.payroll.finalized_context import (
+    FINALIZED_STATUSES as _FINALIZED_STATUSES,
+)
+from app.payroll.finalized_context import (
+    availability as _availability,
+)
+from app.payroll.finalized_context import (
+    finalized_error as _unavailable,
+)
+from app.payroll.finalized_context import (
+    get_finalized_period_context as _period_context,
+)
+from app.payroll.finalized_context import (
+    resolve_originating_snapshot as _originating_snapshot,
+)
+from app.payroll.report_components import (
+    aggregate_definition_amounts,
+    load_financial_definition_columns,
+    load_report_columns,
+    summarize_status_entries,
 )
 
 _REPORT_TYPES = {"drivers", "period-work", "period-pay", "mixed"}
-_FINALIZED_STATUSES = {"Locked", "Archived"}
-
-
-def _unavailable(code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=422, detail=f"{code}: {message}")
-
-
-def _availability(state: str, reason_code: str | None = None) -> dict[str, str | None]:
-    return {"state": state, "reason_code": reason_code}
-
-
-async def _approved_currency(period: dict[str, Any], db: AsyncConnection):
-    """Resolve finalized denomination from the exact approved snapshot."""
-    final_rows = (await db.execute(text("""
-        SELECT DISTINCT currencycode, currencyminorunitdigits
-        FROM payroll.payrollfinallines
-        WHERE companyid = :cid AND branchid = :bid AND payrollperiodid = :pid
-    """), {"cid": period["companyid"], "bid": period["branchid"],
-           "pid": period["payrollperiodid"]})).mappings().all()
-    if len(final_rows) > 1:
-        raise _unavailable("SNAPSHOT_CURRENCY_MISMATCH", "FinalLines contain inconsistent frozen currency.")
-    if final_rows:
-        return frozen_currency(final_rows[0]["currencycode"], final_rows[0]["currencyminorunitdigits"])
-    rows = (await db.execute(text("""
-        SELECT s.currencycode, s.currencyminorunitdigits
-        FROM review.managerreviewitems ri
-        JOIN payroll.payrollcalculationsnapshots s
-          ON s.payrollcalculationsnapshotid = ri.payrollcalculationsnapshotid
-         AND s.companyid = ri.companyid AND s.branchid = ri.branchid
-         AND s.payrollperiodid = :pid
-        WHERE ri.companyid = :cid AND ri.branchid = :bid
-          AND ri.entityschema = 'payroll' AND ri.entityname = 'PayrollPeriods'
-          AND ri.entityid = :entity_id AND ri.requesttype = 'PeriodApproval'
-          AND ri.status = 'Approved'
-    """), {"cid": period["companyid"], "bid": period["branchid"],
-           "pid": period["payrollperiodid"], "entity_id": str(period["payrollperiodid"])})).mappings().all()
-    if len(rows) != 1:
-        raise _unavailable("SNAPSHOT_CURRENCY_REQUIRED", "Approved snapshot currency is unavailable.")
-    return frozen_currency(rows[0]["currencycode"], rows[0]["currencyminorunitdigits"])
 
 
 async def _approved_currencies(periods: list[dict[str, Any]], db: AsyncConnection) -> dict[int, Any]:
@@ -73,7 +51,7 @@ async def _approved_currencies(periods: list[dict[str, Any]], db: AsyncConnectio
     if not periods:
         return {}
     period_ids = [int(period["period_id"]) for period in periods]
-    period_clause, period_params = _build_in_clause(period_ids, "currency_period")
+    period_clause, period_params = build_in_clause(period_ids, "currency_period")
     final_rows = (await db.execute(text(f"""
         SELECT payrollperiodid AS period_id,
                COUNT(*) AS row_count,
@@ -89,7 +67,7 @@ async def _approved_currencies(periods: list[dict[str, Any]], db: AsyncConnectio
     missing_ids = [period_id for period_id in period_ids if period_id not in by_final_period]
     approved_by_period: dict[int, Any] = {}
     if missing_ids:
-        missing_clause, missing_params = _build_in_clause(missing_ids, "approved_currency_period")
+        missing_clause, missing_params = build_in_clause(missing_ids, "approved_currency_period")
         approved_rows = (await db.execute(text(f"""
             SELECT s.payrollperiodid AS period_id,
                    COUNT(*) AS row_count,
@@ -136,8 +114,8 @@ async def list_finalized_periods(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """List only finalized periods visible through the ledger permission."""
-    await _require_not_driver_role(company_id, user_id, db)
-    can_see_all, accessible_branch_ids = await _check_branch_access(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
+    can_see_all, accessible_branch_ids = await check_branch_access(company_id, user_id, db)
 
     if period_status is not None and period_status not in _FINALIZED_STATUSES:
         raise HTTPException(
@@ -164,7 +142,7 @@ async def list_finalized_periods(
     if not candidate_branch_ids:
         raise HTTPException(status_code=403, detail="No accessible branch for finalized payroll.")
 
-    candidate_clause, candidate_params = _build_in_clause(candidate_branch_ids, "candidate_branch")
+    candidate_clause, candidate_params = build_in_clause(candidate_branch_ids, "candidate_branch")
     permission_rows = (await db.execute(text(f"""
         SELECT b.branchid
         FROM core.branches b
@@ -186,7 +164,7 @@ async def list_finalized_periods(
             detail="You do not have ledger.view permission on an accessible branch.",
         )
 
-    branch_clause, branch_params = _build_in_clause(permitted_branch_ids, "finalized_branch")
+    branch_clause, branch_params = build_in_clause(permitted_branch_ids, "finalized_branch")
     conditions = [
         "p.companyid = :company_id",
         f"p.branchid IN ({branch_clause})",
@@ -227,37 +205,6 @@ async def list_finalized_periods(
     return items
 
 
-async def _period_context(
-    *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
-) -> dict[str, Any]:
-    """Authorize a finalized-library request before loading child data."""
-    await _require_not_driver_role(company_id, user_id, db)
-    row = (await db.execute(text("""
-        SELECT p.payrollperiodid, p.companyid, p.branchid, p.status, p.periodcode,
-               p.periodname, p.periodtype, p.startdate, p.enddate, p.lockedatutc,
-               p.lockedbyuserid, b.branchname
-        FROM payroll.payrollperiods p
-        JOIN core.branches b ON b.branchid = p.branchid
-        WHERE p.payrollperiodid = :period_id AND p.companyid = :company_id
-    """), {"period_id": period_id, "company_id": company_id})).mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Payroll period not found.")
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
-    if not can_see_all and int(row["branchid"]) not in branch_ids:
-        raise HTTPException(status_code=403, detail="Access denied to this period's branch.")
-    await _check_permission(company_id, user_id, int(row["branchid"]), "ledger.view", db)
-    if str(row["status"]) not in _FINALIZED_STATUSES:
-        raise _unavailable(
-            "FINALIZED_LIBRARY_UNAVAILABLE",
-            "Finalized payroll information is available only for Locked or Archived periods.",
-        )
-    result = dict(row)
-    currency = await _approved_currency(result, db)
-    result["currency_code"] = currency.code
-    result["currency_minor_unit_digits"] = currency.minor_unit_digits
-    return result
-
-
 async def _financial_summary(period: dict[str, Any], db: AsyncConnection) -> dict[str, Any]:
     row = (await db.execute(text("""
         SELECT COUNT(*) AS final_line_count,
@@ -276,57 +223,34 @@ async def _financial_summary(period: dict[str, Any], db: AsyncConnection) -> dic
     }
 
 
-async def _originating_snapshot(
-    period: dict[str, Any], db: AsyncConnection,
-) -> tuple[dict[str, Any] | None, dict[str, str | None]]:
-    """Resolve FinalLines provenance exactly; never select a latest snapshot."""
-    rows = (await db.execute(text("""
-        SELECT DISTINCT
-               sourcesnapshot ->> 'payroll_calculation_snapshot_id' AS snapshot_id,
-               sourcesnapshot ->> 'revision_number' AS revision_number,
-               sourcesnapshot ->> 'snapshot_hash' AS snapshot_hash
-        FROM payroll.payrollfinallines
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().all()
-    if not rows:
-        return None, _availability("UNAVAILABLE", "FINAL_LINES_EMPTY")
-    if len(rows) != 1 or any(value is None for value in rows[0].values()):
-        return None, _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    source = rows[0]
-    try:
-        snapshot_id = int(source["snapshot_id"])
-        revision_number = int(source["revision_number"])
-    except (TypeError, ValueError):
-        return None, _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    snapshot = (await db.execute(text("""
-        SELECT payrollcalculationsnapshotid, revisionnumber, calculationversion, snapshothash, sourceconfighash,
-               currencycode, currencyminorunitdigits, reportevidenceversion, reportevidencehash
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
-    """), {
-        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-    })).mappings().first()
-    if snapshot is None or (
-        int(snapshot["revisionnumber"]) != revision_number
-        or str(snapshot["snapshothash"]) != str(source["snapshot_hash"])
-    ):
-        return None, _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    try:
-        require_supported_calculation_version(snapshot["calculationversion"])
-    except UnsupportedCalculationVersionError as exc:
-        raise _unavailable("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
-    return dict(snapshot), _availability("AVAILABLE")
-
-
 async def _columns(period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
     """Read the frozen period definition layout only; never current PayDefinitions."""
-    columns = await report_read_model._columns(period, db)
+    columns = await load_report_columns(period, db)
     return columns, _availability("AVAILABLE")
+
+
+def classify_final_line_component(row: Any) -> str:
+    """Map one immutable FinalLine to its canonical financial component.
+
+    Every monetary FinalLine must belong to an explicit canonical owner; an
+    unrecognized source fails closed instead of falling into a catch-all.
+    """
+    if row["linetype"] == "SYS_MIN_TOPUP":
+        return "minimum_adjustment"
+    if row["linetype"] == "SYS_MAX_CAP":
+        return "maximum_adjustment"
+    if row["sourcetype"] == "BonusEvent":
+        return "bonus_total"
+    if row["sourcetype"] == "StatusEntryState":
+        return "status_pay"
+    if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
+        return "daily_pay"
+    raise _unavailable(
+        "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
+        "a FinalLine does not belong to a canonical payroll component "
+        f"(sourcetype={row['sourcetype']!r}, linetype={row['linetype']!r}, "
+        f"linescope={row['linescope']!r}).",
+    )
 
 
 async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
@@ -351,7 +275,7 @@ async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[lis
         amount = Decimal(str(row["finalamount"]))
         total = totals[driver_id]
         total["total_pay"] += amount
-        total[report_read_model.classify_final_line_component(row)] += amount
+        total[classify_final_line_component(row)] += amount
         lines.append({
             "driver_id": driver_id, "source_type": row["sourcetype"],
             "source_id": row["sourceid"], "line_type": row["linetype"],
@@ -361,6 +285,51 @@ async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[lis
             "bonus_event_id": row["bonuseventid"], "snapshot_source_type": row["sourcetype"],
         })
     return lines, dict(totals)
+
+
+async def _snapshot_evidence(snapshot_id: int, period: dict[str, Any], db: AsyncConnection) -> tuple[bool, int | None, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    header = (await db.execute(text("""
+        SELECT reportevidenceversion, reportevidencehash, companyid, branchid, payrollperiodid
+        FROM payroll.payrollcalculationsnapshots
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+    """), {"snapshot_id": snapshot_id})).mappings().first()
+    if header is None or (
+        int(header["companyid"]) != int(period["companyid"])
+        or int(header["branchid"]) != int(period["branchid"])
+        or int(header["payrollperiodid"]) != int(period["payrollperiodid"])
+    ):
+        raise _unavailable(
+            "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
+            "the finalization provenance does not identify this payroll period's snapshot.",
+        )
+    version = header["reportevidenceversion"]
+    if version is None:
+        return False, None, None, [], []
+    status_rows = await status_evidence.read_status_entries(
+        db,
+        snapshot_id=snapshot_id,
+        company_id=int(header["companyid"]),
+        branch_id=int(header["branchid"]),
+        period_id=int(header["payrollperiodid"]),
+    )
+    statuses = [{
+        "driver_id": row["driver_id"], "work_date": row["work_date"],
+        "status_key_id": row["status_key_id"], "code": row["status_code"],
+        "label": row["status_label"], "is_off": row["is_off_reason"],
+    } for row in status_rows]
+    bonuses = (await db.execute(text("""
+        SELECT payrollbonuseventid, driverid, amount, reason, notes, datarevision,
+               createdbyuserid, creatordisplaynamesnapshot, createdatutc
+        FROM payroll.payrollcalculationsnapshotbonusevents
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+        ORDER BY driverid, payrollbonuseventid
+    """), {"snapshot_id": snapshot_id})).mappings().all()
+    return True, int(version), str(header["reportevidencehash"]), statuses, [
+        {"bonus_event_id": int(r["payrollbonuseventid"]), "driver_id": int(r["driverid"]),
+         "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
+         "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
+         "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]} for r in bonuses
+    ]
 
 
 async def _snapshot_work_and_drivers(
@@ -673,7 +642,7 @@ async def build_finalized_report(
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
     require_target_payroll_evidence()
     columns, columns_availability = await _columns(period, db)
-    definition_columns = await report_read_model._definition_columns(period, db)
+    definition_columns = await load_financial_definition_columns(period, db)
     definition_column_ids = [c["payroll_period_definition_id"] for c in definition_columns]
     final_lines, financial_totals = await _final_lines(period, db)
     per_driver_definitions: dict[int, dict[int, Decimal]] = {}
@@ -681,7 +650,7 @@ async def build_finalized_report(
     # Period Work is operational (quantities/Status), not financial, and must
     # stay independent of the per-Pay-Item financial integrity invariant.
     if report_type != "period-work":
-        per_driver_definitions, definition_total_map = report_read_model._definition_amounts(
+        per_driver_definitions, definition_total_map = aggregate_definition_amounts(
             final_lines, definition_column_ids)
     snapshot, provenance = await _originating_snapshot(period, db)
     frozen_drivers: dict[int, dict[str, Any]] = {}
@@ -695,7 +664,7 @@ async def build_finalized_report(
     if snapshot is not None:
         snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
         frozen_drivers, work_rows = await _snapshot_work_and_drivers(snapshot_id, period, db)
-        evidence_available, evidence_version, evidence_hash, statuses, bonuses = await report_read_model._snapshot_evidence(
+        evidence_available, evidence_version, evidence_hash, statuses, bonuses = await _snapshot_evidence(
             snapshot_id, period, db,
         )
         evidence_availability = (
@@ -717,7 +686,7 @@ async def build_finalized_report(
         by_driver_status[item["driver_id"]].append(item)
     for item in bonuses:
         by_driver_bonus[item["driver_id"]].append(item)
-    summaries = report_read_model._status_summaries(statuses)
+    summaries = summarize_status_entries(statuses)
     result_drivers = []
     for driver_id in sorted(drivers):
         total = financial_totals.get(driver_id)
@@ -993,187 +962,4 @@ async def build_finalized_rates_used(
         },
         "used_rate_definitions": definitions,
         "bonus_events": bonuses,
-    }
-
-
-async def _audit_domain_availability(
-    period: dict[str, Any], db: AsyncConnection,
-) -> dict[str, dict[str, str | None]]:
-    """Expose P6D coverage without reconstructing legacy mutable history."""
-    coverage = (await db.execute(text("""
-        SELECT evidencedomain, coveragestate
-        FROM payroll.payrollperiodauditevidencecoverage
-        WHERE companyid = :company_id AND branchid = :branch_id
-          AND payrollperiodid = :period_id
-    """), {
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-        "period_id": period["payrollperiodid"],
-    })).mappings().all()
-    counts = {
-        row["evidencedomain"]: int(row["event_count"])
-        for row in (await db.execute(text("""
-            SELECT evidencedomain, COUNT(*) AS event_count
-            FROM payroll.payrollperiodauditevidenceevents
-            WHERE companyid = :company_id AND branchid = :branch_id
-              AND payrollperiodid = :period_id
-            GROUP BY evidencedomain
-        """), {
-            "company_id": period["companyid"], "branch_id": period["branchid"],
-            "period_id": period["payrollperiodid"],
-        })).mappings().all()
-    }
-    by_domain = {row["evidencedomain"]: row["coveragestate"] for row in coverage}
-    result: dict[str, dict[str, str | None]] = {}
-    for domain in ("SOURCE", "STATUS_NOTE", "BONUS", "REVIEW_COMMENT"):
-        state = by_domain.get(domain)
-        if state is None:
-            result[domain.lower()] = _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
-        elif state == "PARTIAL":
-            result[domain.lower()] = _availability("PARTIAL", "HISTORY_PRECEDES_P6D_CAPTURE")
-        elif counts.get(domain, 0) == 0:
-            result[domain.lower()] = _availability("EMPTY")
-        else:
-            result[domain.lower()] = _availability("AVAILABLE")
-    return result
-
-
-async def build_finalized_audit(
-    *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
-) -> dict[str, Any]:
-    """Build P6D's lazy immutable change chronology and revision grouping."""
-    period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    require_target_payroll_evidence()
-    await _check_permission(company_id, user_id, int(period["branchid"]), "ledger.audit.view", db)
-    snapshot, provenance = await _originating_snapshot(period, db)
-    availability = await _audit_domain_availability(period, db)
-
-    event_rows = (await db.execute(text("""
-        SELECT e.payrollperiodauditevidenceeventid, e.evidencedomain, e.actioncode,
-               e.sourceentitytype, e.sourceentityid, e.reviewitemid, e.driverid, e.workdate, e.payitemid,
-               e.beforestatejson, e.afterstatejson, e.actoruserid,
-               e.actordisplaynamesnapshot, e.responsibilitycontextsnapshot,
-               e.reasonsnapshot, e.correlationid, e.sourcerevision, e.occurredatutc,
-               m.payrollcalculationsnapshotid, s.revisionnumber
-        FROM payroll.payrollperiodauditevidenceevents e
-        LEFT JOIN payroll.payrollperiodauditevidencesnapshotevents m
-          ON m.payrollperiodauditevidenceeventid = e.payrollperiodauditevidenceeventid
-        LEFT JOIN payroll.payrollcalculationsnapshots s
-          ON s.payrollcalculationsnapshotid = m.payrollcalculationsnapshotid
-         AND s.companyid = e.companyid AND s.branchid = e.branchid
-         AND s.payrollperiodid = e.payrollperiodid
-        WHERE e.companyid = :company_id AND e.branchid = :branch_id
-          AND e.payrollperiodid = :period_id
-        ORDER BY e.occurredatutc, e.payrollperiodauditevidenceeventid
-    """), {
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-        "period_id": period["payrollperiodid"],
-    })).mappings().all()
-    events = [{
-        "event_id": int(row["payrollperiodauditevidenceeventid"]),
-        "domain": row["evidencedomain"], "action_code": row["actioncode"],
-        "source_entity_type": row["sourceentitytype"], "source_entity_id": row["sourceentityid"],
-        "review_item_id": row["reviewitemid"],
-        "driver_id": row["driverid"], "work_date": row["workdate"], "pay_item_id": row["payitemid"],
-        "before_state": row["beforestatejson"], "after_state": row["afterstatejson"],
-        "actor_user_id": int(row["actoruserid"]), "actor_display_name": row["actordisplaynamesnapshot"],
-        "responsibility_context": row["responsibilitycontextsnapshot"], "reason": row["reasonsnapshot"],
-        "correlation_id": None if row["correlationid"] is None else str(row["correlationid"]),
-        "source_revision": row["sourcerevision"], "occurred_at_utc": row["occurredatutc"],
-        "snapshot_id": row["payrollcalculationsnapshotid"], "revision_number": row["revisionnumber"],
-    } for row in event_rows]
-
-    workflow_rows = (await db.execute(text("""
-        SELECT w.actioncode, w.actoruserid, w.actordisplaynamesnapshot,
-               w.responsibilitycontextsnapshot, w.requiredpermissioncode, w.reasonsnapshot,
-               w.actionatutc, w.payrollcalculationsnapshotid, s.revisionnumber,
-               w.reviewitemid, w.reviewdecisionid
-        FROM payroll.payrollperiodworkflowactionevidence w
-        LEFT JOIN payroll.payrollcalculationsnapshots s
-          ON s.payrollcalculationsnapshotid = w.payrollcalculationsnapshotid
-         AND s.companyid = w.companyid AND s.branchid = w.branchid
-         AND s.payrollperiodid = w.payrollperiodid
-        WHERE w.companyid = :company_id AND w.branchid = :branch_id
-          AND w.payrollperiodid = :period_id
-        ORDER BY w.actionatutc, w.payrollperiodworkflowactionevidenceid
-    """), {
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-        "period_id": period["payrollperiodid"],
-    })).mappings().all()
-    lifecycle = [{
-        "action_code": row["actioncode"], "actor_user_id": int(row["actoruserid"]),
-        "actor_display_name": row["actordisplaynamesnapshot"],
-        "responsibility_context": row["responsibilitycontextsnapshot"],
-        "required_permission_code": row["requiredpermissioncode"], "reason": row["reasonsnapshot"],
-        "action_at_utc": row["actionatutc"], "snapshot_id": row["payrollcalculationsnapshotid"],
-        "revision_number": row["revisionnumber"], "review_item_id": row["reviewitemid"],
-        "review_decision_id": row["reviewdecisionid"],
-    } for row in workflow_rows]
-
-    groups: dict[int, dict[str, Any]] = {}
-    for item in lifecycle:
-        snapshot_id = item["snapshot_id"]
-        if snapshot_id is not None and item["action_code"] in {"SUBMITTED", "RESUBMITTED"}:
-            groups[int(snapshot_id)] = {
-                "snapshot_id": int(snapshot_id), "revision_number": int(item["revision_number"]),
-                "submit_action": item["action_code"],
-                "is_final_approved_revision": snapshot is not None and int(snapshot_id) == int(snapshot["payrollcalculationsnapshotid"]),
-                "event_ids": [], "review_comment_event_ids": [],
-            }
-    for event in events:
-        snapshot_id = event["snapshot_id"]
-        if snapshot_id is not None and int(snapshot_id) not in groups:
-            groups[int(snapshot_id)] = {
-                "snapshot_id": int(snapshot_id),
-                "revision_number": int(event["revision_number"]),
-                "submit_action": None,
-                "is_final_approved_revision": (
-                    snapshot is not None
-                    and int(snapshot_id) == int(snapshot["payrollcalculationsnapshotid"])
-                ),
-                "event_ids": [],
-                "review_comment_event_ids": [],
-            }
-        if snapshot_id is not None and int(snapshot_id) in groups:
-            target = "review_comment_event_ids" if event["domain"] == "REVIEW_COMMENT" else "event_ids"
-            groups[int(snapshot_id)][target].append(event["event_id"])
-
-    rate_rows = []
-    if snapshot is not None:
-        rate_rows = [{
-            "used_rate_definition_id": int(row["payrollcalculationsnapshotusedratedefinitionid"]),
-            "evidence_kind": row["evidencekind"], "definition_fingerprint": row["definitionfingerprint"],
-        } for row in (await db.execute(text("""
-            SELECT payrollcalculationsnapshotusedratedefinitionid, evidencekind, definitionfingerprint
-            FROM payroll.payrollcalculationsnapshotusedratedefinitions
-            WHERE payrollcalculationsnapshotid = :snapshot_id
-              AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
-            ORDER BY payrollcalculationsnapshotusedratedefinitionid
-        """), {
-            "snapshot_id": snapshot["payrollcalculationsnapshotid"],
-            "company_id": period["companyid"], "branch_id": period["branchid"],
-            "period_id": period["payrollperiodid"],
-        })).mappings().all()]
-
-    complete = all(value["state"] in {"AVAILABLE", "EMPTY"} for value in availability.values())
-    metadata = {
-        "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
-        "period_name": period["periodname"], "period_status": period["status"],
-        "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
-        "branch_id": int(period["branchid"]),
-        "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
-        "revision_number": None if snapshot is None else int(snapshot["revisionnumber"]),
-        "snapshot_hash": None if snapshot is None else str(snapshot["snapshothash"]),
-        "complete_period_chronology_available": complete,
-        "evidence_version": 1 if any(v["state"] != "UNAVAILABLE" for v in availability.values()) else None,
-        "section_availability": {"snapshot_provenance": provenance, **availability},
-        "generated_at_utc": datetime.now(UTC),
-    }
-    return {
-        "metadata": metadata, "lifecycle_events": lifecycle,
-        "source_events": [event for event in events if event["domain"] == "SOURCE"],
-        "status_note_events": [event for event in events if event["domain"] == "STATUS_NOTE"],
-        "bonus_events": [event for event in events if event["domain"] == "BONUS"],
-        "review_events": [event for event in events if event["domain"] == "REVIEW_COMMENT"],
-        "chronology": events, "revision_groups": list(groups.values()),
-        "rate_rule_provenance": rate_rows,
     }

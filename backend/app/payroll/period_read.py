@@ -1,31 +1,7 @@
 """
-Period read model — list periods and fetch a single period by ID.
+Access-scoped period lists, individual period reads, and entry counts.
 
-Extracted from app.payroll.service (Stage B4-7) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-_BASE_SELECT and _row_to_summary are private implementation details of this
-module: both have exactly two consumers, get_periods and get_period_by_id,
-and neither is referenced anywhere else in the backend or tests.
-
-get_period_by_id is a genuine cross-domain dependency gate: call sites
-remain across many payroll domain modules (Lifecycle, Resubmission,
-Draft-line CRUD, Finalization, Calculation, Bonus,
-Drivers Off, Day Grid — Period Create's own call site moved here directly
-with it in B4-21). Stage B4-22 retargeted app.payroll.off_drivers to import
-this function directly from this module — it no longer resolves it via
-qualified access through app.payroll.service. app.payroll.service retains a
-plain imported binding purely for legacy test compatibility (it has no
-internal callers of its own).
-
-get_periods has no remaining caller in app.payroll.service after this move —
-router.py is its only consumer and now imports it directly.
-
-get_period_entry_count (Stage B4-21) is a period-level data-presence read —
-"does this period hold non-void draft data?", used by the UI to warn before
-cancellation — not a source-line read, so it belongs here rather than in
-app.payroll.source_line_read despite querying PayrollDraftLines. Pure
-relocation from app.payroll.service, no behavior change.
+Entry counts report non-void draft data for cancellation warnings.
 """
 from decimal import Decimal
 from typing import Any
@@ -34,13 +10,10 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import (
-    _build_in_clause,
-    _check_any_permission,
-    _check_branch_access,
-    _has_any_permission,
-    _require_not_driver_role,
-)
+from app.access.branch_access import check_branch_access
+from app.access.permissions import check_any_permission, has_any_permission
+from app.access.policy import require_non_driver_subject
+from app.db.sql import build_in_clause
 from app.payroll.schemas import PeriodEntryCount, PeriodSummary
 
 
@@ -115,9 +88,9 @@ async def get_periods(
     offset: int = 0,
 ) -> list[PeriodSummary]:
     # ── Driver-role hard-block (Current Payroll is not a Driver Screen) ─────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     # ── Payroll read permission gate ─────────────────────────────────────────── #
     # Operational users must have payroll.view OR payroll.entry on at least one
@@ -142,7 +115,7 @@ async def get_periods(
 
     permitted_branches = [
         bid for bid in candidate_branch_ids
-        if await _has_any_permission(company_id, user_id, bid, _PAYROLL_READ_PERMS, db)
+        if await has_any_permission(company_id, user_id, bid, _PAYROLL_READ_PERMS, db)
     ]
     if not permitted_branches:
         raise HTTPException(
@@ -165,7 +138,7 @@ async def get_periods(
         conditions.append("v.branchid = :branch_id")
         params["branch_id"] = branch_id
     else:
-        in_clause, in_params = _build_in_clause(permitted_branches, "pb")
+        in_clause, in_params = build_in_clause(permitted_branches, "pb")
         conditions.append(f"v.branchid IN ({in_clause})")
         params.update(in_params)
 
@@ -200,9 +173,9 @@ async def get_period_by_id(
     db: AsyncConnection,
 ) -> PeriodSummary:
     # ── Driver-role hard-block — must be first, before any data is read ─────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
-    can_see_all, branch_ids = await _check_branch_access(company_id, user_id, db)
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     result = await db.execute(
         text(
@@ -227,7 +200,7 @@ async def get_period_by_id(
         )
 
     # ── Payroll permission gate — any payroll-capable role is sufficient ─────── #
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, row["branchid"],
         ["payroll.view", "payroll.entry", "payroll.finalize"],
         db,

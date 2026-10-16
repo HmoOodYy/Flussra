@@ -9,7 +9,7 @@ A user can hold two simultaneous active assignments:
 sec.fn_UserHasPermission only matches a SpecificBranch assignment when a
 concrete branch id is supplied. get_periods previously checked the
 AllCompanyBranches-implied permission set with branch_id=None whenever
-_check_branch_access reported can_see_all=True, which can never see a
+check_branch_access reported can_see_all=True, which can never see a
 SpecificBranch-scoped grant. That incorrectly denied selected-branch
 discovery and could not constrain unfiltered discovery to permitted
 branches only.
@@ -100,7 +100,7 @@ async def _make_mixed_authority_user(
     """Two simultaneously active assignments on one user:
       - a new-path company-role assignment, AllCompanyBranches scope, granting
         an unrelated permission (users.view) — this is what makes
-        _check_branch_access report can_see_all=True;
+        check_branch_access report can_see_all=True;
       - a legacy roleid-based assignment, SpecificBranch scope, granting
         payroll.view (via the legacy PAYROLL_ADMIN role) on exactly one branch.
 

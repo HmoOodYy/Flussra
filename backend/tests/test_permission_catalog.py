@@ -228,7 +228,7 @@ class TestUiVisibility:
         codes = {p["permission_code"] for p in resp.json()}
         assert "review.decide" in codes, (
             "review.decide (modulecode='review') must be visible to the Roles UI. "
-            "The 'review' module was added to the ui_only filter in admin/service.py."
+            "The 'review' module was added to the ui_only filter in admin/permissions.py."
         )
 
 

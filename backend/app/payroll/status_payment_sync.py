@@ -1,42 +1,9 @@
 """
-Status Payment Sync — derives and synchronizes STATUS_PAYMENT source-line
-behavior from canonical driver/day entry-state status data.
+Derive Status pay from canonical driver/day entry state.
 
-Extracted from app.payroll.service (Stage B4-15) as a dependency-closed leaf
-module — no behavior change, pure relocation.
-
-Distinct from app.payroll.day_entry_state (Stage B4-13A), which owns the
-canonical per-driver/day status + note state itself, StatusKey validation/
-resolution, entry-state mutation, and STATUS_NOTE evidence. This module
-consumes that canonical state (by reading
-PayrollPeriodDriverDayEntryState/PayrollStatusKeys directly) and derives
-STATUS_PAYMENT source-line/payment behavior from it — it does not import or
-duplicate any Day Entry State function.
-
-Owns two views of the same canonical Status Payment policy, both sharing the
-same rate-resolution rule and the same arithmetic
-(_calculate_status_payment_amount), so they can never independently drift:
-
-  A. Persisted synchronization/write path:
-     _sync_status_payment_for_entry_state, _refresh_status_payment_lines
-  B. Live/read-only projection path:
-     _LiveStatusLine, _resolve_live_status_payment_lines
-
-Plus _STATUS_PAYMENT_PROJECTION_SQL: the exact identity predicate for the
-persisted STATUS_PAYMENT compatibility-projection DraftLine written by
-_sync_status_payment_for_entry_state, used by Calculation
-(_build_live_calculation_packet, in app.payroll.period_calculation) to
-exclude those rows from its own live-line scan since the canonical live
-status pay is sourced from _resolve_live_status_payment_lines instead.
-
-Current consumers, each in its own module:
-  - Day Grid (save_day_grid, in app.payroll.day_grid) calls
-    _sync_status_payment_for_entry_state.
-  - Lifecycle (change_period_status, resubmit_period, in
-    app.payroll.period_lifecycle) calls _refresh_status_payment_lines.
-  - Calculation (_build_live_calculation_packet, in
-    app.payroll.period_calculation) calls _resolve_live_status_payment_lines
-    and references _STATUS_PAYMENT_PROJECTION_SQL.
+The persisted compatibility projection and read-only live resolver share
+Status-payment arithmetic. Day Grid synchronizes the projection; live
+Calculation resolves current applicable rates directly from canonical Status selections.
 """
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -463,9 +430,6 @@ async def _refresh_status_payment_lines(
 ) -> int:
     """
     Re-sync all STATUS_PAYMENT draft lines for a period from PPDES state.
-
-    Called before _refresh_draft_calculations at submit and finalize so that
-    status-payment lines are current before the NMR guard runs.
 
     Returns the count of PPDES rows processed.
     """

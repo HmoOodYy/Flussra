@@ -14,7 +14,9 @@ from app.company_currency import (
     frozen_currency,
     lock_and_get_company_currency_for_monetary_write,
 )
-from app.settings import service as settings_service
+from app.settings import audit as settings_audit
+from app.settings import company
+from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
 from tests.p3a_currency_fixtures import (
     INSERT_DRIVER_RATE,
@@ -51,9 +53,9 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
     async def allow(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(settings_service, "_ensure_company_admin", allow)
-    monkeypatch.setattr(settings_service, "_check_branch_access", allow)
-    monkeypatch.setattr(settings_service, "_write_settings_audit", allow)
+    monkeypatch.setattr(settings_security, "ensure_company_admin", allow)
+    monkeypatch.setattr(company, "check_branch_access", allow)
+    monkeypatch.setattr(settings_audit, "write_settings_audit", allow)
 
     async with test_engine.connect() as db:
         transaction = await db.begin()
@@ -65,22 +67,22 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             """), {"code": code})).scalar_one()
             def update(currency):
                 return CompanyUpdate(company_name="P3a isolation", currency_code=currency)
-            profile = await settings_service.get_company_profile(company_id, 1, db)
+            profile = await company.get_company_profile(company_id, 1, db)
             assert profile.currency_code is None and not profile.currency_change_locked
             with pytest.raises(HTTPException) as missing:
                 await lock_and_get_company_currency_for_monetary_write(company_id, db)
             assert missing.value.detail["code"] == "COMPANY_CURRENCY_REQUIRED"
             with pytest.raises(HTTPException) as unsupported:
-                await settings_service.update_company_profile(company_id, 1, update("ZZZ"), db)
+                await company.update_company_profile(company_id, 1, update("ZZZ"), db)
             assert unsupported.value.detail["code"] == "UNSUPPORTED_CURRENCY_CODE"
             with pytest.raises(HTTPException) as null:
-                await settings_service.update_company_profile(company_id, 1, update(None), db)
+                await company.update_company_profile(company_id, 1, update(None), db)
             assert null.value.detail["code"] == "COMPANY_CURRENCY_REQUIRED"
-            profile = await settings_service.update_company_profile(company_id, 1, update(" usd "), db)
+            profile = await company.update_company_profile(company_id, 1, update(" usd "), db)
             assert profile.currency_code == "USD" and not profile.currency_change_locked
-            profile = await settings_service.update_company_profile(company_id, 1, update("USD"), db)
+            profile = await company.update_company_profile(company_id, 1, update("USD"), db)
             assert profile.currency_code == "USD"
-            profile = await settings_service.update_company_profile(company_id, 1, update("JPY"), db)
+            profile = await company.update_company_profile(company_id, 1, update("JPY"), db)
             assert profile.currency_code == "JPY" and profile.currency_minor_unit_digits == 0
 
             branch_id, driver_id = await create_branch_and_driver(db, company_id, code[-12:])
@@ -90,10 +92,10 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
                 "rid": rate_type_id, "amount": "1.2345",
             })).scalar_one()
             assert await company_has_durable_monetary_state(company_id, db)
-            profile = await settings_service.get_company_profile(company_id, 1, db)
+            profile = await company.get_company_profile(company_id, 1, db)
             assert profile.currency_change_locked
             with pytest.raises(HTTPException) as changed:
-                await settings_service.update_company_profile(company_id, 1, update("USD"), db)
+                await company.update_company_profile(company_id, 1, update("USD"), db)
             assert changed.value.detail["code"] == "COMPANY_CURRENCY_CHANGE_BLOCKED"
             # Cleanup of an active row must not be used to unlock the Company. A
             # lifecycle change (to Voided) retains the durable row.

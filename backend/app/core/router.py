@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core import service
+from app.core import service, workforce_adapters
 from app.core.schemas import (
     BranchSummary,
     DriverCreate,
@@ -63,7 +63,7 @@ async def list_people(
     ),
     q: str | None = Query(None, description="Case-insensitive search on name, email, key"),
 ) -> list[PersonSummary]:
-    return await service.get_people(
+    return await workforce_adapters.get_people(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -140,7 +140,7 @@ async def create_driver(
     token: TokenDep,
     db: DbDep,
 ) -> DriverSummary:
-    return await service.create_driver(
+    return await workforce_adapters.create_driver(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -163,7 +163,7 @@ async def patch_driver(
     token: TokenDep,
     db: DbDep,
 ) -> DriverSummary:
-    return await service.update_driver(
+    return await workforce_adapters.update_driver(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         driver_id=driver_id,

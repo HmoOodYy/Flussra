@@ -19,7 +19,7 @@ import app.company_currency as company_currency
 from app.company_concurrency import lock_company_for_monetary_use, lock_company_for_mutation
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.db.transaction_retry import retryable_sqlstate
-from app.settings import service as settings_service
+from app.settings import company
 from app.settings.schemas import CompanyUpdate
 
 _LOCK_NOT_AVAILABLE = "55P03"
@@ -273,12 +273,12 @@ async def test_update_company_profile_waits_behind_a_monetary_writer_without_dea
         user_id, company_id = (await db.execute(text(
             "SELECT userid, companyid FROM sec.users WHERE username = 'admin'"
         ))).one()
-        profile = await settings_service.get_company_profile(company_id, user_id, db)
+        profile = await company.get_company_profile(company_id, user_id, db)
 
     async with _tx(test_engine) as writer, _tx(test_engine) as profile_tx:
         await lock_company_for_monetary_use(company_id, writer)
         pid = await _backend_pid(profile_tx)
-        update = asyncio.create_task(settings_service.update_company_profile(
+        update = asyncio.create_task(company.update_company_profile(
             company_id, user_id,
             CompanyUpdate(company_name=profile.company_name, legal_name=profile.legal_name),
             profile_tx,

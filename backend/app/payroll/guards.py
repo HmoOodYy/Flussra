@@ -1,17 +1,10 @@
 """
-Shared payroll access/guard helpers.
+Payroll access and finalized-period guards shared with Compensation.
 
-Extracted from app.payroll.service (Stage B4-2A) as a dependency-closed leaf
-module — no behavior change, pure relocation. These four functions were
-proven, by caller audit, to be genuinely shared by at least the Rates and
-Driver Pay Rules domains (several are also called directly from Lifecycle,
-Finalization, Calculation, Day Grid, and Current Payroll Hub code) rather
-than owned by any single domain. This module exists to
-remove that incorrect ownership from service.py so both Rates and a future
-Driver Pay Rules module can depend on a neutral leaf instead of importing
-app.payroll.service.
-
-Do not add unrelated helpers here. This is not a general utilities module.
+Internal cross-area contract: ``check_not_in_finalized_period`` performs a
+read-only company/branch/date check and raises HTTP 422 when the effective
+date falls inside a Locked or Archived period (inclusive). It owns no
+authorization, lock, commit, or caller ordering.
 """
 from datetime import date
 
@@ -19,8 +12,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
-from app.core.service import _check_any_permission
 
 
 async def _require_non_driver_rate_subject(
@@ -34,7 +27,7 @@ async def _require_non_driver_rate_subject(
 # Finalized-period guard — shared by approve_rate and batch_save_rates
 # ---------------------------------------------------------------------------
 
-async def _check_not_in_finalized_period(
+async def check_not_in_finalized_period(
     company_id: int,
     branch_id: int,
     effective_from: date,
@@ -43,12 +36,11 @@ async def _check_not_in_finalized_period(
     label: str = "rate",
 ) -> None:
     """
-    Raise HTTP 422 if effective_from falls inside a Locked or Archived payroll
-    period for the same company and branch.
+    Raise HTTP 422 when effective_from falls inside a Locked or Archived period
+    for this company and branch. The date comparison includes both period bounds.
 
-    Called before approving or auto-approving a rate (label="rate") or creating/
-    copying a pay rule (label="pay rule") so that payroll history cannot be
-    retroactively altered inside finalized pay periods.
+    Called for rate approval, batch rate auto-approval, Compensation assignment
+    approval, and pay-rule creation to prevent retroactive finalized changes.
     """
     result = await db.execute(
         text("""
@@ -84,15 +76,14 @@ async def _check_driver_read_access(
     Shared security gate for all driver-scoped rate read endpoints
     (pending, history, summary).
 
-    Performs:
-      1. Driver lookup — 404 if not in this company.
-      2. Permission check with driver's branch_id — 403 if no payrates.* permission.
-      3. DRIVER/Self ceiling — generic rate administration is denied.
+    Rejects DRIVER subjects before looking up the Driver in the Company.
+    Then requires payrates.view, payrates.edit, settings.manage, or setup.manage
+    on the Driver's branch.
 
     Returns the driver's branch_id on success.
 
-    Note: explicit _check_branch_access is not called separately because
-    _check_any_permission with the driver's actual branch_id is sufficient
+    Note: explicit check_branch_access is not called separately because
+    check_any_permission with the driver's actual branch_id is sufficient
     to enforce branch scope (fn_UserHasPermission returns FALSE for
     SpecificBranch users on a different branch).
     """
@@ -105,7 +96,7 @@ async def _check_driver_read_access(
     if drv_row is None:
         raise HTTPException(status_code=404, detail="Driver not found.")
     branch_id: int = drv_row["branchid"]
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, branch_id,
         ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"], db,
     )

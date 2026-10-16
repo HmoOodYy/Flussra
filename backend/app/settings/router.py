@@ -4,9 +4,9 @@ and per-branch payroll setup + status keys.
 
 All endpoints require a valid JWT.
 Company and user identity come from the token; access checks are enforced
-inside the service layer.
+inside the owning Settings module.
 
-Write endpoints require AllCompanyBranches scope — see _ensure_company_admin().
+Write endpoints require AllCompanyBranches scope — see the Settings security module.
 """
 from datetime import date
 from typing import Annotated
@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
-from app.settings import service
+from app.settings import branch_reads, branches, company, status_keys, status_rate_columns
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
@@ -43,7 +43,7 @@ DbDep    = Annotated[AsyncConnection, Depends(get_db)]
 
 @router.get("/currencies", response_model=list[SupportedCurrency])
 async def list_supported_currencies(token: TokenDep, db: DbDep) -> list[SupportedCurrency]:
-    return await service.list_supported_currencies(
+    return await company.list_supported_currencies(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -69,7 +69,7 @@ async def get_company_profile(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyProfile:
-    return await service.get_company_profile(
+    return await company.get_company_profile(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -100,7 +100,7 @@ async def update_company_profile(
     token: TokenDep,
     db: DbDep,
 ) -> CompanyProfile:
-    return await service.update_company_profile(
+    return await company.update_company_profile(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -128,7 +128,7 @@ async def list_branches(
     token: TokenDep,
     db: DbDep,
 ) -> list[BranchAdmin]:
-    return await service.get_branches(
+    return await branch_reads.get_branches(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -161,7 +161,7 @@ async def get_onboarding_options(
     db: DbDep,
     around: date | None = Query(None, description="Reference date; defaults to company-local today"),
 ) -> OnboardingOptionsResponse:
-    return await service.get_onboarding_options(
+    return await branches.get_onboarding_options(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -183,7 +183,7 @@ async def get_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.get_branch_by_id(
+    return await branch_reads.get_branch_by_id(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -218,7 +218,7 @@ async def create_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.create_branch(
+    return await branches.create_branch(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -249,7 +249,7 @@ async def update_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.update_branch(
+    return await branches.update_branch(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -279,7 +279,7 @@ async def set_default_branch(
     token: TokenDep,
     db: DbDep,
 ) -> BranchAdmin:
-    return await service.set_default_branch(
+    return await branches.set_default_branch(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -310,7 +310,7 @@ async def list_status_keys(
     db: DbDep,
     include_inactive: bool = Query(False, description="Include deactivated keys"),
 ) -> list[StatusKey]:
-    return await service.get_status_keys(
+    return await status_keys.get_status_keys(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -346,7 +346,7 @@ async def create_status_key(
     token: TokenDep,
     db: DbDep,
 ) -> StatusKey:
-    return await service.create_status_key(
+    return await status_keys.create_status_key(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -377,7 +377,7 @@ async def update_status_key(
     token: TokenDep,
     db: DbDep,
 ) -> StatusKey:
-    return await service.update_status_key(
+    return await status_keys.update_status_key(
         key_id=key_id,
         branch_id=branch_id,
         company_id=int(token["cid"]),
@@ -409,7 +409,7 @@ async def delete_status_key(
     token: TokenDep,
     db: DbDep,
 ) -> StatusKey:
-    return await service.delete_status_key(
+    return await status_keys.delete_status_key(
         key_id=key_id,
         branch_id=branch_id,
         company_id=int(token["cid"]),
@@ -439,7 +439,7 @@ async def list_status_rate_columns(
     db: DbDep,
     include_inactive: bool = Query(False),
 ) -> list[StatusRateColumn]:
-    return await service.list_status_rate_columns(
+    return await status_rate_columns.list_status_rate_columns(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -469,7 +469,7 @@ async def create_status_rate_column(
     token: TokenDep,
     db: DbDep,
 ) -> StatusRateColumn:
-    return await service.create_status_rate_column(
+    return await status_rate_columns.create_status_rate_column(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),

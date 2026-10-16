@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.service import _check_any_permission, _require_not_driver_role
+from app.access.permissions import check_any_permission
+from app.access.policy import require_non_driver_subject
 from app.payroll import status_evidence
 from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
@@ -57,9 +58,9 @@ async def _readable_period(
     db: AsyncConnection,
 ):
     """Apply the established Current Payroll read boundary before new reads."""
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
     )
     return period
@@ -472,10 +473,8 @@ async def get_selected_day_off_drivers(
 # Legacy period-wide Drivers Off (GET /periods/{id}/drivers-off)
 # ---------------------------------------------------------------------------
 #
-# Stage B4-22 moved _finalized_drivers_off_entries and get_drivers_off here
-# from app.payroll.service — pure relocation, no behavior change. This is
-# the LEGACY period-wide surface (all work dates, DailyStatus-driven for
-# non-finalized periods), not the canonical CP-5B surface above (Fully-Off
+# This is the legacy period-wide surface (all work dates, DailyStatus-driven
+# for non-finalized periods), distinct from the surface above (Fully-Off
 # KPI + selected-day, EntryState-first). The two contracts are deliberately
 # NOT unified: get_drivers_off reads legacy DailyStatus DraftLines + live
 # PayrollStatusKeys + a DailyNote join for Draft/Open/InReview/Returned/
@@ -595,11 +594,11 @@ async def get_drivers_off(
     payroll.view OR payroll.entry permission is required.
     """
     # ── Driver-role hard-block ───────────────────────────────────────────────── #
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
 
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
-    await _check_any_permission(
+    await check_any_permission(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
 

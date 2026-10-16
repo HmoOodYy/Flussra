@@ -1,59 +1,14 @@
 """
-Payroll Finalization — the payroll domain's single owner of:
+Approved-snapshot validation, FinalLines projection, and finalization preview.
 
-  A. Finalization-specific audit writing (_write_finalization_audit)
-  B. Finalization-specific error construction (_snapshot_finalization_error)
-  C. Approved-snapshot loading for Finalization (_load_approved_snapshot_packet)
-  D. Approved-snapshot reconciliation (_reconcile_approved_snapshot_packet)
-  E. Snapshot line provenance extraction (_snapshot_line_draft_line_id,
-     _snapshot_line_provenance)
-  F. Immutable snapshot -> FinalLines projection
-     (_project_approved_snapshot_final_lines)
-  G. Finalization execution (finalize_period)
-  H. Finalization preview (get_finalization_preview)
+Finalization and its preview remain refused by the target evidence gate.
+The retained implementation uses the snapshot bound to the Approved
+PeriodApproval, never a latest-snapshot guess or recalculated live money.
+Missing provenance is not reconstructed from mutable Status or Bonus data.
 
-Extracted from app.payroll.service (Stage B4-19) as a dependency-closed leaf
-module — no behavior change, pure relocation. A fresh B4-19 discovery proved
-the transitive service.py-local closure of these 9 symbols is empty: this
-module depends only on already-extracted true owners (app.core.service,
-app.payroll.guards, app.payroll.immutable_evidence, app.payroll.period_read,
-app.payroll.schemas, app.payroll.workflow_lock) and never imports
-app.payroll.service.
-
-Finalization uses an already-approved immutable Calculation snapshot as its
-sole authority. It does NOT rebuild live payroll: it never calls
-app.payroll.period_calculation._build_live_calculation_packet, never calls
-app.payroll.period_calculation._refresh_draft_calculations, and never
-captures a new Calculation snapshot (app.payroll.period_calculation._capture_calculation_snapshot).
-It reads and projects an already-approved snapshot captured earlier by
-Submit/Resubmit (app.payroll.period_lifecycle) — this module has zero
-dependency on either app.payroll.period_calculation or
-app.payroll.period_lifecycle, confirmed fresh by this stage's discovery.
-
-The approved snapshot is resolved through the approved review/PeriodApproval
-evidence binding (_load_approved_snapshot_packet), not merely "the latest
-snapshot" — company, branch, period, and approval-linkage checks all remain
-exactly as they were in service.py. Missing-snapshot and provenance-mismatch
-behavior is unchanged. No historical immutable field is ever reconstructed
-from mutable current tables (Status, Bonus, or otherwise) — that boundary is
-enforced upstream, at capture time, by app.payroll.period_calculation, and
-this module's read-only projection never attempts to fill a gap itself.
-
-finalize_period and get_finalization_preview intentionally do NOT share a
-redesigned implementation in this stage — they were structurally relocated
-exactly as they existed in app.payroll.service, including their independent
-approved-snapshot loading and reconciliation call sites. get_finalization_preview
-remains strictly read-only: it performs no Finalization audit write, no
-FinalLines INSERT, and no status transition.
-
-Transaction ownership is above this module. finalize_period and
-get_finalization_preview receive an ambient AsyncConnection and open no
-transaction of their own, commit nothing, and roll back nothing explicitly
-— the request-level transaction is owned by the existing DB dependency
-(app.dependencies.get_db). _write_finalization_audit is called after the
-FinalLines projection and the period-status UPDATE inside finalize_period,
-in the same ambient transaction, so a failure there rolls back the entire
-finalization atomically.
+The preview is read-only. Finalization projects lines, updates period status,
+and writes its audit in the caller's transaction, so an audit failure rolls
+back the entire operation.
 """
 from __future__ import annotations
 
@@ -65,12 +20,13 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.permissions import check_permission
+from app.access.policy import require_non_driver_subject
 from app.company_currency import (
     frozen_currency,
     lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
-from app.core.service import _check_permission, _require_not_driver_role
 from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
@@ -79,7 +35,7 @@ from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
 )
-from app.payroll.workflow_lock import _acquire_branch_workflow_lock
+from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 if TYPE_CHECKING:
     from app.payroll.schemas import FinalizationPreviewResponse
@@ -333,16 +289,16 @@ async def _project_approved_snapshot_final_lines(
 
 async def finalize_period(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> PeriodSummary:
     """Project the exact approved immutable packet into FinalLines and lock the period."""
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
     # P4c gate: finalizing projects frozen target calculation evidence, which does not
     # exist yet. Refuse before any lock, claim or financial write.
     require_target_payroll_evidence()
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
-    await _acquire_branch_workflow_lock(company_id, period.branch_id, db)
+    await acquire_branch_workflow_lock(company_id, period.branch_id, db)
     locked = (await db.execute(text("""
         SELECT payrollperiodid FROM payroll.payrollperiods
         WHERE payrollperiodid = :period_id AND companyid = :cid AND branchid = :bid AND status = 'Approved'
@@ -393,11 +349,11 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
         FinalizationPreviewResponse,
         FinalizationPreviewSysAdjustment,
     )
-    await _require_not_driver_role(company_id, user_id, db)
+    await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Finalization preview requires an Approved period. Current status: '{period.status}'.")
-    await _check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
+    await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
     require_target_payroll_evidence()
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db)
     _reconcile_approved_snapshot_packet(packet)
