@@ -5,7 +5,7 @@ import {
   getCurrentWorkflow,
   getPeriodCandidate,
 } from '../lib/payrollApi';
-import type { PeriodCandidateMode, PeriodCandidatePreview } from '../types/payroll';
+import type { PeriodCandidateMode, PeriodCandidatePreview } from '../types/payroll/periods';
 import type { Branch } from '../types/core';
 import styles from './CreatePeriodModal.module.css';
 

@@ -1,4 +1,8 @@
-import type { FinalizedCalculationReportResponse, FinalizedReportView, ReportDriver } from '../../../types/payroll';
+import type {
+  FinalizedCalculationReportResponse,
+  FinalizedReportView,
+} from '../../../types/payroll/finalized';
+import type { ReportDriver } from '../../../types/payroll/reports';
 import { buildPeriodPayTable } from '../periodPayTable';
 import { PeriodPayMatrix } from '../PeriodPayMatrix';
 import { WorkTotals } from '../WorkTotals';

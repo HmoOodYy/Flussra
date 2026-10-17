@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildPeriodPayTable, driverLabel } from '../src/pages/payroll/periodPayTable.ts';
-import type { DefinitionAmount, ReportColumn, ReportDriver, ReportPaySection } from '../src/types/payroll.ts';
+import type {
+  DefinitionAmount,
+  ReportColumn,
+  ReportDriver,
+  ReportPaySection,
+} from '../src/types/payroll/reports.ts';
 
 function makeColumn(overrides: Partial<ReportColumn> = {}): ReportColumn {
   return {

@@ -10,7 +10,7 @@ import type {
   CurrentPayrollHubBranch,
   PeriodWorkflowCapabilities,
   WorkflowCapability,
-} from '../src/types/payroll.ts';
+} from '../src/types/payroll/periods.ts';
 
 function makeCapability(overrides: Partial<WorkflowCapability> = {}): WorkflowCapability {
   return { allowed: true, reason_code: null, reason_message: null, ...overrides };

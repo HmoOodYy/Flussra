@@ -8,7 +8,8 @@
  * a real load failure and must propagate.
  */
 import { isAxiosError } from 'axios';
-import type { FinalizedPeriodListItem, PeriodSummary } from '../../types/payroll';
+import type { FinalizedPeriodListItem } from '../../types/payroll/finalized';
+import type { PeriodSummary } from '../../types/payroll/periods';
 
 export type LedgerDiscoveryStatus = 'Locked' | 'Archived';
 

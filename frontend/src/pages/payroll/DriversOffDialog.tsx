@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { getSelectedDayOffDrivers } from '../../lib/payrollApi';
-import type { SelectedDayOffDriver } from '../../types/payroll';
+import type { SelectedDayOffDriver } from '../../types/payroll/entry';
 import styles from './DriversOffDialog.module.css';
 
 // ---------------------------------------------------------------------------

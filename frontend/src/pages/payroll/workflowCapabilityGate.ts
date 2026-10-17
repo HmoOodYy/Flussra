@@ -16,7 +16,7 @@ import type {
   PeriodStatus,
   PeriodWorkflowCapabilities,
   WorkflowCapability,
-} from '../../types/payroll';
+} from '../../types/payroll/periods';
 
 /**
  * Look up the backend-computed workflow capabilities for one period.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { buildSaveRowFromGrid, columnKey, quantityInputProps, quantityTotalViews } from '../src/pages/payroll/dayGridModel.ts';
-import type { DayGridColumn, DayGridResponse } from '../src/types/payroll.ts';
+import type { DayGridColumn, DayGridResponse } from '../src/types/payroll/entry.ts';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -64,7 +64,7 @@ test('Day Grid saves are keyed by the period definition id', () => {
 });
 
 test('period pages carry no PayItem identity', () => {
-  const types = read('src/types/payroll.ts');
+  const types = read('src/types/payroll/entry.ts');
   assert.match(types, /payroll_period_definition_id/);
   const detail = [read('src/pages/payroll/PeriodDetailPage.tsx'), read('src/pages/payroll/useDailyEntryController.ts')].join('\n');
   assert.doesNotMatch(detail, /pay_item_code|PayItem/);

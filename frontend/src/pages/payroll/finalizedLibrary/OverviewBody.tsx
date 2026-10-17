@@ -1,4 +1,4 @@
-import type { FinalizedOverviewResponse } from '../../../types/payroll';
+import type { FinalizedOverviewResponse } from '../../../types/payroll/finalized';
 import { formatHash, formatMoney } from './formatting';
 import { AvailabilityBadge } from './EvidencePresentation';
 import styles from '../FinalizedPayrollLibraryDialog.module.css';

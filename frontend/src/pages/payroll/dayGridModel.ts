@@ -6,7 +6,12 @@
  * that id (as a string), never by a code or a name. Code and label are display metadata
  * and have no behavior here.
  */
-import type { DayGridColumn, DayGridResponse, DayGridSaveRow, DayGridSummary } from '../../types/payroll';
+import type {
+  DayGridColumn,
+  DayGridResponse,
+  DayGridSaveRow,
+  DayGridSummary,
+} from '../../types/payroll/entry';
 
 /** The stable key for a column in value maps and save payloads. */
 export function columnKey(column: Pick<DayGridColumn, 'payroll_period_definition_id'>): string {

@@ -1,4 +1,4 @@
-import type { FinalizedRatesUsedResponse } from '../../../types/payroll';
+import type { FinalizedRatesUsedResponse } from '../../../types/payroll/finalized';
 import { formatMoney } from './formatting';
 import { AvailabilityBadge, EvidenceSectionMessage, StateMessage } from './EvidencePresentation';
 import styles from '../FinalizedPayrollLibraryDialog.module.css';

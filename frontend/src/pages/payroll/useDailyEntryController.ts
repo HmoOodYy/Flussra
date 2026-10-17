@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { getDayGrid, saveDayGrid } from '../../lib/payrollApi';
 import { canEntryPayroll } from '../../lib/permissions';
 import type { UserProfile } from '../../store/authStore';
-import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll';
+import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll/entry';
 import { buildSaveRowFromGrid } from './dayGridModel';
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);

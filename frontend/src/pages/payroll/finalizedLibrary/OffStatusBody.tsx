@@ -1,4 +1,4 @@
-import type { FinalizedOffDriversResponse } from '../../../types/payroll';
+import type { FinalizedOffDriversResponse } from '../../../types/payroll/finalized';
 import { AvailabilityBadge, EvidenceSectionMessage, StateMessage } from './EvidencePresentation';
 import styles from '../FinalizedPayrollLibraryDialog.module.css';
 

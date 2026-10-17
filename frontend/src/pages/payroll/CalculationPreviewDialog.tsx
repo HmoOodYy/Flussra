@@ -4,7 +4,7 @@ import type {
   CalculationPreviewDriver,
   CalculationPreviewLine,
   CalculationPreviewResponse,
-} from '../../types/payroll';
+} from '../../types/payroll/calculation';
 import styles from './CalculationPreviewDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 

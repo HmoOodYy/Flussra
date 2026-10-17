@@ -1,4 +1,4 @@
-import type { FinalizedSectionAvailability } from '../../../types/payroll';
+import type { FinalizedSectionAvailability } from '../../../types/payroll/finalizedEvidence';
 import { formatMoney as formatCurrencyMoney } from '../../../lib/money';
 
 export function formatMoney(value: unknown, code?: string | null, digits?: number | null): string {

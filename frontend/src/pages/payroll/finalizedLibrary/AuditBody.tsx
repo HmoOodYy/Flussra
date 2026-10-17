@@ -1,4 +1,8 @@
-import type { FinalizedAuditEvent, FinalizedAuditResponse, FinalizedSectionAvailability } from '../../../types/payroll';
+import type {
+  FinalizedAuditEvent,
+  FinalizedAuditResponse,
+  FinalizedSectionAvailability,
+} from '../../../types/payroll/finalizedEvidence';
 import { availabilityMessage, formatHash, formatValue } from './formatting';
 import { AvailabilityBadge, StateMessage } from './EvidencePresentation';
 import styles from '../FinalizedPayrollLibraryDialog.module.css';

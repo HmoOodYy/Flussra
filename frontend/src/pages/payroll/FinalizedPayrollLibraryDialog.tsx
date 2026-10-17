@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getFinalizedAudit, getFinalizedOffDrivers, getFinalizedOverview, getFinalizedRatesUsed, getFinalizedReport } from '../../lib/payrollApi';
+import type { FinalizedAuditResponse } from '../../types/payroll/finalizedEvidence';
 import type {
-  FinalizedAuditResponse,
   FinalizedCalculationReportResponse,
   FinalizedOffDriversResponse,
   FinalizedOverviewResponse,
   FinalizedRatesUsedResponse,
   FinalizedReportView,
-} from '../../types/payroll';
+} from '../../types/payroll/finalized';
 import { AuditBody } from './finalizedLibrary/AuditBody';
 import { StateMessage } from './finalizedLibrary/EvidencePresentation';
 import { OffStatusBody } from './finalizedLibrary/OffStatusBody';

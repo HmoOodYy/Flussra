@@ -1,5 +1,8 @@
 import type { ReactNode } from 'react';
-import type { FinalizedAvailabilityState, FinalizedSectionAvailability } from '../../../types/payroll';
+import type {
+  FinalizedAvailabilityState,
+  FinalizedSectionAvailability,
+} from '../../../types/payroll/finalizedEvidence';
 import { availabilityMessage } from './formatting';
 import styles from '../FinalizedPayrollLibraryDialog.module.css';
 
