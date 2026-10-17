@@ -34,7 +34,7 @@ test('Bonus and DriverPayRule amount inputs accept four-decimal source precision
   assert.doesNotMatch(bonusAmountInput, /step="0\.01"|min="0\.01"/);
   assert.match(bonusSource, /formatMoney\(v, user\?\.currency_code, user\?\.currency_minor_unit_digits\)/);
 
-  const payRatesSource = readFileSync(resolve(import.meta.dirname, '../src/pages/people/pay-rates/PayRatesPage.tsx'), 'utf8');
+  const payRatesSource = readFileSync(resolve(import.meta.dirname, '../src/pages/people/pay-rates/DriverPayRulesTab.tsx'), 'utf8');
   const driverPayRuleAmountInput = payRatesSource.match(/type="number"([\s\S]*?)value=\{ruleForm\.amount\}/)?.[1];
   assert.ok(driverPayRuleAmountInput, 'DriverPayRule amount input should exist');
   assert.match(driverPayRuleAmountInput, /step="0\.0001"/);
@@ -77,6 +77,21 @@ test('financial screens have no known USD-specific formatting assumptions', () =
   const files = [
     '../src/pages/ReviewDetailDialog.tsx',
     '../src/pages/people/pay-rates/PayRatesPage.tsx',
+    '../src/pages/people/pay-rates/payRatesView.ts',
+    '../src/pages/people/pay-rates/statusRatesApi.ts',
+    '../src/pages/people/pay-rates/driverPayRulesApi.ts',
+    '../src/pages/people/pay-rates/usePayRateDriverContext.ts',
+    '../src/pages/people/pay-rates/usePayRateReads.ts',
+    '../src/pages/people/pay-rates/useTargetRateEditing.ts',
+    '../src/pages/people/pay-rates/useStatusRateEditing.ts',
+    '../src/pages/people/pay-rates/useRateAssignmentActions.ts',
+    '../src/pages/people/pay-rates/useDriverPayRules.ts',
+    '../src/pages/people/pay-rates/PayRateDriverList.tsx',
+    '../src/pages/people/pay-rates/TargetRateSection.tsx',
+    '../src/pages/people/pay-rates/StatusRateSection.tsx',
+    '../src/pages/people/pay-rates/PendingRateChanges.tsx',
+    '../src/pages/people/pay-rates/AssignmentHistoryTab.tsx',
+    '../src/pages/people/pay-rates/DriverPayRulesTab.tsx',
     '../src/pages/payroll/BonusDialog.tsx',
     '../src/pages/payroll/CalculationPreviewDialog.tsx',
     '../src/pages/payroll/CurrentPayrollReportsDialog.tsx',
@@ -88,7 +103,25 @@ test('financial screens have no known USD-specific formatting assumptions', () =
     '../src/pages/payroll/grossDisplay.ts',
     '../src/pages/payroll/PeriodDetailPage.tsx',
   ];
-  for (const file of files) {
+  const payRatesFeatureFiles = [
+    '../src/pages/people/pay-rates/PayRatesPage.tsx',
+    '../src/pages/people/pay-rates/payRatesView.ts',
+    '../src/pages/people/pay-rates/statusRatesApi.ts',
+    '../src/pages/people/pay-rates/driverPayRulesApi.ts',
+    '../src/pages/people/pay-rates/usePayRateDriverContext.ts',
+    '../src/pages/people/pay-rates/usePayRateReads.ts',
+    '../src/pages/people/pay-rates/useTargetRateEditing.ts',
+    '../src/pages/people/pay-rates/useStatusRateEditing.ts',
+    '../src/pages/people/pay-rates/useRateAssignmentActions.ts',
+    '../src/pages/people/pay-rates/useDriverPayRules.ts',
+    '../src/pages/people/pay-rates/PayRateDriverList.tsx',
+    '../src/pages/people/pay-rates/TargetRateSection.tsx',
+    '../src/pages/people/pay-rates/StatusRateSection.tsx',
+    '../src/pages/people/pay-rates/PendingRateChanges.tsx',
+    '../src/pages/people/pay-rates/AssignmentHistoryTab.tsx',
+    '../src/pages/people/pay-rates/DriverPayRulesTab.tsx',
+  ];
+  for (const file of [...files.filter((file) => !file.includes('/people/pay-rates/')), ...payRatesFeatureFiles]) {
     const source = readFileSync(resolve(import.meta.dirname, file), 'utf8');
     assert.doesNotMatch(source, /currency\s*:\s*['"]USD['"]/i, file);
     assert.doesNotMatch(source, /toFixed\(2\)/, file);
