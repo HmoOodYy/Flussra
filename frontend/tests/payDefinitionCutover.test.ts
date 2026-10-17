@@ -4,20 +4,55 @@ import { readFileSync } from 'node:fs';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-const payItemsPage = read('src/pages/settings/pay-items/PayItemsPage.tsx');
+const payItemsFeatureFiles = [
+  'src/pages/settings/pay-items/PayItemsPage.tsx',
+  'src/pages/settings/pay-items/payItemsModel.ts',
+  'src/pages/settings/pay-items/usePayItemBranchContext.ts',
+  'src/pages/settings/pay-items/useCompanyPayDefinitions.ts',
+  'src/pages/settings/pay-items/usePayItemApplicability.ts',
+  'src/pages/settings/pay-items/usePayItemConfiguration.ts',
+  'src/pages/settings/pay-items/usePayDefinitionRequests.ts',
+  'src/pages/settings/pay-items/usePayItemCreation.ts',
+  'src/pages/settings/pay-items/PayItemCatalog.tsx',
+  'src/pages/settings/pay-items/PayDefinitionRequestsPanel.tsx',
+  'src/pages/settings/pay-items/BranchConfigurationDialogs.tsx',
+  'src/pages/settings/pay-items/PayItemCreationDialog.tsx',
+  'src/pages/settings/pay-items/requestDraftWorkflow.ts',
+];
+const payItemsSources = payItemsFeatureFiles.map(read);
+const payItemsFeatureSource = payItemsSources.join('\n');
+const payItemsSource = (name: string) => read(`src/pages/settings/pay-items/${name}`);
 const payRatesPage = read('src/pages/people/pay-rates/PayRatesPage.tsx');
 const compensationApi = read('src/lib/compensationApi.ts');
 
-test('Pay Items settings use only target Compensation APIs for definitions and branch configuration', () => {
-  assert.doesNotMatch(payItemsPage, /\/settings\/cdpi/);
-  assert.doesNotMatch(payItemsPage, /\/settings\/pay-items/);
-  assert.doesNotMatch(payItemsPage, /\/settings\/branches\/[^'"`]*pay-items/);
-  assert.doesNotMatch(payItemsPage, /cdpiApi|Cdpi/);
-  assert.match(payItemsPage, /compensationApi/);
+test('Pay Items implementation keeps all definition, request, and branch APIs behind current lib owners', () => {
+  assert.doesNotMatch(payItemsFeatureSource, /\/settings\/cdpi/);
+  assert.doesNotMatch(payItemsFeatureSource, /\/settings\/pay-items/);
+  assert.doesNotMatch(payItemsFeatureSource, /\/settings\/branches\/[^'"`]*pay-items/);
+  assert.doesNotMatch(payItemsFeatureSource, /cdpiApi|Cdpi/);
+  assert.doesNotMatch(payItemsFeatureSource, /\bapiClient\.(?:get|post|put|patch|delete)(?:<[^>]*>)?\s*\(/);
+
+  assert.match(payItemsSource('usePayItemBranchContext.ts'), /getSettingsBranches\(\)/);
+  assert.ok(payItemsSource('usePayItemBranchContext.ts').includes("from '../../../lib/settingsApi'"));
+  for (const owner of ['useCompanyPayDefinitions.ts', 'usePayItemApplicability.ts', 'usePayItemConfiguration.ts', 'usePayDefinitionRequests.ts', 'usePayItemCreation.ts']) {
+    assert.ok(payItemsSource(owner).includes("from '../../../lib/compensationApi'"), owner);
+  }
+  assert.match(payItemsSource('useCompanyPayDefinitions.ts'), /listPayDefinitions\(\)/);
+  assert.match(payItemsSource('useCompanyPayDefinitions.ts'), /retirePayDefinition\(selectedId\)/);
+  assert.match(payItemsSource('usePayItemApplicability.ts'), /listBranchPayDefinitions\(selectedBranchId\)/);
+  assert.match(payItemsSource('usePayItemApplicability.ts'), /listBranchPayDefinitionHistory\(selectedBranchId, selectedId\)/);
+  assert.match(payItemsSource('usePayItemConfiguration.ts'), /updateBranchPayDefinition\(selectedBranchId, selectedId, payload\)/);
+  assert.match(payItemsSource('usePayItemConfiguration.ts'), /bulkUpdateBranchPayDefinition\(selectedId/);
+  assert.match(payItemsSource('usePayItemCreation.ts'), /createPayDefinition\(fields\)/);
+  assert.match(payItemsSource('usePayItemCreation.ts'), /createPayDefinitionRequest\(/);
+  assert.match(payItemsSource('usePayDefinitionRequests.ts'), /listPayDefinitionRequests\(/);
+  assert.match(payItemsSource('usePayDefinitionRequests.ts'), /decidePayDefinitionRequest\(/);
+  assert.match(payItemsSource('usePayDefinitionRequests.ts'), /copyPayDefinitionRequest\(request\.request_id\)/);
+  assert.match(payItemsSource('usePayDefinitionRequests.ts'), /listPayDefinitionRequestEvents\(request\.request_id\)/);
 });
 
-test('Pay Items settings expose no legacy display-order or PayItem identity', () => {
-  assert.doesNotMatch(payItemsPage, /pay_item_id|sort_order|PayItemOrder|dragHandle/);
+test('Pay Items feature modules expose no legacy display-order or PayItem identity', () => {
+  assert.doesNotMatch(payItemsFeatureSource, /pay_item_id|sort_order|PayItemOrder|dragHandle/);
 });
 
 test('Pay Rates authors ordinary rates through target assignments and exposes no copy flow', () => {
