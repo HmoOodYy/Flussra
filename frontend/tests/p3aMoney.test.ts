@@ -44,17 +44,24 @@ test('Bonus and DriverPayRule amount inputs accept four-decimal source precision
 });
 
 test('company currency settings use the server catalog and update auth currency after a successful save', () => {
-  const source = readFileSync(resolve(import.meta.dirname, '../src/pages/settings/company-branches/CompanyBranchesPage.tsx'), 'utf8');
-  assert.match(source, /get<SupportedCurrency\[]>\('\/settings\/currencies'\)/);
-  assert.match(source, /currencies\.map\(\(currency\)/);
-  assert.match(source, /value=\{coForm\.currency_code \?\? company\.currency_code \?\? ''\}/);
-  assert.match(source, /!company\.currency_code/);
-  assert.match(source, /currency_change_locked/);
+  const section = readFileSync(resolve(import.meta.dirname, '../src/pages/settings/company-branches/CompanyProfileSection.tsx'), 'utf8');
+  const hook = readFileSync(resolve(import.meta.dirname, '../src/pages/settings/company-branches/useCompanyProfile.ts'), 'utf8');
+  const api = readFileSync(resolve(import.meta.dirname, '../src/lib/settingsApi.ts'), 'utf8');
+  assert.match(api, /apiClient\.get<SupportedCurrency\[]>\('\/settings\/currencies'\)/);
+  assert.match(hook, /getSupportedCurrencies\(\)/);
+  assert.match(hook, /getSupportedCurrencies\(\)[\s\S]*?\.then\(\(\{ data \}\) => setCurrencies\(data\)\)/);
+  assert.match(readFileSync(resolve(import.meta.dirname, '../src/pages/settings/company-branches/CompanyBranchesPage.tsx'), 'utf8'), /useCompanyProfile\(\{ user, setUser, setSuccessInfo, setConfirmKind \}\)/);
+  assert.match(section, /currencies\.map\(\(currency\)/);
+  assert.match(section, /value=\{coForm\.currency_code \?\? company\.currency_code \?\? ''\}/);
+  assert.match(section, /!company\.currency_code/);
+  assert.match(section, /currency_change_locked/);
 
-  const saveBody = source.match(/async function saveCo\(\) \{([\s\S]*?)\r?\n[ \t]{2}\}\r?\n\r?\n[ \t]{2}async function setDefault/)?.[1];
+  const saveBody = hook.match(/async function saveCo\(\) \{([\s\S]*?)\n\x20{2}\}/)?.[1];
   assert.ok(saveBody, 'company save handler should exist');
-  assert.match(saveBody, /await apiClient\.patch<CompanyProfile>\('\/settings\/company', coForm\)/);
+  assert.match(saveBody, /await updateCompanyProfile\(coForm\)/);
+  assert.match(api, /apiClient\.patch<CompanyProfile>\('\/settings\/company', payload\)/);
   assert.match(saveBody, /setUser\(\{[\s\S]*?\.\.\.user,[\s\S]*?currency_code:\s*data\.currency_code,[\s\S]*?currency_minor_unit_digits:\s*data\.currency_minor_unit_digits,[\s\S]*?\}\)/);
+  assert.match(saveBody, /catch \(e\) \{ setCoSaveErr\(apiError\(e\)\); \}/);
   assert.doesNotMatch(saveBody, /auth\/me/);
 });
 

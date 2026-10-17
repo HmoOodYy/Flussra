@@ -78,6 +78,18 @@ const pageSource = readFileSync(
   new URL('../src/pages/settings/company-branches/CompanyBranchesPage.tsx', import.meta.url), 'utf8');
 const viewSource = readFileSync(
   new URL('../src/pages/settings/company-branches/companyBranchesView.ts', import.meta.url), 'utf8');
+const companySectionSource = readFileSync(new URL('../src/pages/settings/company-branches/CompanyProfileSection.tsx', import.meta.url), 'utf8');
+const overviewSource = readFileSync(new URL('../src/pages/settings/company-branches/BranchOverview.tsx', import.meta.url), 'utf8');
+const branchEditorSource = readFileSync(new URL('../src/pages/settings/company-branches/BranchEditorDialog.tsx', import.meta.url), 'utf8');
+const branchFieldsSource = readFileSync(new URL('../src/pages/settings/company-branches/BranchFormFields.tsx', import.meta.url), 'utf8');
+const branchHookSource = readFileSync(new URL('../src/pages/settings/company-branches/useBranchManagement.ts', import.meta.url), 'utf8');
+const onboardingHookSource = readFileSync(new URL('../src/pages/settings/company-branches/useBranchOnboarding.ts', import.meta.url), 'utf8');
+const companyHookSource = readFileSync(new URL('../src/pages/settings/company-branches/useCompanyProfile.ts', import.meta.url), 'utf8');
+const presentationSource = readFileSync(new URL('../src/pages/settings/company-branches/companyBranchesPresentation.ts', import.meta.url), 'utf8');
+const branchFormSource = readFileSync(new URL('../src/pages/settings/company-branches/branchForm.ts', import.meta.url), 'utf8');
+const iconsSource = readFileSync(new URL('../src/pages/settings/company-branches/CompanyBranchesIcons.tsx', import.meta.url), 'utf8');
+const settingsApiSource = readFileSync(new URL('../src/lib/settingsApi.ts', import.meta.url), 'utf8');
+const featureSource = [pageSource, companySectionSource, overviewSource, branchEditorSource, branchFieldsSource, branchHookSource, onboardingHookSource, companyHookSource, presentationSource, branchFormSource, iconsSource, settingsApiSource].join('\n');
 const periodsListPageSource = readFileSync(
   new URL('../src/pages/payroll/PeriodsListPage.tsx', import.meta.url), 'utf8');
 
@@ -146,23 +158,24 @@ test('C. capabilities: branches.create-only -> canCreate true, canAdmin false', 
 });
 
 test('C. page source: Add Branch guarded by caps.canCreate', () => {
-  assert.match(pageSource, /caps\.canCreate\s*&&\s*\(\s*<button className=\{styles\.btnPrimary\} onClick=\{openCreate\}/);
+  assert.match(overviewSource, /caps\.canCreate\s*&&\s*\(\s*<button className=\{styles\.btnPrimary\} onClick=\{openCreate\}/);
 });
 
 test('C. page source: Edit Company guarded by caps.canAdmin', () => {
-  assert.match(pageSource, /caps\.canAdmin\s*&&\s*\(\s*<button className=\{styles\.btnSecondary\} onClick=\{startEditCo\}/);
+  assert.match(companySectionSource, /canAdmin\s*&&\s*\(\s*<button className=\{styles\.btnSecondary\} onClick=\{startEditCo\}/);
+  assert.match(pageSource, /canAdmin=\{caps\.canAdmin\}/);
 });
 
 test('C. page source: row edit action ("⋮") guarded by caps.canAdmin', () => {
-  assert.match(pageSource, /caps\.canAdmin\s*&&\s*\(\s*<td className=\{styles\.tdAction\}>/);
+  assert.match(overviewSource, /caps\.canAdmin\s*&&\s*\(\s*<td className=\{styles\.tdAction\}>/);
 });
 
 test('C. page source: "Set as Default Branch" region requires caps.canAdmin', () => {
-  assert.match(pageSource, /modal === 'edit' && caps\.canAdmin && editingBranch\.status === 'Active'/);
+  assert.match(branchEditorSource, /modal === 'edit' && caps\.canAdmin && editingBranch\.status === 'Active'/);
 });
 
 test('C. page source: no canEdit identifier remains', () => {
-  assert.doesNotMatch(pageSource, /canEdit/);
+  assert.doesNotMatch(featureSource, /canEdit/);
 });
 
 test('D. capabilities: company-wide setup.manage WITHOUT branches.create -> canCreate false, canAdmin true, canAccess true', () => {
@@ -300,12 +313,13 @@ test('J. buildBranchUpdatePayload: never has first_payroll_start_date or is_defa
 });
 
 test('J. page source: PATCH call uses buildBranchUpdatePayload', () => {
-  assert.match(pageSource, /const payload = buildBranchUpdatePayload\(bForm\);/);
-  assert.match(pageSource, /apiClient\.patch<BranchAdmin>\(`\/settings\/branches\/\$\{editingBranch\.branch_id\}`, payload\)/);
+  assert.match(branchHookSource, /const payload = buildBranchUpdatePayload\(bForm\);/);
+  assert.match(branchHookSource, /updateSettingsBranch\(editingBranch\.branch_id, payload\)/);
+  assert.match(settingsApiSource, /apiClient\.patch<BranchAdmin>\(\x60\/settings\/branches\/\$\{branchId\}\x60, payload\)/);
 });
 
-test('J. Unit B: onboarding section is shown only for modal === \'create\' AND showOnboardingCheckbox(caps)', () => {
-  assert.match(pageSource, /modal === 'create' && showOnboardingCheckbox\(caps\) && \(/);
+test('J. Unit B: onboarding section appears only in create mode and with onboarding capability', () => {
+  assert.match(branchEditorSource, /modal === 'create' && showOnboardingCheckbox\(caps\) && \(/);
 });
 
 // ── K. Create payload key shape ──────────────────────────────────────────────
@@ -402,26 +416,26 @@ test('W. canOnboard stays independent of canSetDefaultOnCreate: date present, is
 // ── X. Page source: default-on-create gating ────────────────────────────────
 
 test('X. page source: "Set as default branch" checkbox conditioned on isCreate && canSetDefault', () => {
-  assert.match(pageSource, /isCreate\s*&&\s*canSetDefault\s*&&\s*\(/);
+  assert.match(branchFieldsSource, /isCreate\s*&&\s*canSetDefault\s*&&\s*\(/);
 });
 
 test('X. page source: help line conditioned on isCreate && !canSetDefault', () => {
-  assert.match(pageSource, /isCreate\s*&&\s*!canSetDefault\s*&&\s*\(/);
-  assert.match(pageSource, /Only settings administrators can make a new Branch the Company default\./);
+  assert.match(branchFieldsSource, /isCreate\s*&&\s*!canSetDefault\s*&&\s*\(/);
+  assert.match(branchFieldsSource, /Only settings administrators can make a new Branch the Company default\./);
 });
 
 test('X. page source: modal passes canSetDefault={caps.canSetDefaultOnCreate}', () => {
-  assert.match(pageSource, /canSetDefault=\{caps\.canSetDefaultOnCreate\}/);
+  assert.match(branchEditorSource, /canSetDefault=\{caps\.canSetDefaultOnCreate\}/);
 });
 
 test('X. page source: create call passes canSetDefaultOnCreate: caps.canSetDefaultOnCreate', () => {
-  assert.match(pageSource, /canSetDefaultOnCreate:\s*caps\.canSetDefaultOnCreate/);
+  assert.match(branchHookSource, /canSetDefaultOnCreate:\s*caps\.canSetDefaultOnCreate/);
 });
 
 test('X. page source: edit PATCH still uses buildBranchUpdatePayload; set-default POST path present exactly once', () => {
-  assert.match(pageSource, /const payload = buildBranchUpdatePayload\(bForm\);/);
-  const matches = pageSource.match(/\/set-default/g) ?? [];
-  assert.equal(matches.length, 1);
+  assert.match(branchHookSource, /const payload = buildBranchUpdatePayload\(bForm\);/);
+  assert.match(settingsApiSource, /\/set-default/);
+  assert.equal((settingsApiSource.match(/\/set-default/g) ?? []).length, 1);
 });
 
 // ── L. canOnboard independent of payroll_setup.view; no legacy imports ──────
@@ -434,15 +448,14 @@ test('L. canOnboard: create + assign WITHOUT payroll_setup.view -> true', () => 
 });
 
 test('L. page source: no /payroll-setup raw route string, no getDefaultPayrollSetup', () => {
-  assert.doesNotMatch(pageSource, /\/payroll-setup/);
-  assert.doesNotMatch(pageSource, /getDefaultPayrollSetup/);
+  assert.doesNotMatch(featureSource, /\/payroll-setup/);
+  assert.doesNotMatch(featureSource, /getDefaultPayrollSetup/);
 });
 
-test('L (Unit B): page now imports exactly getBranchOnboardingOptions from lib/payrollSetupApi (the onboarding checkbox flow)', () => {
-  const importMatch = pageSource.match(/import\s*\{([^}]*)\}\s*from\s*'\.\.\/\.\.\/\.\.\/lib\/payrollSetupApi'/);
-  assert.ok(importMatch, 'expected an import from lib/payrollSetupApi');
-  const names = importMatch![1].split(',').map((s) => s.trim()).filter((s) => s.length > 0);
-  assert.deepEqual(names, ['getBranchOnboardingOptions']);
+test('L (Unit B): onboarding hook imports exactly getBranchOnboardingOptions from lib/payrollSetupApi', () => {
+  const importMatch = onboardingHookSource.match(/import\s*\{([^}]*)\}\s*from\s*'\.\.\/\.\.\/\.\.\/lib\/payrollSetupApi'/);
+  assert.ok(importMatch);
+  assert.deepEqual(importMatch[1].split(',').map(v => v.trim()).filter(Boolean), ['getBranchOnboardingOptions']);
 });
 
 // ── M/N. onboardingResult ────────────────────────────────────────────────────
@@ -501,14 +514,14 @@ test('O. companyBranchesView.ts: no Date/apiClient/axios/react usage', () => {
 });
 
 test('O. page source: no resolver-logic strings', () => {
-  assert.doesNotMatch(pageSource, /resolve/);
-  assert.doesNotMatch(pageSource, /effective_from/);
-  assert.doesNotMatch(pageSource, /anchor_start_date/);
-  assert.doesNotMatch(pageSource, /normal_days_off_mask/);
+  assert.doesNotMatch(featureSource, /resolve/);
+  assert.doesNotMatch(featureSource, /effective_from/);
+  assert.doesNotMatch(featureSource, /anchor_start_date/);
+  assert.doesNotMatch(featureSource, /normal_days_off_mask/);
 });
 
 test('O. page source: exactly one "new Date(" occurrence (the pre-existing fmtDate)', () => {
-  const matches = pageSource.match(/new Date\(/g) ?? [];
+  const matches = featureSource.match(/new Date\(/g) ?? [];
   assert.equal(matches.length, 1);
 });
 
@@ -535,9 +548,9 @@ test('P. setupNeededLink: null user -> none', () => {
   assert.deepEqual(setupNeededLink(null, 7), { kind: 'none' });
 });
 
-test('P. page source: no literal navigate(\'/settings/payroll\') remains; Setup Needed uses setupNeededLink(', () => {
-  assert.doesNotMatch(pageSource, /navigate\(['"]\/settings\/payroll['"]\)/);
-  assert.match(pageSource, /setupNeededLink\(/);
+test('P. BranchOverview uses setupNeededLink and has no direct payroll-settings navigation', () => {
+  assert.doesNotMatch(featureSource, /navigate\(['"]\/settings\/payroll['"]\)/);
+  assert.match(overviewSource, /setupNeededLink\(/);
 });
 
 // ── Q. payrollScheduleHref ────────────────────────────────────────────────────
@@ -569,15 +582,15 @@ test('R. branchScheduleLink: Driver with payroll.view -> null', () => {
 });
 
 test('R. page source: uses branchScheduleLink(', () => {
-  assert.match(pageSource, /branchScheduleLink\(/);
+  assert.match(overviewSource, /branchScheduleLink\(/);
 });
 
 // ── S. No legacy route / string leakage ──────────────────────────────────────
 
 test('S. page source: no legacy payroll-setup route/string, no PayrollSetupPage reference', () => {
-  assert.doesNotMatch(pageSource, /\/settings\/branches\/\$\{[^}]*\}\/payroll-setup/);
-  assert.doesNotMatch(pageSource, /payroll-setup/);
-  assert.doesNotMatch(pageSource, /PayrollSetupPage/);
+  assert.doesNotMatch(featureSource, /\/settings\/branches\/\$\{[^}]*\}\/payroll-setup/);
+  assert.doesNotMatch(featureSource, /payroll-setup/);
+  assert.doesNotMatch(featureSource, /PayrollSetupPage/);
 });
 
 // ── T. PeriodsListPage.tsx untouched / no schedule route string ─────────────
@@ -677,40 +690,40 @@ test('readinessTitle: null -> undefined; known code -> label (code)', () => {
 // ── Unit B: friendly wording + onboarding checkbox UI ───────────────────────
 
 test('Unit B: branch table uses "Payroll not set up" instead of "Setup Needed"', () => {
-  assert.doesNotMatch(pageSource, /Setup Needed/);
-  assert.match(pageSource, /Payroll not set up/);
+  assert.doesNotMatch(overviewSource, /Setup Needed/);
+  assert.match(overviewSource, /Payroll not set up/);
 });
 
 test('Unit B: "View payroll schedule" replaces "View Payroll Schedule" as the link label', () => {
-  assert.doesNotMatch(pageSource, /View Payroll Schedule/);
-  assert.match(pageSource, /View payroll schedule/);
+  assert.doesNotMatch(overviewSource, /View Payroll Schedule/);
+  assert.match(overviewSource, /View payroll schedule/);
 });
 
 test('Unit B: create-mode onboarding uses a checkbox labelled "Set up payroll for this branch now"', () => {
-  assert.match(pageSource, /type="checkbox"/);
-  assert.match(pageSource, /Set up payroll for this branch now/);
+  assert.match(branchEditorSource, /type="checkbox"/);
+  assert.match(branchEditorSource, /Set up payroll for this branch now/);
 });
 
-test('Unit B: no native type="date" input remains in the page (replaced by PayrollBoundaryDateInput)', () => {
-  assert.doesNotMatch(pageSource, /type="date"/);
+test('Unit B: no native type="date" input remains (replaced by PayrollBoundaryDateInput)', () => {
+  assert.doesNotMatch(featureSource, /type="date"/);
 });
 
-test('Unit B: page renders <PayrollBoundaryDateInput context="onboarding"> and <PayrollErrorNotice>', () => {
-  assert.match(pageSource, /<PayrollBoundaryDateInput/);
-  assert.match(pageSource, /context="onboarding"/);
-  assert.match(pageSource, /<PayrollErrorNotice/);
+test('Unit B: BranchEditorDialog renders PayrollBoundaryDateInput context=onboarding and PayrollErrorNotice', () => {
+  assert.match(branchEditorSource, /<PayrollBoundaryDateInput/);
+  assert.match(branchEditorSource, /context="onboarding"/);
+  assert.match(branchEditorSource, /<PayrollErrorNotice/);
 });
 
-test('Unit B: "no company default" messaging names both the canViewSetups link and the administrator fallback', () => {
-  assert.match(pageSource, /No company default payroll policy is set, so payroll can&apos;t be set up for this branch/);
-  assert.match(pageSource, /Choose a default payroll policy/);
-  assert.match(pageSource, /Ask an administrator to choose a company default payroll policy\./);
+test('Unit B: no-company-default messaging names the canViewSetups link and administrator fallback', () => {
+  assert.match(branchEditorSource, /No company default payroll policy is set, so payroll can&apos;t be set up for this branch/);
+  assert.match(branchEditorSource, /Choose a default payroll policy/);
+  assert.match(branchEditorSource, /Ask an administrator to choose a company default payroll policy\./);
 });
 
-test('Unit B: the onboarding boundary-choices key includes the default setup id', () => {
-  assert.match(pageSource, /`onboarding\|\$\{onboardingDefaultSetup\?\.setup_id \?\? 'none'\}`/);
+test('Unit B: onboarding boundary-choices key includes the default setup id', () => {
+  assert.match(onboardingHookSource, /`onboarding\|\$\{onboardingDefaultSetup\?\.setup_id \?\? 'none'\}`/);
 });
 
 test('Unit B: the Create button is disabled when create mode and !canCreateNow', () => {
-  assert.match(pageSource, /disabled=\{savingBranch \|\| \(modal === 'create' && !canCreateNow\)\}/);
+  assert.match(branchEditorSource, /disabled=\{savingBranch \|\| \(modal === 'create' && !canCreateNow\)\}/);
 });

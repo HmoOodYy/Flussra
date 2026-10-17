@@ -68,6 +68,23 @@ export interface BranchAdmin {
   pending_approvals_count: number | null;
 }
 
+export interface BranchUpdate {
+  branch_name: string;
+  branch_code?: string;
+  status: string;
+  address_line1: string | null;
+  city: string | null;
+  state_province: string | null;
+  postal_code: string | null;
+  country: string | null;
+  notes: string | null;
+}
+
+export interface BranchCreate extends BranchUpdate {
+  is_default: boolean;
+  first_payroll_start_date?: string;
+}
+
 /**
  * GET /settings/branches/onboarding-options?around=
  * `choices` is null when there is no company default Setup to onboard against.
