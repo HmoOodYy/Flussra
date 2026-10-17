@@ -52,8 +52,30 @@ const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8
 const appShellSource = readFileSync(new URL('../src/components/AppShell.tsx', import.meta.url), 'utf8');
 const statusKeysPageSource = readFileSync(
   new URL('../src/pages/settings/status-keys/StatusKeysPage.tsx', import.meta.url), 'utf8');
+const statusKeysBranchHookSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/useStatusKeyBranches.ts', import.meta.url), 'utf8');
+const statusKeysCollectionHookSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/useStatusKeyCollection.ts', import.meta.url), 'utf8');
+const statusKeysEditorHookSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/useStatusKeyEditor.ts', import.meta.url), 'utf8');
+const statusKeysModelSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/statusKeysModel.ts', import.meta.url), 'utf8');
+const statusKeysWorkspaceSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/StatusKeysWorkspace.tsx', import.meta.url), 'utf8');
+const statusKeysEditorDialogSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/StatusKeyEditorDialog.tsx', import.meta.url), 'utf8');
+const statusKeyDetailSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/StatusKeyDetail.tsx', import.meta.url), 'utf8');
+const statusKeysDisplaySource = readFileSync(
+  new URL('../src/pages/settings/status-keys/StatusKeysDisplay.tsx', import.meta.url), 'utf8');
+const settingsApiSource = readFileSync(new URL('../src/lib/settingsApi.ts', import.meta.url), 'utf8');
 const statusKeysCssSource = readFileSync(
   new URL('../src/pages/settings/status-keys/StatusKeysPage.module.css', import.meta.url), 'utf8');
+const statusKeysFeatureSources = [statusKeysPageSource, statusKeysBranchHookSource, statusKeysCollectionHookSource,
+  statusKeysEditorHookSource, statusKeysModelSource, statusKeysWorkspaceSource, statusKeysEditorDialogSource,
+  statusKeyDetailSource, statusKeysDisplaySource].join('\n');
+const statusKeysUiSources = [statusKeysPageSource, statusKeysWorkspaceSource, statusKeysEditorDialogSource,
+  statusKeyDetailSource, statusKeysDisplaySource].join('\n');
 
 // ── A. App.tsx route wiring ─────────────────────────────────────────────────
 
@@ -153,26 +175,44 @@ test('App.tsx: company-branches (U7 gate), pay-items, roles routes present with 
 
 // ── F. StatusKeysPage.tsx source hygiene ────────────────────────────────────
 
-test('StatusKeysPage.tsx: no payroll_setup / payroll-setup strings', () => {
-  assert.doesNotMatch(statusKeysPageSource, /payroll_setup/);
-  assert.doesNotMatch(statusKeysPageSource, /payroll-setup/);
+test('Status Keys feature modules: no payroll_setup / payroll-setup strings', () => {
+  assert.doesNotMatch(statusKeysFeatureSources, /payroll_setup/);
+  assert.doesNotMatch(statusKeysFeatureSources, /payroll-setup/);
 });
 
 test('StatusKeysPage.tsx: uses canManageSettingsAdmin', () => {
   assert.match(statusKeysPageSource, /canManageSettingsAdmin/);
 });
 
-test('StatusKeysPage.tsx: every apiClient call targets /settings/branches', () => {
+test('Status Keys network access stays behind exact settingsApi operations', () => {
+  assert.doesNotMatch(statusKeysFeatureSources, /apiClient\./);
+  const apiFunction = (name: string) => {
+    const functionSource = settingsApiSource.match(new RegExp(`export function ${name}\\([\\s\\S]*?(?=\\nexport function|$)`))?.[0];
+    assert.ok(functionSource, `expected settingsApi.${name}`);
+    return functionSource;
+  };
+  assert.match(statusKeysBranchHookSource, /getSettingsBranches\(\)/);
+  assert.match(apiFunction('getSettingsBranches'), /apiClient\.get<BranchAdmin\[]>\('\/settings\/branches'\)/);
+  assert.match(statusKeysCollectionHookSource, /getBranchStatusKeys\(selectedBranchId, includeInactiveKeys\)/);
+  assert.match(apiFunction('getBranchStatusKeys'), /apiClient\.get<StatusKey\[]>\(`\/settings\/branches\/\$\{branchId\}\/status-keys`, \{\s*params: \{ include_inactive: includeInactiveKeys \},\s*\}\)/);
+  assert.match(statusKeysEditorHookSource, /createBranchStatusKey\(selectedBranchId, payload\)/);
+  assert.match(apiFunction('createBranchStatusKey'), /apiClient\.post<StatusKey>\(`\/settings\/branches\/\$\{branchId\}\/status-keys`, payload\)/);
+  assert.match(statusKeysEditorHookSource, /updateBranchStatusKey\(selectedBranchId, editingKey\.status_key_id, patchPayload\)/);
+  assert.match(statusKeysCollectionHookSource, /updateBranchStatusKey\(selectedBranchId, k\.status_key_id, \{ is_active: true \}\)/);
+  assert.match(apiFunction('updateBranchStatusKey'), /apiClient\.patch<StatusKey>\(`\/settings\/branches\/\$\{branchId\}\/status-keys\/\$\{statusKeyId\}`, payload\)/);
+  assert.match(statusKeysCollectionHookSource, /deactivateBranchStatusKey\(selectedBranchId, k\.status_key_id\)/);
+  assert.match(apiFunction('deactivateBranchStatusKey'), /apiClient\.delete<StatusKey>\(`\/settings\/branches\/\$\{branchId\}\/status-keys\/\$\{statusKeyId\}`\)/);
+
+  assert.match(statusKeysBranchHookSource, /import \{ getSettingsBranches \} from '\.\.\/\.\.\/\.\.\/lib\/settingsApi'/);
+  assert.match(statusKeysCollectionHookSource, /import \{[\s\S]*deactivateBranchStatusKey[\s\S]*getBranchStatusKeys[\s\S]*updateBranchStatusKey[\s\S]*\} from '\.\.\/\.\.\/\.\.\/lib\/settingsApi'/);
+  assert.match(statusKeysEditorHookSource, /import \{ createBranchStatusKey, updateBranchStatusKey \} from '\.\.\/\.\.\/\.\.\/lib\/settingsApi'/);
+  const statusKeysApiOwners = ['getSettingsBranches', 'getBranchStatusKeys', 'createBranchStatusKey', 'updateBranchStatusKey', 'deactivateBranchStatusKey']
+    .map(apiFunction).join('\n');
   const callRe = /apiClient\.(get|post|patch|delete|put)(?:<[^>]*>)?\(\s*(`[^`]*`|'[^']*'|"[^"]*")/g;
-  const matches = [...statusKeysPageSource.matchAll(callRe)];
-  assert.ok(matches.length > 0, 'expected at least one apiClient call in StatusKeysPage.tsx');
-  for (const m of matches) {
-    const pathLiteral = m[2];
-    assert.match(
-      pathLiteral,
-      /^[`'"]\/settings\/branches/,
-      `apiClient.${m[1]} call path ${pathLiteral} does not start with /settings/branches`,
-    );
+  const matches = [...statusKeysApiOwners.matchAll(callRe)];
+  assert.ok(matches.length > 0, 'expected Status Keys settingsApi operations');
+  for (const match of matches) {
+    assert.match(match[2], /^[`'"]\/settings\/branches/, `apiClient.${match[1]} path ${match[2]} is outside /settings/branches`);
   }
 });
 
@@ -189,12 +229,12 @@ test('legacy ?tab=status-keys URL is handled by LegacyStatusKeysRedirect in App.
 
 // ── H. Every styles.X / s.X class referenced in StatusKeysPage.tsx is defined in its CSS module ──
 
-test('StatusKeysPage.module.css: every referenced class is defined', () => {
+test('StatusKeysPage.module.css: every referenced class across moved UI files is defined', () => {
   // Collect styles.X / s.X identifiers, but exclude non-CSS-module property
   // accesses on unrelated `s`-named objects (e.g. reducer state params).
   const usageRe = /\b(?:styles|s)\.([A-Za-z][A-Za-z0-9]*)/g;
   const used = new Set<string>();
-  for (const m of statusKeysPageSource.matchAll(usageRe)) {
+  for (const m of statusKeysUiSources.matchAll(usageRe)) {
     used.add(m[1]);
   }
 
