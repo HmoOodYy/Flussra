@@ -10,6 +10,16 @@ const panelSource = readFileSync(
   new URL('../src/pages/settings/payroll/PolicyDetailPanel.tsx', import.meta.url),
   'utf8',
 );
+const dataSource = readFileSync(new URL('../src/pages/settings/payroll/usePolicyDetailData.ts', import.meta.url), 'utf8');
+const lowerSource = readFileSync(new URL('../src/pages/settings/payroll/PolicyDetailLowerSections.tsx', import.meta.url), 'utf8');
+const featureSource = [
+  panelSource,
+  dataSource,
+  lowerSource,
+  readFileSync(new URL('../src/pages/settings/payroll/PolicyDetailHeader.tsx', import.meta.url), 'utf8'),
+  readFileSync(new URL('../src/pages/settings/payroll/PolicyDetailDialogs.tsx', import.meta.url), 'utf8'),
+  readFileSync(new URL('../src/pages/settings/payroll/VersionTimelineSection.tsx', import.meta.url), 'utf8'),
+].join('\n');
 const modalSource = readFileSync(
   new URL('../src/pages/settings/payroll/DraftEditorModal.tsx', import.meta.url),
   'utf8',
@@ -147,11 +157,13 @@ test('Version Planning is mounted intentionally before the parked lower-section 
 });
 
 test('Version Planning keeps the old lower UI parked and does not add a second fetch path', () => {
-  assert.equal((panelSource.match(/listPayrollSetupVersions\(/g) ?? []).length, 1);
-  assert.equal((panelSource.match(/listPayrollSetupDrafts\(/g) ?? []).length, 1);
+  assert.equal((featureSource.match(/listPayrollSetupVersions\(/g) ?? []).length, 1);
+  assert.equal((featureSource.match(/listPayrollSetupDrafts\(/g) ?? []).length, 1);
+  const lowerGate = lowerGateIndex(panelSource);
+  assert.notEqual(lowerGate, -1);
+  assert.ok(panelSource.indexOf('<PolicyDetailLowerSections', lowerGate) > lowerGate);
   for (const marker of ['title="Draft schedules"', 'title="Policy updates"', 'title="Assigned branches"', '<SectionCard title="Publish">']) {
-    const markerIndex = panelSource.indexOf(marker);
-    assert.ok(markerIndex > lowerGateIndex(panelSource), `${marker} must remain behind showLowerSections`);
+    assert.ok(lowerSource.includes(marker), marker + ' must remain in the lower owner');
   }
 });
 

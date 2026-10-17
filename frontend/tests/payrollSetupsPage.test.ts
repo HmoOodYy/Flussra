@@ -82,6 +82,11 @@ const PAYROLL_DIR = '../src/pages/settings/payroll/';
 const pageSource = readFileSync(new URL(`${PAYROLL_DIR}PayrollSetupsPage.tsx`, import.meta.url), 'utf8');
 const pageCssSource = readFileSync(new URL(`${PAYROLL_DIR}PayrollSetupsPage.module.css`, import.meta.url), 'utf8');
 const detailPanelSource = readFileSync(new URL(`${PAYROLL_DIR}PolicyDetailPanel.tsx`, import.meta.url), 'utf8');
+const detailHeaderSource = readFileSync(new URL(`${PAYROLL_DIR}PolicyDetailHeader.tsx`, import.meta.url), 'utf8');
+const detailLowerSource = readFileSync(new URL(`${PAYROLL_DIR}PolicyDetailLowerSections.tsx`, import.meta.url), 'utf8');
+const detailDialogsSource = readFileSync(new URL(`${PAYROLL_DIR}PolicyDetailDialogs.tsx`, import.meta.url), 'utf8');
+const detailDataSource = readFileSync(new URL(`${PAYROLL_DIR}usePolicyDetailData.ts`, import.meta.url), 'utf8');
+const detailTypesSource = readFileSync(new URL(`${PAYROLL_DIR}policyDetailTypes.ts`, import.meta.url), 'utf8');
 const publishPanelSource = readFileSync(new URL(`${PAYROLL_DIR}PublishPanel.tsx`, import.meta.url), 'utf8');
 const draftEditorModalSource = readFileSync(new URL(`${PAYROLL_DIR}DraftEditorModal.tsx`, import.meta.url), 'utf8');
 const branchAssignmentsTabSource = readFileSync(new URL(`${PAYROLL_DIR}BranchAssignmentsTab.tsx`, import.meta.url), 'utf8');
@@ -96,6 +101,10 @@ const branchPolicyViewSource = readFileSync(new URL(`${PAYROLL_DIR}branchPolicyV
 const ALL_PAYROLL_TSX = [
   ['PayrollSetupsPage.tsx', pageSource],
   ['PolicyDetailPanel.tsx', detailPanelSource],
+  ['PolicyDetailHeader.tsx', detailHeaderSource],
+  ['PolicyDetailLowerSections.tsx', detailLowerSource],
+  ['PolicyDetailDialogs.tsx', detailDialogsSource],
+  ['VersionTimelineSection.tsx', readFileSync(new URL(`${PAYROLL_DIR}VersionTimelineSection.tsx`, import.meta.url), 'utf8')],
   ['PublishPanel.tsx', publishPanelSource],
   ['DraftEditorModal.tsx', draftEditorModalSource],
   ['BranchAssignmentsTab.tsx', branchAssignmentsTabSource],
@@ -180,17 +189,17 @@ test('DashboardPage.tsx: no longer guards the payroll quick action with canManag
 
 test('PolicyDetailPanel.tsx: calls clearDefaultPayrollSetup and has the exact Clear Default confirm copy', () => {
   assert.match(detailPanelSource, /\bclearDefaultPayrollSetup\(\)/);
-  assert.match(detailPanelSource, /title="Clear company default\?"/);
+  assert.match(detailDialogsSource, /title="Clear company default\?"/);
   assert.match(
-    detailPanelSource,
+    detailDialogsSource,
     /message="New branches will no longer have a default payroll policy available for automatic onboarding until another default is selected\. Existing branch assignments are unchanged\."/,
   );
 });
 
 test('PolicyDetailPanel.tsx: has the exact Set Company Default confirm copy (onboarding-only, non-retroactive)', () => {
-  assert.match(detailPanelSource, /title="Set company default\?"/);
+  assert.match(detailDialogsSource, /title="Set company default\?"/);
   assert.match(
-    detailPanelSource,
+    detailDialogsSource,
     /message="Affects only branches created later; existing branch assignments never change\."/,
   );
 });
@@ -212,6 +221,8 @@ test('No new Date(/Date.now/Date.UTC/Date.parse usage anywhere in the payroll fe
     ['publishPreview.ts', publishPreviewSource],
     ['branchAssignmentPreview.ts', branchAssignmentPreviewSource],
     ['branchPolicyView.ts', branchPolicyViewSource],
+    ['usePolicyDetailData.ts', detailDataSource],
+    ['policyDetailTypes.ts', detailTypesSource],
   ];
   for (const [name, source] of allSources) {
     assert.doesNotMatch(source, /\bnew Date\(/, `${name} must not use new Date(`);
@@ -251,11 +262,9 @@ test('PayrollSetupsPage.tsx: does not reach ahead into U6 branch-schedule wrappe
   assert.doesNotMatch(pageSource, /\/payroll\/schedule/);
 });
 
-test('PolicyDetailPanel.tsx references the U5b Draft/Publish wrappers (drafts moved out of the shell in the master-detail Step 1 split)', () => {
-  const expected = ['listPayrollSetupDrafts', 'discardPayrollSetupDraft'];
-  for (const name of expected) {
-    assert.match(detailPanelSource, new RegExp(`\\b${name}\\b`), `must reference ${name}`);
-  }
+test('Policy detail owners reference the U5b Draft/Publish wrappers (draft reads and discard remain in their execution owners)', () => {
+  assert.match(detailDataSource, /\blistPayrollSetupDrafts\b/);
+  assert.match(detailPanelSource, /\bdiscardPayrollSetupDraft\b/);
 });
 
 test('PayrollSetupsPage.tsx (shell): no longer references the drafts/versions wrappers (moved to PolicyDetailPanel.tsx)', () => {
@@ -306,17 +315,17 @@ test('AppShell.tsx: usePageTitle maps /settings/payroll to "Payroll Policies"', 
 
 test('PolicyDetailPanel.tsx: renders the archive PayrollErrorNotice only when actionError.setupId matches the selected policy', () => {
   assert.match(
-    detailPanelSource,
+    detailLowerSource,
     /actionError\?\.kind === 'archive'\s*&&\s*actionError\.setupId === selectedPolicyId/,
   );
 });
 
 test('PolicyDetailPanel.tsx: the Policy updates table has no onClick / mutation calls (read-only)', () => {
-  const anchorIdx = detailPanelSource.indexOf('title="Policy updates"');
+  const anchorIdx = detailLowerSource.indexOf('title="Policy updates"');
   assert.notEqual(anchorIdx, -1, 'Policy updates SectionCard not found');
-  const cardEnd = detailPanelSource.indexOf('</SectionCard>', anchorIdx);
+  const cardEnd = detailLowerSource.indexOf('</SectionCard>', anchorIdx);
   assert.notEqual(cardEnd, -1);
-  const block = detailPanelSource.slice(anchorIdx, cardEnd);
+  const block = detailLowerSource.slice(anchorIdx, cardEnd);
   assert.doesNotMatch(block, /onClick/);
   assert.doesNotMatch(
     block,
@@ -332,12 +341,12 @@ test('PayrollSetupsPage.tsx (shell): does not render a "Policy updates" SectionC
 // ── N. Draft/Publish action buttons only render for an Active policy (moved to PolicyDetailPanel.tsx) ──
 
 test("PolicyDetailPanel.tsx: New Draft button is gated on selectedPolicy.status === 'Active' && canManage", () => {
-  assert.match(detailPanelSource, /selectedPolicy\.status === 'Active' && canManage \?/);
+  assert.match(detailLowerSource, /selectedPolicy\.status === 'Active' && canManage \?/);
 });
 
 test("PolicyDetailPanel.tsx: the Publish panel only renders for selectedPolicy.status === 'Active' && canPublish", () => {
   assert.match(
-    detailPanelSource,
+    detailLowerSource,
     /selectedPolicy && selectedPolicy\.status === 'Active' && canPublish && publishDraft && currentPublishDraft/,
   );
 });
@@ -350,13 +359,13 @@ test('PayrollSetupsPage.tsx (shell): renders no "Publish…" draft button and no
 // ── Q. Publish controls guarded by canPublish; manage never guards a publish button ──
 
 test('PolicyDetailPanel.tsx: declares a canPublish prop (permission computation now lives wherever this panel is eventually mounted)', () => {
-  assert.match(detailPanelSource, /canPublish:\s*boolean;/);
+  assert.match(detailTypesSource, /canPublish:\s*boolean;/);
 });
 
 test('PolicyDetailPanel.tsx: the "Publish…" draft-row button is nearest-guarded by canPublish &&, never canManage &&', () => {
-  const idx = detailPanelSource.indexOf('Publish…');
+  const idx = detailLowerSource.indexOf('Publish…');
   assert.notEqual(idx, -1, 'Publish… button text not found');
-  const preceding = detailPanelSource.slice(Math.max(0, idx - 500), idx);
+  const preceding = detailLowerSource.slice(Math.max(0, idx - 500), idx);
   const lastCanPublishGuard = preceding.lastIndexOf('canPublish &&');
   const lastCanManageGuard = preceding.lastIndexOf('canManage &&');
   assert.ok(lastCanPublishGuard !== -1, 'no canPublish && guard found before the Publish… button');
@@ -451,12 +460,15 @@ test('The local PolicyErrorNotice component no longer exists anywhere in the pay
   }
 });
 
-test('Every payroll feature .tsx file that shows an error uses <PayrollErrorNotice>', () => {
+test('Every payroll detail error renderer uses <PayrollErrorNotice>, and the panel forwards errors to those owners', () => {
   for (const [name, source] of ALL_PAYROLL_TSX) {
-    if (/ApiErrorInfo/.test(source)) {
+    if (/ApiErrorInfo/.test(source) && name !== 'PolicyDetailPanel.tsx') {
       assert.match(source, /<PayrollErrorNotice/, `${name} handles ApiErrorInfo but never renders <PayrollErrorNotice>`);
     }
   }
+  assert.match(detailPanelSource, /<PolicyDetailHeader[\s\S]*?actionError=\{actionError\}[\s\S]*?versionsError=\{versionsError\}/);
+  assert.match(detailPanelSource, /<PolicyDetailLowerSections[\s\S]*?actionError=\{actionError\}[\s\S]*?draftsError=\{draftsError\}[\s\S]*?versionsError=\{versionsError\}[\s\S]*?summariesError=\{summariesError\}/);
+  assert.match(detailPanelSource, /<PolicyDetailDialogs[\s\S]*?editError=\{editError\}/);
 });
 
 // ── Static: no type="date", no "Preview impact" button, no raw ids outside Technical details ──
@@ -931,17 +943,18 @@ test('W14. Old detail content is NOT rendered by PayrollSetupsPage.tsx in the Po
     // on the Step 2 master pane's own unrelated "Archived" filter/status label.
     const re = marker === 'Archive' ? /\bArchive\b/ : new RegExp(escaped);
     assert.doesNotMatch(pageSourceNoComments, re, `shell must not render "${marker}"`);
-    assert.match(detailPanelSource, re, `PolicyDetailPanel.tsx must still contain "${marker}"`);
+    const owner = marker === 'Company default' ? detailPanelSource : detailLowerSource;
+    assert.match(owner, re, `${marker} must remain in its detail owner`);
   }
 });
 
 test('W15. PolicyDetailPanel.tsx still imports PublishPanel and DraftEditorModal (business logic preserved, not mounted by the shell)', () => {
-  assert.match(detailPanelSource, /import \{ PublishPanel \} from '\.\/PublishPanel'/);
-  assert.match(detailPanelSource, /import \{ DraftEditorModal \} from '\.\/DraftEditorModal'/);
+  assert.match(detailLowerSource, /import \{ PublishPanel \} from '\.\/PublishPanel'/);
+  assert.match(detailDialogsSource, /import \{ DraftEditorModal \} from '\.\/DraftEditorModal'/);
 });
 
 test('W16. PolicyDetailPanel.tsx typechecks as a real component (has a props type and returns JSX) — sanity via source shape', () => {
-  assert.match(detailPanelSource, /type PolicyDetailPanelProps = \{/);
+  assert.match(detailTypesSource, /type PolicyDetailPanelProps = \{/);
   assert.match(detailPanelSource, /export function PolicyDetailPanel\(\{/);
 });
 
