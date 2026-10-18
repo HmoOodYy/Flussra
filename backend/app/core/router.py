@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.core import service, workforce_adapters
 from app.core.schemas import (
     BranchSummary,
+    DriverAssignmentSummary,
     DriverCreate,
     DriverSummary,
     DriverUpdate,
@@ -118,6 +119,28 @@ async def get_driver(
     db: DbDep,
 ) -> DriverSummary:
     return await service.get_driver_by_id(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        driver_id=driver_id,
+        db=db,
+    )
+
+
+@router.get(
+    "/drivers/{driver_id}/assignments",
+    response_model=list[DriverAssignmentSummary],
+    summary="List a Driver's home-Branch assignments the user may read",
+    responses={
+        403: {"description": "No readable assignment"},
+        404: {"description": "Driver not found"},
+    },
+)
+async def list_driver_assignments(
+    driver_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> list[DriverAssignmentSummary]:
+    return await service.get_driver_assignments(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         driver_id=driver_id,

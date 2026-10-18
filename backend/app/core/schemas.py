@@ -3,7 +3,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, field_validator
 
 
 class BranchSummary(BaseModel):
@@ -57,6 +57,19 @@ class DriverSummary(BaseModel):
     primary_phone: str | None = None
     hire_date: date | None = None
     termination_date: date | None = None
+
+
+class DriverAssignmentSummary(BaseModel):
+    """One home-Branch tenure of a permanent Driver, as the user is allowed to see it."""
+
+    driver_assignment_id: int
+    driver_id: int
+    branch_id: int
+    branch_name: str
+    effective_from_at: AwareDatetime
+    effective_to_at: AwareDatetime | None = None
+    end_reason: str | None = None
+    state: Literal["current", "pending", "ended"]
 
 
 class DriverCreate(BaseModel):

@@ -76,6 +76,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /core/drivers': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.view',), None, 'BRANCH', 'DENY', None, None),
     'POST /core/drivers': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'BRANCH', 'DENY', None, None),
     'GET /core/drivers/{driver_id}': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.view',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /core/drivers/{driver_id}/assignments': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.view',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'PATCH /core/drivers/{driver_id}': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /core/people': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.view',), None, 'BRANCH', 'DENY', None, None),
     'GET /dashboard': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.dashboard.service.get_dashboard_summary', 'BRANCH', 'DENY', None, None),
