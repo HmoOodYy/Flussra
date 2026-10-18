@@ -7,8 +7,7 @@ import psycopg2
 import pytest
 from psycopg2 import errors
 
-from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401 - register fixtures
-from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
+from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     build_tenant,
     create_definition,
     p3c_application,
@@ -16,6 +15,10 @@ from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
     p3c_http_client,
     p3c_tenant,
     p3c_unconfigured_tenant,
+)
+from tests.compensation_database_fixtures import (  # noqa: F401 - register fixtures
+    p3b_cursor,
+    p3b_database,
 )
 
 pytestmark = pytest.mark.asyncio

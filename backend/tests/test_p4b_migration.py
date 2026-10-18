@@ -11,7 +11,7 @@ import psycopg2
 import pytest
 from psycopg2 import errors, sql
 
-from tests.p3b_fixtures import make_pay_definition, make_rate_definition
+from tests.compensation_database_fixtures import make_pay_definition, make_rate_definition
 
 _ROOT = Path(__file__).resolve().parents[2]
 

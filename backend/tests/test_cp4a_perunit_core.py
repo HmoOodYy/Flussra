@@ -12,10 +12,10 @@ Covers:
     therefore exercised here directly, without database fixtures.
 
 This is a behavior-preserving-extraction verification slice, not a new
-characterization slice: `test_phase4_characterization_slice1.py` and
-`test_phase4_characterization_slice2_status.py` remain the authoritative
-compatibility evidence and are left unmodified. No M13c legacy-method cases
-are added here (OrdinalTier/RangeBracket/RangeProgressive/Block remain out
+characterization slice. Current Status characterization lives in
+`test_payroll_status_characterization.py`; canonical entry and Status-payment
+contracts remain in `test_cp2d_canonical_entry_state.py` and
+`test_cp2d2_status_payment.py`. No M13c legacy-method cases are added here (OrdinalTier/RangeBracket/RangeProgressive/Block remain out
 of CP-4A scope).
 
 Isolation: periods use year 2099 dates, distinct from every other test
@@ -222,9 +222,7 @@ class TestPureCorePerUnit:
 def _old_inline_per_unit_formula(quantity: Decimal, rate_amount: Decimal) -> Decimal:
     """
     Local reference reproducing the exact pre-cutover inline formula that
-    lived at `_compute_calculated_amount` before CP-4A (see
-    `test_phase4_characterization_slice1.py` / slice2 for the same
-    characterized values):
+    lived at `_compute_calculated_amount` before CP-4A:
 
         calculated = (quantity * resolved_amt).quantize(Decimal("0.0001"))
     """

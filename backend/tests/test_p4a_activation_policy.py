@@ -6,13 +6,16 @@ from datetime import timedelta
 import pytest
 
 from app.compensation.branch_config import MUTABLE_PERIOD_STATUSES
-from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401 - register fixtures
-from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
+from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     create_definition,
     p3c_application,
     p3c_database_engine,
     p3c_http_client,
     p3c_tenant,
+)
+from tests.compensation_database_fixtures import (  # noqa: F401 - register fixtures
+    p3b_cursor,
+    p3b_database,
 )
 from tests.test_p3c_pay_definition_governance import _decide, _submitted
 

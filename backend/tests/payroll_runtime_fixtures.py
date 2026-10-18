@@ -15,8 +15,7 @@ import httpx
 import psycopg2
 from sqlalchemy import text
 
-from tests.p3b_fixtures import make_driver
-from tests.p3c_fixtures import (
+from tests.compensation_api_fixtures import (
     PERMISSIONS,
     Tenant,
     approve_assignment,
@@ -26,6 +25,7 @@ from tests.p3c_fixtures import (
     grant_applicability,
     set_scalar_value,
 )
+from tests.compensation_database_fixtures import make_driver
 
 PAYROLL_PERMISSIONS = PERMISSIONS + [
     "payroll.view", "payroll.entry", "payroll.period.create", "payroll.finalize",
@@ -184,7 +184,7 @@ def make_user(
     branch_id: int | None = None, role_code: str | None = None,
 ) -> dict[str, str]:
     """A further user with exactly the given permissions; returns its request headers."""
-    from tests.p3c_fixtures import _role, _user
+    from tests.compensation_api_fixtures import _role, _user
 
     conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
     conn.autocommit = True

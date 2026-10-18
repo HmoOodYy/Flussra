@@ -18,8 +18,7 @@ from app.payroll.definition_calculation import (
     is_method_operational,
     quantity_error,
 )
-from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401
-from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
+from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     authored_assignment,
     create_definition,
     p3c_application,
@@ -27,7 +26,8 @@ from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
     p3c_http_client,
     p3c_tenant,
 )
-from tests.p4b_fixtures import add_driver
+from tests.compensation_database_fixtures import p3b_cursor, p3b_database  # noqa: F401
+from tests.payroll_runtime_fixtures import add_driver
 
 pytestmark = pytest.mark.asyncio
 

@@ -6,8 +6,7 @@ from sqlalchemy import text
 
 from app.compensation import assignments, definitions
 from app.compensation.schemas import AssignmentCreate
-from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401 - register fixtures
-from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
+from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     approve_assignment,
     create_definition,
     create_pending,
@@ -17,6 +16,10 @@ from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
     p3c_http_client,
     p3c_tenant,
     set_scalar_value,
+)
+from tests.compensation_database_fixtures import (  # noqa: F401 - register fixtures
+    p3b_cursor,
+    p3b_database,
 )
 from tests.test_p3c_compensation_concurrency import _blocked_with_pid, _status
 

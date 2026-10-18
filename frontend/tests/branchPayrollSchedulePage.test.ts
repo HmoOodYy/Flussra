@@ -1,3 +1,4 @@
+import { makeAuthority, makeBranchAccess as makeBranch } from './authorityTestFixtures.ts';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -8,31 +9,11 @@ import {
 import { toUserProfile } from '../src/store/authStore.ts';
 import type {
   BranchAccess,
-  PermissionAuthority,
   UserInfoResponse,
   UserProfile,
 } from '../src/store/authStore.ts';
 
 // ── Fixtures (mirrors tests/payrollSetupAuthority.test.ts) ──────────────────
-
-function makeAuthority(overrides: Partial<PermissionAuthority> = {}): PermissionAuthority {
-  return {
-    company_permissions: [],
-    branch_permissions: [],
-    ...overrides,
-  };
-}
-
-function makeBranch(overrides: Partial<BranchAccess> = {}): BranchAccess {
-  return {
-    branch_id: 10,
-    branch_name: 'Branch 10',
-    scope: 'SpecificBranch',
-    role_code: 'BRANCH_MANAGER',
-    role_name: 'Branch Manager',
-    ...overrides,
-  };
-}
 
 function makeUser(overrides: Partial<UserInfoResponse> = {}): UserProfile {
   return toUserProfile({

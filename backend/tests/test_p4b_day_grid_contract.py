@@ -11,15 +11,18 @@ from decimal import Decimal
 
 import pytest
 
-from tests.p3b_fixtures import p3b_cursor, p3b_database  # noqa: F401 - register fixtures
-from tests.p3c_fixtures import (  # noqa: F401 - register fixtures
+from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     create_definition,
     grant_applicability,
     p3c_application,
     p3c_database_engine,
     p3c_http_client,
 )
-from tests.p4b_fixtures import (
+from tests.compensation_database_fixtures import (  # noqa: F401 - register fixtures
+    p3b_cursor,
+    p3b_database,
+)
+from tests.payroll_runtime_fixtures import (
     assign_weekly_setup,
     build_payroll_tenant,
     create_period,

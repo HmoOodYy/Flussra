@@ -10,7 +10,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.db.transaction_retry import run_retryable_transaction
-from tests.p3a_currency_fixtures import (
+from tests.currency_test_helpers import (
     INSERT_DRIVER_RATE,
     create_branch_and_driver,
     first_rate_type_id,
