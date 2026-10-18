@@ -20,7 +20,7 @@ export interface DriverTransferRequest {
   requested_by_user_id: number;
   initiated_by: 'Driver' | 'SourceBranch';
   status: TransferStatus;
-  effective_date: string;          // ISO date "YYYY-MM-DD"
+  effective_at: string | null;     // ISO instant; null until an immediate request completes
   reason: string | null;
   notes: string | null;
   source_approved_by_user_id: number | null;
@@ -51,7 +51,7 @@ export interface TransferListResponse {
 export interface DriverTransferCreate {
   driver_id: number;
   target_branch_id: number;
-  effective_date: string;          // ISO date "YYYY-MM-DD"
+  effective_at?: string;           // Explicit scheduled ISO instant; omitted means immediate on completion
   initiated_by: 'Driver' | 'SourceBranch';
   reason?: string;
   notes?: string;

@@ -249,8 +249,8 @@ async def paytest_branch_id(session_db_conn, test_database_url):
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": branch_code, "name": f"CP1E {branch_code}"},
@@ -994,9 +994,9 @@ class TestPermissionsAndSecurity:
         foreign_co_id = (await direct_db.execute(
             _text("""
                 INSERT INTO core.companies
-                    (companycode, companyname, legalname, status, issuspended, timezonename)
+                    (companycode, companyname, legalname, status, issuspended)
                 VALUES ('CP1E_XCOTEST', 'CP1E Cross-Co', 'CP1E Cross-Co Ltd',
-                        'Active', FALSE, 'UTC')
+                        'Active', FALSE)
                 ON CONFLICT (companycode) DO UPDATE SET companyname = EXCLUDED.companyname
                 RETURNING companyid
             """)
@@ -1004,8 +1004,8 @@ class TestPermissionsAndSecurity:
         foreign_br_id = (await direct_db.execute(
             _text("""
                 INSERT INTO core.branches
-                    (companyid, branchcode, branchname, status, isdefault)
-                VALUES (:cid, 'CP1E_XCOBR', 'CP1E Cross-Co Branch', 'Active', TRUE)
+                    (companyid, branchcode, branchname, status, isdefault, timezoneid)
+                VALUES (:cid, 'CP1E_XCOBR', 'CP1E Cross-Co Branch', 'Active', TRUE, 'UTC')
                 ON CONFLICT (companyid, branchcode) DO UPDATE SET branchname = EXCLUDED.branchname
                 RETURNING branchid
             """),
@@ -1191,8 +1191,8 @@ class TestCompositionAndSetup:
         await _clean(direct_db, paytest_branch_id)
         branch_id = (await direct_db.execute(_text("""
             INSERT INTO core.Branches
-                (CompanyID, BranchCode, BranchName, Status, IsDefault)
-            VALUES (:cid, :code, 'CP1E unpublished setup branch', 'Active', FALSE)
+                (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+            VALUES (:cid, :code, 'CP1E unpublished setup branch', 'Active', FALSE, 'UTC')
             RETURNING BranchID
         """), {
             "cid": _COMPANY_ID, "code": f"CP1E_UNPUB_{uuid.uuid4().hex[:10]}",

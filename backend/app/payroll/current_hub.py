@@ -1,5 +1,5 @@
 """CP-5A read model for the active Current Payroll workflow Hub."""
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -14,7 +14,7 @@ from app.db.sql import build_in_clause
 from app.payroll import off_drivers, period_calculation
 from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
-    _period_has_driver_eligibility_snapshot,
+    require_period_eligibility_snapshot,
 )
 from app.payroll.evidence_gate import EVIDENCE_NOT_READY_MESSAGE, TARGET_PAYROLL_EVIDENCE_NOT_READY
 from app.payroll.period_creation import _check_slot_matrix
@@ -46,63 +46,21 @@ async def _eligible_driver_ids(
     period_id: int,
     company_id: int,
     branch_id: int,
-    start_date: date,
-    end_date: date,
     db: AsyncConnection,
-) -> tuple[set[int], dict[int, SimpleNamespace] | None]:
-    """Return period eligibility plus CP-2E date windows when snapshotted."""
-    has_snapshot = await _period_has_driver_eligibility_snapshot(period_id, db)
-
-    if has_snapshot:
-        rows = (await db.execute(
-            text("""
-                SELECT driverid,
-                       iseligibleforperiod,
-                       eligibilityreasoncode,
-                       hiredatesnapshot,
-                       terminationdatesnapshot,
-                       drivereffectivefromsnapshot,
-                       drivereffectivetosnapshot
-                FROM payroll.payrollperioddrivereligibility
-                WHERE payrollperiodid = :period_id
-                  AND companyid = :company_id
-                  AND branchid = :branch_id
-                  AND iseligibleforperiod = TRUE
-            """),
-            {
-                "period_id": period_id,
-                "company_id": company_id,
-                "branch_id": branch_id,
-            },
-        )).mappings().all()
-        by_driver = {
-            int(row["driverid"]): SimpleNamespace(**dict(row))
-            for row in rows
-        }
-        return set(by_driver), by_driver
-
-    rows = (await db.execute(
-        text("""
-            SELECT DISTINCT d.driverid
-            FROM core.drivers d
-            JOIN core.employees e ON e.employeeid = d.employeeid
-            WHERE d.companyid = :company_id
-              AND d.branchid = :branch_id
-              AND e.employmentstatus = 'Active'
-              AND d.driverstatus = 'Active'
-              AND (e.hiredate IS NULL OR e.hiredate <= :period_end)
-              AND (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
-              AND (d.effectivefrom IS NULL OR d.effectivefrom <= :period_end)
-              AND (d.effectiveto IS NULL OR d.effectiveto >= :period_start)
-        """),
-        {
-            "company_id": company_id,
-            "branch_id": branch_id,
-            "period_start": start_date,
-            "period_end": end_date,
-        },
-    )).mappings().all()
-    return {int(row["driverid"]) for row in rows}, None
+) -> tuple[set[int], dict[int, SimpleNamespace]]:
+    """Return the required frozen period roster and captured WorkDate arrays."""
+    await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
+    rows = (await db.execute(text("""
+        SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
+               hiredatesnapshot, terminationdatesnapshot, eligibleworkdates
+        FROM payroll.payrollperioddrivereligibility
+        WHERE payrollperiodid = :period_id AND companyid = :company_id
+          AND branchid = :branch_id AND iseligibleforperiod = TRUE
+    """), {
+        "period_id": period_id, "company_id": company_id, "branch_id": branch_id,
+    })).mappings().all()
+    by_driver = {int(row['driverid']): SimpleNamespace(**dict(row)) for row in rows}
+    return set(by_driver), by_driver
 
 
 async def _period_metrics(
@@ -114,8 +72,6 @@ async def _period_metrics(
         period_id=slot.period_id,
         company_id=company_id,
         branch_id=slot.branch_id,
-        start_date=slot.start_date,
-        end_date=slot.end_date,
         db=db,
     )
     if not eligible_ids:
@@ -128,23 +84,8 @@ async def _period_metrics(
     # Working is operational daily entry, never Status, Bonus, system money, or
     # a financial total. Every source must be inside the period bounds. CP-2E
     # periods are additionally filtered through the canonical snapshotted
-    # driver-date helper below; the SQL conditions are the legacy day-grid path.
+    # driver-date helper below.
     in_clause, in_params = build_in_clause(sorted(eligible_ids), "driver")
-    legacy_date_eligibility = ""
-    if snapshot_rows is None:
-        legacy_date_eligibility = """
-              AND e.employmentstatus = 'Active'
-              AND (
-                    d.driverstatus = 'Active'
-                 OR (d.driverstatus = 'Transferred'
-                     AND d.effectiveto IS NOT NULL
-                     AND d.effectiveto >= dl.workdate)
-              )
-              AND (e.hiredate IS NULL OR e.hiredate <= dl.workdate)
-              AND (e.terminationdate IS NULL OR e.terminationdate >= dl.workdate)
-              AND (d.effectivefrom IS NULL OR d.effectivefrom <= dl.workdate)
-              AND (d.effectiveto IS NULL OR d.effectiveto >= dl.workdate)
-        """
     rows = (await db.execute(
         text(f"""
             SELECT DISTINCT dl.driverid, dl.workdate
@@ -152,8 +93,6 @@ async def _period_metrics(
             JOIN payroll.payrollperioddefinitions ppd
                    ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
                   AND ppd.payrollperiodid = dl.payrollperiodid
-            LEFT JOIN core.drivers d ON d.driverid = dl.driverid
-            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
             WHERE dl.payrollperiodid = :period_id
               AND dl.companyid = :company_id
               AND dl.branchid = :branch_id
@@ -165,7 +104,6 @@ async def _period_metrics(
               AND dl.quantity <> 0
               AND dl.sourcetype <> 'System'
               AND ppd.isactiveinperiod = TRUE
-              {legacy_date_eligibility}
         """),
         {
             "period_id": slot.period_id,
@@ -176,16 +114,13 @@ async def _period_metrics(
             **in_params,
         },
     )).mappings().all()
-    if snapshot_rows is not None:
-        working_ids = {
-            int(row["driverid"])
-            for row in rows
-            if _is_snapshot_row_eligible_for_workdate(
-                snapshot_rows[int(row["driverid"])], row["workdate"],
-            )
-        }
-    else:
-        working_ids = {int(row["driverid"]) for row in rows}
+    working_ids = {
+        int(row["driverid"])
+        for row in rows
+        if _is_snapshot_row_eligible_for_workdate(
+            snapshot_rows[int(row["driverid"])], row["workdate"],
+        )
+    }
     fully_off = await off_drivers.resolve_fully_off_drivers(slot, company_id, db)
     return CurrentPayrollHubMetrics(
         total_eligible_drivers=len(eligible_ids),

@@ -39,7 +39,8 @@ async def get_branches(
     if can_see_all:
         result = await db.execute(
             text("""
-                SELECT b.branchid, b.branchcode, b.branchname, b.status,
+                SELECT b.branchid, b.branchcode, b.branchname, b.timezoneid,
+                       core.fn_BranchToday(b.companyid, b.branchid) AS businessdate, b.status,
                        b.isdefault, b.city, b.stateprovince, b.country
                 FROM   core.branches b
                 WHERE  b.companyid = :company_id
@@ -53,7 +54,8 @@ async def get_branches(
         in_clause, in_params = build_in_clause(branch_ids, "b")
         result = await db.execute(
             text(f"""
-                SELECT b.branchid, b.branchcode, b.branchname, b.status,
+                SELECT b.branchid, b.branchcode, b.branchname, b.timezoneid,
+                       core.fn_BranchToday(b.companyid, b.branchid) AS businessdate, b.status,
                        b.isdefault, b.city, b.stateprovince, b.country
                 FROM   core.branches b
                 WHERE  b.companyid = :company_id
@@ -68,6 +70,8 @@ async def get_branches(
             branch_id=r["branchid"],
             branch_code=r["branchcode"],
             branch_name=r["branchname"],
+            time_zone_id=r["timezoneid"],
+            business_date=r["businessdate"],
             status=r["status"],
             is_default=r["isdefault"],
             city=r["city"],

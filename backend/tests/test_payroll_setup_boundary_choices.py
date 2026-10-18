@@ -1,8 +1,6 @@
 """Focused tests for the canonical `boundaries` module: publication, assignment,
-reassignment, and onboarding legal-date navigation. Company-local "today" is
-stubbed via `app.payroll_setup.clock.company_today` and must never influence
-whether a *given* date is valid — only the `relation` label, the onboarding
-floor, and the default requested/suggested date when no date is supplied.
+reassignment, and onboarding legal-date navigation. Branch business dates are
+contextual labels/defaults; they never determine whether a given date is valid.
 
 Reuses the rollback-per-test DEMO-tenant fixture pattern from
 tests/test_payroll_setup_onboarding_window.py for direct policy/boundaries
@@ -21,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.auth.security import create_access_token
-from app.payroll_setup import boundaries, clock
+from app.payroll_setup import boundaries, payroll_policy
 from app.payroll_setup.chronology import Schedule, is_period_start
 from app.payroll_setup.onboarding import onboarding_window_floor
 from app.payroll_setup.payroll_policy import (
@@ -59,8 +57,8 @@ async def payroll_setup_db(test_database_url):
                 user_id = int(tenant["userid"])
                 branch_id = (await conn.execute(text("""
                     INSERT INTO core.Branches
-                        (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                    VALUES (:cid, :code, :name, 'Active', FALSE)
+                        (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                    VALUES (:cid, :code, :name, 'Active', FALSE, 'UTC')
                     RETURNING BranchID
                 """), {
                     "cid": company_id,
@@ -79,8 +77,8 @@ async def payroll_setup_db(test_database_url):
 
 async def _new_branch(db, suffix: str) -> int:
     result = await db.db.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, :code, :name, 'Active', FALSE)
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, :code, :name, 'Active', FALSE, 'UTC')
         RETURNING BranchID
     """), {"cid": db.company_id, "code": f"BC{suffix}_{db.marker}",
            "name": f"Boundary choices {suffix}"})
@@ -118,10 +116,13 @@ async def _new_draft(
 
 
 def _stub_today(monkeypatch, today: date) -> None:
-    async def _stub(company_id, conn):
+    async def _stub(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub)
+    monkeypatch.setattr(boundaries, "branch_today", _stub)
+    monkeypatch.setattr(boundaries, "prospective_today", _stub)
+    monkeypatch.setattr(payroll_policy, "branch_today", _stub)
+    monkeypatch.setattr(payroll_policy, "prospective_today", _stub)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +195,7 @@ async def test_publication_choices_surfaces_policy_successor_conflict_without_as
 
 
 @pytest.mark.asyncio
-async def test_publication_choices_defaults_around_to_today_and_suggests_next(
+async def test_company_publication_choices_use_configured_date_without_current_context(
     payroll_setup_db, monkeypatch,
 ):
     db = payroll_setup_db
@@ -204,17 +205,13 @@ async def test_publication_choices_defaults_around_to_today_and_suggests_next(
     biweek_anchor = date(2090, 2, 5)
     draft_id = await _new_draft(db, setup_id, frequency="Biweek", anchor=biweek_anchor)
 
-    today = date(2090, 2, 10)  # off the Biweek grid
-    _stub_today(monkeypatch, today)
-
     result = await boundaries.publication_choices(
         db.company_id, db.user_id, setup_id, draft_id, None, db.db,
     )
-    assert result["reference_date"] == today
-    assert result["requested_date"] == today
-    assert result["requested_valid"] is False
-    assert result["suggested"] == result["next"]
-    assert result["suggested"]["date"] == date(2090, 2, 19)
+    assert result["reference_date"] is None
+    assert result["requested_date"] == biweek_anchor
+    assert result["requested_valid"] is True
+    assert result["requested"]["relation"] is None
 
 
 @pytest.mark.asyncio
@@ -277,7 +274,7 @@ async def test_publication_and_reassignment_validity_independent_of_today(
     assert _without_relation(first["previous"]) == _without_relation(second["previous"])
     assert _without_relation(first["next"]) == _without_relation(second["next"])
     assert first["suggested"] is None and second["suggested"] is None
-    assert first["reference_date"] != second["reference_date"]
+    assert first["reference_date"] is None and second["reference_date"] is None
 
     # Reassignment: source Week setup, destination the Biweek draft published.
     # Reset the onboarding-window clock stub to the anchor itself so this
@@ -463,7 +460,7 @@ async def test_onboarding_choices_suggests_current_period(payroll_setup_db, monk
     today = date(2090, 3, 15)
     _stub_today(monkeypatch, today)
 
-    result = await boundaries.onboarding_choices(db.company_id, setup_id, None, db.db)
+    result = await boundaries.onboarding_choices(db.company_id, setup_id, None, db.db, time_zone_id="UTC")
     assert result["suggested"] is not None
     assert result["suggested"]["relation"] == "current"
     assert result["suggested"]["date"] < today
@@ -480,7 +477,7 @@ async def test_onboarding_choices_reports_setup_not_active_as_a_conflict_not_a_s
     await archive_setup(db.company_id, db.user_id, setup_id, db.db)
     _stub_today(monkeypatch, anchor)
 
-    result = await boundaries.onboarding_choices(db.company_id, setup_id, anchor, db.db)
+    result = await boundaries.onboarding_choices(db.company_id, setup_id, anchor, db.db, time_zone_id="UTC")
     assert result["requested_valid"] is False
     assert any(c["code"] == "SETUP_NOT_ACTIVE" for c in result["conflicts"])
 
@@ -615,6 +612,7 @@ async def test_http_assignment_choices_200_and_403(client, auth_token, db_conn):
     branch = await client.post("/settings/branches", headers=_auth(auth_token), json={
         "branch_name": "Boundary choices HTTP " + marker[:8],
         "branch_code": "BCHA" + marker[:6],
+        "time_zone_id": "UTC",
     })
     assert branch.status_code == 201, branch.text
     branch_id = branch.json()["branch_id"]
@@ -647,6 +645,7 @@ async def test_http_assignment_choices_404_unknown_branch_unknown_setup_and_cros
     branch = await client.post("/settings/branches", headers=_auth(auth_token), json={
         "branch_name": "Boundary choices 404 " + marker[:8],
         "branch_code": "BC404" + marker[:5],
+        "time_zone_id": "UTC",
     })
     assert branch.status_code == 201, branch.text
     branch_id = branch.json()["branch_id"]
@@ -671,8 +670,8 @@ async def test_http_assignment_choices_404_unknown_branch_unknown_setup_and_cros
         RETURNING CompanyID
     """), {"code": "BCX_" + marker[:8]})).scalar_one()
     foreign_branch = (await db_conn.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, 'FOREIGN', 'Foreign branch', 'Active', FALSE) RETURNING BranchID
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, 'FOREIGN', 'Foreign branch', 'Active', FALSE, 'UTC') RETURNING BranchID
     """), {"cid": foreign_company})).scalar_one()
 
     cross_tenant = await client.get(
@@ -690,6 +689,7 @@ async def test_http_reassignment_choices_200_403_404(client, auth_token, db_conn
     branch = await client.post("/settings/branches", headers=_auth(auth_token), json={
         "branch_name": "Boundary choices HTTP R" + marker[:8],
         "branch_code": "BCHR" + marker[:6],
+        "time_zone_id": "UTC",
     })
     assert branch.status_code == 201, branch.text
     branch_id = branch.json()["branch_id"]
@@ -743,7 +743,7 @@ async def test_http_onboarding_options_no_default_and_with_default(
         assert cleared.status_code == 204, cleared.text
 
         empty = await client.get("/settings/branches/onboarding-options",
-                                 headers=_auth(auth_token))
+                                 headers=_auth(auth_token), params={"time_zone_id": "UTC"})
         assert empty.status_code == 200, empty.text
         assert empty.json() == {"default_setup": None, "choices": None}
 
@@ -754,14 +754,14 @@ async def test_http_onboarding_options_no_default_and_with_default(
 
         with_default = await client.get("/settings/branches/onboarding-options",
                                         headers=_auth(auth_token),
-                                        params={"around": "2090-01-01"})
+                                        params={"around": "2090-01-01", "time_zone_id": "UTC"})
         assert with_default.status_code == 200, with_default.text
         body = with_default.json()
         assert body["default_setup"]["setup_id"] == setup_id
         assert body["choices"]["requested"]["date"] == "2090-01-01"
 
         no_around = await client.get("/settings/branches/onboarding-options",
-                                     headers=_auth(auth_token))
+                                     headers=_auth(auth_token), params={"time_zone_id": "UTC"})
         assert no_around.status_code == 200, no_around.text
         suggested = no_around.json()["choices"]["suggested"]
         assert suggested is not None
@@ -770,6 +770,7 @@ async def test_http_onboarding_options_no_default_and_with_default(
         created = await client.post("/settings/branches", headers=_auth(auth_token), json={
             "branch_name": "Boundary choices onboarding " + marker[:8],
             "branch_code": branch_code,
+            "time_zone_id": "UTC",
             "first_payroll_start_date": suggested["date"],
         })
         assert created.status_code == 201, created.text
@@ -784,14 +785,14 @@ async def test_http_onboarding_options_no_default_and_with_default(
             db_conn, permissions=("branches.create",), scope="AllCompanyBranches",
         )
         denied1 = await client.get("/settings/branches/onboarding-options",
-                                   headers=_auth(missing_assign))
+                                   headers=_auth(missing_assign), params={"time_zone_id": "UTC"})
         assert denied1.status_code == 403, denied1.text
 
         missing_create = await _make_actor(
             db_conn, permissions=("payroll_setup.assign",), scope="AllCompanyBranches",
         )
         denied2 = await client.get("/settings/branches/onboarding-options",
-                                   headers=_auth(missing_create))
+                                   headers=_auth(missing_create), params={"time_zone_id": "UTC"})
         assert denied2.status_code == 403, denied2.text
     finally:
         restore = await client.put("/payroll-setup/default", headers=_auth(auth_token),

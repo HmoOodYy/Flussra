@@ -60,7 +60,9 @@ export function PayItemsPage() {
     selectedBranchId, canGovern, showRequestsTab, pageTab, setReloadKey, showToast,
   });
   const configuration = usePayItemConfiguration({
-    branchMode, selectedBranchId, selectedId, selectedItem: applicability.selectedItem,
+    branchMode, selectedBranchId,
+    selectedBranchBusinessDate: branches.find((branch) => branch.branch_id === selectedBranchId)?.business_date,
+    selectedId, selectedItem: applicability.selectedItem,
     selectedAgg: applicability.selectedAgg, setReloadKey, showToast,
   });
   const creation = usePayItemCreation({

@@ -9,6 +9,8 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.business_clock import branch_today, prospective_today
+
 from .audit import write_policy_audit
 from .chronology import DaysOffLimitError, Schedule, validate_normal_days_off_mask
 from .errors import PolicyError
@@ -625,7 +627,7 @@ async def _branch(db: AsyncConnection, company_id: int, branch_id: int):
 
 async def _check_assignment(
     db: AsyncConnection, company_id: int, branch_id: int | None, setup_id: int,
-    effective_from_date: date, timeline,
+    effective_from_date: date, timeline, *, prospective_time_zone_id: str | None = None,
 ) -> date | None:
     """Validate a proposed Branch assignment against its timeline; returns effective_to.
 
@@ -651,7 +653,13 @@ async def _check_assignment(
     if version is None:
         raise PolicyError("VERSION_NOT_FOUND", "No Published Version applies at assignment start")
     if not timeline:
-        await ensure_onboarding_window(db, company_id, setup_id, effective_from_date)
+        if branch_id is None:
+            if prospective_time_zone_id is None:
+                raise PolicyError("TIME_ZONE_REQUIRED", "Prospective Branch timezone is required")
+            business_date = await prospective_today(prospective_time_zone_id, db)
+        else:
+            business_date = await branch_today(company_id, branch_id, db)
+        await ensure_onboarding_window(db, setup_id, effective_from_date, business_date)
     successor = version_schedule(version)
     predecessor = (version_schedule(await terminal_version(
         db, prior["payrollsetupid"], effective_from_date - timedelta(days=1)))
@@ -1119,7 +1127,7 @@ async def _reassignment_impact(
 
 async def evaluate_assignment(
     company_id: int, branch_id: int | None, setup_id: int,
-    effective_from_date: date, db: AsyncConnection,
+    effective_from_date: date, db: AsyncConnection, *, prospective_time_zone_id: str | None = None,
 ) -> list[dict]:
     """Read-only conflict evaluator; callers authorize. An empty list means allowed."""
     conflicts = []
@@ -1131,6 +1139,7 @@ async def evaluate_assignment(
                    if branch_id is not None else [])
         await _check_assignment(
             db, company_id, branch_id, setup_id, effective_from_date, timeline,
+            prospective_time_zone_id=prospective_time_zone_id,
         )
     except PolicyError as exc:
         conflicts.append({"branch_id": branch_id, "code": exc.code, "reason": str(exc)})

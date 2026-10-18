@@ -26,8 +26,8 @@ _COUNTER = itertools.count(1)
 async def paytest_branch_id(session_db_conn) -> int:
     """Keep CP5B workflow slots isolated from the shared PAYTEST branch."""
     row = (await session_db_conn.execute(_text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (1, :code, 'CP5B isolated', 'Active', FALSE)
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (1, :code, 'CP5B isolated', 'Active', FALSE, 'UTC')
         RETURNING branchid
     """), {"code": f"CP5B_{uuid4().hex}"})).scalar_one()
     return int(row)
@@ -270,33 +270,28 @@ async def _insert_eligibility(
     effective_from: datetime.date | None = None,
     effective_to: datetime.date | None = None,
 ) -> None:
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrollperioddrivereligibility
-                (companyid, branchid, payrollperiodid, driverid, iseligibleforperiod,
-                 eligibilityreasoncode, snapshotsource, drivereffectivefromsnapshot,
-                 drivereffectivetosnapshot)
-            VALUES (:company_id, :branch_id, :period_id, :driver_id, TRUE, 'Active', 'Generated',
-                    :effective_from, :effective_to)
-        """),
-        {
-            "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
-            "period_id": period_id,
-            "driver_id": driver_id,
-            "effective_from": effective_from,
-            "effective_to": effective_to,
-        },
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+
+    await _create_period_driver_eligibility_rows(
+        period_id, _COMPANY_ID, branch_id, db, snapshot_source="Generated", freeze=True,
     )
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrollperiodeligibilitysnapshots
-                (payrollperiodid, companyid, branchid, snapshotsource)
-            VALUES (:period_id, :company_id, :branch_id, 'Generated')
-            ON CONFLICT (payrollperiodid) DO NOTHING
-        """),
-        {"period_id": period_id, "company_id": _COMPANY_ID, "branch_id": branch_id},
-    )
+    if effective_from is not None or effective_to is not None:
+        await db.execute(_text("""
+            UPDATE payroll.PayrollPeriodDriverEligibility pde
+            SET EligibleWorkDates = ARRAY(
+                SELECT d::DATE FROM generate_series(
+                    GREATEST(pp.StartDate, COALESCE(:effective_from, pp.StartDate)),
+                    LEAST(pp.EndDate, COALESCE(:effective_to, pp.EndDate)),
+                    INTERVAL '1 day'
+                ) d ORDER BY d
+            )
+            FROM payroll.PayrollPeriods pp
+            WHERE pde.PayrollPeriodID = pp.PayrollPeriodID
+              AND pde.PayrollPeriodID = :period_id AND pde.DriverID = :driver_id
+        """), {
+            "period_id": period_id, "driver_id": driver_id,
+            "effective_from": effective_from, "effective_to": effective_to,
+        })
     await db.commit()
 
 
@@ -580,6 +575,53 @@ def _hub_branch(payload: dict, branch_id: int) -> dict:
 
 @pytest.mark.asyncio
 class TestOffDrivers:
+    async def test_frozen_off_driver_identity_does_not_follow_live_renames(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    ):
+        await _clean(direct_db, paytest_branch_id)
+        period_id = await _insert_period(direct_db, paytest_branch_id, "FROZEN_IDENTITY")
+        days = await _period_dates(direct_db, period_id)
+        prior = (await direct_db.execute(_text("""
+            SELECT e.FullName, d.DriverCode
+            FROM core.Drivers d JOIN core.Employees e ON e.EmployeeID = d.EmployeeID
+            WHERE d.DriverID = :driver_id
+        """), {"driver_id": paytest_driver_id})).mappings().one()
+        try:
+            await direct_db.execute(_text("""
+                UPDATE core.Employees e SET FullName = ''
+                FROM core.Drivers d WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_id": paytest_driver_id})
+            await direct_db.execute(_text(
+                "UPDATE core.Drivers SET DriverCode = NULL WHERE DriverID = :driver_id"
+            ), {"driver_id": paytest_driver_id})
+            await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+            await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, days)
+
+            await direct_db.execute(_text("""
+                UPDATE core.Employees e SET FullName = :name
+                FROM core.Drivers d WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_id": paytest_driver_id, "name": f"Renamed {uuid4().hex[:8]}"})
+            await direct_db.execute(_text("""
+                UPDATE core.Drivers SET DriverCode = :code WHERE DriverID = :driver_id
+            """), {"driver_id": paytest_driver_id, "code": f"RENAMED-{uuid4().hex[:8]}"})
+
+            response = await _summary(session_client, auth_token, period_id)
+            assert response.status_code == 200, response.text
+            row = next(
+                item for item in response.json()["fully_off_drivers"]
+                if item["driver_id"] == paytest_driver_id
+            )
+            assert row["driver_name"] == ""
+            assert row["driver_code"] is None
+        finally:
+            await direct_db.execute(_text("""
+                UPDATE core.Employees e SET FullName = :name
+                FROM core.Drivers d WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_id": paytest_driver_id, "name": prior["fullname"]})
+            await direct_db.execute(_text("""
+                UPDATE core.Drivers SET DriverCode = :code WHERE DriverID = :driver_id
+            """), {"driver_id": paytest_driver_id, "code": prior["drivercode"]})
+
     async def test_summary_counts_distinct_fully_off_drivers(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
     ):

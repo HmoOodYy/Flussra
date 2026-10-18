@@ -3,7 +3,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
 class DriverProfileCreate(BaseModel):
@@ -12,7 +12,7 @@ class DriverProfileCreate(BaseModel):
     driver_code: str | None = None
     cdl_number: str | None = None
     external_driver_id: str | None = None
-    effective_from: date | None = None
+    effective_from_at: AwareDatetime | None = None
 
 
 class EmployeeCreate(BaseModel):
@@ -96,8 +96,8 @@ class DriverProfileSummary(BaseModel):
     cdl_number: str | None = None
     external_driver_id: str | None = None
     driver_status: str
-    effective_from: date | None = None
-    effective_to: date | None = None
+    effective_from_at: AwareDatetime
+    effective_to_at: AwareDatetime | None = None
 
 
 class EmployeeSummary(BaseModel):

@@ -32,7 +32,7 @@ async def driver_user(
     )
     employee_id = account.scalar_one()
     driver = await db.execute(
-        text("SELECT DriverID FROM core.Drivers WHERE EmployeeID = :employee_id ORDER BY EffectiveFrom DESC LIMIT 1"),
+        text("SELECT DriverID FROM core.Drivers WHERE EmployeeID = :employee_id ORDER BY EffectiveFromAt DESC LIMIT 1"),
         {"employee_id": employee_id},
     )
     return token, int(driver.scalar_one())
@@ -49,6 +49,9 @@ async def test_driver_self_transfer_is_limited_to_current_owned_driver(
     token, own_driver_id = await driver_user(client, auth_token, paytest_branch_id, db_conn)
     other_token, other_driver_id = await driver_user(client, auth_token, paytest_branch_id, db_conn)
     assert token != other_token
+    scheduled_at = (await db_conn.execute(
+        text("SELECT NOW() + INTERVAL '365 days'")
+    )).scalar_one().isoformat()
 
     me = await client.get("/auth/me", headers=auth(token))
     assert me.status_code == 200, me.text
@@ -62,7 +65,7 @@ async def test_driver_self_transfer_is_limited_to_current_owned_driver(
         json={
             "driver_id": own_driver_id,
             "target_branch_id": hq_branch_id,
-            "effective_date": "2099-01-01",
+            "effective_at": scheduled_at,
             "initiated_by": "Driver",
         },
         headers=auth(token),
@@ -74,7 +77,7 @@ async def test_driver_self_transfer_is_limited_to_current_owned_driver(
         json={
             "driver_id": other_driver_id,
             "target_branch_id": hq_branch_id,
-            "effective_date": "2099-01-01",
+            "effective_at": scheduled_at,
             "initiated_by": "Driver",
         },
         headers=auth(token),
@@ -86,7 +89,7 @@ async def test_driver_self_transfer_is_limited_to_current_owned_driver(
         json={
             "driver_id": own_driver_id,
             "target_branch_id": hq_branch_id,
-            "effective_date": "2099-01-01",
+            "effective_at": scheduled_at,
             "initiated_by": "SourceBranch",
         },
         headers=auth(token),

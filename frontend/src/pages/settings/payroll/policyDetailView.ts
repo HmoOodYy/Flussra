@@ -94,6 +94,7 @@ export function timelinePublishedVersions(versions: readonly VersionResponse[]):
     (version) => version.lifecycle_state === 'Published' && version.is_terminal,
   );
   const currentIndex = terminalPublished.findIndex((version) => version.is_current);
+  if (versions[0]?.reference_branch_id == null) return [...terminalPublished].reverse();
   return currentIndex === -1 ? [] : terminalPublished.slice(0, currentIndex + 1).reverse();
 }
 
@@ -110,6 +111,7 @@ export function effectiveDisplayVersionNumbers(
   const terminalPublished = versions.filter(
     (version) => version.lifecycle_state === 'Published' && version.is_terminal,
   );
+  if (versions[0]?.reference_branch_id == null) return new Map();
   const currentIndex = terminalPublished.findIndex((version) => version.is_current);
   if (currentIndex === -1) return new Map();
 
@@ -124,6 +126,9 @@ export function startingPointLabel(
   version: VersionResponse,
   versions: readonly VersionResponse[],
 ): string {
+  if (version.reference_branch_id == null) {
+    return `Latest published schedule — starts ${formatIsoLong(version.effective_from_date)}`;
+  }
   const displayNumber = effectiveDisplayVersionNumbers(versions).get(version.version_id);
   if (displayNumber != null) {
     return version.is_current
@@ -137,6 +142,9 @@ export function timelineDateRange(version: VersionResponse): string {
   const starts = isValidIsoDate(version.effective_from_date)
     ? formatIsoLong(version.effective_from_date)
     : 'Date unavailable';
+  if (version.reference_branch_id == null) {
+    return `${starts} — ${version.effective_to_date ? formatIsoLong(version.effective_to_date) : 'Open-ended'}`;
+  }
   if (version.is_current) return `${starts} — Present`;
   const ends = version.effective_to_date && isValidIsoDate(version.effective_to_date)
     ? formatIsoLong(version.effective_to_date)

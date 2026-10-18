@@ -23,6 +23,7 @@ type Props = {
   versionsError: ApiErrorInfo | null;
   versionsLoading: boolean;
   scheduleFields: PolicyScheduleFields | null;
+  referenceBranchName: string | null;
 };
 
 export function PolicyDetailHeader(p: Props) {
@@ -42,6 +43,7 @@ export function PolicyDetailHeader(p: Props) {
     versionsError,
     versionsLoading,
     scheduleFields,
+    referenceBranchName,
   } = p;
   return (
         <div className={styles.policyHeader}>
@@ -107,13 +109,18 @@ export function PolicyDetailHeader(p: Props) {
             )}
 
           {/* ── Payroll schedule: the currently effective published Version ── */}
+          <p className={styles.policyScheduleContext}>
+            {referenceBranchName
+              ? `Current version using ${referenceBranchName}'s business date`
+              : 'Select a Branch above to identify the current version.'}
+          </p>
           <section className={styles.policyDetailsCard} aria-label="Payroll schedule">
           <div className={styles.policyDetailsHead}>
               <div className={styles.policyDetailsHeading}>
                 <span className={styles.policyDetailsIcon} aria-hidden="true">▤</span>
                 <div>
                   <h3 className={styles.policyDetailsTitle}>Payroll schedule</h3>
-                  <p className={styles.policyDetailsSubtitle}>The schedule currently in effect for this policy.</p>
+                  <p className={styles.policyDetailsSubtitle}>The published schedule currently in effect for this policy.</p>
                 </div>
               </div>
             </div>
@@ -127,8 +134,13 @@ export function PolicyDetailHeader(p: Props) {
             </div>
           ) : scheduleFields === null ? (
             <div className={styles.scheduleEmpty}>
-              <p className={styles.scheduleEmptyTitle}>No payroll schedule is active yet</p>
-              <p className={styles.scheduleEmptyText}>Publish a schedule to start using this policy.</p>
+              {referenceBranchName ? <>
+                <p className={styles.scheduleEmptyTitle}>No payroll schedule is active for this date</p>
+                <p className={styles.scheduleEmptyText}>Choose a Branch with a current version, or publish a schedule.</p>
+              </> : <>
+                <p className={styles.scheduleEmptyTitle}>Select a Branch to identify the current version</p>
+                <p className={styles.scheduleEmptyText}>Published schedules are shared configuration; the Branch date provides current-version context.</p>
+              </>}
             </div>
           ) : (
             <dl className={styles.policyDetailsGrid}>

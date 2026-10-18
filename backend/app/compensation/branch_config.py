@@ -22,6 +22,7 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
 from app.branch_compensation_config_concurrency import lock_branch_compensation_config
+from app.business_clock import branch_today
 from app.compensation.audit import write_audit
 from app.compensation.errors import compensation_error
 from app.compensation.schemas import (
@@ -85,12 +86,6 @@ async def require_definition_applicable(
             f"The PayDefinition is not active for this Branch on {on_date.isoformat()}.", 422)
 
 
-async def _company_today(company_id: int, db: AsyncConnection) -> date:
-    return (await db.execute(
-        text("SELECT core.fn_CompanyToday(:cid)"), {"cid": company_id},
-    )).scalar_one()
-
-
 # Non-terminal payroll workflow states: configuration must not take effect inside them.
 MUTABLE_PERIOD_STATUSES = ("Draft", "Open", "InReview", "Returned", "Approved")
 
@@ -135,7 +130,7 @@ async def resolve_activation_date(
 ) -> tuple[date, date | None]:
     """The one effective-date policy for target Branch applicability.
 
-    ``today`` is Company-local today. With no requested date the result is today, or
+    ``today`` is the owning Branch's business date. With no requested date the result is today, or
     the day after the end of a non-terminal period that contains today. An explicit
     date inside such a period is rejected. Returns the date and that period end.
     """
@@ -149,7 +144,7 @@ async def activate_for_requesting_branch(
 ) -> None:
     """Activate a newly approved PayDefinition for the Branch that requested it."""
     await lock_branch_compensation_config(company_id, branch_id, db)
-    today = await _company_today(company_id, db)
+    today = await branch_today(company_id, branch_id, db)
     effective_from, _ = await resolve_activation_date(company_id, branch_id, None, today, db)
     await apply_config(
         db, company_id=company_id, branch_id=branch_id, pay_definition_id=pay_definition_id,
@@ -350,7 +345,7 @@ async def list_branch_definitions(
             "BRANCH_ACCESS_DENIED", "You do not have access to this branch.", 403)
     await _require_branch_in_company(company_id, branch_id, db)
 
-    today = await _company_today(company_id, db)
+    today = await branch_today(company_id, branch_id, db)
     rows = (await db.execute(
         text(f"""
             SELECT {_DEFINITION_COLUMNS}
@@ -404,7 +399,7 @@ async def update_branch_config(
     definition = await _lock_definition(company_id, pay_definition_id, db)
     _require_activatable(definition, data.is_active)
 
-    today = await _company_today(company_id, db)
+    today = await branch_today(company_id, branch_id, db)
     effective_from, period_end = await resolve_activation_date(
         company_id, branch_id, data.effective_from, today, db)
     await apply_config(
@@ -449,11 +444,11 @@ async def bulk_update_branch_config(
     definition = await _lock_definition(company_id, pay_definition_id, db)
     _require_activatable(definition, data.is_active)
 
-    today = await _company_today(company_id, db)
     validated: list[tuple[dict, date]] = []
     errors: list[dict] = []
     for row in rows:
         try:
+            today = await branch_today(company_id, row["branchid"], db)
             resolved, _ = await resolve_activation_date(
                 company_id, row["branchid"], data.effective_from, today, db)
             validated.append((dict(row), resolved))

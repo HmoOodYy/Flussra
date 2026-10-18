@@ -73,6 +73,7 @@ export function accessNotice(caps: CompanyBranchesCapabilities): string | null {
 
 export interface BranchFormValues {
   branch_name: string;
+  time_zone_id: string;
   branch_code: string;
   status: string;
   is_default: boolean;
@@ -102,6 +103,7 @@ export function validateFirstPayrollStartDate(raw: string): string | null {
 export function buildBranchUpdatePayload(form: BranchFormValues) {
   return {
     branch_name: form.branch_name.trim(),
+    time_zone_id: form.time_zone_id.trim(),
     branch_code: form.branch_code.trim() || undefined,
     status: form.status,
     address_line1: form.address_line1 || null,
@@ -137,6 +139,7 @@ export function buildBranchCreatePayload(
   const trimmedDate = firstPayrollStartDate.trim();
   return {
     branch_name: u.branch_name,
+    time_zone_id: u.time_zone_id,
     branch_code: u.branch_code,
     status: u.status,
     is_default: options.canSetDefaultOnCreate && form.is_default,
@@ -175,9 +178,11 @@ export function showOnboardingCheckbox(caps: Pick<CompanyBranchesCapabilities, '
 export function canCreateBranchWithOnboarding(params: {
   setUpPayrollNow: boolean;
   hasCompanyDefault: boolean;
+  optionsResolved: boolean;
   choicesCurrentAndValid: boolean;
 }): boolean {
   if (!params.setUpPayrollNow) return true;
+  if (!params.optionsResolved) return false;
   if (!params.hasCompanyDefault) return true;
   return params.choicesCurrentAndValid;
 }

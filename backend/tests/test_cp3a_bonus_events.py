@@ -68,6 +68,13 @@ async def _insert_period_db(
     )).mappings().first()
     await db.commit()
     assert r is not None
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    await _create_period_driver_eligibility_rows(
+        r["payrollperiodid"], 1, branch_id, db,
+        snapshot_source="Generated",
+        freeze=status in {"Open", "Returned"},
+    )
+    await db.commit()
     return r["payrollperiodid"]
 
 
@@ -133,8 +140,8 @@ async def cp3a_branch_id(
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": (code := f"CP3A_{uuid.uuid4().hex[:10]}"), "name": code},
@@ -149,27 +156,22 @@ async def cp3a_driver_id(
     auth_token: str,
     cp3a_branch_id: int,
 ) -> int:
-    driver_code = f"CP3A-BON-{_BASE_MONDAY.isoformat()}"
-    # Look up first — driver persists across test runs in the shared DB.
-    r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
-    if r_list.status_code == 200:
-        for d in r_list.json():
-            if d.get("driver_code") == driver_code:
-                return d["driver_id"]
+    driver_code = f"CP3A-BON-{_BASE_MONDAY.isoformat()}-{_RUN_ID}"
     resp = await session_client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
-            "branch_id":      cp3a_branch_id,
-            "full_name":      "CP3A Bonus Driver",
-            "preferred_name": "BonDrv",
-            "driver_code":    driver_code,
-            "cdl_number":     f"CDL-CP3A-{_BASE_MONDAY.isoformat()}",
-            "email":          f"cp3a.bonus.{_BASE_MONDAY.isoformat()}@example.com",
+            "branch_id": cp3a_branch_id,
+            "full_name": "CP3A Bonus Driver",
+            "hire_date": "1990-01-01",
+            "driver_profile": {
+                "driver_code": driver_code,
+                "effective_from_at": "2000-01-01T00:00:00Z",
+            },
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["current_or_pending_driver"]["driver_id"]
 
 
 # ---------------------------------------------------------------------------

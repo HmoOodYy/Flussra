@@ -36,7 +36,7 @@ from app.access.policy import require_non_driver_subject
 from app.company_currency import get_company_currency
 from app.payroll import bonus as payroll_bonus
 from app.payroll.definition_calculation import CalculationStatus
-from app.payroll.eligibility import _period_has_driver_eligibility_snapshot
+from app.payroll.eligibility import require_period_eligibility_snapshot
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
@@ -101,61 +101,23 @@ async def _validate_period_can_finalize(
         )
 
     # ── 2. Driver eligibility ─────────────────────────────────────────────────
-    # A source line proves existing source on its exact date; the frozen eligibility
-    # snapshot passes a driver that is in it at all. Periods without the snapshot
-    # marker use the live roster rules.
-    if await _period_has_driver_eligibility_snapshot(period_id, db):
-        elig_rows = (await db.execute(
-            text("""
-                SELECT dl.draftlineid, dl.driverid, dl.workdate
-                FROM   payroll.payrolldraftlines dl
-                WHERE  dl.payrollperiodid = :period_id
-                  AND  dl.companyid       = :company_id
-                  AND  dl.status         != 'Void'
-                  AND  dl.payrollperioddefinitionid IS NOT NULL
-                  AND  NOT EXISTS (
-                           SELECT 1
-                           FROM   payroll.payrollperioddrivereligibility ppde
-                           WHERE  ppde.payrollperiodid = dl.payrollperiodid
-                             AND  ppde.driverid        = dl.driverid
-                             AND  ppde.iseligibleforperiod = TRUE
-                       )
-                LIMIT 5
-            """),
-            {"period_id": period_id, "company_id": company_id},
-        )).mappings().all()
-    else:
-        elig_rows = (await db.execute(
-            text("""
-                SELECT dl.draftlineid, dl.driverid, dl.workdate
-                FROM   payroll.payrolldraftlines dl
-                WHERE  dl.payrollperiodid = :period_id
-                  AND  dl.companyid       = :company_id
-                  AND  dl.status         != 'Void'
-                  AND  dl.payrollperioddefinitionid IS NOT NULL
-                  AND  NOT EXISTS (
-                           SELECT 1
-                           FROM   core.drivers   d
-                           JOIN   core.employees e ON e.employeeid = d.employeeid
-                           WHERE  d.driverid         = dl.driverid
-                             AND  d.companyid        = :company_id
-                             AND  d.branchid         = :branch_id
-                             AND  e.employmentstatus = 'Active'
-                             AND  (
-                                      d.driverstatus = 'Active'
-                                   OR (d.driverstatus = 'Transferred'
-                                       AND d.effectiveto IS NOT NULL
-                                       AND d.effectiveto >= dl.workdate)
-                                  )
-                             AND  (e.hiredate IS NULL OR e.hiredate <= dl.workdate)
-                             AND  (e.terminationdate IS NULL OR e.terminationdate >= dl.workdate)
-                             AND  (d.effectivefrom IS NULL OR d.effectivefrom <= dl.workdate)
-                             AND  (d.effectiveto   IS NULL OR d.effectiveto   >= dl.workdate)
-                       )
-                LIMIT 5
-            """),
-            {"period_id": period_id, "company_id": company_id, "branch_id": branch_id},
-        )).mappings().all()
+    # Every operational period must have its tenant-scoped frozen roster marker.
+    # Saved source is rescued only on its exact date; no live-roster fallback exists.
+    await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
+    elig_rows = (await db.execute(
+        text("""
+            SELECT dl.draftlineid, dl.driverid, dl.workdate
+            FROM payroll.payrolldraftlines dl
+            WHERE dl.payrollperiodid = :period_id AND dl.companyid = :company_id
+              AND dl.status != 'Void' AND dl.payrollperioddefinitionid IS NOT NULL
+              AND NOT EXISTS (
+                    SELECT 1 FROM payroll.payrollperioddrivereligibility ppde
+                    WHERE ppde.payrollperiodid = dl.payrollperiodid
+                      AND ppde.driverid = dl.driverid AND ppde.iseligibleforperiod = TRUE
+              )
+            LIMIT 5
+        """), {"period_id": period_id, "company_id": company_id},
+    )).mappings().all()
     if elig_rows:
         examples = "; ".join(f"driver {r['driverid']} {r['workdate']}" for r in elig_rows)
         blockers.append(

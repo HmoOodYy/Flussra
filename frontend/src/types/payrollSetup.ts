@@ -141,7 +141,9 @@ export interface VersionResponse {
   replaces_version_id: number | null;
   replaced_by_version_id: number | null;
   is_terminal: boolean;
-  is_current: boolean; // effective on company-local today (display only)
+  is_current: boolean | null; // null when no Branch business-date context was requested
+  reference_date: string | null;
+  reference_branch_id: number | null;
 }
 
 export interface ConflictResponse {
@@ -226,7 +228,7 @@ export interface BoundaryChoiceResponse {
   period_end_date: string; // ISO date (YYYY-MM-DD)
   payroll_frequency: string; // known values: Week | Biweek | Month | Custom
   custom_interval_days: number | null;
-  relation: BoundaryRelation;
+  relation: BoundaryRelation | null;
   predecessor_payroll_frequency: string | null;
   predecessor_custom_interval_days: number | null;
   predecessor_period_end_date: string | null; // ISO date (YYYY-MM-DD)
@@ -235,7 +237,7 @@ export interface BoundaryChoiceResponse {
 }
 
 export interface BoundaryChoicesResponse {
-  reference_date: string; // ISO date (YYYY-MM-DD)
+  reference_date: string | null; // ISO date (YYYY-MM-DD), null without Branch context
   requested_date: string; // ISO date (YYYY-MM-DD)
   requested_valid: boolean;
   requested: BoundaryChoiceResponse | null;

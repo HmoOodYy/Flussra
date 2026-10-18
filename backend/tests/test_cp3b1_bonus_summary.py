@@ -132,10 +132,22 @@ async def _seed_snapshot(
                 INSERT INTO payroll.payrollperioddrivereligibility
                     (companyid, branchid, payrollperiodid, driverid,
                      drivercodesnapshot, drivernamesnapshot,
+                     drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
+                     branchtimezoneidsnapshot, eligibleworkdates,
                      iseligibleforperiod, eligibilityreasoncode, snapshotsource,
                      createdatutc, updatedatutc)
-                VALUES (1, :bid, :pid, :did, :code, :name,
-                        TRUE, :reason, 'Generated', NOW(), NOW())
+                SELECT 1, :bid, :pid, d.driverid, :code, :name,
+                       d.effectivefromat, d.effectivetoat, b.timezoneid,
+                       CASE WHEN :reason = 'IncludedByExistingData' THEN ARRAY[]::DATE[]
+                            ELSE ARRAY(SELECT pp.startdate + n.day_index
+                                       FROM payroll.payrollperiods pp
+                                       CROSS JOIN LATERAL generate_series(0, pp.enddate - pp.startdate) n(day_index)
+                                       WHERE pp.payrollperiodid = :pid)
+                       END,
+                       TRUE, :reason, 'Generated', NOW(), NOW()
+                FROM core.drivers d
+                JOIN core.branches b ON b.companyid = d.companyid AND b.branchid = d.branchid
+                WHERE d.driverid = :did AND d.companyid = 1 AND d.branchid = :bid
                 ON CONFLICT (payrollperiodid, driverid) DO NOTHING
             """),
             {
@@ -228,8 +240,8 @@ async def cp3b1_branch_id(
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": (code := f"CP3B1_{uuid.uuid4().hex[:10]}"), "name": code},
@@ -748,7 +760,7 @@ async def test_branch_isolation(
 
 
 # ---------------------------------------------------------------------------
-# 14. No-marker behavior — controlled unavailable, no live fallback
+# 14. Missing marker is structural corruption — fail closed, no live fallback
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -759,7 +771,7 @@ async def test_no_marker_returns_controlled_unavailable(
     cp3b1_branch_id: int,
     cp3b1_drivers: dict[str, int],
 ) -> None:
-    """A period without a CP-2E marker gets 422 with an explicit code — the
+    """A period without a CP-2E marker gets 409 with an explicit code — the
     live roster (which WOULD contain the active CP3B1 drivers) is never used."""
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3b1_branch_id, start, end)
@@ -767,11 +779,11 @@ async def test_no_marker_returns_controlled_unavailable(
     # fallback would have returned.
 
     r = await _get_summary(client, auth_token, period_id)
-    assert r.status_code == 422, (
-        f"No-marker period must return controlled 422, got {r.status_code}: {r.text}"
+    assert r.status_code == 409, (
+        f"No-marker period must return controlled 409, got {r.status_code}: {r.text}"
     )
     detail = r.json()["detail"]
-    assert "BONUS_SUMMARY_UNAVAILABLE_NO_ELIGIBILITY_SNAPSHOT" in detail
+    assert detail["code"] == "ELIGIBILITY_SNAPSHOT_MISSING"
     assert "drivers" not in r.json(), "No roster data may leak on the unavailable path"
 
     await _cancel_period_db(db_conn, period_id)

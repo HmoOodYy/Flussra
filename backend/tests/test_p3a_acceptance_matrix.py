@@ -56,8 +56,8 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 VALUES (:code, 'P3a acceptance') RETURNING companyid
             """), {"code": f"P3AM_{marker}"})).scalar_one())
             branch_id = int((await db.execute(text("""
-                INSERT INTO core.branches(companyid, branchcode, branchname, status, isdefault)
-                VALUES (:cid, :code, 'P3a acceptance', 'Active', TRUE) RETURNING branchid
+                INSERT INTO core.branches(companyid, branchcode, branchname, status, isdefault, timezoneid)
+                VALUES (:cid, :code, 'P3a acceptance', 'Active', TRUE, 'UTC') RETURNING branchid
             """), {"cid": company_id, "code": f"P3AB_{marker}"})).scalar_one())
             employee_id = int((await db.execute(text("""
                 INSERT INTO core.employees(companyid, branchid, fullname, employeetype, employmentstatus, createdbyuserid)
@@ -171,7 +171,7 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
         try:
             marker = uuid4().hex[:16]
             cid = int((await db.execute(text("INSERT INTO core.companies(companycode,companyname) VALUES (:c,'P3a invalid') RETURNING companyid"), {"c": f"P3AI_{marker}"})).scalar_one())
-            bid = int((await db.execute(text("INSERT INTO core.branches(companyid,branchcode,branchname,status,isdefault) VALUES (:c,:b,'P3a invalid','Active',TRUE) RETURNING branchid"), {"c": cid, "b": f"P3AIB_{marker}"})).scalar_one())
+            bid = int((await db.execute(text("INSERT INTO core.branches(companyid,branchcode,branchname,status,isdefault, timezoneid) VALUES (:c,:b,'P3a invalid','Active',TRUE, 'UTC') RETURNING branchid"), {"c": cid, "b": f"P3AIB_{marker}"})).scalar_one())
             eid = int((await db.execute(text("INSERT INTO core.employees(companyid,branchid,fullname,employeetype,employmentstatus,createdbyuserid) VALUES (:c,:b,'P3a invalid','Driver','Active',1) RETURNING employeeid"), {"c": cid, "b": bid})).scalar_one())
             did = int((await db.execute(text("INSERT INTO core.drivers(companyid,branchid,employeeid,drivercode,driverstatus) VALUES (:c,:b,:e,:d,'Active') RETURNING driverid"), {"c": cid, "b": bid, "e": eid, "d": f"P3AID_{marker}"})).scalar_one())
             period_id = int((await db.execute(text("INSERT INTO payroll.payrollperiods(companyid,branchid,status,periodcode,periodname,periodtype,startdate,enddate) VALUES (:c,:b,'Open',:p,'P3a invalid','Week',DATE '2099-01-01',DATE '2099-01-07') RETURNING payrollperiodid"), {"c": cid, "b": bid, "p": f"P3AIP_{marker}"})).scalar_one())

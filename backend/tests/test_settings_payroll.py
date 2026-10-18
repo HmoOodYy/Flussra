@@ -20,7 +20,7 @@ async def setup_branch_id(
     resp = await session_client.post(
         "/settings/branches",
         json={
-            "branch_name": "Payroll Setup Test Branch",
+            "branch_name": "Payroll Setup Test Branch", "time_zone_id": "UTC",
             "branch_code": "PSTB",
             "status":      "Active",
             "is_default":  False,
@@ -67,7 +67,7 @@ class TestGetStatusKeys:
         """A brand-new branch has no status keys."""
         br = await client.post(
             "/settings/branches",
-            json={"branch_name": "Empty Keys Branch 2", "branch_code": "EKB2"},
+            json={"branch_name": "Empty Keys Branch 2", "time_zone_id": "UTC", "branch_code": "EKB2"},
             headers=auth(auth_token),
         )
         assert br.status_code == 201

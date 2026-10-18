@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { approveAssignment, createAssignment, replaceAssignmentValues, updateAssignment } from '../../../lib/compensationApi';
 import type { DriverPayRateRow } from '../../../types/compensation';
-import { apiError, today, type EditRow } from './payRatesView';
+import { apiError, type EditRow } from './payRatesView';
 
-export function useTargetRateEditing(selectedDriverId: number | null, refreshTargetRows: (driverId: number) => Promise<void>) {
+export function useTargetRateEditing(selectedDriverId: number | null, refreshTargetRows: (driverId: number) => Promise<void>, referenceDate: string | undefined) {
   const [targetDrafts, setTargetDrafts] = useState<Record<number, EditRow>>({});
   const [targetSavingId, setTargetSavingId] = useState<number | null>(null);
   const [targetErrors, setTargetErrors] = useState<Record<number, string>>({});
@@ -14,7 +14,7 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
       ...prev,
       [row.rate_definition_id]: {
         amount: row.pending?.amount ?? row.current?.amount ?? '',
-        effective_from: row.pending?.effective_from ?? today(),
+        effective_from: row.pending?.effective_from ?? referenceDate ?? '',
       },
     }));
   }
@@ -37,7 +37,7 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
   async function saveTargetRow(row: DriverPayRateRow, approve: boolean) {
     const id = row.rate_definition_id;
     const draft = targetDrafts[id];
-    if (!selectedDriverId || !draft || draft.amount === '') return;
+    if (!selectedDriverId || !draft || draft.amount === '' || !draft.effective_from) return;
     const driverId = selectedDriverId;
     setTargetSavingId(id);
     setTargetErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });

@@ -90,8 +90,8 @@ async def isolated_policy_database(pg_instance):
             for index in range(1, 5):
                 cursor.execute("""
                     INSERT INTO core.Branches
-                        (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                    VALUES (%s, %s, %s, 'Active', FALSE) RETURNING BranchID
+                        (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                    VALUES (%s, %s, %s, 'Active', FALSE, 'UTC') RETURNING BranchID
                 """, (company_id, f"B{index}", f"Concurrency Branch {index}"))
                 branch_ids.append(cursor.fetchone()[0])
             cursor.execute("""

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { DriverTransferRequest, TransferStatus } from '../src/types/transfer.ts';
-import { FILTER_LABELS, apiError, matchesFilter } from '../src/pages/people/transfers/transferRequestsView.ts';
+import { FILTER_LABELS, apiError, matchesFilter, normalizeUtcDateTimeLocal, fmtEffectiveAt } from '../src/pages/people/transfers/transferRequestsView.ts';
 import { buildTimeline } from '../src/pages/people/transfers/transferTimeline.ts';
 
 const statuses: TransferStatus[] = [
@@ -20,7 +20,7 @@ function request(status: TransferStatus, initiated_by: DriverTransferRequest['in
     requested_by_user_id: 22,
     initiated_by,
     status,
-    effective_date: '2026-10-20',
+    effective_at: null,
     reason: null,
     notes: null,
     source_approved_by_user_id: null,
@@ -69,6 +69,24 @@ test('transfer API error formatter preserves detail, validation-array, empty-arr
   assert.equal(apiError({ response: { data: { detail: [] } } }), '');
   assert.equal(apiError({ response: { data: { detail: '  ' } } }), 'An unexpected error occurred.');
   assert.equal(apiError(new Error('network')), 'An unexpected error occurred.');
+});
+
+test('transfer time input is optional, explicitly UTC, and rejects invalid calendar/time values', () => {
+  assert.equal(request('PendingTargetApproval').effective_at, null);
+  assert.equal(fmtEffectiveAt(null), 'On completion');
+  const originalTz = process.env.TZ;
+  try {
+    for (const tz of ['America/New_York', 'America/Los_Angeles', 'Asia/Tokyo']) {
+      process.env.TZ = tz;
+      assert.equal(normalizeUtcDateTimeLocal('2026-11-01T09:30'), '2026-11-01T09:30:00Z');
+    }
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+  assert.equal(normalizeUtcDateTimeLocal('2026-02-30T09:30'), null);
+  assert.equal(normalizeUtcDateTimeLocal('2026-11-01T24:00'), null);
+  assert.equal(normalizeUtcDateTimeLocal('2026-11-01T09:60'), null);
 });
 
 test('transfer timeline keeps step order, labels, and states for both initiators and every status', () => {

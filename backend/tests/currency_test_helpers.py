@@ -20,8 +20,8 @@ INSERT_DRIVER_RATE = text("""
 async def create_branch_and_driver(db, company_id: int, marker: str) -> tuple[int, int]:
     """Create a branch and an active driver for an existing company."""
     branch_id = int((await db.execute(text("""
-        INSERT INTO core.branches(companyid, branchcode, branchname, status, isdefault)
-        VALUES (:cid, :code, 'P3a currency', 'Active', TRUE) RETURNING branchid
+        INSERT INTO core.branches(companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (:cid, :code, 'P3a currency', 'Active', TRUE, 'UTC') RETURNING branchid
     """), {"cid": company_id, "code": f"B_{marker}"[:20]})).scalar_one())
     employee_id = int((await db.execute(text("""
         INSERT INTO core.employees(companyid, branchid, fullname, employeetype, employmentstatus, createdbyuserid)

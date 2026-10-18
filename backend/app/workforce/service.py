@@ -1,6 +1,6 @@
 """Canonical non-transfer Employee and Driver-profile mutation owner."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.workforce import audit as workforce_audit
-from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 from app.workforce.projection import (
     sync_company_employee_branch_projections,
@@ -87,18 +86,18 @@ async def _profile_summary(row: dict[str, Any]) -> DriverProfileSummary:
         cdl_number=row["cdlnumber"],
         external_driver_id=row["externaldriverid"],
         driver_status=row["driverstatus"],
-        effective_from=row["effectivefrom"],
-        effective_to=row["effectiveto"],
+        effective_from_at=row["effectivefromat"],
+        effective_to_at=row["effectivetoat"],
     )
 
 
 async def _driver_state(
     company_id: int,
     employee_id: int,
-    business_date: date,
+    as_of: datetime | None,
     db: AsyncConnection,
 ) -> tuple[str, dict[str, Any] | None]:
-    current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
+    current = await resolve_effective_driver_profile(company_id, employee_id, as_of, db)
     if current is not None:
         row = await db.execute(
             text("""
@@ -116,15 +115,12 @@ async def _driver_state(
             FROM core.Drivers d JOIN core.Branches b ON b.BranchID = d.BranchID
             WHERE d.CompanyID = :company_id
               AND d.EmployeeID = :employee_id
-              AND d.EffectiveFrom > :business_date
-              AND NOT (
-                    d.DriverStatus = 'Terminated'
-                AND d.EffectiveTo = d.EffectiveFrom - 1
-              )
-            ORDER BY d.EffectiveFrom, d.DriverID
+              AND d.EffectiveFromAt > COALESCE(:as_of, NOW())
+              AND (d.EffectiveToAt IS NULL OR d.EffectiveToAt > d.EffectiveFromAt)
+            ORDER BY d.EffectiveFromAt, d.DriverID
             LIMIT 1
         """),
-        {"company_id": company_id, "employee_id": employee_id, "business_date": business_date},
+        {"company_id": company_id, "employee_id": employee_id, "as_of": as_of},
     )
     pending = result.mappings().first()
     return ("pending", dict(pending)) if pending is not None else ("none", None)
@@ -133,10 +129,10 @@ async def _driver_state(
 async def _employee_summary(
     row: dict[str, Any],
     company_id: int,
-    business_date: date,
+    as_of: datetime | None,
     db: AsyncConnection,
 ) -> tuple[EmployeeSummary, dict[str, Any] | None]:
-    driver_state, profile = await _driver_state(company_id, row["employeeid"], business_date, db)
+    driver_state, profile = await _driver_state(company_id, row["employeeid"], as_of, db)
     summary = EmployeeSummary(
         employee_id=row["employeeid"],
         company_id=row["companyid"],
@@ -166,12 +162,11 @@ async def list_employees(
     driver_state: str | None = None,
     q: str | None = None,
 ) -> list[EmployeeSummary]:
-    business_date = await company_today(company_id, db)
     _, permitted_branches = await _readable_employee_branches(company_id, user_id, db, branch_id)
-    await sync_company_employee_branch_projections(company_id, business_date, db)
+    await sync_company_employee_branch_projections(company_id, None, db)
     visible_branch = "COALESCE(current_driver.BranchID, e.BranchID)"
     conditions = ["e.CompanyID = :company_id"]
-    params: dict[str, Any] = {"company_id": company_id, "business_date": business_date}
+    params: dict[str, Any] = {"company_id": company_id}
     if branch_id is not None:
         conditions.append(f"{visible_branch} = :branch_id")
         params["branch_id"] = branch_id
@@ -195,7 +190,7 @@ async def list_employees(
             LEFT JOIN core.Drivers current_driver
               ON current_driver.CompanyID = e.CompanyID
              AND current_driver.EmployeeID = e.EmployeeID
-             AND core.fn_EffectiveDriverProfile(e.CompanyID, e.EmployeeID, :business_date) = current_driver.DriverID
+             AND core.fn_EffectiveDriverProfile(e.CompanyID, e.EmployeeID) = current_driver.DriverID
             JOIN core.Branches b ON b.BranchID = {visible_branch}
             WHERE {' AND '.join(conditions)}
             ORDER BY e.FullName, e.EmployeeID
@@ -204,7 +199,7 @@ async def list_employees(
     )
     summaries: list[EmployeeSummary] = []
     for raw in result.mappings().all():
-        summary, _ = await _employee_summary(dict(raw), company_id, business_date, db)
+        summary, _ = await _employee_summary(dict(raw), company_id, None, db)
         if driver_state is None or summary.driver_state == driver_state:
             summaries.append(summary)
     return summaries
@@ -218,7 +213,6 @@ async def get_employee(
     *,
     require_view: bool = True,
 ) -> EmployeeDetail:
-    business_date = await company_today(company_id, db)
     result = await db.execute(
         text("""
             SELECT e.EmployeeID, e.CompanyID, e.BranchID, b.BranchName,
@@ -233,7 +227,7 @@ async def get_employee(
     row = result.mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
-    current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
+    current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
     visible_branch = current["branchid"] if current is not None else row["branchid"]
     if require_view:
         await _readable_employee_branches(company_id, user_id, db, visible_branch)
@@ -241,7 +235,7 @@ async def get_employee(
         can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
         if not can_see_all and visible_branch not in branch_ids:
             raise HTTPException(status_code=403, detail="Access denied to the Employee branch.")
-    await sync_employee_branch_projection(company_id, employee_id, business_date, db)
+    await sync_employee_branch_projection(company_id, employee_id, None, db)
     refreshed = await db.execute(
         text("""
             SELECT e.EmployeeID, e.CompanyID, e.BranchID, b.BranchName,
@@ -253,13 +247,13 @@ async def get_employee(
         {"employee_id": employee_id, "company_id": company_id},
     )
     row = refreshed.mappings().one()
-    summary, _ = await _employee_summary(dict(row), company_id, business_date, db)
+    summary, _ = await _employee_summary(dict(row), company_id, None, db)
     profiles_result = await db.execute(
         text("""
             SELECT d.*, b.BranchName
             FROM core.Drivers d JOIN core.Branches b ON b.BranchID = d.BranchID
             WHERE d.CompanyID = :company_id AND d.EmployeeID = :employee_id
-            ORDER BY d.EffectiveFrom, d.DriverID
+            ORDER BY d.EffectiveFromAt, d.DriverID
         """),
         {"company_id": company_id, "employee_id": employee_id},
     )
@@ -290,7 +284,7 @@ def _conflict_from_integrity(exc: IntegrityError, *, employee: bool = False) -> 
         return HTTPException(status_code=409, detail="EmployeeKey already exists in this company.")
     if "drivercode" in message or "ux_drivers_company_drivercode" in message:
         return HTTPException(status_code=409, detail="DriverCode already exists in this company.")
-    if "excl_drivers_employee_effectivewindow" in message or "exclusion" in message:
+    if "excl_drivers_employee_assignmentwindow" in message or "exclusion" in message:
         return HTTPException(status_code=409, detail="Driver profile overlaps an existing effective profile.")
     return HTTPException(status_code=409, detail="Workforce record conflicts with an existing record.")
 
@@ -340,22 +334,18 @@ async def _insert_driver_profile(
     company_id: int,
     employee_id: int,
     branch_id: int,
-    hire_date: date | None,
     actor_user_id: int,
     data: DriverProfileCreate,
     db: AsyncConnection,
 ) -> int:
-    effective_from = data.effective_from
-    if effective_from is None:
-        effective_from = hire_date or await company_today(company_id, db)
     result = await db.execute(
         text("""
             INSERT INTO core.Drivers
                 (CompanyID, BranchID, EmployeeID, DriverCode, CDLNumber,
-                 ExternalDriverID, DriverStatus, EffectiveFrom)
+                 ExternalDriverID, DriverStatus, EffectiveFromAt)
             VALUES (:company_id, :branch_id, :employee_id, :driver_code, :cdl_number,
-                    :external_driver_id, 'Active', :effective_from)
-            RETURNING DriverID
+                    :external_driver_id, 'Active', COALESCE(:effective_from_at, NOW()))
+            RETURNING DriverID, EffectiveFromAt
         """),
         {
             "company_id": company_id,
@@ -364,15 +354,21 @@ async def _insert_driver_profile(
             "driver_code": data.driver_code,
             "cdl_number": data.cdl_number,
             "external_driver_id": data.external_driver_id,
-            "effective_from": effective_from,
+            "effective_from_at": data.effective_from_at,
         },
     )
-    driver_id = result.scalar_one()
+    inserted = result.mappings().one()
+    driver_id = inserted["driverid"]
     await workforce_audit.write_workforce_audit(
         db, company_id=company_id, branch_id=branch_id, actor_user_id=actor_user_id,
         action_code="DRIVER_PROFILE_CREATED", entity_name="Drivers", entity_id=driver_id,
         new_value={"employee_id": employee_id, "branch_id": branch_id,
-                   "effective_from": effective_from, "driver_status": "Active"},
+                   "effective_from_at": inserted["effectivefromat"], "driver_status": "Active"},
+    )
+    from app.payroll.eligibility import append_driver_to_editable_periods
+
+    await append_driver_to_editable_periods(
+        company_id, branch_id, driver_id, actor_user_id, db,
     )
     return driver_id
 
@@ -393,7 +389,7 @@ async def create_employee(
         )
         if data.driver_profile is not None:
             await _insert_driver_profile(
-                company_id, employee_id, data.branch_id, data.hire_date,
+                company_id, employee_id, data.branch_id,
                 user_id, data.driver_profile, db,
             )
         return await get_employee(company_id, user_id, employee_id, db, require_view=False)
@@ -436,19 +432,18 @@ async def _has_current_or_pending_profile(
     employee_id: int,
     db: AsyncConnection,
 ) -> bool:
-    business_date = await company_today(company_id, db)
-    if await resolve_effective_driver_profile(company_id, employee_id, business_date, db):
+    if await resolve_effective_driver_profile(company_id, employee_id, None, db):
         return True
     result = await db.execute(
         text("""
             SELECT EXISTS (
                 SELECT 1 FROM core.Drivers d
                 WHERE d.CompanyID = :cid AND d.EmployeeID = :eid
-                  AND d.EffectiveFrom > :today
-                  AND NOT (d.DriverStatus = 'Terminated' AND d.EffectiveTo = d.EffectiveFrom - 1)
+                  AND d.EffectiveFromAt > NOW()
+                  AND (d.EffectiveToAt IS NULL OR d.EffectiveToAt > d.EffectiveFromAt)
             )
         """),
-        {"cid": company_id, "eid": employee_id, "today": business_date},
+        {"cid": company_id, "eid": employee_id},
     )
     return bool(result.scalar_one())
 
@@ -502,9 +497,8 @@ async def update_employee(
     old_row = result.mappings().first()
     if old_row is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
-    business_date = await company_today(company_id, db)
     _, projected_branch = await sync_employee_branch_projection(
-        company_id, employee_id, business_date, db,
+        company_id, employee_id, None, db,
     )
     old = dict(old_row)
     if projected_branch is not None:
@@ -591,7 +585,7 @@ async def create_first_driver_profile(
         raise HTTPException(status_code=409, detail="Driver profile history already exists; later profiles require Driver Transfer.")
     try:
         await _insert_driver_profile(
-            company_id, employee_id, branch_id, employee["hiredate"], user_id, data, db,
+            company_id, employee_id, branch_id, user_id, data, db,
         )
     except IntegrityError as exc:
         raise _conflict_from_integrity(exc) from exc
@@ -605,236 +599,131 @@ async def terminate_driver_employee(
     data: EmployeeTermination,
     db: AsyncConnection,
 ) -> EmployeeDetail:
-    """Atomically terminate a Driver Employee and close future profile activity."""
-    employee_result = await db.execute(
-        text("""
-            SELECT EmployeeID, BranchID, EmploymentStatus, TerminationDate, HireDate
-            FROM core.Employees
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-            FOR UPDATE
-        """),
-        {"company_id": company_id, "employee_id": employee_id},
-    )
+    """Terminate employment and close each profile at its Branch-local day end."""
+    employee_result = await db.execute(text("""
+        SELECT EmployeeID, BranchID, EmploymentStatus, TerminationDate, HireDate
+        FROM core.Employees
+        WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+        FOR UPDATE
+    """), {"company_id": company_id, "employee_id": employee_id})
     employee_row = employee_result.mappings().first()
     if employee_row is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
     if employee_row["employmentstatus"] == "Terminated":
         raise HTTPException(status_code=409, detail="Employee is already terminated.")
-
-    driver_ids_result = await db.execute(
-        text("""
-            SELECT DriverID
-            FROM core.Drivers
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-            ORDER BY DriverID
-        """),
-        {"company_id": company_id, "employee_id": employee_id},
-    )
-    driver_ids = [row["driverid"] for row in driver_ids_result.mappings().all()]
-    if not driver_ids:
-        raise HTTPException(
-            status_code=422,
-            detail="This termination operation is only for Employees with Driver profiles.",
-        )
-
-    profiles_result = await db.execute(
-        text("""
-            SELECT DriverID, DriverStatus, EffectiveFrom, EffectiveTo,
-                   TransferredFromDriverID, TransferredToDriverID
-            FROM core.Drivers
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-            ORDER BY DriverID
-            FOR UPDATE
-        """),
-        {"company_id": company_id, "employee_id": employee_id},
-    )
-    profiles = [dict(row) for row in profiles_result.mappings().all()]
-    request_result = await db.execute(
-        text("""
-            SELECT TransferRequestID, Status
-            FROM core.DriverTransferRequests
-            WHERE CompanyID = :company_id
-              AND DriverID = ANY(:driver_ids)
-              AND Status NOT IN ('Completed', 'Cancelled', 'Rejected')
-            ORDER BY TransferRequestID
-            FOR UPDATE
-        """),
-        {"company_id": company_id, "driver_ids": driver_ids},
-    )
-    active_requests = [dict(row) for row in request_result.mappings().all()]
-
-    business_date = await company_today(company_id, db)
-    current_today = await resolve_effective_driver_profile(
-        company_id, employee_id, business_date, db,
-    )
-    current = await resolve_effective_driver_profile(
-        company_id, employee_id, data.termination_date, db,
-    )
     if employee_row["hiredate"] is not None and data.termination_date < employee_row["hiredate"]:
-        raise HTTPException(
-            status_code=422,
-            detail="Termination date cannot precede the Employee hire date.",
-        )
-    if current is None:
-        raise HTTPException(
-            status_code=422,
-            detail="A Driver profile must be effective on the termination date.",
-        )
-    branch_id = current_today["branchid"] if current_today is not None else current["branchid"]
-    await _require_branch_write(company_id, user_id, branch_id, db)
-    if current is not None and current["driverstatus"] == "Terminated":
-        raise HTTPException(
-            status_code=409,
-            detail="The effective Driver profile is already terminated.",
-        )
+        raise HTTPException(status_code=422, detail="Termination date cannot precede the Employee hire date.")
 
-    pending_profiles = []
-    for profile in profiles:
-        effective_from = profile["effectivefrom"]
-        if effective_from is None or effective_from <= data.termination_date:
-            continue
-        if (
-            profile["driverstatus"] == "Terminated"
-            and profile["effectiveto"] == effective_from - timedelta(days=1)
-        ):
-            continue
-        if profile["driverstatus"] in {"Transferred", "Terminated"}:
-            raise HTTPException(
-                status_code=409,
-                detail="A terminal pending Driver profile cannot be closed by this lifecycle operation.",
-            )
-        pending_profiles.append(profile)
+    profiles_result = await db.execute(text("""
+        SELECT DriverID, BranchID, DriverStatus, EffectiveFromAt, EffectiveToAt,
+               TransferredFromDriverID, TransferredToDriverID
+        FROM core.Drivers
+        WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+        ORDER BY DriverID FOR UPDATE
+    """), {"company_id": company_id, "employee_id": employee_id})
+    profiles = [dict(row) for row in profiles_result.mappings().all()]
+    if not profiles:
+        raise HTTPException(status_code=422, detail="This operation requires Driver profiles.")
 
-    final_line = await db.execute(
-        text("""
-            SELECT 1
-            FROM payroll.PayrollFinalLines fl
-            JOIN core.Drivers d ON d.DriverID = fl.DriverID
-            WHERE d.CompanyID = :company_id
-              AND d.EmployeeID = :employee_id
-              AND fl.CompanyID = :company_id
-              AND fl.WorkDate IS NOT NULL
-              AND fl.WorkDate > :termination_date
-            LIMIT 1
-        """),
-        {
-            "company_id": company_id,
-            "employee_id": employee_id,
-            "termination_date": data.termination_date,
-        },
-    )
+    covering = await db.execute(text("""
+        SELECT d.DriverID, d.BranchID, d.DriverStatus
+        FROM core.Drivers d
+        WHERE d.CompanyID = :company_id AND d.EmployeeID = :employee_id
+          AND core.fn_DriverCoversWorkDate(d.CompanyID, d.DriverID, d.BranchID, :work_date)
+        ORDER BY d.EffectiveFromAt DESC, d.DriverID DESC
+        LIMIT 1
+    """), {"company_id": company_id, "employee_id": employee_id, "work_date": data.termination_date})
+    target = covering.mappings().first()
+    if target is None:
+        raise HTTPException(status_code=422, detail="A Driver assignment must overlap the termination WorkDate in its Branch.")
+    current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
+    permission_branch_id = current["branchid"] if current is not None else target["branchid"]
+    await _require_branch_write(company_id, user_id, permission_branch_id, db)
+
+    final_line = await db.execute(text("""
+        SELECT 1
+        FROM payroll.PayrollFinalLines fl
+        JOIN core.Drivers d ON d.DriverID = fl.DriverID
+        WHERE d.CompanyID = :company_id AND d.EmployeeID = :employee_id
+          AND fl.CompanyID = :company_id AND fl.WorkDate > :termination_date
+        LIMIT 1
+    """), {"company_id": company_id, "employee_id": employee_id,
+           "termination_date": data.termination_date})
     if final_line.first() is not None:
-        raise HTTPException(
-            status_code=422,
-            detail="Termination date cannot precede dated finalized payroll activity.",
-        )
+        raise HTTPException(status_code=422, detail="Termination date cannot precede dated finalized payroll activity.")
 
-    await db.execute(
-        text("SELECT set_config('flussra.workforce_op', 'terminate', TRUE)")
-    )
-    await db.execute(
-        text("""
-            UPDATE core.Employees
-            SET EmploymentStatus = 'Terminated', TerminationDate = :termination_date,
+    driver_ids = [profile["driverid"] for profile in profiles]
+    request_result = await db.execute(text("""
+        SELECT TransferRequestID
+        FROM core.DriverTransferRequests
+        WHERE CompanyID = :company_id AND DriverID = ANY(:driver_ids)
+          AND Status NOT IN ('Completed', 'Cancelled', 'Rejected')
+        ORDER BY TransferRequestID FOR UPDATE
+    """), {"company_id": company_id, "driver_ids": driver_ids})
+    request_ids = [row["transferrequestid"] for row in request_result.mappings().all()]
+
+    await db.execute(text("SELECT set_config('flussra.workforce_op', 'terminate', TRUE)"))
+    await db.execute(text("""
+        UPDATE core.Employees
+        SET EmploymentStatus = 'Terminated', TerminationDate = :termination_date,
+            UpdatedAtUtc = NOW()
+        WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+    """), {"company_id": company_id, "employee_id": employee_id,
+           "termination_date": data.termination_date})
+
+    closed_ids: list[int] = []
+    for profile in profiles:
+        cutoff_result = await db.execute(text("""
+        SELECT core.fn_LocalDateBoundary(b.TimeZoneId, CAST(:termination_date AS DATE) + 1)
+            FROM core.Branches b
+            WHERE b.CompanyID = :company_id AND b.BranchID = :branch_id
+        """), {"company_id": company_id, "branch_id": profile["branchid"],
+               "termination_date": data.termination_date})
+        cutoff = cutoff_result.scalar_one()
+        start = profile["effectivefromat"]
+        end = profile["effectivetoat"]
+        if profile["driverstatus"] == "Terminated" and end is not None and end <= cutoff:
+            continue
+        if end is not None and end <= cutoff and start < cutoff:
+            continue
+        new_end = start if start >= cutoff else min(end, cutoff) if end is not None else cutoff
+        await db.execute(text("""
+            UPDATE core.Drivers
+            SET DriverStatus = 'Terminated', EffectiveToAt = :effective_to_at,
                 UpdatedAtUtc = NOW()
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-        """),
-        {
-            "company_id": company_id,
-            "employee_id": employee_id,
-            "termination_date": data.termination_date,
-        },
-    )
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id AND DriverID = :driver_id
+        """), {"company_id": company_id, "employee_id": employee_id,
+               "driver_id": profile["driverid"], "effective_to_at": new_end})
+        closed_ids.append(profile["driverid"])
 
-    if current is not None:
-        closed = await db.execute(
-            text("""
-                UPDATE core.Drivers
-                SET DriverStatus = 'Terminated', EffectiveTo = :termination_date,
-                    UpdatedAtUtc = NOW()
-                WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-                  AND DriverID = :driver_id
-                  AND DriverStatus IN ('Active', 'Inactive', 'OnLeave', 'Transferred')
-                RETURNING DriverID
-            """),
-            {
-                "company_id": company_id,
-                "employee_id": employee_id,
-                "driver_id": current["driverid"],
-                "termination_date": data.termination_date,
-            },
-        )
-        if closed.scalar_one_or_none() is None:
-            raise HTTPException(status_code=409, detail="Driver lifecycle changed during termination.")
-
-    pending_ids: list[int] = []
-    for profile in pending_profiles:
-        effective_from = profile["effectivefrom"]
-        await db.execute(
-            text("""
-                UPDATE core.Drivers
-                SET DriverStatus = 'Terminated', EffectiveTo = :effective_to,
-                    UpdatedAtUtc = NOW()
-                WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-                  AND DriverID = :driver_id
-            """),
-            {
-                "company_id": company_id,
-                "employee_id": employee_id,
-                "driver_id": profile["driverid"],
-                "effective_to": effective_from - timedelta(days=1),
-            },
-        )
-        pending_ids.append(profile["driverid"])
-
-    now = datetime.now(UTC)
     cancelled_ids: list[int] = []
-    if active_requests:
-        request_ids = [row["transferrequestid"] for row in active_requests]
-        cancelled_result = await db.execute(
-            text("""
-                UPDATE core.DriverTransferRequests
-                SET Status = 'Cancelled', CancelledAtUtc = :now,
-                    CancelledByUserID = :user_id,
-                    CancelReason = :reason, UpdatedAtUtc = :now
-                WHERE CompanyID = :company_id
-                  AND TransferRequestID = ANY(:request_ids)
-                  AND Status NOT IN ('Completed', 'Cancelled', 'Rejected')
-                RETURNING TransferRequestID
-            """),
-            {
-                "now": now,
-                "user_id": user_id,
-                "reason": f"Cancelled because Employee {employee_id} was terminated on {data.termination_date}.",
-                "company_id": company_id,
-                "request_ids": request_ids,
-            },
-        )
+    if request_ids:
+        cancelled_result = await db.execute(text("""
+            UPDATE core.DriverTransferRequests
+            SET Status = 'Cancelled', CancelledAtUtc = NOW(),
+                CancelledByUserID = :user_id,
+                CancelReason = :reason, UpdatedAtUtc = NOW()
+            WHERE CompanyID = :company_id AND TransferRequestID = ANY(:request_ids)
+              AND Status NOT IN ('Completed', 'Cancelled', 'Rejected')
+            RETURNING TransferRequestID
+        """), {
+            "user_id": user_id,
+            "reason": f"Cancelled because Employee {employee_id} was terminated on {data.termination_date}.",
+            "company_id": company_id,
+            "request_ids": request_ids,
+        })
         cancelled_ids = [row["transferrequestid"] for row in cancelled_result.mappings().all()]
 
-    if data.termination_date <= business_date:
-        await sync_employee_branch_projection(company_id, employee_id, data.termination_date, db)
-
+    await sync_employee_branch_projection(company_id, employee_id, None, db)
     await workforce_audit.write_workforce_audit(
-        db,
-        company_id=company_id,
-        branch_id=branch_id,
-        actor_user_id=user_id,
-        action_code="DRIVER_EMPLOYEE_TERMINATED",
-        entity_name="Employees",
-        entity_id=employee_id,
-        old_value={
-            "employment_status": employee_row["employmentstatus"],
-            "termination_date": employee_row["terminationdate"],
-        },
-        new_value={
-            "employee_id": employee_id,
-            "termination_date": data.termination_date,
-            "reason": data.reason,
-            "current_driver_id": current["driverid"] if current is not None else None,
-            "pending_driver_ids": pending_ids,
-            "cancelled_transfer_request_ids": cancelled_ids,
-        },
+        db, company_id=company_id, branch_id=permission_branch_id, actor_user_id=user_id,
+        action_code="DRIVER_EMPLOYEE_TERMINATED", entity_name="Employees", entity_id=employee_id,
+        old_value={"employment_status": employee_row["employmentstatus"],
+                   "termination_date": employee_row["terminationdate"]},
+        new_value={"employee_id": employee_id, "termination_date": data.termination_date,
+                   "reason": data.reason, "workdate_driver_id": target["driverid"],
+                   "closed_driver_ids": closed_ids,
+                   "cancelled_transfer_request_ids": cancelled_ids},
     )
     return await get_employee(company_id, user_id, employee_id, db, require_view=False)
 
@@ -869,7 +758,7 @@ async def update_driver_profile(
         text("""
             SELECT d.DriverID, d.CompanyID, d.BranchID, d.EmployeeID, d.DriverCode,
                    d.CDLNumber, d.ExternalDriverID, d.DriverStatus,
-                   d.EffectiveFrom, d.EffectiveTo
+                   d.EffectiveFromAt, d.EffectiveToAt
             FROM core.Drivers d
             WHERE d.DriverID = :driver_id AND d.CompanyID = :company_id
             FOR UPDATE
@@ -882,24 +771,21 @@ async def update_driver_profile(
     await _require_branch_write(company_id, user_id, old["branchid"], db)
     updates = data.model_dump(exclude_unset=True)
     if updates:
-        business_date = await company_today(company_id, db)
         current = await resolve_effective_driver_profile(
-            company_id, old["employeeid"], business_date, db,
+            company_id, old["employeeid"], None, db,
         )
         is_current = current is not None and current["driverid"] == driver_id
         if old["driverstatus"] in {"Transferred", "Terminated"}:
             raise HTTPException(status_code=422, detail="Historical Driver profiles cannot be edited.")
         if not is_current:
-            effective_from = old["effectivefrom"]
-            is_pending = (
-                effective_from is not None
-                and effective_from > business_date
-                and not (
-                    old["driverstatus"] == "Terminated"
-                    and old["effectiveto"] == effective_from - timedelta(days=1)
-                )
-            )
-            if not is_pending:
+            pending_result = await db.execute(text("""
+                SELECT CAST(:effective_from_at AS TIMESTAMPTZ) > NOW()
+                   AND (CAST(:effective_to_at AS TIMESTAMPTZ) IS NULL
+                        OR CAST(:effective_to_at AS TIMESTAMPTZ)
+                           > CAST(:effective_from_at AS TIMESTAMPTZ))
+            """), {"effective_from_at": old["effectivefromat"],
+                   "effective_to_at": old["effectivetoat"]})
+            if not pending_result.scalar_one():
                 raise HTTPException(status_code=422, detail="Only current or pending Driver profiles can be edited.")
 
     columns = {"driver_code": "drivercode", "cdl_number": "cdlnumber", "external_driver_id": "externaldriverid", "driver_status": "driverstatus"}
@@ -933,7 +819,7 @@ async def _driver_dict(company_id: int, driver_id: int, db: AsyncConnection) -> 
         text("""
             SELECT d.DriverID, d.EmployeeID, d.CompanyID, d.BranchID, b.BranchName,
                    d.DriverCode, d.CDLNumber, d.ExternalDriverID, d.DriverStatus,
-                   d.EffectiveFrom, d.EffectiveTo, e.FullName, e.PreferredName,
+                   d.EffectiveFromAt, d.EffectiveToAt, e.FullName, e.PreferredName,
                    e.EmployeeKey, e.EmploymentStatus, e.Email, e.PrimaryPhone,
                    e.HireDate, e.TerminationDate
             FROM core.Drivers d JOIN core.Employees e ON e.EmployeeID = d.EmployeeID
@@ -954,19 +840,18 @@ async def find_employee_driver_profile(
     db: AsyncConnection,
 ) -> dict[str, Any] | None:
     """Return the current Driver profile, or the nearest pending profile if absent."""
-    business_date = await company_today(company_id, db)
-    current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
+    current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
     profile_id = current["driverid"] if current else None
     if profile_id is None:
         result = await db.execute(
             text("""
                 SELECT DriverID FROM core.Drivers
                 WHERE CompanyID = :cid AND EmployeeID = :eid
-                  AND EffectiveFrom > :today
-                  AND NOT (DriverStatus = 'Terminated' AND EffectiveTo = EffectiveFrom - 1)
-                ORDER BY EffectiveFrom, DriverID LIMIT 1
+                  AND EffectiveFromAt > NOW()
+                  AND (EffectiveToAt IS NULL OR EffectiveToAt > EffectiveFromAt)
+                ORDER BY EffectiveFromAt, DriverID LIMIT 1
             """),
-            {"cid": company_id, "eid": employee_id, "today": business_date},
+            {"cid": company_id, "eid": employee_id},
         )
         found = result.scalar_one_or_none()
         if found is None:

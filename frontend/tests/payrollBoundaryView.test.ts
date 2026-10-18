@@ -82,6 +82,14 @@ test('describeBoundaryChoice: biweekly future period, no "(current period)" suff
   assert.equal(describeBoundaryChoice(choice, 'onboarding'), 'Biweekly payroll period: Oct 7 – Oct 20');
 });
 
+test('describeBoundaryChoice: Company publication without Branch context has no current-date claim', () => {
+  const choice = makeChoice({ relation: null });
+  assert.equal(
+    describeBoundaryChoice(choice, 'publication'),
+    'Weekly payroll period: Sep 23 – Sep 29',
+  );
+});
+
 test('describeBoundaryChoice: custom interval frequency', () => {
   const choice = makeChoice({
     date: '2026-10-01',

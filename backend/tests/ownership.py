@@ -63,12 +63,12 @@ async def preserved_company_profile(db, company_code: str = "DEMO"):
     """Capture the Company's exact mutable profile, and restore and verify it on exit.
 
     PATCH /settings/company rewrites the whole company-wide profile (name, legal name,
-    notes, time zone, self-approval policy), which every other module reads. Restoration
+    notes, self-approval policy), which every other module reads. Restoration
     runs in ``finally`` -- whatever the body did, including raising -- and restores the
     values that were captured, never a hard-coded name. A restoration mismatch fails.
     """
     read = _text(
-        "SELECT companyname, legalname, timezonename, notes, allowselfapproval, updatedatutc "
+        "SELECT companyname, legalname, notes, allowselfapproval, updatedatutc "
         "FROM core.companies WHERE companycode = :code"
     )
     original = dict((await db.execute(read, {"code": company_code})).mappings().one())
@@ -78,12 +78,12 @@ async def preserved_company_profile(db, company_code: str = "DEMO"):
         await db.execute(
             _text("""
                 UPDATE core.companies
-                SET companyname = :name, legalname = :legal, timezonename = :tz,
+                SET companyname = :name, legalname = :legal,
                     notes = :notes, allowselfapproval = :allow_self, updatedatutc = :updated
                 WHERE companycode = :code
             """),
             {"name": original["companyname"], "legal": original["legalname"],
-             "tz": original["timezonename"], "notes": original["notes"],
+             "notes": original["notes"],
              "allow_self": original["allowselfapproval"], "updated": original["updatedatutc"],
              "code": company_code},
         )

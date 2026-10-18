@@ -88,8 +88,8 @@ async def phase5_onboarding_db(pg_instance):
                 VALUES (%s, %s, NULL, %s, %s, 'AllCompanyBranches', TRUE)
             """, (user_id, company_id, role_id, company_role_id))
             cursor.execute("""
-                INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                VALUES (%s, 'P5BRANCH', 'Phase 5 Branch', 'Active', FALSE)
+                INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                VALUES (%s, 'P5BRANCH', 'Phase 5 Branch', 'Active', FALSE, 'UTC')
                 RETURNING BranchID
             """, (company_id,))
             branch_id = cursor.fetchone()[0]
@@ -268,13 +268,13 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
             scope="Self", driver=True,
         )
         missing_assign = await client.post("/settings/branches", headers=_auth(create_only), json={
-            "branch_name": "Phase5 denied dated " + marker[:8],
+            "branch_name": "Phase5 denied dated " + marker[:8], "time_zone_id": "UTC",
             "branch_code": "P5D" + marker[:6], "first_payroll_start_date": "2090-01-01",
         })
         assert missing_assign.status_code == 403
         for token in (manager, assign_only, branch_scoped, driver_self):
             denied = await client.post("/settings/branches", headers=_auth(token), json={
-                "branch_name": "Phase5 denied " + uuid4().hex[:8],
+                "branch_name": "Phase5 denied " + uuid4().hex[:8], "time_zone_id": "UTC",
                 "branch_code": "P5X" + uuid4().hex[:6],
             })
             assert denied.status_code == 403, denied.text
@@ -285,7 +285,7 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
 
         branch_code = "P5L" + marker[:7]
         branch = await client.post("/settings/branches", headers=_auth(create_only), json={
-            "branch_name": "Phase5 no legacy authority " + marker[:8],
+            "branch_name": "Phase5 no legacy authority " + marker[:8], "time_zone_id": "UTC",
             "branch_code": branch_code,
         })
         assert branch.status_code == 201, branch.text
@@ -388,7 +388,7 @@ async def test_branch_onboarding_default_null_and_assignment_readiness(
                                    scope="AllCompanyBranches")
         no_default_missing_assign = await client.post(
             "/settings/branches", headers=_auth(create_only), json={
-                "branch_name": "Phase5 no default denied " + marker[:8],
+                "branch_name": "Phase5 no default denied " + marker[:8], "time_zone_id": "UTC",
                 "branch_code": "P5Q" + marker[:7],
                 "first_payroll_start_date": "2090-01-01",
             },
@@ -398,7 +398,7 @@ async def test_branch_onboarding_default_null_and_assignment_readiness(
             SELECT COUNT(*) FROM core.Branches WHERE CompanyID = :cid AND BranchCode = :code
         """), {"cid": company_id, "code": "P5Q" + marker[:7]})).scalar_one() == 0
         unassigned = await client.post("/settings/branches", headers=_auth(actor), json={
-            "branch_name": "Phase5 no default " + marker[:8],
+            "branch_name": "Phase5 no default " + marker[:8], "time_zone_id": "UTC",
             "branch_code": "P5N" + marker[:7],
             "first_payroll_start_date": "2090-01-01",
         })
@@ -415,7 +415,7 @@ async def test_branch_onboarding_default_null_and_assignment_readiness(
                                           json={"setup_id": setup_id})
         assert restored_setup.status_code == 204, restored_setup.text
         assigned = await client.post("/settings/branches", headers=_auth(actor), json={
-            "branch_name": "Phase5 assigned " + marker[:8],
+            "branch_name": "Phase5 assigned " + marker[:8], "time_zone_id": "UTC",
             "branch_code": "P5A" + marker[:7],
             "first_payroll_start_date": "2090-01-01",
         })
@@ -468,7 +468,7 @@ async def test_branch_onboarding_default_null_and_assignment_readiness(
             )
             assert changed_default.status_code == 204, changed_default.text
             cadence_branch = await client.post("/settings/branches", headers=_auth(actor), json={
-                "branch_name": f"Phase5 {frequency} cadence " + marker[:6],
+                "branch_name": f"Phase5 {frequency} cadence " + marker[:6], "time_zone_id": "UTC",
                 "branch_code": "P5" + frequency[:3].upper() + marker[:6],
                 "first_payroll_start_date": boundary,
             })
@@ -478,7 +478,7 @@ async def test_branch_onboarding_default_null_and_assignment_readiness(
 
         invalid_code = "P5I" + marker[:7]
         invalid = await client.post("/settings/branches", headers=_auth(actor), json={
-            "branch_name": "Phase5 invalid cadence " + marker[:8],
+            "branch_name": "Phase5 invalid cadence " + marker[:8], "time_zone_id": "UTC",
             "branch_code": invalid_code, "first_payroll_start_date": "2090-01-02",
         })
         assert invalid.status_code == 409, invalid.text
@@ -530,7 +530,7 @@ async def test_branch_onboarding_policy_audit_failure_rolls_back_all_branch_effe
     try:
         with pytest.raises(RuntimeError, match="Phase5 injected BranchAssigned audit failure"):
             await client.post("/settings/branches", headers=_auth(actor), json={
-                "branch_name": "Phase5 rollback " + marker[:8],
+                "branch_name": "Phase5 rollback " + marker[:8], "time_zone_id": "UTC",
                 "branch_code": branch_code, "first_payroll_start_date": "2090-01-01",
             })
         assert len(captured_branch_ids) == 1
@@ -582,7 +582,7 @@ async def test_concurrent_onboarding_uses_company_default_lock(
     try:
         async def create(suffix: str):
             return await client.post("/settings/branches", headers=_auth(actor), json={
-                "branch_name": f"Phase5 concurrent {suffix} {marker[:6]}",
+                "branch_name": f"Phase5 concurrent {suffix} {marker[:6]}", "time_zone_id": "UTC",
                 "branch_code": f"P5C{suffix}{marker[:6]}",
                 "first_payroll_start_date": "2090-01-01",
             })
@@ -641,7 +641,7 @@ async def test_onboarding_serializes_with_company_default_change(
     monkeypatch.setattr(branches, "lock_company", pause_after_onboarding_company_lock)
     monkeypatch.setattr(payroll_policy, "lock_company", observe_default_lock)
     onboard = asyncio.create_task(client.post("/settings/branches", headers=_auth(actor), json={
-        "branch_name": "P5 default race " + marker[:8], "branch_code": "P5D" + marker[:7],
+        "branch_name": "P5 default race " + marker[:8], "time_zone_id": "UTC", "branch_code": "P5D" + marker[:7],
         "first_payroll_start_date": "2090-01-01",
     }), name="p5-onboard-default")
     change = None
@@ -713,7 +713,7 @@ async def test_onboarding_serializes_with_version_replacement(
     monkeypatch.setattr(branches, "lock_setups", pause_after_onboarding_setup_lock)
     monkeypatch.setattr(payroll_policy, "lock_setups", observe_publish_setup_lock)
     onboard = asyncio.create_task(client.post("/settings/branches", headers=_auth(actor), json={
-        "branch_name": "P5 publish race " + marker[:8], "branch_code": "P5V" + marker[:7],
+        "branch_name": "P5 publish race " + marker[:8], "time_zone_id": "UTC", "branch_code": "P5V" + marker[:7],
         "first_payroll_start_date": "2090-01-01",
     }), name="p5-onboard-version")
     publisher = None
@@ -775,7 +775,7 @@ async def test_onboarding_serializes_with_setup_archive(
     monkeypatch.setattr(branches, "lock_setups", pause_after_onboarding_setup_lock)
     monkeypatch.setattr(payroll_policy, "lock_setups", observe_archive_setup_lock)
     onboard = asyncio.create_task(client.post("/settings/branches", headers=_auth(actor), json={
-        "branch_name": "P5 archive race " + marker[:8], "branch_code": "P5X" + marker[:7],
+        "branch_name": "P5 archive race " + marker[:8], "time_zone_id": "UTC", "branch_code": "P5X" + marker[:7],
         "first_payroll_start_date": "2090-01-01",
     }), name="p5-onboard-archive")
     archiver = None
@@ -841,7 +841,7 @@ async def test_no_applicable_version_and_inactive_branch_both_roll_back(
     ):
         branch_code = "P5Z" + suffix + marker[:6]
         response = await client.post("/settings/branches", headers=_auth(actor), json={
-            "branch_name": f"Phase5 rollback {suffix} " + marker[:8],
+            "branch_name": f"Phase5 rollback {suffix} " + marker[:8], "time_zone_id": "UTC",
             "branch_code": branch_code, "first_payroll_start_date": "2090-01-01",
             **extra,
         })
@@ -901,7 +901,7 @@ async def test_branch_create_default_requires_settings_admin(
         #    original default still default.
         code1 = "P6D" + uuid4().hex[:7]
         ordinary = await client.post("/settings/branches", headers=_auth(create_only), json={
-            "branch_name": "P6 ordinary " + marker[:8],
+            "branch_name": "P6 ordinary " + marker[:8], "time_zone_id": "UTC",
             "branch_code": code1,
         })
         assert ordinary.status_code == 201, ordinary.text
@@ -914,7 +914,7 @@ async def test_branch_create_default_requires_settings_admin(
         #    original default unchanged.
         code2 = "P6D" + uuid4().hex[:7]
         denied_create_only = await client.post("/settings/branches", headers=_auth(create_only), json={
-            "branch_name": "P6 denied create-only " + marker[:8],
+            "branch_name": "P6 denied create-only " + marker[:8], "time_zone_id": "UTC",
             "branch_code": code2, "is_default": True,
         })
         assert denied_create_only.status_code == 403, denied_create_only.text
@@ -929,7 +929,7 @@ async def test_branch_create_default_requires_settings_admin(
         #    default authority); no branch created.
         code3 = "P6D" + uuid4().hex[:7]
         denied_assign = await client.post("/settings/branches", headers=_auth(create_assign), json={
-            "branch_name": "P6 denied assign " + marker[:8],
+            "branch_name": "P6 denied assign " + marker[:8], "time_zone_id": "UTC",
             "branch_code": code3, "is_default": True,
         })
         assert denied_assign.status_code == 403, denied_assign.text
@@ -941,7 +941,7 @@ async def test_branch_create_default_requires_settings_admin(
         #    required); no branch created.
         code4 = "P6D" + uuid4().hex[:7]
         denied_admin_only = await client.post("/settings/branches", headers=_auth(admin_only), json={
-            "branch_name": "P6 denied admin-only " + marker[:8],
+            "branch_name": "P6 denied admin-only " + marker[:8], "time_zone_id": "UTC",
             "branch_code": code4, "is_default": True,
         })
         assert denied_admin_only.status_code == 403, denied_admin_only.text
@@ -954,7 +954,7 @@ async def test_branch_create_default_requires_settings_admin(
         #    now reads is_default False.
         code5 = "P6D" + uuid4().hex[:7]
         promoted = await client.post("/settings/branches", headers=_auth(create_admin), json={
-            "branch_name": "P6 promoted " + marker[:8],
+            "branch_name": "P6 promoted " + marker[:8], "time_zone_id": "UTC",
             "branch_code": code5, "is_default": True,
         })
         assert promoted.status_code == 201, promoted.text
@@ -970,7 +970,7 @@ async def test_branch_create_default_requires_settings_admin(
         #    -> 403 (assign still independently required); no branch created.
         code6 = "P6D" + uuid4().hex[:7]
         denied_dated = await client.post("/settings/branches", headers=_auth(create_admin), json={
-            "branch_name": "P6 denied dated " + marker[:8],
+            "branch_name": "P6 denied dated " + marker[:8], "time_zone_id": "UTC",
             "branch_code": code6, "is_default": True,
             "first_payroll_start_date": "2090-01-01",
         })

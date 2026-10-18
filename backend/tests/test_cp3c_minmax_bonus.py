@@ -74,6 +74,12 @@ async def _insert_period_db(
     )).mappings().first()
     await db.commit()
     assert r is not None
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    await _create_period_driver_eligibility_rows(
+        r["payrollperiodid"], 1, branch_id, db, snapshot_source="Generated",
+        freeze=status in {"Open", "Returned"},
+    )
+    await db.commit()
     return r["payrollperiodid"]
 
 
@@ -243,8 +249,8 @@ async def cp3c_branch_id(direct_db: AsyncConnection) -> int:
     row = (await direct_db.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {
@@ -266,12 +272,19 @@ async def _get_or_create_driver(
     # another branch/test.
     driver_code = f"{driver_code}-{uuid.uuid4().hex[:8]}"
     resp = await session_client.post(
-        "/core/drivers",
-        json={"branch_id": branch_id, "full_name": full_name, "driver_code": driver_code},
+        "/workforce/employees",
+        json={
+            "branch_id": branch_id, "full_name": full_name,
+            "hire_date": "1990-01-01",
+            "driver_profile": {
+                "driver_code": driver_code,
+                "effective_from_at": "2000-01-01T00:00:00Z",
+            },
+        },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["current_or_pending_driver"]["driver_id"]
 
 
 @pytest_asyncio.fixture

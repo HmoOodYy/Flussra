@@ -471,8 +471,9 @@ async def _query_driver_counts(
             FROM   core.drivers   d
             JOIN   core.employees e ON e.employeeid = d.employeeid
             WHERE  d.companyid        = :company_id
-              AND  d.driverstatus     = 'Active'
-              AND  e.employmentstatus = 'Active'
+              AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+              AND  e.employmentstatus IN ('Active', 'Terminated')
+              AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid) = d.driverid
               {_and(branch_filter)}
             GROUP  BY d.branchid
         """),
@@ -715,8 +716,9 @@ async def _compute_setup_warnings(
                 JOIN   core.employees e ON e.employeeid  = d.employeeid
                 JOIN   core.branches  b ON b.branchid    = d.branchid
                 WHERE  d.companyid        = :company_id
-                  AND  d.driverstatus     = 'Active'
-                  AND  e.employmentstatus = 'Active'
+                  AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+                  AND  e.employmentstatus IN ('Active', 'Terminated')
+                  AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid) = d.driverid
                   {_and(bf_d)}
                   AND  NOT EXISTS (
                       SELECT 1

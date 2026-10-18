@@ -102,6 +102,12 @@ async def _open_period(
         """),
         {"bid": branch_id, "code": code, "name": f"M14 {start}", "start": _date.fromisoformat(start), "end": _date.fromisoformat(end)},
     )).mappings().first()
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    await _create_period_driver_eligibility_rows(
+        row["payrollperiodid"], 1, branch_id, db, snapshot_source="Generated",
+        freeze=status in {"Open", "Returned"},
+    )
+    await db.commit()
     return {"payroll_period_id": row["payrollperiodid"]}
 
 
@@ -144,8 +150,8 @@ async def paytest_branch_id(session_db_conn) -> int:
     branch_id = (await session_db_conn.execute(
         _sqla_text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """), {"code": f"M14_{marker[:12]}", "name": f"M14 owned branch {marker[:8]}"},
     )).scalar_one()
@@ -180,16 +186,20 @@ async def paytest_driver_id(
     """Use one M14-owned Driver; finalization history never reaches global PAYTEST."""
     marker = uuid.uuid4().hex
     created = await session_client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
             "branch_id": paytest_branch_id,
             "full_name": f"M14 owned driver {marker}",
-            "driver_code": f"M14D-{marker[:10]}",
+            "hire_date": "1990-01-01",
+            "driver_profile": {
+                "driver_code": f"M14D-{marker[:10]}",
+                "effective_from_at": "2000-01-01T00:00:00Z",
+            },
         },
         headers=auth(auth_token),
     )
     assert created.status_code == 201, f"M14 Driver create failed: {created.text}"
-    return int(created.json()["driver_id"])
+    return int(created.json()["current_or_pending_driver"]["driver_id"])
 
 
 # ---------------------------------------------------------------------------

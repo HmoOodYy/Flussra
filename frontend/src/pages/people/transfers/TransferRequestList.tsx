@@ -1,7 +1,7 @@
 import type { Dispatch } from 'react';
 import type { DriverTransferRequest } from '../../../types/transfer';
 import { statusKind, statusLabel, TRANSFER_ACTIVE } from '../../../types/transfer';
-import { FILTER_LABELS, fmtDate, type FilterView } from './transferRequestsView';
+import { FILTER_LABELS, fmtEffectiveAt, type FilterView } from './transferRequestsView';
 import type { TabAction, TabState } from './transferRequestsState';
 import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
@@ -101,7 +101,7 @@ function TransferCard({
           <span className={styles.scopeChip}>
             {req.initiated_by === 'Driver' ? '🧑 Driver request' : '🏢 Branch initiated'}
           </span>
-          <span className={styles.scopeChip}>Effective {fmtDate(req.effective_date)}</span>
+          <span className={styles.scopeChip}>Effective {fmtEffectiveAt(req.effective_at)}</span>
         </div>
       </div>
     </button>

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, timedelta
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -24,14 +24,18 @@ def user_payload(*, staged: bool = True, **values) -> dict:
     }
 
 
-async def employee(client: httpx.AsyncClient, token: str, *, driver: bool = False, future: bool = False) -> dict:
+async def employee(
+    client: httpx.AsyncClient, token: str, db, *, driver: bool = False, future: bool = False,
+) -> dict:
     profile = None
     if driver:
         profile = {"driver_code": f"P2A-{uuid4().hex[:10]}"}
         if future:
-            profile["effective_from"] = (date.today() + timedelta(days=365)).isoformat()
+            profile["effective_from_at"] = (await db.execute(
+                text("SELECT NOW() + INTERVAL '365 days'")
+            )).scalar_one().isoformat()
         else:
-            profile["effective_from"] = "2000-01-01"
+            profile["effective_from_at"] = datetime(2000, 1, 1, tzinfo=UTC).isoformat()
     response = await client.post(
         "/workforce/employees",
         json={"branch_id": 1, "full_name": f"P2a Employee {uuid4().hex[:8]}",
@@ -66,8 +70,8 @@ async def provision(client: httpx.AsyncClient, token: str, user_id: int, role_id
 
 @pytest.mark.asyncio
 async def test_staged_account_link_lifecycle_and_constraints(client, auth_token, db_conn):
-    first_employee = await employee(client, auth_token)
-    second_employee = await employee(client, auth_token)
+    first_employee = await employee(client, auth_token, db_conn)
+    second_employee = await employee(client, auth_token, db_conn)
     first_user = await staged_user(client, auth_token)
     second_user = await staged_user(client, auth_token)
     first_id, second_id = first_employee["employee_id"], second_employee["employee_id"]
@@ -100,12 +104,12 @@ async def test_staged_account_link_lifecycle_and_constraints(client, auth_token,
         """), {"eid": first_id, "username": duplicate["username"]})
 
     cross_company_id = (await db_conn.execute(text("""
-        INSERT INTO core.Companies (CompanyCode, CompanyName, LegalName, Status, IsSuspended, TimeZoneName)
-        VALUES (:code, 'P2a Company', 'P2a Company', 'Active', FALSE, 'UTC') RETURNING CompanyID
+        INSERT INTO core.Companies (CompanyCode, CompanyName, LegalName, Status, IsSuspended)
+        VALUES (:code, 'P2a Company', 'P2a Company', 'Active', FALSE) RETURNING CompanyID
     """), {"code": f"P2A{uuid4().hex[:8]}"})).scalar_one()
     cross_branch_id = (await db_conn.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, 'P2A', 'P2a Branch', 'Active', TRUE) RETURNING BranchID
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, 'P2A', 'P2a Branch', 'Active', TRUE, 'UTC') RETURNING BranchID
     """), {"cid": cross_company_id})).scalar_one()
     cross_employee_id = (await db_conn.execute(text("""
         INSERT INTO core.Employees (CompanyID, BranchID, FullName, EmploymentStatus)
@@ -238,11 +242,11 @@ async def test_create_modes_and_driver_boundary_are_access_only(client, auth_tok
     role_conflict = await client.post("/admin/users", json=user_payload(staged=True, role_assignment={"company_role_id": role_id, "scope_type": "AllCompanyBranches"}), headers=auth(auth_token))
     assert role_conflict.status_code == 422
 
-    current = await employee(client, auth_token, driver=True)
+    current = await employee(client, auth_token, db_conn, driver=True)
     assert current["linked_user"] is None
-    future = await employee(client, auth_token, driver=True, future=True)
-    specific_employee = await employee(client, auth_token, driver=True)
-    all_branch_employee = await employee(client, auth_token, driver=True)
+    future = await employee(client, auth_token, db_conn, driver=True, future=True)
+    specific_employee = await employee(client, auth_token, db_conn, driver=True)
+    all_branch_employee = await employee(client, auth_token, db_conn, driver=True)
     driver_role = await company_role(client, auth_token, "DRIVER")
     counts_before = (await db_conn.execute(text("SELECT (SELECT COUNT(*) FROM core.Employees), (SELECT COUNT(*) FROM core.Drivers)"))).one()
 
@@ -584,7 +588,7 @@ async def test_disabled_final_owner_is_staged_by_owner_transfer(client, auth_tok
     original_employee_id = owner["employee_id"]
     original_is_staged = owner["is_staged"]
     original_can_login = owner["can_login"]
-    employee_row = await employee(client, auth_token)
+    employee_row = await employee(client, auth_token, db_conn)
     linked = await client.put(
         f"/admin/users/{owner_id}/employee-link",
         json={"employee_id": employee_row["employee_id"]}, headers=auth(auth_token),

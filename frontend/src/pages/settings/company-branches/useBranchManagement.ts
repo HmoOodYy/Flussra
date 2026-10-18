@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { UserProfile } from '../../../store/authStore';
 import type { BranchAdmin, CompanyProfile } from '../../../types/settings';
-import { createSettingsBranch, getCompanyProfile, getSettingsBranches, setDefaultSettingsBranch, updateSettingsBranch } from '../../../lib/settingsApi';
+import { createSettingsBranch, getCompanyProfile, getSettingsBranches, getSupportedTimeZones, setDefaultSettingsBranch, updateSettingsBranch } from '../../../lib/settingsApi';
 import type { ApiErrorInfo } from '../../../lib/payrollSetupErrors';
 import { readApiError } from '../../../lib/payrollSetupErrors';
 import type { CompanyBranchesCapabilities } from './companyBranchesView';
@@ -20,6 +20,8 @@ export function useBranchManagement({
   setCompany,
   setSuccessInfo,
   showToast,
+  bForm,
+  setBForm,
 }: {
   modal: 'create' | 'edit' | null;
   setModal: Dispatch<SetStateAction<'create' | 'edit' | null>>;
@@ -29,15 +31,17 @@ export function useBranchManagement({
   setCompany: Dispatch<SetStateAction<CompanyProfile | null>>;
   setSuccessInfo: Dispatch<SetStateAction<SuccessInfo | null>>;
   showToast: (msg: string, warn?: boolean) => void;
+  bForm: BranchForm;
+  setBForm: Dispatch<SetStateAction<BranchForm>>;
 }) {
   const [branches, setBranches] = useState<BranchAdmin[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(true);
   const [branchesError, setBranchesError] = useState('');
+  const [timeZones, setTimeZones] = useState<string[]>([]);
   const [filter, setFilter] = useState<'All' | 'Active' | 'Inactive' | 'Closed'>('All');
   const [searchQuery, setSearchQuery] = useState('');
 
   const [editingBranch, setEditingBranch] = useState<BranchAdmin | null>(null);
-  const [bForm, setBForm] = useState<BranchForm>(EMPTY_FORM);
   const [savingBranch, setSavingBranch] = useState(false);
   const [bSaveErr, setBSaveErr] = useState('');
   const [bCreateErr, setBCreateErr] = useState<ApiErrorInfo | null>(null);
@@ -47,6 +51,11 @@ export function useBranchManagement({
     getSettingsBranches()
       .then(({ data }) => { setBranches(data); setBranchesLoading(false); })
       .catch((e) => { setBranchesError(apiError(e)); setBranchesLoading(false); });
+  }, []);
+
+  useEffect(() => {
+    getSupportedTimeZones().then(({ data }) => setTimeZones(data))
+      .catch((e) => setBranchesError(apiError(e)));
   }, []);
 
   const filtered = useMemo(() => {
@@ -155,6 +164,7 @@ export function useBranchManagement({
 
   return {
     branches,
+    timeZones,
     branchesLoading,
     branchesError,
     filter,

@@ -255,8 +255,8 @@ async def paytest_branch_id(session_db_conn) -> int:
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": (code := f"CP4A_{uuid.uuid4().hex[:10]}"), "name": code},

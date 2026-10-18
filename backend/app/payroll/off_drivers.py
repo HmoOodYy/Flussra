@@ -13,9 +13,9 @@ from app.access.policy import require_non_driver_subject
 from app.payroll import status_evidence
 from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
-    _period_has_driver_eligibility_snapshot,
+    require_period_eligibility_snapshot,
 )
-from app.payroll.period_day_calendar import _validate_period_work_date
+from app.payroll.period_day_calendar import _validate_period_work_date, resolve_period_work_date
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import (
     FullyOffDriverSummary,
@@ -102,91 +102,34 @@ async def _eligible_driver_days(
     *,
     candidate_days: set[date] | None = None,
 ) -> dict[int, tuple[_DriverIdentity, set[date]]]:
-    """Return date-level eligibility using the Fully-Off denominator or a selected date."""
+    """Return date eligibility exclusively from the required frozen roster."""
+    await require_period_eligibility_snapshot(
+        _period_id(period), company_id, period.branch_id, db,
+    )
     eligible_dates = candidate_days if candidate_days is not None else await _scheduled_work_days(period, db)
     if not eligible_dates:
         return {}
-
-    if await _period_has_driver_eligibility_snapshot(_period_id(period), db):
-        rows = (await db.execute(
-            text("""
-                SELECT pde.driverid,
-                       COALESCE(NULLIF(pde.drivernamesnapshot, ''), e.fullname, '') AS drivername,
-                       COALESCE(NULLIF(pde.drivercodesnapshot, ''), d.drivercode) AS drivercode,
-                       pde.iseligibleforperiod, pde.eligibilityreasoncode,
-                       pde.hiredatesnapshot, pde.terminationdatesnapshot,
-                       pde.drivereffectivefromsnapshot, pde.drivereffectivetosnapshot
-                FROM payroll.payrollperioddrivereligibility pde
-                LEFT JOIN core.drivers d ON d.driverid = pde.driverid
-                LEFT JOIN core.employees e ON e.employeeid = d.employeeid
-                WHERE pde.payrollperiodid = :period_id
-                  AND pde.companyid = :company_id
-                  AND pde.branchid = :branch_id
-                  AND pde.iseligibleforperiod = TRUE
-                ORDER BY COALESCE(NULLIF(pde.drivernamesnapshot, ''), e.fullname, ''),
-                         COALESCE(NULLIF(pde.drivercodesnapshot, ''), d.drivercode),
-                         pde.driverid
-            """),
-            {
-                "period_id": _period_id(period),
-                "company_id": company_id,
-                "branch_id": period.branch_id,
-            },
-        )).mappings().all()
-        output: dict[int, tuple[_DriverIdentity, set[date]]] = {}
-        for row in rows:
-            snapshot = SimpleNamespace(**dict(row))
-            eligible_days = {
-                work_date for work_date in eligible_dates
-                if _is_snapshot_row_eligible_for_workdate(snapshot, work_date)
-            }
-            if eligible_days:
-                driver_id = int(row["driverid"])
-                output[driver_id] = (
-                    _DriverIdentity(driver_id, row["drivername"], row["drivercode"]),
-                    eligible_days,
-                )
-        return output
-
-    rows = (await db.execute(
-        text("""
-            SELECT d.driverid, e.fullname AS drivername, d.drivercode,
-                   d.driverstatus, d.effectivefrom, d.effectiveto,
-                   e.employmentstatus, e.hiredate, e.terminationdate
-            FROM core.drivers d
-            JOIN core.employees e ON e.employeeid = d.employeeid
-            WHERE d.companyid = :company_id
-              AND d.branchid = :branch_id
-              AND e.employmentstatus = 'Active'
-              AND (d.driverstatus = 'Active'
-                   OR (d.driverstatus = 'Transferred'
-                       AND d.effectiveto IS NOT NULL
-                       AND d.effectiveto >= :period_start))
-              AND (e.hiredate IS NULL OR e.hiredate <= :period_end)
-              AND (e.terminationdate IS NULL OR e.terminationdate >= :period_start)
-              AND (d.effectivefrom IS NULL OR d.effectivefrom <= :period_end)
-              AND (d.effectiveto IS NULL OR d.effectiveto >= :period_start)
-            ORDER BY e.fullname, d.drivercode, d.driverid
-        """),
-        {
-            "company_id": company_id,
-            "branch_id": period.branch_id,
-            "period_start": period.start_date,
-            "period_end": period.end_date,
-        },
-    )).mappings().all()
-    output = {}
+    rows = (await db.execute(text("""
+        SELECT pde.driverid,
+               COALESCE(pde.drivernamesnapshot, '') AS drivername,
+               pde.drivercodesnapshot AS drivercode,
+               pde.iseligibleforperiod, pde.eligibilityreasoncode,
+               pde.eligibleworkdates
+        FROM payroll.payrollperioddrivereligibility pde
+        WHERE pde.payrollperiodid = :period_id AND pde.companyid = :company_id
+          AND pde.branchid = :branch_id AND pde.iseligibleforperiod = TRUE
+        ORDER BY COALESCE(pde.drivernamesnapshot, ''),
+                 pde.drivercodesnapshot, pde.driverid
+    """), {
+        "period_id": _period_id(period), "company_id": company_id,
+        "branch_id": period.branch_id,
+    })).mappings().all()
+    output: dict[int, tuple[_DriverIdentity, set[date]]] = {}
     for row in rows:
+        snapshot = SimpleNamespace(**dict(row))
         eligible_days = {
             work_date for work_date in eligible_dates
-            if (row["hiredate"] is None or row["hiredate"] <= work_date)
-            and (row["terminationdate"] is None or row["terminationdate"] >= work_date)
-            and (row["effectivefrom"] is None or row["effectivefrom"] <= work_date)
-            and (row["effectiveto"] is None or row["effectiveto"] >= work_date)
-            and (row["driverstatus"] == "Active"
-                 or (row["driverstatus"] == "Transferred"
-                     and row["effectiveto"] is not None
-                     and row["effectiveto"] >= work_date))
+            if _is_snapshot_row_eligible_for_workdate(snapshot, work_date)
         }
         if eligible_days:
             driver_id = int(row["driverid"])
@@ -425,12 +368,15 @@ async def get_off_drivers_summary(
 
 async def get_selected_day_off_drivers(
     period_id: int,
-    work_date: date,
+    work_date: date | None,
     company_id: int,
     user_id: int,
     db: AsyncConnection,
 ) -> SelectedDayOffDriversResponse:
     period = await _readable_period(period_id, company_id, user_id, db)
+    work_date = await resolve_period_work_date(
+        company_id, period.branch_id, period.start_date, period.end_date, work_date, db,
+    )
     await _validate_period_work_date(
         _period_id(period), work_date, period.start_date, period.end_date, db,
     )

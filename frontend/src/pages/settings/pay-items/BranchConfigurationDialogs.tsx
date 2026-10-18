@@ -1,7 +1,6 @@
 import type { BranchAdmin } from '../../../types/settings';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import type { BulkBranchConfigResult } from '../../../types/compensation';
-import { todayISO } from './payItemsModel';
 import styles from './PayItemsPage.module.css';
 
 interface ConfigurationEditorProps {
@@ -77,10 +76,10 @@ export function ConfigurationEditor({
                   Pick a specific date
                 </label>
                 {editUseDate ? (
-                  <input type="date" className={styles.input} value={editDate} min={todayISO()}
+                  <input type="date" className={styles.input} value={editDate}
                     onChange={e => setEditDate(e.target.value)} />
                 ) : (
-                  <div className={styles.inputNote}>Today, or after any open payroll period.</div>
+                  <div className={styles.inputNote}>Each Branch uses its business date, subject to open payroll period rules.</div>
                 )}
               </div>
               <div className={styles.formGroup}>

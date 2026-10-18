@@ -8,7 +8,7 @@ import {
 } from '../../../lib/transferApi';
 import type { TargetDecisionRequest } from '../../../types/transfer';
 import { useAuth } from '../../../store/authStore';
-import { apiError, matchesFilter } from './transferRequestsView';
+import { apiError, matchesFilter, normalizeUtcDateTimeLocal } from './transferRequestsView';
 import { INITIAL, reducer } from './transferRequestsState';
 
 export function useTransferRequests(branches: Branch[]) {
@@ -87,13 +87,17 @@ export function useTransferRequests(branches: Branch[]) {
     const { create } = st;
     if (!create.driverId) { dispatch({ type: 'CREATE_ERR', err: 'Please select a driver.' }); return; }
     if (!create.targetBranchId) { dispatch({ type: 'CREATE_ERR', err: 'Please select a target branch.' }); return; }
-    if (!create.effectiveDate) { dispatch({ type: 'CREATE_ERR', err: 'Effective date is required.' }); return; }
+    const parsedEffectiveAt = create.effectiveAt ? normalizeUtcDateTimeLocal(create.effectiveAt) : null;
+    if (create.effectiveAt && !parsedEffectiveAt) {
+      dispatch({ type: 'CREATE_ERR', err: 'Enter a valid effective time in UTC.' }); return;
+    }
+    const effectiveAt = parsedEffectiveAt ?? undefined;
     dispatch({ type: 'CREATE_LOADING', val: true });
     try {
       const req = await createTransfer({
         driver_id:        create.driverId,
         target_branch_id: create.targetBranchId,
-        effective_date:   create.effectiveDate,
+        effective_at:     effectiveAt,
         initiated_by:     'SourceBranch',
         reason:           create.reason.trim() || undefined,
         notes:            create.notes.trim() || undefined,

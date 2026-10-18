@@ -268,8 +268,8 @@ class TestSectionGating:
 
         branch_id = int((await direct_db.execute(
             _text("""
-                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-                VALUES (1, :code, 'Dashboard isolated', 'Active', FALSE)
+                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+                VALUES (1, :code, 'Dashboard isolated', 'Active', FALSE, 'UTC')
                 RETURNING branchid
             """), {"code": f"DASH_{uuid4().hex}"}
         )).scalar_one())

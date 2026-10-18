@@ -6,7 +6,6 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from . import clock
 from .chronology import ScheduleSegment, is_timeline_start, timeline_previous_start
 from .errors import PolicyError
 from .validation import terminal_segments
@@ -28,11 +27,10 @@ def onboarding_window_floor(segments: Sequence[ScheduleSegment], today: date) ->
 
 
 async def ensure_onboarding_window(
-    db: AsyncConnection, company_id: int, setup_id: int, start: date,
+    db: AsyncConnection, setup_id: int, start: date, business_date: date,
 ) -> None:
     segments = await terminal_segments(db, setup_id)
-    today = await clock.company_today(company_id, db)
-    floor = onboarding_window_floor(segments, today)
+    floor = onboarding_window_floor(segments, business_date)
     if floor is not None and start < floor:
         raise PolicyError(
             "ONBOARDING_START_TOO_EARLY",

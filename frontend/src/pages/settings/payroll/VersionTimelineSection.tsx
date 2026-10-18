@@ -14,13 +14,16 @@ type VersionTimelineSectionProps = {
 export function VersionTimelineSection({ versions, loading, error }: VersionTimelineSectionProps) {
   const timelineVersions = useMemo(() => timelinePublishedVersions(versions), [versions]);
   const displayNumbers = useMemo(() => effectiveDisplayVersionNumbers(versions), [versions]);
+  const hasBranchContext = versions.length > 0 && versions[0].reference_branch_id != null;
 
   return (
     <section className={styles.versionTimeline} aria-labelledby="version-timeline-title">
       <div className={styles.versionTimelineHeader}>
         <div>
           <h3 id="version-timeline-title" className={styles.versionTimelineTitle}>Version Timeline</h3>
-          <p className={styles.versionTimelineSubtitle}>See the published policy changes that have taken effect.</p>
+          <p className={styles.versionTimelineSubtitle}>{hasBranchContext
+            ? 'See the published policy changes that have taken effect for this Branch.'
+            : 'Select a Branch to identify its current and upcoming policy changes.'}</p>
         </div>
       </div>
       {error ? (
@@ -30,7 +33,9 @@ export function VersionTimelineSection({ versions, loading, error }: VersionTime
       ) : loading ? (
         <p className={styles.versionTimelineMessage}>Loading published versions…</p>
       ) : timelineVersions.length === 0 ? (
-        <p className={styles.versionTimelineMessage}>No version has taken effect yet.</p>
+        <p className={styles.versionTimelineMessage}>{hasBranchContext
+          ? 'No version has taken effect for this Branch yet.'
+          : 'No published versions are available.'}</p>
       ) : (
         <ol className={styles.versionTimelineList}>
           {timelineVersions.map((version) => (
@@ -39,7 +44,9 @@ export function VersionTimelineSection({ versions, loading, error }: VersionTime
               <article className={styles.versionTimelineCard}>
                 <div className={styles.versionTimelineCardHeader}>
                   <div className={styles.versionTimelineVersion}>
-                    <strong>{`Version ${displayNumbers.get(version.version_id) ?? '—'}`}</strong>
+                    <strong>{hasBranchContext
+                      ? `Version ${displayNumbers.get(version.version_id) ?? ''}`
+                      : 'Published schedule'}</strong>
                     {version.is_current && <span className={styles.versionTimelineCurrent}>Current</span>}
                   </div>
                   <span className={styles.versionTimelineDate}>{timelineDateRange(version)}</span>

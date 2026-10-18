@@ -16,6 +16,7 @@ import type {
 } from '../types/review';
 import styles from './ReviewDetailDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../lib/money';
+import { formatIsoLong, isValidIsoDate } from '../lib/isoDate';
 
 interface Props {
   item: ReviewItemSummary;
@@ -46,10 +47,7 @@ function formatTimestamp(value: string | null | undefined): string {
 
 function formatDate(value: string | null): string {
   if (!value) return '-';
-  const date = new Date(`${value}T00:00:00`);
-  return Number.isNaN(date.valueOf())
-    ? value
-    : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return isValidIsoDate(value) ? formatIsoLong(value) : value;
 }
 
 function statusLabel(status: string): string {

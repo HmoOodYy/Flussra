@@ -88,8 +88,8 @@ async def phase4_policy_db(pg_instance):
                 VALUES (%s, %s, NULL, %s, %s, 'AllCompanyBranches', TRUE)
             """, (user_id, company_id, role_id, company_role_id))
             cursor.execute("""
-                INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                VALUES (%s, 'P4BRANCH', 'Phase 4 Branch', 'Active', FALSE)
+                INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                VALUES (%s, 'P4BRANCH', 'Phase 4 Branch', 'Active', FALSE, 'UTC')
                 RETURNING BranchID
             """, (company_id,))
             branch_id = cursor.fetchone()[0]

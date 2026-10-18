@@ -35,6 +35,8 @@ function makeVersion(overrides: Partial<VersionResponse> = {}, schedule: Partial
     replaced_by_version_id: null,
     is_terminal: true,
     is_current: true,
+    reference_date: '2026-01-04',
+    reference_branch_id: 7,
     ...overrides,
   };
 }
@@ -147,6 +149,16 @@ test('timelinePublishedVersions keeps current and historical terminal Published 
 test('timelinePublishedVersions is empty for a future-only response with no backend current version', () => {
   const future = makeVersion({ version_id: 3, effective_from_date: '2090-01-04', is_current: false });
   assert.deepEqual(timelinePublishedVersions([future]), []);
+});
+
+test('without Branch context, published history is unclassified and never labeled current', () => {
+  const older = makeVersion({ version_id: 2, effective_from_date: '2025-01-04', effective_to_date: '2025-12-31', is_current: null });
+  const latest = makeVersion({ version_id: 3, effective_from_date: '2026-01-01', is_current: null, reference_date: null, reference_branch_id: null });
+  const versions = [older, latest].map((version) => ({ ...version, reference_date: null, reference_branch_id: null, is_current: null }));
+  assert.deepEqual(timelinePublishedVersions(versions).map((version) => version.version_id), [3, 2]);
+  assert.equal(effectiveDisplayVersionNumbers(versions).size, 0);
+  assert.equal(timelineDateRange(latest), 'Jan 1, 2026 — Open-ended');
+  assert.equal(startingPointLabel(latest, versions), 'Latest published schedule — starts Jan 1, 2026');
 });
 
 test('effective display numbering follows effective chronology, not internal publication order', () => {

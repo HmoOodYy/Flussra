@@ -133,10 +133,22 @@ async def _seed_snapshot(
                 INSERT INTO payroll.payrollperioddrivereligibility
                     (companyid, branchid, payrollperiodid, driverid,
                      drivercodesnapshot, drivernamesnapshot,
+                     drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
+                     branchtimezoneidsnapshot, eligibleworkdates,
                      iseligibleforperiod, eligibilityreasoncode, snapshotsource,
                      createdatutc, updatedatutc)
-                VALUES (1, :bid, :pid, :did, :code, :name,
-                        TRUE, :reason, 'Generated', NOW(), NOW())
+                SELECT 1, :bid, :pid, d.driverid, :code, :name,
+                       d.effectivefromat, d.effectivetoat, b.timezoneid,
+                       CASE WHEN :reason = 'IncludedByExistingData' THEN ARRAY[]::DATE[]
+                            ELSE ARRAY(SELECT pp.startdate + n.day_index
+                                       FROM payroll.payrollperiods pp
+                                       CROSS JOIN LATERAL generate_series(0, pp.enddate - pp.startdate) n(day_index)
+                                       WHERE pp.payrollperiodid = :pid)
+                       END,
+                       TRUE, :reason, 'Generated', NOW(), NOW()
+                FROM core.drivers d
+                JOIN core.branches b ON b.companyid = d.companyid AND b.branchid = d.branchid
+                WHERE d.driverid = :did AND d.companyid = 1 AND d.branchid = :bid
                 ON CONFLICT (payrollperiodid, driverid) DO NOTHING
             """),
             {"bid": branch_id, "pid": period_id, "did": e["driver_id"],
@@ -194,8 +206,8 @@ async def cp3b2b_branch_id(session_db_conn) -> int:
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": (code := f"CP3B2B_{uuid.uuid4().hex[:10]}"), "name": code},
@@ -767,13 +779,10 @@ async def test_included_by_existing_data_matches_single_event(
 async def test_no_marker_period_matches_single_event_behavior(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
-    """On a period without a CP-2E snapshot marker, bonus creation (single-event
-    POST and batch alike) falls back to the live eligibility check — the batch
-    must behave identically to single-event POST, not diverge. (This differs
-    from GET /bonuses/summary, which requires a marker; creation does not.)"""
+    """A missing mandatory snapshot fails closed for single and batch writes."""
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3b2b_branch_id, start, end)
-    # No snapshot seeded — both paths use the live-eligibility fallback.
+    # No snapshot seeded — neither write path may fall back to live roster state.
     single = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
         json={"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
@@ -782,13 +791,11 @@ async def test_no_marker_period_matches_single_event_behavior(
     batch = await _batch(client, auth_token, period_id, _key(), 1, [
         {"driver_id": cp3b2b_drivers["beta"], "amount": "20.00"},
     ])
-    # Batch's status matches single-event POST's status (both accept a
-    # live-eligible driver on a no-marker period). Consistency is the assertion.
-    assert batch.status_code in (201, single.status_code), (
-        f"batch={batch.status_code} single={single.status_code}: {batch.text}"
-    )
-    if single.status_code == 201:
-        assert batch.status_code == 201, batch.text
+    assert single.status_code == 409, single.text
+    assert single.json()["detail"]["code"] == "ELIGIBILITY_SNAPSHOT_MISSING"
+    assert batch.status_code == 409, batch.text
+    assert "ELIGIBILITY_SNAPSHOT_MISSING" in batch.text
+    assert await _count_events(db_conn, period_id) == 0
     await _cancel_period_db(db_conn, period_id)
 
 

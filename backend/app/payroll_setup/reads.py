@@ -1,9 +1,13 @@
 """Tenant-scoped read models for the Payroll Setup API."""
 
+from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from . import clock, readiness
+from app.access.branch_access import check_branch_access
+from app.business_clock import branch_today
+
+from . import readiness
 from .errors import PolicyError
 from .resolver import resolve_payroll_setup_version
 from .validation import terminal_version, version_schedule
@@ -97,8 +101,25 @@ async def list_drafts(company_id: int, setup_id: int, db: AsyncConnection) -> li
     ]
 
 
-async def list_versions(company_id: int, setup_id: int, db: AsyncConnection) -> list[dict]:
+async def list_versions(
+    company_id: int, setup_id: int, db: AsyncConnection, *,
+    branch_id: int | None = None, user_id: int | None = None,
+) -> list[dict]:
     await get_setup(company_id, setup_id, db)
+    today = None
+    if branch_id is not None:
+        if user_id is None:
+            raise ValueError("user_id is required when version currentness has Branch context")
+        visible = (await db.execute(text("""
+            SELECT 1 FROM core.Branches WHERE CompanyID = :cid AND BranchID = :bid
+        """), {"cid": company_id, "bid": branch_id})).scalar_one_or_none()
+        if visible is None:
+            raise PolicyError("BRANCH_NOT_FOUND", "Branch does not belong to Company")
+        all_branches, allowed = await check_branch_access(company_id, user_id, db)
+        if not all_branches and branch_id not in allowed:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Branch is not accessible")
+        today = await branch_today(company_id, branch_id, db)
     result = await db.execute(text("""
         SELECT v.PayrollSetupID, v.PayrollSetupVersionID, v.LifecycleState,
                v.VersionNumber, v.EffectiveFromDate, v.PayrollFrequency,
@@ -123,9 +144,7 @@ async def list_versions(company_id: int, setup_id: int, db: AsyncConnection) -> 
         ORDER BY v.EffectiveFromDate, v.VersionNumber, v.PayrollSetupVersionID
     """), {"cid": company_id, "sid": setup_id})
     rows = result.mappings().all()
-    # Display/read-model only: which published Version is in effect on company-local today.
-    today = await clock.company_today(company_id, db)
-    current_row = await terminal_version(db, setup_id, today)
+    current_row = await terminal_version(db, setup_id, today) if today is not None else None
     current_id = current_row["payrollsetupversionid"] if current_row else None
     return [
         {
@@ -137,7 +156,9 @@ async def list_versions(company_id: int, setup_id: int, db: AsyncConnection) -> 
             "replaces_version_id": row["replacesversionid"],
             "replaced_by_version_id": row["replacedbyversionid"],
             "is_terminal": row["replacedbyversionid"] is None,
-            "is_current": row["payrollsetupversionid"] == current_id,
+            "is_current": (row["payrollsetupversionid"] == current_id) if today is not None else None,
+            "reference_date": today,
+            "reference_branch_id": branch_id,
         }
         for row in rows
     ]
@@ -303,7 +324,8 @@ async def list_branch_policy_summaries(company_id: int, db: AsyncConnection) -> 
     lists ALL future non-withdrawn assignments (in effective-date order), since a Branch can
     hold more than one — `scheduled_change` is always `upcoming_assignments[0]` (or None).
 
-    Display/read-model only — `today` (clock.company_today) never decides
+    Display/read-model only — the optional reference date is supplied by a
+    selected Branch context and never decides
     payroll authority, only which non-withdrawn assignment is "current" here.
     """
     branches = (await db.execute(text("""
@@ -312,11 +334,10 @@ async def list_branch_policy_summaries(company_id: int, db: AsyncConnection) -> 
         ORDER BY BranchName, BranchID
     """), {"cid": company_id})).mappings().all()
 
-    today = await clock.company_today(company_id, db)
-
     summaries = []
     for branch in branches:
         branch_id = branch["branchid"]
+        today = await branch_today(company_id, branch_id, db)
         assignments = (await db.execute(text("""
             SELECT a.BranchPayrollSetupAssignmentID, a.PayrollSetupID,
                    s.SetupCode, s.SetupName, a.EffectiveFromDate, a.EffectiveToDate

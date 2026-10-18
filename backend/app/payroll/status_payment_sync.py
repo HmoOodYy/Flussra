@@ -16,7 +16,7 @@ from app.company_currency import CompanyCurrency
 from app.payroll.eligibility import (
     _driver_has_existing_daily_source_on_date,
     _is_snapshot_row_eligible_for_workdate,
-    _period_has_driver_eligibility_snapshot,
+    require_period_eligibility_snapshot,
 )
 
 # CP-4B fix (P2): exact identity predicate for the persisted Status-
@@ -470,42 +470,39 @@ async def _refresh_status_payment_lines(
     )
 
     # CP-2E: pre-load snapshot rows for this period (one query, not per-row)
-    _refresh_has_snap = await _period_has_driver_eligibility_snapshot(period_id, db)
+    await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
     _snap_row_by_driver: dict[int, Any] = {}
-    if _refresh_has_snap:
-        snap_res = await db.execute(
-            text("""
-                SELECT driverid, eligibilityreasoncode,
-                       hiredatesnapshot, terminationdatesnapshot,
-                       drivereffectivefromsnapshot, drivereffectivetosnapshot,
-                       iseligibleforperiod
-                FROM   payroll.payrollperioddrivereligibility
-                WHERE  payrollperiodid = :pid AND companyid = :cid
-            """),
-            {"pid": period_id, "cid": company_id},
-        )
-        for snap in snap_res.mappings().all():
-            _snap_row_by_driver[snap["driverid"]] = snap
+    snap_res = await db.execute(
+        text("""
+            SELECT driverid, eligibilityreasoncode,
+                   hiredatesnapshot, terminationdatesnapshot,
+                   drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
+                   branchtimezoneidsnapshot, eligibleworkdates,
+                   iseligibleforperiod
+            FROM   payroll.payrollperioddrivereligibility
+            WHERE  payrollperiodid = :pid AND companyid = :cid
+        """),
+        {"pid": period_id, "cid": company_id},
+    )
+    for snap in snap_res.mappings().all():
+        _snap_row_by_driver[snap["driverid"]] = snap
 
     for row in rows:
         driver_id = row["driverid"]
         work_date = row["workdate"]
 
         # CP-2E: eligibility guard — skip ineligible dates in snapshotted periods
-        if _refresh_has_snap:
-            snap = _snap_row_by_driver.get(driver_id)
-            if snap is None:
-                # Driver not in snapshot → skip
+        snap = _snap_row_by_driver.get(driver_id)
+        if snap is None:
+            # Driver not in snapshot → skip
+            continue
+        # Existing source rescue is exact-date and only applies to this captured roster.
+        if not _is_snapshot_row_eligible_for_workdate(snap, work_date):
+            has_src = await _driver_has_existing_daily_source_on_date(
+                period_id, driver_id, work_date, db
+            )
+            if not has_src:
                 continue
-            # Primary: date-window check. Secondary rescue: existing source on
-            # exact date (any reason code — covers generated-row drivers with
-            # PPDES outside their eligibility window from before the snapshot).
-            if not _is_snapshot_row_eligible_for_workdate(snap, work_date):
-                has_src = await _driver_has_existing_daily_source_on_date(
-                    period_id, driver_id, work_date, db
-                )
-                if not has_src:
-                    continue
 
         await _sync_status_payment_for_entry_state(
             company_id=company_id,

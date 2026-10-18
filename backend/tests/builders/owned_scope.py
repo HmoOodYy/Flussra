@@ -16,8 +16,8 @@ from sqlalchemy import text
 async def create_owned_branch(db, code_prefix: str, name: str) -> int:
     marker = uuid4().hex
     return int((await db.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (1, :code, :name, 'Active', FALSE)
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
         RETURNING branchid
     """), {"code": f"{code_prefix}_{marker[:12]}", "name": f"{name} {marker[:8]}"})).scalar_one())
 

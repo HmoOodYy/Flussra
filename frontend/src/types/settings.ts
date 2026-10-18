@@ -7,7 +7,6 @@ export interface CompanyProfile {
   legal_name: string | null;
   status: string;
   is_suspended: boolean;
-  timezone_name: string;
   notes: string | null;
   default_branch_id: number | null;
   default_branch_name: string | null;
@@ -23,7 +22,6 @@ export interface CompanyProfile {
 export interface CompanyUpdate {
   company_name: string;
   legal_name?: string | null;
-  timezone_name?: string | null;
   notes?: string | null;
   allow_self_approval?: boolean | null;
   currency_code?: string | null;
@@ -55,6 +53,8 @@ export interface BranchAdmin {
   notes: string | null;
   created_at_utc: string;
   updated_at_utc: string | null;
+  time_zone_id: string;
+  business_date: string;
   // Operational metrics
   payroll_setup_done: boolean;
   // Canonical readiness (U0): null unless the caller has non-driver payroll.view on this branch,
@@ -78,12 +78,16 @@ export interface BranchUpdate {
   postal_code: string | null;
   country: string | null;
   notes: string | null;
+  time_zone_id?: string;
 }
 
 export interface BranchCreate extends BranchUpdate {
   is_default: boolean;
+  time_zone_id: string;
   first_payroll_start_date?: string;
 }
+
+export type SupportedTimeZones = string[];
 
 /**
  * GET /settings/branches/onboarding-options?around=

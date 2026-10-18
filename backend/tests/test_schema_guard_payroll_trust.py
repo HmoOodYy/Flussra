@@ -353,7 +353,117 @@ def test_p10_t9b_run_schema_guard_fails_closed_in_prod(apply_schema):
 
     assert "Phase 6" in str(exc_info.value)
     assert "trg_guard_final_line_insert" in str(exc_info.value)
-    assert "PAYROLL TRUST SCHEMA PROTECTIONS ARE MISSING" in str(exc_info.value)
+    assert "PAYROLL TRUST OR TEMPORAL AUTHORITY SCHEMA IS INVALID" in str(exc_info.value)
+
+
+def test_branch_temporal_function_drift_blocks_production_startup(apply_schema):
+    """The canonical timezone/instant function contract is hard in production too."""
+    dsn = apply_schema.dsn()
+    sync_url = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
+    conn = psycopg2.connect(client_encoding="utf-8", **dsn)
+    conn.autocommit = True
+    cur = conn.cursor()
+    renamed = False
+    try:
+        cur.execute("ALTER FUNCTION core.fn_BusinessDate(TEXT, TIMESTAMPTZ) RENAME TO fn_BusinessDate_guard_test")
+        renamed = True
+        with pytest.raises(RuntimeError, match="Startup blocked in all environments") as exc_info:
+            run_schema_guard(sync_url, is_dev=False)
+        assert "fn_BusinessDate(TEXT, TIMESTAMPTZ)" in str(exc_info.value)
+    finally:
+        if renamed:
+            cur.execute("ALTER FUNCTION core.fn_BusinessDate_guard_test(TEXT, TIMESTAMPTZ) RENAME TO fn_BusinessDate")
+        cur.close()
+        conn.close()
+
+
+def test_branch_temporal_constraint_drift_blocks_production_startup(apply_schema):
+    """Transfer relies on the assignment exclusion being deferred to commit."""
+    dsn = apply_schema.dsn()
+    sync_url = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
+    conn = psycopg2.connect(client_encoding="utf-8", **dsn)
+    conn.autocommit = True
+    cur = conn.cursor()
+    replaced = False
+    try:
+        cur.execute("ALTER TABLE core.Drivers DROP CONSTRAINT excl_Drivers_Employee_AssignmentWindow")
+        cur.execute("""
+            ALTER TABLE core.Drivers ADD CONSTRAINT excl_Drivers_Employee_AssignmentWindow
+            EXCLUDE USING gist (
+                EmployeeID WITH =,
+                core.fn_DriverEffectiveRange(EffectiveFromAt, EffectiveToAt) WITH &&
+            ) NOT DEFERRABLE
+        """)
+        replaced = True
+        with pytest.raises(RuntimeError, match="Startup blocked in all environments") as exc_info:
+            run_schema_guard(sync_url, is_dev=False)
+        assert "must be DEFERRABLE INITIALLY DEFERRED" in str(exc_info.value)
+    finally:
+        if replaced:
+            cur.execute("ALTER TABLE core.Drivers DROP CONSTRAINT excl_Drivers_Employee_AssignmentWindow")
+            cur.execute("""
+                ALTER TABLE core.Drivers ADD CONSTRAINT excl_Drivers_Employee_AssignmentWindow
+                EXCLUDE USING gist (
+                    EmployeeID WITH =,
+                    core.fn_DriverEffectiveRange(EffectiveFromAt, EffectiveToAt) WITH &&
+                ) DEFERRABLE INITIALLY DEFERRED
+            """)
+        cur.close()
+        conn.close()
+
+
+def test_branch_timezone_registry_shape_drift_blocks_production_startup(apply_schema):
+    """The DB-generated registry must keep its documented VARCHAR(100) key."""
+    dsn = apply_schema.dsn()
+    sync_url = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
+    conn = psycopg2.connect(client_encoding="utf-8", **dsn)
+    conn.autocommit = True
+    cur = conn.cursor()
+    altered = False
+    try:
+        cur.execute("ALTER TABLE core.Branches DROP CONSTRAINT fk_Branches_TimeZone")
+        cur.execute("ALTER TABLE payroll.PayrollPeriodDriverEligibility DROP CONSTRAINT fk_PPDE_SnapshotTimeZone")
+        cur.execute("ALTER TABLE core.SupportedTimeZones ALTER COLUMN TimeZoneId TYPE VARCHAR(99)")
+        altered = True
+        with pytest.raises(RuntimeError, match="Startup blocked in all environments") as exc_info:
+            run_schema_guard(sync_url, is_dev=False)
+        assert "SupportedTimeZones.TimeZoneId must be a NOT NULL VARCHAR(100)" in str(exc_info.value)
+    finally:
+        if altered:
+            cur.execute("ALTER TABLE core.SupportedTimeZones ALTER COLUMN TimeZoneId TYPE VARCHAR(100)")
+            cur.execute("""
+                ALTER TABLE core.Branches ADD CONSTRAINT fk_Branches_TimeZone
+                FOREIGN KEY (TimeZoneId) REFERENCES core.SupportedTimeZones(TimeZoneId)
+            """)
+            cur.execute("""
+                ALTER TABLE payroll.PayrollPeriodDriverEligibility
+                ADD CONSTRAINT fk_PPDE_SnapshotTimeZone
+                FOREIGN KEY (BranchTimeZoneIdSnapshot)
+                REFERENCES core.SupportedTimeZones(TimeZoneId)
+            """)
+        cur.close()
+        conn.close()
+
+
+def test_retired_company_clock_blocks_production_startup(apply_schema):
+    """A resurrected Company clock is temporal authority drift, not a prod warning."""
+    dsn = apply_schema.dsn()
+    sync_url = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
+    conn = psycopg2.connect(client_encoding="utf-8", **dsn)
+    conn.autocommit = True
+    cur = conn.cursor()
+    created = False
+    try:
+        cur.execute("CREATE FUNCTION core.fn_CompanyToday(INTEGER) RETURNS DATE LANGUAGE SQL STABLE AS $$ SELECT CURRENT_DATE $$")
+        created = True
+        with pytest.raises(RuntimeError, match="Startup blocked in all environments") as exc_info:
+            run_schema_guard(sync_url, is_dev=False)
+        assert "Retired Company clock function" in str(exc_info.value)
+    finally:
+        if created:
+            cur.execute("DROP FUNCTION core.fn_CompanyToday(INTEGER)")
+        cur.close()
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

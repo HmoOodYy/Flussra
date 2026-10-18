@@ -1,5 +1,6 @@
 import type { DriverTransferRequest } from '../../../types/transfer.ts';
 import { TRANSFER_ACTIVE, TRANSFER_TERMINAL } from '../../../types/transfer.ts';
+import { isValidIsoDate } from '../../../lib/isoDate.ts';
 
 export function apiError(err: unknown): string {
   const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -27,6 +28,20 @@ export function fmtDateTime(s: string | null | undefined): string {
     year: 'numeric', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });
+}
+
+export function fmtEffectiveAt(s: string | null | undefined): string {
+  return s ? fmtDateTime(s) : 'On completion';
+}
+
+export function normalizeUtcDateTimeLocal(value: string): string | null {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!match || !isValidIsoDate(match[1])) return null;
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  const second = Number(match[4] ?? '0');
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  return `${match[1]}T${match[2]}:${match[3]}:${match[4] ?? '00'}Z`;
 }
 
 // ─── Filter types ─────────────────────────────────────────────────────────────

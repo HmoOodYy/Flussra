@@ -1,5 +1,4 @@
 """Resource-aware Access policy for the current DRIVER/Self product surface."""
-from datetime import date
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -47,7 +46,6 @@ async def require_non_driver_subject(
 async def resolve_driver_self_profile(
     company_id: int,
     user_id: int,
-    operation_date: date,
     db: AsyncConnection,
     *,
     target_driver_id: int | None = None,
@@ -89,7 +87,7 @@ async def resolve_driver_self_profile(
         )
 
     profile = await resolve_effective_driver_profile(
-        company_id, int(row["employeeid"]), operation_date, db
+        company_id, int(row["employeeid"]), None, db
     )
     if profile is None:
         raise HTTPException(

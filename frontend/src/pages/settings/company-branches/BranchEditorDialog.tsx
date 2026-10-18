@@ -16,6 +16,7 @@ import styles from './CompanyBranchesPage.module.css';
 export function BranchEditorDialog({
   modal, editingBranch, closeModal, savingBranch, caps, settingDefault,
   setConfirmKind, bForm, setBForm, onboarding, bSaveErr, bCreateErr, canCreateNow,
+  timeZones,
 }: {
   modal: 'create' | 'edit' | null; editingBranch: BranchAdmin | null;
   closeModal: () => void; savingBranch: boolean; caps: CompanyBranchesCapabilities;
@@ -23,11 +24,12 @@ export function BranchEditorDialog({
   bForm: BranchForm; setBForm: Dispatch<SetStateAction<BranchForm>>;
   onboarding: BranchOnboardingState; bSaveErr: string;
   bCreateErr: ApiErrorInfo | null; canCreateNow: boolean;
+  timeZones: string[];
 }) {
   const {
     firstPayrollStart, setFirstPayrollStart, setUpPayrollNow, setSetUpPayrollNow,
     onboardingDefaultSetup, onboardingDefaultLoading, onboardingDefaultError,
-    onboardingBoundary, hasCompanyDefault,
+    onboardingBoundary, hasCompanyDefault, onboardingOptionsResolved,
   } = onboarding;
   return (
     <>
@@ -69,10 +71,18 @@ export function BranchEditorDialog({
 
               <BranchFormFields
                 form={bForm}
-                onChange={(p) => setBForm((f) => ({ ...f, ...p }))}
+                onChange={(p) => {
+                  if (p.time_zone_id !== undefined && p.time_zone_id !== bForm.time_zone_id) {
+                    onboarding.setFirstPayrollStart('');
+                    onboarding.setOnboardingDefaultSetup(null);
+                    onboarding.setOnboardingDefaultError(null);
+                  }
+                  setBForm((f) => ({ ...f, ...p }));
+                }}
                 disabled={savingBranch}
                 isCreate={modal === 'create'}
                 canSetDefault={caps.canSetDefaultOnCreate}
+                timeZones={timeZones}
                 styles={styles}
               />
 
@@ -92,9 +102,11 @@ export function BranchEditorDialog({
                   </label>
 
                   {setUpPayrollNow && (
-                    onboardingDefaultError ? (
+                    !bForm.time_zone_id ? (
+                      <p className={styles.fieldHelp}>Choose a Branch timezone before requesting payroll dates.</p>
+                    ) : onboardingDefaultError ? (
                       <PayrollErrorNotice info={onboardingDefaultError} />
-                    ) : onboardingDefaultLoading ? (
+                    ) : onboardingDefaultLoading || !onboardingOptionsResolved ? (
                       <p className={styles.fieldHelp}>Loading…</p>
                     ) : hasCompanyDefault ? (
                       <>
@@ -147,7 +159,7 @@ export function BranchEditorDialog({
               <button
                 className={styles.btnPrimary}
                 onClick={() => setConfirmKind('save-branch')}
-                disabled={savingBranch || (modal === 'create' && !canCreateNow)}
+                disabled={savingBranch || !bForm.time_zone_id || (modal === 'create' && !canCreateNow)}
               >
                 {savingBranch ? <><SpinnerIcon /> Saving…</> : modal === 'create' ? 'Create Branch' : 'Save Changes'}
               </button>

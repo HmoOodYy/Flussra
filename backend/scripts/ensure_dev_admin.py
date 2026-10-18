@@ -26,6 +26,7 @@ COMPANY_CODE = "DEMO"
 COMPANY_NAME = "Demo Logistics"
 BRANCH_CODE  = "HQ"
 BRANCH_NAME  = "Headquarters"
+BRANCH_TIME_ZONE_ID = "America/New_York"
 USERNAME     = "admin"
 DISPLAY_NAME = "Admin User"
 PASSWORD     = "TestPass123!"
@@ -71,8 +72,9 @@ async def main() -> None:
         # ── 2. Branch ─────────────────────────────────────────────────────────
         branch_id = await conn.fetchval(
             """
-            INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-            VALUES ($1, $2, $3, 'Active', TRUE)
+            INSERT INTO core.branches
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES ($1, $2, $3, 'Active', TRUE, $4)
             ON CONFLICT (companyid, branchcode) DO UPDATE
                 SET branchname   = EXCLUDED.branchname,
                     status       = 'Active',
@@ -80,7 +82,7 @@ async def main() -> None:
                     updatedatutc = NOW()
             RETURNING branchid
             """,
-            company_id, BRANCH_CODE, BRANCH_NAME,
+            company_id, BRANCH_CODE, BRANCH_NAME, BRANCH_TIME_ZONE_ID,
         )
         print(f"[OK] Branch    id={branch_id}  code={BRANCH_CODE}  name={BRANCH_NAME}  isdefault=True")
 

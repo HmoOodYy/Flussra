@@ -169,11 +169,11 @@ export async function voidBonusEvent(
 
 export async function getSelectedDayOffDrivers(
   periodId: number,
-  workDate: string,
+  workDate?: string,
 ): Promise<SelectedDayOffDriversResponse> {
   const resp = await apiClient.get<SelectedDayOffDriversResponse>(
     `/payroll/periods/${periodId}/off-drivers`,
-    { params: { work_date: workDate } },
+    { params: workDate ? { work_date: workDate } : undefined },
   );
   return resp.data;
 }

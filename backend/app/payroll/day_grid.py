@@ -58,12 +58,12 @@ from app.payroll.eligibility import (
     _assert_driver_eligible_for_workdate_via_snapshot,
     _is_snapshot_row_eligible_for_workdate,
     _lifecycle_eligible_driver_ids,
-    _period_has_driver_eligibility_snapshot,
+    require_period_eligibility_snapshot,
 )
 from app.payroll.line_audit import _write_line_audit
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.mutation_lock import _lock_period_for_mutation
-from app.payroll.period_day_calendar import _validate_period_work_date
+from app.payroll.period_day_calendar import _validate_period_work_date, resolve_period_work_date
 from app.payroll.period_definitions import list_period_definitions
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import (
@@ -136,12 +136,9 @@ async def get_day_grid(
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     # ── P1 #1: resolve work_date when omitted ────────────────────────────── #
-    if work_date is None:
-        today = date.today()
-        if period.start_date <= today <= period.end_date:
-            work_date = today
-        else:
-            work_date = period.start_date
+    work_date = await resolve_period_work_date(
+        company_id, period.branch_id, period.start_date, period.end_date, work_date, db,
+    )
 
     # ── work_date bounds check (CP-2B: snapshot-aware) ───────────────────── #
     await _validate_period_work_date(
@@ -198,114 +195,79 @@ async def get_day_grid(
         status_keys.append(sk)
         status_key_map[row["statuscode"]] = sk
 
-    # ── Load eligible drivers (CP-2E: snapshot-aware) ────────────────────── #
-    # For snapshotted periods use the canonical eligibility snapshot roster.
-    # Legacy periods (no marker) fall back to the live EmploymentStatus query.
-    _has_snapshot = await _period_has_driver_eligibility_snapshot(period_id, db)
-    if _has_snapshot:
-        # Load all snapshot rows for this period
-        snap_rows_result = await db.execute(
-            text("""
-                SELECT driverid,
-                       COALESCE(drivernamesnapshot, '') AS drivername,
-                       COALESCE(drivercodesnapshot, '') AS drivercode,
-                       eligibilityreasoncode,
-                       hiredatesnapshot,
-                       terminationdatesnapshot,
-                       drivereffectivefromsnapshot,
-                       drivereffectivetosnapshot,
-                       iseligibleforperiod
-                FROM   payroll.payrollperioddrivereligibility
-                WHERE  payrollperiodid = :pid
-                  AND  companyid       = :cid
-                  AND  branchid        = :bid
-                ORDER BY drivername
-            """),
-            {"pid": period_id, "cid": company_id, "bid": branch_id},
-        )
-        snap_rows_all = list(snap_rows_result.mappings().all())
-        snapshot_driver_ids = [r["driverid"] for r in snap_rows_all]
-        lifecycle_eligible_ids = await _lifecycle_eligible_driver_ids(
-            company_id, branch_id, work_date, snapshot_driver_ids, db,
-        )
+    # ── Load eligible drivers from the required canonical snapshot ───────── #
+    await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
+    # Load all snapshot rows for this period
+    snap_rows_result = await db.execute(
+        text("""
+            SELECT driverid,
+                   COALESCE(drivernamesnapshot, '') AS drivername,
+                   COALESCE(drivercodesnapshot, '') AS drivercode,
+                   eligibilityreasoncode,
+                   hiredatesnapshot,
+                   terminationdatesnapshot,
+                   eligibleworkdates,
+                   iseligibleforperiod
+            FROM   payroll.payrollperioddrivereligibility
+            WHERE  payrollperiodid = :pid
+              AND  companyid       = :cid
+              AND  branchid        = :bid
+            ORDER BY drivername
+        """),
+        {"pid": period_id, "cid": company_id, "bid": branch_id},
+    )
+    snap_rows_all = list(snap_rows_result.mappings().all())
+    snapshot_driver_ids = [r["driverid"] for r in snap_rows_all]
+    lifecycle_eligible_ids = await _lifecycle_eligible_driver_ids(
+        period_id, company_id, branch_id, work_date, snapshot_driver_ids, db,
+    )
 
-        # Existing-source rescue: for ANY reason code, a driver out of their
-        # date window is still shown if they have existing daily source on this
-        # exact work_date (DraftLine or EntryState).  Collect the out-of-window
-        # candidates first, then batch-check them.
-        out_of_window_candidates = [
-            r["driverid"] for r in snap_rows_all
-            if (
-                not _is_snapshot_row_eligible_for_workdate(r, work_date)
-                or r["driverid"] not in lifecycle_eligible_ids
-            )
-        ]
-        rescue_driver_ids_on_date: set[int] = set()
-        if out_of_window_candidates:
-            in_clause_rescue, in_params_rescue = build_in_clause(
-                out_of_window_candidates, "rescue"
-            )
-            rescue_result = await db.execute(
-                text(f"""
-                    SELECT DISTINCT driverid FROM (
-                        SELECT driverid FROM payroll.payrolldraftlines
-                        WHERE payrollperiodid = :pid AND workdate = :dt
-                          AND status != 'Void'
-                          AND driverid IN ({in_clause_rescue})
-                        UNION
-                        SELECT driverid FROM payroll.payrollperioddriverdayentrystate
-                        WHERE payrollperiodid = :pid AND workdate = :dt
-                          AND isvoided = FALSE
-                          AND driverid IN ({in_clause_rescue})
-                    ) src
-                """),
-                {"pid": period_id, "dt": work_date, **in_params_rescue},
-            )
-            rescue_driver_ids_on_date = {
-                r["driverid"] for r in rescue_result.mappings().all()
-            }
-
-        # A frozen window must still fit current lifecycle boundaries.
-        # Existing exact-date source remains visible through the rescue path.
-        drivers_raw = []
-        for snap in snap_rows_all:
-            if (
-                _is_snapshot_row_eligible_for_workdate(snap, work_date)
-                and snap["driverid"] in lifecycle_eligible_ids
-            ):
-                pass  # window eligible — include
-            elif snap["driverid"] in rescue_driver_ids_on_date:
-                pass  # existing source rescue — include
-            else:
-                continue
-            drivers_raw.append({
-                "driverid":   snap["driverid"],
-                "drivername": snap["drivername"],
-                "drivercode": snap["drivercode"],
-            })
-        drivers = drivers_raw
-    else:
-        # Legacy fallback: live roster query
-        drv_result = await db.execute(
-            text("""
-                SELECT d.driverid, e.fullname AS drivername, d.drivercode
-                FROM   core.drivers   d
-                JOIN   core.employees e ON e.employeeid = d.employeeid
-                WHERE  d.companyid          = :cid
-                  AND  d.branchid           = :bid
-                  AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
-                  AND  (e.employmentstatus = 'Active'
-                        OR (e.employmentstatus = 'Terminated'
-                            AND e.terminationdate IS NOT NULL
-                            AND e.terminationdate >= :dt))
-                  AND  (e.hiredate IS NULL OR e.hiredate <= :dt)
-                  AND  (e.terminationdate IS NULL OR e.terminationdate >= :dt)
-                  AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid, :dt) = d.driverid
-                ORDER BY e.fullname
-            """),
-            {"cid": company_id, "bid": branch_id, "dt": work_date},
+    # Existing-source rescue: for ANY reason code, a driver out of their
+    # date window is still shown if they have existing daily source on this
+    # exact work_date (DraftLine or EntryState).  Collect the out-of-window
+    # candidates first, then batch-check them.
+    out_of_window_candidates = [
+        r["driverid"] for r in snap_rows_all
+        if (
+            not _is_snapshot_row_eligible_for_workdate(r, work_date)
+            or r["driverid"] not in lifecycle_eligible_ids
         )
-        drivers = list(drv_result.mappings().all())
+    ]
+    rescue_driver_ids_on_date: set[int] = set()
+    if out_of_window_candidates:
+        in_clause_rescue, in_params_rescue = build_in_clause(
+            out_of_window_candidates, "rescue"
+        )
+        rescue_result = await db.execute(
+            text(f"""
+                SELECT DISTINCT driverid FROM (
+                    SELECT driverid FROM payroll.payrolldraftlines
+                    WHERE payrollperiodid = :pid AND workdate = :dt
+                      AND status != 'Void'
+                      AND driverid IN ({in_clause_rescue})
+                    UNION
+                    SELECT driverid FROM payroll.payrollperioddriverdayentrystate
+                    WHERE payrollperiodid = :pid AND workdate = :dt
+                      AND isvoided = FALSE
+                      AND driverid IN ({in_clause_rescue})
+                ) src
+            """),
+            {"pid": period_id, "dt": work_date, **in_params_rescue},
+        )
+        rescue_driver_ids_on_date = {
+            r["driverid"] for r in rescue_result.mappings().all()
+        }
+
+    # A frozen window must still fit current lifecycle boundaries.
+    # Existing exact-date source remains visible through the rescue path.
+    drivers = [
+        dict(snap)
+        for snap in snap_rows_all
+        if (
+            _is_snapshot_row_eligible_for_workdate(snap, work_date)
+            and snap["driverid"] in lifecycle_eligible_ids
+        ) or snap["driverid"] in rescue_driver_ids_on_date
+    ]
     driver_ids = [d["driverid"] for d in drivers]
 
     # ── Load existing draft lines for these drivers on this date ─────────── #

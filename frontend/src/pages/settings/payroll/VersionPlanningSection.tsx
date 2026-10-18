@@ -27,6 +27,8 @@ type VersionPlanningSectionProps = {
   onCreate: () => void;
   onEditDraft: (draft: DraftResponse) => void;
   onDiscardDraft: (draft: DraftResponse) => void;
+  hasBranchContext: boolean;
+  referenceBranchName: string | null;
 };
 
 export function VersionPlanningSection({
@@ -42,8 +44,11 @@ export function VersionPlanningSection({
   onCreate,
   onEditDraft,
   onDiscardDraft,
+  hasBranchContext,
+  referenceBranchName,
 }: VersionPlanningSectionProps) {
   const isResolvedEmpty =
+    hasBranchContext &&
     !versionsLoading &&
     !versionsError &&
     !draftsLoading &&
@@ -56,7 +61,11 @@ export function VersionPlanningSection({
       <div className={styles.versionPlanningHeader}>
         <div>
           <h3 id="version-planning-title" className={styles.versionPlanningTitle}>Version Planning</h3>
-          <p className={styles.versionPlanningSubtitle}>Prepare and schedule future payroll policy changes.</p>
+          <p className={styles.versionPlanningSubtitle}>
+            {hasBranchContext
+              ? `Upcoming changes, using ${referenceBranchName}'s business date.`
+              : 'Select a Branch above to identify upcoming schedule changes.'}
+          </p>
         </div>
         {!isResolvedEmpty && canCreate && (
           <button className={styles.btnPrimary} onClick={onCreate} disabled={mutating}>
@@ -87,6 +96,10 @@ export function VersionPlanningSection({
           ) : versionsLoading ? (
             <div className={styles.versionPlanningGroup}>
               <p className={styles.mutedText}>Loading upcoming versions…</p>
+            </div>
+          ) : !hasBranchContext ? (
+            <div className={styles.versionPlanningGroup}>
+              <p className={styles.mutedText}>Upcoming versions are shown after you select a Branch context.</p>
             </div>
           ) : upcomingVersions.length > 0 ? (
             <div className={styles.versionPlanningGroup}>

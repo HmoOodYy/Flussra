@@ -13,6 +13,7 @@ async def create_branch(
     *,
     branch_code: str,
     branch_name: str,
+    time_zone_id: str = "UTC",
 ) -> int:
     """Create an active, non-default branch through the settings service."""
     branch = await create_branch_service(
@@ -21,6 +22,7 @@ async def create_branch(
         BranchCreate(
             branch_code=branch_code,
             branch_name=branch_name,
+                time_zone_id=time_zone_id,
             status="Active",
             is_default=False,
         ),

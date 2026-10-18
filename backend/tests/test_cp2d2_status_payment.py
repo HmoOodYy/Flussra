@@ -128,7 +128,18 @@ async def _open_period_db(
             {"bid": branch_id, "code": code},
         )).mappings().first()
     assert r is not None
-    return r["payrollperiodid"]
+    period_id = r["payrollperiodid"]
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+
+    actor_id = (await db.execute(_text(
+        "SELECT UserID FROM sec.Users WHERE CompanyID = 1 AND Username = 'admin' LIMIT 1"
+    ))).scalar_one()
+    await _create_period_driver_eligibility_rows(
+        period_id, 1, branch_id, db, snapshot_source="Generated", freeze=True,
+        frozen_by_user_id=actor_id,
+    )
+    await db.commit()
+    return period_id
 
 
 async def _insert_status_key_db(
@@ -556,7 +567,7 @@ class TestFutureBranchDefault:
         """Creating a new branch automatically creates a default Status Pay column."""
         resp = await session_client.post(
             "/settings/branches",
-            json={"branch_name": "CP2D2 Temp Branch 2097", "status": "Active"},
+            json={"branch_name": "CP2D2 Temp Branch 2097", "status": "Active", "time_zone_id": "UTC"},
             headers=_auth(auth_token),
         )
         assert resp.status_code == 201, resp.text
@@ -597,7 +608,7 @@ class TestFutureBranchDefault:
         """The default Status Pay column for a new branch is returned by the list API."""
         resp = await session_client.post(
             "/settings/branches",
-            json={"branch_name": "CP2D2 Temp Branch 2097B", "status": "Active"},
+            json={"branch_name": "CP2D2 Temp Branch 2097B", "status": "Active", "time_zone_id": "UTC"},
             headers=_auth(auth_token),
         )
         assert resp.status_code == 201
@@ -633,7 +644,7 @@ class TestFutureBranchDefault:
         """Creating a branch twice (or calling ensure twice) does not duplicate the default."""
         resp = await session_client.post(
             "/settings/branches",
-            json={"branch_name": "CP2D2 Temp Branch 2097C", "status": "Active"},
+            json={"branch_name": "CP2D2 Temp Branch 2097C", "status": "Active", "time_zone_id": "UTC"},
             headers=_auth(auth_token),
         )
         assert resp.status_code == 201
@@ -1282,8 +1293,8 @@ class TestGenericRatesBypassClosed:
         # Create a second branch and a status column for it
         other_branch = (await direct_db.execute(
             _text("""
-                INSERT INTO core.branches (companyid, branchname, branchcode, status)
-                VALUES (1, 'CP2D2 Other Branch P1', 'OBP1-2097', 'Active')
+                INSERT INTO core.branches (companyid, branchname, branchcode, status, timezoneid)
+                VALUES (1, 'CP2D2 Other Branch P1', 'OBP1-2097', 'Active', 'UTC')
                 RETURNING branchid
             """),
         )).mappings().first()
@@ -1574,8 +1585,8 @@ class TestDbBranchCompanyOwnership:
         # Create a new branch properly owned by company 1
         new_branch = (await direct_db.execute(
             _text("""
-                INSERT INTO core.branches (companyid, branchname, branchcode, status)
-                VALUES (1, 'CP2D2 P1Fix3 Valid Branch', 'P1F3-2097', 'Active')
+                INSERT INTO core.branches (companyid, branchname, branchcode, status, timezoneid)
+                VALUES (1, 'CP2D2 P1Fix3 Valid Branch', 'P1F3-2097', 'Active', 'UTC')
                 RETURNING branchid
             """),
         )).mappings().first()
@@ -1615,8 +1626,8 @@ class TestDbBranchCompanyOwnership:
         # Create another branch
         other_branch = (await direct_db.execute(
             _text("""
-                INSERT INTO core.branches (companyid, branchname, branchcode, status)
-                VALUES (1, 'CP2D2 P1Fix3 Other', 'P1F3B-2097', 'Active')
+                INSERT INTO core.branches (companyid, branchname, branchcode, status, timezoneid)
+                VALUES (1, 'CP2D2 P1Fix3 Other', 'P1F3B-2097', 'Active', 'UTC')
                 RETURNING branchid
             """),
         )).mappings().first()
@@ -1725,8 +1736,8 @@ class TestApproveRateStatusGuard:
 
         other_branch = (await direct_db.execute(
             _text("""
-                INSERT INTO core.branches (companyid, branchname, branchcode, status)
-                VALUES (1, 'CP2D2 Approve Guard Branch', 'AGBR-2097', 'Active')
+                INSERT INTO core.branches (companyid, branchname, branchcode, status, timezoneid)
+                VALUES (1, 'CP2D2 Approve Guard Branch', 'AGBR-2097', 'Active', 'UTC')
                 RETURNING branchid
             """),
         )).mappings().first()

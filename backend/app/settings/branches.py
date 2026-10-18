@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.business_clock import validate_time_zone
 from app.payroll_setup import boundaries
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.locks import lock_company, lock_setups
@@ -77,6 +78,8 @@ async def create_branch(
         with_payroll_start=data.first_payroll_start_date is not None,
         with_default=data.is_default,
     )
+    if not await validate_time_zone(data.time_zone_id, db):
+        raise HTTPException(status_code=422, detail="Unsupported timezone identifier.")
 
     default_setup_id = None
     if data.first_payroll_start_date is not None:
@@ -115,10 +118,10 @@ async def create_branch(
     _INSERT_BRANCH_SQL = text("""
         INSERT INTO core.branches (
             companyid, branchcode, branchname, status, isdefault,
-            addressline1, city, stateprovince, postalcode, country, notes
+            addressline1, city, stateprovince, postalcode, country, notes, timezoneid
         ) VALUES (
             :cid, :code, :name, :st, :def,
-            :addr, :city, :sp, :pc, :country, :notes
+            :addr, :city, :sp, :pc, :country, :notes, :tz
         )
         RETURNING branchid
     """)
@@ -144,6 +147,7 @@ async def create_branch(
                         "pc":      data.postal_code,
                         "country": data.country,
                         "notes":   data.notes,
+                        "tz":      data.time_zone_id,
                     },
                 )
             break  # success — savepoint released
@@ -181,6 +185,7 @@ async def create_branch(
             "branch_name": data.branch_name,
             "status":      data.status,
             "is_default":  data.is_default,
+            "time_zone_id": data.time_zone_id,
         },
     )
 
@@ -252,6 +257,11 @@ async def update_branch(
     new_pc     = data.postal_code    if data.postal_code    is not None else row.get("postalcode")
     new_co     = data.country        if data.country        is not None else row.get("country")
     new_notes  = data.notes          if data.notes          is not None else row.get("notes")
+    new_timezone = row["timezoneid"]
+    if "time_zone_id" in data.model_fields_set:
+        new_timezone = data.time_zone_id
+        if not await validate_time_zone(new_timezone, db):
+            raise HTTPException(status_code=422, detail="Unsupported timezone identifier.")
 
     # Business rule: the default branch cannot be deactivated.
     if bool(row["isdefault"]) and new_status != "Active":
@@ -273,6 +283,7 @@ async def update_branch(
                        postalcode    = :pc,
                        country       = :co,
                        notes         = :notes,
+                       timezoneid    = :tz,
                        updatedatutc  = NOW()
                 WHERE  branchid  = :bid
                   AND  companyid = :cid
@@ -289,6 +300,7 @@ async def update_branch(
                 "pc":    new_pc,
                 "co":    new_co,
                 "notes": new_notes,
+                "tz": new_timezone,
             },
         )
     except SAIntegrityError as exc:
@@ -312,6 +324,7 @@ async def update_branch(
             "postal_code":    row.get("postalcode"),
             "country":        row.get("country"),
             "notes":          row.get("notes"),
+            "time_zone_id":   row["timezoneid"],
         },
         new_value={
             "branch_code":    new_code,
@@ -323,6 +336,7 @@ async def update_branch(
             "postal_code":    new_pc,
             "country":        new_co,
             "notes":          new_notes,
+            "time_zone_id":   new_timezone,
         },
     )
 
@@ -416,6 +430,7 @@ async def get_onboarding_options(
     user_id: int,
     db: AsyncConnection,
     *,
+    time_zone_id: str,
     around: _date | None = None,
 ) -> OnboardingOptionsResponse:
     """
@@ -435,6 +450,8 @@ async def get_onboarding_options(
     await security.ensure_branch_creator(
         company_id, user_id, db, with_payroll_start=True, with_default=False,
     )
+    if not await validate_time_zone(time_zone_id, db):
+        raise HTTPException(status_code=422, detail="Unsupported timezone identifier.")
     result = await db.execute(text("""
         SELECT s.PayrollSetupID, s.SetupCode, s.SetupName, s.Description, s.Status
         FROM core.Companies c
@@ -453,6 +470,6 @@ async def get_onboarding_options(
         status=row["status"],
     )
     choices = await boundaries.onboarding_choices(
-        company_id, row["payrollsetupid"], around, db,
+        company_id, row["payrollsetupid"], around, db, time_zone_id=time_zone_id,
     )
     return OnboardingOptionsResponse(default_setup=default_setup, choices=choices)

@@ -23,7 +23,7 @@ from app.company_currency import lock_and_get_company_currency_for_monetary_writ
 from app.payroll.audit_evidence import capture_period_audit_evidence
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_period_via_snapshot,
-    _period_has_driver_eligibility_snapshot,
+    require_period_eligibility_snapshot,
 )
 from app.payroll.line_audit import _write_line_audit
 from app.payroll.mutation_lock import _lock_period_for_mutation
@@ -1008,16 +1008,9 @@ async def get_bonus_summary(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
     )
 
-    if not await _period_has_driver_eligibility_snapshot(period_id, db):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "BONUS_SUMMARY_UNAVAILABLE_NO_ELIGIBILITY_SNAPSHOT: "
-                "the zero-inclusive bonus summary requires a period eligibility "
-                "snapshot (CP-2E). This period has no snapshot marker, and the "
-                "summary never falls back to the live driver roster."
-            ),
-        )
+    await require_period_eligibility_snapshot(
+        period_id, company_id, period.branch_id, db,
+    )
 
     # ── Roster: snapshot rows only ─────────────────────────────────────────── #
     roster_result = await db.execute(

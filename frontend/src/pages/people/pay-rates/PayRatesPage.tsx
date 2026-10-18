@@ -31,9 +31,13 @@ import { DriverPayRulesTab } from './DriverPayRulesTab';
 export function PayRatesPage() {
   const { user } = useAuth();
   const driver = usePayRateDriverContext(user);
-  const reads = usePayRateReads();
-  const target = useTargetRateEditing(driver.selectedDriverId, reads.refreshTargetRows);
-  const status = useStatusRateEditing(driver.selectedDriverId, reads.statusMatrix, reads.loadRates);
+  const reads = usePayRateReads(driver.selectedDriverId);
+  const branchBusinessDate = driver.branches.find((b) => b.branch_id === driver.selectedDriver?.branch_id)?.business_date;
+  const referenceDate = reads.statusMatrix?.driver_id === driver.selectedDriverId
+    ? reads.statusMatrix.as_of
+    : branchBusinessDate;
+  const target = useTargetRateEditing(driver.selectedDriverId, reads.refreshTargetRows, referenceDate);
+  const status = useStatusRateEditing(driver.selectedDriverId, reads.statusMatrix, reads.loadRates, referenceDate);
   const actions = useRateAssignmentActions(driver.selectedDriverId, reads.reloadAll);
   const rules = useDriverPayRules(driver.selectedDriverId, reads.loadPayRules, reads.setPayRulesError);
   const { selectedDriverId, activeTab } = driver;
@@ -166,10 +170,10 @@ export function PayRatesPage() {
 
               <div className={styles.tabPanel}>
                 {driver.activeTab === 'current' && <>
-                  <TargetRateSection rows={reads.rows} canEditMatrix={!!canEditMatrix} currencyCode={currencyCode} currencyDigits={currencyDigits}
+                  <TargetRateSection rows={reads.rows} canEditMatrix={!!canEditMatrix} referenceDate={referenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
                     targetDrafts={target.targetDrafts} targetErrors={target.targetErrors} targetSavingId={target.targetSavingId}
                     setTargetField={target.setTargetField} saveTargetRow={target.saveTargetRow} cancelTargetEdit={target.cancelTargetEdit} startTargetEdit={target.startTargetEdit} />
-                  <StatusRateSection statusMatrix={reads.statusMatrix} canEditMatrix={!!canEditMatrix} currencyCode={currencyCode} currencyDigits={currencyDigits}
+                  <StatusRateSection statusMatrix={reads.statusMatrix} canEditMatrix={!!canEditMatrix} referenceDate={referenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
                     statusEditMode={status.statusEditMode} statusDrafts={status.statusDrafts} statusSaving={status.statusSaving} statusSaveError={status.statusSaveError}
                     dirtyStatusKeys={status.dirtyStatusKeys} statusKey={status.statusKey} startStatusEdit={status.startStatusEdit} setStatusField={status.setStatusField}
                     isStatusDirty={status.isStatusDirty} saveStatusRates={status.saveStatusRates} cancelStatusEdit={status.cancelStatusEdit} />
@@ -180,7 +184,7 @@ export function PayRatesPage() {
                 {driver.activeTab === 'history' && <AssignmentHistoryTab historyRows={reads.historyRows} loadingHistory={reads.loadingHistory} canEditMatrix={!!canEditMatrix}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} setVoidTarget={actions.setVoidTarget} setVoidReason={actions.setVoidReason} setVoidError={actions.setVoidError} />}
                 {driver.activeTab === 'pay-rules' && <DriverPayRulesTab payRules={reads.payRules} payRulesError={reads.payRulesError} loadingPayRules={reads.loadingPayRules}
-                  canEditMatrix={!!canEditMatrix} currencyCode={user?.currency_code} currencyDigits={user?.currency_minor_unit_digits}
+                  canEditMatrix={!!canEditMatrix} referenceDate={referenceDate} currencyCode={user?.currency_code} currencyDigits={user?.currency_minor_unit_digits}
                   ruleForm={rules.ruleForm} setRuleForm={rules.setRuleForm} savingRule={rules.savingRule} ruleFormError={rules.ruleFormError}
                   setRuleFormError={rules.setRuleFormError} voidPayRule={rules.voidPayRule} createPayRule={rules.createPayRule} endPayRule={rules.endPayRule} />}
               </div>

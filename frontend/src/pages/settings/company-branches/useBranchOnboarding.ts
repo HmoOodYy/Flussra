@@ -7,47 +7,76 @@ import { useBoundaryChoices } from '../../../lib/useBoundaryChoices';
 import { readApiError } from '../../../lib/payrollSetupErrors';
 import { canCreateBranchWithOnboarding } from './companyBranchesView';
 
-export function useBranchOnboarding(modal: 'create' | 'edit' | null) {
+export function useBranchOnboarding(modal: 'create' | 'edit' | null, timeZoneId: string) {
   const [firstPayrollStart, setFirstPayrollStart] = useState('');
   const [setUpPayrollNow, setSetUpPayrollNow] = useState(false);
-  const [onboardingDefaultSetup, setOnboardingDefaultSetup] = useState<SetupResponse | null>(null);
-  const [onboardingDefaultLoading, setOnboardingDefaultLoading] = useState(false);
-  const [onboardingDefaultError, setOnboardingDefaultError] = useState<ApiErrorInfo | null>(null);
-  const hasCompanyDefault = onboardingDefaultSetup != null;
+  const [onboardingOptions, setOnboardingOptions] = useState<{
+    context: string;
+    defaultSetup: SetupResponse | null;
+  } | null>(null);
+  const [onboardingDefaultLoadingContext, setOnboardingDefaultLoadingContext] = useState<string | null>(null);
+  const [onboardingDefaultFailure, setOnboardingDefaultFailure] = useState<{
+    context: string;
+    error: ApiErrorInfo;
+  } | null>(null);
+  const requestContext = modal === 'create' && setUpPayrollNow && timeZoneId
+    ? `create|${timeZoneId}|checked`
+    : null;
+  const onboardingOptionsResolved = requestContext != null && onboardingOptions?.context === requestContext;
+  const onboardingDefaultSetup = onboardingOptionsResolved ? onboardingOptions?.defaultSetup ?? null : null;
+  const onboardingDefaultLoading = requestContext != null && onboardingDefaultLoadingContext === requestContext;
+  const onboardingDefaultError = requestContext != null && onboardingDefaultFailure?.context === requestContext
+    ? onboardingDefaultFailure.error
+    : null;
+  const hasCompanyDefault = onboardingOptionsResolved && onboardingDefaultSetup != null;
+
+  function resetOnboardingOptions() {
+    setOnboardingOptions(null);
+    setOnboardingDefaultFailure(null);
+    setOnboardingDefaultLoadingContext(null);
+  }
+
+  function changeSetUpPayrollNow(value: boolean) {
+    resetOnboardingOptions();
+    setSetUpPayrollNow(value);
+  }
 
   // Loaded once (no `around`) whenever the checkbox is turned on — gives us
   // default_setup for display and for the useBoundaryChoices key below.
   useEffect(() => {
-    if (modal !== 'create' || !setUpPayrollNow) return;
+    if (!requestContext || !timeZoneId) return;
     let active = true;
     function markLoading() {
-      setOnboardingDefaultLoading(true);
+      setOnboardingDefaultLoadingContext(requestContext);
     }
     markLoading();
-    getBranchOnboardingOptions()
+    getBranchOnboardingOptions(timeZoneId)
       .then((r) => {
         if (active) {
-          setOnboardingDefaultSetup(r.default_setup);
-          setOnboardingDefaultError(null);
-          setOnboardingDefaultLoading(false);
+          setOnboardingOptions({ context: requestContext, defaultSetup: r.default_setup });
+          setOnboardingDefaultFailure(null);
+          setOnboardingDefaultLoadingContext(null);
         }
       })
       .catch((err) => {
         if (active) {
-          setOnboardingDefaultError(readApiError(err, 'Failed to load onboarding options.'));
-          setOnboardingDefaultLoading(false);
+          setOnboardingDefaultFailure({
+            context: requestContext,
+            error: readApiError(err, 'Failed to load onboarding options.'),
+          });
+          setOnboardingDefaultLoadingContext(null);
         }
       });
     return () => {
       active = false;
     };
-  }, [modal, setUpPayrollNow]);
+  }, [requestContext, timeZoneId]);
 
-  const onboardingChoicesKey = `onboarding|${onboardingDefaultSetup?.setup_id ?? 'none'}`;
+  const onboardingChoicesKey = `onboarding|${timeZoneId}|${onboardingDefaultSetup?.setup_id ?? 'none'}`;
   const onboardingChoicesFetcher =
-    setUpPayrollNow && onboardingDefaultSetup != null
+    setUpPayrollNow && !!timeZoneId && onboardingDefaultSetup != null
       ? (around?: string) =>
-          getBranchOnboardingOptions(around).then((r) => {
+          getBranchOnboardingOptions(timeZoneId, around).then((r) => {
             if (r.choices == null) throw new Error('No onboarding choices available.');
             return r.choices;
           })
@@ -74,6 +103,7 @@ export function useBranchOnboarding(modal: 'create' | 'edit' | null) {
   const canCreateNow = canCreateBranchWithOnboarding({
     setUpPayrollNow,
     hasCompanyDefault,
+    optionsResolved: onboardingOptionsResolved,
     choicesCurrentAndValid: onboardingChoicesReady,
   });
 
@@ -81,13 +111,20 @@ export function useBranchOnboarding(modal: 'create' | 'edit' | null) {
     firstPayrollStart,
     setFirstPayrollStart,
     setUpPayrollNow,
-    setSetUpPayrollNow,
+    setSetUpPayrollNow: changeSetUpPayrollNow,
     onboardingDefaultSetup,
-    setOnboardingDefaultSetup,
+    setOnboardingDefaultSetup: (setup: SetupResponse | null) => {
+      if (setup == null) resetOnboardingOptions();
+      else setOnboardingOptions(requestContext ? { context: requestContext, defaultSetup: setup } : null);
+    },
     onboardingDefaultLoading,
     onboardingDefaultError,
-    setOnboardingDefaultError,
+    setOnboardingDefaultError: (error: ApiErrorInfo | null) => {
+      if (error == null) setOnboardingDefaultFailure(null);
+      else if (requestContext) setOnboardingDefaultFailure({ context: requestContext, error });
+    },
     hasCompanyDefault,
+    onboardingOptionsResolved,
     onboardingBoundary,
     onboardingChoicesReady,
     canCreateNow,

@@ -121,20 +121,36 @@ async def _create_transfer(
     driver_id: int,
     target_branch_id: int,
     initiated_by: str = "SourceBranch",
-    effective_date: str = "2090-01-01",
+    effective_at: datetime.datetime | None = None,
+    immediate: bool = False,
 ) -> dict:
+    # Most state-machine tests need a completed-but-not-yet-current destination.
+    # The date-era default is represented as an explicit future instant; callers
+    # testing immediate completion omit effective_at entirely.
+    boundary = effective_at or datetime.datetime(2090, 1, 1, 13, 27, tzinfo=datetime.UTC)
+    payload = {
+        "driver_id": driver_id,
+        "target_branch_id": target_branch_id,
+        "initiated_by": initiated_by,
+        "reason": "Test transfer reason",
+    }
+    if not immediate:
+        payload["effective_at"] = boundary.isoformat()
     r = await client.post(
         "/driver-transfers",
-        json={
-            "driver_id":        driver_id,
-            "target_branch_id": target_branch_id,
-            "effective_date":   effective_date,
-            "initiated_by":     initiated_by,
-            "reason":           "Test transfer reason",
-        },
+        json=payload,
         headers=auth(token),
     )
     return r
+
+
+async def _branch_midnight(direct_db, branch_id: int, day: str) -> datetime.datetime:
+    """Resolve a test boundary through PostgreSQL's canonical local-day helper."""
+    value = (await direct_db.execute(_text("""
+        SELECT core.fn_LocalDateBoundary(b.TimeZoneId, CAST(:day AS DATE))
+        FROM core.Branches b WHERE b.BranchID = :bid
+    """), {"day": datetime.date.fromisoformat(day), "bid": branch_id})).scalar_one()
+    return value
 
 
 async def _approve_source(
@@ -980,7 +996,7 @@ async def test_get_user_driver_info_returns_active_after_transfer(
 
     # Complete a transfer for this driver
     r_t = await _create_transfer(
-        session_client, auth_token, drv_id, hq_branch_id, "SourceBranch"
+        session_client, auth_token, drv_id, hq_branch_id, "SourceBranch", immediate=True
     )
     assert r_t.status_code == 201
     tid = r_t.json()["transfer_request_id"]
@@ -1038,7 +1054,7 @@ async def test_people_list_no_duplicate_after_transfer(
 
     # Complete transfer
     r_t = await _create_transfer(
-        session_client, auth_token, drv_id, hq_branch_id, "SourceBranch"
+        session_client, auth_token, drv_id, hq_branch_id, "SourceBranch", immediate=True
     )
     assert r_t.status_code == 201
     tid = r_t.json()["transfer_request_id"]
@@ -1501,7 +1517,7 @@ async def test_db_composite_fk_blocks_cross_company_driver(
             _text("""
                 INSERT INTO core.drivertransferrequests
                     (companyid, driverid, sourcebranchid, targetbranchid,
-                     requestedbyuserid, initiatedby, status, effectivedate)
+                     requestedbyuserid, initiatedby, status)
                 SELECT
                     0,
                     :did,
@@ -1509,8 +1525,7 @@ async def test_db_composite_fk_blocks_cross_company_driver(
                     :tbid,
                     u.userid,
                     'SourceBranch',
-                    'PendingTargetApproval',
-                    '2094-01-01'
+                    'PendingTargetApproval'
                 FROM sec.users u WHERE u.username = 'admin'
                 LIMIT 1
             """),
@@ -1700,6 +1715,12 @@ async def _create_open_period(
         },
     )).mappings().first()
     await direct_db.commit()
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    await _create_period_driver_eligibility_rows(
+        row["payrollperiodid"], 1, branch_id, direct_db,
+        snapshot_source="Generated", freeze=True,
+    )
+    await direct_db.commit()
     return row["payrollperiodid"]
 
 
@@ -1854,7 +1875,7 @@ async def test_effective_date_defers_target_activation(
     # Transfer PAYTEST → HQ with effective_date = 2094-07-15
     r = await _create_transfer(
         session_client, auth_token, old_drv_id, hq_branch_id,
-        "SourceBranch", effective_date="2094-07-15",
+        "SourceBranch", effective_at=await _branch_midnight(direct_db, paytest_branch_id, "2094-07-15"),
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
@@ -1921,7 +1942,7 @@ async def test_future_transfer_source_visible_before_effective(
 
     r = await _create_transfer(
         session_client, auth_token, old_drv_id, hq_branch_id,
-        "SourceBranch", effective_date="2095-08-01",
+        "SourceBranch", effective_at=await _branch_midnight(direct_db, paytest_branch_id, "2095-08-01"),
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
@@ -1970,7 +1991,7 @@ async def test_future_transfer_target_hidden_before_effective(
 
     r = await _create_transfer(
         session_client, auth_token, old_drv_id, paytest_branch_id,
-        "SourceBranch", effective_date="2095-09-15",
+        "SourceBranch", effective_at=await _branch_midnight(direct_db, paytest_branch_id, "2095-09-15"),
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
@@ -2030,7 +2051,7 @@ async def test_source_hidden_on_effective_date(
 
     r = await _create_transfer(
         session_client, auth_token, old_drv_id, hq_branch_id,
-        "SourceBranch", effective_date="2096-03-01",
+        "SourceBranch", effective_at=await _branch_midnight(direct_db, paytest_branch_id, "2096-03-01"),
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
@@ -2078,7 +2099,7 @@ async def test_target_visible_on_effective_date(
 
     r = await _create_transfer(
         session_client, auth_token, old_drv_id, paytest_branch_id,
-        "SourceBranch", effective_date="2096-05-01",
+        "SourceBranch", effective_at=await _branch_midnight(direct_db, paytest_branch_id, "2096-05-01"),
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
@@ -2139,7 +2160,7 @@ async def test_mid_period_transfer_split_visibility(
 
     r = await _create_transfer(
         session_client, auth_token, old_drv_id, hq_branch_id,
-        "SourceBranch", effective_date="2097-01-27",
+        "SourceBranch", effective_at=await _branch_midnight(direct_db, paytest_branch_id, "2097-01-27"),
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
