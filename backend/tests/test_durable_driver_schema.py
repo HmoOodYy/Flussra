@@ -640,6 +640,114 @@ def test_closing_an_open_effective_assignment_needs_no_operation(cur):
     assert cur.rowcount == 1
 
 
+def test_the_start_of_a_started_assignment_never_changes_even_under_reschedule(cur):
+    p = _person(cur)
+    open_started = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"], PAST_START)
+    move = "UPDATE core.driverassignments SET effectivefromat = %s WHERE driverassignmentid = %s"
+    for op in ("", "transfer_reschedule", "transfer_cancel", "terminate"):
+        _set_op(cur, op) if op else _clear_op(cur)
+        for instant in ("2019-01-01 00:00+00", PAST_MID, FUTURE_START):
+            with rejected(cur, errors.RaiseException):
+                cur.execute(move, (instant, open_started))
+
+
+def test_a_reschedule_cannot_move_the_start_of_the_source_assignment(cur):
+    p = _person(cur)
+    source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                         PAST_START, FUTURE_START, "Transferred")
+    _assignment(cur, p["company"], p["branches"][1], p["employee"], p["driver"], FUTURE_START)
+    _set_op(cur, "transfer_reschedule")
+    with rejected(cur, errors.RaiseException):
+        cur.execute("UPDATE core.driverassignments SET effectivefromat = %s, effectivetoat = %s "
+                    "WHERE driverassignmentid = %s", (PAST_MID, FUTURE_LATER, source))
+
+
+def test_a_pending_start_moves_only_to_another_future_instant_under_reschedule(cur):
+    p = _person(cur)
+    _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                PAST_START, FUTURE_START, "Transferred")
+    pending = _assignment(cur, p["company"], p["branches"][1], p["employee"], p["driver"], FUTURE_START)
+    move = "UPDATE core.driverassignments SET effectivefromat = %s WHERE driverassignmentid = %s"
+    for op in ("", "transfer_cancel", "terminate"):
+        _set_op(cur, op) if op else _clear_op(cur)
+        with rejected(cur, errors.RaiseException):
+            cur.execute(move, (FUTURE_LATER, pending))
+    _set_op(cur, "transfer_reschedule")
+    with rejected(cur, errors.RaiseException):
+        cur.execute(move, (PAST_MID, pending))
+    cur.execute(move, (FUTURE_LATER, pending))
+    assert cur.rowcount == 1
+
+
+def test_an_open_assignment_is_closed_in_the_past_only_by_termination(cur):
+    p = _person(cur)
+    open_started = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"], PAST_START)
+    close = ("UPDATE core.driverassignments SET effectivetoat = %s, endreason = %s "
+             "WHERE driverassignmentid = %s")
+    for op in ("", "transfer_cancel", "transfer_reschedule"):
+        _set_op(cur, op) if op else _clear_op(cur)
+        with rejected(cur, errors.RaiseException):
+            cur.execute(close, (PAST_MID, "Transferred", open_started))
+    _clear_op(cur)
+    cur.execute("UPDATE core.driverassignments SET effectivetoat = NOW(), endreason = 'Transferred' "
+                "WHERE driverassignmentid = %s", (open_started,))
+    assert cur.rowcount == 1
+
+
+def test_termination_may_close_an_open_assignment_at_a_past_cutoff(cur):
+    p = _person(cur)
+    open_started = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"], PAST_START)
+    _set_op(cur, "terminate")
+    cur.execute("UPDATE core.driverassignments SET effectivetoat = %s, endreason = 'Terminated' "
+                "WHERE driverassignmentid = %s", (PAST_MID, open_started))
+    assert cur.rowcount == 1
+
+
+def test_a_future_end_is_reopened_by_cancel_and_moved_only_to_a_future_instant(cur):
+    p = _person(cur)
+    source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                         PAST_START, FUTURE_START, "Transferred")
+    reopen = ("UPDATE core.driverassignments SET effectivetoat = NULL, endreason = NULL "
+              "WHERE driverassignmentid = %s")
+    _clear_op(cur)
+    with rejected(cur, errors.RaiseException):
+        cur.execute(reopen, (source,))
+    for op in ("transfer_reschedule", "transfer_cancel"):
+        _set_op(cur, op)
+        with rejected(cur, errors.RaiseException):
+            cur.execute("UPDATE core.driverassignments SET effectivetoat = %s WHERE driverassignmentid = %s",
+                        (PAST_MID, source))
+    _set_op(cur, "transfer_cancel")
+    cur.execute(reopen, (source,))
+    assert cur.rowcount == 1
+
+
+def test_transfer_origin_lineage_is_fixed_and_the_forward_link_moves_only_with_the_end(cur):
+    p = _person(cur)
+    first = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"], PAST_START)
+    cur.execute("""
+        INSERT INTO core.driverassignments
+            (companyid, branchid, employeeid, driverid, effectivefromat, transferredfromassignmentid)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING driverassignmentid
+    """, (p["company"], p["branches"][1], p["employee"], p["driver"], FUTURE_START, first))
+    destination = cur.fetchone()[0]
+    for op in ("", "transfer_cancel", "transfer_reschedule", "terminate"):
+        _set_op(cur, op) if op else _clear_op(cur)
+        with rejected(cur, errors.RaiseException):
+            cur.execute("UPDATE core.driverassignments SET transferredfromassignmentid = NULL "
+                        "WHERE driverassignmentid = %s", (destination,))
+        with rejected(cur, errors.RaiseException):
+            cur.execute("UPDATE core.driverassignments SET transferredtoassignmentid = %s "
+                        "WHERE driverassignmentid = %s", (destination, first))
+    _clear_op(cur)
+    cur.execute("""
+        UPDATE core.driverassignments
+        SET effectivetoat = %s, endreason = 'Transferred', transferredtoassignmentid = %s
+        WHERE driverassignmentid = %s
+    """, (FUTURE_START, destination, first))
+    assert cur.rowcount == 1
+
+
 def test_only_transfer_cancel_deletes_and_only_a_never_effective_assignment(cur):
     p = _person(cur)
     source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],

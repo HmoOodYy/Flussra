@@ -201,10 +201,19 @@ CREATE TRIGGER trg_DriverAssignments_IdentityImmutable
 BEFORE UPDATE OF BranchID, DriverID, EmployeeID, CompanyID ON core.DriverAssignments
 FOR EACH ROW EXECUTE FUNCTION core.trg_DriverAssignments_IdentityImmutable();
 
--- Ended windows, reasons and lineage are immutable. A future boundary (the
--- source end or destination start of a Scheduled transfer) changes only under
--- an explicit workforce operation. Deletion is limited to a never-effective
--- destination removed by transfer cancel; foreign keys stop any other delete.
+-- History rules for assignment boundaries.
+--   * The origin lineage (TransferredFromAssignmentID) never changes after insert.
+--   * EffectiveFromAt changes only for a not-yet-started assignment, to another
+--     future instant, under transfer_reschedule.
+--   * An ended assignment (EffectiveToAt <= NOW()) is immutable, except that
+--     termination may cap a transferred assignment at the Branch-local cutoff.
+--   * Closing an open assignment needs no operation when the end is NOW() or later
+--     (immediate and scheduled transfer); a past cap requires terminate.
+--   * A future end changes only under transfer_cancel or transfer_reschedule (to
+--     NULL or a later future instant) or under terminate.
+--   * TransferredToAssignmentID changes only together with an end change.
+-- Deletion is limited to a never-effective destination removed by transfer cancel;
+-- foreign keys stop any other delete.
 CREATE FUNCTION core.trg_DriverAssignments_HistoryImmutable()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -225,6 +234,10 @@ BEGIN
        AND NEW.TransferredFromAssignmentID IS NOT DISTINCT FROM OLD.TransferredFromAssignmentID
        AND NEW.TransferredToAssignmentID IS NOT DISTINCT FROM OLD.TransferredToAssignmentID THEN
         RETURN NEW;
+    END IF;
+
+    IF NEW.TransferredFromAssignmentID IS DISTINCT FROM OLD.TransferredFromAssignmentID THEN
+        RAISE EXCEPTION 'DriverAssignment origin lineage is immutable';
     END IF;
 
     -- Termination may cap a transferred assignment at the Branch-local end of
@@ -249,21 +262,38 @@ BEGIN
                  ))
              )
        )
-       AND NEW.TransferredFromAssignmentID IS NOT DISTINCT FROM OLD.TransferredFromAssignmentID
        AND NEW.TransferredToAssignmentID IS NOT DISTINCT FROM OLD.TransferredToAssignmentID THEN
         RETURN NEW;
     END IF;
 
-    IF OLD.EffectiveToAt IS NOT NULL AND OLD.EffectiveToAt <= NOW() THEN
-        RAISE EXCEPTION 'Historical DriverAssignment window, end reason, and lineage are immutable';
+    IF NEW.EffectiveFromAt IS DISTINCT FROM OLD.EffectiveFromAt
+       AND NOT (OLD.EffectiveFromAt > NOW()
+                AND NEW.EffectiveFromAt > NOW()
+                AND v_WorkforceOp = 'transfer_reschedule') THEN
+        RAISE EXCEPTION 'DriverAssignment start changes only for a not-yet-started assignment under transfer reschedule';
     END IF;
 
-    IF (OLD.EffectiveToAt IS NOT NULL AND OLD.EffectiveToAt > NOW())
-       OR OLD.EffectiveFromAt > NOW() THEN
-        IF v_WorkforceOp IN ('transfer_cancel', 'transfer_reschedule', 'terminate') THEN
-            RETURN NEW;
+    IF NEW.EffectiveToAt IS DISTINCT FROM OLD.EffectiveToAt
+       OR NEW.EndReason IS DISTINCT FROM OLD.EndReason
+       OR NEW.TransferredToAssignmentID IS DISTINCT FROM OLD.TransferredToAssignmentID THEN
+        IF NEW.TransferredToAssignmentID IS DISTINCT FROM OLD.TransferredToAssignmentID
+           AND NEW.EffectiveToAt IS NOT DISTINCT FROM OLD.EffectiveToAt THEN
+            RAISE EXCEPTION 'DriverAssignment transfer link changes only together with the assignment end';
         END IF;
-        RAISE EXCEPTION 'A future DriverAssignment boundary changes only through transfer cancel, reschedule or termination';
+        IF OLD.EffectiveToAt IS NULL THEN
+            IF NEW.EffectiveToAt IS NULL THEN
+                RAISE EXCEPTION 'An open DriverAssignment changes its end reason or transfer link only by closing';
+            END IF;
+            IF NEW.EffectiveToAt < NOW() AND v_WorkforceOp IS DISTINCT FROM 'terminate' THEN
+                RAISE EXCEPTION 'A DriverAssignment is closed in the past only by termination';
+            END IF;
+        ELSIF OLD.EffectiveToAt <= NOW() THEN
+            RAISE EXCEPTION 'Historical DriverAssignment window, end reason, and lineage are immutable';
+        ELSIF NOT (v_WorkforceOp = 'terminate'
+                   OR (v_WorkforceOp IN ('transfer_cancel', 'transfer_reschedule')
+                       AND (NEW.EffectiveToAt IS NULL OR NEW.EffectiveToAt > NOW()))) THEN
+            RAISE EXCEPTION 'A future DriverAssignment end changes only through transfer cancel, reschedule or termination';
+        END IF;
     END IF;
 
     RETURN NEW;
