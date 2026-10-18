@@ -83,6 +83,41 @@ Employee            the person in the company (unchanged; not every employee dri
 - Self authorization works through the Driver.
 - The fresh-upgrade and schema-authority checks pass.
 
+#### Stage 1 implementation decisions
+
+Recorded by the Lead on 2026-10-18 before implementation. They resolve the "implementer must think about" items above and do not alter any approved decision.
+
+**Identity model**
+
+- `core.Employees` is unchanged. The new `core.Drivers` is the permanent Driver: `DriverID`, `CompanyID`, `EmployeeID` (UNIQUE, so 0..1 Driver per Employee; composite FK `(EmployeeID, CompanyID)`), nullable `DriverNumber` (unique per company when present; never generated per assignment), scalar `CDLNumber`, `DriverStatus`, timestamps. `CompanyID` and `EmployeeID` are immutable.
+- A Driver is created in the same Workforce operation as its first `DriverAssignment`. A driver who stops driving and comes back later (DWR-022) reuses the same Driver with a new assignment; the rehire flow itself is still not built.
+- Today's `core.Drivers` rows become `core.DriverAssignments`: one continuous home-Branch tenure with `CompanyID`, immutable `BranchID`, immutable `DriverID`, `EmployeeID` (an FK-enforced copy via `(DriverID, EmployeeID, CompanyID)`, so it can never disagree), `EffectiveFromAt` / `EffectiveToAt` (half-open `TIMESTAMPTZ` instants, as in migration `0086`), `EndReason`, and transfer lineage (`TransferredFromAssignmentID` / `TransferredToAssignmentID`, same Driver, same company).
+- `DriverCode`, `CDLNumber` and `DriverStatus` leave the assignment (to `DriverNumber`, `CDLNumber` and `DriverStatus` on the Driver, and `EndReason`, respectively).
+- No overlapping assignment windows per Driver (instant-range exclusion). The history protections stay: an ended assignment is immutable; a future boundary may change only for transfer cancel, transfer reschedule or termination; a never-effective destination assignment may be deleted only by transfer cancel.
+- The resolver is `core.fn_EffectiveDriverAssignment(company, driver, at)`. Employee-addressed callers map Employee to Driver (0..1) first.
+- `ExternalDriverID` is dropped (no defined meaning, no consumer) and `core.DriverAliases` is dropped (no application consumer). External identities and aliases are designed in C2 Import as source system + external key + Driver. `import.ImportRows.MatchedDriverID` is repointed to the permanent Driver.
+
+**DriverID classification**
+
+After Stage 1, `DriverID` means only the permanent Driver. Everything that stored a branch-profile id becomes `DriverAssignmentID`: payroll drafts, day-entry state, eligibility, bonus events, final lines, calculation totals, snapshots, audit evidence, and (for Stage 1 only, unchanged in ownership) the legacy and target rate/pay-rule tables, which Stage 2 re-keys to the Driver. Evidence and final tables also carry the permanent `DriverID` (bound to the assignment by composite FK) and `DriverNumberSnapshot` in place of `DriverCodeSnapshot`. The rate-table naming collision flagged above stays with Stage 2.
+
+**Status ownership**
+
+- `Driver.DriverStatus` is `Active`, `Inactive` or `OnLeave`: the durable work state of the person-driver. It survives transfers.
+- `DriverAssignment.EndReason` is `NULL`, `Transferred` or `Terminated`, written together with `EffectiveToAt`. `Employee.EmploymentStatus` is unchanged.
+- An assignment is lifecycle-eligible for payroll when it has an `EndReason` (historical) or its Driver is `Active`. Eligibility classification derives from `EndReason`, and the Driver status is snapshotted.
+
+**Transfer lifecycle**
+
+- A permanent transfer ends the source assignment and opens the destination assignment of the same Driver at one instant. Immediate transfers use database `NOW()` at completion and are `Completed`.
+- A future-dated transfer materializes both windows when it is completed (the destination stays pending) and is `Scheduled`, not `Completed`. The windows are the single authority, so currentness switches at `EffectiveAt` by time alone, with no job. One SQL function, `core.fn_DriverTransferStatus`, reports a stored `Scheduled` request as `Completed` once `EffectiveAt` has passed; every read, filter and active-transfer check uses it.
+- A `Scheduled` transfer can be cancelled or rescheduled only while `EffectiveAt` is in the future. Cancel deletes the never-effective destination assignment and reopens the source; reschedule moves both boundaries and keeps the destination assignment ID. Both are refused if payroll facts or non-editable periods would be affected.
+- A transfer whose `EffectiveAt` is at or after the source's termination cap becomes `Cancelled`; one before the cap stays and becomes effectively `Completed` at `EffectiveAt`.
+
+**Eligibility re-capture rule**
+
+Cancel and reschedule may re-capture the named assignment's eligibility row, with the same snapshot SQL as the append rule, only in `Draft`, `Open` or `Returned` periods of that assignment's Branch overlapping the affected interval. If a period in any other state overlaps, the operation is refused. This is the single narrow exception to the rule that existing eligibility rows and frozen date arrays are left untouched.
+
 ---
 
 ### Stage 2: Driver-owned compensation
@@ -182,5 +217,3 @@ Employee            the person in the company (unchanged; not every employee dri
 **P4c** freezes Stage 3’s packet into immutable evidence and the hash, including `DriverAssignmentID`, `DriverID`, `EmployeeID`, `BranchID` and the driver number snapshot. It rebuilds the deleted submit/finalize/report suites and opens the evidence gate, with **no open product decisions left inside the current P4c scope**. The concrete temporary-loan/worked-for-Branch feature remains explicitly deferred, but P4c must not encode identity or Branch-provenance semantics that make that future path impossible.
 
 **P5** must meet the recorded criterion: *a transfer never requires re-entering status rates.*
-
-Still nothing written to any file.

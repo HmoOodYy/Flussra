@@ -1,6 +1,6 @@
 # PEOPLE / WORKFORCE / ACCESS ARCHITECTURE CONTRACT
 
-**Status:** LOCKED — approved architecture boundary for the People / Workforce / Access refoundation  
+**Status:** LOCKED — approved architecture boundary for the People / Workforce / Access refoundation; **amended 2026-10-18** (Driver identity and Scheduled transfer lifecycle, see the Driver identity amendment below)  
 **Scope:** Flussra People, Employee, Driver, User, Role, Scope, Driver Transfer, and future Import boundaries  
 **Precondition:** Payroll Setup is closed and remains out of scope unless a concrete dependency is later proven  
 **Execution sequencing:** governed by the Unified Refoundation Execution Plan; unresolved implementation mechanisms remain for Lead design
@@ -9,6 +9,8 @@
 **Next execution artifact:** `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md`; the older People master plan is a detailed reference only where consistent with this contract and the Unified Plan.
 
 **Locked temporal authority amendment (2026-10-18):** This amendment supersedes every earlier Company-timezone/current-date rule and Driver assignment `EffectiveFrom`/`EffectiveTo` DATE rule in this contract and its older plans. `Branch.TimeZoneId` is the sole business timezone authority. Driver assignments use aware TIMESTAMPTZ half-open ranges `[EffectiveFromAt, EffectiveToAt)`, and a transfer switches current identity at one exact `EffectiveAt` instant. Immediate transfers resolve that instant once at administrative completion using database `NOW()`; explicitly scheduled instants must still be future when completed. Current Driver identity, Employee Branch projection, and Driver Self access all resolve against the same instant. Payroll remains explicit `BranchID + WorkDate`; an assignment overlapping any portion of that Branch-local calendar day permits activity on that WorkDate. A transfer never creates, splits, or prorates pay. Compensation, rates, Payroll Setup versions, periods, hire/termination dates, Status, Bonus, daily entries, and other business-date inputs remain DATE-authoritative; audit/event timestamps and system metadata remain instants. Captured period eligibility stores immutable eligible WorkDates and the captured Branch timezone, while live assignment coverage can restrict new inputs. No Company timezone default or runtime Company clock exists.
+
+**Locked Driver identity amendment (2026-10-18):** This amendment supersedes every earlier reading of "Driver profile" as the Driver's identity. A `Driver` is the permanent person-driver identity: 0..1 per Employee, same Company, with an immutable Employee link. It owns the driver number, the CDL number and the durable Driver work status. A `DriverAssignment` is one continuous home-Branch tenure of that Driver over a half-open instant range `[EffectiveFromAt, EffectiveToAt)`. Wherever the older plans that reference this contract say "Driver profile" they mean a DriverAssignment, and "current Driver profile" means the Driver's effective DriverAssignment. `DriverID` means only the permanent Driver; branch payroll/work provenance is keyed by `DriverAssignmentID`. A permanent transfer closes one home DriverAssignment and opens another under the same Driver; a temporary loan is not a DriverAssignment and never changes the home Branch. Driver compensation follows the Driver (Durable Driver Stage 2), so the transfer rate-copy choice is retired. Future-dated transfers follow the `Scheduled` lifecycle (§8.3, §8.7). Implementation sequencing is recorded in `DURABLE_DRIVER_IDENTITY_DRIVER_OWNED_COMPENSATION_PLAN.md`.
 
 ---
 
@@ -49,12 +51,14 @@ Company
 │       │
 │       ├── non-Driver employee
 │       │
-│       └── Driver Profile(s)
-│           ├── branch-specific
-│           ├── effective-dated
-│           ├── historical lineage
-│           ├── Driver Pay Rates
-│           └── Payroll history
+│       └── Driver (permanent identity, 0..1 per Employee)
+│           ├── driver number, CDL number, Driver status
+│           ├── Driver compensation (rates, Min/Max)
+│           └── DriverAssignment(s)
+│               ├── one continuous home-Branch tenure
+│               ├── effective-instant window
+│               ├── historical lineage
+│               └── Payroll history
 │
 └── Access
     │
@@ -64,20 +68,20 @@ Company
         └── Permission overrides
 ```
 
-Workforce and Access are related domains, but neither silently creates nor mutates the other. A linked DRIVER User derives self identity from the explicit User–Employee link and the Employee’s Driver profiles (§7.5). A Driver transfer or termination changes effective Workforce identity over time; it does not mutate an Access Self assignment or create Access branch membership (§7.6, §8.5).
+Workforce and Access are related domains, but neither silently creates nor mutates the other. A linked DRIVER User derives self identity from the explicit User–Employee link, the Employee’s Driver and that Driver’s effective DriverAssignment (§7.5). A Driver transfer or termination changes effective Workforce identity over time; it does not mutate an Access Self assignment or create Access branch membership (§7.6, §8.5).
 
-### 2.1 Effective-date vocabulary
+### 2.1 Effective-time vocabulary
 
 These terms are used throughout this contract:
 
-- A Driver profile is **effective on date D** when D falls within its effective window (`EffectiveFrom` through `EffectiveTo`, inclusive; a NULL bound is open).
-- The **current Driver profile** of an Employee is the profile effective on the current business date.
-- A **historical Driver profile** is a profile whose effective window has ended.
-- A **pending Driver profile** is a profile whose `EffectiveFrom` is in the future; it is not current.
+- A DriverAssignment is **effective at instant T** when `EffectiveFromAt <= T < EffectiveToAt` (half-open; a NULL `EffectiveToAt` is open). Business-date payroll does not cast an instant to a DATE; it uses the Branch-local WorkDate overlap rule of the Branch Timezone Authority contract.
+- The **current DriverAssignment** of a Driver (and so of its Employee) is the assignment effective at the database transaction instant `NOW()`.
+- A **historical DriverAssignment** is an assignment whose window has ended (`EffectiveToAt <= NOW()`).
+- A **pending DriverAssignment** is an assignment whose `EffectiveFromAt` is in the future; it is not current.
 
 Throughout this contract, "current" always means current and effective in this sense.
 
-"Current" is never determined by status alone. Status and effective window must agree (§4.6), but the effective window decides which profile applies on a date.
+"Current" is never determined by status alone. The assignment window decides which assignment applies at an instant; the window and the end reason (§4.6) are written together and must agree.
 
 ---
 
@@ -89,7 +93,7 @@ Throughout this contract, "current" always means current and effective in this s
 
 `EmployeeID` is the durable workforce identity.
 
-An Employee represents the person who works for the company, not their login account and not one particular Driver incarnation.
+An Employee represents the person who works for the company, not their login account and not one particular Driver assignment.
 
 ### 3.2 Employee lifecycle
 
@@ -116,13 +120,13 @@ The product must not assume:
 Employee == Driver
 ```
 
-Whether an Employee is currently a Driver is determined only by the existence of a current Driver profile.
+Whether an Employee is a Driver is determined only by the existence of a permanent Driver for that Employee; whether that Driver currently has a home Branch is determined only by its current DriverAssignment.
 
 `EmployeeType`, if retained, is workforce metadata only:
 
 - it never grants Access;
 - it never determines authorization;
-- it is not the authority for whether an Employee is a Driver and must not contradict Driver-profile truth;
+- it is not the authority for whether an Employee is a Driver and must not contradict Driver truth;
 - Access-role names (for example Payroll Manager) are not Employee types.
 
 The current free-text values (`Driver`, `OfficeStaff`, `Manager`, `PayrollUser`) are not canonized by this contract. Whether `EmployeeType` is retired, renamed, repurposed, or replaced with another small classification is decided by the refoundation master plan based on actual product need.
@@ -152,88 +156,102 @@ External source-system identifiers, aliases, and import mapping identifiers belo
 
 `Employee.BranchID` is workforce data only. It never grants, restricts, or moves Access.
 
-For an Employee with **no** current or pending Driver profile, `Employee.BranchID` is the canonical current employment/home branch and is editable through the Employee workflow.
+For an Employee with **no** current or pending DriverAssignment, `Employee.BranchID` is the canonical current employment/home branch and is editable through the Employee workflow.
 
-For an Employee **with** a current or pending Driver profile:
+For an Employee **with** a current or pending DriverAssignment:
 
-- the current Driver profile (or, if none is yet current, the pending one) is authoritative for the Driver branch;
-- `Employee.BranchID` is a synchronized workforce projection of that profile's branch;
+- the current DriverAssignment (or, if none is yet current, the pending one) is authoritative for the Driver branch;
+- `Employee.BranchID` is a synchronized workforce projection of that assignment's branch;
 - it is not independently editable;
-- it changes only as a consequence of Driver-profile creation or of a Driver transfer becoming effective (§8.3).
+- it changes only as a consequence of Driver creation with its first assignment or of a Driver transfer becoming effective (§8.3).
 
-A first Driver profile for an existing Employee is created in the Employee's current `Employee.BranchID`. Any later branch change for a Driver is a Driver transfer.
+The first Driver for an existing Employee is created, with its first DriverAssignment, in the Employee's current `Employee.BranchID`. Any later branch change for a Driver is a Driver transfer.
 
 ---
 
 ## 4. Driver Contract
 
-### 4.1 Driver is a profile, not a second person
+### 4.1 Driver is the permanent identity; DriverAssignment is the home-Branch tenure
 
-`core.Drivers` represents a Driver-specific profile under an Employee.
+`core.Drivers` represents the permanent Driver: the driver identity of an Employee. A Driver is not a second person; the Employee remains the canonical human identity.
 
-A Driver record is not the canonical human identity.
+`core.DriverAssignments` represents one continuous home-Branch tenure of a Driver.
 
 The relationship is:
 
 ```text
 Employee
-   └── one or more Driver Profiles over time
+   └── Driver                    0..1 per Employee, permanent
+          └── DriverAssignment[]     home-Branch tenures over time
 ```
 
-### 4.2 DriverID semantics
+A Driver owns the driver number (stable; unique per Company when present; never generated per assignment), the CDL number (a scalar current value), and the Driver's durable work status (§4.6). A permanent transfer never creates a new Driver.
 
-`DriverID` is the branch/effective payroll identity.
+A Driver is created together with its first DriverAssignment in one Workforce operation (§11.1). A driver who stops driving and later returns reuses the same Driver with a new assignment; the lifecycle that permits it is not defined here (§4.6 item 7).
 
-It is intentionally used by Driver Pay Rates and payroll history.
+### 4.2 DriverID and DriverAssignmentID semantics
 
-Existing Driver history must not be collapsed into Employee history.
+`DriverID` identifies only the permanent Driver. It is used for driver identity and display (driver number, CDL number, name through the Employee), Self ownership resolution (§7.5), the transfer request subject (§8), import matching (§9.3), and Driver-owned compensation (§8.4).
 
-### 4.3 Branch and effective-date semantics
+`DriverAssignmentID` identifies one home-Branch tenure and is the branch/effective payroll-history key. Drafts, day entries, eligibility, bonus events, calculation snapshots, final lines and evidence reference it. Evidence and final records also carry the permanent `DriverID` and the driver number snapshot, bound to the assignment so the two cannot disagree.
 
-A Driver profile is:
+Existing payroll history must not be collapsed into Employee history, into the Driver, or into another assignment.
+
+### 4.3 Branch and effective-time semantics
+
+A DriverAssignment is:
 
 - company-bound;
 - branch-bound;
-- effective-dated;
+- effective over a half-open instant range (§2.1);
 - historically preserved.
 
-A historical Driver profile must remain available for payroll provenance.
+A historical DriverAssignment must remain available for payroll provenance.
 
-Driver profile invariants:
+Invariants:
 
-1. A Driver profile and its Employee always belong to the same company.
-2. For one Employee, Driver-profile effective windows must not overlap.
-3. On any date, an Employee has at most one effective Driver profile.
+1. A Driver, its Employee, and each of the Driver's DriverAssignments always belong to the same company.
+2. An Employee has at most one Driver.
+3. For one Driver, DriverAssignment windows must not overlap.
+4. At any instant, a Driver (and therefore its Employee) has at most one effective DriverAssignment.
 
-### 4.4 Driver branch immutability
+### 4.4 Branch immutability
 
-`Drivers.BranchID` is immutable after the profile is created.
+`DriverAssignments.BranchID` is immutable after the assignment is created.
 
-There is no history-dependent exception: a profile's branch is never changed, whether or not payroll, rate, eligibility, entry, or snapshot records already reference it.
+There is no history-dependent exception: an assignment's branch is never changed, whether or not payroll, rate, eligibility, entry, or snapshot records already reference it. An assignment's `DriverID` is likewise immutable, and a Driver's `CompanyID` and `EmployeeID` are immutable.
 
-Working in a different branch means a Driver transfer, which creates a new Driver profile.
+Working permanently in a different branch means a Driver transfer, which creates a new DriverAssignment of the same Driver.
 
-Role assignment, User editing, access-scope editing, Employee editing, or general People UI actions must never move a Driver profile between branches.
+Role assignment, User editing, access-scope editing, Employee editing, or general People UI actions must never move a Driver or a DriverAssignment between branches.
 
-Driver-branch immutability, Driver/Employee same-company ownership, and at most one effective Driver profile per Employee per date are integrity invariants. They must be database-enforced where the database can express them; any part the database cannot express must be enforced in the owning service with tests.
+Assignment-branch immutability, Driver/Employee same-company ownership, one Driver per Employee, and at most one effective DriverAssignment per Driver at any instant are integrity invariants. They must be database-enforced where the database can express them; any part the database cannot express must be enforced in the owning service with tests.
 
-### 4.5 Historical profiles
+### 4.5 Historical assignments
 
-A historical Driver profile is never mutated into another branch or made current again.
+A historical (ended) DriverAssignment is never mutated into another branch or made current again.
 
-Historical lineage and effective windows are authoritative and must remain intact.
+Historical lineage and effective windows are authoritative and must remain intact. Only a future boundary may change: the source end or destination start of a `Scheduled` transfer, and only through transfer cancel, transfer reschedule or termination (§8.7, §8.8).
 
 ### 4.6 Minimum Driver / Employee status rules
 
 This contract defines only the status semantics required to protect payroll and transfer history. It is not an HR lifecycle.
 
-1. A `Transferred` profile is closed by a Driver transfer. It remains effective through its `EffectiveTo` for payroll purposes and can never become current again after that. `Transferred` is set only by the Driver transfer operation.
-2. A `Terminated` profile is never reactivated in place (§4.7). A later rehire/return, if ever supported, uses a separately defined lifecycle rather than reopening historical state.
-3. Generic Driver or Employee editing must never reactivate a historical Driver profile or alter its effective window.
-4. Statuses and effective windows must not contradict payroll eligibility: a profile that has ended (transferred or terminated) always has a closed effective window, and status and window describe the same effective period.
-5. Driver and employment status values are a small, closed set enforced by the platform, not free text.
+Status ownership is split:
+
+- `Driver.DriverStatus` is one of `Active`, `Inactive`, `OnLeave`. It is the durable work state of the person-driver and survives transfers; a transfer never sets it.
+- `DriverAssignment.EndReason` is `NULL`, `Transferred` or `Terminated`. It records why the assignment window ends and is written together with `EffectiveToAt`: the window is open if and only if there is no end reason.
+- `Employee.EmploymentStatus` is unchanged.
+
+Rules:
+
+1. A `Transferred` assignment is closed by a Driver transfer. It remains effective through its `EffectiveToAt` for payroll purposes and can never become current again after that. `Transferred` is set only by the Driver transfer operation.
+2. A `Terminated` assignment is never reactivated in place (§4.7). A later rehire/return, if ever supported, reuses the same Driver with a new assignment under a separately defined lifecycle rather than reopening historical state.
+3. Generic Driver or Employee editing must never reactivate an ended DriverAssignment or alter its effective window.
+4. End reasons and effective windows must not contradict payroll eligibility: an assignment that has ended (transferred or terminated) always has a closed window and an end reason. The only empty window permitted is a never-effective assignment retained as `Terminated` (§4.7). An assignment is lifecycle-eligible for payroll when it has an end reason (historical; its window decides) or its Driver is `Active`.
+5. Driver status, end-reason and employment status values are small, closed sets enforced by the platform, not free text.
 6. For Driver Employees, Employee `EmploymentStatus`, `HireDate`, and `TerminationDate` are payroll-eligibility inputs. Changing them must never rewrite locked or finalized payroll evidence.
-7. Ending a Driver profile while the Employee remains employed in a non-Driver capacity (for example "stops driving, becomes office staff") requires payroll-eligibility semantics that are not currently defined. That transition workflow is deferred and is not part of this refoundation.
+7. Ending a Driver's assignments while the Employee remains employed in a non-Driver capacity (for example "stops driving, becomes office staff") requires payroll-eligibility semantics that are not currently defined. That transition workflow is deferred and is not part of this refoundation.
 
 ### 4.7 Terminating a Driver Employee
 
@@ -241,21 +259,21 @@ When a currently employed Driver Employee is terminated from employment on date 
 
 ```text
 Employee:                         EmploymentStatus = Terminated, TerminationDate = D
-Current Driver profile:           DriverStatus     = Terminated, EffectiveTo     = D
+Current DriverAssignment:         EffectiveToAt    = end of D in its Branch, EndReason = Terminated
 ```
 
-Both changes succeed or fail together. The terminated Employee's Driver profiles never become current after D; the master plan defines how any pending profile or in-flight transfer is closed.
+Both changes succeed or fail together. The terminated Employee's DriverAssignments never become current after that cap (computed by the Branch Timezone Authority contract's local-day boundary); §8.8 defines how a pending assignment and any in-flight transfer are closed.
 
 Historical integrity:
 
-- prior Driver profiles remain unchanged;
-- Driver Pay Rates remain on their original `DriverID`s;
+- prior DriverAssignments remain unchanged;
+- Driver compensation remains with the Driver, and historical payroll records remain on their original `DriverAssignmentID`s;
 - payroll history, finalized evidence, snapshots, and used-rate evidence remain unchanged;
 - termination never rewrites historical payroll.
 
-A `Terminated` profile is never reactivated in place.
+A `Terminated` assignment is never reactivated in place.
 
-Termination is a Workforce operation and does not itself modify Access records. A DRIVER assignment whose linked Employee has no current Driver profile confers no current-profile self-service authorization (§7.6).
+Termination is a Workforce operation and does not itself modify Access records. A DRIVER role assignment whose linked Employee's Driver has no current DriverAssignment confers no current-assignment self-service authorization (§7.6).
 
 This section does not cover the deferred "stops driving but remains employed" transition (§4.6 item 7).
 
@@ -362,9 +380,9 @@ These are separate concepts even when they share similar names.
 Assigning, changing, or removing an access role must never:
 
 - create an Employee;
-- create a Driver profile;
+- create a Driver or DriverAssignment;
 - move an Employee to another branch;
-- move a Driver profile to another branch;
+- move a DriverAssignment to another branch;
 - change EmployeeType;
 - terminate or reactivate workforce records;
 - create, change, or remove a User↔Employee link.
@@ -435,36 +453,36 @@ Assigning or activating `DRIVER` requires that:
 
 1. the User is explicitly linked to an Employee (§5.4);
 2. that Employee belongs to the User's company; and
-3. that Employee has a current Driver profile, resolved through the canonical P1 effective-profile authority.
+3. that Employee has a Driver with a current DriverAssignment, resolved through the canonical effective-assignment resolver.
 
-A pending Driver profile is not current. A future Driver may be linked and kept staged, but `DRIVER` assignment is rejected until the profile becomes effective. For each current/date-sensitive Driver action, resolve the linked Employee's profile effective on that operation's defined date. Missing link, company mismatch, or no effective profile for a current action fails closed.
+A pending DriverAssignment is not current. A future Driver may be linked and kept staged, but `DRIVER` role assignment is rejected until the DriverAssignment becomes effective. For each current/date-sensitive Driver action, resolve the linked Employee's Driver and its DriverAssignment effective at that operation's defined instant. Missing link, company mismatch, or no effective DriverAssignment for a current action fails closed.
 
 Assigning `DRIVER` never creates, links, moves, or modifies Employee or Driver records.
 
-**Future Drivers.** A future Driver may be prepared before their Driver profile becomes effective. Before the profile's `EffectiveFrom` it is valid to have:
+**Future Drivers.** A future Driver may be prepared before their home DriverAssignment becomes effective. Before the assignment's `EffectiveFromAt` it is valid to have:
 
 - the Employee;
-- a pending Driver profile;
+- the Driver with a pending DriverAssignment;
 - an optional User account;
 - an explicit User↔Employee link.
 
-The pending profile is not current, so DRIVER self-service must not become active and the account must not gain DRIVER self-service authorization before that date. Access provisioned ahead of time remains an explicitly staged, login-disabled account (§5.5) until the Driver profile becomes effective. A pending profile is never treated as current merely so an account can be provisioned.
+The pending DriverAssignment is not current, so DRIVER self-service must not become active and the account must not gain DRIVER self-service authorization before that instant. Access provisioned ahead of time remains an explicitly staged, login-disabled account (§5.5) until the DriverAssignment becomes effective. A pending assignment is never treated as current merely so an account can be provisioned.
 
 ### 7.5 Self-service authorization model
 
 Three concepts are distinct:
 
-**Own identity.** Which Driver records belong to a DRIVER User is always derived from:
+**Own identity.** Which Driver and DriverAssignment records belong to a DRIVER User is always derived from:
 
 ```text
-User.EmployeeID → Employee → that Employee's Driver profiles
+User.EmployeeID → Employee → Driver → effective DriverAssignment
 ```
 
 It is never derived from an Access-scope `BranchID`.
 
-**Historical reads.** "Own data" may include the linked Employee's historical Driver profiles where a self-service feature permits history (for example historical pay or work records).
+**Historical reads.** "Own data" may include the linked Employee's Driver's historical DriverAssignments where a self-service feature permits history (for example historical pay or work records).
 
-**Current actions.** A self-service action that operates on a Driver profile targets the linked Employee's profile effective on the date that operation's contract defines (normally the current business date).
+**Current actions.** A self-service action that operates on a DriverAssignment targets the linked Driver's assignment effective at the instant that operation's contract defines (normally the current instant).
 
 A stale Access scope is never used to decide which Driver is "own".
 
@@ -474,9 +492,9 @@ The former `OwnDriverDataOnly` model stored a `BranchID` on the Access assignmen
 
 A `Self` assignment has `BranchID = NULL`. `Self` is not a fake branch membership, does not mean the User's current work branch, and grants no branch-wide access. Branch access views/functions must not fabricate branch membership for a Self assignment.
 
-Self ownership is proven from the User's explicit Employee link and the relevant Employee-owned resource. For a current Driver operation, resolve the linked Employee's Driver profile effective on the operation's defined date. Historical Driver reads may include only profiles of that linked Employee and only where the endpoint's self-service contract permits history.
+Self ownership is proven from the User's explicit Employee link and the relevant Employee-owned resource. For a current Driver operation, resolve the linked Employee's Driver and its DriverAssignment effective at the operation's defined instant. Historical Driver reads may include only DriverAssignments of that linked Employee's Driver and only where the endpoint's self-service contract permits history.
 
-A missing link, company mismatch, or missing effective Driver profile for a current action fails closed. Transfer and termination do not update the Access Self assignment. `Employee.BranchID` remains a distinct Workforce projection under §3.5 and may still follow the effective Driver profile; this does not create Access branch authority.
+A missing link, company mismatch, or missing effective DriverAssignment for a current action fails closed. Transfer and termination do not update the Access Self assignment. `Employee.BranchID` remains a distinct Workforce projection under §3.5 and may still follow the effective DriverAssignment; this does not create Access branch authority.
 
 Unrelated administrative branch scopes never follow a Workforce transfer (§8.6).
 
@@ -510,84 +528,64 @@ The self-only boundary must apply consistently before Driver self-service is exp
 
 ## 8. Driver Transfer Contract
 
-### 8.1 Durable Employee identity
+### 8.1 Durable Employee and Driver identity
 
-A transfer preserves `EmployeeID`.
+A transfer preserves `EmployeeID` and the permanent Driver (`DriverID`, driver number, CDL number, work status).
 
-The person does not become a new Employee because they changed branches.
+The person does not become a new Employee, and does not become a new Driver, because they changed branches.
 
-### 8.2 Driver profile transition
+### 8.2 DriverAssignment transition
 
-A Driver transfer must:
+A permanent Driver transfer must:
 
-1. end the source Driver profile's effective window on the day before the transfer `EffectiveDate`;
-2. preserve the source profile's historical identity and lineage;
-3. create the destination Driver profile in the target branch;
-4. start the destination profile's effective window on the transfer `EffectiveDate`;
-5. preserve old payroll and rate references on the source `DriverID`.
+1. end the source DriverAssignment's window at the transfer `EffectiveAt` instant with `EndReason = Transferred`;
+2. preserve the source assignment's historical identity and lineage;
+3. open a new DriverAssignment of the same Driver in the target branch;
+4. start the destination assignment's window at the identical `EffectiveAt` instant;
+5. preserve old payroll references on the source `DriverAssignmentID`.
+
+No new Driver and no new driver number is created or generated.
 
 Conceptually:
 
 ```text
 Employee 153
-│
-├── Driver 500 — Source Branch — effective until EffectiveDate − 1, then historical
-└── Driver 721 — Target Branch — effective from EffectiveDate
+└── Driver 40 (driver number D-0417)
+    │
+    ├── DriverAssignment 500 — Source Branch — [start, EffectiveAt), EndReason Transferred
+    └── DriverAssignment 721 — Target Branch — [EffectiveAt, open)
 ```
 
-### 8.3 Effective-dated transition
+### 8.3 Effective-instant transition and Scheduled lifecycle
 
-A transfer must never make the destination profile or destination branch current before the transfer `EffectiveDate`, regardless of when the transfer was approved or administratively completed.
+A transfer must never make the destination assignment or destination branch current before its `EffectiveAt`, regardless of when the transfer was approved, completed or scheduled.
 
-Example — approved October 1, `EffectiveDate` November 1:
+Stored request statuses are `PendingSourceApproval`, `PendingTargetApproval`, `Returned`, `Rejected`, `Approved`, `Scheduled`, `Completed` and `Cancelled`.
 
-- through October 31 the source profile remains the current Driver profile, and the source branch remains the Employee's current workforce branch;
-- from November 1 the destination profile is current, `Employee.BranchID` reflects the destination branch, and DRIVER self-service authorization follows the destination profile.
+- **Create.** The request names the permanent Driver. The service resolves that Driver's current DriverAssignment as the source (a DRIVER User may create a request only for its own Driver). `EffectiveAt` NULL means immediate; otherwise it must be a future instant after the source assignment's start.
+- **Complete an `Approved` request, immediate** (`EffectiveAt` NULL): the boundary is database `NOW()`. The source closes and the destination opens at that instant, and the request becomes `Completed`.
+- **Complete an `Approved` request, future `EffectiveAt`:** the same windows are materialized at completion (the source ends, and the not-yet-effective destination starts, at `EffectiveAt`) and the request becomes `Scheduled`. It is not `Completed`.
+- **Activation.** The assignment windows are the single authority, so currentness switches at `EffectiveAt` by time, exactly once, with no job. The request status is derived through one SQL function: a stored `Scheduled` request whose `EffectiveAt` has been reached is reported as `Completed`, with `EffectiveAt` as its completed instant. Every read, filter and active-transfer check uses that function.
 
-Every consequence of "current" — the `Employee.BranchID` Workforce projection (§3.5), self-service current actions (§7.5), and current Workforce views — follows the effective date, not the approval or completion timestamp. Self authorization follows the linked Employee and effective Driver profile; no Access branch projection is synchronized.
+Example: scheduled October 1 for an `EffectiveAt` of the start of November 1 in the source Branch's timezone. Until that instant the source assignment remains current, the Employee's current workforce branch is the source branch, and the request reads `Scheduled`. From that instant the destination assignment is current, `Employee.BranchID` reflects the destination branch, DRIVER self-service follows the destination assignment, and the request reads `Completed`.
 
-The effective-profile resolver governs which profile is current by date. This contract fixes the required outcomes and does not select or reopen the implementation mechanism.
+Every consequence of "current" (the `Employee.BranchID` Workforce projection (§3.5), self-service current actions (§7.5), and current Workforce views) follows the assignment windows, not the approval, completion or scheduling timestamp. Self authorization follows the linked Employee, its Driver and the effective DriverAssignment; no Access branch projection is synchronized.
 
-### 8.4 Driver Pay Rates on transfer
+Scheduling, completing, cancelling and rescheduling a transfer each write a Workforce audit event.
 
-The product does not automatically decide whether a transferred Driver keeps the same rates. Driver transfer supports an explicit choice, conceptually:
+### 8.4 Compensation follows the Driver
 
-```text
-Transfer / copy Driver Rates to the destination profile?
-```
+Ordinary Driver rates and Driver Min/Max rules are owned by the permanent Driver (Durable Driver Stage 2). A permanent transfer therefore carries compensation with the Driver automatically: there is no transfer-time copy, no Yes/No choice, and no rate or pay-rule record created for the destination assignment.
 
-Historical integrity (always):
+The former explicit choice to copy Driver Rates to the destination assignment, its copy semantics, and the legacy copy route are retired.
 
-- existing source Driver rates never move and are never rebound to the destination `DriverID`;
-- they remain attached to the source Driver profile for historical payroll and rate provenance.
+A transfer never creates, moves, copies, rebinds or rewrites rate or pay-rule records, and never rewrites historical payroll. Min/Max rules are bound to the Driver's home pay calendar; a permanent change of home Branch to an incompatible pay calendar is a payroll blocker, not an advisory notice. Status rate columns remain Branch-owned, and a transfer never requires re-entering status rates.
 
-Choice = No:
-
-- the destination Driver profile receives no rates from the source merely because of the transfer.
-
-Choice = Yes:
-
-- equivalent applicable rates are created for the destination Driver profile;
-- they are new rate records owned by the destination `DriverID`;
-- source rate records remain unchanged.
-
-```text
-Source Driver 100
-  rate history remains on Driver 100
-
-Transfer with rates = YES
-        ↓
-Destination Driver 200
-  new equivalent rate records created for Driver 200
-```
-
-This is copy semantics, never move semantics. There is no silent automatic carry-forward.
-
-The master plan defines the UI wording, which rows are selectable, destination effective dates, overlap/conflict resolution, and whether a preview is shown. It must preserve source historical rate evidence, destination `DriverID` ownership, the explicit user choice, and the absence of silent carry-forward. Copied rates are ordinary destination rate records subject to the existing rate integrity rules.
+Until Stage 2 lands, existing rate and pay-rule records stay keyed to their DriverAssignment with unchanged ownership, and the transfer neither copies nor moves them. There is no silent carry-forward.
 
 ### 8.5 Linked DRIVER self-service User
 
-When the transferred Employee has a linked User whose Access Role is `DRIVER`, the User–Employee identity link remains unchanged. The Self assignment is not rewritten when the transfer is approved, completed, or becomes effective. Current Driver self authorization follows the linked Employee's effective profile on the operation's relevant date (§7.5); transfer never changes Access scope or creates branch membership.
+When the transferred Employee has a linked User whose Access Role is `DRIVER`, the User–Employee identity link remains unchanged. The Self assignment is not rewritten when the transfer is approved, completed, scheduled or becomes effective. Current Driver self authorization follows the linked Employee's Driver and its effective DriverAssignment on the operation's relevant instant (§7.5); transfer never changes Access scope or creates branch membership.
 
 ### 8.6 Administrative roles remain independent
 
@@ -599,40 +597,66 @@ For every non-DRIVER role, an Employee's branch change has no automatic effect o
 
 Only access defined as Driver self-service follows the Driver transfer.
 
+### 8.7 Cancel and reschedule
+
+Cancel and reschedule use the same permission as complete. Whether `EffectiveAt` is still in the future is checked under lock with database time.
+
+**Cancel.** Allowed for `PendingSourceApproval`, `PendingTargetApproval`, `Returned` and `Approved` requests, and for a `Scheduled` request only while `EffectiveAt` is still in the future. Cancelling a `Scheduled` request is refused if the destination assignment has any payroll fact (draft lines, day-entry states, bonus events, final lines, evidence) or has eligibility rows in a period that is not `Draft`, `Open` or `Returned`. Otherwise the destination assignment and its eligibility rows are deleted, the source assignment is reopened (open end, no end reason, no transfer link), and the source's eligibility row is re-captured in the `Draft`, `Open` and `Returned` periods of the source Branch that overlap the reopened interval. If a period in any other state overlaps that interval, the cancel is refused. The request becomes `Cancelled`.
+
+**Reschedule.** A new `EffectiveAt`, which must be a future instant after the source assignment's start, may be set on a request in `PendingSourceApproval`, `PendingTargetApproval`, `Returned` or `Approved` (where it only updates the request), and on a `Scheduled` request while its current `EffectiveAt` is still in the future. For `Scheduled`, both assignment boundaries move atomically and the destination assignment keeps its identity. The reschedule is refused if any payroll fact of the source or of the destination falls on WorkDates its changed window no longer covers, or if a non-editable period of either Branch overlaps the affected interval. Both assignments' eligibility rows are re-captured in the affected `Draft`, `Open` and `Returned` periods.
+
+This re-capture is the one narrow exception to the rule that existing eligibility rows are left untouched; it concerns only the named assignment (see the Branch Timezone Authority contract).
+
+### 8.8 Termination and Scheduled transfers
+
+Termination keeps the §4.7 semantics: it caps each DriverAssignment in its own Branch, and an empty future assignment is retained only as an empty `Terminated` assignment. A `Scheduled` transfer whose `EffectiveAt` is at or after the source's termination cap becomes `Cancelled`. One whose `EffectiveAt` is before the cap stays, and is effectively `Completed` at `EffectiveAt`.
+
+### 8.9 Temporary loan is not an assignment
+
+A temporary loan does not close, replace or create a home DriverAssignment. It does not change the Driver's home Branch, the `Employee.BranchID` projection, or the home pay calendar that Min/Max rules are bound to. A future loan feature may record separate host-Branch work provenance; that feature is not defined by this contract, which only preserves this rule.
+
 ---
 
 ## 9. Pay Rates and Payroll History Contract
 
-### 9.1 Preserve DriverID authority
+### 9.1 Payroll history is keyed by DriverAssignmentID; DriverID is durable
 
-Driver Pay Rates and historical payroll remain keyed to `DriverID` according to the existing payroll model.
+Branch payroll history (drafts, day entries, eligibility, bonus events, calculation snapshots, final lines and evidence) is keyed to `DriverAssignmentID`. Evidence and final records also carry the permanent `DriverID` and the driver number snapshot (§4.2).
+
+`DriverID` is durable: it never changes across transfers and never identifies a branch tenure.
+
+Driver compensation is owned by `DriverID` from Stage 2 (§8.4). Until then, rate and pay-rule records stay keyed to their DriverAssignment with unchanged ownership.
 
 This is intentional.
 
 ### 9.2 Never rewrite history because an Employee moved
 
-A transfer must not rewrite old payroll, rates, finalized evidence, snapshots, or eligibility history to the destination DriverID.
+A transfer must not rewrite old payroll, rates, finalized evidence, snapshots, or eligibility history to the destination DriverAssignmentID.
 
-Carrying rates forward is only ever the explicit copy defined in §8.4.
+Compensation continues under the same Driver (§8.4); there is no transfer copy.
 
 ### 9.3 Import resolution rule
 
-A future importer must resolve operational Driver identity using enough context to identify exactly one effective Driver profile.
+A future importer must resolve operational Driver identity using enough context to identify exactly one effective DriverAssignment of one Driver.
 
 The expected conceptual resolution is:
 
 ```text
 Company
 + EmployeeKey (or a C2-defined external identifier that maps to exactly one Employee)
+        ↓
+the Employee's Driver (0..1)
 + Branch
 + Work/Effective Date
         ↓
-the Employee's Driver profile in that branch effective on that date
+the Driver's DriverAssignment in that branch effective for that date
         ↓
-DriverID
+DriverAssignmentID (with its DriverID)
 ```
 
-"Effective" has the meaning defined in §2.1.
+"Effective" has the meaning defined in §2.1; for a WorkDate it is the Branch-local day overlap rule.
+
+An import matches a durable Driver: `import.ImportRows.MatchedDriverID` refers to the permanent Driver. External identifiers and aliases are designed in C2 Import as source system + external key + Driver; this contract creates no alias or external-ID structure.
 
 Name-only matching is not acceptable authority.
 
@@ -705,11 +729,11 @@ Create non-Driver Employee
 ```
 
 ```text
-Create Driver Employee = Create Employee + Create initial Driver Profile
+Create Driver Employee = Create Employee + Create Driver + first DriverAssignment
 ```
 
 ```text
-Add first Driver Profile to an existing Employee
+Add Driver (with its first DriverAssignment) to an existing Employee
 ```
 
 These are workforce operations.
@@ -812,7 +836,7 @@ A workforce import may create/update:
 
 ```text
 Employee
-└── Driver Profile when applicable
+└── Driver and its first DriverAssignment when applicable
 ```
 
 It must not create User login accounts by default.
@@ -825,7 +849,7 @@ It must not be an implicit side effect of workforce import.
 
 ### 14.3 Driver Rate Import
 
-Rate import must resolve the correct effective Driver profile (§9.3) before writing a Driver rate.
+Rate import must resolve the correct Driver (§9.3) before writing a Driver rate.
 
 ### 14.4 Payroll operational Import
 
@@ -862,10 +886,10 @@ The following current behaviours are not part of the target architecture:
 2. Add Person Step 1 persisting a real login-enabled User before the workflow is complete.
 3. Back/resubmit creating another User.
 4. DRIVER role assignment creating an Employee.
-5. DRIVER role assignment creating a Driver profile.
+5. DRIVER role assignment creating a Driver or DriverAssignment.
 6. DRIVER role assignment implicitly linking a User to an Employee.
 7. Role/Scope editing moving Driver or Employee branch.
-8. Any direct update of an existing Driver profile's branch.
+8. Any direct update of an existing DriverAssignment's branch.
 9. EmployeeKey being derived from UserID.
 10. A role save being capable of undoing a completed Driver transfer.
 11. Driver-section visibility depending only on Access Role rather than workforce truth.
@@ -874,10 +898,14 @@ The following current behaviours are not part of the target architecture:
 14. Allowing Driver self-service users general branch-roster visibility.
 15. Detecting the Driver role by substring matching of role codes.
 16. `DRIVER` assigned with `SpecificBranch` or `AllCompanyBranches`; granting `Self` to another current role without explicit policy; or treating legacy `OwnDriverDataOnly` as the target scope.
-17. Reactivating `Transferred` or `Terminated` Driver profiles through generic editing.
-18. Determining the current Driver profile from status alone, or treating a future-dated destination profile as current before the transfer `EffectiveDate`.
+17. Reactivating `Transferred` or `Terminated` DriverAssignments through generic editing.
+18. Determining the current DriverAssignment from status alone, or treating a future-dated destination assignment as current before the transfer `EffectiveAt`.
 19. Multiple User accounts linked to the same Employee.
-20. Terminating a Driver Employee without closing the current Driver profile in the same operation.
+20. Terminating a Driver Employee without closing the current DriverAssignment in the same operation.
+21. Generating a per-assignment driver code, or creating a new Driver identity for a transfer.
+22. Treating `DriverID` as a branch-tenure key, or branch payroll history as keyed by anything other than `DriverAssignmentID`.
+23. A transfer-time rate-copy choice, or any transfer that creates, moves or copies rate or pay-rule records.
+24. Recording a future-dated transfer as `Completed` before its `EffectiveAt`, or treating a temporary loan as a DriverAssignment.
 
 ---
 
@@ -886,11 +914,11 @@ The following current behaviours are not part of the target architecture:
 The refoundation must preserve the good existing architecture:
 
 - `EmployeeID` as durable workforce identity;
-- Driver profile history;
-- multiple historical Driver profiles per Employee where required;
+- DriverAssignment history;
+- multiple historical DriverAssignments per Driver where required;
 - Driver transfer lineage;
-- Driver effective windows;
-- `DriverID`-based rate and payroll provenance;
+- DriverAssignment effective windows;
+- `DriverAssignmentID`-based payroll provenance and Driver-owned compensation;
 - branch-bound composite foreign keys;
 - payroll/rate history protections;
 - optional `User.EmployeeID` relationship, with 0..1 ↔ 0..1 cardinality;
@@ -938,16 +966,16 @@ At minimum the completed refoundation must prove:
 3. A User can exist without an Employee where allowed.
 4. A User can be explicitly linked to an existing same-company Employee, and link cardinality is 0..1 ↔ 0..1.
 5. Role assignment does not create, move, or link workforce records.
-6. `DRIVER` ⇔ `Self` for the current product; Self has no Access BranchID; a current Driver action requires a linked same-company Employee and that Employee's effective Driver profile (§7.4–§7.6).
-7. Driver transfer preserves EmployeeID and Driver history.
-8. A future-dated transfer does not make the destination profile or Workforce branch current before its `EffectiveDate`; Access Self authority is not synchronized to a branch.
-9. Driver transfer cannot be reversed by later Role/Scope saving, and no Driver profile's branch can be updated.
-10. Historical rates/payroll remain on historical DriverIDs; destination rates exist only through the explicit copy choice.
+6. `DRIVER` ⇔ `Self` for the current product; Self has no Access BranchID; a current Driver action requires a linked same-company Employee and that Employee's Driver's effective DriverAssignment (§7.4–§7.6).
+7. Driver transfer preserves EmployeeID, the Driver (driver number and CDL number) and DriverAssignment history; it creates a new assignment, never a new Driver.
+8. A future-dated transfer is `Scheduled`, not `Completed`, and does not make the destination assignment or Workforce branch current before its `EffectiveAt`; it can be cancelled or rescheduled only before then; Access Self authority is not synchronized to a branch.
+9. Driver transfer cannot be reversed by later Role/Scope saving, and no DriverAssignment's branch can be updated.
+10. Historical payroll remains on historical DriverAssignmentIDs; compensation follows the Driver with no transfer copy choice.
 11. Generic People/Driver reads do not leak branch-roster data to Driver self-service users.
 12. A DRIVER User cannot create, edit, approve, or void rates, payroll, or Workforce records, including their own; permission overrides cannot widen their resource scope or capability ceiling.
 13. Workforce and Access creation have the defined transaction boundaries and retry behaviour (§11), and no login-enabled User exists without Role/Scope authority.
-14. A pending Driver profile does not activate current-profile DRIVER self-service before it becomes effective. A valid provisioned Self-only User can be represented by login and `/auth/me` without a fabricated branch-access row.
-15. Terminating a Driver Employee closes the Employee and the current Driver profile in one operation without changing history; Self authorization fails closed when no effective profile exists.
+14. A pending DriverAssignment does not activate current-assignment DRIVER self-service before it becomes effective. A valid provisioned Self-only User can be represented by login and `/auth/me` without a fabricated branch-access row.
+15. Terminating a Driver Employee closes the Employee and the current DriverAssignment in one operation without changing history; Self authorization fails closed when no effective DriverAssignment exists.
 16. A permission override may add an action only within the User's established resource scope and may not bypass Self ownership or the DRIVER ceiling.
 17. The protected `COMPANY_OWNER` dynamic-permission path requires a valid active company-wide owner assignment; malformed branch or Self scope is not company-wide authority.
 18. Workforce import can later be built without requiring User/login creation.
