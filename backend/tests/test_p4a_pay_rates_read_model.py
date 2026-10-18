@@ -28,9 +28,9 @@ async def _activate(client, tenant, branch_id, definition, *, active=True, heade
     grant_applicability(tenant, definition, branch_id, active=active)
 
 
-async def _rows(client, tenant, driver_id, headers=None, **params):
+async def _rows(client, tenant, driver_assignment_id, headers=None, **params):
     response = await client.get(
-        f"/compensation/drivers/{driver_id}/pay-rates", params=params,
+        f"/compensation/driver-assignments/{driver_assignment_id}/pay-rates", params=params,
         headers=headers or tenant.admin)
     assert response.status_code == 200, response.text
     return {row["pay_definition_id"]: row for row in response.json()}
@@ -126,7 +126,7 @@ async def test_read_model_security(p3c_client, tenant, p3b_dsn):
     definition = await create_definition(p3c_client, tenant)
     await _activate(p3c_client, tenant, tenant.branch_a, definition)
     await _activate(p3c_client, tenant, tenant.branch_b, definition)
-    url = "/compensation/drivers/{}/pay-rates"
+    url = "/compensation/driver-assignments/{}/pay-rates"
     assert (await p3c_client.get(
         url.format(tenant.driver_a), headers=tenant.headers(tenant.viewer))).status_code == 200
     assert (await p3c_client.get(

@@ -289,8 +289,9 @@ class CurrentPayrollHubMetrics(BaseModel):
 class CurrentPayrollHubDriverSummary(BaseModel):
     """A compact, authority-backed expected-income driver summary."""
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
-    driver_code: str | None = None
+    driver_number: str | None = None
     driver_name: str | None = None
     expected_pay: Decimal
 

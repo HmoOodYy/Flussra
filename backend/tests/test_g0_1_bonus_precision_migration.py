@@ -26,9 +26,9 @@ def _alembic(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str
 
 
 @pytest.mark.parametrize("model, payload", [
-    (BonusEventCreate, {"driver_id": 1, "amount": "1.2345"}),
+    (BonusEventCreate, {"driver_assignment_id": 1, "amount": "1.2345"}),
     (BonusEventUpdate, {"amount": "1.2345"}),
-    (BonusBatchItem, {"driver_id": 1, "amount": "1.2345"}),
+    (BonusBatchItem, {"driver_assignment_id": 1, "amount": "1.2345"}),
 ])
 def test_shared_bonus_amount_contract_accepts_four_decimals(model, payload):
     assert model.model_validate(payload).amount == Decimal("1.2345")
@@ -39,9 +39,9 @@ def test_shared_bonus_amount_contract_accepts_four_decimals(model, payload):
 ])
 def test_all_bonus_amount_models_reject_invalid_numeric_18_4_values(amount):
     for model, base in (
-        (BonusEventCreate, {"driver_id": 1}),
+        (BonusEventCreate, {"driver_assignment_id": 1}),
         (BonusEventUpdate, {}),
-        (BonusBatchItem, {"driver_id": 1}),
+        (BonusBatchItem, {"driver_assignment_id": 1}),
     ):
         with pytest.raises(ValidationError):
             model.model_validate({**base, "amount": amount})

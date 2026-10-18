@@ -35,7 +35,7 @@ async def _capture_source_evidence(
     *, company_id: int, branch_id: int, period_id: int, user_id: int,
     line_id: int, action_code: str, db: AsyncConnection,
     before_state: dict[str, Any] | None, after_state: dict[str, Any] | None,
-    driver_id: int | None, work_date: date, definition: PeriodDefinition,
+    driver_assignment_id: int | None, work_date: date, definition: PeriodDefinition,
 ) -> None:
     """Capture one ordinary source mutation for P6D with its target identity."""
     context = definition_context(definition)
@@ -46,5 +46,5 @@ async def _capture_source_evidence(
         user_id=user_id, required_permission_code="payroll.entry", db=db,
         before_state=None if before_state is None else {**context, **before_state},
         after_state=None if after_state is None else {**context, **after_state},
-        driver_id=driver_id, work_date=work_date, pay_item_id=None,
+        driver_assignment_id=driver_assignment_id, work_date=work_date, pay_item_id=None,
     )

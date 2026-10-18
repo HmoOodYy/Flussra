@@ -51,7 +51,7 @@ def _lines(period) -> str:
 
 
 def _body(tenant, ppd, work_date, quantity="5") -> dict:
-    return {"driver_id": tenant.driver_a, "work_date": work_date,
+    return {"driver_assignment_id": tenant.driver_a, "work_date": work_date,
             "payroll_period_definition_id": ppd, "quantity": quantity}
 
 
@@ -101,7 +101,7 @@ async def test_source_writes_are_rejected_outside_the_editable_statuses_and_leav
     grid_save = await p3c_client.post(
         f"/payroll/periods/{period_id}/day-grid",
         json={"work_date": other_day, "rows": [
-            {"driver_id": tenant.driver_a, "values": {str(ppd): "3"}}]},
+            {"driver_assignment_id": tenant.driver_a, "values": {str(ppd): "3"}}]},
         headers=tenant.admin)
     for response in (add, update, void, grid_save):
         assert response.status_code in (403, 409, 422), (status, response.status_code, response.text)
@@ -204,7 +204,7 @@ async def test_a_prepared_period_blocks_every_financial_surface(p3c_client, p3c_
         f"/payroll/periods/{period_id}/eligible-drivers", headers=admin)).status_code == 422
     assert (await p3c_client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": tenant.driver_a, "amount": "10"}, headers=admin
+        json={"driver_assignment_id": tenant.driver_a, "amount": "10"}, headers=admin
     )).status_code in (409, 422)
 
 

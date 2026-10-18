@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 INSERT_DRIVER_RATE = text("""
     INSERT INTO payroll.driverrates
-        (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status,
+        (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
          createdbyuserid, approvedbyuserid, approvedatutc)
     VALUES (:cid, :bid, :did, :rid, :amount, DATE '2099-01-01', 'Approved', 1, 1, NOW())
     RETURNING driverrateid
@@ -28,10 +28,14 @@ async def create_branch_and_driver(db, company_id: int, marker: str) -> tuple[in
         VALUES (:cid, :bid, 'P3a currency', 'Driver', 'Active', 1) RETURNING employeeid
     """), {"cid": company_id, "bid": branch_id})).scalar_one())
     driver_id = int((await db.execute(text("""
-        INSERT INTO core.drivers(companyid, branchid, employeeid, drivercode, driverstatus)
-        VALUES (:cid, :bid, :eid, :code, 'Active') RETURNING driverid
-    """), {"cid": company_id, "bid": branch_id, "eid": employee_id, "code": f"D_{marker}"[:20]})).scalar_one())
-    return branch_id, driver_id
+        INSERT INTO core.drivers(companyid, employeeid, drivernumber, driverstatus)
+        VALUES (:cid, :eid, :code, 'Active') RETURNING driverid
+    """), {"cid": company_id, "eid": employee_id, "code": f"D_{marker}"[:20]})).scalar_one())
+    driver_assignment_id = int((await db.execute(text("""
+        INSERT INTO core.driverassignments(companyid, branchid, employeeid, driverid, effectivefromat)
+        VALUES (:cid, :bid, :eid, :did, NOW() - INTERVAL '1 day') RETURNING driverassignmentid
+    """), {"cid": company_id, "bid": branch_id, "eid": employee_id, "did": driver_id})).scalar_one())
+    return branch_id, driver_assignment_id
 
 
 async def first_rate_type_id(db) -> int:

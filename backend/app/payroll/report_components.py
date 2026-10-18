@@ -57,7 +57,7 @@ def aggregate_definition_amounts(
     for line in lines:
         if line["line_scope"] != "Daily" or line["snapshot_source_type"] != "DraftLine":
             continue
-        driver_id = int(line["driver_id"])
+        driver_assignment_id = int(line["driver_assignment_id"])
         definition_id = line.get("payroll_period_definition_id")
         if definition_id is None or int(definition_id) not in column_id_set:
             raise report_error(
@@ -67,7 +67,7 @@ def aggregate_definition_amounts(
             )
         definition_id = int(definition_id)
         amount = Decimal(str(line["calculated_amount"])) if line["calculated_amount"] is not None else Decimal("0")
-        bucket = per_driver[driver_id]
+        bucket = per_driver[driver_assignment_id]
         bucket[definition_id] = bucket.get(definition_id, Decimal("0")) + amount
         totals[definition_id] += amount
     return dict(per_driver), totals
@@ -76,6 +76,6 @@ def aggregate_definition_amounts(
 def summarize_status_entries(statuses: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     grouped: dict[int, dict[tuple[str, str, bool], int]] = defaultdict(lambda: defaultdict(int))
     for status in statuses:
-        grouped[status["driver_id"]][(status["code"], status["label"], status["is_off"])] += 1
-    return {driver_id: [{"code": key[0], "label": key[1], "is_off": key[2], "count": count}
-                        for key, count in values.items()] for driver_id, values in grouped.items()}
+        grouped[status["driver_assignment_id"]][(status["code"], status["label"], status["is_off"])] += 1
+    return {driver_assignment_id: [{"code": key[0], "label": key[1], "is_off": key[2], "count": count}
+                        for key, count in values.items()] for driver_assignment_id, values in grouped.items()}

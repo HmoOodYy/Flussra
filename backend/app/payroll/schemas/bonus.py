@@ -20,7 +20,7 @@ class BonusEventResponse(BaseModel):
     period_id: int
     company_id: int
     branch_id: int
-    driver_id: int
+    driver_assignment_id: int
     amount: Decimal
     reason: str | None
     notes: str | None
@@ -39,7 +39,7 @@ class BonusEventResponse(BaseModel):
 class BonusEventCreate(BaseModel):
     """Create one canonical bonus event."""
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     amount: Decimal
     reason: str | None = None
     notes: str | None = None
@@ -72,7 +72,7 @@ class BonusEventPreviewEntry(BaseModel):
     """One bonus event as it will appear after finalization (preview only)."""
     __module__ = "app.payroll.schemas"
     bonus_event_id: int
-    driver_id: int
+    driver_assignment_id: int
     driver_name: str | None
     amount: Decimal
     reason: str | None = None
@@ -84,7 +84,7 @@ class BonusSummaryEvent(BaseModel):
     """One bonus event row inside the zero-inclusive bonus summary (CP-3B1)."""
     __module__ = "app.payroll.schemas"
     bonus_event_id: int
-    driver_id: int
+    driver_assignment_id: int
     amount: Decimal
     reason: str | None
     notes: str | None
@@ -119,8 +119,9 @@ class BonusSummaryDriver(BaseModel):
     zero bonus events still appear with total_bonus = 0.
     """
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
-    driver_code: str | None
+    driver_number: str | None
     driver_name: str | None
     eligibility_reason_code: str
     total_bonus: Decimal            # sum of Active events only
@@ -184,7 +185,7 @@ _validate_positive_numeric_18_4.__module__ = "app.payroll.schemas"
 class BonusBatchItem(BaseModel):
     """One create-only bonus row inside a batch (CP-3B2b)."""
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     amount: Decimal
     reason: str | None = None
     notes: str | None = None
@@ -265,9 +266,9 @@ class BonusBatchResponse(BaseModel):
 
 class PeriodEligibleDriver(BaseModel):
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     driver_name: str
-    driver_code: str | None = None
+    driver_number: str | None = None
 
 
 

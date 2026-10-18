@@ -59,17 +59,17 @@ async def _save(client, tenant, period, rows, *, offset=0, headers=None):
         headers=headers or tenant.admin)
 
 
-def _row(driver_id, ppd=None, quantity=None, **extra) -> dict:
+def _row(driver_assignment_id, ppd=None, quantity=None, **extra) -> dict:
     values = {} if ppd is None else {str(ppd): quantity}
-    return {"driver_id": driver_id, "values": values, **extra}
+    return {"driver_assignment_id": driver_assignment_id, "values": values, **extra}
 
 
 def _ppd(grid) -> int:
     return grid["columns"][0]["payroll_period_definition_id"]
 
 
-def _row_of(grid, driver_id) -> dict:
-    return next(r for r in grid["rows"] if r["driver_id"] == driver_id)
+def _row_of(grid, driver_assignment_id) -> dict:
+    return next(r for r in grid["rows"] if r["driver_assignment_id"] == driver_assignment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ async def test_the_roster_is_the_branch_drivers_only_and_excludes_inactive_ones(
 ):
     set_employment(tenant, tenant.driver_a2, driver_status="Inactive")
     period, grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
-    ids = [r["driver_id"] for r in grid["rows"]]
+    ids = [r["driver_assignment_id"] for r in grid["rows"]]
     assert tenant.driver_a in ids
     assert tenant.driver_a2 not in ids          # driver profile not Active
     assert tenant.driver_b not in ids           # belongs to the other Branch
@@ -116,7 +116,7 @@ async def test_hire_and_termination_dates_bound_the_roster_by_work_date(
     expected = {0: False, 1: False, 2: True, 3: True, 4: True, 5: False}
     for offset, present in expected.items():
         grid = await get_grid(p3c_client, tenant, period, work_date=_day(period, offset))
-        assert (tenant.driver_a in [r["driver_id"] for r in grid["rows"]]) is present, offset
+        assert (tenant.driver_a in [r["driver_assignment_id"] for r in grid["rows"]]) is present, offset
 
 
 async def test_an_ineligible_driver_cannot_be_saved(p3c_client, p3c_engine, tenant):

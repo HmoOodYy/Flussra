@@ -80,27 +80,28 @@ async def _period_context(
 
 async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
     rows = (await db.execute(text("""
-        SELECT dl.driverid, d.drivercode, e.fullname AS drivername, dl.workdate,
+        SELECT dl.driverassignmentid, a.driverid, d.drivernumber, e.fullname AS drivername, dl.workdate,
                dl.linetype, dl.quantity, dl.sourcetype, dl.sourceid,
                dl.payrollperioddefinitionid, ppd.definitionnamesnapshot
         FROM payroll.payrolldraftlines dl
         LEFT JOIN payroll.payrollperioddefinitions ppd
           ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
-        JOIN core.drivers d ON d.driverid = dl.driverid
-        JOIN core.employees e ON e.employeeid = d.employeeid
+        JOIN core.driverassignments a ON a.driverassignmentid = dl.driverassignmentid
+        JOIN core.drivers d ON d.driverid = a.driverid
+        JOIN core.employees e ON e.employeeid = a.employeeid
         WHERE dl.payrollperiodid = :period_id AND dl.companyid = :company_id
           AND dl.branchid = :branch_id AND dl.status != 'Void'
-        ORDER BY dl.driverid, dl.workdate, dl.draftlineid
+        ORDER BY dl.driverassignmentid, dl.workdate, dl.draftlineid
     """), {"period_id": period["payrollperiodid"], "company_id": period["companyid"],
           "branch_id": period["branchid"]})).mappings().all()
     drivers: dict[int, dict[str, Any]] = {}
     work: list[dict[str, Any]] = []
     for row in rows:
-        driver_id = int(row["driverid"])
-        drivers.setdefault(driver_id, {"driver_id": driver_id, "driver_code": row["drivercode"],
+        driver_assignment_id = int(row["driverassignmentid"])
+        drivers.setdefault(driver_assignment_id, {"driver_assignment_id": driver_assignment_id, "driver_id": int(row["driverid"]), "driver_number": row["drivernumber"],
                                        "driver_name": row["drivername"]})
         if row["sourcetype"] != "System" and row["payrollperioddefinitionid"] is not None:
-            work.append({"driver_id": driver_id, "work_date": row["workdate"],
+            work.append({"driver_assignment_id": driver_assignment_id, "work_date": row["workdate"],
                          "payroll_period_definition_id": int(row["payrollperioddefinitionid"]),
                          "definition_name": row["definitionnamesnapshot"],
                          "quantity": row["quantity"], "line_scope": "Daily"})
@@ -109,17 +110,17 @@ async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tupl
 
 async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[dict[str, Any]]:
     rows = (await db.execute(text("""
-        SELECT es.driverid, es.workdate, es.statuskeyid, sk.statuscode, sk.keyname,
+        SELECT es.driverassignmentid, es.workdate, es.statuskeyid, sk.statuscode, sk.keyname,
                sk.isoffreason
         FROM payroll.payrollperioddriverdayentrystate es
         JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = es.statuskeyid
         WHERE es.payrollperiodid = :period_id AND es.companyid = :company_id
           AND es.branchid = :branch_id AND es.isvoided = FALSE
           AND es.statuskeyid IS NOT NULL
-        ORDER BY es.driverid, es.workdate
+        ORDER BY es.driverassignmentid, es.workdate
     """), {"period_id": period["payrollperiodid"], "company_id": period["companyid"],
           "branch_id": period["branchid"]})).mappings().all()
-    return [{"driver_id": int(r["driverid"]), "work_date": r["workdate"],
+    return [{"driver_assignment_id": int(r["driverassignmentid"]), "work_date": r["workdate"],
              "status_key_id": int(r["statuskeyid"]), "code": r["statuscode"],
              "label": r["keyname"], "is_off": bool(r["isoffreason"])} for r in rows]
 
@@ -147,7 +148,7 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
         # (see report_components.aggregate_definition_amounts); it does not replace source_type.
         lines = [
             {
-                "driver_id": line.driver_id,
+                "driver_assignment_id": line.driver_assignment_id,
                 "source_type": line.source_type,
                 "source_id": line.source_id,
                 "line_type": line.line_type,
@@ -168,10 +169,11 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
             }
             for driver in packet.drivers for line in driver.lines
         ]
-        totals = {d.driver_id: {"daily_pay": d.daily_pay, "status_pay": d.status_pay,
+        totals = {d.driver_assignment_id: {"daily_pay": d.daily_pay, "status_pay": d.status_pay,
                   "minimum_adjustment": d.minimum_adjustment,
                   "maximum_adjustment": d.maximum_adjustment, "bonus_total": d.bonus_total,
-                  "total_pay": d.expected_pay, "driver_code": d.driver_code, "driver_name": d.driver_name}
+                  "total_pay": d.expected_pay, "driver_id": d.driver_id,
+                  "driver_number": d.driver_number, "driver_name": d.driver_name}
                   for d in packet.drivers}
         return lines, totals, packet.blockers, packet.warnings, True, None, None
     # Submitted, approved and final authorities freeze calculation evidence, which target
@@ -225,12 +227,12 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
             lines, definition_column_ids)
     operational_drivers, work_rows = await _operational_rows(period, db)
     drivers = {**operational_drivers}
-    for driver_id, total in financial_totals.items():
-        drivers.setdefault(driver_id, {"driver_id": driver_id, "driver_code": total.get("driver_code"), "driver_name": total.get("driver_name")})
+    for driver_assignment_id, total in financial_totals.items():
+        drivers.setdefault(driver_assignment_id, {"driver_assignment_id": driver_assignment_id, "driver_id": total.get("driver_id"), "driver_number": total.get("driver_number"), "driver_name": total.get("driver_name")})
     evidence_available, evidence_version, evidence_hash, statuses, bonuses = (False, None, None, [], [])
     if authority.authority_kind is ReportAuthorityKind.LIVE:
         statuses = await _live_statuses(period, db)
-        bonuses = [{"bonus_event_id": int(r["payrollbonuseventid"]), "driver_id": int(r["driverid"]),
+        bonuses = [{"bonus_event_id": int(r["payrollbonuseventid"]), "driver_assignment_id": int(r["driverassignmentid"]),
                     "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
                     "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
                     "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]}
@@ -239,22 +241,22 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     summaries = _status_summaries(statuses)
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in work_rows:
-        by_driver_work[row["driver_id"]].append(row)
+        by_driver_work[row["driver_assignment_id"]].append(row)
     by_driver_lines: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for line in lines:
-        by_driver_lines[line["driver_id"]].append(line)
+        by_driver_lines[line["driver_assignment_id"]].append(line)
     by_driver_status: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for item in statuses:
-        by_driver_status[item["driver_id"]].append(item)
+        by_driver_status[item["driver_assignment_id"]].append(item)
     by_driver_bonus: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for item in bonuses:
-        by_driver_bonus[item["driver_id"]].append(item)
+        by_driver_bonus[item["driver_assignment_id"]].append(item)
     result_drivers = []
-    for driver_id in sorted(drivers):
-        total = financial_totals.get(driver_id)
+    for driver_assignment_id in sorted(drivers):
+        total = financial_totals.get(driver_assignment_id)
         pay = None
         if total is not None:
-            item_amounts = per_driver_definitions.get(driver_id, {})
+            item_amounts = per_driver_definitions.get(driver_assignment_id, {})
             gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
                 **total,
@@ -267,11 +269,11 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
                      "amount": item_amounts.get(cid, Decimal("0"))}
                     for cid in definition_column_ids
                 ],
-                "financial_lines": by_driver_lines[driver_id],
+                "financial_lines": by_driver_lines[driver_assignment_id],
             }
-        work = {"daily_rows": by_driver_work[driver_id], "status_entries": by_driver_status[driver_id],
-                "status_summaries": summaries.get(driver_id, [])}
-        result_drivers.append({**drivers[driver_id], "work": work, "pay": pay, "bonus_events": by_driver_bonus[driver_id]})
+        work = {"daily_rows": by_driver_work[driver_assignment_id], "status_entries": by_driver_status[driver_assignment_id],
+                "status_summaries": summaries.get(driver_assignment_id, [])}
+        result_drivers.append({**drivers[driver_assignment_id], "work": work, "pay": pay, "bonus_events": by_driver_bonus[driver_assignment_id]})
     if report_type == "period-pay" and not financials_available:
         raise _unavailable("REPORT_FINANCIALS_UNAVAILABLE", "Prepared payroll periods have no financial report authority.")
     work_totals, pay_totals = _report_totals(work_rows, financial_totals, financials_available)

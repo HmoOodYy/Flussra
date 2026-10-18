@@ -34,7 +34,7 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(
+async def paytest_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -45,12 +45,12 @@ async def paytest_driver_id(
         json={
             "branch_id": paytest_branch_id,
             "full_name": "CP5B Isolated Driver",
-            "driver_code": f"CP5B-D-{uuid4().hex[:10]}",
+            "driver_number": f"CP5B-D-{uuid4().hex[:10]}",
         },
         headers=_auth(auth_token),
     )
     assert response.status_code == 201, response.text
-    return int(response.json()["driver_id"])
+    return int(response.json()["driver_assignment_id"])
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -265,7 +265,7 @@ async def _insert_eligibility(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     *,
     effective_from: datetime.date | None = None,
     effective_to: datetime.date | None = None,
@@ -287,9 +287,9 @@ async def _insert_eligibility(
             )
             FROM payroll.PayrollPeriods pp
             WHERE pde.PayrollPeriodID = pp.PayrollPeriodID
-              AND pde.PayrollPeriodID = :period_id AND pde.DriverID = :driver_id
+              AND pde.PayrollPeriodID = :period_id AND pde.DriverAssignmentID = :driver_assignment_id
         """), {
-            "period_id": period_id, "driver_id": driver_id,
+            "period_id": period_id, "driver_assignment_id": driver_assignment_id,
             "effective_from": effective_from, "effective_to": effective_to,
         })
     await db.commit()
@@ -318,7 +318,7 @@ async def _set_status(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: datetime.date,
     status_key_id: int,
     note: str | None = None,
@@ -326,9 +326,9 @@ async def _set_status(
     await db.execute(
         _text("""
             INSERT INTO payroll.payrollperioddriverdayentrystate
-                (companyid, branchid, payrollperiodid, workdate, driverid, statuskeyid, notetext,
+                (companyid, branchid, payrollperiodid, workdate, driverassignmentid, statuskeyid, notetext,
                  isvoided, createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
-            VALUES (:company_id, :branch_id, :period_id, :work_date, :driver_id, :status_key_id, :note,
+            VALUES (:company_id, :branch_id, :period_id, :work_date, :driver_assignment_id, :status_key_id, :note,
                     FALSE, 1, 1, NOW(), NOW())
         """),
         {
@@ -336,7 +336,7 @@ async def _set_status(
             "branch_id": branch_id,
             "period_id": period_id,
             "work_date": work_date,
-            "driver_id": driver_id,
+            "driver_assignment_id": driver_assignment_id,
             "status_key_id": status_key_id,
             "note": note,
         },
@@ -348,12 +348,12 @@ async def _set_off_for_days(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     days: list[datetime.date],
 ) -> int:
     status_key_id = await _status_key(db, branch_id, f"CP5B_OFF_{next(_COUNTER)}", True)
     for work_date in days:
-        await _set_status(db, period_id, branch_id, driver_id, work_date, status_key_id)
+        await _set_status(db, period_id, branch_id, driver_assignment_id, work_date, status_key_id)
     return status_key_id
 
 
@@ -361,7 +361,7 @@ async def _insert_daily_line(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: datetime.date,
     line_type: str,
     quantity: Decimal = Decimal("1"),
@@ -378,7 +378,7 @@ async def _insert_daily_line(
                 db, period_id=period_id, branch_id=branch_id, name=line_type)
             ).payroll_period_definition_id
         await seed_target_line(
-            db, period_id=period_id, branch_id=branch_id, driver_id=driver_id,
+            db, period_id=period_id, branch_id=branch_id, driver_assignment_id=driver_assignment_id,
             definition=definition_id, quantity=quantity, work_date=work_date,
             source_type=source_type)
         await db.commit()
@@ -386,14 +386,14 @@ async def _insert_daily_line(
     await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date, :line_type, :quantity, :source_type, 'Active', FALSE, 1)
+                (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
+            VALUES (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date, :line_type, :quantity, :source_type, 'Active', FALSE, 1)
         """),
         {
             "company_id": _COMPANY_ID,
             "branch_id": branch_id,
             "period_id": period_id,
-            "driver_id": driver_id,
+            "driver_assignment_id": driver_assignment_id,
             "work_date": work_date,
             "line_type": line_type,
             "quantity": quantity,
@@ -455,14 +455,14 @@ async def _create_driver(
             "branch_id": branch_id,
             "full_name": f"CP5B Driver {suffix}",
             "preferred_name": f"CP5B {suffix}",
-            "driver_code": f"CP5B-{suffix}",
+            "driver_number": f"CP5B-{suffix}",
             "cdl_number": f"CP5B-CDL-{suffix}",
             "email": f"cp5b-{suffix}@example.com",
         },
         headers=_auth(token),
     )
     assert response.status_code == 201, response.text
-    return int(response.json()["driver_id"])
+    return int(response.json()["driver_assignment_id"])
 
 
 async def _summary(client: httpx.AsyncClient, token: str, period_id: int) -> httpx.Response:
@@ -489,7 +489,7 @@ async def _save_day_grid_status(
     client: httpx.AsyncClient,
     token: str,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: datetime.date,
     status_key_code: str,
 ) -> None:
@@ -497,7 +497,7 @@ async def _save_day_grid_status(
         f"/payroll/periods/{period_id}/day-grid",
         headers=_auth(token),
         json={"work_date": work_date.isoformat(),
-              "rows": [{"driver_id": driver_id, "values": {}, "status_key": status_key_code}]},
+              "rows": [{"driver_assignment_id": driver_assignment_id, "values": {}, "status_key": status_key_code}]},
     )
     assert resp.status_code == 200, resp.text
 
@@ -506,7 +506,7 @@ async def _submit_approve_finalize(
     client: httpx.AsyncClient,
     token: str,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: datetime.date,
 ) -> None:
     """Drive a period Open -> InReview -> Approved -> Locked through the
@@ -519,7 +519,7 @@ async def _submit_approve_finalize(
         await client.post(
             f"/payroll/periods/{period_id}/lines",
             headers=headers,
-            json={"driver_id": driver_id, "work_date": work_date.isoformat(),
+            json={"driver_assignment_id": driver_assignment_id, "work_date": work_date.isoformat(),
                   "line_type": "DailyNote", "notes": "filler"},
         )
     submit = await client.patch(
@@ -575,113 +575,115 @@ def _hub_branch(payload: dict, branch_id: int) -> dict:
 
 @pytest.mark.asyncio
 class TestOffDrivers:
-    async def test_frozen_off_driver_identity_does_not_follow_live_renames(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+    async def test_frozen_off_driver_assignment_identity_does_not_follow_live_renames(
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "FROZEN_IDENTITY")
         days = await _period_dates(direct_db, period_id)
         prior = (await direct_db.execute(_text("""
-            SELECT e.FullName, d.DriverCode
-            FROM core.Drivers d JOIN core.Employees e ON e.EmployeeID = d.EmployeeID
-            WHERE d.DriverID = :driver_id
-        """), {"driver_id": paytest_driver_id})).mappings().one()
+            SELECT e.FullName, d.DriverNumber
+            FROM core.DriverAssignments a
+            JOIN core.Drivers d ON d.DriverID = a.DriverID
+            JOIN core.Employees e ON e.EmployeeID = a.EmployeeID
+            WHERE a.DriverAssignmentID = :driver_assignment_id
+        """), {"driver_assignment_id": paytest_driver_assignment_id})).mappings().one()
         try:
             await direct_db.execute(_text("""
                 UPDATE core.Employees e SET FullName = ''
-                FROM core.Drivers d WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
-            """), {"driver_id": paytest_driver_id})
+                FROM core.DriverAssignments d WHERE d.DriverAssignmentID = :driver_assignment_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_assignment_id": paytest_driver_assignment_id})
             await direct_db.execute(_text(
-                "UPDATE core.Drivers SET DriverCode = NULL WHERE DriverID = :driver_id"
-            ), {"driver_id": paytest_driver_id})
-            await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-            await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, days)
+                "UPDATE core.Drivers SET DriverNumber = NULL WHERE DriverID = (SELECT DriverID FROM core.DriverAssignments WHERE DriverAssignmentID = :driver_assignment_id)"
+            ), {"driver_assignment_id": paytest_driver_assignment_id})
+            await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+            await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
 
             await direct_db.execute(_text("""
                 UPDATE core.Employees e SET FullName = :name
-                FROM core.Drivers d WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
-            """), {"driver_id": paytest_driver_id, "name": f"Renamed {uuid4().hex[:8]}"})
+                FROM core.DriverAssignments d WHERE d.DriverAssignmentID = :driver_assignment_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_assignment_id": paytest_driver_assignment_id, "name": f"Renamed {uuid4().hex[:8]}"})
             await direct_db.execute(_text("""
-                UPDATE core.Drivers SET DriverCode = :code WHERE DriverID = :driver_id
-            """), {"driver_id": paytest_driver_id, "code": f"RENAMED-{uuid4().hex[:8]}"})
+                UPDATE core.Drivers SET DriverNumber = :code WHERE DriverID = (SELECT DriverID FROM core.DriverAssignments WHERE DriverAssignmentID = :driver_assignment_id)
+            """), {"driver_assignment_id": paytest_driver_assignment_id, "code": f"RENAMED-{uuid4().hex[:8]}"})
 
             response = await _summary(session_client, auth_token, period_id)
             assert response.status_code == 200, response.text
             row = next(
                 item for item in response.json()["fully_off_drivers"]
-                if item["driver_id"] == paytest_driver_id
+                if item["driver_assignment_id"] == paytest_driver_assignment_id
             )
             assert row["driver_name"] == ""
-            assert row["driver_code"] is None
+            assert row["driver_number"] is None
         finally:
             await direct_db.execute(_text("""
                 UPDATE core.Employees e SET FullName = :name
-                FROM core.Drivers d WHERE d.DriverID = :driver_id AND e.EmployeeID = d.EmployeeID
-            """), {"driver_id": paytest_driver_id, "name": prior["fullname"]})
+                FROM core.DriverAssignments d WHERE d.DriverAssignmentID = :driver_assignment_id AND e.EmployeeID = d.EmployeeID
+            """), {"driver_assignment_id": paytest_driver_assignment_id, "name": prior["fullname"]})
             await direct_db.execute(_text("""
-                UPDATE core.Drivers SET DriverCode = :code WHERE DriverID = :driver_id
-            """), {"driver_id": paytest_driver_id, "code": prior["drivercode"]})
+                UPDATE core.Drivers SET DriverNumber = :code WHERE DriverID = (SELECT DriverID FROM core.DriverAssignments WHERE DriverAssignmentID = :driver_assignment_id)
+            """), {"driver_assignment_id": paytest_driver_assignment_id, "code": prior["drivernumber"]})
 
     async def test_summary_counts_distinct_fully_off_drivers(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "DISTINCT")
         days = await _period_dates(direct_db, period_id)
-        second_driver_id = await _create_driver(session_client, auth_token, paytest_branch_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, second_driver_id)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, days)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, second_driver_id, days)
+        second_driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, second_driver_assignment_id)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, second_driver_assignment_id, days)
 
         response = await _summary(session_client, auth_token, period_id)
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["total_fully_off_drivers"] == 2
-        assert {row["driver_id"] for row in body["fully_off_drivers"]} == {
-            paytest_driver_id, second_driver_id,
+        assert {row["driver_assignment_id"] for row in body["fully_off_drivers"]} == {
+            paytest_driver_assignment_id, second_driver_assignment_id,
         }
         assert {row["eligible_scheduled_day_count"] for row in body["fully_off_drivers"]} == {len(days)}
 
     async def test_missing_or_non_off_status_disqualifies_fully_off(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "STATUS")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[:-1])
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[:-1])
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
         non_off = await _status_key(direct_db, paytest_branch_id, "CP5B_WORK", False)
-        await _set_status(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[-1], non_off)
+        await _set_status(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[-1], non_off)
         response = await _summary(session_client, auth_token, period_id)
         assert response.status_code == 200, response.text
         assert response.json()["total_fully_off_drivers"] == 0
 
     async def test_normal_work_disqualifies_but_financial_only_sources_do_not(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "WORK")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, days)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[0], "STATUS_PAYMENT", source_type="System")
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[1], "SYS_MIN_TOPUP", source_type="System")
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[0], "STATUS_PAYMENT", source_type="System")
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[1], "SYS_MIN_TOPUP", source_type="System")
         bonus = await session_client.post(
             f"/payroll/periods/{period_id}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "20.00", "reason": "CP5B test"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "20.00", "reason": "CP5B test"},
             headers=_auth(auth_token),
         )
         assert bonus.status_code == 201, bonus.text
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 1
 
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[2], "HOURS")
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[2], "HOURS")
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
     async def test_mid_period_eligibility_and_configured_off_days_define_denominator(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "WINDOW")
@@ -692,7 +694,7 @@ class TestOffDrivers:
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             effective_from=days[2],
             effective_to=days[-1],
         )
@@ -700,7 +702,7 @@ class TestOffDrivers:
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             [day for day in days[2:] if day != days[3]],
         )
 
@@ -711,19 +713,19 @@ class TestOffDrivers:
         assert driver["off_day_count"] == len(days[2:]) - 1
 
     async def test_added_configured_off_day_becomes_part_of_denominator(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "ADDED")
         days = await _period_dates(direct_db, period_id)
         await _calendar_with_configured_off_day(direct_db, period_id, paytest_branch_id, days[1], added=True)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, [day for day in days if day != days[1]])
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, [day for day in days if day != days[1]])
 
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
     async def test_zero_eligible_scheduled_days_never_counts_as_fully_off(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "ZERO")
@@ -731,27 +733,27 @@ class TestOffDrivers:
         await _calendar_with_configured_off_day(
             direct_db, period_id, paytest_branch_id, set(days),
         )
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
 
         response = await _summary(session_client, auth_token, period_id)
         assert response.status_code == 200, response.text
         assert response.json()["total_fully_off_drivers"] == 0
 
     async def test_selected_day_is_distinct_from_period_fully_off_and_returns_note(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "SELECTED")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         off_key = await _status_key(direct_db, paytest_branch_id, "CP5B_SELECTED", True)
-        await _set_status(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[0], off_key, "Returned for correction")
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, days[1], "HOURS")
+        await _set_status(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[0], off_key, "Returned for correction")
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[1], "HOURS")
 
         selected = await _selected(session_client, auth_token, period_id, days[0])
         assert selected.status_code == 200, selected.text
         row = selected.json()["drivers"][0]
-        assert row["driver_id"] == paytest_driver_id
+        assert row["driver_assignment_id"] == paytest_driver_assignment_id
         assert row["status_key_id"] == off_key
         assert row["status_code"] == "CP5B_SELECTED"
         assert row["is_off_reason"] is True
@@ -760,15 +762,15 @@ class TestOffDrivers:
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
     async def test_selected_day_requires_in_period_date_and_canonical_eligible_status(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "DATE")
         days = await _period_dates(direct_db, period_id)
         await _insert_eligibility(
-            direct_db, period_id, paytest_branch_id, paytest_driver_id, effective_from=days[1],
+            direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, effective_from=days[1],
         )
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, [days[0], days[1]])
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, [days[0], days[1]])
 
         ineligible = await _selected(session_client, auth_token, period_id, days[0])
         assert ineligible.status_code == 200, ineligible.text
@@ -777,14 +779,14 @@ class TestOffDrivers:
         assert outside.status_code == 400, outside.text
 
     async def test_selected_day_uses_date_eligibility_not_fully_off_calendar_denominator(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "CALENDAR")
         days = await _period_dates(direct_db, period_id)
         await _calendar_with_configured_off_day(direct_db, period_id, paytest_branch_id, days[0])
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, [days[0]])
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, [days[0]])
 
         selected = await _selected(session_client, auth_token, period_id, days[0])
         assert selected.status_code == 200, selected.text
@@ -792,7 +794,7 @@ class TestOffDrivers:
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
     async def test_legacy_drivers_off_endpoint_retains_driver_day_row_semantics(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "LEGACY")
@@ -802,15 +804,15 @@ class TestOffDrivers:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date, 'DailyStatus',
+                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, notes, addedbyuserid)
+                VALUES (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date, 'DailyStatus',
                         1, 'Manual', 'Active', FALSE, :status_code, 1)
             """),
             {
                 "company_id": _COMPANY_ID,
                 "branch_id": paytest_branch_id,
                 "period_id": period_id,
-                "driver_id": paytest_driver_id,
+                "driver_assignment_id": paytest_driver_assignment_id,
                 "work_date": work_date,
                 "status_code": off_code,
             },
@@ -826,13 +828,13 @@ class TestOffDrivers:
         assert response.json()["entries"][0]["status_key_code"] == off_code
 
     async def test_hub_uses_same_distinct_fully_off_resolver_as_summary(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "HUB")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_id, days)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
 
         summary = await _summary(session_client, auth_token, period_id)
         hub = await session_client.get(
@@ -848,7 +850,7 @@ class TestOffDrivers:
     # ------------------------------------------------------------------ #
 
     async def test_locked_period_legacy_snapshot_status_evidence_unavailable(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         """A Locked period whose authoritative snapshot predates CP-5C
         (ReportEvidenceVersion IS NULL) must report status_evidence as
@@ -857,7 +859,7 @@ class TestOffDrivers:
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "LEGACYSNAP", status="Locked")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         snapshot_id = int((await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrollcalculationsnapshots
@@ -878,14 +880,14 @@ class TestOffDrivers:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                          approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                             'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                 """),
                 {
-                    "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
                     "wdate": days[0],
                     "snap": (
                         f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
@@ -912,7 +914,7 @@ class TestOffDrivers:
         }
 
     async def test_locked_period_captured_snapshot_zero_status_rows_is_empty(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         """A Locked period whose authoritative snapshot IS versioned
         (captured) but has zero PayrollCalculationSnapshotStatusEntries rows
@@ -922,7 +924,7 @@ class TestOffDrivers:
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "EMPTYSNAP", status="Locked")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         snapshot_id = int((await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrollcalculationsnapshots
@@ -946,14 +948,14 @@ class TestOffDrivers:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                          approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                             'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                 """),
                 {
-                    "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
                     "wdate": days[0],
                     "snap": (
                         f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
@@ -976,7 +978,7 @@ class TestOffDrivers:
         assert sum_body.get("status_evidence") == {"state": "EMPTY", "reason_code": None}
 
     async def test_locked_period_missing_snapshot_provenance_is_unavailable(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         """A Locked period with no Approved PeriodApproval review item bound
         to a snapshot must report status_evidence as UNAVAILABLE/
@@ -985,19 +987,19 @@ class TestOffDrivers:
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "NOPROV", status="Locked")
         days = await _period_dates(direct_db, period_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         async with allow_final_line_insert(direct_db):
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                          approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                             'DraftLine', 1, NOW(), NOW(), 'USD', 2)
                 """),
                 {
-                    "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "cid": _COMPANY_ID, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
                     "wdate": days[0],
                 },
             )

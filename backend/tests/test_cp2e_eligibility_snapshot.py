@@ -2095,7 +2095,6 @@ class TestGeneratedRowExistingSourceRescue:
             )
             await direct_db.commit()
 
-    @pytest.mark.skip(reason="WP2b: payroll finalization (period_calculation) moves to DriverAssignmentID")
     async def test_cp2e_finalization_accepts_generated_row_existing_source_outside_window(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):

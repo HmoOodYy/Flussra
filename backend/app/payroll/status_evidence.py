@@ -34,7 +34,7 @@ async def read_status_entries(
     Returns one dict per captured entry, using exactly the fields this table
     captures (no note text, no hours value, no void state -- not part of
     this table's contract):
-        {driver_id, work_date, status_key_id, status_code, status_label,
+        {driver_assignment_id, driver_id, work_date, status_key_id, status_code, status_label,
          is_off_reason}
 
     Does not raise, does not interpret ReportEvidenceVersion, does not decide
@@ -43,14 +43,14 @@ async def read_status_entries(
     it fits.
     """
     rows = (await db.execute(text("""
-        SELECT driverid, workdate, statuskeyid, statuscodesnapshot,
+        SELECT driverassignmentid, driverid, workdate, statuskeyid, statuscodesnapshot,
                statuslabelsnapshot, statusisoffreasonsnapshot
         FROM payroll.payrollcalculationsnapshotstatusentries
         WHERE payrollcalculationsnapshotid = :snapshot_id
           AND companyid = :company_id
           AND branchid = :branch_id
           AND payrollperiodid = :period_id
-        ORDER BY driverid, workdate
+        ORDER BY driverassignmentid, workdate
     """), {
         "snapshot_id": snapshot_id,
         "company_id": company_id,
@@ -58,6 +58,7 @@ async def read_status_entries(
         "period_id": period_id,
     })).mappings().all()
     return [{
+        "driver_assignment_id": int(row["driverassignmentid"]),
         "driver_id": int(row["driverid"]),
         "work_date": row["workdate"],
         "status_key_id": int(row["statuskeyid"]),

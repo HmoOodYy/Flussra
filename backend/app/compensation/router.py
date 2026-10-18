@@ -285,47 +285,47 @@ async def discard_assignment(token: TokenDep, db: DbDep, assignment_id: int) -> 
     return Response(status_code=204)
 
 
-@router.get("/drivers/{driver_id}/pay-rates", response_model=list[DriverPayRateRow],
+@router.get("/driver-assignments/{driver_assignment_id}/pay-rates", response_model=list[DriverPayRateRow],
             summary="Branch-applicable PayDefinitions and the Driver's scalar rate state")
 async def driver_pay_rates(
-    token: TokenDep, db: DbDep, driver_id: int, as_of: date | None = Query(None),
+    token: TokenDep, db: DbDep, driver_assignment_id: int, as_of: date | None = Query(None),
 ) -> list[DriverPayRateRow]:
     company_id, user_id = _ids(token)
-    return await assignments.driver_pay_rates(company_id, user_id, driver_id, as_of, db)
+    return await assignments.driver_pay_rates(company_id, user_id, driver_assignment_id, as_of, db)
 
 
-@router.get("/drivers/{driver_id}/rate-definitions/{rate_definition_id}/assignments",
+@router.get("/driver-assignments/{driver_assignment_id}/rate-definitions/{rate_definition_id}/assignments",
             response_model=list[AssignmentSummary],
             summary="Driver rate assignment history for one rate definition")
 async def assignment_history(
-    token: TokenDep, db: DbDep, driver_id: int, rate_definition_id: int,
+    token: TokenDep, db: DbDep, driver_assignment_id: int, rate_definition_id: int,
 ) -> list[AssignmentSummary]:
     company_id, user_id = _ids(token)
-    return await assignments.history(company_id, user_id, driver_id, rate_definition_id, db)
+    return await assignments.history(company_id, user_id, driver_assignment_id, rate_definition_id, db)
 
 
-@router.get("/drivers/{driver_id}/rate-assignments/summary",
+@router.get("/driver-assignments/{driver_assignment_id}/rate-assignments/summary",
             response_model=list[DriverRateSummaryItem],
             summary="Current and Pending assignment per rate definition for a Driver")
 async def driver_assignment_summary(
-    token: TokenDep, db: DbDep, driver_id: int,
+    token: TokenDep, db: DbDep, driver_assignment_id: int,
 ) -> list[DriverRateSummaryItem]:
     company_id, user_id = _ids(token)
-    return await assignments.driver_summary(company_id, user_id, driver_id, db)
+    return await assignments.driver_summary(company_id, user_id, driver_assignment_id, db)
 
 
-@router.get("/drivers/{driver_id}/rate-definitions/{rate_definition_id}/resolution",
+@router.get("/driver-assignments/{driver_assignment_id}/rate-definitions/{rate_definition_id}/resolution",
             response_model=ResolvedCompensation,
             summary="Resolve the whole assignment effective on a work date")
 async def resolve_assignment(
-    token: TokenDep, db: DbDep, driver_id: int, rate_definition_id: int,
+    token: TokenDep, db: DbDep, driver_assignment_id: int, rate_definition_id: int,
     work_date: date = Query(...),
 ) -> ResolvedCompensation:
     company_id, user_id = _ids(token)
-    branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
+    branch_id = await load_company_driver_branch(company_id, user_id, driver_assignment_id, db)
     await require_rate_read(company_id, user_id, branch_id, db)
     try:
-        resolved = await resolver.resolve(company_id, driver_id, rate_definition_id, work_date, db)
+        resolved = await resolver.resolve(company_id, driver_assignment_id, rate_definition_id, work_date, db)
     except CompensationOwnershipError as exc:
         raise compensation_error("RATE_DEFINITION_NOT_FOUND", str(exc), 404) from exc
     if resolved is None:

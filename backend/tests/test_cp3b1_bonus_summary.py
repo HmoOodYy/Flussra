@@ -114,7 +114,7 @@ async def _seed_snapshot(
 ) -> None:
     """Seed a CP-2E eligibility snapshot: marker row + one detail row per entry.
 
-    Each entry: {"driver_id", "code", "name", "reason"}.
+    Each entry: {"driver_assignment_id", "code", "name", "reason"}.
     """
     await db.execute(
         _text("""
@@ -130,13 +130,13 @@ async def _seed_snapshot(
         await db.execute(
             _text("""
                 INSERT INTO payroll.payrollperioddrivereligibility
-                    (companyid, branchid, payrollperiodid, driverid,
-                     drivercodesnapshot, drivernamesnapshot,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
+                     drivernumbersnapshot, drivernamesnapshot,
                      drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
                      branchtimezoneidsnapshot, eligibleworkdates,
                      iseligibleforperiod, eligibilityreasoncode, snapshotsource,
                      createdatutc, updatedatutc)
-                SELECT 1, :bid, :pid, d.driverid, :code, :name,
+                SELECT 1, :bid, :pid, d.driverassignmentid, :code, :name,
                        d.effectivefromat, d.effectivetoat, b.timezoneid,
                        CASE WHEN :reason = 'IncludedByExistingData' THEN ARRAY[]::DATE[]
                             ELSE ARRAY(SELECT pp.startdate + n.day_index
@@ -145,15 +145,15 @@ async def _seed_snapshot(
                                        WHERE pp.payrollperiodid = :pid)
                        END,
                        TRUE, :reason, 'Generated', NOW(), NOW()
-                FROM core.drivers d
+                FROM core.driverassignments d
                 JOIN core.branches b ON b.companyid = d.companyid AND b.branchid = d.branchid
-                WHERE d.driverid = :did AND d.companyid = 1 AND d.branchid = :bid
-                ON CONFLICT (payrollperiodid, driverid) DO NOTHING
+                WHERE d.driverassignmentid = :did AND d.companyid = 1 AND d.branchid = :bid
+                ON CONFLICT (payrollperiodid, driverassignmentid) DO NOTHING
             """),
             {
                 "bid":    branch_id,
                 "pid":    period_id,
-                "did":    e["driver_id"],
+                "did":    e["driver_assignment_id"],
                 "code":   e["code"],
                 "name":   e["name"],
                 "reason": e.get("reason", "Active"),
@@ -166,12 +166,12 @@ async def _post_bonus(
     client: httpx.AsyncClient,
     token: str,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     amount: str,
 ) -> int:
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": driver_id, "amount": amount},
+        json={"driver_assignment_id": driver_assignment_id, "amount": amount},
         headers=_auth(token),
     )
     assert r.status_code == 201, f"Bonus create failed: {r.text}"
@@ -189,8 +189,8 @@ async def _get_summary(
     )
 
 
-def _driver_row(summary: dict, driver_id: int) -> dict | None:
-    return next((d for d in summary["drivers"] if d["driver_id"] == driver_id), None)
+def _driver_row(summary: dict, driver_assignment_id: int) -> dict | None:
+    return next((d for d in summary["drivers"] if d["driver_assignment_id"] == driver_assignment_id), None)
 
 
 async def _advance_to_approved(
@@ -254,25 +254,25 @@ async def _get_or_create_driver(
     session_client: httpx.AsyncClient,
     auth_token: str,
     branch_id: int,
-    driver_code: str,
+    driver_number: str,
     full_name: str,
 ) -> int:
     r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
     if r_list.status_code == 200:
         for d in r_list.json():
-            if d.get("driver_code") == driver_code:
-                return d["driver_id"]
+            if d.get("driver_number") == driver_number:
+                return d["driver_assignment_id"]
     resp = await session_client.post(
         "/core/drivers",
         json={
             "branch_id":   branch_id,
             "full_name":   full_name,
-            "driver_code": driver_code,
+            "driver_number": driver_number,
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -291,7 +291,7 @@ async def cp3b1_drivers(
     ]:
         out[key] = await _get_or_create_driver(
             session_client, auth_token, cp3b1_branch_id,
-            driver_code=f"CP3B1-{key.upper()}", full_name=name,
+            driver_number=f"CP3B1-{key.upper()}", full_name=name,
         )
     return out
 
@@ -299,7 +299,7 @@ async def cp3b1_drivers(
 def _roster(drivers: dict[str, int], keys: list[str], reason: str = "Active") -> list[dict]:
     return [
         {
-            "driver_id": drivers[k],
+            "driver_assignment_id": drivers[k],
             "code":      f"CP3B1-{k.upper()}",
             "name":      f"CP3B1 {k.capitalize()} Driver",
             "reason":    reason,
@@ -370,7 +370,7 @@ async def test_only_snapshot_drivers_appear(
     await db_conn.execute(
         _text("""
             INSERT INTO payroll.payrollbonusevents
-                (companyid, branchid, payrollperiodid, driverid,
+                (companyid, branchid, payrollperiodid, driverassignmentid,
                  amount, status, createdbyuserid, createdatutc, datarevision)
             VALUES (1, :bid, :pid, :did, 500.00, 'Active', 1, NOW(), 1)
         """),
@@ -381,9 +381,9 @@ async def test_only_snapshot_drivers_appear(
     r = await _get_summary(client, auth_token, period_id)
     assert r.status_code == 200, r.text
     summary = r.json()
-    driver_ids = [d["driver_id"] for d in summary["drivers"]]
-    assert driver_ids == [cp3b1_drivers["alpha"]], (
-        f"Only snapshot drivers may appear; got {driver_ids}"
+    driver_assignment_ids = [d["driver_assignment_id"] for d in summary["drivers"]]
+    assert driver_assignment_ids == [cp3b1_drivers["alpha"]], (
+        f"Only snapshot drivers may appear; got {driver_assignment_ids}"
     )
     # The contaminated event must not leak into the top-level totals either.
     assert Decimal(summary["active_bonus_total"]) == Decimal("0")
@@ -409,13 +409,13 @@ async def test_terminated_historical_driver_visible(
     await _seed_snapshot(db_conn, cp3b1_branch_id, period_id, [
         *_roster(cp3b1_drivers, ["alpha"]),
         {
-            "driver_id": cp3b1_drivers["beta"],
+            "driver_assignment_id": cp3b1_drivers["beta"],
             "code":      "CP3B1-BETA",
             "name":      "CP3B1 Beta Driver",
             "reason":    "TerminatedHistorical",
         },
         {
-            "driver_id": cp3b1_drivers["gamma"],
+            "driver_assignment_id": cp3b1_drivers["gamma"],
             "code":      "CP3B1-GAMMA",
             "name":      "CP3B1 Gamma Driver",
             "reason":    "Transferred",
@@ -454,7 +454,7 @@ async def test_included_by_existing_data_reason_preserved(
     period_id = await _insert_period_db(db_conn, cp3b1_branch_id, start, end)
     await _seed_snapshot(db_conn, cp3b1_branch_id, period_id, [
         {
-            "driver_id": cp3b1_drivers["alpha"],
+            "driver_assignment_id": cp3b1_drivers["alpha"],
             "code":      "CP3B1-ALPHA",
             "name":      "CP3B1 Alpha Driver",
             "reason":    "IncludedByExistingData",
@@ -568,7 +568,7 @@ async def test_sorting(
 
     r = await _get_summary(client, auth_token, period_id)
     assert r.status_code == 200, r.text
-    order = [d["driver_id"] for d in r.json()["drivers"]]
+    order = [d["driver_assignment_id"] for d in r.json()["drivers"]]
     assert order == [
         cp3b1_drivers["zeta"],    # 250.00 — highest total first
         cp3b1_drivers["alpha"],   # 100.00
@@ -676,14 +676,14 @@ async def test_view_only_user_reads_but_cannot_mutate(
     branch_user_token: str,
     db_conn: AsyncConnection,
     hq_branch_id: int,
-    hq_driver_id: int,
+    hq_driver_assignment_id: int,
 ) -> None:
     """branch_user (payroll.view only, HQ scope) reads the summary with all
     mutation capabilities false and a permission reason code."""
     start, end = _week()
     period_id = await _insert_period_db(db_conn, hq_branch_id, start, end, status="Open")
     await _seed_snapshot(db_conn, hq_branch_id, period_id, [
-        {"driver_id": hq_driver_id, "code": "HQD-001", "name": "HQ Driver", "reason": "Active"},
+        {"driver_assignment_id": hq_driver_assignment_id, "code": "HQD-001", "name": "HQ Driver", "reason": "Active"},
     ])
 
     r = await _get_summary(client, branch_user_token, period_id)
@@ -926,7 +926,7 @@ async def test_included_by_existing_data_not_creatable(
     period_id = await _insert_period_db(db_conn, cp3b1_branch_id, start, end)
     await _seed_snapshot(db_conn, cp3b1_branch_id, period_id, [
         {
-            "driver_id": cp3b1_drivers["alpha"],
+            "driver_assignment_id": cp3b1_drivers["alpha"],
             "code":      "CP3B1-ALPHA",
             "name":      "CP3B1 Alpha Driver",
             "reason":    "IncludedByExistingData",
@@ -949,7 +949,7 @@ async def test_included_by_existing_data_not_creatable(
     # Prove consistency: the actual create endpoint rejects the same driver.
     create_resp = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3b1_drivers["alpha"], "amount": "10.00"},
+        json={"driver_assignment_id": cp3b1_drivers["alpha"], "amount": "10.00"},
         headers=_auth(auth_token),
     )
     assert create_resp.status_code == 422, (

@@ -131,13 +131,13 @@ async def _seed_snapshot(
         await db.execute(
             _text("""
                 INSERT INTO payroll.payrollperioddrivereligibility
-                    (companyid, branchid, payrollperiodid, driverid,
-                     drivercodesnapshot, drivernamesnapshot,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
+                     drivernumbersnapshot, drivernamesnapshot,
                      drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
                      branchtimezoneidsnapshot, eligibleworkdates,
                      iseligibleforperiod, eligibilityreasoncode, snapshotsource,
                      createdatutc, updatedatutc)
-                SELECT 1, :bid, :pid, d.driverid, :code, :name,
+                SELECT 1, :bid, :pid, d.driverassignmentid, :code, :name,
                        d.effectivefromat, d.effectivetoat, b.timezoneid,
                        CASE WHEN :reason = 'IncludedByExistingData' THEN ARRAY[]::DATE[]
                             ELSE ARRAY(SELECT pp.startdate + n.day_index
@@ -146,12 +146,12 @@ async def _seed_snapshot(
                                        WHERE pp.payrollperiodid = :pid)
                        END,
                        TRUE, :reason, 'Generated', NOW(), NOW()
-                FROM core.drivers d
+                FROM core.driverassignments d
                 JOIN core.branches b ON b.companyid = d.companyid AND b.branchid = d.branchid
-                WHERE d.driverid = :did AND d.companyid = 1 AND d.branchid = :bid
-                ON CONFLICT (payrollperiodid, driverid) DO NOTHING
+                WHERE d.driverassignmentid = :did AND d.companyid = 1 AND d.branchid = :bid
+                ON CONFLICT (payrollperiodid, driverassignmentid) DO NOTHING
             """),
-            {"bid": branch_id, "pid": period_id, "did": e["driver_id"],
+            {"bid": branch_id, "pid": period_id, "did": e["driver_assignment_id"],
              "code": e["code"], "name": e["name"], "reason": e.get("reason", "Active")},
         )
     await db.commit()
@@ -219,20 +219,20 @@ async def cp3b2b_branch_id(session_db_conn) -> int:
 
 async def _get_or_create_driver(
     session_client: httpx.AsyncClient, auth_token: str,
-    branch_id: int, driver_code: str, full_name: str,
+    branch_id: int, driver_number: str, full_name: str,
 ) -> int:
     r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
     if r_list.status_code == 200:
         for d in r_list.json():
-            if d.get("driver_code") == driver_code:
-                return d["driver_id"]
+            if d.get("driver_number") == driver_number:
+                return d["driver_assignment_id"]
     resp = await session_client.post(
         "/core/drivers",
-        json={"branch_id": branch_id, "full_name": full_name, "driver_code": driver_code},
+        json={"branch_id": branch_id, "full_name": full_name, "driver_number": driver_number},
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture
@@ -247,13 +247,13 @@ async def cp3b2b_drivers(
     ]:
         out[key] = await _get_or_create_driver(
             session_client, auth_token, cp3b2b_branch_id,
-            driver_code=f"CP3B2B-{key.upper()}", full_name=name,
+            driver_number=f"CP3B2B-{key.upper()}", full_name=name,
         )
     return out
 
 
 def _entry(drivers: dict[str, int], k: str) -> dict:
-    return {"driver_id": drivers[k], "code": f"CP3B2B-{k.upper()}", "name": f"CP3B2B {k.capitalize()} Driver"}
+    return {"driver_assignment_id": drivers[k], "code": f"CP3B2B-{k.upper()}", "name": f"CP3B2B {k.capitalize()} Driver"}
 
 
 async def _open_period_with_roster(
@@ -275,9 +275,9 @@ async def test_multi_driver_batch_succeeds_201(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta", "gamma"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "Safety"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "75.00"},
-        {"driver_id": cp3b2b_drivers["gamma"], "amount": "20.00", "notes": "spot"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "Safety"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "75.00"},
+        {"driver_assignment_id": cp3b2b_drivers["gamma"], "amount": "20.00", "notes": "spot"},
     ])
     assert r.status_code == 201, r.text
     body = r.json()
@@ -301,8 +301,8 @@ async def test_duplicate_driver_rows_create_separate_events(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "20.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "20.00"},
     ])
     assert r.status_code == 201, r.text
     body = r.json()
@@ -318,8 +318,8 @@ async def test_events_carry_correlation_and_idempotency_key(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta"])
     key = _key()
     r = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
     ])
     assert r.status_code == 201, r.text
     corr = r.json()["batch_correlation_id"]
@@ -343,8 +343,8 @@ async def test_get_bonuses_lists_created_events(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta"])
     await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
     ])
     r = await client.get(f"/payroll/periods/{period_id}/bonuses", headers=_auth(auth_token))
     assert r.status_code == 200, r.text
@@ -358,8 +358,8 @@ async def test_summary_reflects_batch_totals_and_revision(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
     ])
     result_rev = r.json()["result_bonus_data_revision"]
     s = await client.get(f"/payroll/periods/{period_id}/bonuses/summary", headers=_auth(auth_token))
@@ -382,9 +382,9 @@ async def test_batch_increments_revision_exactly_once(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta", "gamma"])
     before = await _get_bonus_data_revision(db_conn, period_id)
     r = await _batch(client, auth_token, period_id, _key(), before, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "20.00"},
-        {"driver_id": cp3b2b_drivers["gamma"], "amount": "30.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "20.00"},
+        {"driver_assignment_id": cp3b2b_drivers["gamma"], "amount": "30.00"},
     ])
     assert r.status_code == 201, r.text
     after = await _get_bonus_data_revision(db_conn, period_id)
@@ -399,7 +399,7 @@ async def test_stale_expected_revision_conflicts_writes_nothing(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     before = await _get_bonus_data_revision(db_conn, period_id)
     r = await _batch(client, auth_token, period_id, _key(), before + 99, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 409, r.text
     assert await _count_events(db_conn, period_id) == 0
@@ -418,13 +418,13 @@ async def test_single_event_post_invalidates_batch_revision(
     rev_seen = s.json()["bonus_data_revision"]
     pe = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3b2b_drivers["alpha"], "amount": "5.00"},
+        json={"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "5.00"},
         headers=_auth(auth_token),
     )
     assert pe.status_code == 201, pe.text
     # Batch built against the now-stale revision must 409.
     r = await _batch(client, auth_token, period_id, _key(), rev_seen, [
-        {"driver_id": cp3b2b_drivers["beta"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"], "amount": "10.00"},
     ])
     assert r.status_code == 409, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -441,8 +441,8 @@ async def test_replay_same_key_same_payload_returns_200(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta"])
     key = _key()
     items = [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "x"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "x"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
     ]
     r1 = await _batch(client, auth_token, period_id, key, 0, items)
     assert r1.status_code == 201, r1.text
@@ -472,11 +472,11 @@ async def test_same_key_different_amount_conflicts(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
     r1 = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
     ])
     assert r1.status_code == 201, r1.text
     r2 = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "51.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "51.00"},
     ])
     assert r2.status_code == 409, r2.text
     assert await _count_events(db_conn, period_id) == 1
@@ -490,11 +490,11 @@ async def test_same_key_different_reason_conflicts(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
     r1 = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "A"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "A"},
     ])
     assert r1.status_code == 201, r1.text
     r2 = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "B"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": "B"},
     ])
     assert r2.status_code == 409, r2.text
     await _cancel_period_db(db_conn, period_id)
@@ -507,12 +507,12 @@ async def test_same_key_different_expected_revision_conflicts(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
     r1 = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
     ])
     assert r1.status_code == 201, r1.text
     # Same key, same items, but different expected revision → different hash → 409.
     r2 = await _batch(client, auth_token, period_id, key, 1, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
     ])
     assert r2.status_code == 409, r2.text
     await _cancel_period_db(db_conn, period_id)
@@ -527,7 +527,7 @@ async def test_sequential_same_key_yields_one_apply_one_replay(
     duplicate write."""
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
-    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
+    items = [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
     codes = []
     for _ in range(3):
         r = await _batch(client, auth_token, period_id, key, 0, items)
@@ -548,7 +548,7 @@ async def test_four_decimal_batch_is_stored_and_replayed_exactly(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
-    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "12.3456"}]
+    items = [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "12.3456"}]
     first = await _batch(client, auth_token, period_id, key, 0, items)
     assert first.status_code == 201, first.text
     assert Decimal(str(first.json()["events"][0]["amount"])) == Decimal("12.3456")
@@ -564,7 +564,7 @@ async def test_four_decimal_batch_is_stored_and_replayed_exactly(
     assert Decimal(str(replay.json()["events"][0]["amount"])) == Decimal("12.3456")
 
     conflict = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "12.3457"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "12.3457"},
     ])
     assert conflict.status_code == 409, conflict.text
     await _cancel_period_db(db_conn, period_id)
@@ -578,7 +578,7 @@ async def test_exact_replay_does_not_require_currency_lookup(
 
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
-    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
+    items = [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
     applied = await _batch(client, auth_token, period_id, key, 0, items)
     assert applied.status_code == 201, applied.text
 
@@ -598,14 +598,14 @@ async def test_legacy_v1_replay_requires_exact_two_decimal_amount(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
-    item = {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}
+    item = {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"}
     applied = await _batch(client, auth_token, period_id, key, 0, [item])
     assert applied.status_code == 201, applied.text
 
     v1_payload = {
         "version": 1,
         "expected_bonus_data_revision": 0,
-        "items": [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": None, "notes": None}],
+        "items": [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00", "reason": None, "notes": None}],
     }
     canonical = json.dumps(v1_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     request_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -623,7 +623,7 @@ async def test_legacy_v1_replay_requires_exact_two_decimal_amount(
     assert replay.status_code == 200, replay.text
     assert replay.json()["replayed"] is True
     fractional = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.001"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.001"},
     ])
     assert fractional.status_code == 409, fractional.text
     assert await _count_events(db_conn, period_id) == 1
@@ -636,7 +636,7 @@ async def test_unknown_stored_batch_payload_version_fails_closed(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
-    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
+    items = [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"}]
     applied = await _batch(client, auth_token, period_id, key, 0, items)
     assert applied.status_code == 201, applied.text
     await db_conn.execute(_text("""
@@ -668,7 +668,7 @@ async def test_more_than_100_items_rejected(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
-    items = [{"driver_id": cp3b2b_drivers["alpha"], "amount": "1.00"} for _ in range(101)]
+    items = [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "1.00"} for _ in range(101)]
     r = await _batch(client, auth_token, period_id, _key(), 0, items)
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -680,7 +680,7 @@ async def test_zero_amount_rejected(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "0.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "0.00"},
     ])
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -692,7 +692,7 @@ async def test_negative_amount_rejected(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "-5.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "-5.00"},
     ])
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -704,7 +704,7 @@ async def test_more_than_four_decimals_rejected(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00005"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00005"},
     ])
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -716,7 +716,7 @@ async def test_amount_out_of_numeric_range_rejected(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "100000000000000.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "100000000000000.00"},
     ])
     assert r.status_code == 422, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -733,12 +733,12 @@ async def test_one_ineligible_item_rolls_back_whole_batch(
     # A driver on a different branch — not in this period's snapshot.
     hq_driver = await _get_or_create_driver(
         session_client, auth_token, hq_branch_id,
-        driver_code=f"CP3B2B-HQ-{uuid.uuid4().hex[:6]}", full_name="CP3B2B HQ Driver",
+        driver_number=f"CP3B2B-HQ-{uuid.uuid4().hex[:6]}", full_name="CP3B2B HQ Driver",
     )
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
-        {"driver_id": hq_driver,               "amount": "20.00"},   # ineligible
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "30.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": hq_driver,               "amount": "20.00"},   # ineligible
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "30.00"},
     ])
     assert r.status_code == 422, r.text
     assert await _count_events(db_conn, period_id) == 0
@@ -756,19 +756,19 @@ async def test_included_by_existing_data_matches_single_event(
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3b2b_branch_id, start, end)
     await _seed_snapshot(db_conn, cp3b2b_branch_id, period_id, [{
-        "driver_id": cp3b2b_drivers["alpha"], "code": "CP3B2B-ALPHA",
+        "driver_assignment_id": cp3b2b_drivers["alpha"], "code": "CP3B2B-ALPHA",
         "name": "CP3B2B Alpha Driver", "reason": "IncludedByExistingData",
     }])
     # Single-event POST rejects it →
     single = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        json={"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
         headers=_auth(auth_token),
     )
     assert single.status_code == 422, single.text
     # Batch rejects it too, nothing written.
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 422, r.text
     assert await _count_events(db_conn, period_id) == 0
@@ -785,11 +785,11 @@ async def test_no_marker_period_matches_single_event_behavior(
     # No snapshot seeded — neither write path may fall back to live roster state.
     single = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        json={"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
         headers=_auth(auth_token),
     )
     batch = await _batch(client, auth_token, period_id, _key(), 1, [
-        {"driver_id": cp3b2b_drivers["beta"], "amount": "20.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"], "amount": "20.00"},
     ])
     assert single.status_code == 409, single.text
     assert single.json()["detail"]["code"] == "ELIGIBILITY_SNAPSHOT_MISSING"
@@ -811,7 +811,7 @@ async def test_draft_period_blocked(
     period_id = await _insert_period_db(db_conn, cp3b2b_branch_id, start, end, status="Draft")
     await _seed_snapshot(db_conn, cp3b2b_branch_id, period_id, [_entry(cp3b2b_drivers, "alpha")])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 422, r.text
     assert await _count_events(db_conn, period_id) == 0
@@ -826,7 +826,7 @@ async def test_non_editable_statuses_blocked(
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     await _force_status_db(db_conn, period_id, status)
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 422, f"{status}: {r.text}"
     assert await _count_events(db_conn, period_id) == 0
@@ -848,7 +848,7 @@ async def test_driver_self_user_denied(
     driver_self_token = login.json()["access_token"]
 
     r = await _batch(session_client, driver_self_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 403, r.text
     await _cancel_period_db(db_conn, period_id)
@@ -856,16 +856,16 @@ async def test_driver_self_user_denied(
 
 @pytest.mark.asyncio
 async def test_view_only_user_denied(
-    client, auth_token, branch_user_token, db_conn, hq_branch_id, hq_driver_id,
+    client, auth_token, branch_user_token, db_conn, hq_branch_id, hq_driver_assignment_id,
 ) -> None:
     """branch_user (payroll.view only, HQ scope) cannot apply a batch."""
     start, end = _week()
     period_id = await _insert_period_db(db_conn, hq_branch_id, start, end, status="Open")
     await _seed_snapshot(db_conn, hq_branch_id, period_id, [
-        {"driver_id": hq_driver_id, "code": "HQD-001", "name": "HQ Driver"},
+        {"driver_assignment_id": hq_driver_assignment_id, "code": "HQD-001", "name": "HQ Driver"},
     ])
     r = await _batch(client, branch_user_token, period_id, _key(), 0, [
-        {"driver_id": hq_driver_id, "amount": "10.00"},
+        {"driver_assignment_id": hq_driver_assignment_id, "amount": "10.00"},
     ])
     assert r.status_code == 403, r.text
     assert await _count_events(db_conn, period_id) == 0
@@ -882,8 +882,8 @@ async def test_audit_rows_share_one_correlation_id_and_batch_row(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
     ])
     assert r.status_code == 201, r.text
     corr = r.json()["batch_correlation_id"]
@@ -922,8 +922,8 @@ async def test_audit_failure_rolls_back_everything(
     monkeypatch.setattr("app.payroll.bonus._write_line_audit", _boom)
     with pytest.raises(RuntimeError):
         await _batch(client, auth_token, period_id, _key(), before_rev, [
-            {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
-            {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+            {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+            {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
         ])
     # Full rollback: no events, no batch row, no revision bump.
     assert await _count_events(db_conn, period_id) == 0
@@ -1043,7 +1043,7 @@ async def test_downgrade_guard_detects_live_batch_rows(
     shared session DB)."""
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 201, r.text
     total = (await db_conn.execute(
@@ -1063,8 +1063,8 @@ async def test_batch_creates_no_draftline_bonus_rows(
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha", "beta"])
     await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
-        {"driver_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00"},
+        {"driver_assignment_id": cp3b2b_drivers["beta"],  "amount": "60.00"},
     ])
     row = (await db_conn.execute(
         _text("SELECT COUNT(*) FROM payroll.payrolldraftlines "

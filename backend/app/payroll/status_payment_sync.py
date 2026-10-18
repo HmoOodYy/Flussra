@@ -71,7 +71,7 @@ async def _sync_status_payment_for_entry_state(
     company_id: int,
     branch_id: int,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: "date",
     status_key_id: "int | None",
     user_id: int,
@@ -97,9 +97,9 @@ async def _sync_status_payment_for_entry_state(
         text("""
             SELECT payrollperioddriverdayentrystateid
             FROM   payroll.payrollperioddriverdayentrystate
-            WHERE  payrollperiodid = :pid AND driverid = :did AND workdate = :dt
+            WHERE  payrollperiodid = :pid AND driverassignmentid = :did AND workdate = :dt
         """),
-        {"pid": period_id, "did": driver_id, "dt": work_date},
+        {"pid": period_id, "did": driver_assignment_id, "dt": work_date},
     )
     es_row = es_result.mappings().first()
     entry_state_id: int | None = (
@@ -148,14 +148,14 @@ async def _sync_status_payment_for_entry_state(
             SELECT draftlineid, sourceid
             FROM   payroll.payrolldraftlines
             WHERE  payrollperiodid = :pid
-              AND  driverid        = :did
+              AND  driverassignmentid        = :did
               AND  workdate        = :dt
               AND  companyid       = :cid
               AND  sourceid        LIKE 'STATUS_PAYMENT:%'
               AND  status         != 'Void'
             LIMIT 1
         """),
-        {"pid": period_id, "did": driver_id, "dt": work_date, "cid": company_id},
+        {"pid": period_id, "did": driver_assignment_id, "dt": work_date, "cid": company_id},
     )
     existing = existing_result.mappings().first()
 
@@ -187,7 +187,7 @@ async def _sync_status_payment_for_entry_state(
         text("""
             SELECT driverrateid, amount
             FROM   payroll.driverrates
-            WHERE  driverid     = :did
+            WHERE  driverassignmentid     = :did
               AND  ratetypeid   = :rtid
               AND  companyid    = :cid
               AND  status       IN ('Approved', 'Superseded')
@@ -196,7 +196,7 @@ async def _sync_status_payment_for_entry_state(
             ORDER BY effectivefrom DESC
             LIMIT 1
         """),
-        {"did": driver_id, "rtid": src_rate_type_id, "cid": company_id, "dt": work_date},
+        {"did": driver_assignment_id, "rtid": src_rate_type_id, "cid": company_id, "dt": work_date},
     )
     rate_row = rate_result.mappings().first()
     resolved_rate    = Decimal(str(rate_row["amount"])) if rate_row else None
@@ -212,7 +212,7 @@ async def _sync_status_payment_for_entry_state(
     snapshot_dict: dict = {
         "entry_state_id":           entry_state_id,
         "payroll_period_id":        period_id,
-        "driver_id":                driver_id,
+        "driver_assignment_id":                driver_assignment_id,
         "work_date":                str(work_date),
         "status_key_id":            status_key_id,
         "status_code":              status_code_val,
@@ -270,7 +270,7 @@ async def _sync_status_payment_for_entry_state(
     await db.execute(
         text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid,
+                (companyid, branchid, payrollperiodid, driverassignmentid,
                  workdate, linetype, quantity,
                  calculatedamount, sourcetype, sourceid,
                  status, needsmanagerreview, addedbyuserid, sourcesnapshot)
@@ -284,7 +284,7 @@ async def _sync_status_payment_for_entry_state(
             "cid":    company_id,
             "bid":    branch_id,
             "pid":    period_id,
-            "did":    driver_id,
+            "did":    driver_assignment_id,
             "dt":     work_date,
             "lt":     rate_code,
             "qty":    hours_value,
@@ -301,7 +301,7 @@ class _LiveStatusLine(NamedTuple):
     """One canonically-resolved, read-only, live Status-derived pay line
     (CP-4B). Distinct from the persisted STATUS_PAYMENT compatibility
     projection DraftLine, which may be stale."""
-    driver_id: int
+    driver_assignment_id: int
     entry_state_id: int
     work_date: "date"
     status_key_id: int
@@ -347,7 +347,7 @@ async def _resolve_live_status_payment_lines(
     rows = (await db.execute(
         text("""
             SELECT
-                ppdes.driverid,
+                ppdes.driverassignmentid,
                 ppdes.payrollperioddriverdayentrystateid,
                 ppdes.workdate,
                 sk.statuskeyid,
@@ -365,7 +365,7 @@ async def _resolve_live_status_payment_lines(
               AND  ppdes.branchid        = :bid
               AND  ppdes.isvoided        = FALSE
               AND  ppdes.statuskeyid IS NOT NULL
-            ORDER BY ppdes.driverid, ppdes.workdate
+            ORDER BY ppdes.driverassignmentid, ppdes.workdate
         """),
         {"pid": period_id, "cid": company_id, "bid": branch_id},
     )).mappings().all()
@@ -385,7 +385,7 @@ async def _resolve_live_status_payment_lines(
             text("""
                 SELECT driverrateid, amount
                 FROM   payroll.driverrates
-                WHERE  driverid      = :did
+                WHERE  driverassignmentid      = :did
                   AND  ratetypeid    = :rtid
                   AND  companyid     = :cid
                   AND  status        IN ('Approved', 'Superseded')
@@ -395,14 +395,14 @@ async def _resolve_live_status_payment_lines(
                 LIMIT 1
             """),
             {
-                "did": row["driverid"], "rtid": src_rate_type_id,
+                "did": row["driverassignmentid"], "rtid": src_rate_type_id,
                 "cid": company_id, "dt": row["workdate"],
             },
         )).mappings().first()
         resolved_rate = Decimal(str(rate_row["amount"])) if rate_row else None
 
         results.append(_LiveStatusLine(
-            driver_id=row["driverid"],
+            driver_assignment_id=row["driverassignmentid"],
             entry_state_id=row["payrollperioddriverdayentrystateid"],
             work_date=row["workdate"],
             status_key_id=row["statuskeyid"],
@@ -437,7 +437,7 @@ async def _refresh_status_payment_lines(
     ppdes_result = await db.execute(
         text("""
             SELECT payrollperioddriverdayentrystateid,
-                   driverid, workdate, statuskeyid
+                   driverassignmentid, workdate, statuskeyid
             FROM   payroll.payrollperioddriverdayentrystate
             WHERE  payrollperiodid = :pid
               AND  companyid       = :cid
@@ -460,7 +460,7 @@ async def _refresh_status_payment_lines(
               AND  NOT EXISTS (
                 SELECT 1 FROM payroll.payrollperioddriverdayentrystate ppdes
                 WHERE  ppdes.payrollperiodid = payrolldraftlines.payrollperiodid
-                  AND  ppdes.driverid        = payrolldraftlines.driverid
+                  AND  ppdes.driverassignmentid        = payrolldraftlines.driverassignmentid
                   AND  ppdes.workdate        = payrolldraftlines.workdate
                   AND  ppdes.isvoided        = FALSE
                   AND  ppdes.statuskeyid     IS NOT NULL
@@ -474,7 +474,7 @@ async def _refresh_status_payment_lines(
     _snap_row_by_driver: dict[int, Any] = {}
     snap_res = await db.execute(
         text("""
-            SELECT driverid, eligibilityreasoncode,
+            SELECT driverassignmentid, eligibilityreasoncode,
                    hiredatesnapshot, terminationdatesnapshot,
                    drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
                    branchtimezoneidsnapshot, eligibleworkdates,
@@ -485,21 +485,21 @@ async def _refresh_status_payment_lines(
         {"pid": period_id, "cid": company_id},
     )
     for snap in snap_res.mappings().all():
-        _snap_row_by_driver[snap["driverid"]] = snap
+        _snap_row_by_driver[snap["driverassignmentid"]] = snap
 
     for row in rows:
-        driver_id = row["driverid"]
+        driver_assignment_id = row["driverassignmentid"]
         work_date = row["workdate"]
 
         # CP-2E: eligibility guard — skip ineligible dates in snapshotted periods
-        snap = _snap_row_by_driver.get(driver_id)
+        snap = _snap_row_by_driver.get(driver_assignment_id)
         if snap is None:
             # Driver not in snapshot → skip
             continue
         # Existing source rescue is exact-date and only applies to this captured roster.
         if not _is_snapshot_row_eligible_for_workdate(snap, work_date):
             has_src = await _driver_has_existing_daily_source_on_date(
-                period_id, driver_id, work_date, db
+                period_id, driver_assignment_id, work_date, db
             )
             if not has_src:
                 continue
@@ -508,7 +508,7 @@ async def _refresh_status_payment_lines(
             company_id=company_id,
             branch_id=branch_id,
             period_id=period_id,
-            driver_id=driver_id,
+            driver_assignment_id=driver_assignment_id,
             work_date=work_date,
             status_key_id=row["statuskeyid"],
             user_id=user_id,

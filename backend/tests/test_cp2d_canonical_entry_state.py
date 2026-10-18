@@ -307,13 +307,13 @@ async def _canonical_rows(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
             SELECT payrollperioddriverdayentrystateid, payrollperiodid,
-                   companyid, branchid, driverid, workdate,
+                   companyid, branchid, driverassignmentid, workdate,
                    statuskeyid, notetext, isvoided,
                    statuscodesnapshot, statuslabelsnapshot,
                    statusisoffreasonsnapshot, finalizedatutc
             FROM   payroll.payrollperioddriverdayentrystate
             WHERE  payrollperiodid = :pid
-            ORDER BY driverid, workdate
+            ORDER BY driverassignmentid, workdate
         """),
         {"pid": period_id},
     )).mappings().all()
@@ -321,7 +321,7 @@ async def _canonical_rows(db: AsyncConnection, period_id: int) -> list[dict]:
 
 
 async def _advance_to_approved(
-    client, token: str, period_id: int, driver_id: int, work_date: str,
+    client, token: str, period_id: int, driver_assignment_id: int, work_date: str,
 ) -> None:
     headers = _auth(token)
     lines_resp = await client.get(f"/payroll/periods/{period_id}/lines",
@@ -330,7 +330,7 @@ async def _advance_to_approved(
         await client.post(
             f"/payroll/periods/{period_id}/lines",
             headers=headers,
-            json={"driver_id": driver_id, "work_date": work_date,
+            json={"driver_assignment_id": driver_assignment_id, "work_date": work_date,
                   "line_type": "DailyNote", "notes": "filler"},
         )
     r = await client.patch(f"/payroll/periods/{period_id}/status",
@@ -375,25 +375,25 @@ async def ces_branch_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="class")
-async def ces_driver_id(session_client, auth_token: str, ces_branch_id: int) -> int:
+async def ces_driver_assignment_id(session_client, auth_token: str, ces_branch_id: int) -> int:
     resp = await session_client.post(
         "/core/drivers",
         json={
             "branch_id":      ces_branch_id,
             "full_name":      "CES Driver Alpha",
             "preferred_name": "CESA",
-            "driver_code":    "CESA-2096",
+            "driver_number":    "CESA-2096",
             "cdl_number":     "CDL-CESA-2096",
             "email":          "cesa2096@example.com",
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code in (200, 201), f"driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(scope="class")
-async def ces_driver_id_b(session_client, auth_token: str, ces_branch_id: int) -> int:
+async def ces_driver_assignment_id_b(session_client, auth_token: str, ces_branch_id: int) -> int:
     """Second driver for per-driver precedence tests."""
     resp = await session_client.post(
         "/core/drivers",
@@ -401,14 +401,14 @@ async def ces_driver_id_b(session_client, auth_token: str, ces_branch_id: int) -
             "branch_id":      ces_branch_id,
             "full_name":      "CES Driver Beta",
             "preferred_name": "CESB",
-            "driver_code":    "CESB-2096",
+            "driver_number":    "CESB-2096",
             "cdl_number":     "CDL-CESB-2096",
             "email":          "cesb2096@example.com",
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code in (200, 201), f"driver B seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +443,7 @@ class TestCp2dCanonicalEntryState:
         cols = {row["column_name"] for row in cols_r.mappings().all()}
         required = {
             "payrollperioddriverdayentrystateid", "companyid", "branchid",
-            "payrollperiodid", "payrollperioddayid", "workdate", "driverid",
+            "payrollperiodid", "payrollperioddayid", "workdate", "driverassignmentid",
             "statuskeyid", "notetext",
             "statuscodesnapshot", "statuslabelsnapshot",
             "statusisoffreasonsnapshot", "statushoursvaluesnapshot",
@@ -455,7 +455,7 @@ class TestCp2dCanonicalEntryState:
 
     @pytest.mark.asyncio
     async def test_e01b_unique_constraint(self, direct_db, ces_branch_id: int):
-        """E01b: Unique constraint rejects duplicate (PayrollPeriodID, DriverID, WorkDate)."""
+        """E01b: Unique constraint rejects duplicate (PayrollPeriodID, DriverAssignmentID, WorkDate)."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e01b")
         try:
@@ -466,7 +466,7 @@ class TestCp2dCanonicalEntryState:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollperioddriverdayentrystate
-                        (companyid, branchid, payrollperiodid, workdate, driverid,
+                        (companyid, branchid, payrollperiodid, workdate, driverassignmentid,
                          isvoided, createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
                     VALUES (:cid, :bid, :pid, :dt, :did, FALSE, :uid, :uid, NOW(), NOW())
                 """),
@@ -476,7 +476,7 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollperioddriverdayentrystate
-                            (companyid, branchid, payrollperiodid, workdate, driverid,
+                            (companyid, branchid, payrollperiodid, workdate, driverassignmentid,
                              isvoided, createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
                         VALUES (:cid, :bid, :pid, :dt, :did, FALSE, :uid, :uid, NOW(), NOW())
                     """),
@@ -498,7 +498,7 @@ class TestCp2dCanonicalEntryState:
         )
         indexes = {row["indexname"] for row in idx_r.mappings().all()}
         required_indexes = {
-            "ix_ppdes_period_date", "ix_ppdes_period_driver",
+            "ix_ppdes_period_date", "ix_ppdes_period_assignment",
             "ix_ppdes_company_branch", "ix_ppdes_statuskey", "ix_ppdes_period_finalized",
         }
         missing = required_indexes - {i.lower() for i in indexes}
@@ -515,7 +515,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E02: A Status Key added AFTER period creation appears in get_day_grid."""
         start, end = _week_2096()
@@ -567,7 +567,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E03: save_day_grid writes a canonical entry-state row with correct fields."""
         start, end = _week_2096()
@@ -583,7 +583,7 @@ class TestCp2dCanonicalEntryState:
                 headers=headers,
                 json={
                     "work_date": wdate,
-                    "rows": [{"driver_id": ces_driver_id, "values": {},
+                    "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                "status_key": code, "notes": "Test note"}],
                 },
             )
@@ -591,7 +591,7 @@ class TestCp2dCanonicalEntryState:
 
             # Verify canonical row in DB
             rows = await _canonical_rows(direct_db, pid)
-            ces = [row for row in rows if row["driverid"] == ces_driver_id]
+            ces = [row for row in rows if row["driverassignmentid"] == ces_driver_assignment_id]
             assert len(ces) == 1, f"Expected 1 canonical row, got {len(ces)}"
             assert ces[0]["statuskeyid"] == sk_id
             assert ces[0]["notetext"] == "Test note"
@@ -604,11 +604,11 @@ class TestCp2dCanonicalEntryState:
             dl = (await direct_db.execute(
                 _text("""
                     SELECT notes FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverid = :did
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                       AND linetype = 'DailyStatus' AND status != 'Void'
                     LIMIT 1
                 """),
-                {"pid": pid, "did": ces_driver_id},
+                {"pid": pid, "did": ces_driver_assignment_id},
             )).mappings().first()
             assert dl is not None, "DraftLine must also be written (dual-write)"
             assert dl["notes"] == code
@@ -632,7 +632,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E04: Clearing both status and note sets IsVoided=TRUE on canonical row."""
         start, end = _week_2096()
@@ -647,7 +647,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                  "status_key": code, "notes": "A note"}]},
             )
             # Clear both
@@ -655,13 +655,13 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                  "status_key": None, "notes": None}]},
             )
             assert r.status_code == 200
 
             rows = await _canonical_rows(direct_db, pid)
-            ces = [row for row in rows if row["driverid"] == ces_driver_id]
+            ces = [row for row in rows if row["driverassignmentid"] == ces_driver_assignment_id]
             assert len(ces) == 1
             assert ces[0]["isvoided"] is True
             assert ces[0]["statuskeyid"] is None
@@ -685,7 +685,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E05: get_day_grid returns canonical row values when canonical row exists."""
         start, end = _week_2096()
@@ -699,7 +699,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                  "status_key": code, "notes": "E05 note"}]},
             )
             r = await session_client.get(
@@ -710,7 +710,7 @@ class TestCp2dCanonicalEntryState:
             assert r.status_code == 200
             data = r.json()
             drv_row = next(
-                (d for d in data["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in data["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
             assert drv_row["status_key"] == code
@@ -735,7 +735,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E06: Period with no canonical rows reads status/note from DraftLines."""
         start, end = _week_2096()
@@ -749,14 +749,14 @@ class TestCp2dCanonicalEntryState:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid,
                          workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
                             'DailyStatus', 0,
                             'Manual', 'Active', FALSE, :code, 1)
                 """),
-                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id, "dt": start, "code": code},
+                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id, "dt": start, "code": code},
             )
             await direct_db.commit()
 
@@ -772,7 +772,7 @@ class TestCp2dCanonicalEntryState:
             )
             assert r.status_code == 200
             drv_row = next(
-                (d for d in r.json()["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in r.json()["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
             assert drv_row["status_key"] == code, "Legacy fallback must return DraftLine status"
@@ -796,8 +796,8 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
-        ces_driver_id_b: int,
+        ces_driver_assignment_id: int,
+        ces_driver_assignment_id_b: int,
     ):
         """E07: Driver A has canonical row; Driver B has only DraftLine.
         get_day_grid uses canonical for A and DraftLine fallback for B."""
@@ -815,20 +815,20 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code_a}]},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code_a}]},
             )
 
             # Driver B: write DraftLine directly (no canonical row)
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid,
                          workdate, linetype, quantity,
                          sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                     VALUES (1, :bid, :pid, :did, :dt,
                             'DailyStatus', 0, 'Manual', 'Active', FALSE, :code, 1)
                 """),
-                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_id_b, "dt": start, "code": code_b},
+                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id_b, "dt": start, "code": code_b},
             )
             await direct_db.commit()
 
@@ -839,10 +839,10 @@ class TestCp2dCanonicalEntryState:
                 headers=headers,
             )
             assert r.status_code == 200
-            drv_rows = {d["driver_id"]: d for d in r.json()["rows"]}
+            drv_rows = {d["driver_assignment_id"]: d for d in r.json()["rows"]}
 
-            assert drv_rows[ces_driver_id]["status_key"] == code_a, "A: canonical row"
-            assert drv_rows[ces_driver_id_b]["status_key"] == code_b, "B: DraftLine fallback"
+            assert drv_rows[ces_driver_assignment_id]["status_key"] == code_a, "A: canonical row"
+            assert drv_rows[ces_driver_assignment_id_b]["status_key"] == code_b, "B: DraftLine fallback"
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             for sid in (sk_a, sk_b):
@@ -863,7 +863,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E08: Re-submitting the same code after the key is deactivated → 200."""
         start, end = _week_2096()
@@ -880,7 +880,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code}]},
             )
             assert r1.status_code == 200, f"initial save failed: {r1.text}"
 
@@ -896,7 +896,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code}]},
             )
             assert r2.status_code == 200, f"Re-submit of deactivated unchanged key failed: {r2.text}"
 
@@ -905,7 +905,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                  "status_key": code + "_NEW"}]},
             )
             assert r3.status_code == 422, "A new deactivated code must be rejected"
@@ -961,7 +961,7 @@ class TestCp2dCanonicalEntryState:
         session_client,
         auth_token: str,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E26: a Locked period whose authoritative snapshot predates CP-5C
         (ReportEvidenceVersion IS NULL) must report status_evidence as
@@ -995,14 +995,14 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                              linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                              approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                        VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                        VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                                 'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                     """),
                     {
-                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
                         "wdate": start,
                         "snap": (
                             f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
@@ -1023,7 +1023,7 @@ class TestCp2dCanonicalEntryState:
                 "state": "UNAVAILABLE", "reason_code": "LEGACY_NOT_CAPTURED",
             }
             drv_row = next(
-                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in body["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
             assert drv_row["status_key"] is None
@@ -1042,7 +1042,7 @@ class TestCp2dCanonicalEntryState:
         session_client,
         auth_token: str,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E27: a Locked period whose authoritative snapshot IS versioned
         (captured) but has zero PayrollCalculationSnapshotStatusEntries rows
@@ -1078,14 +1078,14 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                              linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                              approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                        VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                        VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                                 'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                     """),
                     {
-                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
                         "wdate": start,
                         "snap": (
                             f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
@@ -1104,7 +1104,7 @@ class TestCp2dCanonicalEntryState:
             body = r.json()
             assert body.get("status_evidence") == {"state": "EMPTY", "reason_code": None}
             drv_row = next(
-                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in body["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
             assert drv_row["status_key"] is None
@@ -1126,7 +1126,7 @@ class TestCp2dCanonicalEntryState:
         session_client,
         auth_token: str,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E28: a Locked period whose FinalLines carry no snapshot provenance
         at all must report status_evidence as UNAVAILABLE/PROVENANCE_UNAVAILABLE
@@ -1144,14 +1144,14 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                              linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                              approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-                        VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                        VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                                 'DraftLine', 1, NOW(), NOW(), 'USD', 2)
                     """),
                     {
-                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_id,
+                        "cid": _COMPANY_ID, "bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
                         "wdate": start,
                     },
                 )
@@ -1168,7 +1168,7 @@ class TestCp2dCanonicalEntryState:
                 "state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE",
             }
             drv_row = next(
-                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in body["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
             assert drv_row["status_key"] is None
@@ -1187,7 +1187,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E29: Open periods are untouched by Stage B3 Unit 8C-3 -- Day Grid
         keeps reading live StatusKey label/off-reason (mutable-state drift
@@ -1208,7 +1208,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code}]},
             )
             assert save.status_code == 200, save.text
 
@@ -1230,7 +1230,7 @@ class TestCp2dCanonicalEntryState:
             assert r.status_code == 200
             body = r.json()
             drv_row = next(
-                (d for d in body["rows"] if d["driver_id"] == ces_driver_id), None
+                (d for d in body["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
             assert drv_row["status_key"] == code
@@ -1293,7 +1293,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E13: A period that has acquired P6D audit evidence through the
         supported Day Grid workflow rejects physical DELETE, and the
@@ -1310,7 +1310,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/day-grid",
                 headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {}, "status_key": code}]},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code}]},
             )
             assert await _canonical_rows(direct_db, pid), "Canonical row must exist before delete"
 
@@ -1389,7 +1389,7 @@ class TestCp2dCanonicalEntryState:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollperioddriverdayentrystate
-                        (companyid, branchid, payrollperiodid, workdate, driverid,
+                        (companyid, branchid, payrollperiodid, workdate, driverassignmentid,
                          isvoided, createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
                     VALUES (1, :bid, :pid, :dt, 999992, FALSE, 1, 1, NOW(), NOW())
                 """),
@@ -1400,7 +1400,7 @@ class TestCp2dCanonicalEntryState:
             # Row is scoped to company 1
             rows = (await direct_db.execute(
                 _text("SELECT companyid FROM payroll.payrollperioddriverdayentrystate "
-                      "WHERE payrollperiodid = :pid AND driverid = 999992"),
+                      "WHERE payrollperiodid = :pid AND driverassignmentid = 999992"),
                 {"pid": pid},
             )).mappings().all()
             assert all(r["companyid"] == 1 for r in rows)
@@ -1426,7 +1426,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E16: add_draft_line with DailyStatus and a non-existent code → 422.
         No DraftLine and no canonical row must be created."""
@@ -1439,7 +1439,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/lines",
                 headers=headers,
                 json={
-                    "driver_id": ces_driver_id,
+                    "driver_assignment_id": ces_driver_assignment_id,
                     "work_date": wdate,
                     "line_type": "DailyStatus",
                     "quantity": "0",
@@ -1452,9 +1452,9 @@ class TestCp2dCanonicalEntryState:
             dl_count = (await direct_db.execute(
                 _text("""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverid = :did AND linetype = 'DailyStatus'
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did AND linetype = 'DailyStatus'
                 """),
-                {"pid": pid, "did": ces_driver_id},
+                {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar()
             assert dl_count == 0, "No DraftLine must be inserted on validation failure"
 
@@ -1475,7 +1475,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E17: add_draft_line with DailyStatus and an inactive code → 422.
         No DraftLine and no canonical row must be created."""
@@ -1498,7 +1498,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/lines",
                 headers=headers,
                 json={
-                    "driver_id": ces_driver_id,
+                    "driver_assignment_id": ces_driver_assignment_id,
                     "work_date": wdate,
                     "line_type": "DailyStatus",
                     "quantity": "0",
@@ -1510,9 +1510,9 @@ class TestCp2dCanonicalEntryState:
             dl_count = (await direct_db.execute(
                 _text("""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverid = :did AND linetype = 'DailyStatus'
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did AND linetype = 'DailyStatus'
                 """),
-                {"pid": pid, "did": ces_driver_id},
+                {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar()
             assert dl_count == 0, "No DraftLine must be inserted for inactive code"
             assert not await _canonical_rows(direct_db, pid), \
@@ -1537,7 +1537,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E18: add_draft_line with DailyStatus and missing/blank notes → 422."""
         start, end = _week_2096()
@@ -1549,7 +1549,7 @@ class TestCp2dCanonicalEntryState:
                 f"/payroll/periods/{pid}/lines",
                 headers=headers,
                 json={
-                    "driver_id": ces_driver_id,
+                    "driver_assignment_id": ces_driver_assignment_id,
                     "work_date": wdate,
                     "line_type": "DailyStatus",
                     "quantity": "0",
@@ -1560,9 +1560,9 @@ class TestCp2dCanonicalEntryState:
             dl_count = (await direct_db.execute(
                 _text("""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverid = :did AND linetype = 'DailyStatus'
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did AND linetype = 'DailyStatus'
                 """),
-                {"pid": pid, "did": ces_driver_id},
+                {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar()
             assert dl_count == 0, "No DraftLine must be inserted for blank notes"
         finally:
@@ -1579,7 +1579,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E19 (G0.3): the generic DraftLine PATCH no longer mutates DailyStatus.
         Existing DraftLine and canonical row must remain unchanged."""
@@ -1596,17 +1596,17 @@ class TestCp2dCanonicalEntryState:
             add_r = await session_client.post(
                 f"/payroll/periods/{pid}/day-grid", headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                  "status_key": code}]},
             )
             assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
             line_id = (await direct_db.execute(
                 _text("""
                     SELECT draftlineid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverid = :did
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                       AND linetype = 'DailyStatus' AND status != 'Void'
                 """),
-                {"pid": pid, "did": ces_driver_id},
+                {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar_one()
 
             # Canonical row must exist with the correct statuskeyid
@@ -1656,7 +1656,7 @@ class TestCp2dCanonicalEntryState:
         auth_token: str,
         direct_db,
         ces_branch_id: int,
-        ces_driver_id: int,
+        ces_driver_assignment_id: int,
     ):
         """E20 (G0.3): the generic DraftLine PATCH rejects a DailyStatus line
         outright, including an unchanged resave of a deactivated key. The
@@ -1674,17 +1674,17 @@ class TestCp2dCanonicalEntryState:
             add_r = await session_client.post(
                 f"/payroll/periods/{pid}/day-grid", headers=headers,
                 json={"work_date": wdate,
-                      "rows": [{"driver_id": ces_driver_id, "values": {},
+                      "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {},
                                  "status_key": code}]},
             )
             assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
             line_id = (await direct_db.execute(
                 _text("""
                     SELECT draftlineid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverid = :did
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                       AND linetype = 'DailyStatus' AND status != 'Void'
                 """),
-                {"pid": pid, "did": ces_driver_id},
+                {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar_one()
 
             # Deactivate the key

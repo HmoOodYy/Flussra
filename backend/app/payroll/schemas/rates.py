@@ -104,7 +104,9 @@ class DriverRateSummary(BaseModel):
     driver_rate_id: int
     company_id: int
     branch_id: int
+    driver_assignment_id: int
     driver_id: int
+    driver_number: str | None = None
     driver_name: str
     rate_type_id: int
     rate_code: str
@@ -130,7 +132,7 @@ class DriverRateSummary(BaseModel):
 class DriverRateCreate(BaseModel):
     """Payload to create a new driver rate (starts as PendingApproval)."""
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     rate_type_id: int
     amount: Decimal
     effective_from: date
@@ -210,7 +212,7 @@ class RateLookupResult(BaseModel):
     __module__ = "app.payroll.schemas"
     found: bool
     work_date: date
-    driver_id: int
+    driver_assignment_id: int
     rate_type_id: int
     # Populated when found=True:
     rate: DriverRateSummary | None = None
@@ -262,9 +264,10 @@ class RateMatrixGroup(BaseModel):
 class DriverRateMatrix(BaseModel):
     """Full rate matrix for a driver as-of a given date."""
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
     driver_name: str
-    driver_code: str | None = None
+    driver_number: str | None = None
     branch_id: int
     branch_name: str
     as_of: date
@@ -318,7 +321,7 @@ class BatchRateChange(BaseModel):
 
 class BatchRateRequest(BaseModel):
     """
-    Payload for POST /payroll/drivers/{driver_id}/rates/batch.
+    Payload for POST /payroll/driver-assignments/{driver_assignment_id}/rates/batch.
 
     All changes share the same effective_from.  Tiers and block config are
     not supported in Phase 2A — rates with OrdinalTier, RangeBracket,
@@ -339,9 +342,9 @@ class BatchRateRequest(BaseModel):
 
 
 class BatchRateSaveResult(BaseModel):
-    """Summary response from POST /payroll/drivers/{driver_id}/rates/batch."""
+    """Summary response from POST /payroll/driver-assignments/{driver_assignment_id}/rates/batch."""
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     effective_from: date
     allow_self_approval: bool
     created_count: int
@@ -367,7 +370,7 @@ class DriverRatesSummary(BaseModel):
     only when the computation fails unexpectedly.
     """
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     pending_count: int          # PendingApproval rates
     future_approved_count: int  # Approved rates whose effective_from > today
     missing_required_count: int | None = None  # Required matrix slots with no current rate
@@ -380,7 +383,7 @@ class DriverRatesSummary(BaseModel):
 
 class CopyRatesRequest(BaseModel):
     """
-    Payload for POST /payroll/drivers/{target_driver_id}/rates/copy-from/{source_driver_id}.
+    Payload for POST /payroll/driver-assignments/{target_driver_assignment_id}/rates/copy-from/{source_driver_assignment_id}.
 
     Copies current Approved rates from the source driver (as-of effective_from)
     to the target driver, creating new rates effective from the given date.
@@ -410,8 +413,8 @@ class CopyRatesRequest(BaseModel):
 class CopyRatesResult(BaseModel):
     """Response from the copy-from endpoint."""
     __module__ = "app.payroll.schemas"
-    target_driver_id: int
-    source_driver_id: int
+    target_driver_assignment_id: int
+    source_driver_assignment_id: int
     effective_from: date
     allow_self_approval: bool
     rates_copied: int        # number of rate rows created

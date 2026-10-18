@@ -53,7 +53,7 @@ async def list_rates(
     token: TokenDep,
     db: DbDep,
     branch_id: int | None = Query(None, description="Filter to a specific branch"),
-    driver_id: int | None = Query(None, description="Filter to a specific driver"),
+    driver_assignment_id: int | None = Query(None, description="Filter to a specific driver"),
     rate_status: str | None = Query(
         None,
         alias="status",
@@ -67,7 +67,7 @@ async def list_rates(
         user_id=int(token["sub"]),
         db=db,
         branch_id=branch_id,
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         rate_status=rate_status,
         limit=limit,
         offset=offset,
@@ -90,12 +90,12 @@ async def list_rates(
 async def lookup_rate_for_date(
     token: TokenDep,
     db: DbDep,
-    driver_id: int = Query(..., description="Driver to look up"),
+    driver_assignment_id: int = Query(..., description="Driver to look up"),
     rate_type_id: int = Query(..., description="Rate type to look up"),
     work_date: date = Query(..., description="Work date (YYYY-MM-DD)"),
 ) -> RateLookupResult:
     rate = await rate_reads.resolve_rate_for_date(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         rate_type_id=rate_type_id,
         work_date=work_date,
         company_id=int(token["cid"]),
@@ -105,7 +105,7 @@ async def lookup_rate_for_date(
     return RateLookupResult(
         found=rate is not None,
         work_date=work_date,
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         rate_type_id=rate_type_id,
         rate=rate,
     )
@@ -229,7 +229,7 @@ async def void_rate(
 
 
 @router.get(
-    "/drivers/{driver_id}/rate-matrix",
+    "/driver-assignments/{driver_assignment_id}/rate-matrix",
     response_model=DriverRateMatrix,
     summary="Rate matrix — all required rates for a driver as-of a date",
     responses={
@@ -238,13 +238,13 @@ async def void_rate(
     },
 )
 async def get_driver_rate_matrix(
-    driver_id: int,
+    driver_assignment_id: int,
     token: TokenDep,
     db: DbDep,
     as_of: date | None = Query(default=None, description="As-of date (YYYY-MM-DD); omitted resolves from the Driver's Branch"),
 ) -> DriverRateMatrix:
     return await rate_reads.get_driver_rate_matrix(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         as_of_date=as_of,
@@ -253,7 +253,7 @@ async def get_driver_rate_matrix(
 
 
 @router.post(
-    "/drivers/{driver_id}/rates/batch",
+    "/driver-assignments/{driver_assignment_id}/rates/batch",
     response_model=BatchRateSaveResult,
     status_code=200,
     summary="Atomically save multiple rates for a driver (Phase 2A)",
@@ -285,13 +285,13 @@ async def get_driver_rate_matrix(
     },
 )
 async def batch_save_driver_rates(
-    driver_id: int,
+    driver_assignment_id: int,
     body: BatchRateRequest,
     token: TokenDep,
     db: DbDep,
 ) -> BatchRateSaveResult:
     return await rates.batch_save_rates(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -300,7 +300,7 @@ async def batch_save_driver_rates(
 
 
 @router.get(
-    "/drivers/{driver_id}/rates/summary",
+    "/driver-assignments/{driver_assignment_id}/rates/summary",
     response_model=DriverRatesSummary,
     summary="Quick status counts for a driver's rates (pending, future, missing)",
     description=(
@@ -316,12 +316,12 @@ async def batch_save_driver_rates(
     },
 )
 async def get_driver_rates_summary(
-    driver_id: int,
+    driver_assignment_id: int,
     token: TokenDep,
     db: DbDep,
 ) -> DriverRatesSummary:
     return await rate_reads.get_driver_rates_summary(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -329,7 +329,7 @@ async def get_driver_rates_summary(
 
 
 @router.get(
-    "/drivers/{driver_id}/rates/pending",
+    "/driver-assignments/{driver_assignment_id}/rates/pending",
     response_model=list[DriverRateSummary],
     summary="List PendingApproval rates for a driver",
     description=(
@@ -345,12 +345,12 @@ async def get_driver_rates_summary(
     },
 )
 async def list_driver_rates_pending(
-    driver_id: int,
+    driver_assignment_id: int,
     token: TokenDep,
     db: DbDep,
 ) -> list[DriverRateSummary]:
     return await rate_reads.get_driver_rates_pending(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -358,7 +358,7 @@ async def list_driver_rates_pending(
 
 
 @router.get(
-    "/drivers/{driver_id}/rates/history",
+    "/driver-assignments/{driver_assignment_id}/rates/history",
     response_model=list[DriverRateSummary],
     summary="Full rate history for a driver (all statuses)",
     description=(
@@ -373,14 +373,14 @@ async def list_driver_rates_pending(
     },
 )
 async def list_driver_rates_history(
-    driver_id: int,
+    driver_assignment_id: int,
     token: TokenDep,
     db: DbDep,
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> list[DriverRateSummary]:
     return await rate_reads.get_driver_rates_history(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -390,7 +390,7 @@ async def list_driver_rates_history(
 
 
 @router.get(
-    "/drivers/rates-summary",
+    "/driver-assignments/rates-summary",
     response_model=list[DriverRatesSummary],
     summary="Bulk status counts for all accessible drivers (left-panel badges)",
     description=(
@@ -419,7 +419,7 @@ async def get_bulk_driver_rates_summary(
 
 
 @router.post(
-    "/drivers/{target_driver_id}/rates/copy-from/{source_driver_id}",
+    "/driver-assignments/{target_driver_assignment_id}/rates/copy-from/{source_driver_assignment_id}",
     response_model=CopyRatesResult,
     status_code=200,
     summary="Copy Approved rates from one driver to another",
@@ -440,15 +440,15 @@ async def get_bulk_driver_rates_summary(
     },
 )
 async def copy_driver_rates(
-    target_driver_id: int,
-    source_driver_id: int,
+    target_driver_assignment_id: int,
+    source_driver_assignment_id: int,
     body: CopyRatesRequest,
     token: TokenDep,
     db: DbDep,
 ) -> CopyRatesResult:
     return await rates.copy_driver_rates(
-        target_driver_id=target_driver_id,
-        source_driver_id=source_driver_id,
+        target_driver_assignment_id=target_driver_assignment_id,
+        source_driver_assignment_id=source_driver_assignment_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,

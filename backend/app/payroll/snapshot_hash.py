@@ -32,8 +32,9 @@ def require_supported_calculation_version(version: object) -> None:
 
 
 _DRIVER_TOTAL_FIELDS = (
+    "DriverAssignmentID",
     "DriverID",
-    "DriverCodeSnapshot",
+    "DriverNumberSnapshot",
     "DriverNameSnapshot",
     "DailyPay",
     "StatusPay",
@@ -121,6 +122,7 @@ def calculate_source_config_hash(source_config: Mapping[str, Any]) -> str:
 
 
 _STATUS_EVIDENCE_FIELDS = (
+    "DriverAssignmentID",
     "DriverID",
     "WorkDate",
     "PayrollPeriodDriverDayEntryStateID",
@@ -131,6 +133,7 @@ _STATUS_EVIDENCE_FIELDS = (
 )
 _BONUS_EVIDENCE_FIELDS = (
     "PayrollBonusEventID",
+    "DriverAssignmentID",
     "DriverID",
     "Amount",
     "CurrencyCodeSnapshot",
@@ -159,10 +162,10 @@ def calculate_report_evidence_hash(
         for event in bonus_events
     ]
     statuses.sort(key=lambda entry: (
-        entry["DriverID"], entry["WorkDate"],
+        entry["DriverAssignmentID"], entry["WorkDate"],
         entry["PayrollPeriodDriverDayEntryStateID"],
     ))
-    bonuses.sort(key=lambda event: (event["DriverID"], event["PayrollBonusEventID"]))
+    bonuses.sort(key=lambda event: (event["DriverAssignmentID"], event["PayrollBonusEventID"]))
     return sha256_hex({
         "ReportEvidenceVersion": CURRENT_REPORT_EVIDENCE_VERSION,
         "StatusEntries": statuses,
@@ -217,7 +220,7 @@ def calculate_snapshot_hash(
 ) -> str:
     """Hash the complete financial packet without generated IDs or audit metadata."""
     totals = [_driver_total_projection(total) for total in driver_totals]
-    totals.sort(key=lambda total: total["DriverID"])
+    totals.sort(key=lambda total: total["DriverAssignmentID"])
     return sha256_hex({
         "CompanyID": company_id,
         "BranchID": branch_id,

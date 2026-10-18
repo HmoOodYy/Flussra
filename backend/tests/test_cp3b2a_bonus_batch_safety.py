@@ -124,36 +124,36 @@ async def _seed_snapshot(
         await db.execute(
             _text("""
                 INSERT INTO payroll.payrollperioddrivereligibility
-                    (companyid, branchid, payrollperiodid, driverid,
-                     drivercodesnapshot, drivernamesnapshot,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
+                     drivernumbersnapshot, drivernamesnapshot,
                      drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
                      branchtimezoneidsnapshot, eligibleworkdates,
                      iseligibleforperiod, eligibilityreasoncode, snapshotsource,
                      createdatutc, updatedatutc)
-                SELECT 1, :bid, :pid, d.driverid, :code, :name,
+                SELECT 1, :bid, :pid, d.driverassignmentid, :code, :name,
                        d.effectivefromat, d.effectivetoat, b.timezoneid,
                        ARRAY(SELECT pp.startdate + n.day_index
                              FROM payroll.payrollperiods pp
                              CROSS JOIN LATERAL generate_series(0, pp.enddate - pp.startdate) n(day_index)
                              WHERE pp.payrollperiodid = :pid),
                        TRUE, 'Active', 'Generated', NOW(), NOW()
-                FROM core.drivers d
+                FROM core.driverassignments d
                 JOIN core.branches b ON b.companyid = d.companyid AND b.branchid = d.branchid
-                WHERE d.driverid = :did AND d.companyid = 1 AND d.branchid = :bid
-                ON CONFLICT (payrollperiodid, driverid) DO NOTHING
+                WHERE d.driverassignmentid = :did AND d.companyid = 1 AND d.branchid = :bid
+                ON CONFLICT (payrollperiodid, driverassignmentid) DO NOTHING
             """),
-            {"bid": branch_id, "pid": period_id, "did": e["driver_id"],
+            {"bid": branch_id, "pid": period_id, "did": e["driver_assignment_id"],
              "code": e["code"], "name": e["name"]},
         )
     await db.commit()
 
 
 async def _post_bonus(
-    client: httpx.AsyncClient, token: str, period_id: int, driver_id: int, amount: str,
+    client: httpx.AsyncClient, token: str, period_id: int, driver_assignment_id: int, amount: str,
 ) -> int:
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": driver_id, "amount": amount},
+        json={"driver_assignment_id": driver_assignment_id, "amount": amount},
         headers=_auth(token),
     )
     assert r.status_code == 201, f"Bonus create failed: {r.text}"
@@ -198,30 +198,30 @@ async def cp3b2a_branch_id(
 
 
 @pytest_asyncio.fixture(scope="module")
-async def cp3b2a_driver_id(
+async def cp3b2a_driver_assignment_id(
     session_client: httpx.AsyncClient, auth_token: str, cp3b2a_branch_id: int,
 ) -> int:
-    driver_code = f"CP3B2A-DRV-{_BASE_MONDAY.isoformat()}"
+    driver_number = f"CP3B2A-DRV-{_BASE_MONDAY.isoformat()}"
     r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
     if r_list.status_code == 200:
         for d in r_list.json():
-            if d.get("driver_code") == driver_code:
-                return d["driver_id"]
+            if d.get("driver_number") == driver_number:
+                return d["driver_assignment_id"]
     resp = await session_client.post(
         "/core/drivers",
         json={
             "branch_id": cp3b2a_branch_id,
             "full_name": "CP3B2A Bonus Driver",
-            "driver_code": driver_code,
+            "driver_number": driver_number,
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
-async def _snapshot_entry(driver_id: int) -> dict:
-    return {"driver_id": driver_id, "code": "CP3B2A-DRV", "name": "CP3B2A Bonus Driver"}
+async def _snapshot_entry(driver_assignment_id: int) -> dict:
+    return {"driver_assignment_id": driver_assignment_id, "code": "CP3B2A-DRV", "name": "CP3B2A Bonus Driver"}
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +331,7 @@ async def test_bonus_events_batch_correlation_index_exists(db_conn: AsyncConnect
 async def test_mismatched_branch_insert_rejected(
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
     hq_branch_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
@@ -339,11 +339,11 @@ async def test_mismatched_branch_insert_rejected(
         await db_conn.execute(
             _text("""
                 INSERT INTO payroll.payrollbonusevents
-                    (companyid, branchid, payrollperiodid, driverid,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
                      amount, status, createdbyuserid, createdatutc, datarevision)
                 VALUES (1, :bid, :pid, :did, 50.00, 'Active', 1, NOW(), 1)
             """),
-            {"bid": hq_branch_id, "pid": period_id, "did": cp3b2a_driver_id},
+            {"bid": hq_branch_id, "pid": period_id, "did": cp3b2a_driver_assignment_id},
         )
     assert "PayrollBonusEvents" in str(exc_info.value) or "check_violation" in str(exc_info.value).lower() \
         or "belongs to company/branch" in str(exc_info.value)
@@ -355,18 +355,18 @@ async def test_mismatched_branch_insert_rejected(
 async def test_mismatched_company_insert_rejected(
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
     with pytest.raises(Exception):
         await db_conn.execute(
             _text("""
                 INSERT INTO payroll.payrollbonusevents
-                    (companyid, branchid, payrollperiodid, driverid,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
                      amount, status, createdbyuserid, createdatutc, datarevision)
                 VALUES (999, :bid, :pid, :did, 50.00, 'Active', 1, NOW(), 1)
             """),
-            {"bid": cp3b2a_branch_id, "pid": period_id, "did": cp3b2a_driver_id},
+            {"bid": cp3b2a_branch_id, "pid": period_id, "did": cp3b2a_driver_assignment_id},
         )
 
     await _cancel_period_db(db_conn, period_id)
@@ -376,17 +376,17 @@ async def test_mismatched_company_insert_rejected(
 async def test_valid_insert_still_succeeds(
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
     await db_conn.execute(
         _text("""
             INSERT INTO payroll.payrollbonusevents
-                (companyid, branchid, payrollperiodid, driverid,
+                (companyid, branchid, payrollperiodid, driverassignmentid,
                  amount, status, createdbyuserid, createdatutc, datarevision)
             VALUES (1, :bid, :pid, :did, 50.00, 'Active', 1, NOW(), 1)
         """),
-        {"bid": cp3b2a_branch_id, "pid": period_id, "did": cp3b2a_driver_id},
+        {"bid": cp3b2a_branch_id, "pid": period_id, "did": cp3b2a_driver_assignment_id},
     )
     await db_conn.commit()
     row = (await db_conn.execute(
@@ -408,10 +408,10 @@ async def test_summary_includes_bonus_data_revision_initially_zero(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
 
     r = await _get_summary(client, auth_token, period_id)
     assert r.status_code == 200, r.text
@@ -434,12 +434,12 @@ async def test_create_bumps_revision_by_one(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
     before = await _get_bonus_data_revision(db_conn, period_id)
-    await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
     after = await _get_bonus_data_revision(db_conn, period_id)
     assert after == before + 1
 
@@ -452,11 +452,11 @@ async def test_update_bumps_revision_by_one(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, period_id)
 
     r = await client.patch(
@@ -477,11 +477,11 @@ async def test_void_active_bumps_revision_by_one(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, period_id)
 
     r = await client.delete(
@@ -501,11 +501,11 @@ async def test_idempotent_void_does_not_double_bump(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
 
     r1 = await client.delete(
         f"/payroll/periods/{period_id}/bonuses/{event_id}",
@@ -532,14 +532,14 @@ async def test_failed_create_does_not_bump_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
     before = await _get_bonus_data_revision(db_conn, period_id)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3b2a_driver_id, "amount": "0.00"},
+        json={"driver_assignment_id": cp3b2a_driver_assignment_id, "amount": "0.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 422, r.text
@@ -555,11 +555,11 @@ async def test_failed_update_does_not_bump_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, period_id)
 
     r = await client.patch(
@@ -580,7 +580,7 @@ async def test_failed_void_wrong_period_does_not_bump_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     """Voiding a bonus event through a period ID it doesn't belong to must be
     rejected (here via the Draft-period status gate, since only one Open
@@ -589,8 +589,8 @@ async def test_failed_void_wrong_period_does_not_bump_revision(
     other_period_id = await _insert_period_db(
         db_conn, cp3b2a_branch_id, *_week(), status="Draft"
     )
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, other_period_id)
 
     r = await client.delete(
@@ -615,11 +615,11 @@ async def test_patch_with_correct_revision_succeeds(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
 
     r = await client.patch(
         f"/payroll/periods/{period_id}/bonuses/{event_id}",
@@ -639,11 +639,11 @@ async def test_patch_with_stale_revision_conflicts_no_side_effects(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "50.00")
     before_period_rev = await _get_bonus_data_revision(db_conn, period_id)
 
     r = await client.patch(
@@ -676,15 +676,15 @@ async def test_single_create_invalidates_summary_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
 
     r1 = await _get_summary(client, auth_token, period_id)
     rev_before = r1.json()["bonus_data_revision"]
 
-    await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "20.00")
+    await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "20.00")
 
     r2 = await _get_summary(client, auth_token, period_id)
     rev_after = r2.json()["bonus_data_revision"]
@@ -699,11 +699,11 @@ async def test_single_update_invalidates_summary_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "20.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "20.00")
 
     r1 = await _get_summary(client, auth_token, period_id)
     rev_before = r1.json()["bonus_data_revision"]
@@ -727,11 +727,11 @@ async def test_single_void_invalidates_summary_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
-    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "20.00")
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
+    event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_assignment_id, "20.00")
 
     r1 = await _get_summary(client, auth_token, period_id)
     rev_before = r1.json()["bonus_data_revision"]
@@ -818,13 +818,13 @@ async def test_audit_failure_rolls_back_event_and_revision(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3b2a_branch_id: int,
-    cp3b2a_driver_id: int,
+    cp3b2a_driver_assignment_id: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If _write_line_audit raises, both the event insert and the
     BonusDataRevision bump must roll back (same request transaction)."""
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
-    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_assignment_id)])
     before_rev = await _get_bonus_data_revision(db_conn, period_id)
 
     async def _boom(*args, **kwargs):
@@ -835,7 +835,7 @@ async def test_audit_failure_rolls_back_event_and_revision(
     with pytest.raises(RuntimeError):
         await client.post(
             f"/payroll/periods/{period_id}/bonuses",
-            json={"driver_id": cp3b2a_driver_id, "amount": "77.00"},
+            json={"driver_assignment_id": cp3b2a_driver_assignment_id, "amount": "77.00"},
             headers=_auth(auth_token),
         )
 

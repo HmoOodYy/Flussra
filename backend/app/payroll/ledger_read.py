@@ -19,7 +19,9 @@ _FINAL_SELECT = """
         fl.finallineid,
         fl.payrollperiodid,
         fl.branchid,
+        fl.driverassignmentid,
         fl.driverid,
+        dr.drivernumber,
         e.fullname         AS drivername,
         fl.draftlineid,
         fl.workdate,
@@ -41,8 +43,9 @@ _FINAL_SELECT = """
         fl.sourcesnapshot,
         fl.currencycode, fl.currencyminorunitdigits
     FROM   payroll.payrollfinallines fl
-    JOIN   core.drivers              d  ON d.driverid   = fl.driverid
-    JOIN   core.employees            e  ON e.employeeid = d.employeeid
+    JOIN   core.driverassignments    a  ON a.driverassignmentid = fl.driverassignmentid
+    JOIN   core.drivers              dr ON dr.driverid  = fl.driverid
+    JOIN   core.employees            e  ON e.employeeid = a.employeeid
 """
 
 
@@ -52,7 +55,7 @@ async def get_final_lines(
     user_id: int,
     db: AsyncConnection,
     *,
-    driver_id: int | None = None,
+    driver_assignment_id: int | None = None,
 ) -> list[FinalLineSummary]:
     """Return locked final lines for a period (access-checked via period lookup).
 
@@ -91,16 +94,16 @@ async def get_final_lines(
         "company_id": company_id,
     }
 
-    if driver_id is not None:
-        conditions.append("fl.driverid = :driver_id")
-        params["driver_id"] = driver_id
+    if driver_assignment_id is not None:
+        conditions.append("fl.driverassignmentid = :driver_assignment_id")
+        params["driver_assignment_id"] = driver_assignment_id
 
     where = " AND ".join(conditions)
     result = await db.execute(
         text(
             f"{_FINAL_SELECT} "
             f"WHERE {where} "
-            f"ORDER BY fl.workdate, fl.driverid, fl.linetype"
+            f"ORDER BY fl.workdate, fl.driverassignmentid, fl.linetype"
         ),
         params,
     )
@@ -111,7 +114,9 @@ async def get_final_lines(
             final_line_id=r["finallineid"],
             period_id=r["payrollperiodid"],
             branch_id=r["branchid"],
+            driver_assignment_id=r["driverassignmentid"],
             driver_id=r["driverid"],
+            driver_number=r["drivernumber"],
             driver_name=r["drivername"],
             draft_line_id=r["draftlineid"],
             work_date=r["workdate"],

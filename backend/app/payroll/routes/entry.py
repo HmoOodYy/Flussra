@@ -42,7 +42,7 @@ async def list_period_lines(
     period_id: int,
     token: TokenDep,
     db: DbDep,
-    driver_id: int | None = Query(None, description="Filter to a specific driver"),
+    driver_assignment_id: int | None = Query(None, description="Filter to a specific driver"),
     work_date: date | None = Query(None, description="Filter to a specific work date (YYYY-MM-DD)"),
     line_status: str | None = Query(
         None,
@@ -55,7 +55,7 @@ async def list_period_lines(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         work_date=work_date,
         line_status=line_status,
     )

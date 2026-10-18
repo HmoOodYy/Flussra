@@ -192,12 +192,12 @@ def grant_applicability(
         conn.close()
 
 
-def _ensure_applicable(tenant: Tenant, definition: dict, driver_id: int) -> None:
+def _ensure_applicable(tenant: Tenant, definition: dict, driver_assignment_id: int) -> None:
     conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT branchid FROM core.drivers WHERE driverid = %s", (driver_id,))
+            cur.execute("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = %s", (driver_assignment_id,))
             branch_id = cur.fetchone()[0]
             cur.execute("""
                 SELECT 1 FROM payroll.branchpayitemconfig
@@ -212,15 +212,15 @@ def _ensure_applicable(tenant: Tenant, definition: dict, driver_id: int) -> None
 
 async def create_pending(
     client: httpx.AsyncClient, tenant: Tenant, definition: dict, *,
-    driver_id: int | None = None, effective_from: str = "2026-01-01",
+    driver_assignment_id: int | None = None, effective_from: str = "2026-01-01",
     effective_to: str | None = None, headers: dict | None = None,
     applicable: bool = True,
 ) -> dict:
     if applicable:
-        _ensure_applicable(tenant, definition, driver_id or tenant.driver_a)
+        _ensure_applicable(tenant, definition, driver_assignment_id or tenant.driver_a)
     response = await client.post(
         "/compensation/driver-rate-assignments",
-        json={"driver_id": driver_id or tenant.driver_a,
+        json={"driver_assignment_id": driver_assignment_id or tenant.driver_a,
               "rate_definition_id": definition["rate_definition_id"],
               "effective_from": effective_from, "effective_to": effective_to},
         headers=headers or tenant.admin,

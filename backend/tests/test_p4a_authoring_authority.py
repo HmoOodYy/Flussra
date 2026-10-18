@@ -28,8 +28,8 @@ pytestmark = pytest.mark.asyncio
 BASE = "/compensation/driver-rate-assignments"
 
 
-def _body(tenant, definition, effective_from="2026-01-01", driver_id=None):
-    return {"driver_id": driver_id or tenant.driver_a,
+def _body(tenant, definition, effective_from="2026-01-01", driver_assignment_id=None):
+    return {"driver_assignment_id": driver_assignment_id or tenant.driver_a,
             "rate_definition_id": definition["rate_definition_id"],
             "effective_from": effective_from}
 
@@ -80,7 +80,7 @@ async def test_active_branch_configuration_permits_creation(p3c_client, tenant):
 async def test_applicability_is_per_driver_branch(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a)
-    response = await _post(p3c_client, tenant, definition, driver_id=tenant.driver_b)
+    response = await _post(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_b)
     assert response.status_code == 422
     assert _code(response) == "PAY_DEFINITION_NOT_APPLICABLE"
 
@@ -222,7 +222,7 @@ async def test_creation_waits_for_an_in_flight_retirement_and_then_fails(
     async def create(conn):
         return await assignments.create_pending(
             tenant.company_id, tenant.owner,
-            AssignmentCreate(driver_id=tenant.driver_a,
+            AssignmentCreate(driver_assignment_id=tenant.driver_a,
                              rate_definition_id=definition["rate_definition_id"],
                              effective_from="2026-01-01"), conn)
 
@@ -259,7 +259,7 @@ async def test_retirement_waits_for_in_flight_authoring_and_takes_the_definition
             holder_pid = (await holder.execute(text("SELECT pg_backend_pid()"))).scalar_one()
             created = await assignments.create_pending(
                 tenant.company_id, tenant.owner,
-                AssignmentCreate(driver_id=tenant.driver_a,
+                AssignmentCreate(driver_assignment_id=tenant.driver_a,
                                  rate_definition_id=definition["rate_definition_id"],
                                  effective_from="2026-01-01"), holder)
             task, waiter_pid = await _blocked_with_pid(p3c_engine, retire)

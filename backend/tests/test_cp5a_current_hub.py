@@ -45,18 +45,18 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+async def paytest_driver_assignment_id(session_client, auth_token, paytest_branch_id) -> int:
     response = await session_client.post(
         "/core/drivers",
         json={
             "branch_id": paytest_branch_id,
             "full_name": f"CP5A Driver {uuid.uuid4().hex[:8]}",
-            "driver_code": f"CP5A-{uuid.uuid4().hex[:10]}",
+            "driver_number": f"CP5A-{uuid.uuid4().hex[:10]}",
         },
         headers=_auth(auth_token),
     )
     assert response.status_code == 201, response.text
-    return response.json()["driver_id"]
+    return response.json()["driver_assignment_id"]
 
 
 async def _clean(db: AsyncConnection, branch_id: int) -> None:
@@ -136,7 +136,7 @@ async def _insert_eligibility(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     effective_from: datetime.date | None = None,
     effective_to: datetime.date | None = None,
 ) -> None:
@@ -157,9 +157,9 @@ async def _insert_eligibility(
             )
             FROM payroll.PayrollPeriods pp
             WHERE pde.PayrollPeriodID = pp.PayrollPeriodID
-              AND pde.PayrollPeriodID = :period_id AND pde.DriverID = :driver_id
+              AND pde.PayrollPeriodID = :period_id AND pde.DriverAssignmentID = :driver_assignment_id
         """), {
-            "period_id": period_id, "driver_id": driver_id,
+            "period_id": period_id, "driver_assignment_id": driver_assignment_id,
             "effective_from": effective_from, "effective_to": effective_to,
         })
     await db.commit()
@@ -205,7 +205,7 @@ async def _insert_daily_line(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     line_type: str,
     quantity: Decimal,
     source_type: str = "Manual",
@@ -227,7 +227,7 @@ async def _insert_daily_line(
                 db, period_id=period_id, branch_id=branch_id, name=line_type)
             ).payroll_period_definition_id
         await seed_target_line(
-            db, period_id=period_id, branch_id=branch_id, driver_id=driver_id,
+            db, period_id=period_id, branch_id=branch_id, driver_assignment_id=driver_assignment_id,
             definition=definition_id, quantity=quantity, work_date=work_date,
             source_type=source_type)
         await db.commit()
@@ -235,16 +235,16 @@ async def _insert_daily_line(
     await db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, workdate,
+                (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
                  linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (:company_id, :branch_id, :period_id, :driver_id, :work_date,
+            VALUES (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date,
                     :line_type, :quantity, :source_type, 'Active', FALSE, 1)
         """),
         {
             "company_id": _COMPANY_ID,
             "branch_id": branch_id,
             "period_id": period_id,
-            "driver_id": driver_id,
+            "driver_assignment_id": driver_assignment_id,
             "work_date": work_date,
             "line_type": line_type,
             "quantity": quantity,
@@ -258,7 +258,7 @@ async def _insert_canonical_status(
     db: AsyncConnection,
     period_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
 ) -> None:
     status_key_id = (await db.execute(
         _text("""
@@ -289,9 +289,9 @@ async def _insert_canonical_status(
     await db.execute(
         _text("""
             INSERT INTO payroll.payrollperioddriverdayentrystate
-                (companyid, branchid, payrollperiodid, workdate, driverid, statuskeyid,
+                (companyid, branchid, payrollperiodid, workdate, driverassignmentid, statuskeyid,
                  isvoided, createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
-            VALUES (:company_id, :branch_id, :period_id, :work_date, :driver_id, :status_key_id,
+            VALUES (:company_id, :branch_id, :period_id, :work_date, :driver_assignment_id, :status_key_id,
                     FALSE, 1, 1, NOW(), NOW())
         """),
         {
@@ -299,7 +299,7 @@ async def _insert_canonical_status(
             "branch_id": branch_id,
             "period_id": period_id,
             "work_date": work_date,
-            "driver_id": driver_id,
+            "driver_assignment_id": driver_assignment_id,
             "status_key_id": status_key_id,
         },
     )
@@ -410,11 +410,11 @@ class TestCurrentPayrollHub:
         assert slots == {"open": None, "prepared": None, "in_review": None, "returned": None}
 
     async def test_prepared_has_operational_metrics_but_no_financial_authority(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db, monkeypatch,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db, monkeypatch,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Draft", "PREPARED")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
 
         async def live_packet_must_not_run(*args, **kwargs):
             raise AssertionError("Prepared must not invoke CP-4B live calculation")
@@ -438,12 +438,12 @@ class TestCurrentPayrollHub:
         }
 
     async def test_open_summary_matches_cp4b_live_preview(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "OPEN")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, "HOURS", Decimal("1"))
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "HOURS", Decimal("1"))
 
         preview = await session_client.get(
             f"/payroll/periods/{period_id}/calculation-preview", headers=_auth(auth_token),
@@ -471,13 +471,13 @@ class TestCurrentPayrollHub:
         }
 
     async def test_working_drivers_excludes_status_and_system_sources(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "WORKING")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, "DailyStatus", Decimal("1"))
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, "SYS_MIN_TOPUP", Decimal("1"), "System")
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "DailyStatus", Decimal("1"))
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "SYS_MIN_TOPUP", Decimal("1"), "System")
 
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text
@@ -490,17 +490,17 @@ class TestCurrentPayrollHub:
 
     @pytest.mark.parametrize("line_type", ["HOURS", "MILES", "LOADS", "PALLETS"])
     async def test_normal_daily_work_sources_count_once(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db, line_type,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db, line_type,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", f"WORK-{line_type}")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, line_type, Decimal("1"))
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, line_type, Decimal("1"))
         await _insert_daily_line(
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             line_type,
             Decimal("2"),
             work_date=_BASE_DATE + datetime.timedelta(days=1),
@@ -516,11 +516,11 @@ class TestCurrentPayrollHub:
         }
 
     async def test_inreview_does_not_request_live_financial_authority(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db, monkeypatch,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db, monkeypatch,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "InReview", "INREVIEW")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
 
         async def live_packet_must_not_run(*args, **kwargs):
             raise AssertionError("InReview must not invoke CP-4B live calculation")
@@ -538,12 +538,12 @@ class TestCurrentPayrollHub:
         assert in_review["financial_summary"] is None
 
     async def test_returned_uses_current_live_packet_for_resubmission_work(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_returned_period(direct_db, paytest_branch_id)
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_id, "MILES", Decimal("2"))
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "MILES", Decimal("2"))
 
         preview = await session_client.get(
             f"/payroll/periods/{period_id}/calculation-preview", headers=_auth(auth_token),
@@ -576,11 +576,11 @@ class TestCurrentPayrollHub:
         assert [b["branch_id"] for b in hub.json()["branches"]] == [paytest_branch_id]
 
     async def test_out_of_period_daily_work_never_counts_as_working(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "OUTSIDE")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         period_start = (await direct_db.execute(
             _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :period_id"),
             {"period_id": period_id},
@@ -589,7 +589,7 @@ class TestCurrentPayrollHub:
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             "HOURS",
             Decimal("1"),
             work_date=period_start - datetime.timedelta(days=1),
@@ -604,7 +604,7 @@ class TestCurrentPayrollHub:
         }
 
     async def test_snapshot_driver_date_window_gates_working_metric(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "WINDOW")
@@ -617,7 +617,7 @@ class TestCurrentPayrollHub:
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             effective_from=valid_date,
             effective_to=period_start + datetime.timedelta(days=3),
         )
@@ -625,7 +625,7 @@ class TestCurrentPayrollHub:
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             "HOURS",
             Decimal("1"),
             work_date=period_start,
@@ -639,7 +639,7 @@ class TestCurrentPayrollHub:
             direct_db,
             period_id,
             paytest_branch_id,
-            paytest_driver_id,
+            paytest_driver_assignment_id,
             "HOURS",
             Decimal("1"),
             work_date=valid_date,
@@ -649,12 +649,12 @@ class TestCurrentPayrollHub:
         assert _branch(inside.json(), paytest_branch_id)["slots"]["open"]["metrics"]["working_drivers"] == 1
 
     async def test_canonical_status_only_does_not_count_as_working(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "STATUS")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
-        await _insert_canonical_status(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
+        await _insert_canonical_status(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
 
         response = await _hub(session_client, auth_token, paytest_branch_id)
         assert response.status_code == 200, response.text
@@ -665,14 +665,14 @@ class TestCurrentPayrollHub:
         }
 
     async def test_bonus_only_does_not_count_as_working(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "FINANCIAL")
-        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_id)
+        await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         bonus = await session_client.post(
             f"/payroll/periods/{period_id}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "25.00", "reason": "CP-5A test"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "25.00", "reason": "CP-5A test"},
             headers=_auth(auth_token),
         )
         assert bonus.status_code == 201, bonus.text

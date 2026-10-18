@@ -15,7 +15,7 @@ async def create_approved_rate(
     client: httpx.AsyncClient,
     token: str,
     *,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_type_id: int,
     amount: str,
     effective_from: str,
@@ -25,7 +25,7 @@ async def create_approved_rate(
     created = await client.post(
         "/payroll/rates",
         json={
-            "driver_id": driver_id,
+            "driver_assignment_id": driver_assignment_id,
             "rate_type_id": rate_type_id,
             "amount": amount,
             "effective_from": effective_from,

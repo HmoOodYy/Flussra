@@ -200,15 +200,17 @@ async def get_day_grid(
     # Load all snapshot rows for this period
     snap_rows_result = await db.execute(
         text("""
-            SELECT driverid,
+            SELECT pde.driverassignmentid,
+                   (SELECT a.driverid FROM core.driverassignments a
+                     WHERE a.driverassignmentid = pde.driverassignmentid) AS permanentdriverid,
                    COALESCE(drivernamesnapshot, '') AS drivername,
-                   COALESCE(drivercodesnapshot, '') AS drivercode,
+                   COALESCE(drivernumbersnapshot, '') AS drivernumber,
                    eligibilityreasoncode,
                    hiredatesnapshot,
                    terminationdatesnapshot,
                    eligibleworkdates,
                    iseligibleforperiod
-            FROM   payroll.payrollperioddrivereligibility
+            FROM   payroll.payrollperioddrivereligibility pde
             WHERE  payrollperiodid = :pid
               AND  companyid       = :cid
               AND  branchid        = :bid
@@ -217,9 +219,9 @@ async def get_day_grid(
         {"pid": period_id, "cid": company_id, "bid": branch_id},
     )
     snap_rows_all = list(snap_rows_result.mappings().all())
-    snapshot_driver_ids = [r["driverid"] for r in snap_rows_all]
+    snapshot_driver_assignment_ids = [r["driverassignmentid"] for r in snap_rows_all]
     lifecycle_eligible_ids = await _lifecycle_eligible_assignment_ids(
-        period_id, company_id, branch_id, work_date, snapshot_driver_ids, db,
+        period_id, company_id, branch_id, work_date, snapshot_driver_assignment_ids, db,
     )
 
     # Existing-source rescue: for ANY reason code, a driver out of their
@@ -227,35 +229,35 @@ async def get_day_grid(
     # exact work_date (DraftLine or EntryState).  Collect the out-of-window
     # candidates first, then batch-check them.
     out_of_window_candidates = [
-        r["driverid"] for r in snap_rows_all
+        r["driverassignmentid"] for r in snap_rows_all
         if (
             not _is_snapshot_row_eligible_for_workdate(r, work_date)
-            or r["driverid"] not in lifecycle_eligible_ids
+            or r["driverassignmentid"] not in lifecycle_eligible_ids
         )
     ]
-    rescue_driver_ids_on_date: set[int] = set()
+    rescue_driver_assignment_ids_on_date: set[int] = set()
     if out_of_window_candidates:
         in_clause_rescue, in_params_rescue = build_in_clause(
             out_of_window_candidates, "rescue"
         )
         rescue_result = await db.execute(
             text(f"""
-                SELECT DISTINCT driverid FROM (
-                    SELECT driverid FROM payroll.payrolldraftlines
+                SELECT DISTINCT driverassignmentid FROM (
+                    SELECT driverassignmentid FROM payroll.payrolldraftlines
                     WHERE payrollperiodid = :pid AND workdate = :dt
                       AND status != 'Void'
-                      AND driverid IN ({in_clause_rescue})
+                      AND driverassignmentid IN ({in_clause_rescue})
                     UNION
-                    SELECT driverid FROM payroll.payrollperioddriverdayentrystate
+                    SELECT driverassignmentid FROM payroll.payrollperioddriverdayentrystate
                     WHERE payrollperiodid = :pid AND workdate = :dt
                       AND isvoided = FALSE
-                      AND driverid IN ({in_clause_rescue})
+                      AND driverassignmentid IN ({in_clause_rescue})
                 ) src
             """),
             {"pid": period_id, "dt": work_date, **in_params_rescue},
         )
-        rescue_driver_ids_on_date = {
-            r["driverid"] for r in rescue_result.mappings().all()
+        rescue_driver_assignment_ids_on_date = {
+            r["driverassignmentid"] for r in rescue_result.mappings().all()
         }
 
     # A frozen window must still fit current lifecycle boundaries.
@@ -265,54 +267,54 @@ async def get_day_grid(
         for snap in snap_rows_all
         if (
             _is_snapshot_row_eligible_for_workdate(snap, work_date)
-            and snap["driverid"] in lifecycle_eligible_ids
-        ) or snap["driverid"] in rescue_driver_ids_on_date
+            and snap["driverassignmentid"] in lifecycle_eligible_ids
+        ) or snap["driverassignmentid"] in rescue_driver_assignment_ids_on_date
     ]
-    driver_ids = [d["driverid"] for d in drivers]
+    driver_assignment_ids = [d["driverassignmentid"] for d in drivers]
 
     # ── Load existing draft lines for these drivers on this date ─────────── #
-    # driver_id -> list of line rows
-    lines_by_driver: dict[int, list[Any]] = {did: [] for did in driver_ids}
+    # driver_assignment_id -> list of line rows
+    lines_by_driver: dict[int, list[Any]] = {did: [] for did in driver_assignment_ids}
 
-    if driver_ids:
-        in_clause, in_params = build_in_clause(driver_ids, "drv")
+    if driver_assignment_ids:
+        in_clause, in_params = build_in_clause(driver_assignment_ids, "drv")
         dl_result = await db.execute(
             text(f"""
-                SELECT dl.draftlineid, dl.driverid, dl.linetype,
+                SELECT dl.draftlineid, dl.driverassignmentid, dl.linetype,
                        dl.payrollperioddefinitionid,
                        dl.quantity, dl.notes, dl.status
                 FROM   payroll.payrolldraftlines dl
                 WHERE  dl.payrollperiodid = :pid
                   AND  dl.workdate        = :dt
-                  AND  dl.driverid        IN ({in_clause})
+                  AND  dl.driverassignmentid        IN ({in_clause})
                   AND  dl.status         != 'Void'
             """),
             {"pid": period_id, "dt": work_date, **in_params},
         )
         for row in dl_result.mappings().all():
-            did = row["driverid"]
+            did = row["driverassignmentid"]
             if did in lines_by_driver:
                 lines_by_driver[did].append(dict(row))
 
     # ── CP-2D1: batch-load canonical entry-state rows for this date ───────── #
     canonical_by_driver: dict[int, dict] = {}
-    if driver_ids:
-        in_clause_ces, in_params_ces = build_in_clause(driver_ids, "ces_drv")
+    if driver_assignment_ids:
+        in_clause_ces, in_params_ces = build_in_clause(driver_assignment_ids, "ces_drv")
         ces_result = await db.execute(
             text(f"""
-                SELECT driverid, statuskeyid, notetext,
+                SELECT driverassignmentid, statuskeyid, notetext,
                        statuscodesnapshot, statuslabelsnapshot,
                        statusisoffreasonsnapshot, finalizedatutc
                 FROM   payroll.payrollperioddriverdayentrystate
                 WHERE  payrollperiodid = :pid
                   AND  workdate        = :dt
-                  AND  driverid        IN ({in_clause_ces})
+                  AND  driverassignmentid        IN ({in_clause_ces})
                   AND  isvoided          = FALSE
             """),
             {"pid": period_id, "dt": work_date, **in_params_ces},
         )
         for row in ces_result.mappings().all():
-            canonical_by_driver[row["driverid"]] = dict(row)
+            canonical_by_driver[row["driverassignmentid"]] = dict(row)
 
     # Reverse lookup: StatusKeyID → DayGridStatusKey (for editable canonical path).
     status_key_id_map: dict[int, DayGridStatusKey] = {sk.status_key_id: sk for sk in status_keys}
@@ -376,7 +378,7 @@ async def get_day_grid(
                 _fin_snapshot, _fin_status_entries,
             )
             _status_evidence_by_driver = {
-                entry["driver_id"]: entry
+                entry["driver_assignment_id"]: entry
                 for entry in _fin_status_entries
                 if entry["work_date"] == work_date
             }
@@ -386,11 +388,11 @@ async def get_day_grid(
     # Draft (Prepared) periods are source-only: no money is derived or shown.
     column_ids = {c.payroll_period_definition_id for c in columns}
     live_by_line: dict[int, Any] = {}
-    if period.status != "Draft" and driver_ids:
+    if period.status != "Draft" and driver_assignment_ids:
         live_by_line = {
             line.draft_line_id: line
             for line in await load_live_source_lines(
-                period_id, company_id, db, driver_ids=driver_ids, work_date=work_date,
+                period_id, company_id, db, driver_assignment_ids=driver_assignment_ids, work_date=work_date,
             )
         }
 
@@ -404,7 +406,7 @@ async def get_day_grid(
     off_count = 0
 
     for drv in drivers:
-        did = drv["driverid"]
+        did = drv["driverassignmentid"]
         drv_lines = lines_by_driver.get(did, [])
 
         values: dict[str, DayGridLineValue] = {}
@@ -529,9 +531,10 @@ async def get_day_grid(
             worked_count += 1
 
         rows.append(DayGridRow(
-            driver_id=did,
+            driver_assignment_id=did,
+            driver_id=drv["permanentdriverid"],
             driver_name=drv["drivername"],
-            driver_code=drv.get("drivercode"),
+            driver_number=drv.get("drivernumber"),
             status_key=status_key_code,
             status_label=sk_label,
             is_off=is_off,
@@ -638,21 +641,21 @@ async def save_day_grid(
     # P1 #3: status key validation (invalid/inactive → 422 before writes)
     # This preserves all-or-nothing atomicity.
 
-    # Each row: (save_row, driver_id, parsed_values, validated_status_key, key_row)
+    # Each row: (save_row, driver_assignment_id, parsed_values, validated_status_key, key_row)
     parsed_rows: list[tuple] = []
 
     for save_row in data.rows:
-        driver_id = save_row.driver_id
+        driver_assignment_id = save_row.driver_assignment_id
 
         # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
         try:
             await _assert_driver_eligible_for_workdate_via_snapshot(
-                company_id, branch_id, period.payroll_period_id, driver_id, work_date, db
+                company_id, branch_id, period.payroll_period_id, driver_assignment_id, work_date, db
             )
         except HTTPException:
             raise HTTPException(
                 status_code=422,
-                detail=f"Driver {driver_id} is not eligible for this branch or work date.",
+                detail=f"Driver {driver_assignment_id} is not eligible for this branch or work date.",
             )
 
         # Parse and validate every quantity before any write so the batch is
@@ -698,11 +701,11 @@ async def save_day_grid(
             existing_sk_q = await db.execute(
                 text("""
                     SELECT notes FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid AND workdate = :dt AND driverid = :did
+                    WHERE  payrollperiodid = :pid AND workdate = :dt AND driverassignmentid = :did
                       AND  linetype = 'DailyStatus' AND status != 'Void'
                     LIMIT 1
                 """),
-                {"pid": period_id, "dt": work_date, "did": driver_id},
+                {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
             )
             existing_sk_row = existing_sk_q.mappings().first()
             if (
@@ -716,7 +719,7 @@ async def save_day_grid(
         )
         validated_status_key = save_row.status_key  # None/blank = clear
 
-        parsed_rows.append((save_row, driver_id, parsed_values, validated_status_key, key_row))
+        parsed_rows.append((save_row, driver_assignment_id, parsed_values, validated_status_key, key_row))
 
     # ── Phase 2: execute DB writes (all validations passed) ──────────────── #
     # Period source-mutation lock (also rechecks the Period is still editable).
@@ -731,13 +734,13 @@ async def save_day_grid(
     # limit are caught before any DB write happens (all-or-nothing atomicity).
     # The counts must be read only after the Period lock is held, so a
     # concurrent Status save for this Period has already committed or waits.
-    all_batch_pairs: list[tuple] = [(r.driver_id, work_date) for r in data.rows]
+    all_batch_pairs: list[tuple] = [(r.driver_assignment_id, work_date) for r in data.rows]
     batch_by_code: dict[str, list[int]] = {}
     for _, drv_id, _, vsk, _ in parsed_rows:
         if vsk:
             batch_by_code.setdefault(vsk, []).append(drv_id)
 
-    for status_code, batch_driver_ids in batch_by_code.items():
+    for status_code, batch_driver_assignment_ids in batch_by_code.items():
         code_key_row = next(
             krow
             for _, _, _, vsk, krow in parsed_rows
@@ -749,12 +752,12 @@ async def save_day_grid(
             period_id=period_id,
             company_id=company_id,
             work_date=work_date,
-            batch_driver_ids=batch_driver_ids,
+            batch_driver_assignment_ids=batch_driver_assignment_ids,
             all_batch_pairs=all_batch_pairs,
             db=db,
         )
 
-    for save_row, driver_id, parsed_values, validated_status_key, key_row in parsed_rows:
+    for save_row, driver_assignment_id, parsed_values, validated_status_key, key_row in parsed_rows:
 
         # ── Ordinary pay lines, by period definition ─────────────────────── #
         for ppd_id, qty in parsed_values.items():
@@ -766,11 +769,11 @@ async def save_day_grid(
                     SELECT draftlineid FROM payroll.payrolldraftlines
                     WHERE  payrollperiodid = :pid
                       AND  workdate        = :dt
-                      AND  driverid        = :did
+                      AND  driverassignmentid        = :did
                       AND  payrollperioddefinitionid = :ppd
                       AND  status         != 'Void'
                 """),
-                {"pid": period_id, "dt": work_date, "did": driver_id, "ppd": ppd_id},
+                {"pid": period_id, "dt": work_date, "did": driver_assignment_id, "ppd": ppd_id},
             )
             existing = existing_result.mappings().first()
 
@@ -790,7 +793,7 @@ async def save_day_grid(
                     company_id=company_id,
                     user_id=user_id,
                     data=DraftLineCreate(
-                        driver_id=driver_id,
+                        driver_assignment_id=driver_assignment_id,
                         work_date=work_date,
                         payroll_period_definition_id=ppd_id,
                         quantity=effective_qty,
@@ -816,12 +819,12 @@ async def save_day_grid(
                 SELECT draftlineid FROM payroll.payrolldraftlines
                 WHERE  payrollperiodid = :pid
                   AND  workdate        = :dt
-                  AND  driverid        = :did
+                  AND  driverassignmentid        = :did
                   AND  linetype        = 'DailyStatus'
                   AND  status         != 'Void'
                 LIMIT 1
             """),
-            {"pid": period_id, "dt": work_date, "did": driver_id},
+            {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
         )
         es_row = existing_status.mappings().first()
 
@@ -856,7 +859,7 @@ async def save_day_grid(
                 ins_result = await db.execute(
                     text("""
                         INSERT INTO payroll.payrolldraftlines
-                            (companyid, branchid, payrollperiodid, driverid,
+                            (companyid, branchid, payrollperiodid, driverassignmentid,
                              workdate, linetype, quantity,
                              sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                         VALUES
@@ -867,7 +870,7 @@ async def save_day_grid(
                     """),
                     {
                         "cid": company_id, "bid": branch_id, "pid": period_id,
-                        "did": driver_id, "dt": work_date,
+                        "did": driver_assignment_id, "dt": work_date,
                         "n": status_val, "uid": user_id,
                     },
                 )
@@ -915,12 +918,12 @@ async def save_day_grid(
                 SELECT draftlineid FROM payroll.payrolldraftlines
                 WHERE  payrollperiodid = :pid
                   AND  workdate        = :dt
-                  AND  driverid        = :did
+                  AND  driverassignmentid        = :did
                   AND  linetype        = 'DailyNote'
                   AND  status         != 'Void'
                 LIMIT 1
             """),
-            {"pid": period_id, "dt": work_date, "did": driver_id},
+            {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
         )
         en_row = existing_note.mappings().first()
 
@@ -953,7 +956,7 @@ async def save_day_grid(
                 ins_result2 = await db.execute(
                     text("""
                         INSERT INTO payroll.payrolldraftlines
-                            (companyid, branchid, payrollperiodid, driverid,
+                            (companyid, branchid, payrollperiodid, driverassignmentid,
                              workdate, linetype, quantity,
                              sourcetype, status, needsmanagerreview, notes, addedbyuserid)
                         VALUES
@@ -964,7 +967,7 @@ async def save_day_grid(
                     """),
                     {
                         "cid": company_id, "bid": branch_id, "pid": period_id,
-                        "did": driver_id, "dt": work_date,
+                        "did": driver_assignment_id, "dt": work_date,
                         "n": notes_val, "uid": user_id,
                     },
                 )
@@ -1005,7 +1008,7 @@ async def save_day_grid(
 
         # CP-2D1: upsert canonical entry-state after both DailyStatus/DailyNote writes.
         await _upsert_entry_state(
-            company_id, branch_id, period_id, driver_id, work_date, user_id, db,
+            company_id, branch_id, period_id, driver_assignment_id, work_date, user_id, db,
             status_key_id=key_row["statuskeyid"] if key_row else None,
             note_text=notes_val if notes_val else None,
         )
@@ -1018,7 +1021,7 @@ async def save_day_grid(
             company_id=company_id,
             branch_id=branch_id,
             period_id=period_id,
-            driver_id=driver_id,
+            driver_assignment_id=driver_assignment_id,
             work_date=work_date,
             status_key_id=key_row["statuskeyid"] if key_row else None,
             user_id=user_id,

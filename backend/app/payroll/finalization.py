@@ -169,20 +169,20 @@ async def _load_approved_snapshot_packet(
     except UnsupportedCalculationVersionError as exc:
         raise _snapshot_finalization_error("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
     totals = (await db.execute(text("""
-        SELECT dt.payrollcalculationdrivertotalid, dt.driverid,
-               dt.drivercodesnapshot, dt.drivernamesnapshot,
+        SELECT dt.payrollcalculationdrivertotalid, dt.driverassignmentid, dt.driverid,
+               dt.drivernumbersnapshot, dt.drivernamesnapshot,
                dt.dailypay, dt.statuspay, dt.minimumadjustment,
                dt.maximumadjustment, dt.bonustotal, dt.expectedpay
         FROM payroll.payrollcalculationdrivertotals dt
-        JOIN core.drivers d ON d.driverid = dt.driverid
-            AND d.companyid = dt.companyid AND d.branchid = dt.branchid
+        JOIN core.driverassignments a ON a.driverassignmentid = dt.driverassignmentid
+            AND a.companyid = dt.companyid AND a.branchid = dt.branchid
         WHERE dt.payrollcalculationsnapshotid = :snapshot_id
           AND dt.companyid = :cid AND dt.branchid = :bid
-        ORDER BY dt.driverid, dt.payrollcalculationdrivertotalid
+        ORDER BY dt.driverassignmentid, dt.payrollcalculationdrivertotalid
     """), {"snapshot_id": snapshot_id, "cid": company_id, "bid": branch_id})).mappings().all()
     lines = (await db.execute(text("""
         SELECT sl.payrollcalculationsnapshotlineid,
-               sl.payrollcalculationdrivertotalid, dt.driverid, sl.sourcetype,
+               sl.payrollcalculationdrivertotalid, dt.driverassignmentid, dt.driverid, sl.sourcetype,
                sl.sourceid, sl.linetype, sl.linescope, sl.workdate, sl.payitemid,
                sl.ratetypeid, sl.driverrateid, sl.bonuseventid, sl.quantity,
                sl.resolvedrateamount, sl.calculatedamount, sl.sourceevidencejsonb
@@ -191,7 +191,7 @@ async def _load_approved_snapshot_packet(
           ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
         WHERE dt.payrollcalculationsnapshotid = :snapshot_id
           AND dt.companyid = :cid AND dt.branchid = :bid
-        ORDER BY dt.driverid, sl.payrollcalculationsnapshotlineid
+        ORDER BY dt.driverassignmentid, sl.payrollcalculationsnapshotlineid
     """), {"snapshot_id": snapshot_id, "cid": company_id, "bid": branch_id})).mappings().all()
     return {"review": review, "snapshot": snapshot, "totals": totals, "lines": lines}
 
@@ -257,14 +257,14 @@ async def _project_approved_snapshot_final_lines(
         await db.execute(text("""
             INSERT INTO payroll.payrollfinallines
                 (companyid, branchid, payrollperiodid, draftlineid, bonuseventid,
-                 driverid, workdate, linetype, linescope, quantity, rateamount,
+                 driverassignmentid, driverid, workdate, linetype, linescope, quantity, rateamount,
                  finalamount, sourcetype, sourceid, approvedbyuserid, approvedatutc,
                  lockedatutc, notes, payitemid, ratebehavior, ratetypeid,
                  driverrateid, resolvedrateamount, sourcesnapshot,
                  currencycode, currencyminorunitdigits)
             VALUES
                 (:cid, :bid, :period_id, :draft_line_id, :bonus_event_id,
-                 :driver_id, :work_date, :line_type, :line_scope, :quantity,
+                 :driver_assignment_id, :driver_id, :work_date, :line_type, :line_scope, :quantity,
                  :rate_amount, :final_amount, :source_type, :source_id,
                  :approved_by, NOW(), NOW(), :notes, :pay_item_id,
                  :rate_behavior, :rate_type_id, :driver_rate_id,
@@ -273,7 +273,8 @@ async def _project_approved_snapshot_final_lines(
         """), {
             "cid": company_id, "bid": branch_id, "period_id": period_id,
             "draft_line_id": _snapshot_line_draft_line_id(line),
-            "bonus_event_id": line["bonuseventid"], "driver_id": line["driverid"],
+            "bonus_event_id": line["bonuseventid"], "driver_assignment_id": line["driverassignmentid"],
+            "driver_id": line["driverid"],
             "work_date": line["workdate"], "line_type": line["linetype"],
             "line_scope": line["linescope"], "quantity": line["quantity"] or Decimal("0"),
             "rate_amount": line["resolvedrateamount"], "final_amount": line["calculatedamount"],
@@ -365,7 +366,7 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
         amount, evidence = Decimal(str(row["calculatedamount"])), row["sourceevidencejsonb"] or {}
         lines.append(FinalizationPreviewLine(
             draft_line_id=_snapshot_line_draft_line_id(row), source_key=f"snapshot-line:{row['payrollcalculationsnapshotlineid']}",
-            driver_id=int(row["driverid"]), driver_name=total["drivernamesnapshot"], work_date=row["workdate"],
+            driver_assignment_id=int(row["driverassignmentid"]), driver_name=total["drivernamesnapshot"], work_date=row["workdate"],
             line_type=row["linetype"], line_scope=row["linescope"], quantity=row["quantity"],
             rate_amount=row["resolvedrateamount"], calculated_amount=amount, final_amount=amount,
             needs_manager_review=False, rate_behavior=evidence.get("RateBehavior"),
@@ -373,11 +374,12 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
         ))
         normal_base = Decimal(str(total["dailypay"])) + Decimal(str(total["statuspay"]))
         if row["linetype"] in {"SYS_MIN_TOPUP", "SYS_MAX_CAP"}:
-            adjustments.append(FinalizationPreviewSysAdjustment(driver_id=int(row["driverid"]), driver_name=total["drivernamesnapshot"], adjustment_type=row["linetype"], gross_before=normal_base, adjustment_amount=amount, bonus_total=Decimal(str(total["bonustotal"])), final_pay=Decimal(str(total["expectedpay"]))))
+            adjustments.append(FinalizationPreviewSysAdjustment(driver_assignment_id=int(row["driverassignmentid"]), driver_name=total["drivernamesnapshot"], adjustment_type=row["linetype"], gross_before=normal_base, adjustment_amount=amount, bonus_total=Decimal(str(total["bonustotal"])), final_pay=Decimal(str(total["expectedpay"]))))
         if row["sourcetype"] == "BonusEvent" and row["bonuseventid"] is not None:
-            bonuses.append(BonusEventPreviewEntry(bonus_event_id=int(row["bonuseventid"]), driver_id=int(row["driverid"]), driver_name=total["drivernamesnapshot"], amount=amount, reason=evidence.get("Reason"), notes=evidence.get("Notes")))
+            bonuses.append(BonusEventPreviewEntry(bonus_event_id=int(row["bonuseventid"]), driver_assignment_id=int(row["driverassignmentid"]), driver_name=total["drivernamesnapshot"], amount=amount, reason=evidence.get("Reason"), notes=evidence.get("Notes")))
     driver_totals = [FinalizationPreviewDriverTotal(
-        driver_id=int(row["driverid"]), driver_name=row["drivernamesnapshot"],
+        driver_assignment_id=int(row["driverassignmentid"]), driver_id=int(row["driverid"]),
+        driver_number=row["drivernumbersnapshot"], driver_name=row["drivernamesnapshot"],
         daily_pay=Decimal(str(row["dailypay"])), status_pay=Decimal(str(row["statuspay"])),
         gross_pay=Decimal(str(row["dailypay"])) + Decimal(str(row["statuspay"])),
         sys_adjustment=Decimal(str(row["minimumadjustment"])) + Decimal(str(row["maximumadjustment"])),

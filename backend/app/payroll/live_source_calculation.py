@@ -34,7 +34,7 @@ from app.payroll.period_definitions import definition_from_row
 @dataclass(frozen=True)
 class LiveSourceLine:
     draft_line_id: int
-    driver_id: int
+    driver_assignment_id: int
     work_date: date
     quantity: Decimal
     source_type: str
@@ -48,24 +48,24 @@ async def load_live_source_lines(
     company_id: int,
     db: AsyncConnection,
     *,
-    driver_ids: list[int] | None = None,
+    driver_assignment_ids: list[int] | None = None,
     work_date: date | None = None,
 ) -> list[LiveSourceLine]:
     """Every non-void ordinary target line of the period with its live calculation."""
     filters = ""
     params: dict = {"pid": period_id, "cid": company_id}
-    if driver_ids is not None:
-        if not driver_ids:
+    if driver_assignment_ids is not None:
+        if not driver_assignment_ids:
             return []
-        filters += " AND dl.driverid = ANY(:driver_ids)"
-        params["driver_ids"] = sorted(set(driver_ids))
+        filters += " AND dl.driverassignmentid = ANY(:driver_assignment_ids)"
+        params["driver_assignment_ids"] = sorted(set(driver_assignment_ids))
     if work_date is not None:
         filters += " AND dl.workdate = :work_date"
         params["work_date"] = work_date
 
     rows = (await db.execute(
         text(f"""
-            SELECT dl.draftlineid, dl.driverid, dl.workdate, dl.quantity,
+            SELECT dl.draftlineid, dl.driverassignmentid, dl.workdate, dl.quantity,
                    dl.sourcetype, dl.notes,
                    ppd.payrollperioddefinitionid, ppd.payrollperiodid, ppd.companyid,
                    ppd.branchid, ppd.paydefinitionid, ppd.ratedefinitionid,
@@ -81,14 +81,14 @@ async def load_live_source_lines(
               AND  dl.companyid       = :cid
               AND  dl.status         != 'Void'
               {filters}
-            ORDER  BY dl.driverid, dl.workdate, ppd.sortorder, dl.draftlineid
+            ORDER  BY dl.driverassignmentid, dl.workdate, ppd.sortorder, dl.draftlineid
         """),
         params,
     )).mappings().all()
     if not rows:
         return []
 
-    keys = [ResolutionKey(r["driverid"], r["ratedefinitionid"], r["workdate"]) for r in rows]
+    keys = [ResolutionKey(r["driverassignmentid"], r["ratedefinitionid"], r["workdate"]) for r in rows]
     resolved = await resolve_many(company_id, keys, db)
 
     lines: list[LiveSourceLine] = []
@@ -97,7 +97,7 @@ async def load_live_source_lines(
         quantity = Decimal(str(row["quantity"]))
         lines.append(LiveSourceLine(
             draft_line_id=int(row["draftlineid"]),
-            driver_id=int(row["driverid"]),
+            driver_assignment_id=int(row["driverassignmentid"]),
             work_date=row["workdate"],
             quantity=quantity,
             source_type=row["sourcetype"],

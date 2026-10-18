@@ -76,18 +76,18 @@ async def _clean_branch(db: AsyncConnection, branch_id: int) -> None:
     await db.commit()
 
 
-async def _clean_status_pay_rate(db: AsyncConnection, driver_id: int) -> None:
+async def _clean_status_pay_rate(db: AsyncConnection, driver_assignment_id: int) -> None:
     """Remove all STATUS_PAY and SRC_* driver rates for isolation."""
     await db.execute(
         _text("""
             DELETE FROM payroll.driverrates
-            WHERE driverid = :did
+            WHERE driverassignmentid = :did
               AND ratetypeid IN (
                   SELECT ratetypeid FROM payroll.ratetypes
                   WHERE ratecode = 'STATUS_PAY' OR ratecode LIKE 'SRC_%'
               )
         """),
-        {"did": driver_id},
+        {"did": driver_assignment_id},
     )
     await db.commit()
 
@@ -173,12 +173,12 @@ async def _insert_status_key_db(
 async def _get_draft_lines(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
-            SELECT draftlineid, driverid, workdate, linetype, quantity,
+            SELECT draftlineid, driverassignmentid, workdate, linetype, quantity,
                    calculatedamount, sourcetype, sourceid, status, needsmanagerreview,
                    sourcesnapshot
             FROM   payroll.payrolldraftlines
             WHERE  payrollperiodid = :pid
-            ORDER BY workdate, driverid, linetype
+            ORDER BY workdate, driverassignmentid, linetype
         """),
         {"pid": period_id},
     )).mappings().all()
@@ -189,7 +189,7 @@ async def _insert_driver_rate_db(
     db: AsyncConnection,
     company_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_code: str,
     amount: float,
     effective_from: datetime.date,
@@ -204,14 +204,14 @@ async def _insert_driver_rate_db(
     r = (await db.execute(
         _text("""
             INSERT INTO payroll.driverrates
-                (companyid, branchid, driverid, ratetypeid, amount, status, effectivefrom)
+                (companyid, branchid, driverassignmentid, ratetypeid, amount, status, effectivefrom)
             VALUES (:cid, :bid, :did, :rtid, :amt, 'Approved', :eff)
-            ON CONFLICT (driverid, ratetypeid) WHERE status = 'Approved'
+            ON CONFLICT (driverassignmentid, ratetypeid) WHERE status = 'Approved'
             DO UPDATE SET amount = EXCLUDED.amount, effectivefrom = EXCLUDED.effectivefrom
             RETURNING driverrateid
         """),
         {
-            "cid": company_id, "bid": branch_id, "did": driver_id,
+            "cid": company_id, "bid": branch_id, "did": driver_assignment_id,
             "rtid": rate_type_id, "amt": amount, "eff": effective_from,
         },
     )).mappings().first()
@@ -219,10 +219,10 @@ async def _insert_driver_rate_db(
     return r["driverrateid"]
 
 
-def _day_grid_body(driver_id: int, work_date: datetime.date, status_key: str | None = None) -> dict:
+def _day_grid_body(driver_assignment_id: int, work_date: datetime.date, status_key: str | None = None) -> dict:
     return {
         "work_date": work_date.isoformat(),
-        "rows": [{"driver_id": driver_id, "status_key": status_key, "values": {}}],
+        "rows": [{"driver_assignment_id": driver_assignment_id, "status_key": status_key, "values": {}}],
     }
 
 
@@ -240,7 +240,7 @@ async def cp2d2_branch_id(
 
 
 @pytest_asyncio.fixture(scope="module")
-async def cp2d2_driver_id(
+async def cp2d2_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     cp2d2_branch_id: int,
@@ -251,14 +251,14 @@ async def cp2d2_driver_id(
             "branch_id":      cp2d2_branch_id,
             "full_name":      "CP2D2 Status Pay Driver",
             "preferred_name": "SP2D2",
-            "driver_code":    "SP2D2-001",
+            "driver_number":    "SP2D2-001",
             "cdl_number":     "CDL-SP2D2-001",
             "email":          "sp2d2@example.com",
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -697,12 +697,12 @@ class TestDriverPayRatesMatrix:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """GET rate matrix includes a StatusRateColumn group for Status Pay."""
         resp = await session_client.get(
-            f"/payroll/drivers/{cp2d2_driver_id}/rate-matrix",
+            f"/payroll/driver-assignments/{cp2d2_driver_assignment_id}/rate-matrix",
             headers=_auth(auth_token),
         )
         assert resp.status_code == 200, resp.text
@@ -722,7 +722,7 @@ class TestDriverPayRatesMatrix:
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         direct_db: AsyncConnection,
     ):
         """A custom SRC_ column also appears in the rate matrix."""
@@ -737,7 +737,7 @@ class TestDriverPayRatesMatrix:
 
         try:
             matrix_resp = await session_client.get(
-                f"/payroll/drivers/{cp2d2_driver_id}/rate-matrix",
+                f"/payroll/driver-assignments/{cp2d2_driver_assignment_id}/rate-matrix",
                 headers=_auth(auth_token),
             )
             assert matrix_resp.status_code == 200
@@ -764,7 +764,7 @@ class TestDriverPayRatesMatrix:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
         direct_db: AsyncConnection,
     ):
@@ -779,7 +779,7 @@ class TestDriverPayRatesMatrix:
 
         eff_from = datetime.date(2097, 1, 1)
         resp = await session_client.post(
-            f"/payroll/drivers/{cp2d2_driver_id}/rates/batch",
+            f"/payroll/driver-assignments/{cp2d2_driver_assignment_id}/rates/batch",
             headers=_auth(auth_token),
             json={
                 "effective_from": eff_from.isoformat(),
@@ -798,11 +798,11 @@ class TestDriverPayRatesMatrix:
         dr_row = (await direct_db.execute(
             _text("""
                 SELECT amount FROM payroll.driverrates
-                WHERE driverid = :did AND ratetypeid = :rtid
+                WHERE driverassignmentid = :did AND ratetypeid = :rtid
                   AND status IN ('Approved', 'PendingApproval')
                 ORDER BY createdatutc DESC LIMIT 1
             """),
-            {"did": cp2d2_driver_id, "rtid": rate_type_id},
+            {"did": cp2d2_driver_assignment_id, "rtid": rate_type_id},
         )).mappings().first()
         assert dr_row is not None
         from decimal import Decimal
@@ -813,7 +813,7 @@ class TestDriverPayRatesMatrix:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
         direct_db: AsyncConnection,
     ):
@@ -833,7 +833,7 @@ class TestDriverPayRatesMatrix:
         assert wrong_rt is not None
 
         resp = await session_client.post(
-            f"/payroll/drivers/{cp2d2_driver_id}/rates/batch",
+            f"/payroll/driver-assignments/{cp2d2_driver_assignment_id}/rates/batch",
             headers=_auth(auth_token),
             json={
                 "effective_from": "2097-01-01",
@@ -853,7 +853,7 @@ class TestDriverPayRatesMatrix:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         direct_db: AsyncConnection,
     ):
         """The legacy batch writer no longer accepts a PayItem change."""
@@ -874,7 +874,7 @@ class TestDriverPayRatesMatrix:
             pytest.skip("No PayItem+RateType pair available for batch save test")
 
         resp = await session_client.post(
-            f"/payroll/drivers/{cp2d2_driver_id}/rates/batch",
+            f"/payroll/driver-assignments/{cp2d2_driver_assignment_id}/rates/batch",
             headers=_auth(auth_token),
             json={
                 "effective_from": "2097-01-01",
@@ -897,9 +897,9 @@ class TestDriverPayRatesMatrix:
 
 class TestStatusPaymentLines:
     @pytest_asyncio.fixture(autouse=True)
-    async def setup(self, direct_db: AsyncConnection, cp2d2_branch_id: int, cp2d2_driver_id: int):
+    async def setup(self, direct_db: AsyncConnection, cp2d2_branch_id: int, cp2d2_driver_assignment_id: int):
         await _clean_branch(direct_db, cp2d2_branch_id)
-        await _clean_status_pay_rate(direct_db, cp2d2_driver_id)
+        await _clean_status_pay_rate(direct_db, cp2d2_driver_assignment_id)
         yield
         await _clean_branch(direct_db, cp2d2_branch_id)
 
@@ -910,7 +910,7 @@ class TestStatusPaymentLines:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
     ):
         """Status key with no StatusRateColumnID → no STATUS_PAYMENT line."""
         start, end = _week_2097()
@@ -922,7 +922,7 @@ class TestStatusPaymentLines:
         resp = await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
         assert resp.status_code == 200, resp.text
         lines = await _get_draft_lines(direct_db, pid)
@@ -936,7 +936,7 @@ class TestStatusPaymentLines:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """Status key with rate column + rate → correct STATUS_PAYMENT line."""
@@ -946,12 +946,12 @@ class TestStatusPaymentLines:
         await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code,
                                      hours=8.0, status_rate_column_id=cp2d2_src_col_id)
         await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 25.0, start)
+                                      cp2d2_driver_assignment_id, "STATUS_PAY", 25.0, start)
 
         resp = await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
         assert resp.status_code == 200, resp.text
 
@@ -972,7 +972,7 @@ class TestStatusPaymentLines:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """Status key with rate column but no driver rate → NMR=True, calc=NULL."""
@@ -985,7 +985,7 @@ class TestStatusPaymentLines:
         resp = await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
         assert resp.status_code == 200, resp.text
         lines = await _get_draft_lines(direct_db, pid)
@@ -1001,7 +1001,7 @@ class TestStatusPaymentLines:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """Clearing status voids the STATUS_PAYMENT line."""
@@ -1011,12 +1011,12 @@ class TestStatusPaymentLines:
         await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code,
                                      hours=8.0, status_rate_column_id=cp2d2_src_col_id)
         await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 20.0, start)
+                                      cp2d2_driver_assignment_id, "STATUS_PAY", 20.0, start)
 
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
         active_before = [line for line in await _get_draft_lines(direct_db, pid)
                          if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
@@ -1025,7 +1025,7 @@ class TestStatusPaymentLines:
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=None),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=None),
         )
         active_after = [line for line in await _get_draft_lines(direct_db, pid)
                         if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:") and line["status"] == "Active"]
@@ -1038,7 +1038,7 @@ class TestStatusPaymentLines:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """Switching from one status key to another voids the old line and creates a new one."""
@@ -1052,17 +1052,17 @@ class TestStatusPaymentLines:
         await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code_b,
                                      hours=8.0, status_rate_column_id=cp2d2_src_col_id)
         await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 10.0, start)
+                                      cp2d2_driver_assignment_id, "STATUS_PAY", 10.0, start)
 
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code_a),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code_a),
         )
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code_b),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code_b),
         )
 
         lines = await _get_draft_lines(direct_db, pid)
@@ -1078,9 +1078,9 @@ class TestStatusPaymentLines:
 
 class TestSourceSnapshot:
     @pytest_asyncio.fixture(autouse=True)
-    async def setup(self, direct_db: AsyncConnection, cp2d2_branch_id: int, cp2d2_driver_id: int):
+    async def setup(self, direct_db: AsyncConnection, cp2d2_branch_id: int, cp2d2_driver_assignment_id: int):
         await _clean_branch(direct_db, cp2d2_branch_id)
-        await _clean_status_pay_rate(direct_db, cp2d2_driver_id)
+        await _clean_status_pay_rate(direct_db, cp2d2_driver_assignment_id)
         yield
         await _clean_branch(direct_db, cp2d2_branch_id)
 
@@ -1091,7 +1091,7 @@ class TestSourceSnapshot:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """STATUS_PAYMENT draft line has a SourceSnapshot with required fields."""
@@ -1101,12 +1101,12 @@ class TestSourceSnapshot:
         await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code,
                                      hours=7.0, status_rate_column_id=cp2d2_src_col_id)
         await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 30.0, start)
+                                      cp2d2_driver_assignment_id, "STATUS_PAY", 30.0, start)
 
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
 
         lines = await _get_draft_lines(direct_db, pid)
@@ -1129,9 +1129,9 @@ class TestSourceSnapshot:
 
 class TestManualEditGuards:
     @pytest_asyncio.fixture(autouse=True)
-    async def setup(self, direct_db: AsyncConnection, cp2d2_branch_id: int, cp2d2_driver_id: int):
+    async def setup(self, direct_db: AsyncConnection, cp2d2_branch_id: int, cp2d2_driver_assignment_id: int):
         await _clean_branch(direct_db, cp2d2_branch_id)
-        await _clean_status_pay_rate(direct_db, cp2d2_driver_id)
+        await _clean_status_pay_rate(direct_db, cp2d2_driver_assignment_id)
         yield
         await _clean_branch(direct_db, cp2d2_branch_id)
 
@@ -1142,7 +1142,7 @@ class TestManualEditGuards:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """PATCH on a STATUS_PAYMENT line returns 422."""
@@ -1152,12 +1152,12 @@ class TestManualEditGuards:
         await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code,
                                      hours=8.0, status_rate_column_id=cp2d2_src_col_id)
         await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 30.0, start)
+                                      cp2d2_driver_assignment_id, "STATUS_PAY", 30.0, start)
 
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
         lines = await _get_draft_lines(direct_db, pid)
         sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
@@ -1179,7 +1179,7 @@ class TestManualEditGuards:
         auth_token: str,
         direct_db: AsyncConnection,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
     ):
         """DELETE on a STATUS_PAYMENT line returns 422."""
@@ -1189,12 +1189,12 @@ class TestManualEditGuards:
         await _insert_status_key_db(direct_db, _COMPANY_ID, cp2d2_branch_id, code,
                                      hours=4.0, status_rate_column_id=cp2d2_src_col_id)
         await _insert_driver_rate_db(direct_db, _COMPANY_ID, cp2d2_branch_id,
-                                      cp2d2_driver_id, "STATUS_PAY", 15.0, start)
+                                      cp2d2_driver_assignment_id, "STATUS_PAY", 15.0, start)
 
         await client.post(
             f"/payroll/periods/{pid}/day-grid",
             headers=_auth(auth_token),
-            json=_day_grid_body(cp2d2_driver_id, start, status_key=code),
+            json=_day_grid_body(cp2d2_driver_assignment_id, start, status_key=code),
         )
         lines = await _get_draft_lines(direct_db, pid)
         sp = [line for line in lines if (line.get("sourceid") or "").startswith("STATUS_PAYMENT:")]
@@ -1249,7 +1249,7 @@ class TestGenericRatesBypassClosed:
         session_client: httpx.AsyncClient,
         auth_token: str,
         cp2d2_branch_id: int,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
         direct_db: AsyncConnection,
     ):
@@ -1264,7 +1264,7 @@ class TestGenericRatesBypassClosed:
             "/payroll/rates",
             headers=_auth(auth_token),
             json={
-                "driver_id":      cp2d2_driver_id,
+                "driver_assignment_id":      cp2d2_driver_assignment_id,
                 "rate_type_id":   rate_type_id,
                 "amount":         18.00,
                 "effective_from": "2097-01-01",
@@ -1285,7 +1285,7 @@ class TestGenericRatesBypassClosed:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_branch_id: int,
         direct_db: AsyncConnection,
     ):
@@ -1352,7 +1352,7 @@ class TestGenericRatesBypassClosed:
                 "/payroll/rates",
                 headers=_auth(auth_token),
                 json={
-                    "driver_id":      cp2d2_driver_id,
+                    "driver_assignment_id":      cp2d2_driver_assignment_id,
                     "rate_type_id":   custom_rt_id,
                     "amount":         20.00,
                     "effective_from": "2097-01-01",
@@ -1382,7 +1382,7 @@ class TestGenericRatesBypassClosed:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         direct_db: AsyncConnection,
     ):
         """Generic POST /payroll/rates for an ordinary PayItem RateType is not affected."""
@@ -1404,7 +1404,7 @@ class TestGenericRatesBypassClosed:
             "/payroll/rates",
             headers=_auth(auth_token),
             json={
-                "driver_id":      cp2d2_driver_id,
+                "driver_assignment_id":      cp2d2_driver_assignment_id,
                 "rate_type_id":   pi_row["ratetypeid"],
                 "amount":         12.00,
                 "effective_from": "2097-01-01",
@@ -1441,7 +1441,7 @@ class TestResolveBehaviorDbMembership:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         direct_db: AsyncConnection,
     ):
         """A RateType with SRC_ prefix but NOT in StatusRateColumns gets normal 422 (no PayItemMap)."""
@@ -1470,7 +1470,7 @@ class TestResolveBehaviorDbMembership:
                 "/payroll/rates",
                 headers=_auth(auth_token),
                 json={
-                    "driver_id":      cp2d2_driver_id,
+                    "driver_assignment_id":      cp2d2_driver_assignment_id,
                     "rate_type_id":   orphan_rt_id,
                     "amount":         10.00,
                     "effective_from": "2097-01-01",
@@ -1680,7 +1680,7 @@ class TestApproveRateStatusGuard:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         cp2d2_src_col_id: int,
         direct_db: AsyncConnection,
     ):
@@ -1693,18 +1693,18 @@ class TestApproveRateStatusGuard:
 
         # Purge any existing approved STATUS_PAY rates for this driver to avoid supersede conflicts
         await direct_db.execute(
-            _text("DELETE FROM payroll.driverrates WHERE driverid = :did AND ratetypeid = :rtid"),
-            {"did": cp2d2_driver_id, "rtid": rate_type_id},
+            _text("DELETE FROM payroll.driverrates WHERE driverassignmentid = :did AND ratetypeid = :rtid"),
+            {"did": cp2d2_driver_assignment_id, "rtid": rate_type_id},
         )
         pending = (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.driverrates
-                    (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status)
-                SELECT d.companyid, d.branchid, d.driverid, :rtid, 17.00, '2097-02-01', 'PendingApproval'
-                FROM core.drivers d WHERE d.driverid = :did
+                    (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
+                SELECT d.companyid, d.branchid, d.driverassignmentid, :rtid, 17.00, '2097-02-01', 'PendingApproval'
+                FROM core.driverassignments d WHERE d.driverassignmentid = :did
                 RETURNING driverrateid
             """),
-            {"did": cp2d2_driver_id, "rtid": rate_type_id},
+            {"did": cp2d2_driver_assignment_id, "rtid": rate_type_id},
         )).mappings().first()
         await direct_db.commit()
         rate_id = pending["driverrateid"]
@@ -1717,8 +1717,8 @@ class TestApproveRateStatusGuard:
             assert resp.status_code == 200, resp.text
         finally:
             await direct_db.execute(
-                _text("DELETE FROM payroll.driverrates WHERE driverid = :did AND ratetypeid = :rtid"),
-                {"did": cp2d2_driver_id, "rtid": rate_type_id},
+                _text("DELETE FROM payroll.driverrates WHERE driverassignmentid = :did AND ratetypeid = :rtid"),
+                {"did": cp2d2_driver_assignment_id, "rtid": rate_type_id},
             )
             await direct_db.commit()
 
@@ -1727,7 +1727,7 @@ class TestApproveRateStatusGuard:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         direct_db: AsyncConnection,
     ):
         """Approve a contaminated PendingApproval rate using another branch's status RateType — 422."""
@@ -1768,12 +1768,12 @@ class TestApproveRateStatusGuard:
         pending = (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.driverrates
-                    (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status)
-                SELECT d.companyid, d.branchid, d.driverid, :rtid, 19.00, '2097-03-01', 'PendingApproval'
-                FROM core.drivers d WHERE d.driverid = :did
+                    (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
+                SELECT d.companyid, d.branchid, d.driverassignmentid, :rtid, 19.00, '2097-03-01', 'PendingApproval'
+                FROM core.driverassignments d WHERE d.driverassignmentid = :did
                 RETURNING driverrateid
             """),
-            {"did": cp2d2_driver_id, "rtid": custom_rt_id},
+            {"did": cp2d2_driver_assignment_id, "rtid": custom_rt_id},
         )).mappings().first()
         await direct_db.commit()
         rate_id = pending["driverrateid"]
@@ -1811,7 +1811,7 @@ class TestApproveRateStatusGuard:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        cp2d2_driver_id: int,
+        cp2d2_driver_assignment_id: int,
         direct_db: AsyncConnection,
     ):
         """Approving a PendingApproval rate for an ordinary PayItem RateType still works."""
@@ -1833,12 +1833,12 @@ class TestApproveRateStatusGuard:
         pending = (await direct_db.execute(
             _text("""
                 INSERT INTO payroll.driverrates
-                    (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status)
-                SELECT d.companyid, d.branchid, d.driverid, :rtid, 13.00, '2097-04-01', 'PendingApproval'
-                FROM core.drivers d WHERE d.driverid = :did
+                    (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
+                SELECT d.companyid, d.branchid, d.driverassignmentid, :rtid, 13.00, '2097-04-01', 'PendingApproval'
+                FROM core.driverassignments d WHERE d.driverassignmentid = :did
                 RETURNING driverrateid
             """),
-            {"did": cp2d2_driver_id, "rtid": pi_row["ratetypeid"]},
+            {"did": cp2d2_driver_assignment_id, "rtid": pi_row["ratetypeid"]},
         )).mappings().first()
         await direct_db.commit()
         rate_id = pending["driverrateid"]
@@ -1860,9 +1860,9 @@ class TestApproveRateStatusGuard:
             await direct_db.execute(
                 _text("""
                     DELETE FROM payroll.driverrates
-                    WHERE driverid = :did AND ratetypeid = :rtid AND effectivefrom = '2097-04-01'
+                    WHERE driverassignmentid = :did AND ratetypeid = :rtid AND effectivefrom = '2097-04-01'
                 """),
-                {"did": cp2d2_driver_id, "rtid": pi_row["ratetypeid"]},
+                {"did": cp2d2_driver_assignment_id, "rtid": pi_row["ratetypeid"]},
             )
             await direct_db.commit()
 

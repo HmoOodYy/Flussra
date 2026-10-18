@@ -257,7 +257,7 @@ async def test_retirement_preserves_history_and_blocks_new_activation(p3c_client
     # No new rate authoring, history intact, nothing deleted.
     blocked = await p3c_client.post(
         "/compensation/driver-rate-assignments", headers=tenant.admin,
-        json={"driver_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
+        json={"driver_assignment_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
               "effective_from": "2026-01-01"})
     assert blocked.status_code == 422
     assert blocked.json()["detail"]["code"] == "PAY_DEFINITION_NOT_ACTIVE"
@@ -341,7 +341,7 @@ async def test_driver_self_accounts_are_denied_branch_configuration(
     assert (await session_client.post(
         "/compensation/pay-definitions/1/retire", headers=headers)).status_code == 403
     assert (await session_client.get(
-        "/compensation/drivers/1/pay-rates", headers=headers)).status_code == 403
+        "/compensation/driver-assignments/1/pay-rates", headers=headers)).status_code == 403
 
 
 # ---------------------------------------------------------------------------

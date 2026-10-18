@@ -42,7 +42,7 @@ from app.payroll_setup.resolver import resolve_payroll_setup_version
 _TOP_DRIVER_LIMIT = 5
 
 
-async def _eligible_driver_ids(
+async def _eligible_driver_assignment_ids(
     period_id: int,
     company_id: int,
     branch_id: int,
@@ -51,7 +51,7 @@ async def _eligible_driver_ids(
     """Return the required frozen period roster and captured WorkDate arrays."""
     await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
     rows = (await db.execute(text("""
-        SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
+        SELECT driverassignmentid, iseligibleforperiod, eligibilityreasoncode,
                hiredatesnapshot, terminationdatesnapshot, eligibleworkdates
         FROM payroll.payrollperioddrivereligibility
         WHERE payrollperiodid = :period_id AND companyid = :company_id
@@ -59,7 +59,7 @@ async def _eligible_driver_ids(
     """), {
         "period_id": period_id, "company_id": company_id, "branch_id": branch_id,
     })).mappings().all()
-    by_driver = {int(row['driverid']): SimpleNamespace(**dict(row)) for row in rows}
+    by_driver = {int(row['driverassignmentid']): SimpleNamespace(**dict(row)) for row in rows}
     return set(by_driver), by_driver
 
 
@@ -68,7 +68,7 @@ async def _period_metrics(
     company_id: int,
     db: AsyncConnection,
 ) -> CurrentPayrollHubMetrics:
-    eligible_ids, snapshot_rows = await _eligible_driver_ids(
+    eligible_ids, snapshot_rows = await _eligible_driver_assignment_ids(
         period_id=slot.period_id,
         company_id=company_id,
         branch_id=slot.branch_id,
@@ -88,7 +88,7 @@ async def _period_metrics(
     in_clause, in_params = build_in_clause(sorted(eligible_ids), "driver")
     rows = (await db.execute(
         text(f"""
-            SELECT DISTINCT dl.driverid, dl.workdate
+            SELECT DISTINCT dl.driverassignmentid, dl.workdate
             FROM payroll.payrolldraftlines dl
             JOIN payroll.payrollperioddefinitions ppd
                    ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
@@ -96,7 +96,7 @@ async def _period_metrics(
             WHERE dl.payrollperiodid = :period_id
               AND dl.companyid = :company_id
               AND dl.branchid = :branch_id
-              AND dl.driverid IN ({in_clause})
+              AND dl.driverassignmentid IN ({in_clause})
               AND dl.status != 'Void'
               AND dl.workdate >= :period_start
               AND dl.workdate <= :period_end
@@ -115,10 +115,10 @@ async def _period_metrics(
         },
     )).mappings().all()
     working_ids = {
-        int(row["driverid"])
+        int(row["driverassignmentid"])
         for row in rows
         if _is_snapshot_row_eligible_for_workdate(
-            snapshot_rows[int(row["driverid"])], row["workdate"],
+            snapshot_rows[int(row["driverassignmentid"])], row["workdate"],
         )
     }
     fully_off = await off_drivers.resolve_fully_off_drivers(slot, company_id, db)
@@ -141,7 +141,7 @@ def _financial_summary(packet) -> CurrentPayrollHubFinancialSummary:
     )
     top_drivers = sorted(
         packet.drivers,
-        key=lambda driver: (-driver.expected_pay, driver.driver_id),
+        key=lambda driver: (-driver.expected_pay, driver.driver_assignment_id),
     )[:_TOP_DRIVER_LIMIT]
     return CurrentPayrollHubFinancialSummary(
         total_expected_pay=packet.total_expected_pay,
@@ -153,8 +153,9 @@ def _financial_summary(packet) -> CurrentPayrollHubFinancialSummary:
         warnings=packet.warnings,
         top_drivers=[
             CurrentPayrollHubDriverSummary(
+                driver_assignment_id=driver.driver_assignment_id,
                 driver_id=driver.driver_id,
-                driver_code=driver.driver_code,
+                driver_number=driver.driver_number,
                 driver_name=driver.driver_name,
                 expected_pay=driver.expected_pay,
             )

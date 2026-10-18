@@ -42,13 +42,13 @@ def test_schema_facade_preserves_owner_identity_and_legacy_pickle_names():
 
 
 def test_bonus_schema_facade_preserves_decimal_boundaries():
-    accepted = schemas.BonusEventCreate(driver_id=7, amount=Decimal("99999999999999.9999"))
+    accepted = schemas.BonusEventCreate(driver_assignment_id=7, amount=Decimal("99999999999999.9999"))
     assert accepted.amount == Decimal("99999999999999.9999")
-    assert schemas.BonusEventCreate(driver_id=7, amount=Decimal("0.10000")).amount == Decimal("0.10000")
+    assert schemas.BonusEventCreate(driver_assignment_id=7, amount=Decimal("0.10000")).amount == Decimal("0.10000")
 
     for amount in (Decimal("100000000000000"), Decimal("0.00001"), Decimal("NaN"), Decimal("Infinity")):
         try:
-            schemas.BonusEventCreate(driver_id=7, amount=amount)
+            schemas.BonusEventCreate(driver_assignment_id=7, amount=amount)
         except ValidationError:
             continue
         raise AssertionError(f"invalid amount unexpectedly accepted: {amount}")

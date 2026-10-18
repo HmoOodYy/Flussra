@@ -97,7 +97,7 @@ def add_driver(tenant: Tenant) -> int:
 async def rated_definition(
     client: httpx.AsyncClient, tenant: Tenant, *, rate: str | None = "25",
     effective_from: str = "2020-01-01", activate: bool = True, branch_id: int | None = None,
-    driver_id: int | None = None, **overrides,
+    driver_assignment_id: int | None = None, **overrides,
 ) -> dict:
     """An arbitrary PayDefinition, applicable to the Branch, with an approved scalar rate.
 
@@ -109,16 +109,16 @@ async def rated_definition(
     if rate is not None:
         await approve_rate(
             client, tenant, definition, rate, effective_from=effective_from,
-            driver_id=driver_id)
+            driver_assignment_id=driver_assignment_id)
     return definition
 
 
 async def approve_rate(
     client: httpx.AsyncClient, tenant: Tenant, definition: dict, amount: str, *,
-    effective_from: str, effective_to: str | None = None, driver_id: int | None = None,
+    effective_from: str, effective_to: str | None = None, driver_assignment_id: int | None = None,
 ) -> dict:
     pending = await create_pending(
-        client, tenant, definition, driver_id=driver_id,
+        client, tenant, definition, driver_assignment_id=driver_assignment_id,
         effective_from=effective_from, effective_to=effective_to)
     filled = await set_scalar_value(client, tenant, pending, definition, amount)
     assert filled.status_code == 200, filled.text
@@ -281,13 +281,14 @@ def make_driver_self_user(tenant: Tenant, permissions: list[str]) -> dict[str, s
 
 
 def set_employment(
-    tenant: Tenant, driver_id: int, *, hire_date: date | None = None,
+    tenant: Tenant, driver_assignment_id: int, *, hire_date: date | None = None,
     termination_date: date | None = None, employment_status: str = "Active",
     driver_status: str = "Active",
 ) -> None:
     query(tenant, """
         UPDATE core.employees SET hiredate = %s, terminationdate = %s, employmentstatus = %s
-        WHERE employeeid = (SELECT employeeid FROM core.drivers WHERE driverid = %s)
-    """, (hire_date, termination_date, employment_status, driver_id))
-    query(tenant, "UPDATE core.drivers SET driverstatus = %s WHERE driverid = %s",
-          (driver_status, driver_id))
+        WHERE employeeid = (SELECT employeeid FROM core.driverassignments WHERE driverassignmentid = %s)
+    """, (hire_date, termination_date, employment_status, driver_assignment_id))
+    query(tenant, "UPDATE core.drivers SET driverstatus = %s WHERE driverid = "
+          "(SELECT driverid FROM core.driverassignments WHERE driverassignmentid = %s)",
+          (driver_status, driver_assignment_id))

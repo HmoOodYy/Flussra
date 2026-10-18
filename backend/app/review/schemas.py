@@ -78,8 +78,9 @@ class ReviewItemDetail(ReviewItemSummary):
 # ---------------------------------------------------------------------------
 
 class ReviewPayrollSnapshotDriverTotal(BaseModel):
+    driver_assignment_id: int
     driver_id: int
-    driver_code_snapshot: str | None = None
+    driver_number_snapshot: str | None = None
     driver_name_snapshot: str | None = None
     daily_pay: Decimal
     status_pay: Decimal
@@ -90,7 +91,7 @@ class ReviewPayrollSnapshotDriverTotal(BaseModel):
 
 
 class ReviewPayrollSnapshotLine(BaseModel):
-    driver_id: int
+    driver_assignment_id: int
     source_type: str
     line_type: str
     line_scope: str | None = None

@@ -554,21 +554,22 @@ async def get_review_item_payroll_snapshot(
 
     total_result = await db.execute(
         text("""
-            SELECT driverid, drivercodesnapshot, drivernamesnapshot,
+            SELECT driverassignmentid, driverid, drivernumbersnapshot, drivernamesnapshot,
                    dailypay, statuspay, minimumadjustment,
                    maximumadjustment, bonustotal, expectedpay
             FROM payroll.payrollcalculationdrivertotals
             WHERE payrollcalculationsnapshotid = :snapshot_id
               AND companyid = :company_id
               AND branchid = :branch_id
-            ORDER BY driverid
+            ORDER BY driverassignmentid
         """),
         {"snapshot_id": snapshot_id, "company_id": company_id, "branch_id": item["branchid"]},
     )
     driver_totals = [
         ReviewPayrollSnapshotDriverTotal(
+            driver_assignment_id=row["driverassignmentid"],
             driver_id=row["driverid"],
-            driver_code_snapshot=row["drivercodesnapshot"],
+            driver_number_snapshot=row["drivernumbersnapshot"],
             driver_name_snapshot=row["drivernamesnapshot"],
             daily_pay=row["dailypay"],
             status_pay=row["statuspay"],
@@ -581,7 +582,7 @@ async def get_review_item_payroll_snapshot(
     ]
     line_result = await db.execute(
         text("""
-            SELECT totals.driverid, lines.sourcetype, lines.linetype, lines.linescope,
+            SELECT totals.driverassignmentid, lines.sourcetype, lines.linetype, lines.linescope,
                    lines.workdate, lines.payitemid, lines.quantity,
                    lines.resolvedrateamount, lines.calculatedamount
             FROM payroll.payrollcalculationsnapshotlines lines
@@ -590,7 +591,7 @@ async def get_review_item_payroll_snapshot(
             WHERE totals.payrollcalculationsnapshotid = :snapshot_id
               AND totals.companyid = :company_id
               AND totals.branchid = :branch_id
-            ORDER BY totals.driverid, lines.workdate NULLS LAST, lines.linescope,
+            ORDER BY totals.driverassignmentid, lines.workdate NULLS LAST, lines.linescope,
                      lines.linetype, lines.sourcetype, lines.sourceid,
                      lines.payrollcalculationsnapshotlineid
         """),
@@ -598,7 +599,7 @@ async def get_review_item_payroll_snapshot(
     )
     lines = [
         ReviewPayrollSnapshotLine(
-            driver_id=row["driverid"],
+            driver_assignment_id=row["driverassignmentid"],
             source_type=row["sourcetype"],
             line_type=row["linetype"],
             line_scope=row["linescope"],

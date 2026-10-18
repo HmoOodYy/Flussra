@@ -488,12 +488,12 @@ async def create_rate(
 
     # Resolve driver â†’ branch
     drv_result = await db.execute(
-        text("SELECT driverid, branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": data.driver_id, "cid": company_id},
+        text("SELECT driverassignmentid, branchid FROM core.driverassignments WHERE driverassignmentid = :did AND companyid = :cid"),
+        {"did": data.driver_assignment_id, "cid": company_id},
     )
     drv_row = drv_result.mappings().first()
     if drv_row is None:
-        raise HTTPException(status_code=422, detail="driver_id does not exist in this company.")
+        raise HTTPException(status_code=422, detail="driver_assignment_id does not exist in this company.")
 
     driver_branch_id: int = drv_row["branchid"]
     if not can_see_all and driver_branch_id not in branch_ids:
@@ -601,11 +601,11 @@ async def create_rate(
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.driverrates
-                (companyid, branchid, driverid, ratetypeid, amount,
+                (companyid, branchid, driverassignmentid, ratetypeid, amount,
                  effectivefrom, effectiveto, status, createdbyuserid, notes,
                  blocksize, roundingrule)
             VALUES
-                (:company_id, :branch_id, :driver_id, :rate_type_id, :amount,
+                (:company_id, :branch_id, :driver_assignment_id, :rate_type_id, :amount,
                  :effective_from, :effective_to, 'PendingApproval', :created_by, :notes,
                  :block_size, :rounding_rule)
             RETURNING driverrateid
@@ -613,7 +613,7 @@ async def create_rate(
         {
             "company_id":     company_id,
             "branch_id":      driver_branch_id,
-            "driver_id":      data.driver_id,
+            "driver_assignment_id":      data.driver_assignment_id,
             "rate_type_id":   data.rate_type_id,
             "amount":         data.amount,
             "effective_from": data.effective_from,
@@ -639,7 +639,7 @@ async def create_rate(
         rate_id=rate_id,
         action_code="RATE_CREATED",
         new_value={
-            "driver_id":      data.driver_id,
+            "driver_assignment_id":      data.driver_assignment_id,
             "rate_type_id":   data.rate_type_id,
             "rate_behavior":  rate_behavior,
             "amount":         str(data.amount),
@@ -861,7 +861,7 @@ async def update_rate(
 
 async def _check_no_future_approved_conflict(
     company_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_type_id: int,
     effective_from: date,
     db: AsyncConnection,
@@ -881,7 +881,7 @@ async def _check_no_future_approved_conflict(
     """
     params: dict[str, Any] = {
         "company_id":   company_id,
-        "driver_id":    driver_id,
+        "driver_assignment_id":    driver_assignment_id,
         "rate_type_id": rate_type_id,
         "new_from":     effective_from,
     }
@@ -895,7 +895,7 @@ async def _check_no_future_approved_conflict(
             SELECT driverrateid, effectivefrom
             FROM   payroll.driverrates
             WHERE  companyid    = :company_id
-              AND  driverid     = :driver_id
+              AND  driverassignmentid     = :driver_assignment_id
               AND  ratetypeid   = :rate_type_id
               AND  status       = 'Approved'
               AND  effectivefrom >= CAST(:new_from AS date)
@@ -919,7 +919,7 @@ async def _check_no_future_approved_conflict(
 
 async def _supersede_current_approved_rates(
     company_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_type_id: int,
     effective_from: date,
     changed_by_user_id: int,
@@ -946,7 +946,7 @@ async def _supersede_current_approved_rates(
     params: dict[str, Any] = {
         "new_from":     effective_from,
         "company_id":   company_id,
-        "driver_id":    driver_id,
+        "driver_assignment_id":    driver_assignment_id,
         "rate_type_id": rate_type_id,
     }
     exclude_clause = ""
@@ -965,7 +965,7 @@ async def _supersede_current_approved_rates(
                        ELSE effectiveto
                    END
             WHERE  companyid    = :company_id
-              AND  driverid     = :driver_id
+              AND  driverassignmentid     = :driver_assignment_id
               AND  ratetypeid   = :rate_type_id
               AND  status       = 'Approved'
               AND  effectivefrom < CAST(:new_from AS date)
@@ -1121,7 +1121,7 @@ async def approve_rate(
     # (it is in the DB but not yet Approved, so the STATUS filter already excludes
     # it â€” the exclude_rate_id is a belt-and-suspenders guard against edge cases).
     await _check_no_future_approved_conflict(
-        company_id, rate.driver_id, rate.rate_type_id, rate.effective_from, db,
+        company_id, rate.driver_assignment_id, rate.rate_type_id, rate.effective_from, db,
         exclude_rate_id=rate_id,
     )
 
@@ -1129,7 +1129,7 @@ async def approve_rate(
     # The helper only touches rates with EffectiveFrom < effective_from.
     # Writes RATE_SUPERSEDED audit inside the same transaction.
     await _supersede_current_approved_rates(
-        company_id, rate.driver_id, rate.rate_type_id, rate.effective_from,
+        company_id, rate.driver_assignment_id, rate.rate_type_id, rate.effective_from,
         user_id, rate.branch_id, db,
         exclude_rate_id=rate_id,
     )
@@ -1321,7 +1321,7 @@ async def void_rate(
 # ===========================================================================
 
 async def batch_save_rates(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     user_id: int,
     data: BatchRateRequest,
@@ -1363,10 +1363,10 @@ async def batch_save_rates(
 
     drv_result = await db.execute(
         text("""
-            SELECT driverid, branchid FROM core.drivers
-            WHERE driverid = :did AND companyid = :cid
+            SELECT driverassignmentid, branchid FROM core.driverassignments
+            WHERE driverassignmentid = :did AND companyid = :cid
         """),
-        {"did": driver_id, "cid": company_id},
+        {"did": driver_assignment_id, "cid": company_id},
     )
     drv_row = drv_result.mappings().first()
     if drv_row is None:
@@ -1460,14 +1460,14 @@ async def batch_save_rates(
         existing = await db.execute(
             text("""
                 SELECT driverrateid FROM payroll.driverrates
-                WHERE  driverid   = :did
+                WHERE  driverassignmentid   = :did
                   AND  ratetypeid = :rtid
                   AND  companyid  = :cid
                   AND  status     = 'PendingApproval'
                 ORDER  BY createdatutc DESC
                 LIMIT  1
             """),
-            {"did": driver_id, "rtid": change.rate_type_id, "cid": company_id},
+            {"did": driver_assignment_id, "rtid": change.rate_type_id, "cid": company_id},
         )
         existing_row = existing.mappings().first()
 
@@ -1533,7 +1533,7 @@ async def batch_save_rates(
             ins = await db.execute(
                 text("""
                     INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverid, ratetypeid, amount,
+                        (companyid, branchid, driverassignmentid, ratetypeid, amount,
                          effectivefrom, effectiveto, status, createdbyuserid, notes)
                     VALUES
                         (:cid, :bid, :did, :rtid, :amount,
@@ -1543,7 +1543,7 @@ async def batch_save_rates(
                 {
                     "cid":            company_id,
                     "bid":            driver_branch_id,
-                    "did":            driver_id,
+                    "did":            driver_assignment_id,
                     "rtid":           change.rate_type_id,
                     "amount":         change.amount,
                     "effective_from": data.effective_from,
@@ -1560,7 +1560,7 @@ async def batch_save_rates(
                 rate_id=new_rate_id,
                 action_code="RATE_CREATED",
                 new_value={
-                    "driver_id":      driver_id,
+                    "driver_assignment_id":      driver_assignment_id,
                     "rate_type_id":   change.rate_type_id,
                     "amount":         str(change.amount),
                     "effective_from": str(data.effective_from),
@@ -1589,7 +1589,7 @@ async def batch_save_rates(
     rate_summaries = [await rate_reads.load_rate_with_tiers(rid, company_id, db) for rid in all_rate_ids]
 
     return BatchRateSaveResult(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         effective_from=data.effective_from,
         allow_self_approval=allow_self_approval,
         created_count=len(created_ids),
@@ -1605,8 +1605,8 @@ async def batch_save_rates(
 # ---------------------------------------------------------------------------
 
 async def copy_driver_rates(
-    target_driver_id: int,
-    source_driver_id: int,
+    target_driver_assignment_id: int,
+    source_driver_assignment_id: int,
     company_id: int,
     user_id: int,
     data: CopyRatesRequest,

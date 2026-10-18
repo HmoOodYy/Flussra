@@ -21,6 +21,7 @@ from app.company_currency import lock_and_get_company_currency_for_monetary_writ
 from app.db.transaction_retry import retryable_sqlstate
 from app.settings import company
 from app.settings.schemas import CompanyUpdate
+from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
 
 _LOCK_NOT_AVAILABLE = "55P03"
 
@@ -142,8 +143,13 @@ async def _seed_bonus_graph(engine) -> dict:
             VALUES (:cid, :bid, 'G0.3 driver', 'Driver') RETURNING employeeid
         """), {"cid": cid, "bid": bid})).scalar_one())
         did = int((await db.execute(text("""
-            INSERT INTO core.drivers(companyid, branchid, employeeid, drivercode)
-            VALUES (:cid, :bid, :eid, :code) RETURNING driverid
+            WITH d AS (
+                INSERT INTO core.drivers(companyid, employeeid, drivernumber)
+                VALUES (:cid, :eid, :code) RETURNING driverid
+            )
+            INSERT INTO core.driverassignments(companyid, branchid, employeeid, driverid, effectivefromat)
+            SELECT :cid, :bid, :eid, d.driverid, NOW() - INTERVAL '1 day' FROM d
+            RETURNING driverassignmentid
         """), {"cid": cid, "bid": bid, "eid": eid, "code": f"G03-{marker}"})).scalar_one())
         pid = int((await db.execute(text("""
             INSERT INTO payroll.payrollperiods
@@ -151,7 +157,7 @@ async def _seed_bonus_graph(engine) -> dict:
             VALUES (:cid, :bid, 'Open', :code, 'G0.3 period', 'Week', DATE '2097-03-03', DATE '2097-03-09')
             RETURNING payrollperiodid
         """), {"cid": cid, "bid": bid, "code": f"G03P-{marker}"})).scalar_one())
-    return {"company_id": cid, "branch_id": bid, "user_id": uid, "driver_id": did, "period_id": pid}
+    return {"company_id": cid, "branch_id": bid, "user_id": uid, "driver_assignment_id": did, "period_id": pid}
 
 
 async def _drop_bonus_graph(engine, g: dict) -> None:
@@ -159,6 +165,14 @@ async def _drop_bonus_graph(engine, g: dict) -> None:
         for sql in (
             "DELETE FROM payroll.payrollbonusevents WHERE companyid = :cid",
             "DELETE FROM payroll.payrollperiods WHERE companyid = :cid",
+        ):
+            await db.execute(text(sql), {"cid": g["company_id"]})
+        async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+            await db.execute(
+                text("DELETE FROM core.driverassignments WHERE companyid = :cid"),
+                {"cid": g["company_id"]},
+            )
+        for sql in (
             "DELETE FROM core.drivers WHERE companyid = :cid",
             "DELETE FROM core.employees WHERE companyid = :cid",
             "DELETE FROM sec.users WHERE companyid = :cid",
@@ -179,11 +193,11 @@ async def test_direct_sql_currency_change_waits_for_writer_then_is_blocked(test_
             assert currency.code == "USD"
             await writer.execute(text("""
                 INSERT INTO payroll.payrollbonusevents
-                    (companyid, branchid, payrollperiodid, driverid,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
                      amount, status, createdbyuserid, createdatutc, datarevision)
                 VALUES (:cid, :bid, :pid, :did, 50.00, 'Active', :uid, NOW(), 1)
             """), {"cid": g["company_id"], "bid": g["branch_id"], "pid": g["period_id"],
-                   "did": g["driver_id"], "uid": g["user_id"]})
+                   "did": g["driver_assignment_id"], "uid": g["user_id"]})
 
             # Direct SQL, no application helper: must queue behind the FOR SHARE guard.
             changer_pid = await _backend_pid(changer)

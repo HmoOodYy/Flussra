@@ -20,7 +20,7 @@ class FinalizationPreviewLine(BaseModel):
     __module__ = "app.payroll.schemas"
     draft_line_id: int | None
     source_key: str
-    driver_id: int
+    driver_assignment_id: int
     driver_name: str | None
     work_date: date | None
     line_type: str
@@ -49,7 +49,7 @@ class FinalizationPreviewSysAdjustment(BaseModel):
     sees the true payout, not a bonus-free intermediate figure.
     """
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     driver_name: str | None
     adjustment_type: str          # "SYS_MIN_TOPUP" or "SYS_MAX_CAP"
     gross_before: Decimal         # normal_base only — excludes bonus
@@ -68,7 +68,9 @@ class FinalizationPreviewDriverTotal(BaseModel):
     final_pay = gross_pay + sys_adjustment + bonus_total.
     """
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
+    driver_number: str | None = None
     driver_name: str | None
     daily_pay: Decimal
     status_pay: Decimal = Decimal("0")
@@ -132,7 +134,7 @@ class CalculationPreviewLine(BaseModel):
     definition_name: str | None = None                # display only
     calculation_status: str | None = None
     rate_column_id: int | None = None      # StatusRateColumnID for Status lines only
-    driver_id: int
+    driver_assignment_id: int
     quantity: Decimal | None
     resolved_rate: Decimal | None
     calculated_amount: Decimal | None
@@ -144,7 +146,9 @@ class CalculationPreviewLine(BaseModel):
 class CalculationPreviewDriverTotal(BaseModel):
     """One driver's provisional expected-pay breakdown."""
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
+    driver_number: str | None = None
     driver_name: str | None
     daily_pay: Decimal
     status_pay: Decimal

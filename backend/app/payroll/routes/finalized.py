@@ -157,12 +157,12 @@ async def list_final_lines(
     period_id: int,
     token: TokenDep,
     db: DbDep,
-    driver_id: int | None = Query(None, description="Filter to a specific driver"),
+    driver_assignment_id: int | None = Query(None, description="Filter to a specific driver"),
 ) -> list[FinalLineSummary]:
     return await ledger_read.get_final_lines(
         period_id=period_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
     )

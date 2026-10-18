@@ -234,7 +234,7 @@ async def get_period_entry_count(
     row = await db.execute(
         text("""
             SELECT
-                COUNT(DISTINCT driverid) AS driver_count,
+                COUNT(DISTINCT driverassignmentid) AS driver_count,
                 COUNT(*)                 AS entry_count
             FROM   payroll.payrolldraftlines
             WHERE  payrollperiodid = :pid

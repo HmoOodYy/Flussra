@@ -85,10 +85,10 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             profile = await company.update_company_profile(company_id, 1, update("JPY"), db)
             assert profile.currency_code == "JPY" and profile.currency_minor_unit_digits == 0
 
-            branch_id, driver_id = await create_branch_and_driver(db, company_id, code[-12:])
+            branch_id, driver_assignment_id = await create_branch_and_driver(db, company_id, code[-12:])
             rate_type_id = await first_rate_type_id(db)
             driver_rate_id = (await db.execute(INSERT_DRIVER_RATE, {
-                "cid": company_id, "bid": branch_id, "did": driver_id,
+                "cid": company_id, "bid": branch_id, "did": driver_assignment_id,
                 "rid": rate_type_id, "amount": "1.2345",
             })).scalar_one()
             assert await company_has_durable_monetary_state(company_id, db)

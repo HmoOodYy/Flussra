@@ -109,11 +109,16 @@ def make_driver(cur, company_id: int, branch_id: int) -> int:
     """, (company_id, branch_id))
     employee_id = cur.fetchone()[0]
     cur.execute("""
-        INSERT INTO core.drivers
-            (companyid, branchid, employeeid, drivercode, driverstatus, effectivefromat)
-        VALUES (%s, %s, %s, %s, 'Active', TIMESTAMPTZ '2000-01-01 00:00:00+00')
-        RETURNING driverid
-    """, (company_id, branch_id, employee_id, unique("D")))
+        INSERT INTO core.drivers (companyid, employeeid, drivernumber, driverstatus)
+        VALUES (%s, %s, %s, 'Active') RETURNING driverid
+    """, (company_id, employee_id, unique("D")))
+    driver_id = cur.fetchone()[0]
+    cur.execute("""
+        INSERT INTO core.driverassignments
+            (companyid, branchid, employeeid, driverid, effectivefromat)
+        VALUES (%s, %s, %s, %s, TIMESTAMPTZ '2000-01-01 00:00:00+00')
+        RETURNING driverassignmentid
+    """, (company_id, branch_id, employee_id, driver_id))
     return cur.fetchone()[0]
 
 
@@ -169,9 +174,9 @@ class Scalar:
     def __init__(self, cur, *, currency: str | None = "USD", driver_count: int = 1):
         self.company_id = make_company(cur, currency)
         self.branch_id = make_branch(cur, self.company_id)
-        self.driver_ids = [make_driver(cur, self.company_id, self.branch_id)
+        self.driver_assignment_ids = [make_driver(cur, self.company_id, self.branch_id)
                            for _ in range(driver_count)]
-        self.driver_id = self.driver_ids[0]
+        self.driver_assignment_id = self.driver_assignment_ids[0]
         self.pay_definition_id = make_pay_definition(cur, self.company_id)
         self.rate_definition_id = make_rate_definition(cur, self.pay_definition_id)
         self.component_id = add_scalar_component(cur, self.rate_definition_id)
@@ -183,7 +188,7 @@ class Ordinal:
     def __init__(self, cur, *, currency: str | None = "USD", tiers=TIERS):
         self.company_id = make_company(cur, currency)
         self.branch_id = make_branch(cur, self.company_id)
-        self.driver_id = make_driver(cur, self.company_id, self.branch_id)
+        self.driver_assignment_id = make_driver(cur, self.company_id, self.branch_id)
         self.pay_definition_id = make_pay_definition(cur, self.company_id, method="OrdinalTier")
         self.rate_definition_id = make_rate_definition(cur, self.pay_definition_id)
         self.component_ids = add_tiers(cur, self.rate_definition_id, tiers)
@@ -194,14 +199,14 @@ def add_driver(cur, fx) -> int:
 
 
 def make_pending(
-    cur, fx, *, driver_id: int | None = None, effective_from: str = "2026-01-01",
+    cur, fx, *, driver_assignment_id: int | None = None, effective_from: str = "2026-01-01",
     effective_to: str | None = None, rate_definition_id: int | None = None,
 ) -> int:
     cur.execute("""
         INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverid, ratedefinitionid, effectivefrom, effectiveto)
+            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom, effectiveto)
         VALUES (%s, %s, %s, %s, %s, %s) RETURNING driverrateassignmentid
-    """, (fx.company_id, fx.branch_id, driver_id or fx.driver_id,
+    """, (fx.company_id, fx.branch_id, driver_assignment_id or fx.driver_assignment_id,
           rate_definition_id or fx.rate_definition_id, effective_from, effective_to))
     return cur.fetchone()[0]
 

@@ -21,7 +21,7 @@ class DriverPayRuleSummary(BaseModel):
     driver_pay_rule_id: int
     company_id: int
     branch_id: int
-    driver_id: int
+    driver_assignment_id: int
     rule_type: str           # 'MinimumPay' | 'MaximumPay'
     amount: Decimal          # > 0
     effective_from: date
@@ -41,7 +41,7 @@ _VALID_RULE_TYPES = {"MinimumPay", "MaximumPay"}
 
 class DriverPayRuleCreate(BaseModel):
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     rule_type: str
     amount: Decimal
     effective_from: date

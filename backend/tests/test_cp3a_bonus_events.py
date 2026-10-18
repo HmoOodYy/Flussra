@@ -92,7 +92,7 @@ async def _advance_to_approved(
     client: httpx.AsyncClient,
     token: str,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
 ) -> None:
     """Push period through Open -> InReview -> Approved via the review system."""
     r = await client.patch(
@@ -151,27 +151,27 @@ async def cp3a_branch_id(
 
 
 @pytest_asyncio.fixture(scope="module")
-async def cp3a_driver_id(
+async def cp3a_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     cp3a_branch_id: int,
 ) -> int:
-    driver_code = f"CP3A-BON-{_BASE_MONDAY.isoformat()}-{_RUN_ID}"
+    driver_number = f"CP3A-BON-{_BASE_MONDAY.isoformat()}-{_RUN_ID}"
     resp = await session_client.post(
         "/workforce/employees",
         json={
             "branch_id": cp3a_branch_id,
             "full_name": "CP3A Bonus Driver",
             "hire_date": "1990-01-01",
-            "driver_profile": {
-                "driver_code": driver_code,
+            "driver": {
+                "driver_number": driver_number,
                 "effective_from_at": "2000-01-01T00:00:00Z",
             },
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["current_or_pending_driver"]["driver_id"]
+    return resp.json()["current_or_pending_assignment"]["driver_assignment_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ async def test_bonus_events_canonical_columns(db_conn: AsyncConnection) -> None:
         """)
     )).scalars().all()
     required = {
-        "payrollbonuseventid", "companyid", "branchid", "payrollperiodid", "driverid",
+        "payrollbonuseventid", "companyid", "branchid", "payrollperiodid", "driverassignmentid",
         "amount", "reason", "notes", "status", "datarevision",
         "voidedbyuserid", "voidedatutc", "voidreason",
         "createdbyuserid", "createdatutc", "updatedbyuserid", "updatedatutc",
@@ -248,21 +248,21 @@ async def test_create_bonus_event(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "150.1234", "reason": "Great job"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "150.1234", "reason": "Great job"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 201, r.text
     data = r.json()
     assert Decimal(str(data["amount"])) == Decimal("150.1234")
     assert data["status"] == "Active"
-    assert data["driver_id"] == cp3a_driver_id
+    assert data["driver_assignment_id"] == cp3a_driver_assignment_id
     assert data["data_revision"] == 1
     stored_amount = (await db_conn.execute(_text("""
         SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :event_id
@@ -278,7 +278,7 @@ async def test_list_bonus_events(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
@@ -286,7 +286,7 @@ async def test_list_bonus_events(
     for amt in ["50.00", "75.00"]:
         await client.post(
             f"/payroll/periods/{period_id}/bonuses",
-            json={"driver_id": cp3a_driver_id, "amount": amt},
+            json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": amt},
             headers=_auth(auth_token),
         )
 
@@ -307,14 +307,14 @@ async def test_update_bonus_event_amount(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "200.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "200.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 201, r.text
@@ -339,14 +339,14 @@ async def test_void_bonus_event(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "100.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "100.00"},
         headers=_auth(auth_token),
     )
     event_id = r.json()["bonus_event_id"]
@@ -378,14 +378,14 @@ async def test_zero_amount_rejected(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "0.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "0.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 422, r.text
@@ -399,13 +399,13 @@ async def test_single_create_rejects_more_than_four_decimals(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
     response = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "1.23456"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "1.23456"},
         headers=_auth(auth_token),
     )
     assert response.status_code == 422, response.text
@@ -422,13 +422,13 @@ async def test_single_update_rejects_more_than_four_decimals(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
     created = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "1.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "1.00"},
         headers=_auth(auth_token),
     )
     assert created.status_code == 201, created.text
@@ -452,14 +452,14 @@ async def test_negative_amount_rejected(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "-50.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "-50.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 422, r.text
@@ -473,14 +473,14 @@ async def test_update_to_zero_rejected(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "100.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "100.00"},
         headers=_auth(auth_token),
     )
     event_id = r.json()["bonus_event_id"]
@@ -501,14 +501,14 @@ async def test_update_voided_event_rejected(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "100.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "100.00"},
         headers=_auth(auth_token),
     )
     event_id = r.json()["bonus_event_id"]
@@ -533,14 +533,14 @@ async def test_optimistic_concurrency_conflict(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "100.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "100.00"},
         headers=_auth(auth_token),
     )
     event_id = r.json()["bonus_event_id"]
@@ -578,7 +578,7 @@ async def test_create_bonus_eligible_driver_succeeds(
     auth_token: str,
     db_conn: AsyncConnection,
     cp3a_branch_id: int,
-    cp3a_driver_id: int,
+    cp3a_driver_assignment_id: int,
 ) -> None:
     """POST /bonuses with a driver eligible for the period's branch succeeds."""
     start, end = _week()
@@ -586,11 +586,11 @@ async def test_create_bonus_eligible_driver_succeeds(
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": cp3a_driver_id, "amount": "80.00"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "80.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 201, r.text
-    assert r.json()["driver_id"] == cp3a_driver_id
+    assert r.json()["driver_assignment_id"] == cp3a_driver_assignment_id
 
     await _cancel_period_db(db_conn, period_id)
 
@@ -615,25 +615,25 @@ async def test_create_bonus_wrong_branch_driver_rejects(
     other_branch_id = other_branch["branch_id"]
 
     # Create a driver on the other branch.
-    driver_code = f"CP3A-WRONGBRANCH-{uuid.uuid4().hex[:6]}"
+    driver_number = f"CP3A-WRONGBRANCH-{uuid.uuid4().hex[:6]}"
     resp = await session_client.post(
         "/core/drivers",
         json={
             "branch_id":   other_branch_id,
             "full_name":   "CP3A Wrong Branch Driver",
-            "driver_code": driver_code,
+            "driver_number": driver_number,
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, resp.text
-    wrong_branch_driver_id = resp.json()["driver_id"]
+    wrong_branch_driver_assignment_id = resp.json()["driver_assignment_id"]
 
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": wrong_branch_driver_id, "amount": "80.00"},
+        json={"driver_assignment_id": wrong_branch_driver_assignment_id, "amount": "80.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 422, (
@@ -653,18 +653,18 @@ async def test_create_bonus_ineligible_driver_rejects(
 ) -> None:
     """POST /bonuses rejects a driver that is not eligible for the period."""
     # Create a driver then immediately terminate (making them ineligible).
-    driver_code = f"CP3A-INELIGIBLE-{uuid.uuid4().hex[:6]}"
+    driver_number = f"CP3A-INELIGIBLE-{uuid.uuid4().hex[:6]}"
     resp = await session_client.post(
         "/core/drivers",
         json={
             "branch_id":   cp3a_branch_id,
             "full_name":   "CP3A Ineligible Driver",
-            "driver_code": driver_code,
+            "driver_number": driver_number,
         },
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, resp.text
-    ineligible_driver_id = resp.json()["driver_id"]
+    ineligible_driver_assignment_id = resp.json()["driver_assignment_id"]
 
     # Terminate the driver's employment so they are not eligible in 2096.
     await db_conn.execute(
@@ -672,11 +672,11 @@ async def test_create_bonus_ineligible_driver_rejects(
             UPDATE core.employees
             SET    terminationdate = '2090-01-01'
             WHERE  employeeid = (
-                SELECT employeeid FROM core.drivers
-                WHERE  driverid = :did
+                SELECT employeeid FROM core.driverassignments
+                WHERE  driverassignmentid = :did
             )
         """),
-        {"did": ineligible_driver_id},
+        {"did": ineligible_driver_assignment_id},
     )
     await db_conn.commit()
 
@@ -685,7 +685,7 @@ async def test_create_bonus_ineligible_driver_rejects(
 
     r = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": ineligible_driver_id, "amount": "80.00"},
+        json={"driver_assignment_id": ineligible_driver_assignment_id, "amount": "80.00"},
         headers=_auth(auth_token),
     )
     assert r.status_code == 422, (

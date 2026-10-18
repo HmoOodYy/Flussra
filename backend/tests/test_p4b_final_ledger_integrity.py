@@ -34,9 +34,11 @@ pytestmark = pytest.mark.asyncio
 
 INSERT = """
     INSERT INTO payroll.payrollfinallines
-        (companyid, branchid, payrollperiodid, driverid, linetype, sourcetype,
+        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, linetype, sourcetype,
          currencycode, currencyminorunitdigits, quantity, finalamount, linescope, workdate)
-    SELECT p.companyid, p.branchid, p.payrollperiodid, %s, 'DailyNote', 'Manual',
+    SELECT p.companyid, p.branchid, p.payrollperiodid, %s,
+           (SELECT a.driverid FROM core.driverassignments a WHERE a.driverassignmentid = %s),
+           'DailyNote', 'Manual',
            'USD', 2, 1, 100, 'Daily', p.startdate
     FROM payroll.payrollperiods p WHERE p.payrollperiodid = %s
     RETURNING finallineid
@@ -54,7 +56,7 @@ def _insert_final_line(tenant, period_id: int) -> int:
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT set_config('app.allow_payroll_final_line_insert', 'true', true)")
-            cur.execute(INSERT, (tenant.driver_a, period_id))
+            cur.execute(INSERT, (tenant.driver_a, tenant.driver_a, period_id))
             line_id = cur.fetchone()[0]
         conn.commit()
         return line_id
@@ -84,7 +86,7 @@ async def test_final_lines_can_only_be_inserted_through_the_controlled_path(
         if status == "Locked":
             force_status(tenant, period_id, "Locked")
         with pytest.raises(psycopg2.errors.RestrictViolation):
-            query(tenant, INSERT, (tenant.driver_a, period_id))
+            query(tenant, INSERT, (tenant.driver_a, tenant.driver_a, period_id))
     assert query(tenant, "SELECT count(*) FROM payroll.payrollfinallines "
                          "WHERE payrollperiodid = %s", (period_id,)) == [(0,)]
 
@@ -136,7 +138,7 @@ async def test_final_lines_are_served_for_a_finalized_period(
     assert lines[0]["currency_code"] == "USD" and lines[0]["currency_minor_unit_digits"] == 2
     filtered = await p3c_client.get(
         f"/payroll/periods/{period_id}/final-lines",
-        params={"driver_id": tenant.driver_a2}, headers=tenant.admin)
+        params={"driver_assignment_id": tenant.driver_a2}, headers=tenant.admin)
     assert filtered.json() == []
     listed = await p3c_client.get("/payroll/periods", params={"status": "Locked"},
                                   headers=tenant.admin)
@@ -259,14 +261,14 @@ async def test_finalized_period_discovery_is_minimal_and_scoped(
 # A DriverRate referenced by the final ledger is protected (Status rates still use them)
 # ---------------------------------------------------------------------------
 
-def _driver_rate(tenant, driver_id: int) -> int:
+def _driver_rate(tenant, driver_assignment_id: int) -> int:
     rate_type_id = query(tenant, "SELECT ratetypeid FROM payroll.ratetypes "
                                  "WHERE companyid IS NULL ORDER BY ratetypeid LIMIT 1")[0][0]
     return query(tenant, """
         INSERT INTO payroll.driverrates
-            (companyid, branchid, driverid, ratetypeid, amount, effectivefrom)
+            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom)
         VALUES (%s, %s, %s, %s, 15, DATE '2000-01-01') RETURNING driverrateid
-    """, (tenant.company_id, tenant.branch_a, driver_id, rate_type_id))[0][0]
+    """, (tenant.company_id, tenant.branch_a, driver_assignment_id, rate_type_id))[0][0]
 
 
 async def test_a_driver_rate_used_by_a_final_line_cannot_be_voided_changed_or_deleted(
@@ -281,7 +283,7 @@ async def test_a_driver_rate_used_by_a_final_line_cannot_be_voided_changed_or_de
         with conn.cursor() as cur:
             cur.execute("SELECT set_config('app.allow_payroll_final_line_insert', 'true', true)")
             cur.execute(INSERT,
-                        (tenant.driver_a, period_id))
+                        (tenant.driver_a, tenant.driver_a, period_id))
             cur.execute("UPDATE payroll.payrollfinallines SET driverrateid = %s "
                         "WHERE payrollperiodid = %s", (used, period_id))
         conn.commit()
