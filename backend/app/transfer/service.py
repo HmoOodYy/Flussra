@@ -16,7 +16,7 @@ Transfer lifecycle:
   approve_source → PendingTargetApproval
                    (accepts PendingSourceApproval OR Returned status)
   decide_target  → Approved | Rejected | Returned
-  complete       → Completed  (EffectiveAt NULL: the database NOW() is the boundary; the
+  complete       → Completed  (EffectiveAt NULL: the decision instant is the boundary; the
                                source assignment closes and the destination opens at it)
                  → Scheduled  (future EffectiveAt: both windows are materialized now and
                                currentness switches at EffectiveAt by time alone)
@@ -30,6 +30,9 @@ Scheduled request reads as Completed once its EffectiveAt has been reached.
 
 Lock order: Employee → transfer request → the Driver's assignments (ascending) →
 Branch workflow advisory locks (ascending BranchID) → PayrollPeriod rows (ascending).
+Every future/past decision of complete, cancel and reschedule uses one wall-clock
+instant (``decision_instant``) read after those locks, never the transaction-start NOW().
+A terminated Employee's Scheduled transfer can no longer be cancelled or rescheduled.
 
 P1 scope rules:
   - DRIVER/Self users may call create only for their own Driver with initiated_by='Driver'.
@@ -71,7 +74,7 @@ from app.transfer.schemas import (
 )
 from app.workforce import audit as workforce_audit
 from app.workforce.effective import resolve_effective_driver_assignment
-from app.workforce.ops import workforce_operation
+from app.workforce.ops import decision_instant, workforce_operation
 from app.workforce.projection import sync_employee_branch_projection
 
 log = logging.getLogger(__name__)
@@ -139,14 +142,25 @@ async def _get_transfer_or_404(
     transfer_request_id: int,
     company_id: int,
     db: AsyncConnection,
+    *,
+    at: datetime | None = None,
 ) -> dict:
+    """Load one request; ``at`` evaluates the effective status at a decision instant."""
+    select = _TRANSFER_SELECT
+    params: dict = {"tid": transfer_request_id, "cid": company_id}
+    if at is not None:
+        select = select.replace(
+            "core.fn_DriverTransferStatus(dtr.status, dtr.effectiveat) AS status",
+            "core.fn_DriverTransferStatus(dtr.status, dtr.effectiveat, CAST(:at AS TIMESTAMPTZ)) AS status",
+        )
+        params["at"] = at
     result = await db.execute(
         text(f"""
-            {_TRANSFER_SELECT}
+            {select}
             WHERE  dtr.transferrequestid = :tid
               AND  dtr.companyid         = :cid
         """),
-        {"tid": transfer_request_id, "cid": company_id},
+        params,
     )
     row = result.mappings().first()
     if row is None:
@@ -673,15 +687,27 @@ async def complete_driver_transfer(
     """Complete an Approved transfer in one transaction.
 
     The same source-close and destination-open windows are materialized in both
-    cases: an immediate request (EffectiveAt NULL) switches at database NOW() and is
-    Completed; a future EffectiveAt leaves the destination pending and the request
+    cases: an immediate request (EffectiveAt NULL) switches at the decision instant and
+    is Completed; a future EffectiveAt leaves the destination pending and the request
     Scheduled until that instant.
+
+    Closing the source removes its coverage from the boundary onward, so every
+    PayrollPeriod overlapping that interval is locked (lock-only: no period state
+    blocks a completion) before any window changes, and the source's payroll facts are
+    verified against the new window under those locks.
     """
+    from app.payroll.eligibility import (
+        BoundaryWindow,
+        append_driver_assignment_to_editable_periods,
+        assert_assignment_payroll_covered,
+        lock_boundary_periods,
+    )
+
     await require_non_driver_subject(company_id, user_id, db)
 
     _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
-    if row["status"] != "Approved":
+    if row["stored_status"] != "Approved":
         raise HTTPException(
             status_code=422,
             detail=f"Request is '{row['status']}', not Approved.",
@@ -707,21 +733,31 @@ async def complete_driver_transfer(
             detail="Transfer source is no longer available for completion.",
         )
 
+    # Lock every period the source loses coverage in, before anything changes. An
+    # immediate boundary is the decision instant, which is never before the
+    # transaction start, so the transaction start bounds the interval from below.
+    lower_bound = row["effectiveat"]
+    if lower_bound is None:
+        lower_bound = (await db.execute(text("SELECT NOW()"))).scalar_one()
+    await lock_boundary_periods(
+        company_id,
+        [BoundaryWindow(row["sourcebranchid"], lower_bound, None),
+         BoundaryWindow(row["targetbranchid"], lower_bound, None)],
+        db,
+        lock_only=True,
+    )
+    decided_at = await decision_instant(db)
+
     employee_id = source["employeeid"]
-    current = await resolve_effective_driver_assignment(company_id, row["driverid"], None, db)
+    current = await resolve_effective_driver_assignment(company_id, row["driverid"], decided_at, db)
     if current is None or current["driverassignmentid"] != source["driverassignmentid"]:
         raise HTTPException(status_code=409, detail="Transfer source is no longer current.")
 
-    boundary_result = await db.execute(text("""
-        SELECT COALESCE(:requested_at, NOW()) AS boundary,
-               (:requested_at IS NULL OR :requested_at > NOW()) AS schedule_valid,
-               COALESCE(:requested_at, NOW()) > NOW() AS boundary_future
-    """), {"requested_at": row["effectiveat"]})
-    boundary_row = boundary_result.mappings().one()
-    effective_at = boundary_row["boundary"]
-    is_future = bool(boundary_row["boundary_future"])
-    if not boundary_row["schedule_valid"]:
+    requested_at = row["effectiveat"]
+    if requested_at is not None and requested_at <= decided_at:
         raise HTTPException(status_code=409, detail="Scheduled transfer time has expired.")
+    effective_at = requested_at if requested_at is not None else decided_at
+    is_future = requested_at is not None
     if effective_at <= source["effectivefromat"]:
         raise HTTPException(status_code=409, detail="Transfer instant precedes the source assignment window.")
     pending_result = await db.execute(
@@ -729,7 +765,7 @@ async def complete_driver_transfer(
             SELECT 1 FROM core.DriverAssignments
             WHERE CompanyID = :company_id AND DriverID = :driver_id
               AND DriverAssignmentID <> :source_assignment_id
-              AND EffectiveFromAt > NOW()
+              AND EffectiveFromAt > :decided_at
               AND (EffectiveToAt IS NULL OR EffectiveToAt > EffectiveFromAt)
             LIMIT 1
         """),
@@ -737,6 +773,7 @@ async def complete_driver_transfer(
             "company_id": company_id,
             "driver_id": row["driverid"],
             "source_assignment_id": source["driverassignmentid"],
+            "decided_at": decided_at,
         },
     )
     if pending_result.first() is not None:
@@ -773,14 +810,9 @@ async def complete_driver_transfer(
         },
     )
     new_assignment_id: int = new_assignment_ins.scalar_one()
-    from app.payroll.eligibility import append_driver_assignment_to_editable_periods
 
-    await append_driver_assignment_to_editable_periods(
-        company_id, row["targetbranchid"], new_assignment_id, user_id, db,
-    )
-
-    # Close the source: an open assignment ends at NOW() or a later instant, so no
-    # workforce operation is needed.
+    # Close the source: an open assignment ends at the decision instant or later, so
+    # no workforce operation is needed.
     source_closed = await db.execute(
         text("""
             UPDATE core.DriverAssignments
@@ -798,6 +830,15 @@ async def complete_driver_transfer(
     )
     if source_closed.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="Transfer source changed; refresh and retry.")
+
+    # The source no longer covers WorkDates from the boundary onward; none of its
+    # payroll facts may sit there (period rows are locked, so this cannot race a writer).
+    await assert_assignment_payroll_covered(
+        company_id, row["sourcebranchid"], source["driverassignmentid"], db,
+    )
+    await append_driver_assignment_to_editable_periods(
+        company_id, row["targetbranchid"], new_assignment_id, user_id, db,
+    )
 
     if is_future:
         request_updated = await db.execute(
@@ -835,7 +876,7 @@ async def complete_driver_transfer(
         raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
 
     _, new_employee_branch = await sync_employee_branch_projection(
-        company_id, employee_id, None, db,
+        company_id, employee_id, decided_at, db,
     )
     projection_changed = new_employee_branch != old_employee_branch
     await workforce_audit.write_workforce_audit(
@@ -867,87 +908,24 @@ async def complete_driver_transfer(
     return _row_to_response(row)
 
 
-async def _cancel_scheduled_transfer(
-    company_id: int,
-    user_id: int,
-    row: dict,
-    cancel_reason: str | None,
-    db: AsyncConnection,
-) -> None:
-    """Undo the materialized windows of a Scheduled transfer that has not yet taken effect.
+def _employee_terminated_conflict() -> HTTPException:
+    return HTTPException(status_code=409, detail={
+        "code": "TRANSFER_EMPLOYEE_TERMINATED",
+        "message": "The Employee is terminated. A scheduled transfer can no longer be "
+                   "cancelled or rescheduled; it takes effect at its EffectiveAt.",
+    })
 
-    The request is cancelled and detached from the destination first, because the
-    destination assignment is deleted and a Cancelled request keeps no destination.
-    """
-    from app.payroll.eligibility import (
-        BoundaryWindow,
-        assignment_eligibility_in_noneditable_period,
-        assignment_payroll_fact_exists,
-        delete_assignment_eligibility_rows,
-        lock_boundary_periods,
-        recapture_assignment_eligibility,
-    )
 
-    source_id = row["sourcedriverassignmentid"]
-    destination_id = row["destinationdriverassignmentid"]
-    effective_at = row["effectiveat"]
-    periods = await lock_boundary_periods(
-        company_id,
-        [
-            BoundaryWindow(row["sourcebranchid"], effective_at, None),
-            BoundaryWindow(row["targetbranchid"], effective_at, None),
-        ],
-        db,
-    )
-    if await assignment_payroll_fact_exists(company_id, destination_id, db):
-        raise HTTPException(status_code=409, detail={
-            "code": "TRANSFER_DESTINATION_HAS_PAYROLL_FACTS",
-            "message": "The destination Driver assignment already has payroll facts; the transfer cannot be cancelled.",
-        })
-    if await assignment_eligibility_in_noneditable_period(company_id, destination_id, db):
-        raise HTTPException(status_code=409, detail={
-            "code": "TRANSFER_DESTINATION_IN_LOCKED_PERIOD",
-            "message": "The destination Driver assignment is on the roster of a period past Draft, Open or Returned.",
-        })
-    now = _now_utc()
-    changed = await db.execute(
+async def _employee_is_terminated(company_id: int, employee_id: int, db: AsyncConnection) -> bool:
+    result = await db.execute(
         text("""
-            UPDATE core.drivertransferrequests
-            SET    status                        = 'Cancelled',
-                   destinationdriverassignmentid = NULL,
-                   cancelledatutc                = :now,
-                   cancelledbyuserid             = :uid,
-                   cancelreason                  = :reason,
-                   updatedatutc                  = :now
-            WHERE  transferrequestid = :tid AND status = 'Scheduled'
-            RETURNING transferrequestid
+            SELECT EmploymentStatus = 'Terminated'
+            FROM core.Employees
+            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
         """),
-        {"now": now, "uid": user_id, "reason": cancel_reason,
-         "tid": row["transferrequestid"]},
+        {"company_id": company_id, "employee_id": employee_id},
     )
-    if changed.scalar_one_or_none() is None:
-        raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
-    async with workforce_operation(db, "transfer_cancel"):
-        await delete_assignment_eligibility_rows(company_id, destination_id, db)
-        await db.execute(
-            text("""
-                UPDATE core.DriverAssignments
-                SET    EffectiveToAt = NULL, EndReason = NULL,
-                       TransferredToAssignmentID = NULL, UpdatedAtUtc = NOW()
-                WHERE  DriverAssignmentID = :source_id AND CompanyID = :company_id
-            """),
-            {"source_id": source_id, "company_id": company_id},
-        )
-        await db.execute(
-            text("""
-                DELETE FROM core.DriverAssignments
-                WHERE DriverAssignmentID = :destination_id AND CompanyID = :company_id
-            """),
-            {"destination_id": destination_id, "company_id": company_id},
-        )
-    await recapture_assignment_eligibility(
-        company_id, row["sourcebranchid"], source_id, periods, user_id, db,
-    )
+    return bool(result.scalar_one())
 
 
 async def cancel_driver_transfer(
@@ -961,28 +939,74 @@ async def cancel_driver_transfer(
     Cancel an in-flight (non-terminal) transfer request.
 
     A Scheduled request can be cancelled only while its EffectiveAt is still in the
-    future (database time, under lock); that deletes the never-effective destination
-    assignment and reopens the source.
+    future at the decision instant, which is read once after every lock (Employee,
+    request, the Driver's assignments, Branch workflow advisory, period rows) is held.
+    That disposes of the never-effective destination assignment and reopens the source.
+    A terminated Employee's Scheduled transfer can no longer be cancelled: termination
+    is authoritative and the transfer takes effect at its EffectiveAt.
     Requires drivers.edit on source or target branch.
     DRIVER/Self users are blocked.
     """
+    from app.payroll.eligibility import (
+        BoundaryWindow,
+        lock_boundary_periods,
+        recapture_assignment_eligibility,
+    )
+    from app.transfer.disposal import dispose_scheduled_transfer
+
     await require_non_driver_subject(company_id, user_id, db)
 
     employee_id, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
-    if row["status"] in _TERMINAL:
+    stored_status = row["stored_status"]
+    if stored_status in _TERMINAL:
         raise HTTPException(
             status_code=422,
-            detail=f"Request is already '{row['status']}' and cannot be cancelled.",
+            detail=f"Request is already '{stored_status}' and cannot be cancelled.",
         )
 
     await _require_edit_on_source_or_target(
         company_id, user_id, row, db, action="cancel",
     )
 
-    stored_status = row["stored_status"]
     if stored_status == "Scheduled":
-        await _cancel_scheduled_transfer(company_id, user_id, row, data.cancel_reason, db)
+        if await _employee_is_terminated(company_id, employee_id, db):
+            raise _employee_terminated_conflict()
+        periods = await lock_boundary_periods(
+            company_id,
+            [BoundaryWindow(row["sourcebranchid"], row["effectiveat"], None),
+             BoundaryWindow(row["targetbranchid"], row["effectiveat"], None)],
+            db,
+        )
+        decided_at = await decision_instant(db)
+        if row["effectiveat"] <= decided_at:
+            raise HTTPException(
+                status_code=422,
+                detail="Request is already 'Completed' and cannot be cancelled.",
+            )
+        await dispose_scheduled_transfer(
+            company_id=company_id, user_id=user_id, request=row,
+            cancel_reason=data.cancel_reason, source_cap=None, db=db,
+        )
+        await recapture_assignment_eligibility(
+            company_id, row["sourcebranchid"], row["sourcedriverassignmentid"],
+            periods, user_id, db,
+        )
+        await sync_employee_branch_projection(company_id, employee_id, None, db)
+        await workforce_audit.write_workforce_audit(
+            db,
+            company_id=company_id,
+            branch_id=row["sourcebranchid"],
+            actor_user_id=user_id,
+            action_code="DRIVER_TRANSFER_CANCELLED",
+            entity_name="DriverTransferRequests",
+            entity_id=transfer_request_id,
+            old_value={"status": "Scheduled", "effective_at": row["effectiveat"],
+                       "destination_driver_assignment_id": row["destinationdriverassignmentid"]},
+            new_value={"status": "Cancelled",
+                       "source_driver_assignment_id": row["sourcedriverassignmentid"],
+                       "reason": data.cancel_reason},
+        )
     else:
         now = _now_utc()
         changed = await db.execute(
@@ -1006,22 +1030,6 @@ async def cancel_driver_transfer(
         )
         if changed.scalar_one_or_none() is None:
             raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
-    if stored_status == "Scheduled":
-        await sync_employee_branch_projection(company_id, employee_id, None, db)
-        await workforce_audit.write_workforce_audit(
-            db,
-            company_id=company_id,
-            branch_id=row["sourcebranchid"],
-            actor_user_id=user_id,
-            action_code="DRIVER_TRANSFER_CANCELLED",
-            entity_name="DriverTransferRequests",
-            entity_id=transfer_request_id,
-            old_value={"status": "Scheduled", "effective_at": row["effectiveat"],
-                       "destination_driver_assignment_id": row["destinationdriverassignmentid"]},
-            new_value={"status": "Cancelled",
-                       "source_driver_assignment_id": row["sourcedriverassignmentid"],
-                       "reason": data.cancel_reason},
-        )
     row = await _get_transfer_or_404(transfer_request_id, company_id, db)
     return _row_to_response(row)
 
@@ -1036,17 +1044,22 @@ async def reschedule_driver_transfer(
     """Change a request's EffectiveAt to another future instant.
 
     Before completion only the request changes. For a Scheduled request, which is
-    allowed only while its current EffectiveAt is still future, the source end and the
-    destination start move together and the destination assignment keeps its id.
+    allowed only while its current EffectiveAt is still future at the decision instant,
+    the source end and the destination start move together and the destination
+    assignment keeps its id. The decision instant is read once after every lock is held.
+    A terminated Employee's Scheduled transfer can no longer be rescheduled.
     """
+    from app.payroll.eligibility import BoundaryWindow, lock_boundary_periods
+
     await require_non_driver_subject(company_id, user_id, db)
 
-    _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
+    employee_id, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
 
-    if row["status"] in _TERMINAL:
+    stored_status = row["stored_status"]
+    if stored_status in _TERMINAL:
         raise HTTPException(
             status_code=422,
-            detail=f"Request is already '{row['status']}' and cannot be rescheduled.",
+            detail=f"Request is already '{stored_status}' and cannot be rescheduled.",
         )
 
     await _require_edit_on_source_or_target(
@@ -1054,7 +1067,24 @@ async def reschedule_driver_transfer(
     )
 
     new_effective_at = data.effective_at
-    if not await _db_instant_is_future(new_effective_at, db):
+    periods: list[dict] = []
+    if stored_status == "Scheduled":
+        if await _employee_is_terminated(company_id, employee_id, db):
+            raise _employee_terminated_conflict()
+        low, high = sorted((row["effectiveat"], new_effective_at))
+        periods = await lock_boundary_periods(
+            company_id,
+            [BoundaryWindow(row["sourcebranchid"], low, high),
+             BoundaryWindow(row["targetbranchid"], low, high)],
+            db,
+        )
+    decided_at = await decision_instant(db)
+    if stored_status == "Scheduled" and row["effectiveat"] <= decided_at:
+        raise HTTPException(
+            status_code=422,
+            detail="Request is already 'Completed' and cannot be rescheduled.",
+        )
+    if new_effective_at <= decided_at:
         raise HTTPException(status_code=422, detail="Rescheduled transfer time must be in the future.")
     start_result = await db.execute(
         text("""
@@ -1068,9 +1098,9 @@ async def reschedule_driver_transfer(
         raise HTTPException(status_code=422, detail="Transfer time must be after the source assignment start instant.")
 
     old_effective_at = row["effectiveat"]
-    if row["stored_status"] == "Scheduled":
+    if stored_status == "Scheduled":
         await _reschedule_scheduled_transfer(
-            company_id, user_id, row, new_effective_at, db,
+            company_id, user_id, row, new_effective_at, periods, db,
         )
 
     changed = await db.execute(
@@ -1082,7 +1112,7 @@ async def reschedule_driver_transfer(
             RETURNING transferrequestid
         """),
         {"effective_at": new_effective_at, "tid": transfer_request_id,
-         "old_status": row["stored_status"]},
+         "old_status": stored_status},
     )
     if changed.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
@@ -1094,8 +1124,8 @@ async def reschedule_driver_transfer(
         action_code="DRIVER_TRANSFER_RESCHEDULED",
         entity_name="DriverTransferRequests",
         entity_id=transfer_request_id,
-        old_value={"status": row["stored_status"], "effective_at": old_effective_at},
-        new_value={"status": row["stored_status"], "effective_at": new_effective_at,
+        old_value={"status": stored_status, "effective_at": old_effective_at},
+        new_value={"status": stored_status, "effective_at": new_effective_at,
                    "source_driver_assignment_id": row["sourcedriverassignmentid"],
                    "destination_driver_assignment_id": row["destinationdriverassignmentid"]},
     )
@@ -1108,27 +1138,17 @@ async def _reschedule_scheduled_transfer(
     user_id: int,
     row: dict,
     new_effective_at: datetime,
+    periods: list[dict],
     db: AsyncConnection,
 ) -> None:
+    """Move both boundaries; ``periods`` are the already-locked editable periods."""
     from app.payroll.eligibility import (
-        BoundaryWindow,
         assert_assignment_payroll_covered,
-        lock_boundary_periods,
         recapture_assignment_eligibility,
     )
 
     source_id = row["sourcedriverassignmentid"]
     destination_id = row["destinationdriverassignmentid"]
-    old_effective_at = row["effectiveat"]
-    low, high = sorted((old_effective_at, new_effective_at))
-    periods = await lock_boundary_periods(
-        company_id,
-        [
-            BoundaryWindow(row["sourcebranchid"], low, high),
-            BoundaryWindow(row["targetbranchid"], low, high),
-        ],
-        db,
-    )
     async with workforce_operation(db, "transfer_reschedule"):
         await db.execute(
             text("""

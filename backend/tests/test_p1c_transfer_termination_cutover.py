@@ -640,38 +640,39 @@ async def test_termination_before_scheduled_transfer_cancels_it_and_keeps_histor
     )
     assert term.status_code == 200, term.text
     assert term.json()["employment_status"] == "Terminated"
-    source, destination = (await direct_db.execute(text("""
-        SELECT DriverAssignmentID, EndReason, EffectiveFromAt, EffectiveToAt, TransferredToAssignmentID
-        FROM core.DriverAssignments WHERE DriverAssignmentID IN (:source_id, :destination_id)
-        ORDER BY DriverAssignmentID
-    """), {"source_id": source_id, "destination_id": destination_id})).mappings().all()
-    by_id = {row["driverassignmentid"]: row for row in (source, destination)}
-    assert by_id[source_id]["endreason"] == "Terminated"
+    assert term.json()["cancelled_transfer_request_ids"] == [request["transfer_request_id"]]
     termination_cutoff = await branch_boundary(
         direct_db, paytest_branch_id, today + timedelta(days=1),
     )
-    assert by_id[source_id]["effectivetoat"] == termination_cutoff
-    assert by_id[source_id]["effectivefromat"] == old_source["effectivefromat"]
-    assert by_id[source_id]["transferredtoassignmentid"] == destination_id
-    assert by_id[destination_id]["endreason"] == "Terminated"
-    assert by_id[destination_id]["effectivetoat"] == future_at
-    assert by_id[destination_id]["effectivefromat"] == future_at  # an empty, never-effective window
+    source = (await direct_db.execute(text("""
+        SELECT DriverAssignmentID, EndReason, EffectiveFromAt, EffectiveToAt, TransferredToAssignmentID
+        FROM core.DriverAssignments WHERE DriverAssignmentID = :source_id
+    """), {"source_id": source_id})).mappings().one()
+    assert source["endreason"] == "Terminated"
+    assert source["effectivetoat"] == termination_cutoff
+    assert source["effectivefromat"] == old_source["effectivefromat"]
+    assert source["transferredtoassignmentid"] is None
+    # The never-effective destination is disposed of, not kept as an empty window, and
+    # its roster row (here in a Cancelled period) goes with it.
+    assert (await direct_db.execute(text(
+        "SELECT COUNT(*) FROM core.DriverAssignments WHERE DriverAssignmentID = :id"
+    ), {"id": destination_id})).scalar_one() == 0
+    assert (await direct_db.execute(text(
+        "SELECT COUNT(*) FROM payroll.PayrollPeriodDriverEligibility WHERE DriverAssignmentID = :id"
+    ), {"id": destination_id})).scalar_one() == 0
     assert await resolve_effective_driver_assignment(
         1, driver_id, await branch_boundary(direct_db, paytest_branch_id, today), direct_db,
     )
     assert await resolve_effective_driver_assignment(1, driver_id, termination_cutoff, direct_db) is None
-    from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
-    with pytest.raises(HTTPException) as bonus_rejected:
-        await _assert_driver_eligible_for_period_via_snapshot(
-            1, hq_branch_id, destination_period_id, destination_id, direct_db,
-        )
-    assert bonus_rejected.value.status_code == 422
-    assert "not eligible for new Bonus" in bonus_rejected.value.detail
-    # A Scheduled transfer at or after the termination cap can never take effect: Cancelled.
+    assert await resolve_effective_driver_assignment(1, driver_id, future_at, direct_db) is None
+    # A Scheduled transfer at or after the termination cap can never take effect: Cancelled
+    # with no destination.
     request_state = (await direct_db.execute(text(
-        "SELECT Status, CancelReason FROM core.DriverTransferRequests WHERE TransferRequestID = :id"
+        "SELECT Status, CancelReason, DestinationDriverAssignmentID FROM core.DriverTransferRequests "
+        "WHERE TransferRequestID = :id"
     ), {"id": request["transfer_request_id"]})).mappings().one()
     assert request_state["status"] == "Cancelled"
+    assert request_state["destinationdriverassignmentid"] is None
     assert "terminated" in request_state["cancelreason"].lower()
     frozen_eligibility = (await direct_db.execute(text("""
         SELECT DriverStatusSnapshot, EndReasonSnapshot, TerminationDateSnapshot,
@@ -693,7 +694,7 @@ async def test_termination_before_scheduled_transfer_cancels_it_and_keeps_histor
           AND ActionCode = 'DRIVER_EMPLOYEE_TERMINATED'
         ORDER BY AuditID DESC LIMIT 1
     """), {"id": str(employee_id)})).scalar_one()
-    assert "End of employment" in audit and str(destination_id) in audit
+    assert "End of employment" in audit and str(request["transfer_request_id"]) in audit
 
 
 @pytest.mark.asyncio

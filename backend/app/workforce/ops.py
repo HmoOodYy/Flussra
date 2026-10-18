@@ -2,11 +2,24 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 WORKFORCE_OPERATIONS = frozenset({"terminate", "transfer_cancel", "transfer_reschedule"})
+
+
+async def decision_instant(db: AsyncConnection) -> datetime:
+    """The one wall-clock instant an operation uses for every future/past decision.
+
+    ``NOW()`` is the transaction start: an operation that waited on the Employee,
+    request, Branch or period lock would judge a boundary that has passed meanwhile as
+    still in the future. Read this once, after every lock is held, and use it for every
+    decision of the operation. The DriverAssignment history trigger reads the clock
+    itself later, so the database is at least as strict as this decision.
+    """
+    return (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
 
 
 @asynccontextmanager

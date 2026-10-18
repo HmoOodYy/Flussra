@@ -132,3 +132,9 @@ class EmployeeSummary(BaseModel):
 class EmployeeDetail(EmployeeSummary):
     driver_assignments: list[DriverAssignmentSummary] = Field(default_factory=list)
     linked_user: UserSummary | None = None
+
+
+class EmployeeTerminationResult(EmployeeDetail):
+    """The terminated Employee plus the transfer requests the termination cancelled."""
+
+    cancelled_transfer_request_ids: list[int] = Field(default_factory=list)

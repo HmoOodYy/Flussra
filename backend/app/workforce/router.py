@@ -14,6 +14,7 @@ from app.workforce.schemas import (
     EmployeeDetail,
     EmployeeSummary,
     EmployeeTermination,
+    EmployeeTerminationResult,
     EmployeeUpdate,
 )
 
@@ -60,13 +61,13 @@ async def update_employee(
     return await service.update_employee(int(token["cid"]), int(token["sub"]), employee_id, body, db)
 
 
-@router.post("/employees/{employee_id}/terminate", response_model=EmployeeDetail)
+@router.post("/employees/{employee_id}/terminate", response_model=EmployeeTerminationResult)
 async def terminate_employee(
     employee_id: int,
     body: EmployeeTermination,
     token: TokenDep,
     db: DbDep,
-) -> EmployeeDetail:
+) -> EmployeeTerminationResult:
     return await service.terminate_driver_employee(
         int(token["cid"]), int(token["sub"]), employee_id, body, db,
     )

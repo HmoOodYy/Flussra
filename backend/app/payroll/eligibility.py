@@ -500,13 +500,25 @@ async def lock_boundary_periods(
     company_id: int,
     windows: list[BoundaryWindow],
     db: AsyncConnection,
+    *,
+    lock_only: bool = False,
 ) -> list[dict]:
     """Lock Branch workflow and PayrollPeriod rows touched by a boundary change.
 
     Lock order: Branch workflow advisory locks in ascending BranchID, then every
-    overlapping PayrollPeriod row in ascending PayrollPeriodID. A period in any
-    state other than Draft, Open or Returned that overlaps a window makes the
-    whole operation refuse with 409; nothing in such a period is ever rewritten.
+    overlapping PayrollPeriod row in ascending PayrollPeriodID. This is what makes a
+    coverage-shrinking operation wait for an in-flight source writer (which holds the
+    period row) and what makes a later writer re-check its eligibility against the
+    changed window.
+
+    Strict mode (cancel, reschedule): a period in review, approved, locked or archived
+    state that overlaps a window makes the whole operation refuse with 409; nothing in
+    such a period is ever rewritten, and only the Draft, Open and Returned periods are
+    returned for re-capture. A Cancelled period never carries submissions or evidence
+    (it is reachable only from Draft or Open), so it neither blocks nor is re-captured.
+
+    Lock-only mode (transfer complete, termination): every overlapping period is locked
+    and returned, and no state blocks the operation.
     """
     for branch_id in sorted({window.branch_id for window in windows}):
         await acquire_branch_workflow_lock(company_id, branch_id, db)
@@ -531,6 +543,9 @@ async def lock_boundary_periods(
         FOR UPDATE OF pp
     """), params)
     periods = [dict(row) for row in rows.mappings().all()]
+    if lock_only:
+        return periods
+    periods = [p for p in periods if p["status"] != "Cancelled"]
     blocking = [p for p in periods if p["status"] not in SOURCE_ENTRY_STATUSES]
     if blocking:
         raise HTTPException(status_code=409, detail={
@@ -610,13 +625,18 @@ async def assignment_eligibility_in_noneditable_period(
     driver_assignment_id: int,
     db: AsyncConnection,
 ) -> bool:
-    """Whether the assignment has an eligibility row in a period past Draft/Open/Returned."""
+    """Whether the assignment has an eligibility row in a period past Draft/Open/Returned.
+
+    A Cancelled period never blocks: it carries no submission or evidence and its roster
+    rows are deleted together with the editable ones when the assignment is disposed of.
+    """
     result = await db.execute(text("""
         SELECT EXISTS (
             SELECT 1
             FROM payroll.PayrollPeriodDriverEligibility pde
             JOIN payroll.PayrollPeriods pp ON pp.PayrollPeriodID = pde.PayrollPeriodID
             WHERE pde.CompanyID = :company_id AND pde.DriverAssignmentID = :aid
+              AND pp.Status <> 'Cancelled'
               AND NOT (pp.Status = ANY(:statuses))
         )
     """), {"company_id": company_id, "aid": driver_assignment_id,

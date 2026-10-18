@@ -15,7 +15,7 @@ from app.workforce.effective import (
     VISIBLE_ASSIGNMENT_JOIN,
     resolve_effective_employee_assignment,
 )
-from app.workforce.ops import workforce_operation
+from app.workforce.ops import decision_instant, workforce_operation
 from app.workforce.projection import (
     sync_company_employee_branch_projections,
     sync_employee_branch_projection,
@@ -29,6 +29,7 @@ from app.workforce.schemas import (
     EmployeeDetail,
     EmployeeSummary,
     EmployeeTermination,
+    EmployeeTerminationResult,
     EmployeeUpdate,
     UserSummary,
 )
@@ -656,8 +657,23 @@ async def terminate_driver_employee(
     employee_id: int,
     data: EmployeeTermination,
     db: AsyncConnection,
-) -> EmployeeDetail:
-    """Terminate employment and close each assignment at its Branch-local day end."""
+) -> EmployeeTerminationResult:
+    """Terminate employment and close each assignment at its Branch-local day end.
+
+    Termination is authoritative over future-effective transfers. A Scheduled transfer
+    whose EffectiveAt is at or after the source's termination cutoff is disposed of
+    through the same routine a transfer cancel uses: the request becomes Cancelled with
+    no destination, the never-effective destination assignment is deleted, and the source
+    ends at its own cutoff as Terminated. A Scheduled transfer that takes effect before
+    the cutoff survives and its destination is capped like any other assignment.
+
+    Lock order: Employee, transfer requests, the Driver's assignments (ascending), Branch
+    workflow advisory locks (ascending), PayrollPeriod rows (ascending); the decision
+    instant is read once after all of them.
+    """
+    from app.payroll.eligibility import BoundaryWindow, lock_boundary_periods
+    from app.transfer.disposal import dispose_scheduled_transfer
+
     employee_result = await db.execute(text("""
         SELECT EmployeeID, BranchID, EmploymentStatus, TerminationDate, HireDate
         FROM core.Employees
@@ -677,22 +693,31 @@ async def terminate_driver_employee(
         raise HTTPException(status_code=422, detail="This operation requires a Driver.")
     driver_id = driver["driverid"]
 
-    # Canonical order: Employee, transfer requests, then the Driver's assignments.
+    # Canonical order: Employee, transfer requests, then the Driver's assignments. The
+    # assignments are locked FOR NO KEY UPDATE (like the transfer operations): a payroll
+    # writer holds its period row lock and then takes FOR KEY SHARE on the assignment for
+    # its foreign key, which must not conflict with this lock or the two would deadlock.
     request_result = await db.execute(text("""
-        SELECT TransferRequestID
-        FROM core.DriverTransferRequests
-        WHERE CompanyID = :company_id AND DriverID = :driver_id
-          AND core.fn_DriverTransferStatus(Status, EffectiveAt) NOT IN ('Completed', 'Cancelled', 'Rejected')
-        ORDER BY TransferRequestID FOR UPDATE
-    """), {"company_id": company_id, "driver_id": driver_id})
-    request_ids = [row["transferrequestid"] for row in request_result.mappings().all()]
+        SELECT dtr.TransferRequestID, dtr.Status AS stored_status, dtr.EffectiveAt,
+               dtr.SourceBranchID, dtr.TargetBranchID,
+               dtr.SourceDriverAssignmentID, dtr.DestinationDriverAssignmentID,
+               core.fn_LocalDateBoundary(sb.TimeZoneId, CAST(:termination_date AS DATE) + 1)
+                   AS source_cutoff
+        FROM core.DriverTransferRequests dtr
+        JOIN core.Branches sb ON sb.CompanyID = dtr.CompanyID AND sb.BranchID = dtr.SourceBranchID
+        WHERE dtr.CompanyID = :company_id AND dtr.DriverID = :driver_id
+          AND dtr.Status NOT IN ('Completed', 'Cancelled', 'Rejected')
+        ORDER BY dtr.TransferRequestID FOR UPDATE OF dtr
+    """), {"company_id": company_id, "driver_id": driver_id,
+           "termination_date": data.termination_date})
+    open_requests = [dict(row) for row in request_result.mappings().all()]
 
     assignments_result = await db.execute(text("""
         SELECT DriverAssignmentID, BranchID, EndReason, EffectiveFromAt, EffectiveToAt,
                TransferredFromAssignmentID, TransferredToAssignmentID
         FROM core.DriverAssignments
         WHERE CompanyID = :company_id AND DriverID = :driver_id
-        ORDER BY DriverAssignmentID FOR UPDATE
+        ORDER BY DriverAssignmentID FOR NO KEY UPDATE
     """), {"company_id": company_id, "driver_id": driver_id})
     assignments = [dict(row) for row in assignments_result.mappings().all()]
     if not assignments:
@@ -724,25 +749,93 @@ async def terminate_driver_employee(
     if final_line.first() is not None:
         raise HTTPException(status_code=422, detail="Termination date cannot precede dated finalized payroll activity.")
 
-    closed_ids: list[int] = []
-    cancelled_ids: list[int] = []
-    async with workforce_operation(db, "terminate"):
-        await db.execute(text("""
-            UPDATE core.Employees
-            SET EmploymentStatus = 'Terminated', TerminationDate = :termination_date,
-                UpdatedAtUtc = NOW()
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-        """), {"company_id": company_id, "employee_id": employee_id,
-               "termination_date": data.termination_date})
+    # Branch-local cutoff of the termination date, per Branch the Driver touches.
+    branch_ids = sorted(
+        {a["branchid"] for a in assignments}
+        | {r["sourcebranchid"] for r in open_requests}
+        | {r["targetbranchid"] for r in open_requests}
+    )
+    cutoff_result = await db.execute(text("""
+        SELECT b.BranchID,
+               core.fn_LocalDateBoundary(b.TimeZoneId, CAST(:termination_date AS DATE) + 1) AS cutoff
+        FROM core.Branches b
+        WHERE b.CompanyID = :company_id AND b.BranchID = ANY(:branch_ids)
+    """), {"company_id": company_id, "branch_ids": branch_ids,
+           "termination_date": data.termination_date})
+    cutoffs: dict[int, datetime] = {
+        row["branchid"]: row["cutoff"] for row in cutoff_result.mappings().all()
+    }
 
+    # Capping removes coverage from each Branch's cutoff onward, and disposing of a
+    # Scheduled transfer removes its destination from EffectiveAt onward: lock the
+    # Branch workflow and every overlapping PayrollPeriod before anything changes. No
+    # period state blocks a termination.
+    scheduled_candidates = [
+        r for r in open_requests
+        if r["stored_status"] == "Scheduled" and r["effectiveat"] >= r["source_cutoff"]
+    ]
+    windows = [BoundaryWindow(branch_id, cutoffs[branch_id], None) for branch_id in branch_ids]
+    for request in scheduled_candidates:
+        windows.append(BoundaryWindow(request["sourcebranchid"], request["effectiveat"], None))
+        windows.append(BoundaryWindow(request["targetbranchid"], request["effectiveat"], None))
+    await lock_boundary_periods(company_id, windows, db, lock_only=True)
+    decided_at = await decision_instant(db)
+
+    # A Scheduled transfer still in the future at the decision instant and at or after
+    # the source cutoff can never happen: dispose of it. One whose EffectiveAt has
+    # already passed is effective history and is left to the capping below; one before
+    # the cutoff survives and takes effect at EffectiveAt.
+    disposed = [r for r in scheduled_candidates if r["effectiveat"] > decided_at]
+    cancelled_ids: list[int] = []
+    closed_ids: list[int] = []
+
+    await db.execute(text("""
+        UPDATE core.Employees
+        SET EmploymentStatus = 'Terminated', TerminationDate = :termination_date,
+            UpdatedAtUtc = NOW()
+        WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+    """), {"company_id": company_id, "employee_id": employee_id,
+           "termination_date": data.termination_date})
+
+    reason = f"Cancelled because Employee {employee_id} was terminated on {data.termination_date}."
+    assignments_by_id = {a["driverassignmentid"]: a for a in assignments}
+    for request in disposed:
+        source = assignments_by_id[request["sourcedriverassignmentid"]]
+        cap = max(source["effectivefromat"], request["source_cutoff"])
+        await dispose_scheduled_transfer(
+            company_id=company_id, user_id=user_id, request=request,
+            cancel_reason=reason, source_cap=cap, db=db,
+        )
+        cancelled_ids.append(request["transferrequestid"])
+        closed_ids.append(source["driverassignmentid"])
+
+    # Transfers that have not been scheduled yet are cancelled outright.
+    unscheduled_ids = [r["transferrequestid"] for r in open_requests if r["stored_status"] != "Scheduled"]
+    if unscheduled_ids:
+        cancelled_result = await db.execute(text("""
+            UPDATE core.DriverTransferRequests
+            SET Status = 'Cancelled', CancelledAtUtc = NOW(),
+                CancelledByUserID = :user_id,
+                CancelReason = :reason, UpdatedAtUtc = NOW()
+            WHERE CompanyID = :company_id AND TransferRequestID = ANY(:request_ids)
+              AND Status NOT IN ('Scheduled', 'Completed', 'Cancelled', 'Rejected')
+            RETURNING TransferRequestID
+        """), {"user_id": user_id, "reason": reason, "company_id": company_id,
+               "request_ids": unscheduled_ids})
+        cancelled_ids.extend(row["transferrequestid"] for row in cancelled_result.mappings().all())
+
+    assignments_result = await db.execute(text("""
+        SELECT DriverAssignmentID, BranchID, EndReason, EffectiveFromAt, EffectiveToAt,
+               TransferredFromAssignmentID, TransferredToAssignmentID
+        FROM core.DriverAssignments
+        WHERE CompanyID = :company_id AND DriverID = :driver_id
+        ORDER BY DriverAssignmentID
+    """), {"company_id": company_id, "driver_id": driver_id})
+    assignments = [dict(row) for row in assignments_result.mappings().all()]
+
+    async with workforce_operation(db, "terminate"):
         for assignment in assignments:
-            cutoff_result = await db.execute(text("""
-                SELECT core.fn_LocalDateBoundary(b.TimeZoneId, CAST(:termination_date AS DATE) + 1)
-                FROM core.Branches b
-                WHERE b.CompanyID = :company_id AND b.BranchID = :branch_id
-            """), {"company_id": company_id, "branch_id": assignment["branchid"],
-                   "termination_date": data.termination_date})
-            cutoff = cutoff_result.scalar_one()
+            cutoff = cutoffs[assignment["branchid"]]
             start = assignment["effectivefromat"]
             end = assignment["effectivetoat"]
             if assignment["endreason"] == "Terminated" and end is not None and end <= cutoff:
@@ -759,31 +852,6 @@ async def terminate_driver_employee(
                    "assignment_id": assignment["driverassignmentid"], "effective_to_at": new_end})
             closed_ids.append(assignment["driverassignmentid"])
 
-    # A Scheduled transfer at or after the source's termination cap can no longer
-    # happen and is cancelled; one before the cap stays and takes effect at EffectiveAt.
-    if request_ids:
-        cancelled_result = await db.execute(text("""
-            UPDATE core.DriverTransferRequests dtr
-            SET Status = 'Cancelled', CancelledAtUtc = NOW(),
-                CancelledByUserID = :user_id,
-                CancelReason = :reason, UpdatedAtUtc = NOW()
-            FROM core.Branches sb
-            WHERE dtr.CompanyID = :company_id AND dtr.TransferRequestID = ANY(:request_ids)
-              AND sb.CompanyID = dtr.CompanyID AND sb.BranchID = dtr.SourceBranchID
-              AND core.fn_DriverTransferStatus(dtr.Status, dtr.EffectiveAt) NOT IN ('Completed', 'Cancelled', 'Rejected')
-              AND (dtr.Status <> 'Scheduled'
-                   OR dtr.EffectiveAt >= core.fn_LocalDateBoundary(
-                        sb.TimeZoneId, CAST(:termination_date AS DATE) + 1))
-            RETURNING dtr.TransferRequestID
-        """), {
-            "user_id": user_id,
-            "reason": f"Cancelled because Employee {employee_id} was terminated on {data.termination_date}.",
-            "company_id": company_id,
-            "request_ids": request_ids,
-            "termination_date": data.termination_date,
-        })
-        cancelled_ids = [row["transferrequestid"] for row in cancelled_result.mappings().all()]
-
     await sync_employee_branch_projection(company_id, employee_id, None, db)
     await workforce_audit.write_workforce_audit(
         db, company_id=company_id, branch_id=permission_branch_id, actor_user_id=user_id,
@@ -796,7 +864,10 @@ async def terminate_driver_employee(
                    "closed_driver_assignment_ids": closed_ids,
                    "cancelled_transfer_request_ids": cancelled_ids},
     )
-    return await get_employee(company_id, user_id, employee_id, db, require_view=False)
+    detail = await get_employee(company_id, user_id, employee_id, db, require_view=False)
+    return EmployeeTerminationResult(
+        **detail.model_dump(), cancelled_transfer_request_ids=sorted(cancelled_ids),
+    )
 
 
 async def update_driver(

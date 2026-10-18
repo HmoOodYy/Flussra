@@ -597,7 +597,7 @@ async def test_old_history_stays_on_old_driver_assignment(
                  linetype, workdate, status, sourcetype)
             VALUES
                 (:pid, :cid, :bid, :aid,
-                 'HistoryTest', '2092-01-15', 'Active', 'Manual')
+                 'HistoryTest', '2089-12-31', 'Active', 'Manual')
         """),
         {
             "pid": period_id,
