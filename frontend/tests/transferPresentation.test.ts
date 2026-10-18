@@ -5,6 +5,7 @@ import { FILTER_LABELS, apiError, matchesFilter, normalizeUtcDateTimeLocal, fmtE
 import { buildTimeline } from '../src/pages/people/transfers/transferTimeline.ts';
 import {
   canCancelRequest, canCompleteRequest, canRescheduleRequest, driverLabel, isFutureScheduled,
+  terminationWarning,
 } from '../src/pages/people/transfers/transferActions.ts';
 import { statusKind, statusLabel, TRANSFER_ACTIVE, TRANSFER_TERMINAL } from '../src/types/transfer.ts';
 
@@ -218,4 +219,31 @@ test('transfer identity shows the Driver number, not an assignment or profile id
   assert.equal(driverLabel(request('Approved', 'Driver', { driver_number: null })), 'Casey Driver');
   assert.equal(driverLabel(request('Approved', 'Driver', { driver_name: null })), 'D-0009');
   assert.equal(driverLabel(request('Approved', 'Driver', { driver_name: null, driver_number: null })), 'Driver');
+});
+
+test('a Scheduled transfer warns which termination dates would cancel it, in the source Branch zone', () => {
+  // EffectiveAt is Dec 1 00:00 in New York (05:00Z): the latest cancelling date is Nov 30.
+  const scheduled = request('Scheduled', 'SourceBranch', { effective_at: '2026-12-01T05:00:00Z' });
+  assert.equal(
+    terminationWarning(scheduled, 'America/New_York', NOW),
+    'Terminating this employee with a termination date on or before Nov 30, 2026 will cancel this scheduled transfer.',
+  );
+  // Mid-day EffectiveAt: same local day, same latest cancelling date.
+  const midday = request('Scheduled', 'SourceBranch', { effective_at: '2026-12-01T17:00:00Z' });
+  assert.match(terminationWarning(midday, 'America/New_York', NOW) ?? '', /on or before Nov 30, 2026/);
+  // The Branch-local date differs from the UTC date: 02:00Z on Dec 1 is still Nov 30 in New York.
+  const lateEvening = request('Scheduled', 'SourceBranch', { effective_at: '2026-12-01T02:00:00Z' });
+  assert.match(terminationWarning(lateEvening, 'America/New_York', NOW) ?? '', /on or before Nov 29, 2026/);
+  assert.match(terminationWarning(lateEvening, 'UTC', NOW) ?? '', /on or before Nov 30, 2026/);
+});
+
+test('no termination warning for anything that is not a Scheduled transfer still ahead', () => {
+  const when = { effective_at: '2026-12-01T05:00:00Z' };
+  for (const status of statuses) {
+    if (status === 'Scheduled') continue;
+    assert.equal(terminationWarning(request(status, 'Driver', when), 'UTC', NOW), null, status);
+  }
+  assert.equal(terminationWarning(request('Scheduled', 'Driver', { effective_at: PAST }), 'UTC', NOW), null);
+  assert.equal(terminationWarning(request('Scheduled', 'Driver', when), null, NOW), null);
+  assert.equal(terminationWarning(request('Scheduled', 'Driver', { effective_at: null }), 'UTC', NOW), null);
 });

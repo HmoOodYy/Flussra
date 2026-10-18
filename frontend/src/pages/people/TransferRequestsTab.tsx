@@ -23,7 +23,7 @@ export function TransferRequestsTab({ branches }: Props) {
 
   return (
     <div className={styles.body}>
-      <TransferRequestList st={st} filtered={filtered} dispatch={dispatch} />
+      <TransferRequestList st={st} filtered={filtered} branches={branches} dispatch={dispatch} />
 
       {/* ── Right panel ── */}
       <main className={styles.right}>
@@ -58,6 +58,7 @@ export function TransferRequestsTab({ branches }: Props) {
             canComplete={canActOnEitherBranch}
             canCancel={canActOnEitherBranch}
             canReschedule={canActOnEitherBranch}
+            sourceTimeZoneId={branches.find(b => b.branch_id === selected.source_branch_id)?.time_zone_id}
             actionLoading={st.actionLoading}
             actionError={st.actionError}
             onApproveSource={() => dispatch({ type: 'APPROVE_OPEN' })}

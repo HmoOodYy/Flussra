@@ -1,7 +1,9 @@
 import type { DriverTransferRequest } from '../../../types/transfer';
 import { statusKind, statusLabel, TRANSFER_TERMINAL } from '../../../types/transfer';
 import { fmtDate, fmtDateTime, fmtEffectiveAt } from './transferRequestsView';
-import { canCancelRequest, canCompleteRequest, canRescheduleRequest, driverLabel } from './transferActions';
+import {
+  canCancelRequest, canCompleteRequest, canRescheduleRequest, driverLabel, terminationWarning,
+} from './transferActions';
 import { buildTimeline } from './transferTimeline';
 import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
@@ -13,6 +15,7 @@ interface DetailProps {
   canComplete: boolean;
   canCancel: boolean;
   canReschedule: boolean;
+  sourceTimeZoneId?: string | null;
   actionLoading: boolean;
   actionError: string | null;
   onApproveSource(): void;
@@ -24,7 +27,7 @@ interface DetailProps {
 }
 
 export function TransferDetail({
-  req, canApproveSource, canDecideTarget, canComplete, canCancel, canReschedule, actionLoading, actionError,
+  req, canApproveSource, canDecideTarget, canComplete, canCancel, canReschedule, sourceTimeZoneId, actionLoading, actionError,
   onApproveSource, onDecide, onComplete, onCancel, onReschedule, onClearError,
 }: DetailProps) {
   const isTerminal = TRANSFER_TERMINAL.has(req.status);
@@ -32,6 +35,7 @@ export function TransferDetail({
   // Availability comes from the server-reported status/instant, never a client-derived status.
   const showCancel = canCancel && canCancelRequest(req);
   const showReschedule = canReschedule && canRescheduleRequest(req);
+  const warning = terminationWarning(req, sourceTimeZoneId);
 
   return (
     <div className={styles.detail}>
@@ -99,6 +103,8 @@ export function TransferDetail({
               )}
             </div>
           )}
+
+          {warning && <p className={styles.helpTxt}>{warning}</p>}
 
           {actionError && (
             <div className={trStyles.actionErr}>

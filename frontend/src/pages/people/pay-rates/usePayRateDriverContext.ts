@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
-import type { DriverSummary, Branch } from '../../../types/core';
+import type { DriverSummary, DriverAssignmentInfo, Branch } from '../../../types/core';
 import type { ActiveTab } from './payRatesView';
+import { getDriverAssignments } from './driverAssignmentsApi';
+import { viewedAssignmentId } from './payRatesAssignments';
 
 export function usePayRateDriverContext(user: { company_id?: number } | null) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -18,8 +20,13 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
   const initialDriverAssignmentId = searchParams.get('driverAssignmentId')
     ? parseInt(searchParams.get('driverAssignmentId')!, 10)
     : null;
-  const [selectedDriverAssignmentId, setSelectedDriverAssignmentId] =
+  // The list/URL selects a Driver through its visible assignment; the assignment actually
+  // viewed can be switched to another tenure of the same Driver (ended ones are read-only).
+  const [selectedBaseAssignmentId, setSelectedBaseAssignmentId] =
     useState<number | null>(initialDriverAssignmentId);
+  const [pickedAssignmentId, setPickedAssignmentId] = useState<number | null>(null);
+  const [loadedAssignments, setLoadedAssignments] =
+    useState<{ driverId: number; list: DriverAssignmentInfo[] } | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('current');
   const [noProfile, setNoProfile] = useState(false);
 
@@ -38,7 +45,8 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
           newParams.delete('driverUserId');
           newParams.set('driverAssignmentId', String(data.driver_assignment_id));
           navigate({ search: newParams.toString() }, { replace: true });
-          setSelectedDriverAssignmentId(data.driver_assignment_id);
+          setSelectedBaseAssignmentId(data.driver_assignment_id);
+          setPickedAssignmentId(null);
         }
       })
       .catch(() => setNoProfile(true));
@@ -72,7 +80,8 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
   }, [user?.company_id]);
 
   function selectDriver(driverAssignmentId: number) {
-    setSelectedDriverAssignmentId(driverAssignmentId);
+    setSelectedBaseAssignmentId(driverAssignmentId);
+    setPickedAssignmentId(null);
     setActiveTab('current');
     const newParams = new URLSearchParams(searchParams);
     newParams.set('driverAssignmentId', String(driverAssignmentId));
@@ -92,10 +101,37 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
   });
 
   const selectedDriver =
-    drivers.find((d) => d.driver_assignment_id === selectedDriverAssignmentId) ?? null;
+    drivers.find((d) => d.driver_assignment_id === selectedBaseAssignmentId) ?? null;
+
+  // ── The selected Driver's assignments (only Branches the user may read) ────
+  const selectedDriverId = selectedDriver?.driver_id ?? null;
+  useEffect(() => {
+    if (selectedDriverId == null) return;
+    let cancelled = false;
+    void getDriverAssignments(selectedDriverId)
+      .then((res) => { if (!cancelled) setLoadedAssignments({ driverId: selectedDriverId, list: res.data }); })
+      .catch(() => { if (!cancelled) setLoadedAssignments({ driverId: selectedDriverId, list: [] }); });
+    return () => { cancelled = true; };
+  }, [selectedDriverId]);
+  // Only the selected Driver's list counts; a stale list for another Driver is ignored.
+  const assignments = loadedAssignments != null && loadedAssignments.driverId === selectedDriverId
+    ? loadedAssignments.list
+    : [];
+
+  const selectedDriverAssignmentId = selectedBaseAssignmentId == null
+    ? null
+    : viewedAssignmentId(assignments, pickedAssignmentId, selectedBaseAssignmentId);
+  const viewedAssignment =
+    assignments.find((a) => a.driver_assignment_id === selectedDriverAssignmentId) ?? null;
+
+  function chooseAssignment(driverAssignmentId: number) {
+    setPickedAssignmentId(driverAssignmentId);
+    setActiveTab('current');
+  }
 
   return {
     branches, loadingDrivers, search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter,
-    selectedDriverAssignmentId, activeTab, setActiveTab, noProfile, selectDriver, filteredDrivers, selectedDriver,
+    selectedDriverAssignmentId, selectedBaseAssignmentId, assignments, viewedAssignment, chooseAssignment,
+    activeTab, setActiveTab, noProfile, selectDriver, filteredDrivers, selectedDriver,
   };
 }

@@ -27,12 +27,14 @@ import { StatusRateSection } from './StatusRateSection';
 import { PendingRateChanges } from './PendingRateChanges';
 import { AssignmentHistoryTab, VoidRateDialog } from './AssignmentHistoryTab';
 import { DriverPayRulesTab } from './DriverPayRulesTab';
+import { assignmentLabel, isReadOnlyAssignment } from './payRatesAssignments';
 
 export function PayRatesPage() {
   const { user } = useAuth();
   const driver = usePayRateDriverContext(user);
   const reads = usePayRateReads(driver.selectedDriverAssignmentId);
-  const branchBusinessDate = driver.branches.find((b) => b.branch_id === driver.selectedDriver?.branch_id)?.business_date;
+  const viewedBranchId = driver.viewedAssignment?.branch_id ?? driver.selectedDriver?.branch_id;
+  const branchBusinessDate = driver.branches.find((b) => b.branch_id === viewedBranchId)?.business_date;
   const referenceDate = reads.statusMatrix?.driver_assignment_id === driver.selectedDriverAssignmentId
     ? reads.statusMatrix.as_of
     : branchBusinessDate;
@@ -101,7 +103,11 @@ export function PayRatesPage() {
   const statusPending = (reads.statusMatrix?.groups ?? []).filter((g) => g.pending_rate !== null);
   const pendingCount = pendingRows.length + statusPending.length;
   const futureCount = reads.rows.filter((r) => r.future !== null).length;
-  const canEditMatrix = user && driver.selectedDriver ? canEditPayRates(user, driver.selectedDriver.branch_id) : false;
+  // An ended assignment is history: it stays readable after a transfer but is never edited.
+  const readOnlyAssignment = isReadOnlyAssignment(driver.viewedAssignment);
+  const canEditMatrix = user && viewedBranchId != null && !readOnlyAssignment
+    ? canEditPayRates(user, viewedBranchId)
+    : false;
 
   return (
     <div className={styles.page}>
@@ -118,7 +124,7 @@ export function PayRatesPage() {
           branchFilter={driver.branchFilter} setBranchFilter={driver.setBranchFilter}
           statusFilter={driver.statusFilter} setStatusFilter={driver.setStatusFilter}
           branches={driver.branches} loadingDrivers={driver.loadingDrivers}
-          filteredDrivers={driver.filteredDrivers} selectedDriverAssignmentId={driver.selectedDriverAssignmentId}
+          filteredDrivers={driver.filteredDrivers} selectedDriverAssignmentId={driver.selectedBaseAssignmentId}
           selectDriver={driver.selectDriver}
         />
 
@@ -148,7 +154,27 @@ export function PayRatesPage() {
                 <div className={styles.dHeaderTop}>
                   <div>
                     <p className={styles.dName}>{driver.selectedDriver?.full_name ?? 'Driver'}</p>
-                    <p className={styles.dMeta}>{driver.selectedDriver?.driver_number ?? 'No number'} &middot; {driver.selectedDriver?.branch_name ?? ''}</p>
+                    <p className={styles.dMeta}>{driver.selectedDriver?.driver_number ?? 'No number'} &middot; {driver.viewedAssignment?.branch_name ?? driver.selectedDriver?.branch_name ?? ''}</p>
+                    {driver.assignments.length > 1 && (
+                      <label className={styles.assignmentPicker}>
+                        <span>Assignment</span>
+                        <select
+                          value={driver.selectedDriverAssignmentId ?? ''}
+                          onChange={(e) => driver.chooseAssignment(Number(e.target.value))}
+                        >
+                          {driver.assignments.map((a) => (
+                            <option key={a.driver_assignment_id} value={a.driver_assignment_id}>
+                              {assignmentLabel(a)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    {readOnlyAssignment && (
+                      <p className={styles.readOnlyBanner}>
+                        This assignment has ended. Its rates and pay rules are shown for reference and cannot be changed.
+                      </p>
+                    )}
                     <div className={styles.summaryBadges}>
                       {missingCount > 0 && <span className={styles.missingChip}>{missingCount} missing</span>}
                       {pendingCount > 0 && <span className={styles.pendingBadge}>{pendingCount} pending</span>}

@@ -50,3 +50,15 @@ export interface Branch {
   time_zone_id: string;
   business_date: string;
 }
+
+/** Matches backend core DriverAssignmentSummary — one home-Branch tenure of a Driver. */
+export interface DriverAssignmentInfo {
+  driver_assignment_id: number;
+  driver_id: number;
+  branch_id: number;
+  branch_name: string;
+  effective_from_at: string;
+  effective_to_at: string | null;
+  end_reason: string | null;
+  state: 'current' | 'pending' | 'ended';
+}

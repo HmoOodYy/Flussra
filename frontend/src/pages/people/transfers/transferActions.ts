@@ -1,5 +1,6 @@
 import type { DriverTransferRequest } from '../../../types/transfer.ts';
 import { TRANSFER_TERMINAL } from '../../../types/transfer.ts';
+import { addIsoDays, formatIsoLong } from '../../../lib/isoDate.ts';
 
 /**
  * Which lifecycle actions a request offers, from the server-reported fields only.
@@ -48,4 +49,28 @@ export function driverLabel(
 ): string {
   if (!req.driver_name) return req.driver_number ?? 'Driver';
   return req.driver_number ? `${req.driver_name} (${req.driver_number})` : req.driver_name;
+}
+
+/** The Branch-local calendar date (YYYY-MM-DD) of an instant in an IANA time zone. */
+export function localIsoDate(instantIso: string, timeZoneId: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timeZoneId, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(instantIso));
+}
+
+/**
+ * Warning shown with a Scheduled transfer: a termination whose cutoff (the end of its
+ * termination date in the source Branch) is at or before EffectiveAt cancels it. That is
+ * every termination date up to the day before EffectiveAt's Branch-local date. The
+ * backend stays authoritative; this only tells the user what to expect.
+ */
+export function terminationWarning(
+  req: Pick<DriverTransferRequest, 'status' | 'effective_at'>,
+  sourceTimeZoneId: string | null | undefined,
+  nowMs: number = Date.now(),
+): string | null {
+  if (!sourceTimeZoneId || !req.effective_at || !isFutureScheduled(req, nowMs)) return null;
+  const latest = addIsoDays(localIsoDate(req.effective_at, sourceTimeZoneId), -1);
+  return `Terminating this employee with a termination date on or before ${formatIsoLong(latest)} `
+    + 'will cancel this scheduled transfer.';
 }
