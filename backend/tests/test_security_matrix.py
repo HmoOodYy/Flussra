@@ -352,6 +352,19 @@ async def _make_driver_self_user(
 @pytest.mark.asyncio
 class TestSecurityMatrix:
 
+    async def test_driver_self_cannot_read_timezone_catalog(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+        sm_hq_id: int,
+        sm_driver_role_id: int,
+    ):
+        token = await _make_driver_self_user(
+            session_client, auth_token, sm_driver_role_id, sm_hq_id,
+        )
+        response = await session_client.get("/settings/time-zones", headers=_hdr(token))
+        assert response.status_code == 403
+
     # -----------------------------------------------------------------------
     # 1. DRIVER/Self user cannot access payroll period list/detail/lines/summary
     # -----------------------------------------------------------------------
@@ -1169,8 +1182,8 @@ class TestDriverSelfGenericDenial:
         branch_id = (await direct_db.execute(
             _sqla_text("""
                 INSERT INTO core.branches
-                    (companyid, branchcode, branchname, status, isdefault)
-                SELECT companyid, :code, :name, 'Active', FALSE
+                    (companyid, branchcode, branchname, status, isdefault, timezoneid)
+                SELECT companyid, :code, :name, 'Active', FALSE, 'UTC'
                 FROM core.companies WHERE companycode = 'DEMO'
                 RETURNING branchid
             """),

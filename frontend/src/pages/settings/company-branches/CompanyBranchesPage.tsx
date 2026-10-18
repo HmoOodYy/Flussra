@@ -14,6 +14,7 @@ import { useBranchManagement } from './useBranchManagement';
 import { CompanyProfileCard, CompanyEditDialog } from './CompanyProfileSection';
 import { BranchOverview } from './BranchOverview';
 import { BranchEditorDialog } from './BranchEditorDialog';
+import { EMPTY_FORM, type BranchForm } from './branchForm';
 import { AlertIcon } from './CompanyBranchesIcons';
 import type { ConfirmKind, SuccessInfo } from './companyBranchesPresentation';
 import styles from './CompanyBranchesPage.module.css';
@@ -28,6 +29,7 @@ export function CompanyBranchesPage() {
   const [successInfo, setSuccessInfo] = useState<SuccessInfo | null>(null);
   const [confirmKind, setConfirmKind] = useState<ConfirmKind | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [bForm, setBForm] = useState<BranchForm>(EMPTY_FORM);
 
   const [toast, setToast] = useState<{ msg: string; warn?: boolean } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -37,7 +39,7 @@ export function CompanyBranchesPage() {
     toastTimer.current = setTimeout(() => setToast(null), warn ? 6000 : 3500);
   }, []);
 
-  const onboarding = useBranchOnboarding(modal);
+  const onboarding = useBranchOnboarding(modal, bForm.time_zone_id);
   const company = useCompanyProfile({ user, setUser, setSuccessInfo, setConfirmKind });
   const branches = useBranchManagement({
     modal,
@@ -48,6 +50,8 @@ export function CompanyBranchesPage() {
     setCompany: company.setCompany,
     setSuccessInfo,
     showToast,
+    bForm,
+    setBForm,
   });
 
   async function handleConfirm() {
@@ -195,8 +199,9 @@ export function CompanyBranchesPage() {
         caps={caps}
         settingDefault={branches.settingDefault}
         setConfirmKind={setConfirmKind}
-        bForm={branches.bForm}
-        setBForm={branches.setBForm}
+        bForm={bForm}
+        setBForm={setBForm}
+        timeZones={branches.timeZones}
         onboarding={onboarding}
         bSaveErr={branches.bSaveErr}
         bCreateErr={branches.bCreateErr}

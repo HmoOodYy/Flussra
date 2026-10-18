@@ -159,10 +159,15 @@ async def delete_draft(setup_id: int, draft_id: int, token: TokenDep, db: DbDep)
 
 
 @router.get("/setups/{setup_id}/versions", response_model=list[VersionResponse])
-async def get_versions(setup_id: int, token: TokenDep, db: DbDep):
+async def get_versions(
+    setup_id: int, token: TokenDep, db: DbDep,
+    branch_id: int | None = Query(default=None, gt=0),
+):
     company_id, user_id = int(token["cid"]), int(token["sub"])
     await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
-    return [_version_response(row) for row in await reads.list_versions(company_id, setup_id, db)]
+    return [_version_response(row) for row in await reads.list_versions(
+        company_id, setup_id, db, branch_id=branch_id, user_id=user_id,
+    )]
 
 
 @router.post(

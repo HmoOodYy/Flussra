@@ -2,10 +2,9 @@
 (`reads.list_branch_policy_summaries`): one compact row per Branch showing
 the current and next-scheduled non-withdrawn assignment plus readiness.
 
-`today` (clock.company_today) is stubbed for the direct-call tests, matching
-the pattern in tests/test_payroll_setup_boundary_choices.py; it decides only
-which non-withdrawn assignment is "current" vs "scheduled_change" here, never
-payroll authority itself."""
+Branch business dates are supplied explicitly in direct-call tests. The
+current-versus-scheduled classification is contextual display metadata, not
+payroll authority."""
 
 from __future__ import annotations
 
@@ -19,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.auth.security import create_access_token
-from app.payroll_setup import clock, reads
+from app.payroll_setup import reads
 from app.payroll_setup.payroll_policy import (
     assign_setup,
     create_draft,
@@ -86,10 +85,10 @@ async def _published_setup(
 
 
 def _stub_today(monkeypatch, today: date) -> None:
-    async def _stub(company_id, conn):
+    async def _stub(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub)
+    monkeypatch.setattr(reads, "branch_today", _stub)
 
 
 def _row_for(summaries: list[dict], branch_id: int) -> dict:

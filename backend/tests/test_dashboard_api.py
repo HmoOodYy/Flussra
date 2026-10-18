@@ -31,8 +31,8 @@ BASE = "/dashboard"
 async def paytest_branch_id(session_db_conn) -> int:
     """Use a module-isolated branch for dashboard period-count fixtures."""
     row = (await session_db_conn.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (1, :code, :name, 'Active', FALSE)
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
         RETURNING branchid
     """), {"code": f"M17_{uuid4().hex}", "name": "M17 isolated"})).scalar_one()
     return int(row)
@@ -387,8 +387,8 @@ class TestDashboardLastFinalized:
         # Create temp branch (unique code to avoid conflicts)
         cur.execute(
             """
-            INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-            SELECT companyid, 'NULLTEST', 'Null Test Branch', 'Active', FALSE
+            INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            SELECT companyid, 'NULLTEST', 'Null Test Branch', 'Active', FALSE, 'UTC'
             FROM core.companies WHERE companycode = 'DEMO'
             RETURNING branchid
             """,
@@ -530,8 +530,8 @@ class TestDashboardSetupWarnings:
         # Insert a bare branch — admin has AllCompanyBranches scope so no extra grant needed
         result = await direct_db.execute(
             text("""
-                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-                SELECT companyid, 'M17WARN', 'M17 Warning Branch', 'Active', FALSE
+                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+                SELECT companyid, 'M17WARN', 'M17 Warning Branch', 'Active', FALSE, 'UTC'
                 FROM core.companies WHERE companycode = 'DEMO'
                 RETURNING branchid
             """),

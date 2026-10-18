@@ -9,6 +9,8 @@
 
 **Supersession note (2026-10-02):** The Unified Plan controls current execution sequencing. The amended `PEOPLE_WORKFORCE_ACCESS_ARCHITECTURE_CONTRACT.md` controls DRIVER authorization semantics. Any earlier `OwnDriverDataOnly` branch-projection instruction in this older plan is superseded by generic `Self` scope: no Access BranchID, no branch-membership projection, and ownership through the explicit User–Employee relationship and canonical effective Driver profile. References below to the old scope are retained only as historical implementation/planning evidence or legacy behavior being retired.
 
+**Temporal supersession note (2026-10-18):** This plan records the earlier date-effective transfer and Company-clock design as historical provenance only. The locked temporal amendment in `PEOPLE_WORKFORCE_ACCESS_ARCHITECTURE_CONTRACT.md` replaces Driver assignment DATE intervals and transfer `EffectiveDate` with TIMESTAMPTZ half-open assignment ranges and one transfer `EffectiveAt` instant. Current identity and Employee Branch projection change at that instant. Payroll eligibility is Branch-local WorkDate overlap; a transfer does not split or generate pay. Branch timezone is authoritative; the former Company timezone/business-date clock has been retired.
+
 The locked contract owns semantics. This older plan is a detailed design reference only where it does not conflict with the contract or Unified Plan. It does not select a mechanism that the Lead has left open.
 
 ---

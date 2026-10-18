@@ -2,7 +2,7 @@
  * Pure presentation helpers for the Step 3B-1 Version Planning surface.
  *
  * The versions endpoint is already ordered by effective date and marks the
- * one terminal Published Version effective on company-local today with
+ * one terminal Published Version effective on the selected Branch date with
  * `is_current`. This module deliberately never reads the browser clock or
  * reconstructs chronology from client-local dates.
  */
@@ -16,9 +16,10 @@ import type { DraftResponse, VersionResponse } from '../../../types/payrollSetup
  * The backend read model is chronological. Replaced same-date Versions are
  * removed by `is_terminal`, historical Versions are before the current
  * terminal Version, and a no-current response is the backend's future-only
- * state (there is no terminal version effective on company-local today).
+ * state (there is no terminal version effective on the selected Branch date).
  */
 export function upcomingPublishedVersions(versions: readonly VersionResponse[]): VersionResponse[] {
+  if (versions[0]?.reference_branch_id == null) return [];
   const terminalPublished = versions.filter(
     (version) => version.lifecycle_state === 'Published' && version.is_terminal,
   );

@@ -42,10 +42,6 @@ export function fmtAmount(amount: string | null, unit: string | null, code: stri
   return unit ? `${text}/${unit}` : text;
 }
 
-export function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
 export function statusBadgeClass(status: string): string {
   switch (status) {
     case 'Approved':   return styles.badgeApproved;

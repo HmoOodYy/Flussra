@@ -76,7 +76,7 @@ async def test_driver_employee_without_user_has_profile_and_audit(
     )
     profile = employee["current_or_pending_driver"]
     assert employee["driver_state"] == "current"
-    assert profile["effective_from"] is not None
+    assert profile["effective_from_at"] is not None
     assert profile["branch_id"] == hq_branch_id
     assert employee["employee_key"] == f"E{employee['employee_id']:06d}"
     assert (await direct_db.execute(
@@ -172,12 +172,12 @@ async def test_historical_driver_profile_edits_are_rejected_but_pending_edits_wo
 ):
     historical = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2000-01-01"},
+        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
     historical_profile = historical["current_or_pending_driver"]
     await direct_db.execute(text("""
         UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveTo = DATE '2000-12-31'
+        SET DriverStatus = 'Transferred', EffectiveToAt = TIMESTAMPTZ '2001-01-01T00:00:00Z'
         WHERE DriverID = :driver_id
     """), {"driver_id": historical_profile["driver_id"]})
 
@@ -194,7 +194,7 @@ async def test_historical_driver_profile_edits_are_rejected_but_pending_edits_wo
 
     pending = await create_employee(
         client, auth_token, hq_branch_id,
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2099-01-01"},
+        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2099-01-01T00:00:00Z"},
     )
     pending_profile = pending["current_or_pending_driver"]
     changed = await client.patch(
@@ -206,22 +206,20 @@ async def test_historical_driver_profile_edits_are_rejected_but_pending_edits_wo
 
 
 @pytest.mark.asyncio
-async def test_legacy_null_effective_window_current_profile_remains_editable(
+async def test_current_instant_profile_remains_editable(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}"},
     )
     driver_id = employee["current_or_pending_driver"]["driver_id"]
-    await direct_db.execute(text("""
-        UPDATE core.Drivers
-        SET EffectiveFrom = NULL, EffectiveTo = NULL, DriverStatus = 'Active'
-        WHERE DriverID = :driver_id
-    """), {"driver_id": driver_id})
+    stored_from_at = (await direct_db.execute(text(
+        "SELECT EffectiveFromAt FROM core.Drivers WHERE DriverID = :driver_id"
+    ), {"driver_id": driver_id})).scalar_one()
+    assert stored_from_at.tzinfo is not None
+    from app.workforce.effective import resolve_effective_driver_profile
 
-    from app.workforce.effective import resolve_current_driver_profile
-
-    resolved = await resolve_current_driver_profile(1, employee["employee_id"], direct_db)
+    resolved = await resolve_effective_driver_profile(1, employee["employee_id"], None, direct_db)
     assert resolved is not None
     assert resolved["driverid"] == driver_id
 
@@ -263,7 +261,7 @@ async def test_employee_key_is_immutable(client: httpx.AsyncClient, auth_token: 
 
 
 @pytest.mark.asyncio
-async def test_first_profile_uses_employee_branch_and_effective_date(
+async def test_first_profile_uses_employee_branch_and_database_instant(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int,
 ):
     employee = await create_employee(client, auth_token, hq_branch_id, hire_date="2020-02-03")
@@ -274,7 +272,7 @@ async def test_first_profile_uses_employee_branch_and_effective_date(
     assert response.status_code == 201, response.text
     profile = response.json()["current_or_pending_driver"]
     assert profile["branch_id"] == hq_branch_id
-    assert profile["effective_from"] == "2020-02-03"
+    assert profile["effective_from_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -291,16 +289,16 @@ async def test_employee_branch_editable_without_profile(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effective_from", [None, "2099-01-01"], ids=["current", "pending"])
+@pytest.mark.parametrize("effective_from_at", [None, "2099-01-01T00:00:00Z"], ids=["current", "pending"])
 async def test_employee_branch_edit_rejected_with_current_or_pending_profile(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, paytest_branch_id: int,
-    effective_from: str | None,
+    effective_from_at: str | None,
 ):
     profile = {"driver_code": f"P1B-{suffix()}"}
-    if effective_from:
-        profile["effective_from"] = effective_from
+    if effective_from_at:
+        profile["effective_from_at"] = effective_from_at
     employee = await create_employee(client, auth_token, hq_branch_id, driver_profile=profile)
-    assert employee["driver_state"] == ("pending" if effective_from else "current")
+    assert employee["driver_state"] == ("pending" if effective_from_at else "current")
     response = await client.patch(
         f"/workforce/employees/{employee['employee_id']}",
         json={"branch_id": paytest_branch_id}, headers=auth(auth_token),
@@ -324,13 +322,13 @@ async def test_employee_rejects_branch_owned_by_another_company(
     tag = suffix()
     other_company = (await direct_db.execute(text("""
         INSERT INTO core.Companies
-            (CompanyCode, CompanyName, LegalName, Status, IsSuspended, TimeZoneName)
-        VALUES (:code, :name, :name, 'Active', FALSE, 'America/New_York')
+            (CompanyCode, CompanyName, LegalName, Status, IsSuspended)
+        VALUES (:code, :name, :name, 'Active', FALSE)
         RETURNING CompanyID
     """), {"code": f"P1B{tag}", "name": f"P1B Other {tag}"})).scalar_one()
     other_branch = (await direct_db.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:company_id, :code, :name, 'Active', TRUE)
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:company_id, :code, :name, 'Active', TRUE, 'UTC')
         RETURNING BranchID
     """), {"company_id": other_company, "code": f"B{tag}", "name": f"Branch {tag}"})).scalar_one()
     response = await client.post(
@@ -346,13 +344,13 @@ async def test_driver_state_current_pending_none_and_historical_only(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     current = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}"})
-    pending = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2099-01-01"})
+    pending = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2099-01-01T00:00:00Z"})
     none = await create_employee(client, auth_token, hq_branch_id)
-    historical = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2000-01-01"})
+    historical = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"})
     historical_driver = historical["current_or_pending_driver"]["driver_id"]
     await direct_db.execute(text("""
         UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveTo = DATE '2000-12-31'
+        SET DriverStatus = 'Transferred', EffectiveToAt = TIMESTAMPTZ '2001-01-01T00:00:00Z'
         WHERE DriverID = :driver_id
     """), {"driver_id": historical_driver})
     reread = await client.get(f"/workforce/employees/{historical['employee_id']}", headers=auth(auth_token))
@@ -482,18 +480,18 @@ async def test_hire_date_guard_uses_nonvoid_daily_draft_lines_across_driver_hist
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2000-01-01"},
+        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
     source_id = employee["current_or_pending_driver"]["driver_id"]
     await direct_db.execute(text("""
         UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveTo = DATE '2019-12-31'
+        SET DriverStatus = 'Transferred', EffectiveToAt = TIMESTAMPTZ '2020-01-01T00:00:00Z'
         WHERE DriverID = :driver_id
     """), {"driver_id": source_id})
     target_id = (await direct_db.execute(text("""
         INSERT INTO core.Drivers
-            (CompanyID, BranchID, EmployeeID, DriverCode, DriverStatus, EffectiveFrom)
-        VALUES (1, :branch_id, :employee_id, :code, 'Active', DATE '2020-01-01')
+            (CompanyID, BranchID, EmployeeID, DriverCode, DriverStatus, EffectiveFromAt)
+        VALUES (1, :branch_id, :employee_id, :code, 'Active', TIMESTAMPTZ '2020-01-01T00:00:00Z')
         RETURNING DriverID
     """), {"branch_id": hq_branch_id, "employee_id": employee["employee_id"], "code": f"P1B-{suffix()}"})).scalar_one()
     await direct_db.execute(text("""
@@ -520,7 +518,7 @@ async def test_hire_date_guard_ignores_void_draft_line(
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2000-01-01"},
+        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
     driver_id = employee["current_or_pending_driver"]["driver_id"]
     await direct_db.execute(text("""
@@ -545,7 +543,7 @@ async def test_hire_date_guard_protects_final_line_dates(
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from": "2000-01-01"},
+        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
     driver_id = employee["current_or_pending_driver"]["driver_id"]
     async with allow_final_line_insert(direct_db):

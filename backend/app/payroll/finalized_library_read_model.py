@@ -783,7 +783,8 @@ async def _finalized_eligible_driver_days(
         SELECT pde.driverid, pde.drivercodesnapshot, pde.drivernamesnapshot,
                pde.iseligibleforperiod, pde.eligibilityreasoncode,
                pde.hiredatesnapshot, pde.terminationdatesnapshot,
-               pde.drivereffectivefromsnapshot, pde.drivereffectivetosnapshot,
+               pde.drivereffectivefromatsnapshot, pde.drivereffectivetoatsnapshot,
+               pde.branchtimezoneidsnapshot, pde.eligibleworkdates,
                dt.drivercodesnapshot AS total_driver_code,
                dt.drivernamesnapshot AS total_driver_name
         FROM payroll.payrollperioddrivereligibility pde

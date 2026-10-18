@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { getDayGrid, saveDayGrid } from '../../lib/payrollApi';
 import { canEntryPayroll } from '../../lib/permissions';
+import { addIsoDays, formatIsoShort, weekdayOfIso } from '../../lib/isoDate';
 import type { UserProfile } from '../../store/authStore';
 import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll/entry';
 import { buildSaveRowFromGrid } from './dayGridModel';
@@ -9,21 +10,9 @@ const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
 
 // Shared grid state and actions; each surface owns its read trigger and save-error presentation.
 
-function subtractDay(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  dt.setDate(dt.getDate() - 1);
-  return dt.toISOString().slice(0, 10);
-}
-
-function addDay(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  dt.setDate(dt.getDate() + 1);
-  return dt.toISOString().slice(0, 10);
-}
-
 export function formatDayLabel(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][weekdayOfIso(d)];
+  return `${weekday}, ${formatIsoShort(d)}`;
 }
 
 interface DailyEntryControllerOptions {
@@ -54,9 +43,15 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
       setGrid(data);
       setSelectedDate(data.work_date);
     } catch (e: unknown) {
+      const detail = (e as {
+        response?: { data?: { detail?: string | { message?: unknown } } };
+      })?.response?.data?.detail;
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to load grid.';
+        typeof detail === 'string'
+          ? detail
+          : typeof detail?.message === 'string'
+            ? detail.message
+            : 'Failed to load grid.';
       setError(msg);
     } finally {
       setLoading(false);
@@ -66,8 +61,8 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
   const atStart = grid && selectedDate ? selectedDate <= grid.period.start_date : true;
   const atEnd   = grid && selectedDate ? selectedDate >= grid.period.end_date   : true;
 
-  function prevDay() { setSelectedDate((d) => d ? subtractDay(d) : d); }
-  function nextDay() { setSelectedDate((d) => d ? addDay(d) : d); }
+  function prevDay() { setSelectedDate((d) => d ? addIsoDays(d, -1) : d); }
+  function nextDay() { setSelectedDate((d) => d ? addIsoDays(d, 1) : d); }
 
   const isEditable = grid ? EDITABLE_STATUSES.has(grid.period.status) : false;
   const canEdit    = isEditable && grid !== null && user !== null && canEntryPayroll(user, grid.period.branch_id);

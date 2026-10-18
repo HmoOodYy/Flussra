@@ -62,13 +62,14 @@ export function TransferRequestDialogs({ st, selected, branches, dispatch, submi
               </select>
             </TrField>
 
-            <TrField label="Effective Date *">
+            <TrField label="Effective time (UTC, optional)">
+              <p className={styles.helpTxt}>Leave blank to apply the transfer when it is completed.</p>
               <input
                 className={styles.inp}
-                type="date"
-                value={st.create.effectiveDate}
-                onChange={e => dispatch({ type: 'CREATE_FIELD', field: 'effectiveDate', val: e.target.value })}
-                required
+                type="datetime-local"
+                step={60}
+                value={st.create.effectiveAt}
+                onChange={e => dispatch({ type: 'CREATE_FIELD', field: 'effectiveAt', val: e.target.value })}
               />
             </TrField>
 

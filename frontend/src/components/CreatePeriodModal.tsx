@@ -7,12 +7,11 @@ import {
 } from '../lib/payrollApi';
 import type { PeriodCandidateMode, PeriodCandidatePreview } from '../types/payroll/periods';
 import type { Branch } from '../types/core';
+import { formatIsoLong } from '../lib/isoDate';
 import styles from './CreatePeriodModal.module.css';
 
 function fmtDate(date: string): string {
-  return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric',
-  });
+  return formatIsoLong(date);
 }
 
 function frequencyLabel(periodType: string): string {

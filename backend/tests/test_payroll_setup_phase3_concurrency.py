@@ -92,8 +92,8 @@ async def phase3_concurrency_db(pg_instance):
             """, (company_role_id,))
             cursor.execute("""
                 INSERT INTO core.Branches
-                    (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                VALUES (%s, 'P3C_BRANCH', 'Concurrency Branch', 'Active', FALSE)
+                    (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                VALUES (%s, 'P3C_BRANCH', 'Concurrency Branch', 'Active', FALSE, 'UTC')
                 RETURNING BranchID
             """, (company_id,))
             branch_id = cursor.fetchone()[0]

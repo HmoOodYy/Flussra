@@ -9,6 +9,23 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.business_clock import branch_today
+
+
+async def resolve_period_work_date(
+    company_id: int,
+    branch_id: int,
+    start_date: date,
+    end_date: date,
+    requested: date | None,
+    db: AsyncConnection,
+) -> date:
+    """Resolve an omitted work date from the owning Branch's canonical clock."""
+    if requested is not None:
+        return requested
+    today = await branch_today(company_id, branch_id, db)
+    return today if start_date <= today <= end_date else start_date
+
 
 async def _validate_period_work_date(
     period_id: int,

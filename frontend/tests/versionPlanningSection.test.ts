@@ -40,7 +40,7 @@ test('empty Version Planning has one centered create path and no header duplicat
 
 test('content Version Planning keeps one cohesive surface without nested empty subsections', () => {
   assert.match(sectionSource, /Version Planning/);
-  assert.match(sectionSource, /Prepare and schedule future payroll policy changes\./);
+  assert.match(sectionSource, /Upcoming changes, using \$\{referenceBranchName\}'s business date/);
   assert.doesNotMatch(sectionSource, /<h4>Upcoming<\/h4>|<h4>Drafts<\/h4>/);
   assert.doesNotMatch(sectionSource, /No upcoming changes scheduled\.|No saved versions yet\./);
   assert.ok(sectionSource.indexOf('upcomingVersionRow') < sectionSource.indexOf('planningDraftRow'));
@@ -126,6 +126,7 @@ test('Version Timeline is built from published terminal versions only', () => {
   assert.match(timelineSource, /version\.lifecycle_state === 'Published' && version\.is_terminal/);
   assert.match(timelineSource, /version\.is_current/);
   assert.match(timelineSource, /effectiveDisplayVersionNumbers/);
+  assert.match(featureSource, /'Published schedule'/);
   assert.doesNotMatch(panelSource, /<strong>Version \{version\.version_number\}<\/strong>/);
 });
 

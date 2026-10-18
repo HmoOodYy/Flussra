@@ -12,9 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
+from app.business_clock import supported_time_zones
 from app.db.sql import build_in_clause
 from app.payroll_setup.readiness import branch_schedule_readiness, branch_schedule_readiness_detail
 from app.settings.schemas import BranchAdmin
+from app.workforce.projection import count_employee_branch_projections
 
 
 async def _attach_readiness_reasons(
@@ -98,22 +100,14 @@ async def fetch_branch_metrics(
 
     # 3 — Total people count (core.employees, all employment types).
     try:
-        r = await db.execute(
-            text(f"""
-                SELECT branchid, COUNT(*) AS cnt
-                FROM   core.employees
-                WHERE  companyid = :cid
-                  AND  branchid IN ({in_clause})
-                GROUP  BY branchid
-            """),
-            base,
-        )
-        for row in r.mappings().all():
-            _put(row["branchid"], "total_people_count", int(row["cnt"]))
+        counts = await count_employee_branch_projections(company_id, branch_ids, db)
+        for branch_id, count in counts.items():
+            _put(branch_id, "total_people_count", count)
     except Exception:
         pass
 
-    # 4 — Active drivers count (DriverStatus=Active AND EmploymentStatus=Active).
+    # 4 — Current active drivers. Status can change before a scheduled instant,
+    # so the assignment function remains the current-identity authority.
     try:
         r = await db.execute(
             text(f"""
@@ -123,8 +117,9 @@ async def fetch_branch_metrics(
                        ON  e.companyid  = d.companyid
                        AND e.employeeid = d.employeeid
                 WHERE  d.companyid       = :cid
-                  AND  d.driverstatus    = 'Active'
-                  AND  e.employmentstatus = 'Active'
+                  AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+                  AND  e.employmentstatus IN ('Active', 'Terminated')
+                  AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid) = d.driverid
                   AND  d.branchid IN ({in_clause})
                 GROUP  BY d.branchid
             """),
@@ -157,7 +152,8 @@ async def fetch_branch_metrics(
 
 
 BRANCH_COLUMNS = """
-    branchid, companyid, branchcode, branchname,
+    branchid, companyid, branchcode, branchname, timezoneid,
+    core.fn_BranchToday(companyid, branchid) AS businessdate,
     status, isdefault,
     addressline1, city, stateprovince, postalcode, country,
     notes, createdatutc, updatedatutc
@@ -173,6 +169,8 @@ def row_to_branch_admin(row, metrics: dict) -> BranchAdmin:
         company_id=row["companyid"],
         branch_code=row["branchcode"],
         branch_name=row["branchname"],
+        time_zone_id=row["timezoneid"],
+        business_date=row["businessdate"],
         status=row["status"],
         is_default=bool(row["isdefault"]),
         address_line1=row.get("addressline1"),
@@ -268,3 +266,9 @@ async def get_branch_by_id(
     branch = row_to_branch_admin(row, metrics)
     await _attach_readiness_reasons([branch], company_id, user_id, db)
     return branch
+
+
+async def get_supported_time_zones(company_id: int, user_id: int, db: AsyncConnection) -> list[str]:
+    """Return the shared PostgreSQL zone catalog to authenticated non-drivers."""
+    await require_non_driver_subject(company_id, user_id, db)
+    return await supported_time_zones(db)

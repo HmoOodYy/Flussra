@@ -169,7 +169,7 @@ def test_fresh_database_upgrades_to_the_period_definition_model(p4b_database):
     assert _alembic(env, "upgrade", "head").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0085",)
+        assert cur.fetchone() == ("0086",)
         assert _tables(cur) == {"payrollperioddefinitions"}
         columns = _columns(cur, "payrollperioddefinitions")
         assert {"payrollperioddefinitionid", "paydefinitionid", "ratedefinitionid",
@@ -183,6 +183,87 @@ def test_fresh_database_upgrades_to_the_period_definition_model(p4b_database):
         cur.execute("SELECT is_nullable FROM information_schema.columns WHERE table_schema = "
                     "'payroll' AND table_name = 'payrolldraftlines' AND column_name = 'linetype'")
         assert cur.fetchone() == ("YES",)
+
+
+@pytest.mark.parametrize("dirty_table", ["driver", "transfer", "period"])
+def test_0086_refuses_temporal_history_atomically(p4b_database, dirty_table):
+    env, dsn = p4b_database
+    assert _alembic(env, "upgrade", "0085").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        company_id, branch_id = _company(cur, f"TZ86{dirty_table[:2].upper()}")
+        if dirty_table == "period":
+            _period(cur, company_id, branch_id)
+        else:
+            driver_id = _driver(cur, company_id, branch_id)
+            if dirty_table == "transfer":
+                target_branch_id = _branch(cur, company_id, "TZ86TARGET")
+                cur.execute("""
+                    INSERT INTO sec.users (companyid, username, displayname)
+                    VALUES (%s, %s, 'timezone migration test') RETURNING userid
+                """, (company_id, "tz86_" + uuid4().hex[:8]))
+                user_id = cur.fetchone()[0]
+                cur.execute("""
+                    INSERT INTO core.drivertransferrequests
+                        (companyid, driverid, sourcebranchid, targetbranchid,
+                         requestedbyuserid, initiatedby, status, effectivedate)
+                    VALUES (%s, %s, %s, %s, %s, 'SourceBranch', 'PendingSourceApproval', DATE '2030-01-01')
+                """, (company_id, driver_id, branch_id, target_branch_id, user_id))
+        conn.commit()
+
+    result = _alembic(env, "upgrade", "head")
+    assert result.returncode != 0
+    assert "BRANCH_TIMEZONE_REBUILD_REQUIRED" in (result.stderr + result.stdout)
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT version_num FROM public.alembic_version")
+        assert cur.fetchone() == ("0085",)
+        cur.execute("SELECT to_regclass('core.supportedtimezones')")
+        assert cur.fetchone()[0] is None
+        cur.execute("""
+            SELECT count(*) FROM information_schema.columns
+            WHERE table_schema = 'core' AND table_name = 'branches' AND column_name = 'timezoneid'
+        """)
+        assert cur.fetchone() == (0,)
+
+
+def test_0086_copies_supported_company_zone_only_to_existing_branches(p4b_database):
+    env, dsn = p4b_database
+    assert _alembic(env, "upgrade", "0085").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        company_id, branch_id = _company(cur, "TZ86COPY")
+        cur.execute("""
+            INSERT INTO core.companies (companycode, companyname, legalname, status,
+                                        issuspended, timezonename)
+            VALUES ('TZ86NO', 'unused invalid zone', 'unused invalid zone', 'Active',
+                    FALSE, 'Mars/Unused')
+        """)
+        cur.execute("UPDATE core.companies SET timezonename = 'Pacific/Kiritimati' WHERE companyid = %s",
+                    (company_id,))
+        conn.commit()
+    result = _alembic(env, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT timezoneid FROM core.branches WHERE branchid = %s", (branch_id,))
+        assert cur.fetchone() == ("Pacific/Kiritimati",)
+        cur.execute("SELECT to_regclass('core.supportedtimezones')")
+        assert cur.fetchone()[0] == "core.supportedtimezones"
+
+
+def test_0086_invalid_legacy_branch_zone_fails_atomically(p4b_database):
+    env, dsn = p4b_database
+    assert _alembic(env, "upgrade", "0085").returncode == 0
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        company_id, _ = _company(cur, "TZ86BAD")
+        cur.execute("UPDATE core.companies SET timezonename = 'Mars/Nope' WHERE companyid = %s",
+                    (company_id,))
+        conn.commit()
+    result = _alembic(env, "upgrade", "head")
+    assert result.returncode != 0
+    assert "BRANCH_TIMEZONE_INVALID_COMPANY_ZONE" in (result.stderr + result.stdout)
+    with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute("SELECT version_num FROM public.alembic_version")
+        assert cur.fetchone() == ("0085",)
+        cur.execute("SELECT to_regclass('core.supportedtimezones')")
+        assert cur.fetchone()[0] is None
 
 
 @pytest.mark.parametrize("status", ALL_STATUSES)
@@ -227,7 +308,7 @@ def test_0085_is_irreversible(p4b_database):
 
 def test_period_definition_scope_and_snapshot_constraints(p4b_database):
     env, dsn = p4b_database
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0085").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         company_a, branch_a = _company(cur, "P4BC")
         company_b, branch_b = _company(cur, "P4BD")
@@ -290,7 +371,7 @@ def test_period_definition_scope_and_snapshot_constraints(p4b_database):
 
 def test_draft_lines_reference_only_their_own_period_definition(p4b_database):
     env, dsn = p4b_database
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0085").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         company_a, branch_a = _company(cur, "P4BF")
         company_b, branch_b = _company(cur, "P4BG")
@@ -329,7 +410,7 @@ def test_draft_lines_reference_only_their_own_period_definition(p4b_database):
 
 def test_a_draft_line_is_either_a_target_source_fact_or_a_compatibility_row(p4b_database):
     env, dsn = p4b_database
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0085").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         company_id, branch_id = _company(cur, "P4BI")
         driver_id = _driver(cur, company_id, branch_id)
@@ -367,7 +448,7 @@ def test_a_draft_line_is_either_a_target_source_fact_or_a_compatibility_row(p4b_
 
 def test_zero_pay_definitions_needs_no_sentinel_row(p4b_database):
     env, dsn = p4b_database
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0085").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         company_id, branch_id = _company(cur, "P4BJ")
         period_id = _period(cur, company_id, branch_id)
@@ -382,7 +463,7 @@ def test_zero_pay_definitions_needs_no_sentinel_row(p4b_database):
 
 def test_legacy_pay_item_identity_cannot_be_period_definition_authority(p4b_database):
     env, dsn = p4b_database
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0085").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         columns = _columns(cur, "payrollperioddefinitions")
         assert "payitemid" not in columns and "payitemcode" not in columns

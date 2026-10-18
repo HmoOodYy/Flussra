@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -19,8 +19,14 @@ def suffix() -> str:
     return uuid4().hex[:10]
 
 
-async def today(db) -> date:
-    return (await db.execute(text("SELECT core.fn_CompanyToday(1)"))).scalar_one()
+async def current_instant(db) -> datetime:
+    return (await db.execute(text("SELECT NOW()"))).scalar_one()
+
+
+async def branch_today(db, branch_id: int):
+    return (await db.execute(
+        text("SELECT core.fn_BranchToday(1, :branch_id)"), {"branch_id": branch_id},
+    )).scalar_one()
 
 
 async def create_driver(client, token: str, branch_id: int) -> tuple[int, int]:
@@ -32,7 +38,6 @@ async def create_driver(client, token: str, branch_id: int) -> tuple[int, int]:
             "hire_date": "2020-01-01",
             "driver_profile": {
                 "driver_code": f"P1C-RACE-{suffix()}",
-                "effective_from": "2020-01-01",
             },
         },
         headers=auth(token),
@@ -42,13 +47,15 @@ async def create_driver(client, token: str, branch_id: int) -> tuple[int, int]:
     return data["employee_id"], data["current_or_pending_driver"]["driver_id"]
 
 
-async def create_transfer(client, token: str, driver_id: int, target_branch_id: int, effective_date: date):
+async def create_transfer(
+    client, token: str, driver_id: int, target_branch_id: int, effective_at: datetime,
+):
     response = await client.post(
         "/driver-transfers",
         json={
             "driver_id": driver_id,
             "target_branch_id": target_branch_id,
-            "effective_date": effective_date.isoformat(),
+            "effective_at": effective_at.isoformat(),
             "initiated_by": "SourceBranch",
             "reason": "P1c race",
         },
@@ -71,9 +78,9 @@ async def approve(client, token: str, request_id: int) -> None:
 async def test_two_completions_create_exactly_one_destination(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
-    effective_date = await today(direct_db) + timedelta(days=30)
+    effective_at = await current_instant(direct_db) + timedelta(days=30, hours=3, minutes=17)
     employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
-    request_id = await create_transfer(client, auth_token, driver_id, hq_branch_id, effective_date)
+    request_id = await create_transfer(client, auth_token, driver_id, hq_branch_id, effective_at)
     await approve(client, auth_token, request_id)
 
     async def complete():
@@ -97,7 +104,7 @@ async def test_two_transfer_creations_for_employee_serialize(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int,
     direct_db,
 ):
-    effective_date = await today(direct_db) + timedelta(days=45)
+    effective_at = await current_instant(direct_db) + timedelta(days=45, hours=2, minutes=13)
     _, driver_id = await create_driver(client, auth_token, paytest_branch_id)
 
     async def create(target):
@@ -106,7 +113,7 @@ async def test_two_transfer_creations_for_employee_serialize(
             json={
                 "driver_id": driver_id,
                 "target_branch_id": target,
-                "effective_date": effective_date.isoformat(),
+                "effective_at": effective_at.isoformat(),
                 "initiated_by": "SourceBranch",
                 "reason": "Competing transfer creation",
             },
@@ -125,10 +132,11 @@ async def test_two_transfer_creations_for_employee_serialize(
 async def test_transfer_completion_and_termination_serialize_without_partial_profiles(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
-    current_date = await today(direct_db)
+    current_date = await branch_today(direct_db, paytest_branch_id)
     employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
     request_id = await create_transfer(
-        client, auth_token, driver_id, hq_branch_id, current_date + timedelta(days=25),
+        client, auth_token, driver_id, hq_branch_id,
+        await current_instant(direct_db) + timedelta(days=25, hours=1, minutes=19),
     )
     await approve(client, auth_token, request_id)
 
@@ -148,24 +156,25 @@ async def test_transfer_completion_and_termination_serialize_without_partial_pro
     assert termination.status_code == 200, termination.text
     assert completion.status_code in (200, 422)
     rows = (await direct_db.execute(text("""
-        SELECT DriverID, EffectiveFrom, EffectiveTo, DriverStatus
+        SELECT DriverID, EffectiveFromAt, EffectiveToAt, DriverStatus
         FROM core.Drivers WHERE EmployeeID = :employee_id ORDER BY DriverID
     """), {"employee_id": employee_id})).mappings().all()
     assert len(rows) in (1, 2)
     assert all(
-        row["effectiveto"] is None
-        or row["effectiveto"] >= row["effectivefrom"]
+        row["effectivetoat"] is None
+        or row["effectivetoat"] > row["effectivefromat"]
         or (row["driverstatus"] == "Terminated"
-            and row["effectiveto"] == row["effectivefrom"] - timedelta(days=1))
+            and row["effectivetoat"] == row["effectivefromat"])
         for row in rows
     )
     assert (await direct_db.execute(text(
         "SELECT EmploymentStatus FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee_id})).scalar_one() == "Terminated"
     if len(rows) == 2:
-        future = next(row for row in rows if row["effectivefrom"] > current_date)
-        assert (future["driverstatus"], future["effectiveto"]) == (
-            "Terminated", future["effectivefrom"] - timedelta(days=1),
+        now = await current_instant(direct_db)
+        future = next(row for row in rows if row["effectivefromat"] > now)
+        assert (future["driverstatus"], future["effectivetoat"]) == (
+            "Terminated", future["effectivefromat"],
         )
 
 
@@ -173,13 +182,13 @@ async def test_transfer_completion_and_termination_serialize_without_partial_pro
 async def test_driver_edit_and_transfer_completion_do_not_lose_update(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
-    today_date = await today(direct_db)
     employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
     original_code = (await direct_db.execute(text(
         "SELECT DriverCode FROM core.Drivers WHERE DriverID = :id"
     ), {"id": driver_id})).scalar_one()
     request_id = await create_transfer(
-        client, auth_token, driver_id, hq_branch_id, today_date + timedelta(days=30),
+        client, auth_token, driver_id, hq_branch_id,
+        await current_instant(direct_db) + timedelta(days=30, hours=4, minutes=11),
     )
     await approve(client, auth_token, request_id)
     new_code = f"P1C-EDIT-{suffix()}"
@@ -210,7 +219,7 @@ async def test_driver_edit_and_transfer_completion_do_not_lose_update(
 async def test_two_termination_attempts_apply_one_lifecycle_transition(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
-    today_date = await today(direct_db)
+    today_date = await branch_today(direct_db, hq_branch_id)
     employee_id, driver_id = await create_driver(client, auth_token, hq_branch_id)
 
     async def terminate(reason):
@@ -238,7 +247,7 @@ async def test_stale_target_decision_and_cancel_cannot_overwrite_terminal_state(
 ):
     request_id = await create_transfer(
         client, auth_token, (await create_driver(client, auth_token, paytest_branch_id))[1],
-        hq_branch_id, await today(direct_db) + timedelta(days=30),
+        hq_branch_id, await current_instant(direct_db) + timedelta(days=30, hours=2, minutes=37),
     )
 
     async def reject():
@@ -260,3 +269,62 @@ async def test_stale_target_decision_and_cancel_cannot_overwrite_terminal_state(
         "SELECT Status FROM core.DriverTransferRequests WHERE TransferRequestID = :id"
     ), {"id": request_id})).scalar_one()
     assert status in {"Rejected", "Cancelled"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_path", ["create", "completion"])
+async def test_driver_no_key_update_lock_allows_snapshot_foreign_key_capture(
+    client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
+    hq_branch_id: int, direct_db, test_engine, lock_path: str,
+):
+    """Create and completion Driver locks must remain compatible with FK KEY SHARE."""
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    from app.transfer.service import _lock_employee_for_transfer_create, _lock_transfer_lifecycle
+
+    employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
+    branch_today_date = await branch_today(direct_db, paytest_branch_id)
+    company_id = (await direct_db.execute(text(
+        "SELECT companyid FROM core.branches WHERE branchid = :bid"
+    ), {"bid": paytest_branch_id})).scalar_one()
+    period_id = (await direct_db.execute(text("""
+        INSERT INTO payroll.PayrollPeriods
+            (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType, StartDate, EndDate, Status)
+        VALUES (:cid, :bid, :code, 'Driver FK lock compatibility', 'Custom', :start, :end, 'Cancelled')
+        RETURNING PayrollPeriodID
+    """), {"cid": company_id, "bid": paytest_branch_id, "code": f"P1C-{suffix()}",
+          "start": branch_today_date, "end": branch_today_date + timedelta(days=30)})).scalar_one()
+    await direct_db.execute(text("""
+        INSERT INTO payroll.PayrollPeriodEligibilitySnapshots
+            (PayrollPeriodID, CompanyID, BranchID, SnapshotSource)
+        VALUES (:pid, :cid, :bid, 'Generated')
+    """), {"pid": period_id, "cid": company_id, "bid": paytest_branch_id})
+
+    transfer_request_id = None
+    if lock_path == "completion":
+        transfer_request_id = await create_transfer(
+            client, auth_token, driver_id, hq_branch_id,
+            await current_instant(direct_db) + timedelta(days=30),
+        )
+
+    async with test_engine.connect() as lock_conn:
+        tx = await lock_conn.begin()
+        if lock_path == "create":
+            await _lock_employee_for_transfer_create(driver_id, company_id, lock_conn)
+        else:
+            await _lock_transfer_lifecycle(transfer_request_id, company_id, lock_conn)
+        try:
+            async with test_engine.begin() as capture_conn:
+                await asyncio.wait_for(
+                    _create_period_driver_eligibility_rows(
+                        period_id, company_id, paytest_branch_id, capture_conn,
+                        snapshot_source="Generated", freeze=True, only_driver_id=driver_id,
+                    ),
+                    timeout=5,
+                )
+        finally:
+            await tx.rollback()
+
+    assert (await direct_db.execute(text("""
+        SELECT COUNT(*) FROM payroll.PayrollPeriodDriverEligibility
+        WHERE PayrollPeriodID = :pid AND DriverID = :did
+    """), {"pid": period_id, "did": driver_id})).scalar_one() == 1

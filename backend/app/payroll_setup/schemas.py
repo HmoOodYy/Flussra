@@ -129,7 +129,9 @@ class VersionResponse(BaseModel):
     replaces_version_id: int | None
     replaced_by_version_id: int | None
     is_terminal: bool
-    is_current: bool
+    is_current: bool | None
+    reference_date: date | None = None
+    reference_branch_id: int | None = None
 
 
 class ConflictResponse(BaseModel):
@@ -205,7 +207,7 @@ class BoundaryChoiceResponse(BaseModel):
     period_end_date: _date
     payroll_frequency: str
     custom_interval_days: int | None
-    relation: str
+    relation: str | None
     predecessor_payroll_frequency: str | None = None
     predecessor_custom_interval_days: int | None = None
     predecessor_period_end_date: _date | None = None
@@ -215,7 +217,7 @@ class BoundaryChoiceResponse(BaseModel):
 
 class BoundaryChoicesResponse(BaseModel):
     """Canonical legal-date navigation result: validity, nearest neighbors, suggestion."""
-    reference_date: _date
+    reference_date: _date | None
     requested_date: _date
     requested_valid: bool
     requested: BoundaryChoiceResponse | None

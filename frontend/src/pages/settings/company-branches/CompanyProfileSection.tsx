@@ -49,7 +49,6 @@ export function CompanyProfileCard({
 
           <div className={styles.companyMeta}>
             <MetaItem label="Company Code"   value={company.company_code} />
-            <MetaItem label="Timezone"        value={company.timezone_name} />
             <MetaItem label="Default Branch"  value={company.default_branch_name ?? '—'} />
             <MetaItem label="Self-Approval"   value={company.allow_self_approval ? 'Allowed' : 'Disabled'} />
             <MetaItem label="Company Currency" value={company.currency_code ? `${company.currency_code}${company.currency_name ? ` · ${company.currency_name}` : ''}` : 'Required before payroll money can be entered'} wide />
@@ -98,12 +97,6 @@ export function CompanyEditDialog({
                   <input className={styles.input} value={coForm.legal_name ?? ''}
                     onChange={(e) => setCoForm((f) => ({ ...f, legal_name: e.target.value || null }))}
                     disabled={savingCo} placeholder="Optional" maxLength={200} />
-                </div>
-                <div className={styles.formGroup}>
-                  <label className={styles.label}>Timezone</label>
-                  <input className={styles.input} value={coForm.timezone_name ?? ''}
-                    onChange={(e) => setCoForm((f) => ({ ...f, timezone_name: e.target.value || null }))}
-                    disabled={savingCo} placeholder="e.g. Africa/Cairo" maxLength={80} />
                 </div>
                 <div className={styles.formGroupFull}>
                   <label className={styles.label}>Company Currency <span className={styles.required}>*</span></label>

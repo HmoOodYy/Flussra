@@ -1516,3 +1516,7 @@
     min-height: 240px;
   }
 }
+
+.policyBranchContext { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; margin-bottom: 1rem; border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; font-size: 0.875rem; }
+.policyBranchContext select { min-width: 14rem; }
+.policyScheduleContext { margin: 0 0 0.5rem; color: #475569; font-size: 0.8rem; }

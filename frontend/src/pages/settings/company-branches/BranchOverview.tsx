@@ -187,7 +187,8 @@ export function BranchOverview({
                         }
                       </td>
                       <td className={styles.tdLocation}>
-                        {[b.city, b.country].filter(Boolean).join(', ') || '—'}
+                        <div>{[b.city, b.country].filter(Boolean).join(', ') || '—'}</div>
+                        <small>{b.time_zone_id} · Business date {b.business_date}</small>
                       </td>
                       {caps.canAdmin && (
                         <td className={styles.tdAction}>

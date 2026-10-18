@@ -193,6 +193,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'POST /settings/branches/{branch_id}/status-rate-columns': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('setup.manage',), None, 'COMPANY', 'DENY', None, None),
     'GET /settings/branches/onboarding-options': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.settings.security.ensure_branch_creator', 'COMPANY', 'DENY', None, None),
     'GET /settings/currencies': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('setup.manage',), None, 'COMPANY', 'DENY', None, None),
+    'GET /settings/time-zones': RouteAuthorization('AUTHENTICATED', 'NONE', (), 'app.access.policy.require_non_driver_subject', 'COMPANY', 'DENY', None, 'The response contains only the PostgreSQL supported-timezone catalog; no additional business-data permission is required.'),
     'GET /settings/company': RouteAuthorization('AUTHENTICATED', 'NONE', (), 'app.access.branch_access.check_branch_access', 'COMPANY', 'DENY', None, 'Any active company assignment permits reading the company profile.'),
     'PATCH /settings/company': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('setup.manage',), None, 'COMPANY', 'DENY', None, None),
     'GET /workforce/employees': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.view',), None, 'BRANCH', 'DENY', None, None),

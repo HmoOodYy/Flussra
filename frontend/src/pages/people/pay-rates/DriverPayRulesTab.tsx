@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { formatMoney } from '../../../lib/money';
 import type { DriverPayRule } from './driverPayRulesApi';
-import { today, type RuleForm } from './payRatesView';
+import type { RuleForm } from './payRatesView';
 import styles from './PayRatesPage.module.css';
 
 type DriverPayRulesTabProps = {
@@ -9,6 +9,7 @@ type DriverPayRulesTabProps = {
   payRulesError: string;
   loadingPayRules: boolean;
   canEditMatrix: boolean;
+  referenceDate: string | undefined;
   currencyCode: string | null | undefined;
   currencyDigits: number | null | undefined;
   ruleForm: RuleForm | null;
@@ -21,7 +22,7 @@ type DriverPayRulesTabProps = {
   endPayRule: (ruleId: number) => Promise<void>;
 };
 
-export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, canEditMatrix, currencyCode, currencyDigits, ruleForm, setRuleForm, savingRule, ruleFormError, setRuleFormError, voidPayRule, createPayRule, endPayRule }: DriverPayRulesTabProps) {
+export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, canEditMatrix, referenceDate, currencyCode, currencyDigits, ruleForm, setRuleForm, savingRule, ruleFormError, setRuleFormError, voidPayRule, createPayRule, endPayRule }: DriverPayRulesTabProps) {
   return (
     <div className={styles.section}>
       <div className={styles.sectionHead}>
@@ -51,9 +52,9 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
                   {active ? <span className={styles.badgeApproved}>Active</span> : <span className={styles.badgeVoided}>Not set</span>}
                   {canEditMatrix && !isFormOpenForThis && (
                     <div className={styles.payRuleActions}>
-                      {!active && <button className={styles.btnApprove} onClick={() => { setRuleForm({ ruleType, action: 'add', amount: '', effectiveFrom: today(), effectiveTo: '', notes: '' }); setRuleFormError(''); }}>+ Add</button>}
+                      {!active && <button className={styles.btnApprove} disabled={!referenceDate} onClick={() => { setRuleForm({ ruleType, action: 'add', amount: '', effectiveFrom: referenceDate ?? '', effectiveTo: '', notes: '' }); setRuleFormError(''); }}>+ Add</button>}
                       {active && <>
-                        <button className={styles.btnSecondary} style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem' }} onClick={() => { setRuleForm({ ruleType, action: 'end', amount: '', effectiveFrom: '', effectiveTo: today(), notes: '' }); setRuleFormError(''); }}>End</button>
+                        <button className={styles.btnSecondary} style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem' }} disabled={!referenceDate} onClick={() => { setRuleForm({ ruleType, action: 'end', amount: '', effectiveFrom: '', effectiveTo: referenceDate ?? '', notes: '' }); setRuleFormError(''); }}>End</button>
                         <button className={styles.btnVoid} style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem' }} disabled={savingRule} onClick={() => void voidPayRule(active.driver_pay_rule_id)}>Void</button>
                       </>}
                     </div>

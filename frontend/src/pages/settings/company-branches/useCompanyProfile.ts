@@ -38,7 +38,7 @@ export function useCompanyProfile({
   function startEditCo() {
     if (!company) return;
     setCoForm({ company_name: company.company_name, legal_name: company.legal_name,
-      timezone_name: company.timezone_name, notes: company.notes, allow_self_approval: company.allow_self_approval,
+      notes: company.notes, allow_self_approval: company.allow_self_approval,
       ...(company.currency_code ? { currency_code: company.currency_code } : {}) });
     setCoSaveErr('');
     setEditingCompany(true);

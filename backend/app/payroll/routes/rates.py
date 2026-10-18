@@ -241,16 +241,13 @@ async def get_driver_rate_matrix(
     driver_id: int,
     token: TokenDep,
     db: DbDep,
-    as_of: date = Query(default=None, description="As-of date (YYYY-MM-DD); defaults to today"),
+    as_of: date | None = Query(default=None, description="As-of date (YYYY-MM-DD); omitted resolves from the Driver's Branch"),
 ) -> DriverRateMatrix:
-    from datetime import date as _date
-
-    effective_date = as_of if as_of is not None else _date.today()
     return await rate_reads.get_driver_rate_matrix(
         driver_id=driver_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
-        as_of_date=effective_date,
+        as_of_date=as_of,
         db=db,
     )
 

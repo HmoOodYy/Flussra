@@ -50,6 +50,15 @@ async def list_supported_currencies(token: TokenDep, db: DbDep) -> list[Supporte
     )
 
 
+@router.get("/time-zones", response_model=list[str])
+async def list_supported_time_zones(token: TokenDep, db: DbDep) -> list[str]:
+    return await branch_reads.get_supported_time_zones(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+    )
+
+
 
 @router.get(
     "/company",
@@ -82,7 +91,7 @@ async def get_company_profile(
     summary="Update the company profile",
     description=(
         "Updates editable fields: **company_name**, **legal_name**, "
-        "**timezone_name**, **notes**, **allow_self_approval**.\n\n"
+        "**notes**, **allow_self_approval**.\n\n"
         "**allow_self_approval** controls whether the same user who submitted "
         "a review item may also record a substantive decision (Approved, "
         "Rejected, EditRequested) on it.  Defaults to `true`.  Set to `false` "
@@ -159,12 +168,14 @@ async def list_branches(
 async def get_onboarding_options(
     token: TokenDep,
     db: DbDep,
-    around: date | None = Query(None, description="Reference date; defaults to company-local today"),
+    time_zone_id: str = Query(..., min_length=1, max_length=100, description="Prospective Branch timezone"),
+    around: date | None = Query(None, description="Optional reference date"),
 ) -> OnboardingOptionsResponse:
     return await branches.get_onboarding_options(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
+        time_zone_id=time_zone_id,
         around=around,
     )
 

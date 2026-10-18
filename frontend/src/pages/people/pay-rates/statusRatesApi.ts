@@ -22,6 +22,7 @@ export interface StatusRateGroup {
 
 export interface StatusRateMatrix {
   driver_id: number;
+  as_of: string;
   groups: StatusRateGroup[];
 }
 

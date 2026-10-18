@@ -19,6 +19,10 @@ export function getSupportedCurrencies(): AxiosPromise<SupportedCurrency[]> {
   return apiClient.get<SupportedCurrency[]>('/settings/currencies');
 }
 
+export function getSupportedTimeZones(): AxiosPromise<string[]> {
+  return apiClient.get<string[]>('/settings/time-zones');
+}
+
 export function getSettingsBranches(): AxiosPromise<BranchAdmin[]> {
   return apiClient.get<BranchAdmin[]>('/settings/branches');
 }

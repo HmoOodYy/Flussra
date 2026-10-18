@@ -22,13 +22,13 @@ from tests.test_p3c_pay_definition_governance import _decide, _submitted
 pytestmark = pytest.mark.asyncio
 
 
-def _company_today(cur, tenant):
-    cur.execute("SELECT core.fn_CompanyToday(%s)", (tenant.company_id,))
+def _branch_today(cur, tenant, branch_id: int):
+    cur.execute("SELECT core.fn_BranchToday(%s, %s)", (tenant.company_id, branch_id))
     return cur.fetchone()[0]
 
 
 def _period_around_today(cur, tenant, status: str, *, ends_in_days: int = 3):
-    today = _company_today(cur, tenant)
+    today = _branch_today(cur, tenant, tenant.branch_a)
     pointer = None
     if status == "Returned":
         cur.execute("""
@@ -60,12 +60,47 @@ def test_the_mutable_period_vocabulary_is_the_canonical_five():
     assert MUTABLE_PERIOD_STATUSES == ("Draft", "Open", "InReview", "Returned", "Approved")
 
 
-async def test_request_approval_without_a_period_activates_on_company_today(
+async def test_request_approval_without_a_period_activates_on_branch_today(
     p3c_client, tenant, cur,
 ):
     submitted = await _submitted(p3c_client, tenant)
     assert (await _decide(p3c_client, tenant, submitted, "Approve")).status_code == 200
-    assert _config_start(cur, tenant, tenant.branch_a) == _company_today(cur, tenant)
+    assert _config_start(cur, tenant, tenant.branch_a) == _branch_today(cur, tenant, tenant.branch_a)
+
+
+async def test_bulk_default_activation_uses_each_branch_business_date(
+    p3c_client, tenant, cur,
+):
+    from tests.test_p3c_pay_definition_governance import create_definition
+
+    cur.execute("SELECT TimeZoneId FROM core.Branches WHERE BranchID = %s", (tenant.branch_a,))
+    prior_a = cur.fetchone()[0]
+    cur.execute("SELECT TimeZoneId FROM core.Branches WHERE BranchID = %s", (tenant.branch_b,))
+    prior_b = cur.fetchone()[0]
+    try:
+        cur.execute("UPDATE core.Branches SET TimeZoneId = 'Pacific/Kiritimati' WHERE BranchID = %s", (tenant.branch_a,))
+        cur.execute("UPDATE core.Branches SET TimeZoneId = 'Pacific/Honolulu' WHERE BranchID = %s", (tenant.branch_b,))
+        today_a = _branch_today(cur, tenant, tenant.branch_a)
+        today_b = _branch_today(cur, tenant, tenant.branch_b)
+        assert (today_a - today_b).days == 1
+
+        definition = await create_definition(p3c_client, tenant)
+        response = await p3c_client.patch(
+            f"/compensation/pay-definitions/{definition['pay_definition_id']}/branch-config",
+            json={"target": "SelectedBranches", "branch_ids": [tenant.branch_a, tenant.branch_b],
+                  "is_active": True},
+            headers=tenant.admin,
+        )
+        assert response.status_code == 200, response.text
+        effective_dates = {
+            row["branch_id"]: row["effective_from"]
+            for row in response.json()["results"]
+        }
+        assert str(effective_dates[tenant.branch_a]) == today_a.isoformat()
+        assert str(effective_dates[tenant.branch_b]) == today_b.isoformat()
+    finally:
+        cur.execute("UPDATE core.Branches SET TimeZoneId = %s WHERE BranchID = %s", (prior_a, tenant.branch_a))
+        cur.execute("UPDATE core.Branches SET TimeZoneId = %s WHERE BranchID = %s", (prior_b, tenant.branch_b))
 
 
 @pytest.mark.parametrize("status", ["Draft", "Open", "InReview", "Returned", "Approved"])

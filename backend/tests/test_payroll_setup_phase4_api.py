@@ -440,8 +440,8 @@ async def test_cross_tenant_assignments_and_removed_setup_routes(client, auth_to
         VALUES (:code, 'Foreign tenant', 'Active', FALSE) RETURNING CompanyID
     """), {"code": "P4X_" + uuid4().hex[:8]})).scalar_one()
     foreign_branch = (await db_conn.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, 'FOREIGN', 'Foreign branch', 'Active', FALSE) RETURNING BranchID
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, 'FOREIGN', 'Foreign branch', 'Active', FALSE, 'UTC') RETURNING BranchID
     """), {"cid": foreign_company})).scalar_one()
     foreign_setup = (await db_conn.execute(text("""
         INSERT INTO payroll.PayrollSetups (CompanyID, SetupCode, SetupName)
@@ -580,13 +580,13 @@ async def test_assignment_reassignment_withdrawal_branch_history_and_effective(
         "SELECT CompanyID FROM core.Companies WHERE CompanyCode = 'DEMO'"
     ))).scalar_one()
     branch_id = (await db_conn.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, :code, 'Phase 4 authority test', 'Active', FALSE)
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, :code, 'Phase 4 authority test', 'Active', FALSE, 'UTC')
         RETURNING BranchID
     """), {"cid": company_id, "code": "P4B_" + uuid4().hex[:8]})).scalar_one()
     second_branch_id = (await db_conn.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, :code, 'Second Phase 4 authority test', 'Active', FALSE)
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, :code, 'Second Phase 4 authority test', 'Active', FALSE, 'UTC')
         RETURNING BranchID
     """), {"cid": company_id, "code": "P4B_" + uuid4().hex[:8]})).scalar_one()
 

@@ -54,8 +54,8 @@ def auth(token: str) -> dict[str, str]:
 async def paytest_branch_id(session_db_conn) -> int:
     """Module-owned branch for Drivers-Off scenarios."""
     row = (await session_db_conn.execute(_text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (1, :code, :name, 'Active', FALSE)
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
         RETURNING branchid
     """), {"code": f"C25_{uuid4().hex}", "name": "CP25 Drivers Off isolated"})).scalar_one()
     return int(row)

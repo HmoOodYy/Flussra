@@ -55,9 +55,9 @@ async def _create_temp_company_and_branch(direct_db, code_suffix: str) -> tuple[
     cmp = await direct_db.execute(
         _text("""
             INSERT INTO core.companies
-                (companycode, companyname, legalname, status, issuspended, timezonename)
+                (companycode, companyname, legalname, status, issuspended)
             VALUES
-                (:code, :name, :legal, 'Active', FALSE, 'UTC')
+                (:code, :name, :legal, 'Active', FALSE)
             RETURNING companyid
         """),
         {
@@ -70,8 +70,8 @@ async def _create_temp_company_and_branch(direct_db, code_suffix: str) -> tuple[
 
     br = await direct_db.execute(
         _text("""
-            INSERT INTO core.branches (companyid, branchcode, branchname, status)
-            VALUES (:cid, :code, :name, 'Active')
+            INSERT INTO core.branches (companyid, branchcode, branchname, status, timezoneid)
+            VALUES (:cid, :code, :name, 'Active', 'UTC')
             RETURNING branchid
         """),
         {"cid": cmp_id, "code": f"IT{code_suffix}HQ", "name": f"IntTest {code_suffix} Branch"},

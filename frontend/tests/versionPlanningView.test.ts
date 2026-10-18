@@ -29,6 +29,8 @@ function makeVersion(overrides: Partial<VersionResponse> = {}, schedule: Partial
     replaced_by_version_id: null,
     is_terminal: true,
     is_current: false,
+    reference_date: '2026-01-04',
+    reference_branch_id: 7,
     ...overrides,
   };
 }

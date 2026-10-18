@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { apiError, today, type EditRow } from './payRatesView';
+import { apiError, type EditRow } from './payRatesView';
 import { saveStatusRateBatch, type StatusRateGroup, type StatusRateMatrix } from './statusRatesApi';
 
 export function useStatusRateEditing(
   selectedDriverId: number | null,
   statusMatrix: StatusRateMatrix | null,
   loadRates: (driverId: number) => Promise<void>,
+  referenceDate: string | undefined,
 ) {
   const [statusEditMode, setStatusEditMode] = useState(false);
   const [statusDrafts, setStatusDrafts] = useState<Record<string, EditRow>>({});
@@ -18,7 +19,7 @@ export function useStatusRateEditing(
   function startStatusEdit() {
     const initial: Record<string, EditRow> = {};
     for (const group of statusMatrix?.groups ?? []) {
-      initial[statusKey(group)] = { amount: group.current_rate?.amount ?? '', effective_from: today() };
+      initial[statusKey(group)] = { amount: group.current_rate?.amount ?? '', effective_from: referenceDate ?? '' };
     }
     setStatusDrafts(initial);
     setStatusOriginal(initial);

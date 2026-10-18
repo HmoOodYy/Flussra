@@ -147,8 +147,12 @@ async def _fetch_driver_ids_for_users(
             SELECT u.userid, d.driverid
             FROM   sec.users        u
             JOIN   core.employees   e ON e.employeeid = u.employeeid
+                                      AND e.companyid = u.companyid
             JOIN   core.drivers     d ON d.employeeid = e.employeeid
-                                      AND d.driverstatus NOT IN ('Transferred','Terminated')
+                                      AND d.companyid = e.companyid
+                                      AND d.driverid = core.fn_EffectiveDriverProfile(
+                                          e.companyid, e.employeeid
+                                      )
             WHERE  u.companyid = :cid
               AND  u.userid    IN ({placeholders})
         """),
@@ -435,7 +439,9 @@ async def get_user_driver_info(
                                       AND e.companyid  = :cid
             LEFT JOIN core.drivers   d ON d.employeeid = e.employeeid
                                       AND d.companyid  = :cid
-                                      AND d.driverstatus NOT IN ('Transferred','Terminated')
+                                      AND d.driverid = core.fn_EffectiveDriverProfile(
+                                          e.companyid, e.employeeid
+                                      )
             LEFT JOIN core.branches  b ON b.branchid   = d.branchid
             WHERE  u.userid    = :uid
               AND  u.companyid = :cid

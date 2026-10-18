@@ -28,8 +28,8 @@ async def _context(direct_db, suffix: str) -> dict[str, int | datetime.date]:
     """))).mappings().one()
     anchor = datetime.date(2094, 1, 7)
     branch_id = int((await direct_db.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (:company_id, :code, :name, 'Active', FALSE)
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (:company_id, :code, :name, 'Active', FALSE, 'UTC')
         RETURNING branchid
     """), {
         "company_id": tenant["companyid"], "code": f"CP2A_{uuid.uuid4().hex[:10]}",

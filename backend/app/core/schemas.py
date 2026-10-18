@@ -10,6 +10,8 @@ class BranchSummary(BaseModel):
     branch_id: int
     branch_code: str
     branch_name: str
+    time_zone_id: str
+    business_date: date
     status: str
     is_default: bool
     city: str | None = None

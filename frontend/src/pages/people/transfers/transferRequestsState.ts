@@ -32,7 +32,7 @@ interface CreateState {
   driversLoading: boolean;
   driverId: number | null;
   targetBranchId: number | null;
-  effectiveDate: string;
+  effectiveAt: string;
   reason: string;
   notes: string;
 }
@@ -52,7 +52,7 @@ const CREATE0: CreateState = {
   open: false, loading: false, error: null,
   drivers: [], driversLoading: false,
   driverId: null, targetBranchId: null,
-  effectiveDate: '', reason: '', notes: '',
+  effectiveAt: '', reason: '', notes: '',
 };
 const DECIDE0: DecideDialogState = { open: false, loading: false, error: null, decision: 'Approved', notes: '' };
 const CANCEL0: CancelDialogState = { open: false, loading: false, error: null, reason: '' };

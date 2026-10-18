@@ -1,18 +1,17 @@
 """Canonical legal-date navigation for publication, assignment, reassignment,
 and onboarding.
 
-The frontend must never compute payroll chronology. Every function here
-answers, for a proposed payroll date: is it valid, why not (stable conflict
+Every function here answers, for a proposed payroll date: is it valid, why not (stable conflict
 codes from the same read-only validators the write paths use), the nearest
 valid previous/next dates, a friendly period description, and — when no date
 is supplied — a server-suggested date.
 
-Company-local "today" (clock.company_today) is used ONLY for the first-
-onboarding window floor (already applied inside the validators), the
-`relation` label (past/current/future), and the default requested/suggested
-date when no date is given. It never influences whether a given date is
-valid for publication or reassignment — validity comes solely from the
-read-only validators in `payroll_policy` and `validation`.
+The owning Branch date, or the explicitly selected prospective Branch
+timezone, is used for Branch-scoped labels and suggested dates. Company
+publication choices have no implicit current date. A proposed date's legal
+validity comes solely from the read-only validators in `payroll_policy` and
+`validation`. Timezone conversion and local-day-to-instant boundaries are
+resolved in SQL; date-only chronology remains explicit DATE arithmetic.
 """
 
 from collections.abc import Awaitable, Callable
@@ -21,7 +20,9 @@ from datetime import date, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from . import clock, payroll_policy, reads
+from app.business_clock import branch_today, prospective_today
+
+from . import payroll_policy, reads
 from .chronology import (
     Schedule,
     next_period_start,
@@ -43,7 +44,9 @@ EvaluateFn = Callable[[date], Awaitable[list[dict]]]
 DescribeFn = Callable[[date], Awaitable[dict]]
 
 
-def _relation(d: date, period_end_date: date, today: date) -> str:
+def _relation(d: date, period_end_date: date, today: date | None) -> str | None:
+    if today is None:
+        return None
     if period_end_date < today:
         return "past"
     if d <= today <= period_end_date:
@@ -76,7 +79,7 @@ def _choice(
 
 
 async def _navigate(
-    *, today: date, requested: date, explicit: bool,
+    *, today: date | None, requested: date, explicit: bool,
     next_candidate: DateCandidateFn, previous_candidate: DateCandidateFn,
     evaluate: EvaluateFn, describe: DescribeFn,
     floor: date | None, prefer_current_period: bool,
@@ -142,8 +145,9 @@ async def publication_choices(
             schedule_data["frequency"], schedule_data["anchor_start_date"],
             schedule_data["custom_interval_days"], schedule_data["normal_days_off_mask"],
         )
-    today = await clock.company_today(company_id, db)
-    requested = around if around is not None else today
+    today = None
+    draft = await reads.get_draft(company_id, setup_id, draft_id, db) if draft_id is not None else None
+    requested = around or (draft["planned_effective_from_date"] if draft else None) or schedule.anchor_start_date
 
     async def evaluate(d: date) -> list[dict]:
         current_at_date = await terminal_version(db, setup_id, d)
@@ -194,7 +198,7 @@ async def assignment_choices(
         raise PolicyError("BRANCH_NOT_FOUND", "Branch does not belong to Company")
     await reads.get_setup(company_id, setup_id, db)
     segments = await terminal_segments(db, setup_id)
-    today = await clock.company_today(company_id, db)
+    today = await branch_today(company_id, branch_id, db)
     requested = around if around is not None else today
     timeline = await payroll_policy._assignment_timeline(db, company_id, branch_id)
     floor = onboarding_window_floor(segments, today) if not timeline else None
@@ -226,8 +230,14 @@ async def reassignment_choices(
 ) -> dict:
     """Legal reassignment dates for a Branch moving onto a destination Setup's timeline."""
     await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
+    branch = (await db.execute(text("""
+        SELECT BranchID FROM core.Branches WHERE CompanyID = :cid AND BranchID = :bid
+    """), {"cid": company_id, "bid": branch_id})).scalar_one_or_none()
+    if branch is None:
+        raise PolicyError("BRANCH_NOT_FOUND", "Branch does not belong to Company")
+    await reads.get_setup(company_id, destination_setup_id, db)
     segments = await terminal_segments(db, destination_setup_id)
-    today = await clock.company_today(company_id, db)
+    today = await branch_today(company_id, branch_id, db)
     requested = around if around is not None else today
 
     async def evaluate(d: date) -> list[dict]:
@@ -277,6 +287,7 @@ async def reassignment_choices(
 
 async def onboarding_choices(
     company_id: int, setup_id: int, around: date | None, db: AsyncConnection,
+    *, time_zone_id: str,
 ) -> dict:
     """Legal first-payroll onboarding dates for a not-yet-created Branch.
 
@@ -284,12 +295,14 @@ async def onboarding_choices(
     the authority the create-with-date write requires.
     """
     segments = await terminal_segments(db, setup_id)
-    today = await clock.company_today(company_id, db)
+    today = await prospective_today(time_zone_id, db)
     requested = around if around is not None else today
     floor = onboarding_window_floor(segments, today)
 
     async def evaluate(d: date) -> list[dict]:
-        return await payroll_policy.evaluate_assignment(company_id, None, setup_id, d, db)
+        return await payroll_policy.evaluate_assignment(
+            company_id, None, setup_id, d, db, prospective_time_zone_id=time_zone_id,
+        )
 
     async def describe(d: date) -> dict:
         schedule = timeline_schedule_at(segments, d)

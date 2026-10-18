@@ -192,13 +192,14 @@ function CountryPicker({ value, onChange, disabled }: {
 }
 
 export function BranchFormFields({
-  form, onChange, disabled, isCreate, canSetDefault, styles: s,
+  form, onChange, disabled, isCreate, canSetDefault, timeZones, styles: s,
 }: {
   form: BranchForm;
   onChange: (p: Partial<BranchForm>) => void;
   disabled: boolean;
   isCreate: boolean;
   canSetDefault: boolean;
+  timeZones: string[];
   styles: Record<string, string>;
 }) {
   return (
@@ -209,6 +210,16 @@ export function BranchFormFields({
         <input className={s.input} value={form.branch_name}
           onChange={(e) => onChange({ branch_name: e.target.value })}
           disabled={disabled} maxLength={120} autoFocus />
+      </div>
+      <div className={`${s.formGroup} ${s.formGroupFull}`}>
+        <label className={s.label}>Branch timezone <span className={s.required}>*</span></label>
+        <select className={s.input} value={form.time_zone_id}
+          onChange={(e) => onChange({ time_zone_id: e.target.value })}
+          disabled={disabled || timeZones.length === 0} required>
+          <option value="">Select a timezone</option>
+          {timeZones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
+        </select>
+        <p className={s.fieldHelp}>Used to determine this Branch’s business date and payroll WorkDates.</p>
       </div>
       {/* Status (half) | Country (half) */}
       <div className={s.formGroup}>

@@ -12,7 +12,7 @@ Covers:
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.payroll_setup.schemas import BoundaryChoicesResponse, SetupResponse
 
@@ -39,7 +39,6 @@ class CompanyProfile(BaseModel):
     legal_name: str | None = None
     status: str
     is_suspended: bool
-    timezone_name: str
     notes: str | None = None
     default_branch_id: int | None = None
     default_branch_name: str | None = None
@@ -59,9 +58,10 @@ class CompanyUpdate(BaseModel):
     Status and IsSuspended are system-controlled — they cannot be changed
     through this endpoint.
     """
+    model_config = ConfigDict(extra="forbid")
+
     company_name: str
     legal_name: str | None = None
-    timezone_name: str | None = None
     notes: str | None = None
     allow_self_approval: bool | None = None
     currency_code: str | None = None
@@ -100,6 +100,8 @@ class BranchAdmin(BaseModel):
     company_id: int
     branch_code: str
     branch_name: str
+    time_zone_id: str
+    business_date: date
     status: str
     is_default: bool
     address_line1: str | None = None
@@ -125,6 +127,7 @@ class BranchAdmin(BaseModel):
 class BranchCreate(BaseModel):
     """Payload to create a new branch."""
     branch_name: str
+    time_zone_id: str = Field(min_length=1, max_length=100)
     branch_code: str | None = None     # auto-generated from name if omitted
     status: str = "Active"
     is_default: bool = False
@@ -142,6 +145,13 @@ class BranchCreate(BaseModel):
         if not v.strip():
             raise ValueError("branch_name must not be blank")
         return v.strip()
+
+    @field_validator("time_zone_id")
+    @classmethod
+    def timezone_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("time_zone_id must not be blank")
+        return value.strip()
 
     @field_validator("branch_code")
     @classmethod
@@ -167,6 +177,7 @@ class BranchUpdate(BaseModel):
     POST /settings/branches/{id}/set-default to promote a branch.
     """
     branch_name: str | None = None
+    time_zone_id: str | None = Field(default=None, max_length=100)
     branch_code: str | None = None
     status: str | None = None
     address_line1: str | None = None
@@ -182,6 +193,15 @@ class BranchUpdate(BaseModel):
         if v is not None and not v.strip():
             raise ValueError("branch_name must not be blank if provided")
         return v.strip() if v else None
+
+    @field_validator("time_zone_id", mode="before")
+    @classmethod
+    def timezone_non_empty(cls, value):
+        if value is None:
+            raise ValueError("time_zone_id must not be null when provided")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("time_zone_id must not be blank")
+        return value.strip()
 
     @field_validator("branch_code")
     @classmethod

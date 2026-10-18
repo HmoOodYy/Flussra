@@ -207,8 +207,8 @@ async def cp1c_setup(session_db_conn, test_database_url):
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (:cid, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (:cid, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"cid": company_id, "code": branch_code, "name": f"CP1C {branch_code}"},

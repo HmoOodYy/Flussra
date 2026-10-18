@@ -1,10 +1,10 @@
 """Pydantic schemas for the Driver Transfer workflow."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 # ---------------------------------------------------------------------------
 # Request bodies
@@ -18,9 +18,11 @@ class DriverTransferCreate(BaseModel):
     When a branch manager initiates on behalf, ``initiated_by`` must be
     'SourceBranch'.
     """
+    model_config = ConfigDict(extra="forbid")
+
     driver_id: int
     target_branch_id: int
-    effective_date: date
+    effective_at: AwareDatetime | None = None
     initiated_by: Literal["Driver", "SourceBranch"]
     reason: str | None = None
     notes: str | None = None
@@ -54,7 +56,7 @@ class DriverTransferResponse(BaseModel):
     requested_by_user_id: int
     initiated_by: str
     status: str
-    effective_date: date
+    effective_at: datetime | None
     reason: str | None
     notes: str | None
     source_approved_by_user_id: int | None
@@ -83,3 +85,4 @@ class DriverTransferResponse(BaseModel):
 class TransferListResponse(BaseModel):
     items: list[DriverTransferResponse]
     total: int
+    model_config = ConfigDict(extra="forbid")

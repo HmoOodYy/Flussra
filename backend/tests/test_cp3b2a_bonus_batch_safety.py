@@ -126,10 +126,20 @@ async def _seed_snapshot(
                 INSERT INTO payroll.payrollperioddrivereligibility
                     (companyid, branchid, payrollperiodid, driverid,
                      drivercodesnapshot, drivernamesnapshot,
+                     drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
+                     branchtimezoneidsnapshot, eligibleworkdates,
                      iseligibleforperiod, eligibilityreasoncode, snapshotsource,
                      createdatutc, updatedatutc)
-                VALUES (1, :bid, :pid, :did, :code, :name,
-                        TRUE, 'Active', 'Generated', NOW(), NOW())
+                SELECT 1, :bid, :pid, d.driverid, :code, :name,
+                       d.effectivefromat, d.effectivetoat, b.timezoneid,
+                       ARRAY(SELECT pp.startdate + n.day_index
+                             FROM payroll.payrollperiods pp
+                             CROSS JOIN LATERAL generate_series(0, pp.enddate - pp.startdate) n(day_index)
+                             WHERE pp.payrollperiodid = :pid),
+                       TRUE, 'Active', 'Generated', NOW(), NOW()
+                FROM core.drivers d
+                JOIN core.branches b ON b.companyid = d.companyid AND b.branchid = d.branchid
+                WHERE d.driverid = :did AND d.companyid = 1 AND d.branchid = :bid
                 ON CONFLICT (payrollperiodid, driverid) DO NOTHING
             """),
             {"bid": branch_id, "pid": period_id, "did": e["driver_id"],
@@ -177,8 +187,8 @@ async def cp3b2a_branch_id(
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": (code := f"CP3B2A_{uuid.uuid4().hex[:10]}"), "name": code},
@@ -427,6 +437,7 @@ async def test_create_bumps_revision_by_one(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     before = await _get_bonus_data_revision(db_conn, period_id)
     await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     after = await _get_bonus_data_revision(db_conn, period_id)
@@ -444,6 +455,7 @@ async def test_update_bumps_revision_by_one(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, period_id)
 
@@ -468,6 +480,7 @@ async def test_void_active_bumps_revision_by_one(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, period_id)
 
@@ -491,6 +504,7 @@ async def test_idempotent_void_does_not_double_bump(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
 
     r1 = await client.delete(
@@ -544,6 +558,7 @@ async def test_failed_update_does_not_bump_revision(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, period_id)
 
@@ -574,6 +589,7 @@ async def test_failed_void_wrong_period_does_not_bump_revision(
     other_period_id = await _insert_period_db(
         db_conn, cp3b2a_branch_id, *_week(), status="Draft"
     )
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     before = await _get_bonus_data_revision(db_conn, other_period_id)
 
@@ -602,6 +618,7 @@ async def test_patch_with_correct_revision_succeeds(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
 
     r = await client.patch(
@@ -625,6 +642,7 @@ async def test_patch_with_stale_revision_conflicts_no_side_effects(
     cp3b2a_driver_id: int,
 ) -> None:
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     event_id = await _post_bonus(client, auth_token, period_id, cp3b2a_driver_id, "50.00")
     before_period_rev = await _get_bonus_data_revision(db_conn, period_id)
 
@@ -806,6 +824,7 @@ async def test_audit_failure_rolls_back_event_and_revision(
     """If _write_line_audit raises, both the event insert and the
     BonusDataRevision bump must roll back (same request transaction)."""
     period_id = await _insert_period_db(db_conn, cp3b2a_branch_id, *_week())
+    await _seed_snapshot(db_conn, cp3b2a_branch_id, period_id, [await _snapshot_entry(cp3b2a_driver_id)])
     before_rev = await _get_bonus_data_revision(db_conn, period_id)
 
     async def _boom(*args, **kwargs):

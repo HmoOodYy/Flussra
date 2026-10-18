@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.admin.schemas import (
     CompanyRoleAssignmentCreate,
 )
-from app.workforce.clock import company_today
 from app.workforce.effective import resolve_effective_driver_profile
 
 
@@ -68,8 +67,7 @@ async def validate_company_role_assignment(
         )
         if employee.first() is None:
             raise HTTPException(status_code=422, detail="Linked Employee not found for this company.")
-        business_date = await company_today(company_id, db)
-        current = await resolve_effective_driver_profile(company_id, employee_id, business_date, db)
+        current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
         if current is None:
             raise HTTPException(status_code=422, detail="DRIVER access requires a current effective Driver profile.")
     else:

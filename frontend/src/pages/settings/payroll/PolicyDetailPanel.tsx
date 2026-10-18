@@ -23,6 +23,7 @@ import { PolicyDetailHeader } from './PolicyDetailHeader';
 import { VersionTimelineSection } from './VersionTimelineSection';
 import { PolicyDetailLowerSections } from './PolicyDetailLowerSections';
 import { PolicyDetailDialogs } from './PolicyDetailDialogs';
+import styles from './PayrollSetupsPage.module.css';
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,16 @@ export function PolicyDetailPanel({
   showLowerSections = false,
 }: PolicyDetailPanelProps) {
   const selectedPolicyId = selectedPolicy?.setup_id ?? null;
+  const [selectedReferenceBranchId, setSelectedReferenceBranchId] = useState<number | null>(null);
+  const [referenceBranchPolicyId, setReferenceBranchPolicyId] = useState(selectedPolicyId);
+  if (referenceBranchPolicyId !== selectedPolicyId) {
+    setReferenceBranchPolicyId(selectedPolicyId);
+    setSelectedReferenceBranchId(null);
+  }
+  const referenceBranchId = referenceBranchPolicyId === selectedPolicyId
+    ? selectedReferenceBranchId
+    : null;
+  const referenceBranchName = summaries.find((branch) => branch.branch_id === referenceBranchId)?.branch_name ?? null;
 
   // A lightweight branch directory (id -> name), used only to label a
   // branch id (publish/preview conflict tables).
@@ -141,7 +152,7 @@ export function PolicyDetailPanel({
   // ── Policy updates ("Versions") + Drafts of the selected policy ──────────
   // Share one reload key so publish (which changes both) can refresh both
   // from the backend without synthesizing local state.
-  const { versions, versionsLoading, versionsError, drafts, draftsLoading, draftsError, setSetupDataReloadKey } = usePolicyDetailData(selectedPolicyId);
+  const { versions, versionsLoading, versionsError, drafts, draftsLoading, draftsError, setSetupDataReloadKey } = usePolicyDetailData(selectedPolicyId, referenceBranchId);
   const displayVersionNumbers = useMemo(() => effectiveDisplayVersionNumbers(versions), [versions]);
 
   // ── Draft editor modal (create + edit share it) ─────────────────────────
@@ -308,6 +319,17 @@ export function PolicyDetailPanel({
   return (
     <>
       {selectedPolicy && (
+        <div className={styles.policyBranchContext}>
+          <label htmlFor="policy-branch-context">Current version reference</label>
+          <select id="policy-branch-context" value={referenceBranchId ?? ''}
+            onChange={(event) => setSelectedReferenceBranchId(event.target.value ? Number(event.target.value) : null)}>
+            <option value="">Select a Branch</option>
+            {summaries.map((branch) => <option key={branch.branch_id} value={branch.branch_id}>{branch.branch_name}</option>)}
+          </select>
+          <span>{referenceBranchName ? `Schedule dates use ${referenceBranchName}'s business date.` : 'Select a Branch to identify its current and upcoming schedule.'}</span>
+        </div>
+      )}
+      {selectedPolicy && (
         <PolicyDetailHeader
           selectedPolicy={selectedPolicy}
           usageState={usageState}
@@ -324,6 +346,7 @@ export function PolicyDetailPanel({
           versionsError={versionsError}
           versionsLoading={versionsLoading}
           scheduleFields={scheduleFields}
+          referenceBranchName={referenceBranchName}
         />
       )}
       {selectedPolicy && (
@@ -344,6 +367,8 @@ export function PolicyDetailPanel({
           onCreate={openCreateDraftModal}
           onEditDraft={openEditDraftModal}
           onDiscardDraft={openDiscardConfirm}
+          hasBranchContext={referenceBranchId != null}
+          referenceBranchName={referenceBranchName}
         />
       )}
 

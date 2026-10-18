@@ -105,15 +105,23 @@ test('Payroll schedule card: renamed, fields come from the current version only,
   assert.doesNotMatch(card, /[Ll]ocked/);
 });
 
-test('no current version: one intentional empty state, no placeholder dash values', () => {
+test('current-version display requires Branch context and keeps the contextual empty state', () => {
   const card = headerSource;
   assert.match(card, /scheduleFields === null \? \(/);
-  assert.match(card, /<p className=\{styles\.scheduleEmptyTitle\}>No payroll schedule is active yet<\/p>/);
-  assert.match(card, /Publish a schedule to start using this policy\./);
-  assert.match(card, /The schedule currently in effect for this policy\./);
+  assert.match(card, /Select a Branch to identify the current version/);
+  assert.match(card, /No payroll schedule is active for this date/);
+  assert.match(card, /Current version using \$\{referenceBranchName\}'s business date/);
+  assert.match(card, /published schedules are shared configuration/i);
   assert.doesNotMatch(card, /'—'|"—"/);
   // No draft/publish actions in the empty state.
   assert.doesNotMatch(card, /openCreateDraftModal|setPublishDraft/);
+});
+
+test('version data is keyed to both Setup and Branch context before it can render', () => {
+  assert.match(dataSource, /setupId: number \| null/);
+  assert.match(dataSource, /branchId: number \| null/);
+  assert.match(dataSource, /versionsState\.setupId === selectedPolicyId && versionsState\.branchId === branchId/);
+  assert.match(dataSource, /!hasVersionContext \|\| versionsState\.loading/);
 });
 
 test('lower sections render only behind showLowerSections (default false); dialogs and modals stay outside it', () => {

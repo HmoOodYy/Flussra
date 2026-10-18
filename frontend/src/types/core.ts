@@ -39,4 +39,6 @@ export interface Branch {
   city: string | null;
   state_province: string | null;
   country: string | null;
+  time_zone_id: string;
+  business_date: string;
 }

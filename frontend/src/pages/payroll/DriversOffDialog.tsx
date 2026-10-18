@@ -5,29 +5,13 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { getSelectedDayOffDrivers } from '../../lib/payrollApi';
+import { formatIsoShort } from '../../lib/isoDate';
 import type { SelectedDayOffDriver } from '../../types/payroll/entry';
 import styles from './DriversOffDialog.module.css';
 
 // ---------------------------------------------------------------------------
 // Date helpers
 // ---------------------------------------------------------------------------
-
-function formatDate(dateStr: string): string {
-  const dt = new Date(dateStr + 'T00:00:00');
-  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function todayIso(): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${now.getFullYear()}-${month}-${day}`;
-}
-
-function defaultWorkDate(startDate: string, endDate: string): string {
-  const today = todayIso();
-  return today >= startDate && today <= endDate ? today : startDate;
-}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -52,7 +36,7 @@ export function DriversOffDialog({
   periodEndDate,
   onClose,
 }: DriversOffDialogProps) {
-  const [workDate, setWorkDate] = useState(() => defaultWorkDate(periodStartDate, periodEndDate));
+  const [workDate, setWorkDate] = useState<string | null>(null);
   const [entries, setEntries] = useState<SelectedDayOffDriver[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [responseDate, setResponseDate] = useState(workDate);
@@ -61,7 +45,7 @@ export function DriversOffDialog({
   const [error, setError] = useState<string | null>(null);
   const requestVersion = useRef(0);
 
-  const boundedWorkDate = workDate < periodStartDate
+  const boundedWorkDate = workDate == null || workDate === '' ? undefined : workDate < periodStartDate
     ? periodStartDate
     : workDate > periodEndDate
       ? periodEndDate
@@ -81,8 +65,9 @@ export function DriversOffDialog({
         setResponseDate(data.work_date);
         setResponseDayName(data.day_name);
       })
-      .catch(() => {
-        if (version === requestVersion.current) setError('Failed to load drivers off data.');
+      .catch((err: unknown) => {
+        const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+        if (version === requestVersion.current) setError(typeof detail === 'string' ? detail : 'Failed to load drivers off data.');
       })
       .finally(() => {
         if (version === requestVersion.current) setLoading(false);
@@ -130,12 +115,12 @@ export function DriversOffDialog({
               type="date"
               min={periodStartDate}
               max={periodEndDate}
-              value={boundedWorkDate}
+              value={boundedWorkDate ?? responseDate ?? ''}
               onChange={(event) => setWorkDate(event.target.value)}
             />
-            {!loading && !error && (
+            {!loading && !error && responseDate && (
               <span className={styles.resultSummary}>
-                {responseDayName} · {formatDate(responseDate)} · {totalCount} driver{totalCount === 1 ? '' : 's'}
+                {responseDayName} · {formatIsoShort(responseDate)} · {totalCount} driver{totalCount === 1 ? '' : 's'}
               </span>
             )}
           </div>

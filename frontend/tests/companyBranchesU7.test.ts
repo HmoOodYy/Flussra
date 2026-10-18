@@ -208,6 +208,7 @@ test('G. canOnboard: create + manage + publish (no assign) -> false', () => {
 
 const BASE_FORM = {
   branch_name: 'North Branch',
+  time_zone_id: 'Africa/Cairo',
   branch_code: 'NB',
   status: 'Active',
   is_default: false,
@@ -258,29 +259,33 @@ test('Unit B: showOnboardingCheckbox mirrors caps.canOnboard exactly', () => {
 
 test('Unit B: canCreateBranchWithOnboarding — unchecked always allows create', () => {
   assert.equal(
-    canCreateBranchWithOnboarding({ setUpPayrollNow: false, hasCompanyDefault: true, choicesCurrentAndValid: false }),
+    canCreateBranchWithOnboarding({ setUpPayrollNow: false, hasCompanyDefault: true, optionsResolved: false, choicesCurrentAndValid: false }),
     true,
   );
   assert.equal(
-    canCreateBranchWithOnboarding({ setUpPayrollNow: false, hasCompanyDefault: false, choicesCurrentAndValid: false }),
+    canCreateBranchWithOnboarding({ setUpPayrollNow: false, hasCompanyDefault: false, optionsResolved: false, choicesCurrentAndValid: false }),
     true,
   );
 });
 
-test('Unit B: canCreateBranchWithOnboarding — checked but no company default still allows create (payroll-less branch)', () => {
+test('Unit B: checked onboarding waits for current options, including a confirmed no-default result', () => {
   assert.equal(
-    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: false, choicesCurrentAndValid: false }),
+    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: false, optionsResolved: false, choicesCurrentAndValid: false }),
+    false,
+  );
+  assert.equal(
+    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: false, optionsResolved: true, choicesCurrentAndValid: false }),
     true,
   );
 });
 
 test('Unit B: canCreateBranchWithOnboarding — checked with a company default requires current, valid boundary choices', () => {
   assert.equal(
-    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: true, choicesCurrentAndValid: false }),
+    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: true, optionsResolved: true, choicesCurrentAndValid: false }),
     false,
   );
   assert.equal(
-    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: true, choicesCurrentAndValid: true }),
+    canCreateBranchWithOnboarding({ setUpPayrollNow: true, hasCompanyDefault: true, optionsResolved: true, choicesCurrentAndValid: true }),
     true,
   );
 });
@@ -310,7 +315,7 @@ test('K. buildBranchCreatePayload: keys exactly equal the expected list (no setu
     canOnboard: true, setUpPayroll: true, canSetDefaultOnCreate: false,
   });
   assert.deepEqual(Object.keys(payload), [
-    'branch_name', 'branch_code', 'status', 'is_default',
+    'branch_name', 'time_zone_id', 'branch_code', 'status', 'is_default',
     'address_line1', 'city', 'state_province', 'postal_code', 'country', 'notes',
     'first_payroll_start_date',
   ]);
@@ -318,7 +323,7 @@ test('K. buildBranchCreatePayload: keys exactly equal the expected list (no setu
     canOnboard: false, setUpPayroll: false, canSetDefaultOnCreate: false,
   });
   assert.deepEqual(Object.keys(withoutDate), [
-    'branch_name', 'branch_code', 'status', 'is_default',
+    'branch_name', 'time_zone_id', 'branch_code', 'status', 'is_default',
     'address_line1', 'city', 'state_province', 'postal_code', 'country', 'notes',
   ]);
   for (const forbidden of ['setup_id', 'version_id', 'assignment_id', 'schedule_readiness_reason', 'schedule_readiness_date']) {
@@ -701,10 +706,10 @@ test('Unit B: no-company-default messaging names the canViewSetups link and admi
   assert.match(branchEditorSource, /Ask an administrator to choose a company default payroll policy\./);
 });
 
-test('Unit B: onboarding boundary-choices key includes the default setup id', () => {
-  assert.match(onboardingHookSource, /`onboarding\|\$\{onboardingDefaultSetup\?\.setup_id \?\? 'none'\}`/);
+test('Unit B: onboarding boundary-choices key includes Branch timezone and default setup id', () => {
+  assert.match(onboardingHookSource, /`onboarding\|\$\{timeZoneId\}\|\$\{onboardingDefaultSetup\?\.setup_id \?\? 'none'\}`/);
 });
 
 test('Unit B: the Create button is disabled when create mode and !canCreateNow', () => {
-  assert.match(branchEditorSource, /disabled=\{savingBranch \|\| \(modal === 'create' && !canCreateNow\)\}/);
+  assert.match(branchEditorSource, /disabled=\{savingBranch \|\| !bForm\.time_zone_id \|\| \(modal === 'create' && !canCreateNow\)\}/);
 });

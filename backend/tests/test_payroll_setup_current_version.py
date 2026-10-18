@@ -1,8 +1,6 @@
-"""Focused tests for `is_current` on the published-version read model
-(`reads.list_versions` / `VersionResponse`): the one published Version in
-effect on company-local today. Display/read-model only — `clock.company_today`
-never decides payroll authority; it is stubbed here as in
-tests/test_payroll_setup_branch_summaries.py."""
+"""Focused tests for `is_current` on the published-version read model.
+Currentness is classified only when a Branch context is supplied and uses that
+Branch's business date; without context the metadata remains unknown (NULL)."""
 
 from __future__ import annotations
 
@@ -15,7 +13,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll_setup import clock, reads
+from app.payroll_setup import reads
 from app.payroll_setup.payroll_policy import create_draft, create_setup, publish_version
 from app.payroll_setup.schemas import VersionResponse
 
@@ -34,9 +32,13 @@ async def payroll_setup_db(test_database_url):
                     JOIN sec.Users u ON u.CompanyID = c.CompanyID
                     WHERE c.CompanyCode = 'DEMO' AND u.Username = 'admin'
                 """))).mappings().one()
+                branch_id = (await conn.execute(text("""
+                    SELECT BranchID FROM core.Branches
+                    WHERE CompanyID = :cid ORDER BY BranchID LIMIT 1
+                """), {"cid": tenant["companyid"]})).scalar_one()
                 yield SimpleNamespace(
                     db=conn, company_id=int(tenant["companyid"]),
-                    user_id=int(tenant["userid"]), marker=marker,
+                    user_id=int(tenant["userid"]), branch_id=int(branch_id), marker=marker,
                 )
             finally:
                 await transaction.rollback()
@@ -45,10 +47,10 @@ async def payroll_setup_db(test_database_url):
 
 
 def _stub_today(monkeypatch, today: date) -> None:
-    async def _stub(company_id, conn):
+    async def _stub(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub)
+    monkeypatch.setattr(reads, "branch_today", _stub)
 
 
 ANCHOR = date(2090, 3, 1)  # weekly boundaries: 03-01, 03-08, 03-15, ...
@@ -83,7 +85,7 @@ async def test_single_past_version_is_current(payroll_setup_db, monkeypatch):
     v1 = await _publish(db, setup_id, ANCHOR, mask=1)
     _stub_today(monkeypatch, date(2090, 3, 20))
 
-    versions = await reads.list_versions(db.company_id, setup_id, db.db)
+    versions = await reads.list_versions(db.company_id, setup_id, db.db, branch_id=db.branch_id, user_id=db.user_id)
 
     assert _current_ids(versions) == [v1]
 
@@ -96,7 +98,7 @@ async def test_future_version_is_not_current_while_past_one_is(payroll_setup_db,
     v2 = await _publish(db, setup_id, date(2090, 3, 15), mask=2)
     _stub_today(monkeypatch, date(2090, 3, 10))
 
-    versions = await reads.list_versions(db.company_id, setup_id, db.db)
+    versions = await reads.list_versions(db.company_id, setup_id, db.db, branch_id=db.branch_id, user_id=db.user_id)
 
     assert _current_ids(versions) == [v1]
     assert v2 not in _current_ids(versions)
@@ -109,7 +111,7 @@ async def test_only_future_version_means_nothing_is_current(payroll_setup_db, mo
     await _publish(db, setup_id, ANCHOR, mask=1)
     _stub_today(monkeypatch, date(2090, 2, 1))
 
-    versions = await reads.list_versions(db.company_id, setup_id, db.db)
+    versions = await reads.list_versions(db.company_id, setup_id, db.db, branch_id=db.branch_id, user_id=db.user_id)
 
     assert versions
     assert _current_ids(versions) == []
@@ -123,7 +125,7 @@ async def test_later_version_becomes_current_once_it_starts(payroll_setup_db, mo
     v2 = await _publish(db, setup_id, date(2090, 3, 15), mask=2)
     _stub_today(monkeypatch, date(2090, 3, 15))
 
-    versions = await reads.list_versions(db.company_id, setup_id, db.db)
+    versions = await reads.list_versions(db.company_id, setup_id, db.db, branch_id=db.branch_id, user_id=db.user_id)
 
     assert _current_ids(versions) == [v2]
 
@@ -136,7 +138,7 @@ async def test_same_date_replacement_only_terminal_is_current(payroll_setup_db, 
     v1b = await _publish(db, setup_id, ANCHOR, mask=2, replaces=v1)
     _stub_today(monkeypatch, date(2090, 3, 10))
 
-    versions = await reads.list_versions(db.company_id, setup_id, db.db)
+    versions = await reads.list_versions(db.company_id, setup_id, db.db, branch_id=db.branch_id, user_id=db.user_id)
 
     assert _current_ids(versions) == [v1b]
     assert next(v for v in versions if v["version_id"] == v1)["is_current"] is False
@@ -149,7 +151,62 @@ async def test_version_response_schema_carries_is_current(payroll_setup_db, monk
     await _publish(db, setup_id, ANCHOR, mask=1)
     _stub_today(monkeypatch, date(2090, 3, 10))
 
-    versions = await reads.list_versions(db.company_id, setup_id, db.db)
+    versions = await reads.list_versions(db.company_id, setup_id, db.db, branch_id=db.branch_id, user_id=db.user_id)
     payload = VersionResponse.model_validate(versions[0]).model_dump()
 
     assert payload["is_current"] is True
+
+
+@pytest.mark.asyncio
+async def test_real_branch_context_classifies_shared_setup_on_kiritimati_and_honolulu_dates(
+    payroll_setup_db,
+):
+    db = payroll_setup_db
+    await db.db.execute(text(
+        "UPDATE core.Branches SET TimeZoneId = 'Pacific/Kiritimati' WHERE BranchID = :branch_id"
+    ), {"branch_id": db.branch_id})
+    honolulu_branch_id = int((await db.db.execute(text("""
+        INSERT INTO core.Branches
+            (CompanyID, BranchCode, BranchName, Status, IsDefault, TimeZoneId)
+        VALUES (:company_id, :code, 'Clock test Honolulu', 'Active', FALSE, 'Pacific/Honolulu')
+        RETURNING BranchID
+    """), {"company_id": db.company_id, "code": f"CVH{db.marker}"})).scalar_one())
+    dates = (await db.db.execute(text("""
+        SELECT core.fn_BranchToday(:company_id, :kiritimati) AS kiritimati,
+               core.fn_BranchToday(:company_id, :honolulu) AS honolulu
+    """), {
+        "company_id": db.company_id,
+        "kiritimati": db.branch_id,
+        "honolulu": honolulu_branch_id,
+    })).mappings().one()
+    assert (dates["kiritimati"] - dates["honolulu"]).days == 1
+
+    setup_id = await _new_setup(db, "world-clock")
+    async def publish_at(effective: date, mask: int) -> int:
+        draft_id = await create_draft(
+            db.company_id, db.user_id, setup_id, db.db,
+            payroll_frequency="Custom", anchor_start_date=dates["honolulu"],
+            custom_interval_days=1, normal_days_off_mask=mask,
+        )
+        return await publish_version(
+            db.company_id, db.user_id, setup_id, draft_id, effective, db.db,
+        )
+
+    v1 = await publish_at(dates["honolulu"], 1)
+    v2 = await publish_at(dates["kiritimati"], 2)
+    honolulu = await reads.list_versions(
+        db.company_id, setup_id, db.db,
+        branch_id=honolulu_branch_id, user_id=db.user_id,
+    )
+    kiritimati = await reads.list_versions(
+        db.company_id, setup_id, db.db,
+        branch_id=db.branch_id, user_id=db.user_id,
+    )
+    assert _current_ids(honolulu) == [v1]
+    assert _current_ids(kiritimati) == [v2]
+
+    without_context = await reads.list_versions(db.company_id, setup_id, db.db)
+    assert without_context
+    assert all(row["is_current"] is None for row in without_context)
+    assert all(row["reference_date"] is None for row in without_context)
+    assert all(row["reference_branch_id"] is None for row in without_context)

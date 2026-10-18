@@ -50,7 +50,7 @@ async def settings_branch_id(
     resp = await session_client.post(
         "/settings/branches",
         json={
-            "branch_name": "Settings Test Branch",
+            "branch_name": "Settings Test Branch", "time_zone_id": "UTC",
             "branch_code": "STB",
             "status":      "Inactive",
             "is_default":  False,
@@ -82,7 +82,6 @@ class TestGetCompanyProfile:
         assert "company_id" in body
         assert "status" in body
         assert "is_suspended" in body
-        assert "timezone_name" in body
         assert "created_at_utc" in body
 
     async def test_branch_user_can_read_profile(
@@ -125,7 +124,7 @@ class TestUpdateCompanyProfile:
         its exact state, and restore and verify it however the test ends, so no test
         here depends on another test (or on execution order) to repair shared state."""
         read = text(
-            "SELECT companyname, legalname, timezonename, notes, allowselfapproval, updatedatutc "
+            "SELECT companyname, legalname, notes, allowselfapproval, updatedatutc "
             "FROM core.companies WHERE companycode = 'DEMO'"
         )
         original = (await direct_db.execute(read)).mappings().one()
@@ -133,12 +132,12 @@ class TestUpdateCompanyProfile:
         await direct_db.execute(
             text("""
                 UPDATE core.companies
-                SET companyname = :name, legalname = :legal, timezonename = :tz,
+                SET companyname = :name, legalname = :legal,
                     notes = :notes, allowselfapproval = :allow_self, updatedatutc = :updated
                 WHERE companycode = 'DEMO'
             """),
             {"name": original["companyname"], "legal": original["legalname"],
-             "tz": original["timezonename"], "notes": original["notes"],
+             "notes": original["notes"],
              "allow_self": original["allowselfapproval"], "updated": original["updatedatutc"]},
         )
         restored = (await direct_db.execute(read)).mappings().one()
@@ -156,7 +155,6 @@ class TestUpdateCompanyProfile:
             json={
                 "company_name":  "Demo Logistics Updated",
                 "legal_name":    "Demo Logistics Ltd Updated",
-                "timezone_name": "Africa/Cairo",
                 "notes":         "Test note",
             },
             headers=auth(auth_token),
@@ -197,23 +195,17 @@ class TestUpdateCompanyProfile:
         )
         assert resp.status_code == 422
 
-    async def test_timezone_preserved_when_omitted(
+    async def test_obsolete_company_timezone_is_rejected(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
     ):
-        """When timezone_name is None, the existing value must be preserved."""
-        current = (
-            await client.get("/settings/company", headers=auth(auth_token))
-        ).json()["timezone_name"]
-
         resp = await client.patch(
             "/settings/company",
-            json={"company_name": "Demo Logistics", "timezone_name": None},
+            json={"company_name": "Demo Logistics", "timezone_name": "Africa/Cairo"},
             headers=auth(auth_token),
         )
-        assert resp.status_code == 200
-        assert resp.json()["timezone_name"] == current
+        assert resp.status_code == 422
 
     async def test_unauthenticated_rejected(self, client: httpx.AsyncClient):
         resp = await client.patch(
@@ -350,7 +342,7 @@ class TestCreateBranch:
         """Minimal payload (only branch_name) — branch_code auto-generated as BR_XXXXXXXX."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "AutoCode Branch Alpha"},
+            json={"branch_name": "AutoCode Branch Alpha", "time_zone_id": "UTC"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
@@ -372,7 +364,7 @@ class TestCreateBranch:
         for i in range(1, 3):
             resp = await client.post(
                 "/settings/branches",
-                json={"branch_name": f"Alpha Beta Gamma {i}"},
+                json={"branch_name": f"Alpha Beta Gamma {i}", "time_zone_id": "UTC"},
                 headers=auth(auth_token),
             )
             assert resp.status_code == 201, (
@@ -391,7 +383,7 @@ class TestCreateBranch:
         """When branch_code is supplied, it must be used (uppercased)."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "Explicit Code Branch", "branch_code": "EXP"},
+            json={"branch_name": "Explicit Code Branch", "time_zone_id": "UTC", "branch_code": "EXP"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
@@ -404,7 +396,7 @@ class TestCreateBranch:
     ):
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "Should Fail"},
+            json={"branch_name": "Should Fail", "time_zone_id": "UTC"},
             headers=auth(branch_user_token),
         )
         assert resp.status_code == 403
@@ -417,7 +409,7 @@ class TestCreateBranch:
         """Branch code must be unique per company."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "Duplicate Code Branch", "branch_code": "HQ"},
+            json={"branch_name": "Duplicate Code Branch", "time_zone_id": "UTC", "branch_code": "HQ"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
@@ -431,7 +423,7 @@ class TestCreateBranch:
         """Branch name must be unique per company."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "Headquarters"},   # HQ's full name isn't HQ but PAYTEST would work
+            json={"branch_name": "Headquarters", "time_zone_id": "UTC"},   # HQ's full name isn't HQ but PAYTEST would work
             headers=auth(auth_token),
         )
         # "Headquarters" is the seeded HQ branch name from conftest
@@ -445,7 +437,7 @@ class TestCreateBranch:
     ):
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "   "},
+            json={"branch_name": "   ", "time_zone_id": "UTC"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
@@ -457,7 +449,7 @@ class TestCreateBranch:
     ):
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "Bad Status Branch", "status": "Pending"},
+            json={"branch_name": "Bad Status Branch", "time_zone_id": "UTC", "status": "Pending"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
@@ -475,7 +467,7 @@ class TestCreateBranch:
         resp = await client.post(
             "/settings/branches",
             json={
-                "branch_name": "Temp Default Branch",
+                "branch_name": "Temp Default Branch", "time_zone_id": "UTC",
                 "branch_code": "TMPD",
                 "status":      "Active",
                 "is_default":  True,
@@ -502,7 +494,7 @@ class TestCreateBranch:
     async def test_unauthenticated_rejected(self, client: httpx.AsyncClient):
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "No Auth"},
+            json={"branch_name": "No Auth", "time_zone_id": "UTC"},
         )
         assert resp.status_code == 401
 
@@ -514,7 +506,7 @@ class TestCreateBranch:
         """branch_code='' (empty string) should auto-generate, not 422."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "EmptyCode Branch", "branch_code": ""},
+            json={"branch_name": "EmptyCode Branch", "time_zone_id": "UTC", "branch_code": ""},
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
@@ -531,7 +523,7 @@ class TestCreateBranch:
         """branch_code='   ' (whitespace only) should auto-generate, not 422."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "WhitespaceCode Branch", "branch_code": "   "},
+            json={"branch_name": "WhitespaceCode Branch", "time_zone_id": "UTC", "branch_code": "   "},
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
@@ -548,7 +540,7 @@ class TestCreateBranch:
         """branch_code=null should auto-generate."""
         resp = await client.post(
             "/settings/branches",
-            json={"branch_name": "NullCode Branch", "branch_code": None},
+            json={"branch_name": "NullCode Branch", "time_zone_id": "UTC", "branch_code": None},
             headers=auth(auth_token),
         )
         assert resp.status_code == 201
@@ -580,7 +572,7 @@ class TestCreateBranch:
         # Pre-create a branch whose code will be the "collision" value.
         pre = await client.post(
             "/settings/branches",
-            json={"branch_name": "Collision Seed Branch", "branch_code": collision_code},
+            json={"branch_name": "Collision Seed Branch", "time_zone_id": "UTC", "branch_code": collision_code},
             headers=auth(auth_token),
         )
         assert pre.status_code == 201, f"Seed branch failed: {pre.text}"
@@ -588,7 +580,7 @@ class TestCreateBranch:
         with patch.object(branches, "_generate_branch_code", _patched_gen):
             resp = await client.post(
                 "/settings/branches",
-                json={"branch_name": "Retry Success Branch"},
+                json={"branch_name": "Retry Success Branch", "time_zone_id": "UTC"},
                 headers=auth(auth_token),
             )
 
@@ -611,7 +603,7 @@ class TestCreateBranch:
         # Pre-create a branch with this code so every generated attempt collides.
         pre = await client.post(
             "/settings/branches",
-            json={"branch_name": "Exhaustion Seed Branch", "branch_code": always_same_code},
+            json={"branch_name": "Exhaustion Seed Branch", "time_zone_id": "UTC", "branch_code": always_same_code},
             headers=auth(auth_token),
         )
         assert pre.status_code == 201, f"Seed branch failed: {pre.text}"
@@ -619,7 +611,7 @@ class TestCreateBranch:
         with patch.object(branches, "_generate_branch_code", lambda: always_same_code):
             resp = await client.post(
                 "/settings/branches",
-                json={"branch_name": "Should Exhaust Retries Branch"},
+                json={"branch_name": "Should Exhaust Retries Branch", "time_zone_id": "UTC"},
                 headers=auth(auth_token),
             )
 
@@ -748,7 +740,7 @@ class TestUpdateBranch:
         """Patching branch_name to one already in use → 422."""
         resp = await client.patch(
             f"/settings/branches/{settings_branch_id}",
-            json={"branch_name": "Headquarters"},
+            json={"branch_name": "Headquarters", "time_zone_id": "UTC"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
@@ -762,7 +754,7 @@ class TestUpdateBranch:
     ):
         resp = await client.patch(
             f"/settings/branches/{settings_branch_id}",
-            json={"branch_name": ""},
+            json={"branch_name": "", "time_zone_id": "UTC"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
@@ -926,7 +918,8 @@ class TestSettingsAudit:
             with pytest.raises(RuntimeError, match="Simulated audit failure on branch create"):
                 await client.post(
                     "/settings/branches",
-                    json={"branch_name": branch_name, "branch_code": "RTBA"},
+                    json={"branch_name": branch_name, "branch_code": "RTBA",
+                          "time_zone_id": "UTC"},
                     headers=auth(auth_token),
                 )
 

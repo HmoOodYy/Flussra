@@ -17,9 +17,10 @@ Behaviour by environment
     • All required schema objects must exist
     • Startup ABORTS with a clear message if either check fails
 
-  ENVIRONMENT=production
-    • A WARNING is logged for version drift, but startup is not blocked
-    • Object checks are skipped (rely on deployment pipeline)
+ENVIRONMENT=production
+    • Legacy version/security checks may warn instead of blocking startup
+    • Payroll trust and branch-timezone/instant authority checks always block
+      startup when required database objects are missing or drifted
 
 Usage
 -----
@@ -42,6 +43,7 @@ log = logging.getLogger(__name__)
 # Required schema objects — security layer (original checks)
 # ---------------------------------------------------------------------------
 _REQUIRED_TABLES = {
+    "core.supportedtimezones",
     "sec.companyroles",
     "sec.companyrolepermissions",
     "sec.userpermissionoverrides",
@@ -367,6 +369,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     cur = conn.cursor()
     errors: list[str] = []              # legacy/security — dev: hard, prod: warning
     pt_errors: list[str] = []           # payroll trust    — ALWAYS hard
+    temporal_errors: list[str] = []     # timezone/instant authority — ALWAYS hard
 
     # ------------------------------------------------------------------
     # 1. Alembic version check
@@ -407,6 +410,171 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     if missing_tables:
         errors.append(f"Missing tables: {missing_tables}")
 
+    required_columns = {
+        ("core", "supportedtimezones", "timezoneid"),
+        ("core", "branches", "timezoneid"),
+        ("core", "drivers", "effectivefromat"),
+        ("core", "drivers", "effectivetoat"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivefromatsnapshot"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivetoatsnapshot"),
+        ("core", "drivertransferrequests", "effectiveat"),
+        ("payroll", "payrollperioddrivereligibility", "branchtimezoneidsnapshot"),
+        ("payroll", "payrollperioddrivereligibility", "eligibleworkdates"),
+    }
+    missing_columns = []
+    for schema, table, column in required_columns:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+            (schema, table, column),
+        )
+        if not cur.fetchone():
+            missing_columns.append(f"{schema}.{table}.{column}")
+    if missing_columns:
+        temporal_errors.append(f"Missing branch-timezone/instant columns: {missing_columns}")
+
+    cur.execute("""
+        SELECT table_schema, table_name, column_name,
+               is_nullable, column_default, data_type,
+               character_maximum_length, udt_name
+        FROM information_schema.columns
+        WHERE (table_schema = 'core' AND table_name = 'branches' AND column_name = 'timezoneid')
+           OR (table_schema = 'core' AND table_name = 'supportedtimezones' AND column_name = 'timezoneid')
+           OR (table_schema = 'core' AND table_name = 'drivers' AND column_name IN ('effectivefromat','effectivetoat'))
+           OR (table_schema = 'core' AND table_name = 'drivertransferrequests' AND column_name = 'effectiveat')
+           OR (table_schema = 'payroll' AND table_name = 'payrollperioddrivereligibility'
+               AND column_name IN ('drivereffectivefromatsnapshot','drivereffectivetoatsnapshot','branchtimezoneidsnapshot','eligibleworkdates'))
+    """)
+    temporal_shapes = {(row[0], row[1], row[2]): row[3:] for row in cur.fetchall()}
+    # Registry and Branch timezone columns share a database name; alias the
+    # registry shape separately so each authority is checked independently.
+    cur.execute("""
+        SELECT is_nullable, data_type, character_maximum_length
+        FROM information_schema.columns
+        WHERE table_schema = 'core' AND table_name = 'supportedtimezones'
+          AND column_name = 'timezoneid'
+    """)
+    registry_zone_shape = cur.fetchone()
+    if registry_zone_shape is None or registry_zone_shape[0] != "NO" \
+       or registry_zone_shape[1] != "character varying" or registry_zone_shape[2] != 100:
+        temporal_errors.append("core.SupportedTimeZones.TimeZoneId must be a NOT NULL VARCHAR(100) primary key.")
+
+    required_not_null = (
+        ("core", "branches", "timezoneid"),
+        ("core", "drivers", "effectivefromat"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivefromatsnapshot"),
+        ("payroll", "payrollperioddrivereligibility", "branchtimezoneidsnapshot"),
+        ("payroll", "payrollperioddrivereligibility", "eligibleworkdates"),
+    )
+    for key in required_not_null:
+        shape = temporal_shapes.get(key)
+        if shape is None or shape[0] != "NO":
+            temporal_errors.append(f"Temporal authority column {'.'.join(key)} must be NOT NULL.")
+    branch_zone_shape = temporal_shapes.get(("core", "branches", "timezoneid"))
+    if branch_zone_shape and branch_zone_shape[1] is not None:
+        temporal_errors.append("core.Branches.TimeZoneId must not have a default.")
+    for key in (("core", "branches", "timezoneid"),
+                ("payroll", "payrollperioddrivereligibility", "branchtimezoneidsnapshot")):
+        shape = temporal_shapes.get(key)
+        if shape and (shape[2] != "character varying" or shape[3] != 100):
+            temporal_errors.append(f"Temporal timezone column {'.'.join(key)} must be VARCHAR(100).")
+    for key in (
+        ("core", "drivers", "effectivetoat"),
+        ("core", "drivertransferrequests", "effectiveat"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivetoatsnapshot"),
+    ):
+        shape = temporal_shapes.get(key)
+        if shape and shape[0] != "YES":
+            temporal_errors.append(f"Temporal boundary column {'.'.join(key)} must remain nullable.")
+    for key in (
+        ("core", "drivers", "effectivefromat"),
+        ("core", "drivers", "effectivetoat"),
+        ("core", "drivertransferrequests", "effectiveat"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivefromatsnapshot"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivetoatsnapshot"),
+    ):
+        shape = temporal_shapes.get(key)
+        if shape and shape[2] != "timestamp with time zone":
+            temporal_errors.append(f"Temporal authority column {'.'.join(key)} must be TIMESTAMPTZ.")
+    work_dates_shape = temporal_shapes.get(("payroll", "payrollperioddrivereligibility", "eligibleworkdates"))
+    if work_dates_shape and (work_dates_shape[2] != "ARRAY" or work_dates_shape[4] != "_date"):
+        temporal_errors.append("PayrollPeriodDriverEligibility.EligibleWorkDates must be DATE[].")
+
+    required_temporal_constraints = [
+        ("core", "branches", "fk_branches_timezone", "f"),
+        ("core", "drivers", "ck_drivers_effectivewindowat", "c"),
+        ("core", "drivers", "ck_drivers_closedhistoryat", "c"),
+        ("core", "drivers", "excl_drivers_employee_assignmentwindow", "x"),
+        ("payroll", "payrollperioddrivereligibility", "fk_ppde_snapshottimezone", "f"),
+        ("core", "drivertransferrequests", "ck_dtr_completedeffectiveat", "c"),
+    ]
+    for schema, table, name, kind in required_temporal_constraints:
+        cur.execute("""
+            SELECT con.condeferrable, con.condeferred FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+            WHERE ns.nspname = %s AND rel.relname = %s
+              AND con.conname = %s AND con.contype = %s AND con.convalidated
+        """, (schema, table, name, kind))
+        constraint_shape = cur.fetchone()
+        if constraint_shape is None:
+            temporal_errors.append(f"Missing or unvalidated branch-timezone/instant constraint {schema}.{table}.{name}.")
+        elif name == "excl_drivers_employee_assignmentwindow" and constraint_shape != (True, True):
+            temporal_errors.append(
+                "core.Drivers.excl_Drivers_Employee_AssignmentWindow must be "
+                "DEFERRABLE INITIALLY DEFERRED."
+            )
+
+    retired_columns = [
+        ("core", "drivers", "effectivefrom"),
+        ("core", "drivers", "effectiveto"),
+        ("core", "drivertransferrequests", "effectivedate"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivefromsnapshot"),
+        ("payroll", "payrollperioddrivereligibility", "drivereffectivetosnapshot"),
+    ]
+    for schema, table, column in retired_columns:
+        if _column_exists(cur, schema, table, column):
+            temporal_errors.append(f"Retired date-based assignment authority still exists: {schema}.{table}.{column}")
+
+    retired_column = ("core", "companies", "timezonename")
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+        retired_column,
+    )
+    if cur.fetchone():
+        temporal_errors.append("Retired Company timezone column still exists: core.Companies.TimeZoneName")
+
+    cur.execute(
+        "SELECT 1 FROM information_schema.routines "
+        "WHERE routine_schema = 'core' AND LOWER(routine_name) = 'fn_companytoday'"
+    )
+    if cur.fetchone():
+        temporal_errors.append("Retired Company clock function still exists: core.fn_CompanyToday")
+    for signature, label in (
+        ("core.fn_effectivedriverprofile(integer,integer,date)", "core.fn_EffectiveDriverProfile(INT, INT, DATE)"),
+        ("core.fn_drivereffectiverange(date,date)", "core.fn_DriverEffectiveRange(DATE, DATE)"),
+    ):
+        cur.execute("SELECT to_regprocedure(%s)", (signature,))
+        if cur.fetchone()[0] is not None:
+            temporal_errors.append(f"Retired date-based temporal function still exists: {label}.")
+    for signature, label in (
+        ("core.fn_businessdate(text,timestamp with time zone)", "core.fn_BusinessDate(TEXT, TIMESTAMPTZ)"),
+        ("core.fn_branchtoday(integer,integer,timestamp with time zone)", "core.fn_BranchToday(INT, INT, TIMESTAMPTZ)"),
+        ("core.fn_issupportedtimezone(text)", "core.fn_IsSupportedTimeZone(TEXT)"),
+        ("core.fn_localdateboundary(text,date)", "core.fn_LocalDateBoundary(TEXT, DATE)"),
+        ("core.fn_workdaterange(text,date,date)", "core.fn_WorkDateRange(TEXT, DATE, DATE)"),
+        ("core.fn_branchworkdaterange(integer,integer,date,date)", "core.fn_BranchWorkDateRange(INT, INT, DATE, DATE)"),
+        ("core.fn_drivercoversworkdate(integer,integer,integer,date)", "core.fn_DriverCoversWorkDate(INT, INT, INT, DATE)"),
+        ("core.fn_effectivedriverprofile(integer,integer,timestamp with time zone)", "core.fn_EffectiveDriverProfile(INT, INT, TIMESTAMPTZ)"),
+        ("core.fn_drivereffectiverange(timestamp with time zone,timestamp with time zone)", "core.fn_DriverEffectiveRange(TIMESTAMPTZ, TIMESTAMPTZ)"),
+    ):
+        cur.execute("SELECT to_regprocedure(%s)", (signature,))
+        if cur.fetchone()[0] is None:
+            temporal_errors.append(f"Missing required temporal function: {label}.")
+    if not _trigger_exists_and_enabled(cur, "trg_drivers_historyimmutable", "core", "drivers"):
+        temporal_errors.append("Missing or disabled temporal history trigger core.trg_Drivers_HistoryImmutable.")
+
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)
     # ------------------------------------------------------------------
@@ -443,21 +611,26 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     # ------------------------------------------------------------------
     pt_errors = _check_payroll_trust(cur)
 
+    if temporal_errors:
+        temporal_errors.extend(pt_errors)
+    else:
+        temporal_errors = pt_errors
+
     cur.close()
     conn.close()
 
     # ------------------------------------------------------------------
     # 6. Report
     # ------------------------------------------------------------------
-    # ── 6a. Payroll trust errors: always fatal, never just a warning ────
-    if pt_errors:
+    # ── 6a. Payroll trust and temporal-authority errors are always fatal ─
+    if temporal_errors:
         pt_message = (
             "\n\n"
             "========================================================\n"
-            "  PAYROLL TRUST SCHEMA PROTECTIONS ARE MISSING\n"
+            "  PAYROLL TRUST OR TEMPORAL AUTHORITY SCHEMA IS INVALID\n"
             "  Startup blocked in all environments.\n"
             "========================================================\n"
-            + "\n".join(f"  * {e}" for e in pt_errors)
+            + "\n".join(f"  * {e}" for e in temporal_errors)
             + "\n\n"
             "  Run:  cd Payroll_App_v3 && python -m alembic upgrade head\n"
             "  Then restart the backend.\n"

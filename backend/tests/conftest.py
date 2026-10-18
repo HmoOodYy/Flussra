@@ -147,19 +147,19 @@ _TEST_PASSWORD_HASH = "$2b$12$placeholderreplacedbyconftest"
 # (%(name)s) only appears in the one statement that actually uses it.
 _SEED_STMTS = [
     """
-    INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, timezonename, currencycode)
-    VALUES ('DEMO', 'Demo Logistics', 'Demo Logistics Ltd', 'Active', FALSE, 'Africa/Cairo', 'USD')
+    INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, currencycode)
+    VALUES ('DEMO', 'Demo Logistics', 'Demo Logistics Ltd', 'Active', FALSE, 'USD')
     """,
     """
-    INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-    SELECT companyid, 'HQ', 'Headquarters', 'Active', TRUE
+    INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+    SELECT companyid, 'HQ', 'Headquarters', 'Active', TRUE, 'America/New_York'
     FROM core.companies WHERE companycode = 'DEMO'
     """,
     # Second branch — used by payroll-period tests so the one-Draft-per-branch
     # and one-Open-per-branch constraints don't conflict with the HQ seed period.
     """
-    INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-    SELECT companyid, 'PAYTEST', 'Payroll Test Branch', 'Active', FALSE
+    INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+    SELECT companyid, 'PAYTEST', 'Payroll Test Branch', 'Active', FALSE, 'America/New_York'
     FROM core.companies WHERE companycode = 'DEMO'
     """,
     """
@@ -719,8 +719,8 @@ async def owned_branch_id(direct_db) -> int:
     branch_id = (await direct_db.execute(
         text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """), {"code": f"OWN-{marker[:12]}", "name": f"Owned test branch {marker[:8]}"},
     )).scalar_one()

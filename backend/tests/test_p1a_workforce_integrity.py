@@ -1,18 +1,15 @@
 """Focused P1a coverage for Driver identity and effective-date integrity."""
 
 import asyncio
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll.eligibility import _assert_driver_eligible_for_date
 from app.workforce.effective import (
-    resolve_current_driver_profile,
     resolve_effective_driver_profile,
 )
 
@@ -21,15 +18,16 @@ async def _workforce_rows(db, timezone: str = "UTC") -> tuple[int, int, int]:
     suffix = uuid4().hex[:12]
     company_id = (await db.execute(text("""
         INSERT INTO core.companies
-            (companycode, companyname, legalname, status, issuspended, timezonename)
-        VALUES (:code, :name, :legal, 'Active', FALSE, :timezone)
+            (companycode, companyname, legalname, status, issuspended)
+        VALUES (:code, :name, :legal, 'Active', FALSE)
         RETURNING companyid
     """), {"code": f"P1A-{suffix}", "name": f"P1A {suffix}",
-           "legal": f"P1A {suffix} Ltd", "timezone": timezone})).scalar_one()
+           "legal": f"P1A {suffix} Ltd"})).scalar_one()
     branch_id = (await db.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname)
-        VALUES (:cid, :code, :name) RETURNING branchid
-    """), {"cid": company_id, "code": f"B-{suffix}", "name": f"Branch {suffix}"})).scalar_one()
+        INSERT INTO core.branches (companyid, branchcode, branchname, timezoneid)
+        VALUES (:cid, :code, :name, :timezone) RETURNING branchid
+    """), {"cid": company_id, "code": f"B-{suffix}", "name": f"Branch {suffix}",
+           "timezone": timezone})).scalar_one()
     employee_id = (await db.execute(text("""
         INSERT INTO core.employees
             (companyid, branchid, employeekey, fullname, employeetype, employmentstatus)
@@ -41,22 +39,42 @@ async def _workforce_rows(db, timezone: str = "UTC") -> tuple[int, int, int]:
 
 async def _driver(db, company_id: int, branch_id: int, employee_id: int,
                   start: date | None, end: date | None, status: str = "Active") -> int:
+    start_date = start or date(2000, 1, 1)
+    start_at = datetime.combine(start_date, time.min, UTC)
+    if end is None:
+        end_at = None
+    elif end == start_date - timedelta(days=1):
+        end_at = start_at
+    else:
+        end_at = datetime.combine(end + timedelta(days=1), time.min, UTC)
     return (await db.execute(text("""
         INSERT INTO core.drivers
-            (companyid, branchid, employeeid, drivercode, driverstatus, effectivefrom, effectiveto)
+            (companyid, branchid, employeeid, drivercode, driverstatus, effectivefromat, effectivetoat)
         VALUES (:cid, :bid, :eid, :code, :status, :start, :end)
         RETURNING driverid
     """), {"cid": company_id, "bid": branch_id, "eid": employee_id,
            "code": f"D-{uuid4().hex[:12]}", "status": status,
-           "start": start, "end": end})).scalar_one()
+           "start": start_at, "end": end_at})).scalar_one()
+
+
+def _at_start(value: date) -> datetime:
+    return datetime.combine(value, time.min, UTC)
+
+
+async def _driver_covers_workdate(company_id, driver_id, branch_id, work_date, db):
+    """Exercise only the canonical assignment/Branch-day overlap predicate."""
+    covered = await db.execute(text("""
+        SELECT core.fn_DriverCoversWorkDate(:cid, :did, :bid, :work_date)
+    """), {"cid": company_id, "did": driver_id, "bid": branch_id, "work_date": work_date})
+    return covered.scalar_one()
 
 
 @pytest.mark.asyncio
 async def test_same_company_identity_and_immutable_branch(direct_db):
     company_id, branch_id, employee_id = await _workforce_rows(direct_db)
     other_branch_id = (await direct_db.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname)
-        VALUES (:cid, :code, :name) RETURNING branchid
+        INSERT INTO core.branches (companyid, branchcode, branchname, timezoneid)
+        VALUES (:cid, :code, :name, 'UTC') RETURNING branchid
     """), {"cid": company_id, "code": f"B-{uuid4().hex[:8]}",
            "name": f"Branch {uuid4().hex[:8]}"})).scalar_one()
     driver_id = await _driver(direct_db, company_id, branch_id, employee_id, None, None)
@@ -92,39 +110,23 @@ async def test_adjacent_windows_and_historical_pending_resolution(direct_db):
     )
 
     assert (await resolve_effective_driver_profile(
-        company_id, employee_id, date(2025, 6, 30), direct_db
+        company_id, employee_id, _at_start(date(2025, 6, 30)), direct_db
     ))["driverid"] == source_id
     assert await resolve_effective_driver_profile(
-        company_id, employee_id, date(2024, 12, 31), direct_db
+        company_id, employee_id, _at_start(date(2024, 12, 31)), direct_db
     ) is None
     assert (await resolve_effective_driver_profile(
-        company_id, employee_id, date(2025, 6, 30), direct_db
+        company_id, employee_id, _at_start(date(2025, 6, 30)), direct_db
     ))["driverid"] != destination_id
     assert (await resolve_effective_driver_profile(
-        company_id, employee_id, date(2025, 7, 1), direct_db
+        company_id, employee_id, _at_start(date(2025, 7, 1)), direct_db
     ))["driverid"] == destination_id
-    await _assert_driver_eligible_for_date(
+    assert await _driver_covers_workdate(
         company_id, source_id, branch_id, date(2025, 6, 30), direct_db
-    )
-    with pytest.raises(HTTPException):
-        await _assert_driver_eligible_for_date(
-            company_id, source_id, branch_id, date(2025, 7, 1), direct_db
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["Inactive", "OnLeave"])
-async def test_effective_noneligible_driver_status_is_rejected_for_workdate(direct_db, status):
-    company_id, branch_id, employee_id = await _workforce_rows(direct_db)
-    driver_id = await _driver(
-        direct_db, company_id, branch_id, employee_id,
-        date(2025, 1, 1), None, status,
-    )
-
-    with pytest.raises(HTTPException):
-        await _assert_driver_eligible_for_date(
-            company_id, driver_id, branch_id, date(2025, 6, 1), direct_db
-        )
+    ) is True
+    assert await _driver_covers_workdate(
+        company_id, source_id, branch_id, date(2025, 7, 1), direct_db
+    ) is False
 
 
 @pytest.mark.asyncio
@@ -158,9 +160,9 @@ async def test_never_effective_terminated_profile_is_empty(direct_db):
     )
     assert (await direct_db.execute(text("""
         SELECT isempty(core.fn_DriverEffectiveRange(:start, :end))
-    """), {"start": effective_from, "end": effective_from - timedelta(days=1)})).scalar_one()
+    """), {"start": _at_start(effective_from), "end": _at_start(effective_from)})).scalar_one()
     assert await resolve_effective_driver_profile(
-        company_id, employee_id, effective_from, direct_db
+        company_id, employee_id, _at_start(effective_from), direct_db
     ) is None
     assert driver_id is not None
 
@@ -174,7 +176,7 @@ async def test_closed_history_rejects_status_window_and_lineage_mutation(direct_
                             {"did": driver_id})
     for update in (
         "UPDATE core.drivers SET driverstatus='Active' WHERE driverid=:did",
-        "UPDATE core.drivers SET effectiveto='2025-07-01' WHERE driverid=:did",
+        "UPDATE core.drivers SET effectivetoat='2025-07-02T00:00:00Z' WHERE driverid=:did",
         "UPDATE core.drivers SET transferredtodriverid=driverid WHERE driverid=:did",
     ):
         with pytest.raises(DBAPIError):
@@ -189,8 +191,8 @@ async def test_terminate_operation_is_narrow_and_preserves_identity_and_lineage(
     source_id = await _driver(direct_db, company_id, branch_id, employee_id,
                               date(2025, 1, 1), date(2025, 6, 30), "Transferred")
     other_branch_id = (await direct_db.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname)
-        VALUES (:cid, :code, :name) RETURNING branchid
+        INSERT INTO core.branches (companyid, branchcode, branchname, timezoneid)
+        VALUES (:cid, :code, :name, 'UTC') RETURNING branchid
     """), {"cid": company_id, "code": f"B-{uuid4().hex[:8]}",
            "name": f"Branch {uuid4().hex[:8]}"})).scalar_one()
     engine = create_async_engine(test_database_url)
@@ -205,7 +207,7 @@ async def test_terminate_operation_is_narrow_and_preserves_identity_and_lineage(
                 with pytest.raises(DBAPIError):
                     await db.execute(text("""
                         UPDATE core.drivers
-                        SET driverstatus='Terminated', effectiveto='2025-06-01'
+                        SET driverstatus='Terminated', effectivetoat='2025-06-02T00:00:00Z'
                         WHERE driverid=:did
                     """), {"did": source_id})
                 await tx.rollback()
@@ -221,7 +223,7 @@ async def test_terminate_operation_is_narrow_and_preserves_identity_and_lineage(
             ))
             await db.execute(text("""
                 UPDATE core.drivers
-                SET driverstatus='Terminated', effectiveto='2025-06-01'
+                SET driverstatus='Terminated', effectivetoat='2025-06-02T00:00:00Z'
                 WHERE driverid=:did
             """), {"did": source_id})
 
@@ -232,7 +234,7 @@ async def test_terminate_operation_is_narrow_and_preserves_identity_and_lineage(
              {"employee": employee_id + 100000, "did": source_id}),
             ("UPDATE core.drivers SET companyid=:company WHERE driverid=:did",
              {"company": company_id + 100000, "did": source_id}),
-            ("UPDATE core.drivers SET effectivefrom='2025-01-02' WHERE driverid=:did",
+            ("UPDATE core.drivers SET effectivefromat='2025-01-02T00:00:00Z' WHERE driverid=:did",
              {"did": source_id}),
             ("UPDATE core.drivers SET transferredtodriverid=driverid WHERE driverid=:did",
              {"did": source_id}),
@@ -261,7 +263,7 @@ async def test_deferred_overlap_still_makes_resolver_fail_closed(test_database_u
                           date(2025, 6, 1), date(2025, 12, 31), "Transferred")
             with pytest.raises(DBAPIError, match="Multiple effective Driver profiles"):
                 await resolve_effective_driver_profile(
-                    company_id, employee_id, date(2025, 7, 1), db
+                    company_id, employee_id, _at_start(date(2025, 7, 1)), db
                 )
     finally:
         await engine.dispose()
@@ -297,19 +299,32 @@ async def test_overlapping_concurrent_transactions_cannot_both_commit(test_datab
 
 
 @pytest.mark.asyncio
-async def test_current_profile_uses_company_business_date(direct_db):
+async def test_current_profile_uses_database_instant_not_branch_calendar_date(direct_db):
     company_id, branch_id, employee_id = await _workforce_rows(direct_db, "Pacific/Auckland")
     driver_id = await _driver(direct_db, company_id, branch_id, employee_id,
                               date(2000, 1, 1), None)
-    database_today = (await direct_db.execute(text("SELECT core.fn_CompanyToday(:cid)"),
-                                               {"cid": company_id})).scalar_one()
-    expected_company_date = (await direct_db.execute(text("""
-        SELECT (NOW() AT TIME ZONE TimeZoneName)::date
-        FROM core.companies WHERE companyid=:cid
-    """), {"cid": company_id})).scalar_one()
-    resolved = await resolve_current_driver_profile(company_id, employee_id, direct_db)
-    assert database_today == expected_company_date
+    instant = (await direct_db.execute(text("SELECT NOW()"))).scalar_one()
+    await direct_db.execute(text("""
+        UPDATE core.drivers
+        SET EffectiveFromAt = (CAST(:instant AS TIMESTAMPTZ) - INTERVAL '1 minute'),
+            EffectiveToAt = (CAST(:instant AS TIMESTAMPTZ) + INTERVAL '1 minute')
+        WHERE DriverID = :driver_id
+    """), {"instant": instant, "driver_id": driver_id})
+    resolved = await resolve_effective_driver_profile(
+        company_id, employee_id, None, direct_db
+    )
     assert resolved["driverid"] == driver_id
+    explicit = await resolve_effective_driver_profile(
+        company_id, employee_id, instant, direct_db
+    )
+    assert explicit["driverid"] == driver_id
+    await direct_db.execute(text("""
+        UPDATE core.branches SET TimeZoneId = 'America/Los_Angeles'
+        WHERE BranchID = :branch_id
+    """), {"branch_id": branch_id})
+    assert (await resolve_effective_driver_profile(
+        company_id, employee_id, None, direct_db
+    ))["driverid"] == driver_id
 
 
 @pytest.mark.asyncio

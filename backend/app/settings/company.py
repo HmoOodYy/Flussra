@@ -37,7 +37,6 @@ async def get_company_profile(
                 c.legalname,
                 c.status,
                 c.issuspended,
-                c.timezonename,
                 c.notes,
                 c.allowselfapproval,
                 c.currencycode,
@@ -81,7 +80,6 @@ async def get_company_profile(
         legal_name=row.get("legalname"),
         status=row["status"],
         is_suspended=bool(row["issuspended"]),
-        timezone_name=row["timezonename"],
         notes=row.get("notes"),
         allow_self_approval=bool(row.get("allowselfapproval", True)),
         currency_code=row["currencycode"],
@@ -102,7 +100,7 @@ async def update_company_profile(
     db: AsyncConnection,
 ) -> CompanyProfile:
     """
-    Update editable company profile fields (name, legal name, timezone, notes).
+    Update editable company profile fields (name, legal name, notes).
 
     Status and IsSuspended are system-controlled and cannot be changed here.
     Requires AllCompanyBranches scope.
@@ -143,8 +141,6 @@ async def update_company_profile(
                 {"cid": company_id, "code": new_currency},
             )
 
-    # Preserve existing values when none are supplied in the patch.
-    new_tz             = data.timezone_name      if data.timezone_name      is not None else current.timezone_name
     new_self_approval  = data.allow_self_approval if data.allow_self_approval is not None else current.allow_self_approval
 
     await db.execute(
@@ -152,7 +148,6 @@ async def update_company_profile(
             UPDATE core.companies
             SET    companyname       = :name,
                    legalname         = :legal,
-                   timezonename      = :tz,
                    notes             = :notes,
                    allowselfapproval = :allow_self,
                    updatedatutc      = NOW()
@@ -162,7 +157,6 @@ async def update_company_profile(
             "cid":        company_id,
             "name":       data.company_name,
             "legal":      data.legal_name,
-            "tz":         new_tz,
             "notes":      data.notes,
             "allow_self": new_self_approval,
         },
@@ -179,7 +173,6 @@ async def update_company_profile(
         old_value={
             "company_name":       current.company_name,
             "legal_name":         current.legal_name,
-            "timezone_name":      current.timezone_name,
             "notes":              current.notes,
             "allow_self_approval": current.allow_self_approval,
             "currency_code": current.currency_code,
@@ -187,7 +180,6 @@ async def update_company_profile(
         new_value={
             "company_name":       data.company_name,
             "legal_name":         data.legal_name,
-            "timezone_name":      new_tz,
             "notes":              data.notes,
             "allow_self_approval": new_self_approval,
             "currency_code": new_currency,

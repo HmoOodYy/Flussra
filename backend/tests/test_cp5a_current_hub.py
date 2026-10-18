@@ -33,8 +33,8 @@ async def paytest_branch_id(session_db_conn) -> int:
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """),
         {"code": (code := f"CP5A_{uuid.uuid4().hex[:10]}"), "name": code},
@@ -140,32 +140,28 @@ async def _insert_eligibility(
     effective_from: datetime.date | None = None,
     effective_to: datetime.date | None = None,
 ) -> None:
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrollperioddrivereligibility
-                (companyid, branchid, payrollperiodid, driverid, iseligibleforperiod,
-                 eligibilityreasoncode, snapshotsource, drivereffectivefromsnapshot,
-                 drivereffectivetosnapshot)
-            VALUES (:company_id, :branch_id, :period_id, :driver_id, TRUE, 'Active', 'Generated',
-                    :effective_from, :effective_to)
-        """),
-        {
-            "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
-            "period_id": period_id,
-            "driver_id": driver_id,
-            "effective_from": effective_from,
-            "effective_to": effective_to,
-        },
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+
+    await _create_period_driver_eligibility_rows(
+        period_id, _COMPANY_ID, branch_id, db, snapshot_source="Generated", freeze=True,
     )
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrollperiodeligibilitysnapshots
-                (payrollperiodid, companyid, branchid, snapshotsource)
-            VALUES (:period_id, :company_id, :branch_id, 'Generated')
-        """),
-        {"period_id": period_id, "company_id": _COMPANY_ID, "branch_id": branch_id},
-    )
+    if effective_from is not None or effective_to is not None:
+        await db.execute(_text("""
+            UPDATE payroll.PayrollPeriodDriverEligibility pde
+            SET EligibleWorkDates = ARRAY(
+                SELECT d::DATE FROM generate_series(
+                    GREATEST(pp.StartDate, COALESCE(:effective_from, pp.StartDate)),
+                    LEAST(pp.EndDate, COALESCE(:effective_to, pp.EndDate)),
+                    INTERVAL '1 day'
+                ) d ORDER BY d
+            )
+            FROM payroll.PayrollPeriods pp
+            WHERE pde.PayrollPeriodID = pp.PayrollPeriodID
+              AND pde.PayrollPeriodID = :period_id AND pde.DriverID = :driver_id
+        """), {
+            "period_id": period_id, "driver_id": driver_id,
+            "effective_from": effective_from, "effective_to": effective_to,
+        })
     await db.commit()
 
 
@@ -707,15 +703,15 @@ class TestCurrentPayrollHub:
         foreign_company_id = (await direct_db.execute(
             _text("""
                 INSERT INTO core.companies
-                    (companycode, companyname, legalname, status, issuspended, timezonename)
-                VALUES ('CP5A_XCO', 'CP5A Cross Company', 'CP5A Cross Company', 'Active', FALSE, 'UTC')
+                    (companycode, companyname, legalname, status, issuspended)
+                VALUES ('CP5A_XCO', 'CP5A Cross Company', 'CP5A Cross Company', 'Active', FALSE)
                 RETURNING companyid
             """),
         )).scalar_one()
         foreign_branch_id = (await direct_db.execute(
             _text("""
-                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-                VALUES (:company_id, 'CP5A_XCO', 'CP5A Cross Company', 'Active', TRUE)
+                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+                VALUES (:company_id, 'CP5A_XCO', 'CP5A Cross Company', 'Active', TRUE, 'UTC')
                 RETURNING branchid
             """),
             {"company_id": foreign_company_id},

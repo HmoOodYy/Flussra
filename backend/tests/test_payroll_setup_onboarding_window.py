@@ -1,6 +1,6 @@
 """Focused tests for the onboarding-window guardrail: pure chronology helpers
-(next/previous period start, version-timeline walking), the company-local
-clock, the onboarding lookback floor, and their wiring into assignment
+(next/previous period start, version-timeline walking), the prospective or
+owning Branch clock, the onboarding lookback floor, and their wiring into assignment
 validation (`_check_assignment`), the read-only evaluator/preview, and the
 two product entry points that enforce the guardrail (POST assignments,
 POST branches with first_payroll_start_date)."""
@@ -17,7 +17,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.payroll_setup import clock
+from app.payroll_setup import boundaries, payroll_policy
 from app.payroll_setup.chronology import (
     Schedule,
     ScheduleSegment,
@@ -146,8 +146,8 @@ async def payroll_setup_db(test_database_url):
                 user_id = int(tenant["userid"])
                 branch_id = (await conn.execute(text("""
                     INSERT INTO core.Branches
-                        (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                    VALUES (:cid, :code, :name, 'Active', FALSE)
+                        (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                    VALUES (:cid, :code, :name, 'Active', FALSE, 'UTC')
                     RETURNING BranchID
                 """), {
                     "cid": company_id,
@@ -166,8 +166,8 @@ async def payroll_setup_db(test_database_url):
 
 async def _new_branch(db, suffix: str) -> int:
     result = await db.db.execute(text("""
-        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-        VALUES (:cid, :code, :name, 'Active', FALSE)
+        INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+        VALUES (:cid, :code, :name, 'Active', FALSE, 'UTC')
         RETURNING BranchID
     """), {"cid": db.company_id, "code": f"OW{suffix}_{db.marker}",
            "name": f"Onboarding window {suffix}"})
@@ -239,10 +239,12 @@ async def test_assign_setup_always_enforces_onboarding_window_for_a_first_assign
     db = payroll_setup_db
     today = date(2090, 3, 12)  # an exact Week-grid period start
 
-    async def _stub_today(company_id, conn):
+    async def _stub_today(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "branch_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "prospective_today", _stub_today)
+    monkeypatch.setattr(boundaries, "prospective_today", _stub_today)
     setup_id = await _new_week_setup(db, "E")
 
     # Current period start: accepted.
@@ -307,18 +309,23 @@ async def test_evaluate_assignment_conflict_codes_and_preview_impact(
     db = payroll_setup_db
     today = date(2090, 3, 12)
 
-    async def _stub_today(company_id, conn):
+    async def _stub_today(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "branch_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "prospective_today", _stub_today)
+    monkeypatch.setattr(boundaries, "prospective_today", _stub_today)
     setup_id = await _new_week_setup(db, "G")
 
     # branch_id=None, on-grid, within window: allowed.
-    assert await evaluate_assignment(db.company_id, None, setup_id, today, db.db) == []
+    assert await evaluate_assignment(
+        db.company_id, None, setup_id, today, db.db, prospective_time_zone_id="UTC"
+    ) == []
 
     # Off-grid date (still within window): SUCCESSOR_BOUNDARY_INVALID.
     off_grid = await evaluate_assignment(
         db.company_id, None, setup_id, today + timedelta(days=2), db.db,
+        prospective_time_zone_id="UTC",
     )
     assert len(off_grid) == 1
     assert off_grid[0]["code"] == "SUCCESSOR_BOUNDARY_INVALID"
@@ -327,6 +334,7 @@ async def test_evaluate_assignment_conflict_codes_and_preview_impact(
     # Before the first Version: VERSION_NOT_FOUND.
     before_first = await evaluate_assignment(
         db.company_id, None, setup_id, date(2089, 12, 25), db.db,
+        prospective_time_zone_id="UTC",
     )
     assert len(before_first) == 1
     assert before_first[0]["code"] == "VERSION_NOT_FOUND"
@@ -334,6 +342,7 @@ async def test_evaluate_assignment_conflict_codes_and_preview_impact(
     # Three periods back: ONBOARDING_START_TOO_EARLY.
     too_early = await evaluate_assignment(
         db.company_id, None, setup_id, today - timedelta(days=21), db.db,
+        prospective_time_zone_id="UTC",
     )
     assert len(too_early) == 1
     assert too_early[0]["code"] == "ONBOARDING_START_TOO_EARLY"
@@ -341,7 +350,10 @@ async def test_evaluate_assignment_conflict_codes_and_preview_impact(
     # Archived Setup: SETUP_NOT_ACTIVE.
     archived_id = await _new_week_setup(db, "GA")
     await archive_setup(db.company_id, db.user_id, archived_id, db.db)
-    archived = await evaluate_assignment(db.company_id, None, archived_id, date(2090, 1, 1), db.db)
+    archived = await evaluate_assignment(
+        db.company_id, None, archived_id, date(2090, 1, 1), db.db,
+        prospective_time_zone_id="UTC",
+    )
     assert len(archived) == 1
     assert archived[0]["code"] == "SETUP_NOT_ACTIVE"
 
@@ -361,20 +373,23 @@ async def test_evaluate_assignment_conflict_codes_and_preview_impact(
 
 
 # ---------------------------------------------------------------------------
-# (h) company_today
+# (h) Branch clock
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_company_today_returns_date_for_demo_and_raises_for_missing_company(
+async def test_branch_today_uses_branch_and_rejects_missing_branch(
     payroll_setup_db,
 ):
     db = payroll_setup_db
-    today = await clock.company_today(db.company_id, db.db)
-    assert isinstance(today, date)
-    with pytest.raises(PolicyError) as exc:
-        await clock.company_today(999_999_999, db.db)
-    assert exc.value.code == "COMPANY_NOT_FOUND"
+    result = await db.db.execute(text(
+        "SELECT core.fn_BranchToday(:cid, :bid)"
+    ), {"cid": db.company_id, "bid": db.branch_id})
+    assert isinstance(result.scalar_one(), date)
+    missing = await db.db.execute(text(
+        "SELECT core.fn_BranchToday(:cid, 999999999)"
+    ), {"cid": db.company_id})
+    assert missing.scalar_one_or_none() is None
 
 
 # ---------------------------------------------------------------------------
@@ -414,15 +429,18 @@ async def test_api_assignment_rejects_and_accepts_relative_to_onboarding_window(
     marker = uuid4().hex
     today = date(2090, 3, 12)
 
-    async def _stub_today(company_id, conn):
+    async def _stub_today(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "branch_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "prospective_today", _stub_today)
+    monkeypatch.setattr(boundaries, "prospective_today", _stub_today)
     setup_id = await _create_published_week_setup(client, auth_token, marker)
 
     branch = await client.post("/settings/branches", headers=_auth(auth_token), json={
         "branch_name": "Onboarding window API " + marker[:8],
         "branch_code": "OWFA" + marker[:6],
+        "time_zone_id": "UTC",
     })
     assert branch.status_code == 201, branch.text
     branch_id = branch.json()["branch_id"]
@@ -452,10 +470,12 @@ async def test_api_branch_create_rejects_first_payroll_start_before_onboarding_w
     marker = uuid4().hex
     today = date(2090, 3, 12)
 
-    async def _stub_today(company_id, conn):
+    async def _stub_today(*args, **kwargs):
         return today
 
-    monkeypatch.setattr(clock, "company_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "branch_today", _stub_today)
+    monkeypatch.setattr(payroll_policy, "prospective_today", _stub_today)
+    monkeypatch.setattr(boundaries, "prospective_today", _stub_today)
     company_id = (await db_conn.execute(text(
         "SELECT CompanyID FROM core.Companies WHERE CompanyCode = 'DEMO'"
     ))).scalar_one()
@@ -471,6 +491,7 @@ async def test_api_branch_create_rejects_first_payroll_start_before_onboarding_w
         too_early = await client.post("/settings/branches", headers=_auth(auth_token), json={
             "branch_name": "Onboarding branch-create API " + marker[:8],
             "branch_code": branch_code,
+            "time_zone_id": "UTC",
             "first_payroll_start_date": (today - timedelta(days=21)).isoformat(),
         })
         assert too_early.status_code == 409, too_early.text

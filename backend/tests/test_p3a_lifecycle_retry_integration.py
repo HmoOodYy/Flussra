@@ -14,8 +14,8 @@ async def _seed_tenant(engine, status, currency_code="USD"):
             VALUES (:code, 'P3a retry tenant', :currency_code) RETURNING companyid
         """), {"code": "P3AR_" + marker, "currency_code": currency_code})).scalar_one()
         bid = (await db.execute(text("""
-            INSERT INTO core.branches(companyid, branchcode, branchname)
-            VALUES (:cid, :code, 'P3a retry branch') RETURNING branchid
+            INSERT INTO core.branches(companyid, branchcode, branchname, timezoneid)
+            VALUES (:cid, :code, 'P3a retry branch', 'UTC') RETURNING branchid
         """), {"cid": cid, "code": "P3AR_" + marker})).scalar_one()
         company_role = (await db.execute(text("""
             INSERT INTO sec.companyroles

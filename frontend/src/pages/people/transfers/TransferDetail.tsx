@@ -1,6 +1,6 @@
 import type { DriverTransferRequest } from '../../../types/transfer';
 import { statusKind, statusLabel, TRANSFER_TERMINAL } from '../../../types/transfer';
-import { fmtDate, fmtDateTime } from './transferRequestsView';
+import { fmtDate, fmtDateTime, fmtEffectiveAt } from './transferRequestsView';
 import { buildTimeline } from './transferTimeline';
 import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
@@ -51,7 +51,7 @@ export function TransferDetail({
             <span className={styles.scopeChip}>
               {req.initiated_by === 'Driver' ? '🧑 Driver requested' : '🏢 Branch initiated'}
             </span>
-            <span className={styles.scopeChip}>Effective {fmtDate(req.effective_date)}</span>
+            <span className={styles.scopeChip}>Effective {fmtEffectiveAt(req.effective_at)}</span>
             <span className={styles.scopeChip}>Requested {fmtDate(req.created_at_utc)}</span>
           </div>
 
@@ -120,8 +120,8 @@ export function TransferDetail({
           <span className={styles.fl}>Target branch</span>
           <span>{req.target_branch_name ?? `Branch ${req.target_branch_id}`}</span>
 
-          <span className={styles.fl}>Effective date</span>
-          <span>{fmtDate(req.effective_date)}</span>
+          <span className={styles.fl}>Effective time</span>
+          <span>{fmtEffectiveAt(req.effective_at)}</span>
 
           <span className={styles.fl}>Requested by</span>
           <span>{req.requested_by_name ?? `User ${req.requested_by_user_id}`}</span>

@@ -35,8 +35,8 @@ def company(cursor):
     )
     company_id = cursor.fetchone()[0]
     cursor.execute(
-        "INSERT INTO core.Branches (CompanyID, BranchCode, BranchName) "
-        "VALUES (%s, 'MAIN', 'Main') RETURNING BranchID",
+        "INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, timezoneid) "
+        "VALUES (%s, 'MAIN', 'Main', 'UTC') RETURNING BranchID",
         (company_id,),
     )
     return company_id, cursor.fetchone()[0]
@@ -147,8 +147,8 @@ def current_authority(cursor):
 def test_company_owns_multiple_reusable_setups(cursor):
     company_id, branch_a = company(cursor)
     cursor.execute(
-        "INSERT INTO core.Branches (CompanyID, BranchCode, BranchName) "
-        "VALUES (%s, 'OTHER', 'Other') RETURNING BranchID", (company_id,),
+        "INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, timezoneid) "
+        "VALUES (%s, 'OTHER', 'Other', 'UTC') RETURNING BranchID", (company_id,),
     )
     branch_b = cursor.fetchone()[0]
     setup_a, _ = setup(cursor, company_id)

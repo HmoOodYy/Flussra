@@ -350,7 +350,7 @@ async def get_driver_rate_matrix(
     driver_id: int,
     company_id: int,
     user_id: int,
-    as_of_date: date,
+    as_of_date: date | None,
     db: AsyncConnection,
 ) -> DriverRateMatrix:
     """
@@ -380,6 +380,10 @@ async def get_driver_rate_matrix(
         raise HTTPException(status_code=404, detail="Driver not found.")
 
     branch_id: int = drv_row["branchid"]
+    if as_of_date is None:
+        from app.business_clock import branch_today
+
+        as_of_date = await branch_today(company_id, branch_id, db)
 
     # Permission gate â€” requires payrates.view, payrates.edit, settings.manage, or setup.manage
     await check_any_permission(
@@ -517,6 +521,12 @@ async def get_driver_rates_summary(
     """
     await _check_driver_read_access(driver_id, company_id, user_id, db)
 
+    branch_id = (await db.execute(text("""
+        SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid
+    """), {"did": driver_id, "cid": company_id})).scalar_one()
+    from app.business_clock import branch_today
+    as_of = await branch_today(company_id, branch_id, db)
+
     # Counts from driverrates
     counts_result = await db.execute(
         text("""
@@ -524,14 +534,14 @@ async def get_driver_rates_summary(
                 SUM(CASE WHEN status = 'PendingApproval' THEN 1 ELSE 0 END)
                     AS pending_count,
                 SUM(CASE WHEN status = 'Approved'
-                          AND effectivefrom > CURRENT_DATE THEN 1 ELSE 0 END)
+                          AND effectivefrom > :as_of THEN 1 ELSE 0 END)
                     AS future_approved_count
             FROM payroll.driverrates
             WHERE driverid  = :did
               AND companyid = :cid
               AND status IN ('PendingApproval', 'Approved')
         """),
-        {"did": driver_id, "cid": company_id},
+        {"did": driver_id, "cid": company_id, "as_of": as_of},
     )
     counts_row = counts_result.mappings().first()
     pending_count: int       = int(counts_row["pending_count"] or 0)
@@ -554,8 +564,8 @@ async def get_driver_rates_summary(
                   AND  companyid     = :cid
                   AND  ratetypeid    = pirm.ratetypeid
                   AND  status        IN ('Approved', 'Superseded')
-                  AND  effectivefrom <= CURRENT_DATE
-                  AND  (effectiveto IS NULL OR effectiveto >= CURRENT_DATE)
+                  AND  effectivefrom <= :as_of
+                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
                 ORDER BY effectivefrom DESC
                 LIMIT 1
             ) approved ON TRUE
@@ -564,7 +574,7 @@ async def get_driver_rates_summary(
               AND (pi.companyid IS NULL OR pi.companyid = :cid)
               AND pi.isdefaultbranchactive = TRUE
         """),
-        {"did": driver_id, "cid": company_id},
+        {"did": driver_id, "cid": company_id, "as_of": as_of},
     )
     missing_row = missing_result.mappings().first()
     if missing_row is not None:
@@ -682,10 +692,11 @@ async def get_bulk_driver_rates_summary(
         drv_params["filter_bid"] = branch_id
     where = " AND ".join(drv_q_parts)
     drv_result = await db.execute(
-        text(f"SELECT driverid FROM core.drivers WHERE {where}"),
+        text(f"SELECT driverid, branchid FROM core.drivers WHERE {where}"),
         drv_params,
     )
-    accessible_driver_ids = [r["driverid"] for r in drv_result.mappings().all()]
+    accessible_rows = drv_result.mappings().all()
+    accessible_driver_ids = [r["driverid"] for r in accessible_rows]
 
     if not accessible_driver_ids:
         return []
@@ -695,15 +706,16 @@ async def get_bulk_driver_rates_summary(
     counts_result = await db.execute(
         text(f"""
             SELECT
-                driverid,
+                d.driverid,
                 SUM(CASE WHEN status = 'PendingApproval' THEN 1 ELSE 0 END) AS pending_count,
                 SUM(CASE WHEN status = 'Approved'
-                          AND effectivefrom > CURRENT_DATE THEN 1 ELSE 0 END) AS future_approved_count
-            FROM payroll.driverrates
-            WHERE companyid = :cid
-              AND driverid IN ({in_clause2})
-              AND status IN ('PendingApproval', 'Approved')
-            GROUP BY driverid
+                          AND effectivefrom > core.fn_BranchToday(d.companyid, d.branchid, NOW()) THEN 1 ELSE 0 END) AS future_approved_count
+            FROM payroll.driverrates r
+            JOIN core.drivers d ON d.driverid = r.driverid AND d.companyid = r.companyid
+            WHERE r.companyid = :cid
+              AND r.driverid IN ({in_clause2})
+              AND r.status IN ('PendingApproval', 'Approved')
+            GROUP BY d.driverid, d.companyid, d.branchid
         """),
         {"cid": company_id, **params2},
     )

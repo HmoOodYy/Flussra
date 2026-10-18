@@ -235,7 +235,7 @@ async def get_period_off_drivers(
     period_id: int,
     token: TokenDep,
     db: DbDep,
-    work_date: date = Query(..., description="Date inside the payroll period"),
+    work_date: date | None = Query(default=None, description="Date inside the payroll period; omitted resolves from Branch business date"),
 ) -> SelectedDayOffDriversResponse:
     return await off_drivers.get_selected_day_off_drivers(
         period_id=period_id,

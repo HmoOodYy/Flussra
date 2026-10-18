@@ -112,7 +112,7 @@ async def test_setup_with_a_published_version_can_become_default(payroll_setup_d
 async def test_future_only_published_version_satisfies_the_prerequisite(payroll_setup_db):
     db = payroll_setup_db
     setup_id = await _new_setup(db, "d")
-    # 2090 is far in the future of any real company-local today.
+    # 2090 is far in the future of today's Branch business date.
     await publish_version(db.company_id, db.user_id, setup_id, await _draft(db, setup_id), ANCHOR, db.db)
 
     await set_default_setup(db.company_id, db.user_id, setup_id, db.db)

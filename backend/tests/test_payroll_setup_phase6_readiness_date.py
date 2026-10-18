@@ -84,8 +84,8 @@ async def phase6_ready_db(pg_instance):
                 VALUES (%s, %s, NULL, %s, %s, 'AllCompanyBranches', TRUE)
             """, (user_id, company_id, role_id, company_role_id))
             cursor.execute("""
-                INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault)
-                VALUES (%s, 'P6BRANCH', 'Phase 6 Branch', 'Active', FALSE)
+                INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
+                VALUES (%s, 'P6BRANCH', 'Phase 6 Branch', 'Active', FALSE, 'UTC')
                 RETURNING BranchID
             """, (company_id,))
             branch_id = cursor.fetchone()[0]
@@ -590,6 +590,7 @@ async def test_f_create_branch_with_company_default_reports_ready_and_date(
     )
     created = await client.post("/settings/branches", headers=_auth(actor), json={
         "branch_name": "Phase6 create ready " + marker[:8],
+        "time_zone_id": "UTC",
         "branch_code": "P6F" + marker[:7],
         "first_payroll_start_date": "2090-01-01",
     })
@@ -622,6 +623,7 @@ async def test_g_create_branch_without_company_default_reports_reason_and_date(
     branch_code = "P6G" + marker[:7]
     created = await client.post("/settings/branches", headers=_auth(actor), json={
         "branch_name": "Phase6 create no default " + marker[:8],
+        "time_zone_id": "UTC",
         "branch_code": branch_code,
         "first_payroll_start_date": "2090-01-01",
     })

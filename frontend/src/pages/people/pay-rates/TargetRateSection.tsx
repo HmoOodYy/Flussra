@@ -5,6 +5,7 @@ import styles from './PayRatesPage.module.css';
 type TargetRateSectionProps = {
   rows: DriverPayRateRow[];
   canEditMatrix: boolean;
+  referenceDate: string | undefined;
   currencyCode: string | null;
   currencyDigits: number | null;
   targetDrafts: Record<number, { amount: string; effective_from: string }>;
@@ -16,7 +17,7 @@ type TargetRateSectionProps = {
   startTargetEdit: (row: DriverPayRateRow) => void;
 };
 
-export function TargetRateSection({ rows, canEditMatrix, currencyCode, currencyDigits, targetDrafts, targetErrors, targetSavingId, setTargetField, saveTargetRow, cancelTargetEdit, startTargetEdit }: TargetRateSectionProps) {
+export function TargetRateSection({ rows, canEditMatrix, referenceDate, currencyCode, currencyDigits, targetDrafts, targetErrors, targetSavingId, setTargetField, saveTargetRow, cancelTargetEdit, startTargetEdit }: TargetRateSectionProps) {
   return (
     <div className={styles.section}>
       <div className={styles.sectionHead}><span className={styles.sectionTitle}>Pay Item Rates</span></div>
@@ -53,7 +54,7 @@ export function TargetRateSection({ rows, canEditMatrix, currencyCode, currencyD
                       <button className={styles.btnApprove} disabled={busy || targetSavingId != null || draft.amount === ''} onClick={() => void saveTargetRow(row, true)}>{busy ? 'Saving…' : 'Save & Approve'}</button>
                       <button className={styles.btnSecondary} disabled={busy || targetSavingId != null || draft.amount === ''} onClick={() => void saveTargetRow(row, false)}>Save as Pending</button>
                       <button className={styles.btnSecondary} disabled={busy} onClick={() => cancelTargetEdit(id)}>Cancel</button>
-                    </div> : <button className={styles.btnSecondary} disabled={targetSavingId != null} onClick={() => startTargetEdit(row)}>Edit rate</button>}
+                    </div> : <button className={styles.btnSecondary} disabled={targetSavingId != null || !referenceDate} onClick={() => startTargetEdit(row)}>Edit rate</button>}
                   </td>}
                 </tr>
               );

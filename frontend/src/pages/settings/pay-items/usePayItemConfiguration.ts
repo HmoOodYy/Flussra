@@ -4,11 +4,13 @@ import {
   updateBranchPayDefinition,
 } from '../../../lib/compensationApi';
 import type { BranchConfigUpdatePayload, BranchPayDefinitionState, BulkBranchConfigResult } from '../../../types/compensation';
-import { apiError, todayISO, type AggregateDefinition } from './payItemsModel';
+import { apiError, type AggregateDefinition } from './payItemsModel';
+import { isValidIsoDate } from '../../../lib/isoDate';
 
 interface UsePayItemConfigurationArgs {
   branchMode: 'single' | 'all';
   selectedBranchId: number | null;
+  selectedBranchBusinessDate: string | undefined;
   selectedId: number | null;
   selectedItem: BranchPayDefinitionState | null;
   selectedAgg: AggregateDefinition | null;
@@ -17,13 +19,13 @@ interface UsePayItemConfigurationArgs {
 }
 
 export function usePayItemConfiguration({
-  branchMode, selectedBranchId, selectedId, selectedItem, selectedAgg, setReloadKey, showToast,
+  branchMode, selectedBranchId, selectedBranchBusinessDate, selectedId, selectedItem, selectedAgg, setReloadKey, showToast,
 }: UsePayItemConfigurationArgs) {
   const [editOpen, setEditOpen] = useState(false);
   const [editActive, setEditActive] = useState(true);
   const [editNotes, setEditNotes] = useState('');
   const [editUseDate, setEditUseDate] = useState(false);
-  const [editDate, setEditDate] = useState(todayISO());
+  const [editDate, setEditDate] = useState('');
   const [editTarget, setEditTarget] = useState<'single' | 'all'>('single');
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
@@ -39,7 +41,7 @@ export function usePayItemConfiguration({
       setEditNotes('');
     }
     setEditUseDate(false);
-    setEditDate(todayISO());
+    setEditDate(branchMode === 'single' ? selectedBranchBusinessDate ?? '' : '');
     setEditTarget(branchMode === 'all' ? 'all' : 'single');
     setEditError('');
     setEditOpen(true);
@@ -47,6 +49,10 @@ export function usePayItemConfiguration({
 
   async function executeSave() {
     if (selectedId === null) return;
+    if (editUseDate && !isValidIsoDate(editDate)) {
+      setEditError('Choose a valid effective date, or turn off the specific date option.');
+      return;
+    }
     const payload: BranchConfigUpdatePayload = {
       is_active: editActive,
       notes: editNotes.trim() || null,

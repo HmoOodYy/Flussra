@@ -1,10 +1,11 @@
 import type { StatusRateMatrix } from './statusRatesApi';
-import { fmtAmount, today } from './payRatesView';
+import { fmtAmount } from './payRatesView';
 import styles from './PayRatesPage.module.css';
 
 type StatusRateSectionProps = {
   statusMatrix: StatusRateMatrix | null;
   canEditMatrix: boolean;
+  referenceDate: string | undefined;
   currencyCode: string | null;
   currencyDigits: number | null;
   statusEditMode: boolean;
@@ -20,12 +21,12 @@ type StatusRateSectionProps = {
   cancelStatusEdit: () => void;
 };
 
-export function StatusRateSection({ statusMatrix, canEditMatrix, currencyCode, currencyDigits, statusEditMode, statusDrafts, statusSaving, statusSaveError, dirtyStatusKeys, statusKey, startStatusEdit, setStatusField, isStatusDirty, saveStatusRates, cancelStatusEdit }: StatusRateSectionProps) {
+export function StatusRateSection({ statusMatrix, canEditMatrix, referenceDate, currencyCode, currencyDigits, statusEditMode, statusDrafts, statusSaving, statusSaveError, dirtyStatusKeys, statusKey, startStatusEdit, setStatusField, isStatusDirty, saveStatusRates, cancelStatusEdit }: StatusRateSectionProps) {
   return (statusMatrix?.groups.length ?? 0) > 0 ? (
     <div className={styles.section}>
       <div className={styles.sectionHead}>
         <span className={styles.sectionTitle}>Status Pay Rates</span>
-        {canEditMatrix && !statusEditMode && <button className={styles.btnSecondary} onClick={startStatusEdit}>Edit Status Rates</button>}
+        {canEditMatrix && !statusEditMode && <button className={styles.btnSecondary} disabled={!referenceDate} onClick={startStatusEdit}>Edit Status Rates</button>}
       </div>
       {statusSaveError && <div className={styles.errBanner} style={{ margin: '0.75rem 1.25rem 0' }}>{statusSaveError}</div>}
       <table className={styles.rateTable}>
@@ -37,7 +38,7 @@ export function StatusRateSection({ statusMatrix, canEditMatrix, currencyCode, c
               <tr key={g.group_key}>
                 <td><strong>{g.rate_name}</strong></td>
                 <td>{statusEditMode ? <input className={styles.editInput} type="number" step="0.0001" min="0" placeholder="0.0000" value={statusDrafts[key]?.amount ?? ''} onChange={(e) => setStatusField(key, 'amount', e.target.value)} /> : g.current_rate ? fmtAmount(g.current_rate.amount, g.unit_name, currencyCode, currencyDigits) : <span className={styles.missingText}>No rate set</span>}</td>
-                <td>{statusEditMode ? <input className={styles.editDateInput} type="date" value={statusDrafts[key]?.effective_from ?? today()} onChange={(e) => setStatusField(key, 'effective_from', e.target.value)} /> : g.current_rate ? g.current_rate.effective_from : '—'}</td>
+                <td>{statusEditMode ? <input className={styles.editDateInput} type="date" value={statusDrafts[key]?.effective_from ?? ''} onChange={(e) => setStatusField(key, 'effective_from', e.target.value)} /> : g.current_rate ? g.current_rate.effective_from : '—'}</td>
                 <td>
                   {g.pending_rate && !statusEditMode && <span className={styles.pendingBadge} style={{ marginRight: '0.4rem' }}>Pending</span>}
                   {!statusEditMode && (g.current_rate ? <span className={styles.okIcon}>&#10003;</span> : <span className={styles.missingIcon}>&#9888;</span>)}

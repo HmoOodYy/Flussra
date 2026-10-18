@@ -129,8 +129,8 @@ async def _seed_bonus_graph(engine) -> dict:
             VALUES (:code, 'G0.3 bonus', 'USD') RETURNING companyid
         """), {"code": f"G03B_{marker}"})).scalar_one())
         bid = int((await db.execute(text("""
-            INSERT INTO core.branches(companyid, branchcode, branchname, status, isdefault)
-            VALUES (:cid, 'G03B', 'G0.3 branch', 'Active', FALSE) RETURNING branchid
+            INSERT INTO core.branches(companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (:cid, 'G03B', 'G0.3 branch', 'Active', FALSE, 'UTC') RETURNING branchid
         """), {"cid": cid})).scalar_one())
         uid = int((await db.execute(text("""
             INSERT INTO sec.users(companyid, username, displayname, passwordhash, isactive, canlogin)

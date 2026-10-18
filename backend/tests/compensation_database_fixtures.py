@@ -37,9 +37,8 @@ def p3b_database(pg_instance):
         for path in sorted(_SQL_DIR.glob("*.sql")):
             cur.execute(path.read_text(encoding="utf-8"))
         cur.execute("""
-            INSERT INTO core.companies (companycode, companyname, legalname, status,
-                                        issuspended, timezonename)
-            VALUES ('P3BUSERCO', 'P3b users', 'P3b users', 'Active', FALSE, 'UTC')
+            INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended)
+            VALUES ('P3BUSERCO', 'P3b users', 'P3b users', 'Active', FALSE)
             RETURNING companyid
         """)
         cur.execute("""
@@ -87,9 +86,9 @@ def unique(prefix: str) -> str:
 def make_company(cur, currency: str | None = "USD") -> int:
     code = unique("P3B")
     cur.execute("""
-        INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended,
-                                    timezonename, currencycode)
-        VALUES (%s, %s, %s, 'Active', FALSE, 'UTC', %s) RETURNING companyid
+    INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended,
+                                currencycode)
+        VALUES (%s, %s, %s, 'Active', FALSE, %s) RETURNING companyid
     """, (code, code, code, currency))
     return cur.fetchone()[0]
 
@@ -97,8 +96,8 @@ def make_company(cur, currency: str | None = "USD") -> int:
 def make_branch(cur, company_id: int, *, is_default: bool = False) -> int:
     code = unique("B")
     cur.execute("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (%s, %s, %s, 'Active', %s) RETURNING branchid
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (%s, %s, %s, 'Active', %s, 'UTC') RETURNING branchid
     """, (company_id, code, code, is_default))
     return cur.fetchone()[0]
 
@@ -110,8 +109,10 @@ def make_driver(cur, company_id: int, branch_id: int) -> int:
     """, (company_id, branch_id))
     employee_id = cur.fetchone()[0]
     cur.execute("""
-        INSERT INTO core.drivers (companyid, branchid, employeeid, drivercode, driverstatus)
-        VALUES (%s, %s, %s, %s, 'Active') RETURNING driverid
+        INSERT INTO core.drivers
+            (companyid, branchid, employeeid, drivercode, driverstatus, effectivefromat)
+        VALUES (%s, %s, %s, %s, 'Active', TIMESTAMPTZ '2000-01-01 00:00:00+00')
+        RETURNING driverid
     """, (company_id, branch_id, employee_id, unique("D")))
     return cur.fetchone()[0]
 

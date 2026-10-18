@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.business_clock import branch_today
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.compensation.branch_config import require_definition_applicable
 from app.compensation.errors import compensation_error, translate_database_error
@@ -530,8 +531,7 @@ async def driver_pay_rates(
     """
     branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
     await require_rate_read(company_id, user_id, branch_id, db)
-    reference = as_of or (await db.execute(
-        text("SELECT core.fn_CompanyToday(:cid)"), {"cid": company_id})).scalar_one()
+    reference = as_of or await branch_today(company_id, branch_id, db)
 
     definitions = (await db.execute(
         text("""

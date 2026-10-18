@@ -102,8 +102,10 @@ export async function discardPayrollSetupDraft(setupId: number, draftId: number)
 
 // ── Versions / publication ─────────────────────────────────────────────────
 
-export async function listPayrollSetupVersions(setupId: number): Promise<VersionResponse[]> {
-  const resp = await apiClient.get<VersionResponse[]>(`/payroll-setup/setups/${setupId}/versions`);
+export async function listPayrollSetupVersions(setupId: number, branchId?: number | null): Promise<VersionResponse[]> {
+  const resp = await apiClient.get<VersionResponse[]>(`/payroll-setup/setups/${setupId}/versions`, {
+    params: branchId == null ? undefined : { branch_id: branchId },
+  });
   return resp.data;
 }
 
@@ -313,11 +315,12 @@ export async function listBranchPolicySummaries(): Promise<BranchPolicySummaryRe
 // ── Onboarding options (settings-owned) ─────────────────────────────────────
 
 export async function getBranchOnboardingOptions(
+  timeZoneId: string,
   around?: string,
 ): Promise<OnboardingOptionsResponse> {
   const resp = await apiClient.get<OnboardingOptionsResponse>(
     '/settings/branches/onboarding-options',
-    { params: around ? { around } : undefined },
+    { params: { time_zone_id: timeZoneId, ...(around ? { around } : {}) } },
   );
   return resp.data;
 }

@@ -197,14 +197,14 @@ def _seed_legacy_access_state(dsn, *, invalid_non_driver_oda: bool = False):
         conn.close()
 
 
-def test_fresh_database_upgrades_through_0085(access_migration_db):
+def test_fresh_database_upgrades_through_0086(access_migration_db):
     config, dsn = access_migration_db
     _upgrade(config, "head")
     conn = _db(dsn)
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0085"
+            assert cur.fetchone()[0] == "0086"
             cur.execute("""
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint
@@ -232,7 +232,7 @@ def test_upgrade_0074_to_0075_migrates_and_enforces_runtime_authority(access_mig
     config, dsn = access_migration_db
     _upgrade(config, "0074")
     ids = _seed_legacy_access_state(dsn)
-    _upgrade(config, "head")
+    _upgrade(config, "0085")
     conn = _db(dsn)
     try:
         with conn.cursor() as cur:
@@ -389,4 +389,4 @@ def test_upgrade_refuses_non_driver_oda_rows(access_migration_db):
     _upgrade(config, "0074")
     _seed_legacy_access_state(dsn, invalid_non_driver_oda=True)
     with pytest.raises(DBAPIError, match="0075 refused: non-DRIVER OwnDriverDataOnly"):
-        _upgrade(config, "head")
+        _upgrade(config, "0075")

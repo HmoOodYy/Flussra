@@ -42,8 +42,8 @@ async def snapshot_db(test_database_url) -> AsyncIterator[SimpleNamespace]:
             """))).mappings().one()
             branch_id = (await conn.execute(text("""
                 INSERT INTO core.branches
-                    (companyid, branchcode, branchname, status, isdefault)
-                VALUES (:company_id, :code, :name, 'Active', FALSE)
+                    (companyid, branchcode, branchname, status, isdefault, timezoneid)
+                VALUES (:company_id, :code, :name, 'Active', FALSE, 'UTC')
                 RETURNING branchid
             """), {
                 "company_id": tenant["companyid"],
@@ -119,13 +119,13 @@ async def _insert_other_company_driver(
 ) -> tuple[int, int, int]:
     marker = uuid4().hex
     company_id = (await conn.execute(text("""
-        INSERT INTO core.companies (companycode, companyname, status, issuspended, timezonename)
-        VALUES (:code, :name, 'Active', FALSE, 'UTC')
+        INSERT INTO core.companies (companycode, companyname, status, issuspended)
+        VALUES (:code, :name, 'Active', FALSE)
         RETURNING companyid
     """), {"code": f"CP4C{marker[:18]}", "name": f"CP4C Other {marker}"})).scalar_one()
     branch_id = (await conn.execute(text("""
-        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-        VALUES (:company_id, :code, :name, 'Active', TRUE)
+        INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
+        VALUES (:company_id, :code, :name, 'Active', TRUE, 'UTC')
         RETURNING branchid
     """), {
         "company_id": company_id,

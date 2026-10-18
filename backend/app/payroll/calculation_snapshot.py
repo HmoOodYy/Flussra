@@ -216,7 +216,8 @@ async def _capture_calculation_snapshot(
         text("""
             SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
                    hiredatesnapshot, terminationdatesnapshot,
-                   drivereffectivefromsnapshot, drivereffectivetosnapshot,
+                   drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
+                   branchtimezoneidsnapshot, eligibleworkdates,
                    drivercodesnapshot, drivernamesnapshot
             FROM payroll.payrollperioddrivereligibility
             WHERE payrollperiodid = :pid AND companyid = :cid AND branchid = :bid

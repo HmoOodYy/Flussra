@@ -64,8 +64,8 @@ async def paytest_branch_id(session_db_conn) -> int:
     row = (await session_db_conn.execute(
         _text("""
             INSERT INTO core.branches
-                (companyid, branchcode, branchname, status, isdefault)
-            VALUES (1, :code, :name, 'Active', FALSE)
+                (companyid, branchcode, branchname, status, isdefault, timezoneid)
+            VALUES (1, :code, :name, 'Active', FALSE, 'UTC')
             RETURNING branchid
         """), {"code": f"P4S2_{uuid.uuid4().hex[:10]}", "name": "P4S2 isolated"},
     )).mappings().one()
@@ -172,6 +172,12 @@ async def _open_period(
             {"code": code},
         )).mappings().first()
     assert row is not None, f"Could not create or find period {code!r}"
+    from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    await _create_period_driver_eligibility_rows(
+        row["payrollperiodid"], 1, branch_id, db,
+        snapshot_source="Generated", freeze=True,
+    )
+    await db.commit()
     return row["payrollperiodid"]
 
 
