@@ -31,7 +31,7 @@ async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
     temporal_contract = await db_conn.execute(text("""
         SELECT table_name, column_name, data_type
         FROM information_schema.columns
-        WHERE (table_schema = 'core' AND table_name = 'drivers'
+        WHERE (table_schema = 'core' AND table_name = 'driverassignments'
                AND column_name IN ('effectivefromat', 'effectivetoat'))
            OR (table_schema = 'core' AND table_name = 'drivertransferrequests'
                AND column_name = 'effectiveat')
@@ -47,8 +47,8 @@ async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
     """))
     observed = {(row["table_name"], row["column_name"]): row["data_type"]
                 for row in temporal_contract.mappings().all()}
-    assert observed[("drivers", "effectivefromat")] == "timestamp with time zone"
-    assert observed[("drivers", "effectivetoat")] == "timestamp with time zone"
+    assert observed[("driverassignments", "effectivefromat")] == "timestamp with time zone"
+    assert observed[("driverassignments", "effectivetoat")] == "timestamp with time zone"
     assert observed[("drivertransferrequests", "effectiveat")] == "timestamp with time zone"
     assert observed[("employees", "hiredate")] == "date"
     assert observed[("employees", "terminationdate")] == "date"

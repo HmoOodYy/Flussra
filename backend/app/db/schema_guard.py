@@ -44,6 +44,8 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _REQUIRED_TABLES = {
     "core.supportedtimezones",
+    "core.drivers",
+    "core.driverassignments",
     "sec.companyroles",
     "sec.companyrolepermissions",
     "sec.userpermissionoverrides",
@@ -413,11 +415,15 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     required_columns = {
         ("core", "supportedtimezones", "timezoneid"),
         ("core", "branches", "timezoneid"),
-        ("core", "drivers", "effectivefromat"),
-        ("core", "drivers", "effectivetoat"),
+        ("core", "driverassignments", "effectivefromat"),
+        ("core", "driverassignments", "effectivetoat"),
+        ("core", "driverassignments", "driverid"),
+        ("core", "driverassignments", "endreason"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivefromatsnapshot"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivetoatsnapshot"),
         ("core", "drivertransferrequests", "effectiveat"),
+        ("core", "drivertransferrequests", "sourcedriverassignmentid"),
+        ("core", "drivertransferrequests", "destinationdriverassignmentid"),
         ("payroll", "payrollperioddrivereligibility", "branchtimezoneidsnapshot"),
         ("payroll", "payrollperioddrivereligibility", "eligibleworkdates"),
     }
@@ -440,7 +446,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         FROM information_schema.columns
         WHERE (table_schema = 'core' AND table_name = 'branches' AND column_name = 'timezoneid')
            OR (table_schema = 'core' AND table_name = 'supportedtimezones' AND column_name = 'timezoneid')
-           OR (table_schema = 'core' AND table_name = 'drivers' AND column_name IN ('effectivefromat','effectivetoat'))
+           OR (table_schema = 'core' AND table_name = 'driverassignments' AND column_name IN ('effectivefromat','effectivetoat'))
            OR (table_schema = 'core' AND table_name = 'drivertransferrequests' AND column_name = 'effectiveat')
            OR (table_schema = 'payroll' AND table_name = 'payrollperioddrivereligibility'
                AND column_name IN ('drivereffectivefromatsnapshot','drivereffectivetoatsnapshot','branchtimezoneidsnapshot','eligibleworkdates'))
@@ -461,7 +467,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
 
     required_not_null = (
         ("core", "branches", "timezoneid"),
-        ("core", "drivers", "effectivefromat"),
+        ("core", "driverassignments", "effectivefromat"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivefromatsnapshot"),
         ("payroll", "payrollperioddrivereligibility", "branchtimezoneidsnapshot"),
         ("payroll", "payrollperioddrivereligibility", "eligibleworkdates"),
@@ -479,7 +485,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         if shape and (shape[2] != "character varying" or shape[3] != 100):
             temporal_errors.append(f"Temporal timezone column {'.'.join(key)} must be VARCHAR(100).")
     for key in (
-        ("core", "drivers", "effectivetoat"),
+        ("core", "driverassignments", "effectivetoat"),
         ("core", "drivertransferrequests", "effectiveat"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivetoatsnapshot"),
     ):
@@ -487,8 +493,8 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         if shape and shape[0] != "YES":
             temporal_errors.append(f"Temporal boundary column {'.'.join(key)} must remain nullable.")
     for key in (
-        ("core", "drivers", "effectivefromat"),
-        ("core", "drivers", "effectivetoat"),
+        ("core", "driverassignments", "effectivefromat"),
+        ("core", "driverassignments", "effectivetoat"),
         ("core", "drivertransferrequests", "effectiveat"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivefromatsnapshot"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivetoatsnapshot"),
@@ -502,11 +508,17 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
 
     required_temporal_constraints = [
         ("core", "branches", "fk_branches_timezone", "f"),
-        ("core", "drivers", "ck_drivers_effectivewindowat", "c"),
-        ("core", "drivers", "ck_drivers_closedhistoryat", "c"),
-        ("core", "drivers", "excl_drivers_employee_assignmentwindow", "x"),
+        ("core", "driverassignments", "ck_driverassignments_effectivewindowat", "c"),
+        ("core", "driverassignments", "ck_driverassignments_endreason", "c"),
+        ("core", "driverassignments", "ck_driverassignments_endreasonwindow", "c"),
+        ("core", "driverassignments", "excl_driverassignments_driver_window", "x"),
+        ("core", "driverassignments", "fk_driverassignments_driver", "f"),
+        ("core", "drivers", "ck_drivers_status", "c"),
+        ("core", "drivers", "uq_drivers_employee", "u"),
         ("payroll", "payrollperioddrivereligibility", "fk_ppde_snapshottimezone", "f"),
-        ("core", "drivertransferrequests", "ck_dtr_completedeffectiveat", "c"),
+        ("core", "drivertransferrequests", "ck_dtr_completedscheduledeffectiveat", "c"),
+        ("core", "drivertransferrequests", "ck_dtr_completedscheduleddestination", "c"),
+        ("core", "drivertransferrequests", "fk_dtr_sourceassignment", "f"),
     ]
     for schema, table, name, kind in required_temporal_constraints:
         cur.execute("""
@@ -519,15 +531,15 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         constraint_shape = cur.fetchone()
         if constraint_shape is None:
             temporal_errors.append(f"Missing or unvalidated branch-timezone/instant constraint {schema}.{table}.{name}.")
-        elif name == "excl_drivers_employee_assignmentwindow" and constraint_shape != (True, True):
+        elif name == "excl_driverassignments_driver_window" and constraint_shape != (True, True):
             temporal_errors.append(
-                "core.Drivers.excl_Drivers_Employee_AssignmentWindow must be "
+                "core.DriverAssignments.excl_DriverAssignments_Driver_Window must be "
                 "DEFERRABLE INITIALLY DEFERRED."
             )
 
     retired_columns = [
-        ("core", "drivers", "effectivefrom"),
-        ("core", "drivers", "effectiveto"),
+        ("core", "driverassignments", "effectivefrom"),
+        ("core", "driverassignments", "effectiveto"),
         ("core", "drivertransferrequests", "effectivedate"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivefromsnapshot"),
         ("payroll", "payrollperioddrivereligibility", "drivereffectivetosnapshot"),
@@ -535,6 +547,23 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     for schema, table, column in retired_columns:
         if _column_exists(cur, schema, table, column):
             temporal_errors.append(f"Retired date-based assignment authority still exists: {schema}.{table}.{column}")
+
+    retired_driver_columns = [
+        ("core", "driverassignments", "drivercode"),
+        ("core", "driverassignments", "cdlnumber"),
+        ("core", "driverassignments", "externaldriverid"),
+        ("core", "driverassignments", "driverstatus"),
+        ("core", "drivertransferrequests", "newdriverid"),
+        ("payroll", "payrollperioddrivereligibility", "driverid"),
+        ("payroll", "payrollperioddrivereligibility", "drivercodesnapshot"),
+        ("payroll", "payrollcalculationdrivertotals", "drivercodesnapshot"),
+    ]
+    for schema, table, column in retired_driver_columns:
+        if _column_exists(cur, schema, table, column):
+            temporal_errors.append(f"Retired branch-profile Driver authority still exists: {schema}.{table}.{column}")
+    cur.execute("SELECT to_regclass('core.driveraliases')")
+    if cur.fetchone()[0] is not None:
+        temporal_errors.append("Retired Driver alias table still exists: core.DriverAliases")
 
     retired_column = ("core", "companies", "timezonename")
     cur.execute(
@@ -553,11 +582,13 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         temporal_errors.append("Retired Company clock function still exists: core.fn_CompanyToday")
     for signature, label in (
         ("core.fn_effectivedriverprofile(integer,integer,date)", "core.fn_EffectiveDriverProfile(INT, INT, DATE)"),
+        ("core.fn_effectivedriverprofile(integer,integer,timestamp with time zone)", "core.fn_EffectiveDriverProfile(INT, INT, TIMESTAMPTZ)"),
+        ("core.fn_drivercoversworkdate(integer,integer,integer,date)", "core.fn_DriverCoversWorkDate(INT, INT, INT, DATE)"),
         ("core.fn_drivereffectiverange(date,date)", "core.fn_DriverEffectiveRange(DATE, DATE)"),
     ):
         cur.execute("SELECT to_regprocedure(%s)", (signature,))
         if cur.fetchone()[0] is not None:
-            temporal_errors.append(f"Retired date-based temporal function still exists: {label}.")
+            temporal_errors.append(f"Retired Driver temporal function still exists: {label}.")
     for signature, label in (
         ("core.fn_businessdate(text,timestamp with time zone)", "core.fn_BusinessDate(TEXT, TIMESTAMPTZ)"),
         ("core.fn_branchtoday(integer,integer,timestamp with time zone)", "core.fn_BranchToday(INT, INT, TIMESTAMPTZ)"),
@@ -565,15 +596,21 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         ("core.fn_localdateboundary(text,date)", "core.fn_LocalDateBoundary(TEXT, DATE)"),
         ("core.fn_workdaterange(text,date,date)", "core.fn_WorkDateRange(TEXT, DATE, DATE)"),
         ("core.fn_branchworkdaterange(integer,integer,date,date)", "core.fn_BranchWorkDateRange(INT, INT, DATE, DATE)"),
-        ("core.fn_drivercoversworkdate(integer,integer,integer,date)", "core.fn_DriverCoversWorkDate(INT, INT, INT, DATE)"),
-        ("core.fn_effectivedriverprofile(integer,integer,timestamp with time zone)", "core.fn_EffectiveDriverProfile(INT, INT, TIMESTAMPTZ)"),
+        ("core.fn_driverassignmentcoversworkdate(integer,integer,integer,date)", "core.fn_DriverAssignmentCoversWorkDate(INT, INT, INT, DATE)"),
+        ("core.fn_effectivedriverassignment(integer,integer,timestamp with time zone)", "core.fn_EffectiveDriverAssignment(INT, INT, TIMESTAMPTZ)"),
+        ("core.fn_drivertransferstatus(text,timestamp with time zone,timestamp with time zone)", "core.fn_DriverTransferStatus(TEXT, TIMESTAMPTZ, TIMESTAMPTZ)"),
         ("core.fn_drivereffectiverange(timestamp with time zone,timestamp with time zone)", "core.fn_DriverEffectiveRange(TIMESTAMPTZ, TIMESTAMPTZ)"),
     ):
         cur.execute("SELECT to_regprocedure(%s)", (signature,))
         if cur.fetchone()[0] is None:
             temporal_errors.append(f"Missing required temporal function: {label}.")
-    if not _trigger_exists_and_enabled(cur, "trg_drivers_historyimmutable", "core", "drivers"):
-        temporal_errors.append("Missing or disabled temporal history trigger core.trg_Drivers_HistoryImmutable.")
+    for trigger_name, trigger_table in (
+        ("trg_driverassignments_historyimmutable", "driverassignments"),
+        ("trg_driverassignments_identityimmutable", "driverassignments"),
+        ("trg_drivers_identityimmutable", "drivers"),
+    ):
+        if not _trigger_exists_and_enabled(cur, trigger_name, "core", trigger_table):
+            temporal_errors.append(f"Missing or disabled Driver identity trigger core.{trigger_name}.")
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)
