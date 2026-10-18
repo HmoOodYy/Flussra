@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.admin.schemas import (
     CompanyRoleAssignmentCreate,
 )
-from app.workforce.effective import resolve_effective_driver_profile
+from app.workforce.effective import resolve_effective_employee_assignment
 
 
 async def _validate_company_role_scope(
@@ -67,9 +67,9 @@ async def validate_company_role_assignment(
         )
         if employee.first() is None:
             raise HTTPException(status_code=422, detail="Linked Employee not found for this company.")
-        current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
+        current = await resolve_effective_employee_assignment(company_id, employee_id, None, db)
         if current is None:
-            raise HTTPException(status_code=422, detail="DRIVER access requires a current effective Driver profile.")
+            raise HTTPException(status_code=422, detail="DRIVER access requires a Driver with a current effective assignment.")
     else:
         if data.scope_type == "Self":
             raise HTTPException(status_code=422, detail="Self scope is currently valid only for the exact DRIVER role.")

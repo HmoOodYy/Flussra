@@ -93,7 +93,7 @@ async def _link_test_driver_employee(
         token,
         branch_id=branch_id,
         full_name=f"{username} Employee",
-        driver_code=f"T-{username[:24]}",
+        driver_number=f"T-{username[:24]}",
     )
     linked = await client.put(
         f"/admin/users/{user_id}/employee-link",

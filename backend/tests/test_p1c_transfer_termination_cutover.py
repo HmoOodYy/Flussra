@@ -1,4 +1,4 @@
-"""P1c effective transfer and atomic termination regressions."""
+"""P1c effective transfer and atomic termination regressions (Driver / DriverAssignment model)."""
 
 from __future__ import annotations
 
@@ -14,12 +14,13 @@ from sqlalchemy import text
 
 from app.payroll.eligibility import _assert_driver_eligible_for_workdate_via_snapshot
 from app.settings.branch_reads import fetch_branch_metrics
-from app.workforce.effective import resolve_effective_driver_profile
+from app.workforce.effective import resolve_effective_driver_assignment
 from app.workforce.projection import (
     count_employee_branch_projections,
     sync_company_employee_branch_projections,
     sync_employee_branch_projection,
 )
+from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
 from tests.db_state import allow_final_line_insert
 
 
@@ -29,6 +30,14 @@ def auth(token: str) -> dict[str, str]:
 
 def suffix() -> str:
     return uuid4().hex[:10]
+
+
+def ids_of(employee: dict) -> tuple[int, int]:
+    """(permanent DriverID, first DriverAssignmentID) of a created Driver Employee."""
+    return (
+        employee["driver"]["driver_id"],
+        employee["current_or_pending_assignment"]["driver_assignment_id"],
+    )
 
 
 async def branch_today(db, branch_id: int) -> date:
@@ -51,8 +60,8 @@ async def create_driver_employee(client, token: str, branch_id: int) -> dict:
             "branch_id": branch_id,
             "full_name": f"P1C {suffix()}",
             "hire_date": "2020-01-01",
-            "driver_profile": {
-                "driver_code": f"P1C-{suffix()}",
+            "driver": {
+                "driver_number": f"P1C-{suffix()}",
                 "effective_from_at": "2020-01-01T00:00:00Z",
             },
         },
@@ -105,7 +114,7 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
     effective_at += timedelta(hours=3, minutes=19, seconds=7)
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
     employee_id = employee["employee_id"]
-    source_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id, source_id = ids_of(employee)
     period_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollPeriods
             (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType, StartDate, EndDate, Status)
@@ -120,28 +129,28 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
     """), {"period_id": period_id, "branch_id": paytest_branch_id})
     eligibility_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollPeriodDriverEligibility
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, SourceEmployeeID,
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, SourceEmployeeID,
              DriverStatusSnapshot, EmploymentStatusSnapshot, HireDateSnapshot,
              DriverEffectiveFromAtSnapshot, DriverEffectiveToAtSnapshot,
              BranchTimeZoneIdSnapshot, EligibleWorkDates,
              IsEligibleForPeriod, EligibilityReasonCode,
              SnapshotSource, FrozenAtUtc)
-        VALUES (1, :branch_id, :period_id, :driver_id, :employee_id, 'Active', 'Active',
+        VALUES (1, :branch_id, :period_id, :assignment_id, :employee_id, 'Active', 'Active',
                 DATE '2020-01-01', TIMESTAMPTZ '2020-01-01 00:00:00+00', NULL,
                 'America/New_York', ARRAY[:today, :last_day]::DATE[],
                 TRUE, 'Active', 'Generated', NOW())
         RETURNING PayrollPeriodDriverEligibilityID
     """), {"branch_id": paytest_branch_id, "period_id": period_id,
-           "driver_id": source_id, "employee_id": employee_id,
+           "assignment_id": source_id, "employee_id": employee_id,
            "today": today, "last_day": effective_date - timedelta(days=1)})).scalar_one()
     rate = await direct_db.execute(text("""
         INSERT INTO payroll.DriverRates
-            (CompanyID, BranchID, DriverID, RateTypeID, Amount, EffectiveFrom, Status)
-        VALUES (1, :branch_id, :driver_id, :rate_type_id, 42, :today, 'PendingApproval')
+            (CompanyID, BranchID, DriverAssignmentID, RateTypeID, Amount, EffectiveFrom, Status)
+        VALUES (1, :branch_id, :assignment_id, :rate_type_id, 42, :today, 'PendingApproval')
         RETURNING DriverRateID
     """), {
         "branch_id": paytest_branch_id,
-        "driver_id": source_id,
+        "assignment_id": source_id,
         "rate_type_id": paytest_rate_type_id,
         "today": today,
     })
@@ -162,30 +171,30 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         VALUES (:rate_definition_id, 'Scalar', 1)
         RETURNING RateComponentDefinitionID
     """), {"rate_definition_id": rate_definition_id})).scalar_one()
-    source_assignment_id = (await direct_db.execute(text("""
+    source_rate_assignment_id = (await direct_db.execute(text("""
         INSERT INTO payroll.DriverRateAssignments
-            (CompanyID, BranchID, DriverID, RateDefinitionID, EffectiveFrom, Status)
-        VALUES (1, :branch_id, :driver_id, :rate_definition_id, :today, 'Pending')
+            (CompanyID, BranchID, DriverAssignmentID, RateDefinitionID, EffectiveFrom, Status)
+        VALUES (1, :branch_id, :assignment_id, :rate_definition_id, :today, 'Pending')
         RETURNING DriverRateAssignmentID
-    """), {"branch_id": paytest_branch_id, "driver_id": source_id,
+    """), {"branch_id": paytest_branch_id, "assignment_id": source_id,
           "rate_definition_id": rate_definition_id, "today": today})).scalar_one()
     await direct_db.execute(text("""
         INSERT INTO payroll.DriverRateValues
             (DriverRateAssignmentID, RateDefinitionID, RateComponentDefinitionID, Amount)
         VALUES (:assignment_id, :rate_definition_id, :component_id, 42)
-    """), {"assignment_id": source_assignment_id, "rate_definition_id": rate_definition_id,
+    """), {"assignment_id": source_rate_assignment_id, "rate_definition_id": rate_definition_id,
            "component_id": rate_component_id})
     await direct_db.execute(text("""
         UPDATE payroll.DriverRateAssignments
         SET Status = 'Approved', ApprovedByUserID = 1, ApprovedAtUtc = NOW()
         WHERE DriverRateAssignmentID = :assignment_id
-    """), {"assignment_id": source_assignment_id})
+    """), {"assignment_id": source_rate_assignment_id})
     source_rule_id = (await direct_db.execute(text("""
         INSERT INTO payroll.DriverPayRules
-            (CompanyID, BranchID, DriverID, RuleType, Amount, EffectiveFrom, Status)
-        VALUES (1, :branch_id, :driver_id, 'MinimumPay', 12.50, :today, 'Active')
+            (CompanyID, BranchID, DriverAssignmentID, RuleType, Amount, EffectiveFrom, Status)
+        VALUES (1, :branch_id, :assignment_id, 'MinimumPay', 12.50, :today, 'Active')
         RETURNING DriverPayRuleID
-    """), {"branch_id": paytest_branch_id, "driver_id": source_id,
+    """), {"branch_id": paytest_branch_id, "assignment_id": source_id,
           "today": today})).scalar_one()
 
     from app.payroll.eligibility import _create_period_driver_eligibility_rows
@@ -212,13 +221,14 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         snapshot_source="Generated", freeze=True, frozen_by_user_id=transfer_actor_id,
     )
     target_rows_before = (await direct_db.execute(text("""
-        SELECT DriverID, EligibleWorkDates, DriverStatusSnapshot, FrozenAtUtc, FrozenByUserID
+        SELECT DriverAssignmentID, EligibleWorkDates, DriverStatusSnapshot, FrozenAtUtc, FrozenByUserID
         FROM payroll.PayrollPeriodDriverEligibility WHERE PayrollPeriodID = :period_id
-        ORDER BY DriverID
+        ORDER BY DriverAssignmentID
     """), {"period_id": target_period_id})).mappings().all()
     target_rows_before = [dict(row) for row in target_rows_before]
 
-    request = await create_transfer(client, auth_token, source_id, hq_branch_id, effective_at)
+    request = await create_transfer(client, auth_token, driver_id, hq_branch_id, effective_at)
+    assert request["source_driver_assignment_id"] == source_id
     await approve_transfer(client, auth_token, request["transfer_request_id"])
     completed = await client.post(
         f"/driver-transfers/{request['transfer_request_id']}/complete",
@@ -226,39 +236,47 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         headers=auth(auth_token),
     )
     assert completed.status_code == 200, completed.text
-    destination_id = completed.json()["new_driver_id"]
+    # A future-dated transfer is Scheduled, never Completed, until its EffectiveAt.
+    assert completed.json()["status"] == "Scheduled"
+    destination_id = completed.json()["destination_driver_assignment_id"]
 
-    profiles = (await direct_db.execute(text("""
-        SELECT DriverID, BranchID, DriverStatus, EffectiveFromAt, EffectiveToAt,
-               TransferredFromDriverID, TransferredToDriverID
-        FROM core.Drivers WHERE EmployeeID = :employee_id ORDER BY DriverID
+    assignments = (await direct_db.execute(text("""
+        SELECT DriverAssignmentID, DriverID, BranchID, EndReason, EffectiveFromAt, EffectiveToAt,
+               TransferredFromAssignmentID, TransferredToAssignmentID
+        FROM core.DriverAssignments WHERE EmployeeID = :employee_id ORDER BY DriverAssignmentID
     """), {"employee_id": employee_id})).mappings().all()
-    by_id = {row["driverid"]: row for row in profiles}
+    by_id = {row["driverassignmentid"]: row for row in assignments}
     assert by_id[source_id]["effectivetoat"] == effective_at
-    assert by_id[source_id]["driverstatus"] == "Transferred"
-    assert by_id[source_id]["transferredtodriverid"] == destination_id
+    assert by_id[source_id]["endreason"] == "Transferred"
+    assert by_id[source_id]["transferredtoassignmentid"] == destination_id
     assert by_id[destination_id]["effectivefromat"] == effective_at
     assert by_id[destination_id]["effectivetoat"] is None
-    assert by_id[destination_id]["transferredfromdriverid"] == source_id
+    assert by_id[destination_id]["endreason"] is None
+    assert by_id[destination_id]["transferredfromassignmentid"] == source_id
+    assert by_id[source_id]["driverid"] == by_id[destination_id]["driverid"] == driver_id
     appended = (await direct_db.execute(text("""
         SELECT IsEligibleForPeriod, EligibilityReasonCode, EligibleWorkDates,
                BranchTimeZoneIdSnapshot, DriverEffectiveFromAtSnapshot,
+               DriverStatusSnapshot, EndReasonSnapshot, TransferredFromAssignmentIDSnapshot,
                FrozenAtUtc, FrozenByUserID
         FROM payroll.PayrollPeriodDriverEligibility
-        WHERE PayrollPeriodID = :period_id AND DriverID = :driver_id
-    """), {"period_id": target_period_id, "driver_id": destination_id})).mappings().one()
+        WHERE PayrollPeriodID = :period_id AND DriverAssignmentID = :assignment_id
+    """), {"period_id": target_period_id, "assignment_id": destination_id})).mappings().one()
     assert appended["iseligibleforperiod"] is True
     assert appended["eligibilityreasoncode"] == "Active"
+    assert appended["driverstatussnapshot"] == "Active"
+    assert appended["endreasonsnapshot"] is None
+    assert appended["transferredfromassignmentidsnapshot"] == source_id
     assert target_work_date in appended["eligibleworkdates"]
     assert appended["branchtimezoneidsnapshot"]
     assert appended["drivereffectivefromatsnapshot"] == effective_at
     assert appended["frozenatutc"] is not None
     assert appended["frozenbyuserid"] == transfer_actor_id
     target_rows_after = (await direct_db.execute(text("""
-        SELECT DriverID, EligibleWorkDates, DriverStatusSnapshot, FrozenAtUtc, FrozenByUserID
+        SELECT DriverAssignmentID, EligibleWorkDates, DriverStatusSnapshot, FrozenAtUtc, FrozenByUserID
         FROM payroll.PayrollPeriodDriverEligibility
-        WHERE PayrollPeriodID = :period_id AND DriverID <> :destination_id
-        ORDER BY DriverID
+        WHERE PayrollPeriodID = :period_id AND DriverAssignmentID <> :destination_id
+        ORDER BY DriverAssignmentID
     """), {"period_id": target_period_id, "destination_id": destination_id})).mappings().all()
     assert [dict(row) for row in target_rows_after] == target_rows_before
     frozen_eligibility = (await direct_db.execute(text("""
@@ -274,83 +292,72 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee_id})).scalar_one() == paytest_branch_id
 
-    current_before = await resolve_effective_driver_profile(
-        1, employee_id, await branch_boundary(direct_db, paytest_branch_id, today), direct_db,
+    current_before = await resolve_effective_driver_assignment(
+        1, driver_id, await branch_boundary(direct_db, paytest_branch_id, today), direct_db,
     )
-    current_until_transfer = await resolve_effective_driver_profile(
-        1, employee_id, effective_at - timedelta(microseconds=1), direct_db,
+    current_until_transfer = await resolve_effective_driver_assignment(
+        1, driver_id, effective_at - timedelta(microseconds=1), direct_db,
     )
-    current_on_date = await resolve_effective_driver_profile(1, employee_id, effective_at, direct_db)
-    current_after = await resolve_effective_driver_profile(
-        1, employee_id, effective_at + timedelta(microseconds=1), direct_db,
+    current_on_date = await resolve_effective_driver_assignment(1, driver_id, effective_at, direct_db)
+    current_after = await resolve_effective_driver_assignment(
+        1, driver_id, effective_at + timedelta(microseconds=1), direct_db,
     )
-    assert current_before["driverid"] == source_id
-    assert current_until_transfer["driverid"] == source_id
-    assert current_on_date["driverid"] == destination_id
-    assert current_after["driverid"] == destination_id
+    assert current_before["driverassignmentid"] == source_id
+    assert current_until_transfer["driverassignmentid"] == source_id
+    assert current_on_date["driverassignmentid"] == destination_id
+    assert current_after["driverassignmentid"] == destination_id
     await sync_employee_branch_projection(1, employee_id, effective_at, direct_db)
     assert (await direct_db.execute(text(
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee_id})).scalar_one() == hq_branch_id
 
     rates = (await direct_db.execute(text("""
-        SELECT DriverID, DriverRateID FROM payroll.DriverRates
-        WHERE DriverID IN (:source_id, :destination_id)
+        SELECT DriverAssignmentID, DriverRateID FROM payroll.DriverRates
+        WHERE DriverAssignmentID IN (:source_id, :destination_id)
     """), {"source_id": source_id, "destination_id": destination_id})).mappings().all()
-    assert [(row["driverid"], row["driverrateid"]) for row in rates] == [(source_id, source_rate_id)]
+    assert [(row["driverassignmentid"], row["driverrateid"]) for row in rates] == [(source_id, source_rate_id)]
     target_compensation = (await direct_db.execute(text("""
         SELECT
-          (SELECT count(*) FROM payroll.DriverRateAssignments WHERE DriverID = :did) AS assignments,
-          (SELECT count(*) FROM payroll.DriverPayRules WHERE DriverID = :did) AS pay_rules,
-          (SELECT count(*) FROM payroll.DriverRates WHERE DriverID = :did) AS legacy_rates,
-          (SELECT count(*) FROM payroll.PayrollDraftLines WHERE DriverID = :did) AS draft_lines,
-          (SELECT count(*) FROM payroll.PayrollBonusEvents WHERE DriverID = :did) AS bonus_events
-    """), {"did": destination_id})).mappings().one()
+          (SELECT count(*) FROM payroll.DriverRateAssignments WHERE DriverAssignmentID = :aid) AS assignments,
+          (SELECT count(*) FROM payroll.DriverPayRules WHERE DriverAssignmentID = :aid) AS pay_rules,
+          (SELECT count(*) FROM payroll.DriverRates WHERE DriverAssignmentID = :aid) AS legacy_rates,
+          (SELECT count(*) FROM payroll.PayrollDraftLines WHERE DriverAssignmentID = :aid) AS draft_lines,
+          (SELECT count(*) FROM payroll.PayrollBonusEvents WHERE DriverAssignmentID = :aid) AS bonus_events
+    """), {"aid": destination_id})).mappings().one()
     assert tuple(target_compensation.values()) == (0, 0, 0, 0, 0)
     source_compensation = (await direct_db.execute(text("""
         SELECT
-          (SELECT DriverRateAssignmentID FROM payroll.DriverRateAssignments WHERE DriverID = :did) AS assignment_id,
-          (SELECT Status FROM payroll.DriverRateAssignments WHERE DriverID = :did) AS assignment_status,
+          (SELECT DriverRateAssignmentID FROM payroll.DriverRateAssignments WHERE DriverAssignmentID = :aid) AS assignment_id,
+          (SELECT Status FROM payroll.DriverRateAssignments WHERE DriverAssignmentID = :aid) AS assignment_status,
           (SELECT Amount FROM payroll.DriverRateValues v JOIN payroll.DriverRateAssignments a
-             ON a.DriverRateAssignmentID = v.DriverRateAssignmentID WHERE a.DriverID = :did) AS assignment_amount,
-          (SELECT DriverPayRuleID FROM payroll.DriverPayRules WHERE DriverID = :did) AS rule_id
-    """), {"did": source_id})).mappings().one()
-    assert source_compensation["assignment_id"] == source_assignment_id
+             ON a.DriverRateAssignmentID = v.DriverRateAssignmentID WHERE a.DriverAssignmentID = :aid) AS assignment_amount,
+          (SELECT DriverPayRuleID FROM payroll.DriverPayRules WHERE DriverAssignmentID = :aid) AS rule_id
+    """), {"aid": source_id})).mappings().one()
+    assert source_compensation["assignment_id"] == source_rate_assignment_id
     assert source_compensation["assignment_status"] == "Approved"
     assert source_compensation["assignment_amount"] == Decimal("42.0000")
     assert source_compensation["rule_id"] == source_rule_id
     audit = (await direct_db.execute(text("""
         SELECT NewValueJson FROM audit.AuditLog
         WHERE EntitySchema = 'core' AND EntityName = 'DriverTransferRequests'
-          AND EntityID = :request_id AND ActionCode = 'DRIVER_TRANSFER_COMPLETED'
+          AND EntityID = :request_id AND ActionCode = 'DRIVER_TRANSFER_SCHEDULED'
     """), {"request_id": str(request["transfer_request_id"])})).scalar_one()
     assert str(destination_id) in audit
     assert "projection_pending_until_effective_at" in audit
 
+    # While the Scheduled transfer is in flight the Driver cannot start another one.
     chained = await client.post(
         "/driver-transfers",
         json={
-            "driver_id": source_id,
+            "driver_id": driver_id,
             "target_branch_id": hq_branch_id,
             "effective_at": (effective_at + timedelta(days=30)).isoformat(),
             "initiated_by": "SourceBranch",
-            "reason": "A transferred source cannot start another transfer",
+            "reason": "A Driver with a Scheduled transfer cannot start another transfer",
         },
         headers=auth(auth_token),
     )
     assert chained.status_code == 422, chained.text
-    pending_as_source = await client.post(
-        "/driver-transfers",
-        json={
-            "driver_id": destination_id,
-            "target_branch_id": paytest_branch_id,
-            "effective_at": (effective_at + timedelta(days=30)).isoformat(),
-            "initiated_by": "SourceBranch",
-            "reason": "Pending destinations are not current sources",
-        },
-        headers=auth(auth_token),
-    )
-    assert pending_as_source.status_code == 422, pending_as_source.text
     await direct_db.execute(text(
         "DELETE FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :period_id"
     ), {"period_id": target_period_id})
@@ -358,7 +365,7 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("company_list_reconciliation", [False, True], ids=["employee-get", "employee-list"])
-async def test_elapsed_future_termination_projection_uses_profile_effective_on_termination_date(
+async def test_elapsed_future_termination_projection_uses_assignment_effective_on_termination_date(
     client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -373,22 +380,24 @@ async def test_elapsed_future_termination_projection_uses_profile_effective_on_t
     reconcile_date = termination_date + timedelta(days=1)
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
     employee_id = employee["employee_id"]
-    source_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id, source_id = ids_of(employee)
 
     transfer_at = await branch_boundary(direct_db, paytest_branch_id, transfer_date)
-    request = await create_transfer(client, auth_token, source_id, hq_branch_id, transfer_at)
+    request = await create_transfer(client, auth_token, driver_id, hq_branch_id, transfer_at)
     await approve_transfer(client, auth_token, request["transfer_request_id"])
     completed = await client.post(
         f"/driver-transfers/{request['transfer_request_id']}/complete",
         json={}, headers=auth(auth_token),
     )
     assert completed.status_code == 200, completed.text
-    destination_id = completed.json()["new_driver_id"]
+    destination_id = completed.json()["destination_driver_assignment_id"]
 
     assert (await direct_db.execute(text(
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee_id})).scalar_one() == paytest_branch_id
-    assert (await resolve_effective_driver_profile(1, employee_id, transfer_at, direct_db))["driverid"] == destination_id
+    assert (await resolve_effective_driver_assignment(
+        1, driver_id, transfer_at, direct_db,
+    ))["driverassignmentid"] == destination_id
 
     terminated = await client.post(
         f"/workforce/employees/{employee_id}/terminate",
@@ -396,6 +405,10 @@ async def test_elapsed_future_termination_projection_uses_profile_effective_on_t
         headers=auth(auth_token),
     )
     assert terminated.status_code == 200, terminated.text
+    # A Scheduled transfer taking effect before the termination cap stays and is not cancelled.
+    assert (await direct_db.execute(text(
+        "SELECT Status FROM core.DriverTransferRequests WHERE TransferRequestID = :id"
+    ), {"id": request["transfer_request_id"]})).scalar_one() == "Scheduled"
     # The endpoint's current-date read is still before E, so the projection remains in A.
     assert (await direct_db.execute(text(
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
@@ -450,9 +463,10 @@ async def test_elapsed_future_termination_projection_uses_profile_effective_on_t
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee_id})).scalar_one()
     assert projected == hq_branch_id
-    assert (await resolve_effective_driver_profile(
-        1, employee_id, await branch_boundary(direct_db, hq_branch_id, termination_date), direct_db,
-    ))["driverid"] == destination_id
+    assert (await resolve_effective_driver_assignment(
+        1, driver_id, await branch_boundary(direct_db, hq_branch_id, termination_date), direct_db,
+    ))["driverassignmentid"] == destination_id
+    assert source_id != destination_id
 
 
 @pytest.mark.asyncio
@@ -460,8 +474,8 @@ async def test_immediate_transfer_synchronizes_employee_branch_in_completion(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
-    source_id = employee["current_or_pending_driver"]["driver_id"]
-    request = await create_transfer(client, auth_token, source_id, hq_branch_id, None)
+    driver_id, source_id = ids_of(employee)
+    request = await create_transfer(client, auth_token, driver_id, hq_branch_id, None)
     assert request["effective_at"] is None
     await approve_transfer(client, auth_token, request["transfer_request_id"])
     before_completion = (await direct_db.execute(text("SELECT NOW()"))).scalar_one()
@@ -469,13 +483,14 @@ async def test_immediate_transfer_synchronizes_employee_branch_in_completion(
         f"/driver-transfers/{request['transfer_request_id']}/complete", json={}, headers=auth(auth_token),
     )
     assert completed.status_code == 200, completed.text
-    destination_id = completed.json()["new_driver_id"]
+    assert completed.json()["status"] == "Completed"
+    destination_id = completed.json()["destination_driver_assignment_id"]
     after_completion = (await direct_db.execute(text("SELECT NOW()"))).scalar_one()
     boundaries = (await direct_db.execute(text("""
         SELECT r.EffectiveAt, source.EffectiveToAt, destination.EffectiveFromAt
         FROM core.DriverTransferRequests r
-        JOIN core.Drivers source ON source.DriverID = r.DriverID
-        JOIN core.Drivers destination ON destination.DriverID = r.NewDriverID
+        JOIN core.DriverAssignments source ON source.DriverAssignmentID = r.SourceDriverAssignmentID
+        JOIN core.DriverAssignments destination ON destination.DriverAssignmentID = r.DestinationDriverAssignmentID
         WHERE r.TransferRequestID = :request_id
     """), {"request_id": request["transfer_request_id"]})).one()
     assert boundaries[0] == boundaries[1] == boundaries[2]
@@ -483,10 +498,13 @@ async def test_immediate_transfer_synchronizes_employee_branch_in_completion(
     assert (await direct_db.execute(text(
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee["employee_id"]})).scalar_one() == hq_branch_id
-    from app.workforce.effective import resolve_effective_driver_profile
-    assert (await resolve_effective_driver_profile(
+    from app.workforce.effective import resolve_effective_employee_assignment
+    resolved = await resolve_effective_employee_assignment(
         1, employee["employee_id"], None, direct_db
-    ))["driverid"] == destination_id
+    )
+    assert resolved["driverassignmentid"] == destination_id
+    assert resolved["driverid"] == driver_id
+    assert source_id != destination_id
 
 
 @pytest.mark.parametrize("effective_delay", [0, 30], ids=["immediate", "future"])
@@ -506,8 +524,8 @@ async def test_transfer_audit_failure_rolls_back_completion(
     )
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
     employee_id = employee["employee_id"]
-    source_id = employee["current_or_pending_driver"]["driver_id"]
-    request = await create_transfer(client, auth_token, source_id, hq_branch_id, effective_at)
+    driver_id, source_id = ids_of(employee)
+    request = await create_transfer(client, auth_token, driver_id, hq_branch_id, effective_at)
     transfer_id = request["transfer_request_id"]
     await approve_transfer(client, auth_token, transfer_id)
     from app.workforce import audit as workforce_audit
@@ -524,34 +542,35 @@ async def test_transfer_audit_failure_rolls_back_completion(
         )
 
     source = (await direct_db.execute(text("""
-        SELECT DriverStatus, EffectiveToAt, TransferredToDriverID
-        FROM core.Drivers WHERE DriverID = :driver_id
-    """), {"driver_id": source_id})).mappings().one()
-    assert source["driverstatus"] == "Active"
+        SELECT EndReason, EffectiveToAt, TransferredToAssignmentID
+        FROM core.DriverAssignments WHERE DriverAssignmentID = :assignment_id
+    """), {"assignment_id": source_id})).mappings().one()
+    assert source["endreason"] is None
     assert source["effectivetoat"] is None
-    assert source["transferredtodriverid"] is None
+    assert source["transferredtoassignmentid"] is None
     assert (await direct_db.execute(text(
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :employee_id",
     ), {"employee_id": employee_id})).scalar_one() == paytest_branch_id
     assert (await direct_db.execute(text(
-        "SELECT COUNT(*) FROM core.Drivers WHERE EmployeeID = :employee_id",
+        "SELECT COUNT(*) FROM core.DriverAssignments WHERE EmployeeID = :employee_id",
     ), {"employee_id": employee_id})).scalar_one() == 1
     transfer = (await direct_db.execute(text("""
-        SELECT Status, NewDriverID, CompletedAtUtc
+        SELECT Status, DestinationDriverAssignmentID, CompletedAtUtc, ScheduledAtUtc
         FROM core.DriverTransferRequests WHERE TransferRequestID = :transfer_id
     """), {"transfer_id": transfer_id})).mappings().one()
     assert transfer["status"] == "Approved"
-    assert transfer["newdriverid"] is None
+    assert transfer["destinationdriverassignmentid"] is None
     assert transfer["completedatutc"] is None
+    assert transfer["scheduledatutc"] is None
     assert (await direct_db.execute(text(
         "SELECT COUNT(*) FROM audit.AuditLog "
         "WHERE EntityName = 'DriverTransferRequests' AND EntityID = :transfer_id "
-        "AND ActionCode = 'DRIVER_TRANSFER_COMPLETED'",
+        "AND ActionCode IN ('DRIVER_TRANSFER_COMPLETED', 'DRIVER_TRANSFER_SCHEDULED')",
     ), {"transfer_id": str(transfer_id)})).scalar_one() == 0
 
 
 @pytest.mark.asyncio
-async def test_termination_before_completed_future_transfer_cancels_future_activity_and_keeps_history(
+async def test_termination_before_scheduled_transfer_cancels_it_and_keeps_history(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
     from app.payroll.eligibility import _create_period_driver_eligibility_rows
@@ -560,15 +579,16 @@ async def test_termination_before_completed_future_transfer_cancels_future_activ
     future = today + timedelta(days=40)
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
     employee_id = employee["employee_id"]
-    source_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id, source_id = ids_of(employee)
     future_at = await branch_boundary(direct_db, paytest_branch_id, future)
-    request = await create_transfer(client, auth_token, source_id, hq_branch_id, future_at)
+    request = await create_transfer(client, auth_token, driver_id, hq_branch_id, future_at)
     await approve_transfer(client, auth_token, request["transfer_request_id"])
     complete = await client.post(
         f"/driver-transfers/{request['transfer_request_id']}/complete", json={}, headers=auth(auth_token),
     )
     assert complete.status_code == 200, complete.text
-    destination_id = complete.json()["new_driver_id"]
+    assert complete.json()["status"] == "Scheduled"
+    destination_id = complete.json()["destination_driver_assignment_id"]
     evidence_period_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollPeriods
             (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType, StartDate, EndDate, Status)
@@ -598,15 +618,16 @@ async def test_termination_before_completed_future_transfer_cancels_future_activ
     )
     assert (await direct_db.execute(text("""
         SELECT EligibleWorkDates FROM payroll.PayrollPeriodDriverEligibility
-        WHERE PayrollPeriodID = :period_id AND DriverID = :driver_id
-    """), {"period_id": destination_period_id, "driver_id": destination_id})).scalar_one()
+        WHERE PayrollPeriodID = :period_id AND DriverAssignmentID = :assignment_id
+    """), {"period_id": destination_period_id, "assignment_id": destination_id})).scalar_one()
     termination_eligibility_id = (await direct_db.execute(text("""
         SELECT PayrollPeriodDriverEligibilityID
         FROM payroll.PayrollPeriodDriverEligibility
-        WHERE PayrollPeriodID = :period_id AND DriverID = :driver_id
-    """), {"period_id": evidence_period_id, "driver_id": source_id})).scalar_one()
+        WHERE PayrollPeriodID = :period_id AND DriverAssignmentID = :assignment_id
+    """), {"period_id": evidence_period_id, "assignment_id": source_id})).scalar_one()
     old_source = (await direct_db.execute(text("""
-        SELECT EffectiveFromAt, TransferredToDriverID FROM core.Drivers WHERE DriverID = :id
+        SELECT EffectiveFromAt, TransferredToAssignmentID FROM core.DriverAssignments
+        WHERE DriverAssignmentID = :id
     """), {"id": source_id})).mappings().one()
     before_calculation_snapshots = (await direct_db.execute(text(
         "SELECT COUNT(*) FROM payroll.PayrollCalculationSnapshots"
@@ -620,23 +641,25 @@ async def test_termination_before_completed_future_transfer_cancels_future_activ
     assert term.status_code == 200, term.text
     assert term.json()["employment_status"] == "Terminated"
     source, destination = (await direct_db.execute(text("""
-        SELECT DriverID, DriverStatus, EffectiveFromAt, EffectiveToAt, TransferredToDriverID
-        FROM core.Drivers WHERE DriverID IN (:source_id, :destination_id) ORDER BY DriverID
+        SELECT DriverAssignmentID, EndReason, EffectiveFromAt, EffectiveToAt, TransferredToAssignmentID
+        FROM core.DriverAssignments WHERE DriverAssignmentID IN (:source_id, :destination_id)
+        ORDER BY DriverAssignmentID
     """), {"source_id": source_id, "destination_id": destination_id})).mappings().all()
-    by_id = {row["driverid"]: row for row in (source, destination)}
-    assert by_id[source_id]["driverstatus"] == "Terminated"
+    by_id = {row["driverassignmentid"]: row for row in (source, destination)}
+    assert by_id[source_id]["endreason"] == "Terminated"
     termination_cutoff = await branch_boundary(
         direct_db, paytest_branch_id, today + timedelta(days=1),
     )
     assert by_id[source_id]["effectivetoat"] == termination_cutoff
     assert by_id[source_id]["effectivefromat"] == old_source["effectivefromat"]
-    assert by_id[source_id]["transferredtodriverid"] == destination_id
-    assert by_id[destination_id]["driverstatus"] == "Terminated"
+    assert by_id[source_id]["transferredtoassignmentid"] == destination_id
+    assert by_id[destination_id]["endreason"] == "Terminated"
     assert by_id[destination_id]["effectivetoat"] == future_at
-    assert await resolve_effective_driver_profile(
-        1, employee_id, await branch_boundary(direct_db, paytest_branch_id, today), direct_db,
+    assert by_id[destination_id]["effectivefromat"] == future_at  # an empty, never-effective window
+    assert await resolve_effective_driver_assignment(
+        1, driver_id, await branch_boundary(direct_db, paytest_branch_id, today), direct_db,
     )
-    assert await resolve_effective_driver_profile(1, employee_id, termination_cutoff, direct_db) is None
+    assert await resolve_effective_driver_assignment(1, driver_id, termination_cutoff, direct_db) is None
     from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
     with pytest.raises(HTTPException) as bonus_rejected:
         await _assert_driver_eligible_for_period_via_snapshot(
@@ -644,16 +667,20 @@ async def test_termination_before_completed_future_transfer_cancels_future_activ
         )
     assert bonus_rejected.value.status_code == 422
     assert "not eligible for new Bonus" in bonus_rejected.value.detail
-    request_status = (await direct_db.execute(text(
-        "SELECT Status FROM core.DriverTransferRequests WHERE TransferRequestID = :id"
-    ), {"id": request["transfer_request_id"]})).scalar_one()
-    assert request_status == "Completed"
+    # A Scheduled transfer at or after the termination cap can never take effect: Cancelled.
+    request_state = (await direct_db.execute(text(
+        "SELECT Status, CancelReason FROM core.DriverTransferRequests WHERE TransferRequestID = :id"
+    ), {"id": request["transfer_request_id"]})).mappings().one()
+    assert request_state["status"] == "Cancelled"
+    assert "terminated" in request_state["cancelreason"].lower()
     frozen_eligibility = (await direct_db.execute(text("""
-        SELECT DriverStatusSnapshot, TerminationDateSnapshot, DriverEffectiveToAtSnapshot, FrozenAtUtc
+        SELECT DriverStatusSnapshot, EndReasonSnapshot, TerminationDateSnapshot,
+               DriverEffectiveToAtSnapshot, FrozenAtUtc
         FROM payroll.PayrollPeriodDriverEligibility
         WHERE PayrollPeriodDriverEligibilityID = :id
     """), {"id": termination_eligibility_id})).mappings().one()
-    assert frozen_eligibility["driverstatussnapshot"] == "Transferred"
+    assert frozen_eligibility["driverstatussnapshot"] == "Active"
+    assert frozen_eligibility["endreasonsnapshot"] == "Transferred"
     assert frozen_eligibility["terminationdatesnapshot"] is None
     assert frozen_eligibility["drivereffectivetoatsnapshot"] == future_at
     assert frozen_eligibility["frozenatutc"] is not None
@@ -690,39 +717,28 @@ async def test_skipped_apia_termination_day_clamps_transferred_history_to_next_d
         "branch_id": apia_branch,
         "full_name": f"Apia boundary {marker}",
         "hire_date": "2000-01-01",
-        "driver_profile": {
-            "driver_code": f"APIA-D-{marker}",
+        "driver": {
+            "driver_number": f"APIA-D-{marker}",
             "effective_from_at": "2010-01-01T00:00:00Z",
         },
     }, headers=auth(auth_token))
     assert created.status_code == 201, created.text
     employee_id = created.json()["employee_id"]
-    source_id = created.json()["current_or_pending_driver"]["driver_id"]
+    driver_id, source_id = ids_of(created.json())
     original_transfer_boundary = datetime(2011, 12, 30, 12, tzinfo=UTC)
-    await direct_db.execute(text("""
-        UPDATE core.Drivers SET EffectiveToAt = :to_at WHERE DriverID = :source_id
-    """), {"to_at": original_transfer_boundary, "source_id": source_id})
-    destination_id = int((await direct_db.execute(text("""
-        INSERT INTO core.Drivers
-            (CompanyID, BranchID, EmployeeID, DriverCode, DriverStatus,
-             EffectiveFromAt, TransferredFromDriverID)
-        VALUES (1, :branch_id, :employee_id, :code, 'Active', :from_at, :source_id)
-        RETURNING DriverID
-    """), {
-        "branch_id": new_york_branch, "employee_id": employee_id,
-        "code": f"NY-D-{marker}", "from_at": original_transfer_boundary,
-        "source_id": source_id,
-    })).scalar_one())
-    await direct_db.execute(text("""
-        UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveToAt = :to_at,
-            TransferredToDriverID = :destination_id
-        WHERE DriverID = :source_id
-    """), {
-        "to_at": original_transfer_boundary,
-        "destination_id": destination_id,
-        "source_id": source_id,
-    })
+    # Close the source first so the destination does not overlap it, then link them.
+    await end_driver_assignment(
+        direct_db, source_id, ended_at=original_transfer_boundary, end_reason="Transferred",
+    )
+    destination_id = await insert_driver_assignment(
+        direct_db, company_id=1, branch_id=new_york_branch, employee_id=employee_id,
+        driver_id=driver_id, effective_from_at=original_transfer_boundary,
+        transferred_from_assignment_id=source_id,
+    )
+    await end_driver_assignment(
+        direct_db, source_id, ended_at=original_transfer_boundary,
+        end_reason="Transferred", transferred_to_assignment_id=destination_id,
+    )
 
     terminated = await client.post(
         f"/workforce/employees/{employee_id}/terminate",
@@ -730,19 +746,21 @@ async def test_skipped_apia_termination_day_clamps_transferred_history_to_next_d
         headers=auth(auth_token),
     )
     assert terminated.status_code == 200, terminated.text
-    profiles = (await direct_db.execute(text("""
-        SELECT DriverID, BranchID, DriverStatus, EffectiveFromAt, EffectiveToAt,
-               TransferredFromDriverID, TransferredToDriverID
-        FROM core.Drivers WHERE DriverID = ANY(:ids)
+    assignments = (await direct_db.execute(text("""
+        SELECT DriverAssignmentID, BranchID, EndReason, EffectiveFromAt, EffectiveToAt,
+               TransferredFromAssignmentID, TransferredToAssignmentID
+        FROM core.DriverAssignments WHERE DriverAssignmentID = ANY(:ids)
     """), {"ids": [source_id, destination_id]})).mappings().all()
-    by_id = {row["driverid"]: row for row in profiles}
+    by_id = {row["driverassignmentid"]: row for row in assignments}
     apia_cutoff = datetime(2011, 12, 30, 10, tzinfo=UTC)
     new_york_cutoff = datetime(2011, 12, 31, 5, tzinfo=UTC)
     assert by_id[source_id]["effectivetoat"] == apia_cutoff
-    assert by_id[source_id]["transferredtodriverid"] == destination_id
+    assert by_id[source_id]["endreason"] == "Terminated"
+    assert by_id[source_id]["transferredtoassignmentid"] == destination_id
     assert by_id[destination_id]["effectivefromat"] == original_transfer_boundary
     assert by_id[destination_id]["effectivetoat"] == new_york_cutoff
-    assert by_id[destination_id]["transferredfromdriverid"] == source_id
+    assert by_id[destination_id]["endreason"] == "Terminated"
+    assert by_id[destination_id]["transferredfromassignmentid"] == source_id
 
 
 @pytest.mark.asyncio
@@ -769,34 +787,28 @@ async def test_branch_metrics_count_current_and_historical_projection_without_wr
     current_employee_response = await client.post("/workforce/employees", json={
         "branch_id": source_branch_id, "full_name": f"Metrics current driver {marker}",
         "hire_date": "2000-01-01",
-        "driver_profile": {
-            "driver_code": f"MET-S-{marker}",
+        "driver": {
+            "driver_number": f"MET-S-{marker}",
             "effective_from_at": "2000-01-01T00:00:00Z",
         },
     }, headers=auth(auth_token))
     assert current_employee_response.status_code == 201, current_employee_response.text
     current_employee = current_employee_response.json()
     current_employee_id = current_employee["employee_id"]
-    source_driver_id = current_employee["current_or_pending_driver"]["driver_id"]
+    driver_id, source_assignment_id = ids_of(current_employee)
     boundary = datetime(2011, 12, 30, 12, tzinfo=UTC)
-    await direct_db.execute(text("""
-        UPDATE core.Drivers SET EffectiveToAt = :boundary WHERE DriverID = :source_driver_id
-    """), {"boundary": boundary, "source_driver_id": source_driver_id})
-    destination_driver_id = (await direct_db.execute(text("""
-        INSERT INTO core.Drivers
-            (CompanyID, BranchID, EmployeeID, DriverCode, DriverStatus,
-             EffectiveFromAt, TransferredFromDriverID)
-        VALUES (1, :branch_id, :employee_id, :code, 'Active', :boundary, :source_driver_id)
-        RETURNING DriverID
-    """), {
-        "branch_id": destination_branch_id, "employee_id": current_employee_id,
-        "code": f"MET-D-{marker}", "boundary": boundary, "source_driver_id": source_driver_id,
-    })).scalar_one()
-    await direct_db.execute(text("""
-        UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', TransferredToDriverID = :destination_driver_id
-        WHERE DriverID = :source_driver_id
-    """), {"destination_driver_id": destination_driver_id, "source_driver_id": source_driver_id})
+    await end_driver_assignment(
+        direct_db, source_assignment_id, ended_at=boundary, end_reason="Transferred",
+    )
+    destination_assignment_id = await insert_driver_assignment(
+        direct_db, company_id=1, branch_id=destination_branch_id, employee_id=current_employee_id,
+        driver_id=driver_id, effective_from_at=boundary,
+        transferred_from_assignment_id=source_assignment_id,
+    )
+    await end_driver_assignment(
+        direct_db, source_assignment_id, ended_at=boundary, end_reason="Transferred",
+        transferred_to_assignment_id=destination_assignment_id,
+    )
 
     non_driver = await client.post("/workforce/employees", json={
         "branch_id": source_branch_id, "full_name": f"Metrics non-driver {marker}",
@@ -807,13 +819,14 @@ async def test_branch_metrics_count_current_and_historical_projection_without_wr
     terminated = await client.post("/workforce/employees", json={
         "branch_id": destination_branch_id, "full_name": f"Metrics terminated {marker}",
         "hire_date": "2000-01-01",
-        "driver_profile": {
-            "driver_code": f"MET-T-{marker}",
+        "driver": {
+            "driver_number": f"MET-T-{marker}",
             "effective_from_at": "2000-01-01T00:00:00Z",
         },
     }, headers=auth(auth_token))
     assert terminated.status_code == 201, terminated.text
     terminated_employee_id = terminated.json()["employee_id"]
+    terminated_driver_id = terminated.json()["driver"]["driver_id"]
     termination = await client.post(
         f"/workforce/employees/{terminated_employee_id}/terminate",
         json={"termination_date": "2011-12-30", "reason": "Metrics history fixture"},
@@ -824,7 +837,9 @@ async def test_branch_metrics_count_current_and_historical_projection_without_wr
         UPDATE core.Employees SET BranchID = :stale_branch_id
         WHERE EmployeeID = :employee_id AND CompanyID = 1
     """), {"stale_branch_id": source_branch_id, "employee_id": terminated_employee_id})
-    assert await resolve_effective_driver_profile(1, terminated_employee_id, None, direct_db) is None
+    assert await resolve_effective_driver_assignment(
+        1, terminated_driver_id, None, direct_db,
+    ) is None
 
     metrics = await fetch_branch_metrics(1, branch_ids, direct_db)
     after = await count_employee_branch_projections(1, branch_ids, direct_db)
@@ -853,9 +868,9 @@ async def test_termination_cancels_uncompleted_transfer_request(
 ):
     today = await branch_today(direct_db, paytest_branch_id)
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
-    source_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id, _ = ids_of(employee)
     request = await create_transfer(
-        client, auth_token, source_id, hq_branch_id,
+        client, auth_token, driver_id, hq_branch_id,
         await branch_boundary(direct_db, paytest_branch_id, today + timedelta(days=20)),
     )
     if approve_first:
@@ -878,7 +893,7 @@ async def test_termination_cancels_uncompleted_transfer_request(
     )
     assert stale_completion.status_code == 422
     assert (await direct_db.execute(text(
-        "SELECT COUNT(*) FROM core.Drivers WHERE EmployeeID = :id"
+        "SELECT COUNT(*) FROM core.DriverAssignments WHERE EmployeeID = :id"
     ), {"id": employee["employee_id"]})).scalar_one() == 1
 
 
@@ -890,9 +905,9 @@ async def test_backdated_termination_reconciles_employee_to_branch_effective_on_
     termination_date = today - timedelta(days=1)
     employee = await create_driver_employee(client, auth_token, hq_branch_id)
     employee_id = employee["employee_id"]
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    _, assignment_id = ids_of(employee)
 
-    # Model a stale stored projection that disagrees with the profile effective on D.
+    # Model a stale stored projection that disagrees with the assignment effective on D.
     await direct_db.execute(text("""
         UPDATE core.Employees SET BranchID = :stale_branch
         WHERE EmployeeID = :employee_id
@@ -909,21 +924,21 @@ async def test_backdated_termination_reconciles_employee_to_branch_effective_on_
     )
     assert terminated.status_code == 200, terminated.text
     state = (await direct_db.execute(text("""
-        SELECT e.BranchID AS EmployeeBranchID, d.BranchID AS DriverBranchID,
-               d.DriverStatus, d.EffectiveToAt
-        FROM core.Employees e JOIN core.Drivers d ON d.EmployeeID = e.EmployeeID
-        WHERE e.EmployeeID = :employee_id AND d.DriverID = :driver_id
-    """), {"employee_id": employee_id, "driver_id": driver_id})).mappings().one()
-    assert state["driverstatus"] == "Terminated"
+        SELECT e.BranchID AS EmployeeBranchID, a.BranchID AS AssignmentBranchID,
+               a.EndReason, a.EffectiveToAt
+        FROM core.Employees e JOIN core.DriverAssignments a ON a.EmployeeID = e.EmployeeID
+        WHERE e.EmployeeID = :employee_id AND a.DriverAssignmentID = :assignment_id
+    """), {"employee_id": employee_id, "assignment_id": assignment_id})).mappings().one()
+    assert state["endreason"] == "Terminated"
     assert state["effectivetoat"] == await branch_boundary(
         direct_db, hq_branch_id, termination_date + timedelta(days=1),
     )
     assert state["employeebranchid"] == hq_branch_id
-    assert state["driverbranchid"] == hq_branch_id
+    assert state["assignmentbranchid"] == hq_branch_id
 
 
 @pytest.mark.asyncio
-async def test_termination_before_first_driver_profile_is_rejected_without_mutation(
+async def test_termination_before_first_driver_assignment_is_rejected_without_mutation(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     today = await branch_today(direct_db, hq_branch_id)
@@ -933,25 +948,25 @@ async def test_termination_before_first_driver_profile_is_rejected_without_mutat
         "branch_id": hq_branch_id,
         "full_name": f"P1C pending termination {suffix()}",
         "hire_date": "2020-01-01",
-        "driver_profile": {"driver_code": f"P1C-{suffix()}", "effective_from_at": future_at.isoformat()},
+        "driver": {"driver_number": f"P1C-{suffix()}", "effective_from_at": future_at.isoformat()},
     }, headers=auth(auth_token))
     assert employee.status_code == 201, employee.text
     employee_id = employee.json()["employee_id"]
-    driver_id = employee.json()["current_or_pending_driver"]["driver_id"]
+    _, assignment_id = ids_of(employee.json())
 
     rejected = await client.post(
         f"/workforce/employees/{employee_id}/terminate",
-        json={"termination_date": today.isoformat(), "reason": "Before first profile"},
+        json={"termination_date": today.isoformat(), "reason": "Before first assignment"},
         headers=auth(auth_token),
     )
     assert rejected.status_code == 422, rejected.text
     state = (await direct_db.execute(text("""
-        SELECT e.EmploymentStatus, e.TerminationDate, d.DriverStatus, d.EffectiveFromAt, d.EffectiveToAt
-        FROM core.Employees e JOIN core.Drivers d ON d.EmployeeID = e.EmployeeID
-        WHERE e.EmployeeID = :employee_id AND d.DriverID = :driver_id
-    """), {"employee_id": employee_id, "driver_id": driver_id})).mappings().one()
+        SELECT e.EmploymentStatus, e.TerminationDate, a.EndReason, a.EffectiveFromAt, a.EffectiveToAt
+        FROM core.Employees e JOIN core.DriverAssignments a ON a.EmployeeID = e.EmployeeID
+        WHERE e.EmployeeID = :employee_id AND a.DriverAssignmentID = :assignment_id
+    """), {"employee_id": employee_id, "assignment_id": assignment_id})).mappings().one()
     assert (state["employmentstatus"], state["terminationdate"]) == ("Active", None)
-    assert (state["driverstatus"], state["effectivefromat"], state["effectivetoat"]) == ("Active", future_at, None)
+    assert (state["endreason"], state["effectivefromat"], state["effectivetoat"]) == (None, future_at, None)
 
 
 @pytest.mark.asyncio
@@ -965,11 +980,11 @@ async def test_termination_before_hire_date_is_rejected_without_mutation(
         "branch_id": hq_branch_id,
         "full_name": f"P1C future hire termination {suffix()}",
         "hire_date": hire_date.isoformat(),
-        "driver_profile": {"driver_code": f"P1C-{suffix()}", "effective_from_at": hire_at.isoformat()},
+        "driver": {"driver_number": f"P1C-{suffix()}", "effective_from_at": hire_at.isoformat()},
     }, headers=auth(auth_token))
     assert employee.status_code == 201, employee.text
     employee_id = employee.json()["employee_id"]
-    driver_id = employee.json()["current_or_pending_driver"]["driver_id"]
+    _, assignment_id = ids_of(employee.json())
 
     rejected = await client.post(
         f"/workforce/employees/{employee_id}/terminate",
@@ -978,12 +993,12 @@ async def test_termination_before_hire_date_is_rejected_without_mutation(
     )
     assert rejected.status_code == 422, rejected.text
     state = (await direct_db.execute(text("""
-        SELECT e.EmploymentStatus, e.TerminationDate, d.DriverStatus, d.EffectiveFromAt, d.EffectiveToAt
-        FROM core.Employees e JOIN core.Drivers d ON d.EmployeeID = e.EmployeeID
-        WHERE e.EmployeeID = :employee_id AND d.DriverID = :driver_id
-    """), {"employee_id": employee_id, "driver_id": driver_id})).mappings().one()
+        SELECT e.EmploymentStatus, e.TerminationDate, a.EndReason, a.EffectiveFromAt, a.EffectiveToAt
+        FROM core.Employees e JOIN core.DriverAssignments a ON a.EmployeeID = e.EmployeeID
+        WHERE e.EmployeeID = :employee_id AND a.DriverAssignmentID = :assignment_id
+    """), {"employee_id": employee_id, "assignment_id": assignment_id})).mappings().one()
     assert (state["employmentstatus"], state["terminationdate"]) == ("Active", None)
-    assert (state["driverstatus"], state["effectivefromat"], state["effectivetoat"]) == ("Active", hire_at, None)
+    assert (state["endreason"], state["effectivefromat"], state["effectivetoat"]) == (None, hire_at, None)
 
 
 @pytest.mark.asyncio
@@ -992,7 +1007,7 @@ async def test_termination_rejects_dated_finalized_work_after_date_without_mutat
 ):
     today = await branch_today(direct_db, paytest_branch_id)
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id, assignment_id = ids_of(employee)
     later = today + timedelta(days=3)
     period_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollPeriods
@@ -1008,12 +1023,12 @@ async def test_termination_rejects_dated_finalized_work_after_date_without_mutat
     async with allow_final_line_insert(direct_db):
         final_line_id = (await direct_db.execute(text("""
             INSERT INTO payroll.PayrollFinalLines
-                (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType, SourceType, FinalAmount, CurrencyCode, CurrencyMinorUnitDigits)
-            VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100, 'USD', 2)
+                (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, DriverID, WorkDate, LineType, SourceType, FinalAmount, CurrencyCode, CurrencyMinorUnitDigits)
+            VALUES (1, :branch_id, :period_id, :assignment_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100, 'USD', 2)
             RETURNING FinalLineID
         """), {
             "branch_id": paytest_branch_id, "period_id": period_id,
-            "driver_id": driver_id, "work_date": later,
+            "assignment_id": assignment_id, "driver_id": driver_id, "work_date": later,
         })).scalar_one()
 
     rejected = await client.post(
@@ -1023,11 +1038,11 @@ async def test_termination_rejects_dated_finalized_work_after_date_without_mutat
     )
     assert rejected.status_code == 422, rejected.text
     status = (await direct_db.execute(text("""
-        SELECT e.EmploymentStatus, d.DriverStatus
-        FROM core.Employees e JOIN core.Drivers d ON d.EmployeeID = e.EmployeeID
+        SELECT e.EmploymentStatus, a.EndReason
+        FROM core.Employees e JOIN core.DriverAssignments a ON a.EmployeeID = e.EmployeeID
         WHERE e.EmployeeID = :employee_id
     """), {"employee_id": employee["employee_id"]})).mappings().one()
-    assert (status["employmentstatus"], status["driverstatus"]) == ("Active", "Active")
+    assert (status["employmentstatus"], status["endreason"]) == ("Active", None)
     assert (await direct_db.execute(text(
         "SELECT COUNT(*) FROM payroll.PayrollFinalLines WHERE FinalLineID = :id"
     ), {"id": final_line_id})).scalar_one() == 1
@@ -1040,7 +1055,7 @@ async def test_termination_preserves_snapshot_and_exact_date_existing_source_res
     today = await branch_today(direct_db, paytest_branch_id)
     next_day = today + timedelta(days=1)
     employee = await create_driver_employee(client, auth_token, paytest_branch_id)
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    _, assignment_id = ids_of(employee)
     period_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollPeriods
             (CompanyID, BranchID, PeriodCode, PeriodName, PeriodType, StartDate, EndDate, Status)
@@ -1055,23 +1070,23 @@ async def test_termination_preserves_snapshot_and_exact_date_existing_source_res
     """), {"period_id": period_id, "branch_id": paytest_branch_id})
     eligibility_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayrollPeriodDriverEligibility
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, SourceEmployeeID,
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, SourceEmployeeID,
              IsEligibleForPeriod, EligibilityReasonCode, SnapshotSource,
              HireDateSnapshot, TerminationDateSnapshot, DriverEffectiveFromAtSnapshot,
              BranchTimeZoneIdSnapshot, EligibleWorkDates)
-        VALUES (1, :branch_id, :period_id, :driver_id, :employee_id,
+        VALUES (1, :branch_id, :period_id, :assignment_id, :employee_id,
                 TRUE, 'Active', 'Generated', DATE '2020-01-01', NULL,
                 TIMESTAMPTZ '2020-01-01 00:00:00+00', 'America/New_York', ARRAY[:today]::DATE[])
         RETURNING PayrollPeriodDriverEligibilityID
     """), {"branch_id": paytest_branch_id, "period_id": period_id,
-           "driver_id": driver_id, "employee_id": employee["employee_id"],
+           "assignment_id": assignment_id, "employee_id": employee["employee_id"],
            "today": today})).scalar_one()
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType, SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 'Active')
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType, SourceType, Status)
+        VALUES (1, :branch_id, :period_id, :assignment_id, :work_date, 'HOURS', 'P1cTest', 'Active')
     """), {"branch_id": paytest_branch_id, "period_id": period_id,
-           "driver_id": driver_id, "work_date": next_day})
+           "assignment_id": assignment_id, "work_date": next_day})
     await client.post(
         f"/workforce/employees/{employee['employee_id']}/terminate",
         json={"termination_date": today.isoformat(), "reason": "Historical cutoff"},
@@ -1079,15 +1094,15 @@ async def test_termination_preserves_snapshot_and_exact_date_existing_source_res
     )
 
     await _assert_driver_eligible_for_workdate_via_snapshot(
-        1, paytest_branch_id, period_id, driver_id, today, direct_db,
+        1, paytest_branch_id, period_id, assignment_id, today, direct_db,
     )
     await _assert_driver_eligible_for_workdate_via_snapshot(
-        1, paytest_branch_id, period_id, driver_id, next_day, direct_db,
+        1, paytest_branch_id, period_id, assignment_id, next_day, direct_db,
         allow_existing_source_rescue=True,
     )
     with pytest.raises(HTTPException):
         await _assert_driver_eligible_for_workdate_via_snapshot(
-            1, paytest_branch_id, period_id, driver_id, next_day, direct_db,
+            1, paytest_branch_id, period_id, assignment_id, next_day, direct_db,
             allow_existing_source_rescue=False,
         )
     snapshot_row = (await direct_db.execute(text("""
@@ -1100,7 +1115,7 @@ async def test_termination_preserves_snapshot_and_exact_date_existing_source_res
 
 
 @pytest.mark.asyncio
-async def test_termination_audit_failure_rolls_back_employee_and_driver(
+async def test_termination_audit_failure_rolls_back_employee_and_assignment(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db, monkeypatch,
 ):
     today = await branch_today(direct_db, hq_branch_id)
@@ -1118,13 +1133,13 @@ async def test_termination_audit_failure_rolls_back_employee_and_driver(
             headers=auth(auth_token),
         )
     state = (await direct_db.execute(text("""
-        SELECT e.EmploymentStatus, e.TerminationDate, d.DriverStatus, d.EffectiveToAt
-        FROM core.Employees e JOIN core.Drivers d ON d.EmployeeID = e.EmployeeID
+        SELECT e.EmploymentStatus, e.TerminationDate, a.EndReason, a.EffectiveToAt
+        FROM core.Employees e JOIN core.DriverAssignments a ON a.EmployeeID = e.EmployeeID
         WHERE e.EmployeeID = :employee_id
     """), {"employee_id": employee["employee_id"]})).mappings().one()
     assert state["employmentstatus"] == "Active"
     assert state["terminationdate"] is None
-    assert state["driverstatus"] == "Active"
+    assert state["endreason"] is None
     assert state["effectivetoat"] is None
 
 

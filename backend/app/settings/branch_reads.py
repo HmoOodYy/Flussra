@@ -111,17 +111,18 @@ async def fetch_branch_metrics(
     try:
         r = await db.execute(
             text(f"""
-                SELECT d.branchid, COUNT(*) AS cnt
-                FROM   core.drivers   d
+                SELECT asg.branchid, COUNT(*) AS cnt
+                FROM   core.driverassignments asg
+                JOIN   core.drivers   d ON d.driverid = asg.driverid
                 JOIN   core.employees e
-                       ON  e.companyid  = d.companyid
-                       AND e.employeeid = d.employeeid
-                WHERE  d.companyid       = :cid
-                  AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+                       ON  e.companyid  = asg.companyid
+                       AND e.employeeid = asg.employeeid
+                WHERE  asg.companyid     = :cid
+                  AND  (asg.endreason IS NOT NULL OR d.driverstatus = 'Active')
                   AND  e.employmentstatus IN ('Active', 'Terminated')
-                  AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid) = d.driverid
-                  AND  d.branchid IN ({in_clause})
-                GROUP  BY d.branchid
+                  AND  asg.driverassignmentid = core.fn_EffectiveDriverAssignment(asg.companyid, asg.driverid)
+                  AND  asg.branchid IN ({in_clause})
+                GROUP  BY asg.branchid
             """),
             base,
         )

@@ -33,6 +33,7 @@ from tests.db_state import (
     preserve_test_guc_state,
     read_trigger_fingerprint,
 )
+from tests.ownership import delete_driver_and_residue
 from tests.postgresql_compat import create_test_postgresql
 
 # Tests that need process configuration must never inherit a developer DSN or
@@ -526,7 +527,7 @@ async def auth_token(session_client: httpx.AsyncClient) -> str:
 @pytest_asyncio.fixture(scope="session")
 async def created_driver_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
     """
-    Create one driver record at session start; return its driver_id.
+    Create one driver record at session start; return its permanent driver_id.
     All GET/PATCH tests for a specific driver use this fixture so only
     one INSERT happens for the entire session.
     """
@@ -536,7 +537,7 @@ async def created_driver_id(session_client: httpx.AsyncClient, auth_token: str) 
             "branch_id": 1,          # seeded HQ branch
             "full_name": "Test Driver One",
             "preferred_name": "TD1",
-            "driver_code": "TD-001",
+            "driver_number": "TD-001",
             "cdl_number": "CDL-TEST-001",
             "email": "td1@example.com",
         },
@@ -544,6 +545,24 @@ async def created_driver_id(session_client: httpx.AsyncClient, auth_token: str) 
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
     return resp.json()["driver_id"]
+
+
+async def _current_driver_assignment_id(
+    client: httpx.AsyncClient, token: str, driver_id: int,
+) -> int:
+    resp = await client.get(
+        f"/core/drivers/{driver_id}", headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, f"Driver lookup failed: {resp.text}"
+    return resp.json()["driver_assignment_id"]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def created_driver_assignment_id(
+    session_client: httpx.AsyncClient, auth_token: str, created_driver_id: int,
+) -> int:
+    """The DriverAssignmentID (home-Branch tenure) of ``created_driver_id``."""
+    return await _current_driver_assignment_id(session_client, auth_token, created_driver_id)
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -612,7 +631,7 @@ async def paytest_driver_id(
     seeded_paytest_branch_id: int,
 ) -> int:
     """
-    Create one driver on the seeded PAYTEST branch at session start; return its driver_id.
+    Create one driver on the seeded PAYTEST branch at session start; return its permanent driver_id.
     Depends on `seeded_paytest_branch_id`, not the shadowable `paytest_branch_id`: this
     session-cached driver must never land on whichever module-owned branch happened to
     request it first. Modules that own their branch shadow this fixture as well.
@@ -623,7 +642,7 @@ async def paytest_driver_id(
             "branch_id":      seeded_paytest_branch_id,
             "full_name":      "Paytest Driver",
             "preferred_name": "PTD",
-            "driver_code":    "PTD-001",
+            "driver_number":  "PTD-001",
             "cdl_number":     "CDL-PT-001",
             "email":          "ptd1@example.com",
         },
@@ -633,6 +652,17 @@ async def paytest_driver_id(
     return resp.json()["driver_id"]
 
 
+@pytest_asyncio.fixture(scope="session")
+async def paytest_driver_assignment_id(
+    session_client: httpx.AsyncClient, auth_token: str, paytest_driver_id: int,
+) -> int:
+    """The DriverAssignmentID (PAYTEST home-Branch tenure) of ``paytest_driver_id``.
+
+    Payroll provenance (draft lines, entries, rates) is keyed by this id.
+    """
+    return await _current_driver_assignment_id(session_client, auth_token, paytest_driver_id)
+
+
 @pytest_asyncio.fixture
 async def owned_driver_id(
     session_client: httpx.AsyncClient,
@@ -640,7 +670,10 @@ async def owned_driver_id(
     paytest_branch_id: int,
     direct_db,
 ) -> int:
-    """Create and remove a test-owned Driver used by isolated rule scenarios."""
+    """Create and remove a test-owned Driver used by isolated rule scenarios.
+
+    Yields the permanent driver_id; ``owned_driver_assignment_id`` yields its assignment.
+    """
 
     marker = uuid4().hex
     created = await session_client.post(
@@ -648,7 +681,7 @@ async def owned_driver_id(
         json={
             "branch_id": paytest_branch_id,
             "full_name": f"Owned rule scenario {marker}",
-            "driver_code": f"OWN-{marker[:10]}",
+            "driver_number": f"OWN-{marker[:10]}",
         },
         headers={"Authorization": f"Bearer {auth_token}"},
     )
@@ -663,52 +696,32 @@ async def owned_driver_id(
             text("""
                 SELECT
                     (SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverid = :did) AS final_lines,
-                    (SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE driverid = :did) AS draft_lines,
-                    (SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE driverid = :did) AS bonuses,
-                    (SELECT COUNT(*) FROM payroll.driverrates WHERE driverid = :did) AS rates,
-                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE driverid = :did) AS day_state
+                    (SELECT COUNT(*) FROM payroll.payrolldraftlines dl
+                     JOIN core.driverassignments a ON a.driverassignmentid = dl.driverassignmentid
+                     WHERE a.driverid = :did) AS draft_lines,
+                    (SELECT COUNT(*) FROM payroll.payrollbonusevents b
+                     JOIN core.driverassignments a ON a.driverassignmentid = b.driverassignmentid
+                     WHERE a.driverid = :did) AS bonuses,
+                    (SELECT COUNT(*) FROM payroll.driverrates r
+                     JOIN core.driverassignments a ON a.driverassignmentid = r.driverassignmentid
+                     WHERE a.driverid = :did) AS rates,
+                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate s
+                     JOIN core.driverassignments a ON a.driverassignmentid = s.driverassignmentid
+                     WHERE a.driverid = :did) AS day_state
             """), {"did": driver_id},
         )).mappings().one()
         assert all(value == 0 for value in dependents.values()), (
             f"Owned Driver {driver_id} has unexpected non-rule dependents: {dict(dependents)}"
         )
-        rule_ids = [row[0] for row in (await direct_db.execute(
-            text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverid = :did"),
-            {"did": driver_id},
-        )).all()]
-        rule_id_strings = [str(rule_id) for rule_id in rule_ids] or [""]
-        await direct_db.execute(
-            text("DELETE FROM audit.auditlog WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)"),
-            {"ids": rule_id_strings},
-        )
-        await direct_db.execute(
-            text("DELETE FROM payroll.driverpayrules WHERE driverid = :did"), {"did": driver_id},
-        )
-        await direct_db.execute(
-            text("DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid"),
-            {"eid": str(driver_id)},
-        )
-        await direct_db.execute(text("DELETE FROM core.drivers WHERE driverid = :did"), {"did": driver_id})
-        await direct_db.execute(
-            text("DELETE FROM audit.auditlog WHERE entityname = 'Employees' AND entityid = :eid"),
-            {"eid": str(employee_id)},
-        )
-        await direct_db.execute(
-            text("DELETE FROM core.employees WHERE employeeid = :eid"), {"eid": employee_id},
-        )
-        residue = (await direct_db.execute(
-            text("""
-                SELECT
-                    (SELECT COUNT(*) FROM core.drivers WHERE driverid = :did) AS drivers,
-                    (SELECT COUNT(*) FROM core.employees WHERE employeeid = :eid) AS employees,
-                    (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did) AS rules,
-                    (SELECT COUNT(*) FROM audit.auditlog
-                     WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)) AS rule_audit
-            """), {"did": driver_id, "eid": employee_id, "ids": rule_id_strings},
-        )).mappings().one()
-        assert all(value == 0 for value in residue.values()), (
-            f"Owned Driver cleanup left residue for {driver_id}: {dict(residue)}"
-        )
+        await delete_driver_and_residue(direct_db, driver_id, employee_id)
+
+
+@pytest_asyncio.fixture
+async def owned_driver_assignment_id(
+    session_client: httpx.AsyncClient, auth_token: str, owned_driver_id: int,
+) -> int:
+    """The DriverAssignmentID of the test-owned Driver."""
+    return await _current_driver_assignment_id(session_client, auth_token, owned_driver_id)
 
 
 @pytest_asyncio.fixture
@@ -731,7 +744,7 @@ async def owned_branch_id(direct_db) -> int:
             text("""
                 SELECT
                     (SELECT COUNT(*) FROM payroll.payrollperiods WHERE branchid = :bid) AS periods,
-                    (SELECT COUNT(*) FROM core.drivers WHERE branchid = :bid) AS drivers,
+                    (SELECT COUNT(*) FROM core.driverassignments WHERE branchid = :bid) AS driver_assignments,
                     (SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE branchid = :bid) AS item_config,
                     (SELECT COUNT(*) FROM sec.userbranchroles WHERE branchid = :bid) AS user_roles
             """), {"bid": branch_id},
@@ -754,14 +767,14 @@ async def hq_driver_id(
     auth_token: str,
     hq_branch_id: int,
 ) -> int:
-    """Create one driver on the HQ branch at session start; return its driver_id."""
+    """Create one driver on the HQ branch at session start; return its permanent driver_id."""
     resp = await session_client.post(
         "/core/drivers",
         json={
             "branch_id":      hq_branch_id,
             "full_name":      "HQ Driver",
             "preferred_name": "HQD",
-            "driver_code":    "HQD-001",
+            "driver_number":  "HQD-001",
             "cdl_number":     "CDL-HQ-001",
             "email":          "hqd1@example.com",
         },
@@ -769,6 +782,14 @@ async def hq_driver_id(
     )
     assert resp.status_code == 201, f"HQ driver seed failed: {resp.text}"
     return resp.json()["driver_id"]
+
+
+@pytest_asyncio.fixture(scope="session")
+async def hq_driver_assignment_id(
+    session_client: httpx.AsyncClient, auth_token: str, hq_driver_id: int,
+) -> int:
+    """The DriverAssignmentID (HQ home-Branch tenure) of ``hq_driver_id``."""
+    return await _current_driver_assignment_id(session_client, auth_token, hq_driver_id)
 
 
 @pytest_asyncio.fixture(scope="session")

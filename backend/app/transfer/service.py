@@ -3,6 +3,12 @@
 All SQL is raw parameterised via sqlalchemy.text().
 All authorization is enforced before any write occurs.
 
+A transfer moves one permanent Driver from its current home-Branch assignment to
+a new assignment in the target Branch; the Driver, driver number and CDL never
+change. Stored request statuses:
+PendingSourceApproval, PendingTargetApproval, Returned, Rejected, Approved,
+Scheduled, Completed, Cancelled.
+
 Transfer lifecycle:
   create   → PendingSourceApproval   (when initiated_by='Driver' — by DRIVER/Self user or manager)
            → PendingTargetApproval   (when initiated_by='SourceBranch' — source
@@ -10,12 +16,23 @@ Transfer lifecycle:
   approve_source → PendingTargetApproval
                    (accepts PendingSourceApproval OR Returned status)
   decide_target  → Approved | Rejected | Returned
-  complete       → Completed  (creates new driver profile in target branch,
-                                closes old profile, syncs branch projection when effective)
-  cancel         → Cancelled
+  complete       → Completed  (EffectiveAt NULL: the database NOW() is the boundary; the
+                               source assignment closes and the destination opens at it)
+                 → Scheduled  (future EffectiveAt: both windows are materialized now and
+                               currentness switches at EffectiveAt by time alone)
+  reschedule     → same status (before completion: only EffectiveAt changes; Scheduled:
+                               both assignment boundaries move, destination id is stable)
+  cancel         → Cancelled  (a Scheduled transfer only while EffectiveAt is still future)
+
+The assignment windows are the single authority for currentness. The request
+status every reader sees comes from ``core.fn_DriverTransferStatus``: a stored
+Scheduled request reads as Completed once its EffectiveAt has been reached.
+
+Lock order: Employee → transfer request → the Driver's assignments (ascending) →
+Branch workflow advisory locks (ascending BranchID) → PayrollPeriod rows (ascending).
 
 P1 scope rules:
-  - DRIVER/Self users may call create only for their own effective Driver with initiated_by='Driver'.
+  - DRIVER/Self users may call create only for their own Driver with initiated_by='Driver'.
     All other transfer lifecycle endpoints are blocked for DRIVER/Self users.
   - Operational users need drivers.view to list/get.
   - Operational users need drivers.edit on the relevant branch for write operations.
@@ -41,33 +58,73 @@ from app.access.permissions import check_permission, has_any_permission
 from app.access.policy import (
     is_driver_self_subject,
     require_non_driver_subject,
-    resolve_driver_self_profile,
+    resolve_driver_self,
 )
 from app.transfer.schemas import (
     CancelRequest,
     DriverTransferCreate,
     DriverTransferResponse,
+    RescheduleRequest,
     SourceApprovalRequest,
     TargetDecisionRequest,
     TransferListResponse,
 )
 from app.workforce import audit as workforce_audit
-from app.workforce.effective import resolve_effective_driver_profile
+from app.workforce.effective import resolve_effective_driver_assignment
+from app.workforce.ops import workforce_operation
 from app.workforce.projection import sync_employee_branch_projection
 
 log = logging.getLogger(__name__)
 
+# Effective statuses (after core.fn_DriverTransferStatus) that end a request's life.
 _TERMINAL = {"Completed", "Cancelled", "Rejected"}
-# Statuses that block a new transfer request for the same driver
-_ACTIVE_TRANSFER_STATUSES = {
-    "PendingSourceApproval",
-    "PendingTargetApproval",
-    "Returned",
-    "Approved",
-}
 
 # Read permissions for transfer data
 _TRANSFER_READ_PERMS = ["drivers.view", "drivers.edit"]
+
+_TRANSFER_SELECT = """
+    SELECT
+        dtr.transferrequestid,
+        dtr.companyid,
+        dtr.driverid,
+        dtr.sourcedriverassignmentid,
+        dtr.destinationdriverassignmentid,
+        dtr.sourcebranchid,
+        dtr.targetbranchid,
+        dtr.requestedbyuserid,
+        dtr.initiatedby,
+        dtr.status AS stored_status,
+        core.fn_DriverTransferStatus(dtr.status, dtr.effectiveat) AS status,
+        dtr.effectiveat,
+        dtr.reason,
+        dtr.notes,
+        dtr.sourceapprovedbyuserid,
+        dtr.sourceapprovedatutc,
+        dtr.targetdecidedbyuserid,
+        dtr.targetdecidedatutc,
+        dtr.targetdecisionnotes,
+        dtr.scheduledatutc,
+        dtr.scheduledbyuserid,
+        dtr.completedatutc,
+        dtr.completedbyuserid,
+        dtr.cancelledatutc,
+        dtr.cancelledbyuserid,
+        dtr.cancelreason,
+        dtr.createdatutc,
+        dtr.updatedatutc,
+        -- Denormalized display fields
+        dr.drivernumber    AS driver_number,
+        e.fullname         AS driver_name,
+        sb.branchname      AS source_branch_name,
+        tb.branchname      AS target_branch_name,
+        u.displayname      AS requested_by_name
+    FROM   core.drivertransferrequests dtr
+    JOIN   core.drivers   dr ON dr.driverid  = dtr.driverid
+    JOIN   core.employees e  ON e.employeeid = dr.employeeid
+    JOIN   core.branches  sb ON sb.branchid  = dtr.sourcebranchid
+    JOIN   core.branches  tb ON tb.branchid  = dtr.targetbranchid
+    JOIN   sec.users      u  ON u.userid      = dtr.requestedbyuserid
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -84,43 +141,8 @@ async def _get_transfer_or_404(
     db: AsyncConnection,
 ) -> dict:
     result = await db.execute(
-        text("""
-            SELECT
-                dtr.transferrequestid,
-                dtr.companyid,
-                dtr.driverid,
-                dtr.sourcebranchid,
-                dtr.targetbranchid,
-                dtr.requestedbyuserid,
-                dtr.initiatedby,
-                dtr.status,
-                dtr.effectiveat,
-                dtr.reason,
-                dtr.notes,
-                dtr.sourceapprovedbyuserid,
-                dtr.sourceapprovedatutc,
-                dtr.targetdecidedbyuserid,
-                dtr.targetdecidedatutc,
-                dtr.targetdecisionnotes,
-                dtr.newdriverid,
-                dtr.completedatutc,
-                dtr.completedbyuserid,
-                dtr.cancelledatutc,
-                dtr.cancelledbyuserid,
-                dtr.cancelreason,
-                dtr.createdatutc,
-                dtr.updatedatutc,
-                -- Denormalized display fields
-                e.fullname         AS driver_name,
-                sb.branchname      AS source_branch_name,
-                tb.branchname      AS target_branch_name,
-                u.displayname      AS requested_by_name
-            FROM   core.drivertransferrequests dtr
-            JOIN   core.drivers   d  ON d.driverid   = dtr.driverid
-            JOIN   core.employees e  ON e.employeeid = d.employeeid
-            JOIN   core.branches  sb ON sb.branchid  = dtr.sourcebranchid
-            JOIN   core.branches  tb ON tb.branchid  = dtr.targetbranchid
-            JOIN   sec.users      u  ON u.userid      = dtr.requestedbyuserid
+        text(f"""
+            {_TRANSFER_SELECT}
             WHERE  dtr.transferrequestid = :tid
               AND  dtr.companyid         = :cid
         """),
@@ -132,17 +154,34 @@ async def _get_transfer_or_404(
     return dict(row)
 
 
+async def _lock_driver_assignments(
+    driver_id: int,
+    company_id: int,
+    db: AsyncConnection,
+) -> None:
+    await db.execute(
+        text("""
+            SELECT DriverAssignmentID
+            FROM core.DriverAssignments
+            WHERE CompanyID = :company_id AND DriverID = :driver_id
+            ORDER BY DriverAssignmentID
+            FOR NO KEY UPDATE
+        """),
+        {"company_id": company_id, "driver_id": driver_id},
+    )
+
+
 async def _lock_transfer_lifecycle(
     transfer_request_id: int,
     company_id: int,
     db: AsyncConnection,
 ) -> tuple[int, dict]:
-    """Lock Employee, request, then all Employee Driver rows in canonical order."""
+    """Lock Employee, request, then all of the Driver's assignments in canonical order."""
     identity = await db.execute(
         text("""
-            SELECT d.EmployeeID
+            SELECT dr.EmployeeID, dr.DriverID
             FROM core.DriverTransferRequests dtr
-            JOIN core.Drivers d ON d.DriverID = dtr.DriverID
+            JOIN core.Drivers dr ON dr.DriverID = dtr.DriverID
             WHERE dtr.TransferRequestID = :request_id AND dtr.CompanyID = :company_id
         """),
         {"request_id": transfer_request_id, "company_id": company_id},
@@ -173,16 +212,7 @@ async def _lock_transfer_lifecycle(
     )
     if request_lock.first() is None:
         raise HTTPException(status_code=404, detail="Transfer request not found.")
-    await db.execute(
-        text("""
-            SELECT DriverID
-            FROM core.Drivers
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-            ORDER BY DriverID
-            FOR NO KEY UPDATE
-        """),
-        {"company_id": company_id, "employee_id": employee_id},
-    )
+    await _lock_driver_assignments(identity_row["driverid"], company_id, db)
     return employee_id, await _get_transfer_or_404(transfer_request_id, company_id, db)
 
 
@@ -215,29 +245,30 @@ async def _lock_employee_for_transfer_create(
     employee = employee_result.mappings().first()
     if employee is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
-    await db.execute(
-        text("""
-            SELECT DriverID
-            FROM core.Drivers
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-            ORDER BY DriverID
-            FOR NO KEY UPDATE
-        """),
-        {"company_id": company_id, "employee_id": employee_id},
-    )
+    await _lock_driver_assignments(driver_id, company_id, db)
     return employee_id, dict(employee)
 
 
 def _row_to_response(row: dict) -> DriverTransferResponse:
+    completed_at = row["completedatutc"]
+    completed_by = row["completedbyuserid"]
+    if row["stored_status"] == "Scheduled" and row["status"] == "Completed":
+        # A scheduled transfer completes at its EffectiveAt instant.
+        completed_at = row["effectiveat"]
+        completed_by = row["scheduledbyuserid"]
     return DriverTransferResponse(
         transfer_request_id=row["transferrequestid"],
         company_id=row["companyid"],
         driver_id=row["driverid"],
+        driver_number=row.get("driver_number"),
+        source_driver_assignment_id=row["sourcedriverassignmentid"],
+        destination_driver_assignment_id=row["destinationdriverassignmentid"],
         source_branch_id=row["sourcebranchid"],
         target_branch_id=row["targetbranchid"],
         requested_by_user_id=row["requestedbyuserid"],
         initiated_by=row["initiatedby"],
         status=row["status"],
+        stored_status=row["stored_status"],
         effective_at=row["effectiveat"],
         reason=row["reason"],
         notes=row["notes"],
@@ -246,9 +277,10 @@ def _row_to_response(row: dict) -> DriverTransferResponse:
         target_decided_by_user_id=row["targetdecidedbyuserid"],
         target_decided_at_utc=row["targetdecidedatutc"],
         target_decision_notes=row["targetdecisionnotes"],
-        new_driver_id=row["newdriverid"],
-        completed_at_utc=row["completedatutc"],
-        completed_by_user_id=row["completedbyuserid"],
+        scheduled_at_utc=row["scheduledatutc"],
+        scheduled_by_user_id=row["scheduledbyuserid"],
+        completed_at_utc=completed_at,
+        completed_by_user_id=completed_by,
         cancelled_at_utc=row["cancelledatutc"],
         cancelled_by_user_id=row["cancelledbyuserid"],
         cancel_reason=row["cancelreason"],
@@ -261,52 +293,23 @@ def _row_to_response(row: dict) -> DriverTransferResponse:
     )
 
 
-async def _assert_driver_belongs_to_branch(
-    driver_id: int,
-    branch_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> dict:
-    """Return active driver row, raising 404 / 422 if not valid."""
-    result = await db.execute(
-        text("""
-            SELECT driverid, employeeid, driverstatus, branchid
-            FROM   core.drivers
-            WHERE  driverid   = :did
-              AND  companyid  = :cid
-        """),
-        {"did": driver_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Driver not found.")
-    if row["driverstatus"] in ("Transferred", "Terminated"):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Driver is already {row['driverstatus']} and cannot be transferred."
-            ),
-        )
-    if row["branchid"] != branch_id:
-        raise HTTPException(
-            status_code=422,
-            detail="Driver does not belong to the source branch.",
-        )
-    return dict(row)
-
-
 async def _assert_no_active_transfer(
     driver_id: int,
     company_id: int,
     db: AsyncConnection,
 ) -> None:
-    """Raise 422 if driver already has an in-flight transfer request."""
+    """Raise 422 if the Driver already has an in-flight transfer request.
+
+    A Scheduled request is in flight only until its EffectiveAt; afterwards it
+    reads Completed and the Driver's new assignment may start another transfer.
+    """
     result = await db.execute(
         text("""
             SELECT transferrequestid FROM core.drivertransferrequests
             WHERE  driverid  = :did
               AND  companyid = :cid
-              AND  status    NOT IN ('Completed','Cancelled','Rejected')
+              AND  core.fn_DriverTransferStatus(status, effectiveat)
+                       NOT IN ('Completed','Cancelled','Rejected')
             LIMIT 1
         """),
         {"did": driver_id, "cid": company_id},
@@ -319,29 +322,6 @@ async def _assert_no_active_transfer(
                 "Cancel or complete it before creating a new one."
             ),
         )
-
-
-async def _get_driver_source_branch(
-    driver_id: int,
-    company_id: int,
-    db: AsyncConnection,
-) -> int:
-    """Return the requested Driver's branch only when current at NOW()."""
-    result = await db.execute(
-        text("""
-            SELECT employeeid, branchid FROM core.drivers
-            WHERE  driverid  = :did
-              AND  companyid = :cid
-        """),
-        {"did": driver_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Driver not found.")
-    current = await resolve_effective_driver_profile(company_id, row["employeeid"], None, db)
-    if current is None or current["driverid"] != driver_id:
-        raise HTTPException(status_code=422, detail="Driver is not the effective current profile.")
-    return int(current["branchid"])
 
 
 async def _get_accessible_branches_for_transfers(
@@ -384,6 +364,33 @@ async def _get_accessible_branches_for_transfers(
     return False, allowed
 
 
+async def _require_edit_on_source_or_target(
+    company_id: int,
+    user_id: int,
+    row: dict,
+    db: AsyncConnection,
+    *,
+    action: str,
+) -> None:
+    src_ok = await has_any_permission(
+        company_id, user_id, row["sourcebranchid"], ["drivers.edit"], db
+    )
+    tgt_ok = await has_any_permission(
+        company_id, user_id, row["targetbranchid"], ["drivers.edit"], db
+    )
+    if not (src_ok or tgt_ok):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You need drivers.edit on the source or target branch to {action}.",
+        )
+
+
+async def _db_instant_is_future(instant: datetime, db: AsyncConnection) -> bool:
+    result = await db.execute(text("SELECT CAST(:instant AS TIMESTAMPTZ) > NOW()"),
+                              {"instant": instant})
+    return bool(result.scalar_one())
+
+
 # ---------------------------------------------------------------------------
 # Service functions
 # ---------------------------------------------------------------------------
@@ -395,18 +402,21 @@ async def create_driver_transfer_request(
     db: AsyncConnection,
 ) -> DriverTransferResponse:
     """
-    Create a new transfer request.
+    Create a new transfer request for a permanent Driver.
+
+    The source is the Driver's current home-Branch assignment.
 
     Two caller types are supported:
 
     DRIVER/Self users:
-      - May only initiate for their OWN active driver profile.
+      - May only initiate for their OWN Driver.
       - initiated_by must be 'Driver'.
       - Source-branch approval is still required (PendingSourceApproval).
       - No operational payroll data is touched or exposed.
 
     Operational users (SpecificBranch / AllCompanyBranches with drivers.edit):
-      - May initiate for any active driver in their accessible source branch.
+      - May initiate for any Driver with a current assignment in their accessible
+        source branch.
       - initiated_by may be 'Driver' or 'SourceBranch'.
       - When 'SourceBranch', source approval is implicit (goes to PendingTargetApproval).
     """
@@ -417,9 +427,8 @@ async def create_driver_transfer_request(
             status_code=422,
             detail="Driver-role users must set initiated_by='Driver'.",
         )
-
     if caller_is_driver_self:
-        await resolve_driver_self_profile(
+        await resolve_driver_self(
             company_id,
             user_id,
             db,
@@ -432,23 +441,20 @@ async def create_driver_transfer_request(
     await sync_employee_branch_projection(
         company_id, employee_id, None, db,
     )
-    current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
-    if current is None or current["driverid"] != data.driver_id:
-        raise HTTPException(status_code=422, detail="Transfer source is not the current Driver profile.")
-    if current["driverstatus"] in {"Transferred", "Terminated"}:
+    current = await resolve_effective_driver_assignment(company_id, data.driver_id, None, db)
+    if current is None:
+        raise HTTPException(status_code=422, detail="Driver has no current assignment to transfer from.")
+    if current["endreason"] is not None:
         raise HTTPException(
             status_code=422,
-            detail="A transferred or terminated Driver profile cannot start another transfer.",
+            detail="A Driver assignment that is already ending cannot start another transfer.",
         )
     if data.effective_at is not None:
-        future_check = await db.execute(text("SELECT :effective_at > NOW()"),
-                                        {"effective_at": data.effective_at})
-        if not future_check.scalar_one():
+        if not await _db_instant_is_future(data.effective_at, db):
             raise HTTPException(status_code=422, detail="Scheduled transfer time must be in the future.")
         if data.effective_at <= current["effectivefromat"]:
-            raise HTTPException(status_code=422, detail="Transfer time must be after the source profile start instant.")
+            raise HTTPException(status_code=422, detail="Transfer time must be after the source assignment start instant.")
     source_branch_id = int(current["branchid"])
-    await _assert_driver_belongs_to_branch(data.driver_id, source_branch_id, company_id, db)
     if not caller_is_driver_self:
         await check_permission(company_id, user_id, source_branch_id, "drivers.edit", db)
 
@@ -471,23 +477,23 @@ async def create_driver_transfer_request(
     await _assert_no_active_transfer(data.driver_id, company_id, db)
     pending_result = await db.execute(
         text("""
-            SELECT 1 FROM core.Drivers
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-              AND DriverID <> :driver_id
+            SELECT 1 FROM core.DriverAssignments
+            WHERE CompanyID = :company_id AND DriverID = :driver_id
+              AND DriverAssignmentID <> :source_assignment_id
               AND EffectiveFromAt > NOW()
               AND (EffectiveToAt IS NULL OR EffectiveToAt > EffectiveFromAt)
             LIMIT 1
         """),
         {
             "company_id": company_id,
-            "employee_id": employee_id,
             "driver_id": data.driver_id,
+            "source_assignment_id": current["driverassignmentid"],
         },
     )
     if pending_result.first() is not None:
         raise HTTPException(
             status_code=422,
-            detail="A pending Driver profile already exists for this Employee.",
+            detail="A pending Driver assignment already exists for this Driver.",
         )
 
     # DRIVER/Self users always get PendingSourceApproval.
@@ -505,13 +511,15 @@ async def create_driver_transfer_request(
     ins = await db.execute(
         text("""
             INSERT INTO core.drivertransferrequests (
-                companyid, driverid, sourcebranchid, targetbranchid,
+                companyid, driverid, sourcedriverassignmentid,
+                sourcebranchid, targetbranchid,
                 requestedbyuserid, initiatedby, status,
                 effectiveat, reason, notes,
                 sourceapprovedbyuserid, sourceapprovedatutc,
                 createdatutc
             ) VALUES (
-                :cid, :did, :sbid, :tbid,
+                :cid, :did, :said,
+                :sbid, :tbid,
                 :uid, :initiated_by, :status,
                 :effective_at, :reason, :notes,
                 :src_by, :src_at,
@@ -522,6 +530,7 @@ async def create_driver_transfer_request(
         {
             "cid":          company_id,
             "did":          data.driver_id,
+            "said":         current["driverassignmentid"],
             "sbid":         source_branch_id,
             "tbid":         data.target_branch_id,
             "uid":          user_id,
@@ -661,7 +670,13 @@ async def complete_driver_transfer(
     transfer_request_id: int,
     db: AsyncConnection,
 ) -> DriverTransferResponse:
-    """Complete an approved effective-dated transfer in one transaction."""
+    """Complete an Approved transfer in one transaction.
+
+    The same source-close and destination-open windows are materialized in both
+    cases: an immediate request (EffectiveAt NULL) switches at database NOW() and is
+    Completed; a future EffectiveAt leaves the destination pending and the request
+    Scheduled until that instant.
+    """
     await require_non_driver_subject(company_id, user_id, db)
 
     _, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
@@ -672,41 +687,29 @@ async def complete_driver_transfer(
             detail=f"Request is '{row['status']}', not Approved.",
         )
 
-    # Require drivers.edit on at least one of the two branches
-    src_ok = await has_any_permission(
-        company_id, user_id, row["sourcebranchid"], ["drivers.edit"], db
+    await _require_edit_on_source_or_target(
+        company_id, user_id, row, db, action="complete this transfer",
     )
-    tgt_ok = await has_any_permission(
-        company_id, user_id, row["targetbranchid"], ["drivers.edit"], db
-    )
-
-    if not (src_ok or tgt_ok):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "You need drivers.edit on the source or target branch to "
-                "complete this transfer."
-            ),
-        )
 
     source_result = await db.execute(
         text("""
-            SELECT DriverID, EmployeeID, BranchID, DriverStatus, EffectiveFromAt, EffectiveToAt
-            FROM core.Drivers
-            WHERE DriverID = :driver_id AND CompanyID = :company_id
+            SELECT DriverAssignmentID, DriverID, EmployeeID, BranchID, EndReason,
+                   EffectiveFromAt, EffectiveToAt
+            FROM core.DriverAssignments
+            WHERE DriverAssignmentID = :assignment_id AND CompanyID = :company_id
         """),
-        {"driver_id": row["driverid"], "company_id": company_id},
+        {"assignment_id": row["sourcedriverassignmentid"], "company_id": company_id},
     )
     source = source_result.mappings().first()
-    if source is None or source["driverstatus"] in {"Transferred", "Terminated"}:
+    if source is None or source["endreason"] is not None:
         raise HTTPException(
             status_code=409,
             detail="Transfer source is no longer available for completion.",
         )
 
     employee_id = source["employeeid"]
-    current = await resolve_effective_driver_profile(company_id, employee_id, None, db)
-    if current is None or current["driverid"] != source["driverid"]:
+    current = await resolve_effective_driver_assignment(company_id, row["driverid"], None, db)
+    if current is None or current["driverassignmentid"] != source["driverassignmentid"]:
         raise HTTPException(status_code=409, detail="Transfer source is no longer current.")
 
     boundary_result = await db.execute(text("""
@@ -716,27 +719,28 @@ async def complete_driver_transfer(
     """), {"requested_at": row["effectiveat"]})
     boundary_row = boundary_result.mappings().one()
     effective_at = boundary_row["boundary"]
+    is_future = bool(boundary_row["boundary_future"])
     if not boundary_row["schedule_valid"]:
         raise HTTPException(status_code=409, detail="Scheduled transfer time has expired.")
     if effective_at <= source["effectivefromat"]:
-        raise HTTPException(status_code=409, detail="Transfer instant precedes the source profile window.")
+        raise HTTPException(status_code=409, detail="Transfer instant precedes the source assignment window.")
     pending_result = await db.execute(
         text("""
-            SELECT 1 FROM core.Drivers
-            WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-              AND DriverID <> :source_driver_id
+            SELECT 1 FROM core.DriverAssignments
+            WHERE CompanyID = :company_id AND DriverID = :driver_id
+              AND DriverAssignmentID <> :source_assignment_id
               AND EffectiveFromAt > NOW()
               AND (EffectiveToAt IS NULL OR EffectiveToAt > EffectiveFromAt)
             LIMIT 1
         """),
         {
             "company_id": company_id,
-            "employee_id": employee_id,
-            "source_driver_id": source["driverid"],
+            "driver_id": row["driverid"],
+            "source_assignment_id": source["driverassignmentid"],
         },
     )
     if pending_result.first() is not None:
-        raise HTTPException(status_code=409, detail="Employee already has a pending Driver profile.")
+        raise HTTPException(status_code=409, detail="Driver already has a pending assignment.")
 
     employee_before = await db.execute(
         text("""
@@ -747,77 +751,87 @@ async def complete_driver_transfer(
     )
     old_employee_branch = employee_before.scalar_one()
 
-    now = _now_utc()
-
-    # Insert the destination at the one shared assignment boundary.
-    new_drv_ins = await db.execute(
+    # Insert the destination assignment of the same Driver at the one shared boundary.
+    new_assignment_ins = await db.execute(
         text("""
-            INSERT INTO core.drivers (
-                companyid, employeeid, branchid,
-                drivercode, driverstatus, effectivefromat,
-                transferredfromdriverid
+            INSERT INTO core.DriverAssignments (
+                CompanyID, BranchID, EmployeeID, DriverID,
+                EffectiveFromAt, TransferredFromAssignmentID
             ) VALUES (
-                :cid, :eid, :tbid,
-                :code, 'Active', :effective_from_at,
-                :from_did
+                :cid, :tbid, :eid, :did,
+                :effective_from_at, :from_aid
             )
-            RETURNING driverid
+            RETURNING DriverAssignmentID
         """),
         {
             "cid":      company_id,
-            "eid":      employee_id,
             "tbid":     row["targetbranchid"],
-            "code":     f"DRV-TR{row['transferrequestid']:06d}",
+            "eid":      employee_id,
+            "did":      row["driverid"],
             "effective_from_at": effective_at,
-            "from_did": row["driverid"],
+            "from_aid": source["driverassignmentid"],
         },
     )
-    new_driver_id: int = new_drv_ins.scalar_one()
-    from app.payroll.eligibility import append_driver_to_editable_periods
+    new_assignment_id: int = new_assignment_ins.scalar_one()
+    from app.payroll.eligibility import append_driver_assignment_to_editable_periods
 
-    await append_driver_to_editable_periods(
-        company_id, row["targetbranchid"], new_driver_id, user_id, db,
+    await append_driver_assignment_to_editable_periods(
+        company_id, row["targetbranchid"], new_assignment_id, user_id, db,
     )
 
-    # Close the source in one trigger-compatible update.
+    # Close the source: an open assignment ends at NOW() or a later instant, so no
+    # workforce operation is needed.
     source_closed = await db.execute(
         text("""
-            UPDATE core.drivers
-            SET    driverstatus          = 'Transferred',
-                   transferredtodriverid = :new_did,
-                   effectivetoat         = :effective_to_at
-            WHERE  driverid  = :old_did
-              AND  companyid = :cid
-              AND  driverstatus NOT IN ('Transferred', 'Terminated')
-            RETURNING driverid
+            UPDATE core.DriverAssignments
+            SET    EndReason                  = 'Transferred',
+                   TransferredToAssignmentID  = :new_aid,
+                   EffectiveToAt              = :effective_to_at,
+                   UpdatedAtUtc               = NOW()
+            WHERE  DriverAssignmentID = :old_aid
+              AND  CompanyID = :cid
+              AND  EffectiveToAt IS NULL
+            RETURNING DriverAssignmentID
         """),
-        {"new_did": new_driver_id, "effective_to_at": effective_at,
-         "old_did": row["driverid"], "cid": company_id},
+        {"new_aid": new_assignment_id, "effective_to_at": effective_at,
+         "old_aid": source["driverassignmentid"], "cid": company_id},
     )
     if source_closed.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="Transfer source changed; refresh and retry.")
 
-    request_completed = await db.execute(
-        text("""
-            UPDATE core.drivertransferrequests
-            SET    status             = 'Completed',
-                   effectiveat       = :effective_at,
-                   newdriverid        = :new_did,
-                   completedatutc     = :now,
-                   completedbyuserid  = :uid,
-                   updatedatutc       = :now
-            WHERE  transferrequestid = :tid AND status = 'Approved'
-            RETURNING transferrequestid
-        """),
-        {
-            "new_did": new_driver_id,
-            "effective_at": effective_at,
-            "now":     now,
-            "uid":     user_id,
-            "tid":     transfer_request_id,
-        },
-    )
-    if request_completed.scalar_one_or_none() is None:
+    if is_future:
+        request_updated = await db.execute(
+            text("""
+                UPDATE core.drivertransferrequests
+                SET    status                           = 'Scheduled',
+                       effectiveat                      = :effective_at,
+                       destinationdriverassignmentid    = :new_aid,
+                       scheduledatutc                   = NOW(),
+                       scheduledbyuserid                = :uid,
+                       updatedatutc                     = NOW()
+                WHERE  transferrequestid = :tid AND status = 'Approved'
+                RETURNING transferrequestid
+            """),
+            {"new_aid": new_assignment_id, "effective_at": effective_at,
+             "uid": user_id, "tid": transfer_request_id},
+        )
+    else:
+        request_updated = await db.execute(
+            text("""
+                UPDATE core.drivertransferrequests
+                SET    status                           = 'Completed',
+                       effectiveat                      = :effective_at,
+                       destinationdriverassignmentid    = :new_aid,
+                       completedatutc                   = NOW(),
+                       completedbyuserid                = :uid,
+                       updatedatutc                     = NOW()
+                WHERE  transferrequestid = :tid AND status = 'Approved'
+                RETURNING transferrequestid
+            """),
+            {"new_aid": new_assignment_id, "effective_at": effective_at,
+             "uid": user_id, "tid": transfer_request_id},
+        )
+    if request_updated.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
 
     _, new_employee_branch = await sync_employee_branch_projection(
@@ -829,26 +843,111 @@ async def complete_driver_transfer(
         company_id=company_id,
         branch_id=row["sourcebranchid"],
         actor_user_id=user_id,
-        action_code="DRIVER_TRANSFER_COMPLETED",
+        action_code="DRIVER_TRANSFER_SCHEDULED" if is_future else "DRIVER_TRANSFER_COMPLETED",
         entity_name="DriverTransferRequests",
         entity_id=transfer_request_id,
         old_value={"status": "Approved", "employee_branch_id": old_employee_branch},
         new_value={
             "transfer_request_id": transfer_request_id,
             "employee_id": employee_id,
-            "source_driver_id": source["driverid"],
-            "destination_driver_id": new_driver_id,
+            "driver_id": row["driverid"],
+            "source_driver_assignment_id": source["driverassignmentid"],
+            "destination_driver_assignment_id": new_assignment_id,
             "source_branch_id": row["sourcebranchid"],
             "target_branch_id": row["targetbranchid"],
             "effective_at": effective_at,
+            "status": "Scheduled" if is_future else "Completed",
             "employee_branch_projection_changed": projection_changed,
             "employee_branch_id": new_employee_branch,
-            "projection_pending_until_effective_at": boundary_row["boundary_future"],
+            "projection_pending_until_effective_at": is_future,
         },
     )
 
     row = await _get_transfer_or_404(transfer_request_id, company_id, db)
     return _row_to_response(row)
+
+
+async def _cancel_scheduled_transfer(
+    company_id: int,
+    user_id: int,
+    row: dict,
+    cancel_reason: str | None,
+    db: AsyncConnection,
+) -> None:
+    """Undo the materialized windows of a Scheduled transfer that has not yet taken effect.
+
+    The request is cancelled and detached from the destination first, because the
+    destination assignment is deleted and a Cancelled request keeps no destination.
+    """
+    from app.payroll.eligibility import (
+        BoundaryWindow,
+        assignment_eligibility_in_noneditable_period,
+        assignment_payroll_fact_exists,
+        delete_assignment_eligibility_rows,
+        lock_boundary_periods,
+        recapture_assignment_eligibility,
+    )
+
+    source_id = row["sourcedriverassignmentid"]
+    destination_id = row["destinationdriverassignmentid"]
+    effective_at = row["effectiveat"]
+    periods = await lock_boundary_periods(
+        company_id,
+        [
+            BoundaryWindow(row["sourcebranchid"], effective_at, None),
+            BoundaryWindow(row["targetbranchid"], effective_at, None),
+        ],
+        db,
+    )
+    if await assignment_payroll_fact_exists(company_id, destination_id, db):
+        raise HTTPException(status_code=409, detail={
+            "code": "TRANSFER_DESTINATION_HAS_PAYROLL_FACTS",
+            "message": "The destination Driver assignment already has payroll facts; the transfer cannot be cancelled.",
+        })
+    if await assignment_eligibility_in_noneditable_period(company_id, destination_id, db):
+        raise HTTPException(status_code=409, detail={
+            "code": "TRANSFER_DESTINATION_IN_LOCKED_PERIOD",
+            "message": "The destination Driver assignment is on the roster of a period past Draft, Open or Returned.",
+        })
+    now = _now_utc()
+    changed = await db.execute(
+        text("""
+            UPDATE core.drivertransferrequests
+            SET    status                        = 'Cancelled',
+                   destinationdriverassignmentid = NULL,
+                   cancelledatutc                = :now,
+                   cancelledbyuserid             = :uid,
+                   cancelreason                  = :reason,
+                   updatedatutc                  = :now
+            WHERE  transferrequestid = :tid AND status = 'Scheduled'
+            RETURNING transferrequestid
+        """),
+        {"now": now, "uid": user_id, "reason": cancel_reason,
+         "tid": row["transferrequestid"]},
+    )
+    if changed.scalar_one_or_none() is None:
+        raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
+    async with workforce_operation(db, "transfer_cancel"):
+        await delete_assignment_eligibility_rows(company_id, destination_id, db)
+        await db.execute(
+            text("""
+                UPDATE core.DriverAssignments
+                SET    EffectiveToAt = NULL, EndReason = NULL,
+                       TransferredToAssignmentID = NULL, UpdatedAtUtc = NOW()
+                WHERE  DriverAssignmentID = :source_id AND CompanyID = :company_id
+            """),
+            {"source_id": source_id, "company_id": company_id},
+        )
+        await db.execute(
+            text("""
+                DELETE FROM core.DriverAssignments
+                WHERE DriverAssignmentID = :destination_id AND CompanyID = :company_id
+            """),
+            {"destination_id": destination_id, "company_id": company_id},
+        )
+    await recapture_assignment_eligibility(
+        company_id, row["sourcebranchid"], source_id, periods, user_id, db,
+    )
 
 
 async def cancel_driver_transfer(
@@ -860,8 +959,85 @@ async def cancel_driver_transfer(
 ) -> DriverTransferResponse:
     """
     Cancel an in-flight (non-terminal) transfer request.
+
+    A Scheduled request can be cancelled only while its EffectiveAt is still in the
+    future (database time, under lock); that deletes the never-effective destination
+    assignment and reopens the source.
     Requires drivers.edit on source or target branch.
     DRIVER/Self users are blocked.
+    """
+    await require_non_driver_subject(company_id, user_id, db)
+
+    employee_id, row = await _lock_transfer_lifecycle(transfer_request_id, company_id, db)
+
+    if row["status"] in _TERMINAL:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Request is already '{row['status']}' and cannot be cancelled.",
+        )
+
+    await _require_edit_on_source_or_target(
+        company_id, user_id, row, db, action="cancel",
+    )
+
+    stored_status = row["stored_status"]
+    if stored_status == "Scheduled":
+        await _cancel_scheduled_transfer(company_id, user_id, row, data.cancel_reason, db)
+    else:
+        now = _now_utc()
+        changed = await db.execute(
+            text("""
+                UPDATE core.drivertransferrequests
+                SET    status             = 'Cancelled',
+                       cancelledatutc    = :now,
+                       cancelledbyuserid = :uid,
+                       cancelreason      = :reason,
+                       updatedatutc      = :now
+                WHERE  transferrequestid = :tid AND status = :old_status
+                RETURNING transferrequestid
+            """),
+            {
+                "now":    now,
+                "uid":    user_id,
+                "reason": data.cancel_reason,
+                "tid":    transfer_request_id,
+                "old_status": stored_status,
+            },
+        )
+        if changed.scalar_one_or_none() is None:
+            raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
+    if stored_status == "Scheduled":
+        await sync_employee_branch_projection(company_id, employee_id, None, db)
+        await workforce_audit.write_workforce_audit(
+            db,
+            company_id=company_id,
+            branch_id=row["sourcebranchid"],
+            actor_user_id=user_id,
+            action_code="DRIVER_TRANSFER_CANCELLED",
+            entity_name="DriverTransferRequests",
+            entity_id=transfer_request_id,
+            old_value={"status": "Scheduled", "effective_at": row["effectiveat"],
+                       "destination_driver_assignment_id": row["destinationdriverassignmentid"]},
+            new_value={"status": "Cancelled",
+                       "source_driver_assignment_id": row["sourcedriverassignmentid"],
+                       "reason": data.cancel_reason},
+        )
+    row = await _get_transfer_or_404(transfer_request_id, company_id, db)
+    return _row_to_response(row)
+
+
+async def reschedule_driver_transfer(
+    company_id: int,
+    user_id: int,
+    transfer_request_id: int,
+    data: RescheduleRequest,
+    db: AsyncConnection,
+) -> DriverTransferResponse:
+    """Change a request's EffectiveAt to another future instant.
+
+    Before completion only the request changes. For a Scheduled request, which is
+    allowed only while its current EffectiveAt is still future, the source end and the
+    destination start move together and the destination assignment keeps its id.
     """
     await require_non_driver_subject(company_id, user_id, db)
 
@@ -870,46 +1046,115 @@ async def cancel_driver_transfer(
     if row["status"] in _TERMINAL:
         raise HTTPException(
             status_code=422,
-            detail=f"Request is already '{row['status']}' and cannot be cancelled.",
+            detail=f"Request is already '{row['status']}' and cannot be rescheduled.",
         )
 
-    src_ok = await has_any_permission(
-        company_id, user_id, row["sourcebranchid"], ["drivers.edit"], db
-    )
-    tgt_ok = await has_any_permission(
-        company_id, user_id, row["targetbranchid"], ["drivers.edit"], db
+    await _require_edit_on_source_or_target(
+        company_id, user_id, row, db, action="reschedule",
     )
 
-    if not (src_ok or tgt_ok):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You need drivers.edit on the source or target branch to cancel.",
+    new_effective_at = data.effective_at
+    if not await _db_instant_is_future(new_effective_at, db):
+        raise HTTPException(status_code=422, detail="Rescheduled transfer time must be in the future.")
+    start_result = await db.execute(
+        text("""
+            SELECT EffectiveFromAt FROM core.DriverAssignments
+            WHERE DriverAssignmentID = :assignment_id AND CompanyID = :company_id
+        """),
+        {"assignment_id": row["sourcedriverassignmentid"], "company_id": company_id},
+    )
+    source_start = start_result.scalar_one()
+    if new_effective_at <= source_start:
+        raise HTTPException(status_code=422, detail="Transfer time must be after the source assignment start instant.")
+
+    old_effective_at = row["effectiveat"]
+    if row["stored_status"] == "Scheduled":
+        await _reschedule_scheduled_transfer(
+            company_id, user_id, row, new_effective_at, db,
         )
 
-    now = _now_utc()
     changed = await db.execute(
         text("""
             UPDATE core.drivertransferrequests
-            SET    status             = 'Cancelled',
-                   cancelledatutc    = :now,
-                   cancelledbyuserid = :uid,
-                   cancelreason      = :reason,
-                   updatedatutc      = :now
+            SET    effectiveat  = :effective_at,
+                   updatedatutc = NOW()
             WHERE  transferrequestid = :tid AND status = :old_status
             RETURNING transferrequestid
         """),
-        {
-            "now":    now,
-            "uid":    user_id,
-            "reason": data.cancel_reason,
-            "tid":    transfer_request_id,
-            "old_status": row["status"],
-        },
+        {"effective_at": new_effective_at, "tid": transfer_request_id,
+         "old_status": row["stored_status"]},
     )
     if changed.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="Transfer request changed; refresh and retry.")
+    await workforce_audit.write_workforce_audit(
+        db,
+        company_id=company_id,
+        branch_id=row["sourcebranchid"],
+        actor_user_id=user_id,
+        action_code="DRIVER_TRANSFER_RESCHEDULED",
+        entity_name="DriverTransferRequests",
+        entity_id=transfer_request_id,
+        old_value={"status": row["stored_status"], "effective_at": old_effective_at},
+        new_value={"status": row["stored_status"], "effective_at": new_effective_at,
+                   "source_driver_assignment_id": row["sourcedriverassignmentid"],
+                   "destination_driver_assignment_id": row["destinationdriverassignmentid"]},
+    )
     row = await _get_transfer_or_404(transfer_request_id, company_id, db)
     return _row_to_response(row)
+
+
+async def _reschedule_scheduled_transfer(
+    company_id: int,
+    user_id: int,
+    row: dict,
+    new_effective_at: datetime,
+    db: AsyncConnection,
+) -> None:
+    from app.payroll.eligibility import (
+        BoundaryWindow,
+        assert_assignment_payroll_covered,
+        lock_boundary_periods,
+        recapture_assignment_eligibility,
+    )
+
+    source_id = row["sourcedriverassignmentid"]
+    destination_id = row["destinationdriverassignmentid"]
+    old_effective_at = row["effectiveat"]
+    low, high = sorted((old_effective_at, new_effective_at))
+    periods = await lock_boundary_periods(
+        company_id,
+        [
+            BoundaryWindow(row["sourcebranchid"], low, high),
+            BoundaryWindow(row["targetbranchid"], low, high),
+        ],
+        db,
+    )
+    async with workforce_operation(db, "transfer_reschedule"):
+        await db.execute(
+            text("""
+                UPDATE core.DriverAssignments
+                SET    EffectiveToAt = :effective_at, UpdatedAtUtc = NOW()
+                WHERE  DriverAssignmentID = :source_id AND CompanyID = :company_id
+            """),
+            {"effective_at": new_effective_at, "source_id": source_id, "company_id": company_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE core.DriverAssignments
+                SET    EffectiveFromAt = :effective_at, UpdatedAtUtc = NOW()
+                WHERE  DriverAssignmentID = :destination_id AND CompanyID = :company_id
+            """),
+            {"effective_at": new_effective_at, "destination_id": destination_id,
+             "company_id": company_id},
+        )
+    await assert_assignment_payroll_covered(company_id, row["sourcebranchid"], source_id, db)
+    await assert_assignment_payroll_covered(company_id, row["targetbranchid"], destination_id, db)
+    await recapture_assignment_eligibility(
+        company_id, row["sourcebranchid"], source_id, periods, user_id, db,
+    )
+    await recapture_assignment_eligibility(
+        company_id, row["targetbranchid"], destination_id, periods, user_id, db,
+    )
 
 
 async def list_transfer_requests(
@@ -929,6 +1174,8 @@ async def list_transfer_requests(
       caller's allowed set.
     - AllCompanyBranches users with drivers.view see all company requests.
     - An optional branch_id filter further narrows results.
+    - The status filter matches the effective status (a Scheduled request whose
+      EffectiveAt has been reached matches Completed, not Scheduled).
     """
     await require_non_driver_subject(company_id, user_id, db)
 
@@ -957,48 +1204,14 @@ async def list_transfer_requests(
         params["bid"] = branch_id
 
     if status_filter is not None:
-        where_parts.append("dtr.status = :status")
+        where_parts.append("core.fn_DriverTransferStatus(dtr.status, dtr.effectiveat) = :status")
         params["status"] = status_filter
 
     where_sql = " AND ".join(where_parts)
 
     result = await db.execute(
         text(f"""
-            SELECT
-                dtr.transferrequestid,
-                dtr.companyid,
-                dtr.driverid,
-                dtr.sourcebranchid,
-                dtr.targetbranchid,
-                dtr.requestedbyuserid,
-                dtr.initiatedby,
-                dtr.status,
-                dtr.effectiveat,
-                dtr.reason,
-                dtr.notes,
-                dtr.sourceapprovedbyuserid,
-                dtr.sourceapprovedatutc,
-                dtr.targetdecidedbyuserid,
-                dtr.targetdecidedatutc,
-                dtr.targetdecisionnotes,
-                dtr.newdriverid,
-                dtr.completedatutc,
-                dtr.completedbyuserid,
-                dtr.cancelledatutc,
-                dtr.cancelledbyuserid,
-                dtr.cancelreason,
-                dtr.createdatutc,
-                dtr.updatedatutc,
-                e.fullname         AS driver_name,
-                sb.branchname      AS source_branch_name,
-                tb.branchname      AS target_branch_name,
-                u.displayname      AS requested_by_name
-            FROM   core.drivertransferrequests dtr
-            JOIN   core.drivers   d  ON d.driverid   = dtr.driverid
-            JOIN   core.employees e  ON e.employeeid = d.employeeid
-            JOIN   core.branches  sb ON sb.branchid  = dtr.sourcebranchid
-            JOIN   core.branches  tb ON tb.branchid  = dtr.targetbranchid
-            JOIN   sec.users      u  ON u.userid      = dtr.requestedbyuserid
+            {_TRANSFER_SELECT}
             WHERE  {where_sql}
             ORDER  BY dtr.createdatutc DESC
         """),

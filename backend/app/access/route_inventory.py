@@ -80,11 +80,12 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /core/people': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.view',), None, 'BRANCH', 'DENY', None, None),
     'GET /dashboard': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.dashboard.service.get_dashboard_summary', 'BRANCH', 'DENY', None, None),
     'GET /driver-transfers': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('drivers.view', 'drivers.edit'), None, 'BRANCH', 'DENY', None, None),
-    'POST /driver-transfers': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.transfer.service.create_driver_transfer_request', 'RESOURCE_SPECIFIC', 'ALLOW_OWN', 'app.access.policy.resolve_driver_self_profile', None),
+    'POST /driver-transfers': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.transfer.service.create_driver_transfer_request', 'RESOURCE_SPECIFIC', 'ALLOW_OWN', 'app.access.policy.resolve_driver_self', None),
     'GET /driver-transfers/{transfer_request_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('drivers.view', 'drivers.edit'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /driver-transfers/{transfer_request_id}/approve-source': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /driver-transfers/{transfer_request_id}/cancel': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /driver-transfers/{transfer_request_id}/complete': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'POST /driver-transfers/{transfer_request_id}/reschedule': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /driver-transfers/{transfer_request_id}/decide-target': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /payroll-setup/assignments/{assignment_id}/withdraw': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll_setup.assign',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll-setup/branch-summaries': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll_setup.view',), None, 'COMPANY', 'DENY', None, None),
@@ -200,7 +201,8 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'POST /workforce/employees': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'BRANCH', 'DENY', None, None),
     'GET /workforce/employees/{employee_id}': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.view',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'PATCH /workforce/employees/{employee_id}': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
-    'POST /workforce/employees/{employee_id}/driver-profiles': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'POST /workforce/employees/{employee_id}/driver': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'PATCH /workforce/drivers/{driver_id}': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /workforce/employees/{employee_id}/terminate': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('employees.manage',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
 }
 

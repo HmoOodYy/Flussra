@@ -81,7 +81,7 @@ async def list_people(
 @router.get(
     "/drivers",
     response_model=list[DriverSummary],
-    summary="List drivers in the user's scope",
+    summary="List permanent Drivers in the user's scope",
 )
 async def list_drivers(
     token: TokenDep,
@@ -89,9 +89,9 @@ async def list_drivers(
     branch_id: int | None = Query(None),
     driver_status: str | None = Query(
         None,
-        description="Active | Inactive | Terminated | OnLeave",
+        description="Active | Inactive | OnLeave",
     ),
-    q: str | None = Query(None, description="Search by name, driver code, or email"),
+    q: str | None = Query(None, description="Search by name, driver number, or email"),
 ) -> list[DriverSummary]:
     return await service.get_drivers(
         company_id=int(token["cid"]),

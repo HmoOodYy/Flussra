@@ -32,7 +32,7 @@ async def driver_user(
     )
     employee_id = account.scalar_one()
     driver = await db.execute(
-        text("SELECT DriverID FROM core.Drivers WHERE EmployeeID = :employee_id ORDER BY EffectiveFromAt DESC LIMIT 1"),
+        text("SELECT DriverID FROM core.Drivers WHERE EmployeeID = :employee_id"),
         {"employee_id": employee_id},
     )
     return token, int(driver.scalar_one())

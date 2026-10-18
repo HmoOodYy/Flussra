@@ -178,7 +178,7 @@ async def _create_driver(
         json={
             "branch_id": branch_id,
             "full_name": f"SM Driver {suffix}",
-            "driver_code": f"SMD-{suffix}",
+            "driver_number": f"SMD-{suffix}",
         },
         headers=_hdr(token),
     )

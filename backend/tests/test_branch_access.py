@@ -216,7 +216,7 @@ class TestPermissionDenial:
                 "branch_id":      hq_branch_id,
                 "full_name":      "Viewer Test Driver",
                 "preferred_name": "VTD",
-                "driver_code":    "VTD-VIEWER-001",
+                "driver_number":  "VTD-VIEWER-001",
                 "cdl_number":     "CDL-VTD-001",
                 "email":          "vtd_viewer@example.com",
             },

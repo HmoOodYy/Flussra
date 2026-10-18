@@ -306,11 +306,11 @@ async def test_valid_driver_role_swap_and_revoke_preserve_workforce_and_link(
     driver = await create_driver_employee_record(
         client, auth_token, branch_id=1,
         full_name=f"P2c linked Driver {uuid4().hex[:8]}",
-        driver_code=f"P2C-{uuid4().hex[:10]}",
+        driver_number=f"P2C-{uuid4().hex[:10]}",
         hire_date="2000-01-01",
     )
     employee_id = driver["employee_id"]
-    driver_id = driver["current_or_pending_driver"]["driver_id"]
+    driver_id = driver["driver"]["driver_id"]
     neutral_role = await get_company_role_id(client, auth_token, "PAYROLL_VIEWER_CO")
     driver_role = await get_company_role_id(client, auth_token, "DRIVER")
     user = await _create_role_user(client, auth_token, neutral_role)
@@ -363,7 +363,7 @@ async def test_driver_provisioning_uses_an_explicit_link_to_existing_workforce(
     driver = await create_driver_employee_record(
         client, auth_token, branch_id=1,
         full_name=f"P2c provisioned Driver {uuid4().hex[:8]}",
-        driver_code=f"P2C-{uuid4().hex[:10]}",
+        driver_number=f"P2C-{uuid4().hex[:10]}",
         hire_date="2000-01-01",
     )
     staged = await _create_staged_user(client, auth_token)
@@ -397,7 +397,7 @@ async def test_legacy_role_assign_and_revoke_are_access_only(
     driver = await create_driver_employee_record(
         client, auth_token, branch_id=1,
         full_name=f"P2c legacy-linked Driver {uuid4().hex[:8]}",
-        driver_code=f"P2C-{uuid4().hex[:10]}",
+        driver_number=f"P2C-{uuid4().hex[:10]}",
         hire_date="2000-01-01",
     )
     neutral_role = await get_company_role_id(client, auth_token, "PAYROLL_VIEWER_CO")
@@ -473,7 +473,7 @@ async def test_owner_transfer_and_replacement_role_leave_workforce_unchanged(
     driver = await create_driver_employee_record(
         client, auth_token, branch_id=1,
         full_name=f"P2c owner-linked Driver {uuid4().hex[:8]}",
-        driver_code=f"P2C-{uuid4().hex[:10]}",
+        driver_number=f"P2C-{uuid4().hex[:10]}",
         hire_date="2000-01-01",
     )
     neutral_role = await get_company_role_id(client, auth_token, "PAYROLL_VIEWER_CO")

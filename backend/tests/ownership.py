@@ -4,7 +4,11 @@ from contextlib import asynccontextmanager
 
 from sqlalchemy import text as _text
 
-from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+from tests.db_state import (
+    DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
+    FINALIZED_HISTORY_TRIGGERS,
+    suspended_test_triggers,
+)
 
 
 class CleanupRunner:
@@ -314,43 +318,58 @@ async def delete_period_and_children(db, period_id: int) -> None:
 
 async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None) -> None:
     """
-    Hard-deletes exactly the test-owned driver/employee pair and every
-    dependent row scoped to this exact driverid, then verifies every exact
-    Driver, Employee, dependent-row, and related audit residue query. `core.drivers`/`core.employees`
-    creation writes NO AuditLog row (confirmed by reading app/core/service.py
-    -- no `entityname` literal for 'Drivers'/'Employees' exists anywhere in
-    that module); the audit deletes below for those two entities are
-    therefore defensive no-ops, kept so the residue assertion still covers
-    the (currently always-zero) audit case explicitly rather than silently
-    assuming it.
+    Hard-deletes exactly the test-owned permanent Driver (and its Employee) together with
+    every DriverAssignment of that Driver and every dependent row scoped to those exact
+    DriverAssignmentIDs, then verifies every exact Driver, Employee, assignment,
+    dependent-row, and related audit residue query.
+
+    ``driver_id`` is the permanent DriverID. Deleting an effective DriverAssignment is
+    refused by its history trigger, so exactly that trigger is suspended through the
+    shared ``suspended_test_triggers`` guard around the assignment delete.
 
     This context unwinds BEFORE its enclosing `_owned_period` (LIFO nesting)
-    and must delete this driver's DraftLines/BonusEvents here to satisfy
-    fk_DraftLines_Driver/fk_BonusEvents_Driver before the driver row itself
-    can be deleted -- which means `delete_period_and_children`'s own later
+    and must delete this driver's DraftLines/BonusEvents here to satisfy their
+    DriverAssignment foreign keys before the assignment rows themselves can be
+    deleted -- which means `delete_period_and_children`'s own later
     capture-then-delete audit sweep will find these rows already gone. This
     function therefore captures and deletes their exact PayrollDraftLines/
     PayrollBonusEvents audit rows itself, BEFORE removing the rows, so no
     audit entry is ever orphaned regardless of unwind order.
     """
+    assignment_ids = [
+        r["driverassignmentid"] for r in (await db.execute(
+            _text("SELECT driverassignmentid FROM core.driverassignments WHERE driverid = :id"),
+            {"id": driver_id},
+        )).mappings().all()
+    ]
     draft_line_ids = [
         r["draftlineid"] for r in (await db.execute(
-            _text("SELECT draftlineid FROM payroll.payrolldraftlines WHERE driverid = :id"), {"id": driver_id},
+            _text("SELECT draftlineid FROM payroll.payrolldraftlines WHERE driverassignmentid = ANY(:ids)"),
+            {"ids": assignment_ids},
         )).mappings().all()
     ]
     bonus_event_ids = [
         r["payrollbonuseventid"] for r in (await db.execute(
-            _text("SELECT payrollbonuseventid FROM payroll.payrollbonusevents WHERE driverid = :id"), {"id": driver_id},
+            _text("SELECT payrollbonuseventid FROM payroll.payrollbonusevents WHERE driverassignmentid = ANY(:ids)"),
+            {"ids": assignment_ids},
         )).mappings().all()
     ]
     pay_rule_ids = [
         r["driverpayruleid"] for r in (await db.execute(
-            _text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverid = :id"), {"id": driver_id},
+            _text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:ids)"),
+            {"ids": assignment_ids},
+        )).mappings().all()
+    ]
+    transfer_ids = [
+        r["transferrequestid"] for r in (await db.execute(
+            _text("SELECT transferrequestid FROM core.drivertransferrequests WHERE driverid = :id"),
+            {"id": driver_id},
         )).mappings().all()
     ]
     draft_line_id_strs = [str(i) for i in draft_line_ids] or [""]
     bonus_event_id_strs = [str(i) for i in bonus_event_ids] or [""]
     pay_rule_id_strs = [str(i) for i in pay_rule_ids] or [""]
+    transfer_id_strs = [str(i) for i in transfer_ids] or [""]
 
     runner = CleanupRunner()
     await runner.execute(db,
@@ -362,15 +381,28 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
     await runner.execute(db,
         "DELETE FROM audit.auditlog WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)",
         {"ids": pay_rule_id_strs}, label="delete driver-scoped DriverPayRules audit")
-    await runner.execute(db, "DELETE FROM payroll.payrollfinallines WHERE driverid = :id", {"id": driver_id}, label="delete FinalLines")
-    await runner.execute(db, "DELETE FROM payroll.payrolldraftlines WHERE driverid = :id", {"id": driver_id}, label="delete DraftLines")
-    await runner.execute(db, "DELETE FROM payroll.payrollbonusevents WHERE driverid = :id", {"id": driver_id}, label="delete BonusEvents")
-    await runner.execute(db, "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE driverid = :id", {"id": driver_id}, label="delete PPDES")
-    await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverid = :id", {"id": driver_id}, label="delete DriverRates")
-    await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverid = :id", {"id": driver_id}, label="delete DriverPayRules")
+    await runner.execute(db,
+        "DELETE FROM audit.auditlog WHERE entityname = 'DriverTransferRequests' AND entityid = ANY(:ids)",
+        {"ids": transfer_id_strs}, label="delete driver-scoped DriverTransferRequests audit")
+    await runner.execute(db, "DELETE FROM payroll.payrollfinallines WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete FinalLines")
+    await runner.execute(db, "DELETE FROM payroll.payrolldraftlines WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DraftLines")
+    await runner.execute(db, "DELETE FROM payroll.payrollbonusevents WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete BonusEvents")
+    await runner.execute(db, "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete PPDES")
+    await runner.execute(db, "DELETE FROM payroll.payrollperioddrivereligibility WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete PPDE")
+    await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverRates")
+    await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverPayRules")
+    await runner.execute(db, "DELETE FROM core.drivertransferrequests WHERE driverid = :id", {"id": driver_id}, label="delete TransferRequests")
     await runner.execute(db,
         "DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid", {"eid": str(driver_id)},
         label="delete Drivers audit")
+    try:
+        async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+            await db.execute(
+                _text("DELETE FROM core.driverassignments WHERE driverid = :id"), {"id": driver_id},
+            )
+    except Exception as exc:  # noqa: BLE001 -- recorded, never dropped
+        exc.add_note("cleanup step failed: delete DriverAssignments")
+        runner._errors.append(exc)
     await runner.execute(db, "DELETE FROM core.drivers WHERE driverid = :id", {"id": driver_id}, label="delete Driver row")
     if employee_id is not None:
         await runner.execute(db,
@@ -382,13 +414,16 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
             _text("""
                 SELECT
                     (SELECT COUNT(*) FROM core.drivers WHERE driverid = :did) AS drivers,
+                    (SELECT COUNT(*) FROM core.driverassignments WHERE driverid = :did) AS assignments,
                     (SELECT COUNT(*) FROM core.employees WHERE employeeid = :eid) AS employees,
-                    (SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverid = :did) AS final_lines,
-                    (SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE driverid = :did) AS draft_lines,
-                    (SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE driverid = :did) AS bonuses,
-                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE driverid = :did) AS day_state,
-                    (SELECT COUNT(*) FROM payroll.driverrates WHERE driverid = :did) AS rates,
-                    (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did) AS pay_rules,
+                    (SELECT COUNT(*) FROM core.drivertransferrequests WHERE driverid = :did) AS transfers,
+                    (SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverassignmentid = ANY(:aids)) AS final_lines,
+                    (SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE driverassignmentid = ANY(:aids)) AS draft_lines,
+                    (SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE driverassignmentid = ANY(:aids)) AS bonuses,
+                    (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE driverassignmentid = ANY(:aids)) AS day_state,
+                    (SELECT COUNT(*) FROM payroll.payrollperioddrivereligibility WHERE driverassignmentid = ANY(:aids)) AS eligibility,
+                    (SELECT COUNT(*) FROM payroll.driverrates WHERE driverassignmentid = ANY(:aids)) AS rates,
+                    (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:aids)) AS pay_rules,
                     (SELECT COUNT(*) FROM audit.auditlog
                      WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:dlids)) AS draft_line_audit,
                     (SELECT COUNT(*) FROM audit.auditlog
@@ -396,13 +431,16 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
                     (SELECT COUNT(*) FROM audit.auditlog
                      WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ruleids)) AS rule_audit,
                     (SELECT COUNT(*) FROM audit.auditlog
+                     WHERE entityname = 'DriverTransferRequests' AND entityid = ANY(:trids)) AS transfer_audit,
+                    (SELECT COUNT(*) FROM audit.auditlog
                      WHERE entityname = 'Drivers' AND entityid = :did_text) AS driver_audit,
                     (SELECT COUNT(*) FROM audit.auditlog
                      WHERE entityname = 'Employees' AND entityid = :eid_text) AS employee_audit
             """), {
-                "did": driver_id, "eid": employee_id,
+                "did": driver_id, "eid": employee_id, "aids": assignment_ids,
                 "dlids": draft_line_id_strs, "beids": bonus_event_id_strs,
-                "ruleids": pay_rule_id_strs, "did_text": str(driver_id),
+                "ruleids": pay_rule_id_strs, "trids": transfer_id_strs,
+                "did_text": str(driver_id),
                 "eid_text": str(employee_id) if employee_id is not None else "",
             },
         )).mappings().one()

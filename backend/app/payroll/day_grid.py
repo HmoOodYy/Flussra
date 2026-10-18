@@ -57,7 +57,7 @@ from app.payroll.draft_line_mutation import (
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_workdate_via_snapshot,
     _is_snapshot_row_eligible_for_workdate,
-    _lifecycle_eligible_driver_ids,
+    _lifecycle_eligible_assignment_ids,
     require_period_eligibility_snapshot,
 )
 from app.payroll.line_audit import _write_line_audit
@@ -218,7 +218,7 @@ async def get_day_grid(
     )
     snap_rows_all = list(snap_rows_result.mappings().all())
     snapshot_driver_ids = [r["driverid"] for r in snap_rows_all]
-    lifecycle_eligible_ids = await _lifecycle_eligible_driver_ids(
+    lifecycle_eligible_ids = await _lifecycle_eligible_assignment_ids(
         period_id, company_id, branch_id, work_date, snapshot_driver_ids, db,
     )
 

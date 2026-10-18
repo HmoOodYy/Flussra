@@ -1,11 +1,12 @@
 """Resource-aware Access policy for the current DRIVER/Self product surface."""
+from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.workforce.effective import resolve_effective_driver_profile
+from app.workforce.effective import resolve_effective_driver_assignment, resolve_employee_driver
 
 
 async def is_driver_self_subject(
@@ -43,14 +44,27 @@ async def require_non_driver_subject(
         )
 
 
-async def resolve_driver_self_profile(
+async def resolve_driver_self(
     company_id: int,
     user_id: int,
     db: AsyncConnection,
     *,
     target_driver_id: int | None = None,
+    at: datetime | None = None,
+    require_assignment: bool = True,
 ) -> dict[str, Any]:
-    """Resolve and optionally match the linked Employee's effective Driver profile."""
+    """Resolve a DRIVER Self account to its own Driver and effective assignment.
+
+    Own identity is always User -> Employee -> Driver -> effective DriverAssignment
+    at the operation instant (database NOW() when ``at`` is None). It never comes
+    from an Access scope. Every fail-closed case stays: staged, unlinked,
+    cross-company, inactive or suspended accounts, a missing Driver, and, for
+    current actions (``require_assignment=True``), a missing effective assignment
+    (pending, terminated or transferred out).
+
+    Returns ``{"employee_id", "driver_id", "driver", "assignment"}`` where
+    ``assignment`` is the effective DriverAssignment row (or None for historical use).
+    """
     account = await db.execute(
         text("""
             SELECT u.EmployeeID
@@ -86,19 +100,69 @@ async def resolve_driver_self_profile(
             detail="A valid linked DRIVER Self account is required.",
         )
 
-    profile = await resolve_effective_driver_profile(
-        company_id, int(row["employeeid"]), None, db
-    )
-    if profile is None:
+    employee_id = int(row["employeeid"])
+    driver = await resolve_employee_driver(company_id, employee_id, db)
+    if driver is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="No effective current Driver profile is available for this operation.",
+            detail="No Driver is linked to this DRIVER Self account.",
         )
-
-    own_driver_id = int(profile["driverid"])
+    own_driver_id = int(driver["driverid"])
     if target_driver_id is not None and own_driver_id != target_driver_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="A DRIVER Self account may only act on its own effective Driver profile.",
+            detail="A DRIVER Self account may only act on its own Driver.",
         )
-    return profile
+    assignment = await resolve_effective_driver_assignment(company_id, own_driver_id, at, db)
+    if assignment is None and require_assignment:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No effective current Driver assignment is available for this operation.",
+        )
+    return {
+        "employee_id": employee_id,
+        "driver_id": own_driver_id,
+        "driver": driver,
+        "assignment": assignment,
+    }
+
+
+async def require_self_owns_assignment(
+    company_id: int,
+    user_id: int,
+    driver_assignment_id: int,
+    db: AsyncConnection,
+    *,
+    current_only: bool = False,
+) -> dict[str, Any]:
+    """Prove that a DRIVER Self account owns a DriverAssignment.
+
+    Ownership is ``assignment.DriverID == own DriverID``. This is the one helper
+    every Self access to an assignment-addressed resource uses. Historical
+    assignments of the own Driver are owned; ``current_only`` restricts to the
+    effective one. Another Driver's assignment, a missing assignment and a
+    cross-company assignment are all the same 403.
+    """
+    own = await resolve_driver_self(
+        company_id, user_id, db, require_assignment=current_only,
+    )
+    result = await db.execute(
+        text("""
+            SELECT DriverAssignmentID, DriverID
+            FROM core.DriverAssignments
+            WHERE DriverAssignmentID = :aid AND CompanyID = :cid
+        """),
+        {"aid": driver_assignment_id, "cid": company_id},
+    )
+    target = result.mappings().first()
+    if target is None or int(target["driverid"]) != own["driver_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A DRIVER Self account may only access its own Driver assignments.",
+        )
+    if current_only and own["assignment"]["driverassignmentid"] != driver_assignment_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the effective current Driver assignment is available for this operation.",
+        )
+    return {**own, "target_assignment_id": driver_assignment_id}

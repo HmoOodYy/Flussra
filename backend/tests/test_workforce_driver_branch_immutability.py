@@ -1,4 +1,4 @@
-"""Driver branch immutability under role assignment (Workforce-owned identity).
+"""DriverAssignment branch immutability under role assignment (Workforce-owned identity).
 
 Restored from the retired Phase-2C additions: the contract is independent of the
 PayItem/DriverRate runtime and stays live across the P4b cutover.
@@ -50,18 +50,18 @@ async def _make_driver(
     record = await create_driver_employee_record(
         client, token, branch_id=branch_id,
         full_name=f"Phase2C Driver {suffix}",
-        driver_code=f"P2C-{suffix}-{uuid4().hex[:8]}",
+        driver_number=f"P2C-{suffix}-{uuid4().hex[:8]}",
     )
-    return int(record["current_or_pending_driver"]["driver_id"])
+    return int(record["driver"]["driver_id"])
 
 
-async def _link_driver_profile(
+async def _link_driver(
     client: httpx.AsyncClient, token: str, user_id: int, branch_id: int, label: str,
 ) -> int:
     record = await create_driver_employee_record(
         client, token, branch_id=branch_id,
         full_name=f"Phase2C {label}",
-        driver_code=f"P2C-{uuid4().hex[:12]}",
+        driver_number=f"P2C-{uuid4().hex[:12]}",
     )
     response = await client.put(
         f"/admin/users/{user_id}/employee-link",
@@ -69,7 +69,7 @@ async def _link_driver_profile(
         headers=auth(token),
     )
     assert response.status_code == 200, response.text
-    return int(record["current_or_pending_driver"]["driver_id"])
+    return int(record["driver"]["driver_id"])
 
 
 # ===========================================================================
@@ -79,7 +79,7 @@ async def _link_driver_profile(
 class TestDriverBranchImmutability:
     """
     DRIVER uses a Workforce-owned Self identity; legacy branch-scoped
-    assignments cannot mutate the linked Driver profile.
+    assignments cannot mutate the linked Driver or its DriverAssignment.
     """
 
     @pytest.mark.asyncio
@@ -90,10 +90,10 @@ class TestDriverBranchImmutability:
         paytest_branch_id: int,
     ):
         """
-        1. Create user and Workforce profile on branch 1 (HQ).
+        1. Create user and Workforce Driver on branch 1 (HQ).
         2. Link the Employee and assign DRIVER with Self scope.
         3. Attempt a legacy branch-scoped assignment and require 422.
-        4. Verify the existing DriverID and HQ branch remain unchanged.
+        4. Verify the existing DriverID, its assignment and HQ branch remain unchanged.
         """
         import random
         username = f"bsync_{random.randint(10000, 99999)}"
@@ -105,8 +105,8 @@ class TestDriverBranchImmutability:
 
         hq_branch_id = 1
 
-        # Link a test-owned Workforce profile, then assign the valid DRIVER/Self role.
-        original_driver_id = await _link_driver_profile(
+        # Link a test-owned Workforce Driver, then assign the valid DRIVER/Self role.
+        original_driver_id = await _link_driver(
             session_client, auth_token, user_id, hq_branch_id, "Branch Sync Test",
         )
         r1 = await session_client.post(
@@ -120,9 +120,10 @@ class TestDriverBranchImmutability:
         info1 = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
         assert info1.status_code == 200
         data1 = info1.json()
-        assert data1["has_driver_profile"] is True
+        assert data1["has_driver"] is True
         assert data1["driver_id"] == original_driver_id
         assert data1["branch_id"] == hq_branch_id
+        assert data1["driver_assignment_id"] is not None
 
         # Attempt the retired branch-scoped assignment shape.
         r2 = await session_client.post(
@@ -140,8 +141,9 @@ class TestDriverBranchImmutability:
         data2 = info2.json()
         assert data2["branch_id"] == hq_branch_id
 
-        # DriverID must be unchanged (no duplicate created)
+        # DriverID and assignment must be unchanged (no duplicate created)
         assert data2["driver_id"] == original_driver_id
+        assert data2["driver_assignment_id"] == data1["driver_assignment_id"]
 
     @pytest.mark.asyncio
     async def test_non_driver_role_no_profile_created(
@@ -185,6 +187,6 @@ class TestDriverBranchImmutability:
         # Admin checks driver info for the new user — should have no driver profile
         info = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
         assert info.status_code == 200
-        assert info.json()["has_driver_profile"] is False, (
+        assert info.json()["has_driver"] is False, (
             "Assigning a non-DRIVER role must not create a driver profile"
         )

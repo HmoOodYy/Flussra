@@ -118,7 +118,7 @@ async def create_provisioned_test_user(
         employee = await create_driver_employee_record(
             client, admin_token, branch_id=driver_branch_id,
             full_name=f"{display_name or username} Employee",
-            driver_code=f"T-{username[:24]}",
+            driver_number=f"T-{username[:24]}",
         )
         employee_id = employee["employee_id"]
 

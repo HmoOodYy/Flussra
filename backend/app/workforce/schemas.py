@@ -1,4 +1,4 @@
-"""Request and response contracts for Workforce Employees and Driver profiles."""
+"""Request and response contracts for Workforce Employees, Drivers and Driver assignments."""
 
 from datetime import date
 from typing import Literal
@@ -6,12 +6,13 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
-class DriverProfileCreate(BaseModel):
+class DriverCreate(BaseModel):
+    """Create the permanent Driver together with its first home-Branch assignment."""
+
     model_config = ConfigDict(extra="forbid")
 
-    driver_code: str | None = None
+    driver_number: str | None = None
     cdl_number: str | None = None
-    external_driver_id: str | None = None
     effective_from_at: AwareDatetime | None = None
 
 
@@ -27,7 +28,7 @@ class EmployeeCreate(BaseModel):
     hire_date: date | None = None
     employment_status: Literal["Active", "Inactive"] = "Active"
     termination_date: date | None = None
-    driver_profile: DriverProfileCreate | None = None
+    driver: DriverCreate | None = None
 
     @field_validator("full_name")
     @classmethod
@@ -71,12 +72,11 @@ class EmployeeTermination(BaseModel):
         return value.strip()
 
 
-class DriverProfileUpdate(BaseModel):
+class DriverUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    driver_code: str | None = None
+    driver_number: str | None = None
     cdl_number: str | None = None
-    external_driver_id: str | None = None
     driver_status: Literal["Active", "Inactive", "OnLeave"] | None = None
 
 
@@ -88,16 +88,27 @@ class UserSummary(BaseModel):
     can_login: bool
 
 
-class DriverProfileSummary(BaseModel):
+class DriverSummary(BaseModel):
+    """The permanent Driver identity."""
+
+    driver_id: int
+    driver_number: str | None = None
+    cdl_number: str | None = None
+    driver_status: str
+
+
+class DriverAssignmentSummary(BaseModel):
+    """One continuous home-Branch tenure of the permanent Driver."""
+
+    driver_assignment_id: int
     driver_id: int
     branch_id: int
     branch_name: str
-    driver_code: str | None = None
-    cdl_number: str | None = None
-    external_driver_id: str | None = None
-    driver_status: str
     effective_from_at: AwareDatetime
     effective_to_at: AwareDatetime | None = None
+    end_reason: str | None = None
+    transferred_from_assignment_id: int | None = None
+    transferred_to_assignment_id: int | None = None
 
 
 class EmployeeSummary(BaseModel):
@@ -114,9 +125,10 @@ class EmployeeSummary(BaseModel):
     employment_status: str
     termination_date: date | None = None
     driver_state: Literal["current", "pending", "none"]
-    current_or_pending_driver: DriverProfileSummary | None = None
+    driver: DriverSummary | None = None
+    current_or_pending_assignment: DriverAssignmentSummary | None = None
 
 
 class EmployeeDetail(EmployeeSummary):
-    driver_profiles: list[DriverProfileSummary] = Field(default_factory=list)
+    driver_assignments: list[DriverAssignmentSummary] = Field(default_factory=list)
     linked_user: UserSummary | None = None

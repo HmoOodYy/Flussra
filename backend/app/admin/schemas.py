@@ -74,7 +74,7 @@ class UserAdmin(BaseModel):
     company_role_scope: str | None = None
     company_role_branch_id: int | None = None
     company_role_branch_name: str | None = None
-    # ── Driver profile — non-None when the user is linked to a core.Drivers row ──
+    # ── Permanent Driver — non-None when the user is linked to a core.Drivers row ──
     driver_id: int | None = None
     # ── Permission codes ──
     # Permissions granted by the current company role (or all perms for Company Owner)

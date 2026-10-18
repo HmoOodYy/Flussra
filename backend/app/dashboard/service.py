@@ -223,11 +223,11 @@ async def get_dashboard_summary(
     # If both, payroll scope takes precedence (typically broader or overlapping).
     active_drivers = 0
     if has_payroll:
-        bf_d, bp_d = _make_branch_filter(payroll_all, payroll_bids, "d.branchid")
+        bf_d, bp_d = _make_branch_filter(payroll_all, payroll_bids, "asg.branchid")
         driver_rows = await _query_driver_counts(db, company_id, bf_d, bp_d)
         active_drivers = sum(row["cnt"] for row in driver_rows)
     elif has_people:
-        bf_d, bp_d = _make_branch_filter(people_all, people_bids, "d.branchid")
+        bf_d, bp_d = _make_branch_filter(people_all, people_bids, "asg.branchid")
         driver_rows = await _query_driver_counts(db, company_id, bf_d, bp_d)
         active_drivers = sum(row["cnt"] for row in driver_rows)
 
@@ -242,7 +242,7 @@ async def get_dashboard_summary(
     pending_rates: int | None = None
     if has_rates:
         # Join through drivers to apply branch scope.
-        bf_dr, bp_dr = _make_branch_filter(rates_all, rates_bids, "d.branchid")
+        bf_dr, bp_dr = _make_branch_filter(rates_all, rates_bids, "asg.branchid")
         pending_rates = await _query_pending_rates(db, company_id, bf_dr, bp_dr)
 
     # ── 10. Setup warnings (permission-gated) ──────────────────────────────────
@@ -290,7 +290,7 @@ async def get_dashboard_summary(
             )
         # Fill driver counts into summaries (if driver data was fetched for payroll scope).
         if has_payroll:
-            bf_d2, bp_d2 = _make_branch_filter(payroll_all, payroll_bids, "d.branchid")
+            bf_d2, bp_d2 = _make_branch_filter(payroll_all, payroll_bids, "asg.branchid")
             driver_rows2 = await _query_driver_counts(db, company_id, bf_d2, bp_d2)
             branch_driver_count = {row["branchid"]: row["cnt"] for row in driver_rows2}
             for s in branch_summaries:
@@ -467,15 +467,16 @@ async def _query_driver_counts(
 ):
     result = await db.execute(
         text(f"""
-            SELECT d.branchid, COUNT(*) AS cnt
-            FROM   core.drivers   d
-            JOIN   core.employees e ON e.employeeid = d.employeeid
-            WHERE  d.companyid        = :company_id
-              AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+            SELECT asg.branchid, COUNT(*) AS cnt
+            FROM   core.driverassignments asg
+            JOIN   core.drivers   d ON d.driverid   = asg.driverid
+            JOIN   core.employees e ON e.employeeid = asg.employeeid
+            WHERE  asg.companyid      = :company_id
+              AND  (asg.endreason IS NOT NULL OR d.driverstatus = 'Active')
               AND  e.employmentstatus IN ('Active', 'Terminated')
-              AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid) = d.driverid
+              AND  asg.driverassignmentid = core.fn_EffectiveDriverAssignment(asg.companyid, asg.driverid)
               {_and(branch_filter)}
-            GROUP  BY d.branchid
+            GROUP  BY asg.branchid
         """),
         {"company_id": company_id, **branch_params},
     )
@@ -606,12 +607,12 @@ async def _query_pending_rates(
     branch_filter: str,
     branch_params: dict,
 ) -> int:
-    """Count DriverRates in PendingApproval status, scoped by branch via driver join."""
+    """Count DriverRates in PendingApproval status, scoped by branch via assignment join."""
     result = await db.execute(
         text(f"""
             SELECT COUNT(*) AS cnt
             FROM   payroll.driverrates dr
-            JOIN   core.drivers        d ON d.driverid  = dr.driverid
+            JOIN   core.driverassignments asg ON asg.driverassignmentid = dr.driverassignmentid
             WHERE  dr.companyid = :company_id
               AND  dr.status    = 'PendingApproval'
               {_and(branch_filter)}
@@ -647,7 +648,7 @@ async def _compute_setup_warnings(
     warnings: list[SetupWarning] = []
 
     bf_b, bp_b = _make_branch_filter(can_see_all, branch_ids, "b.branchid")
-    bf_d, bp_d = _make_branch_filter(can_see_all, branch_ids, "d.branchid")
+    bf_d, bp_d = _make_branch_filter(can_see_all, branch_ids, "asg.branchid")
     bf_p, bp_p = _make_branch_filter(can_see_all, branch_ids, "p.branchid")
 
     # W1: canonical Payroll Setup readiness — only for setup admins.
@@ -711,22 +712,23 @@ async def _compute_setup_warnings(
     if has_rates or has_setup:
         result = await db.execute(
             text(f"""
-                SELECT d.branchid, b.branchname, COUNT(d.driverid) AS cnt
-                FROM   core.drivers   d
-                JOIN   core.employees e ON e.employeeid  = d.employeeid
-                JOIN   core.branches  b ON b.branchid    = d.branchid
-                WHERE  d.companyid        = :company_id
-                  AND  d.driverstatus IN ('Active', 'Transferred', 'Terminated')
+                SELECT asg.branchid, b.branchname, COUNT(asg.driverassignmentid) AS cnt
+                FROM   core.driverassignments asg
+                JOIN   core.drivers   d ON d.driverid    = asg.driverid
+                JOIN   core.employees e ON e.employeeid  = asg.employeeid
+                JOIN   core.branches  b ON b.branchid    = asg.branchid
+                WHERE  asg.companyid      = :company_id
+                  AND  (asg.endreason IS NOT NULL OR d.driverstatus = 'Active')
                   AND  e.employmentstatus IN ('Active', 'Terminated')
-                  AND  core.fn_EffectiveDriverProfile(d.companyid, d.employeeid) = d.driverid
+                  AND  asg.driverassignmentid = core.fn_EffectiveDriverAssignment(asg.companyid, asg.driverid)
                   {_and(bf_d)}
                   AND  NOT EXISTS (
                       SELECT 1
                       FROM   payroll.driverrateassignments a
-                      WHERE  a.driverid = d.driverid
+                      WHERE  a.driverassignmentid = asg.driverassignmentid
                         AND  a.status   = 'Approved'
                   )
-                GROUP  BY d.branchid, b.branchname
+                GROUP  BY asg.branchid, b.branchname
             """),
             {"company_id": company_id, **bp_d},
         )

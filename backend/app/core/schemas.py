@@ -32,22 +32,25 @@ class PersonSummary(BaseModel):
     primary_phone: str | None = None
     hire_date: date | None = None
     driver_id: int | None = None
-    driver_code: str | None = None
+    driver_assignment_id: int | None = None
+    driver_number: str | None = None
     driver_status: str | None = None
     cdl_number: str | None = None
 
 
 class DriverSummary(BaseModel):
+    """A permanent Driver with the Branch of its current (else pending, else latest) assignment."""
+
     driver_id: int
     employee_id: int
+    driver_assignment_id: int | None = None
     branch_id: int
     branch_name: str
     full_name: str
     preferred_name: str | None = None
     employee_key: str | None = None
-    driver_code: str | None = None
+    driver_number: str | None = None
     cdl_number: str | None = None
-    external_driver_id: str | None = None
     driver_status: str
     employment_status: str
     email: str | None = None
@@ -66,9 +69,8 @@ class DriverCreate(BaseModel):
     email: str | None = None
     primary_phone: str | None = None
     hire_date: date | None = None
-    driver_code: str | None = None
+    driver_number: str | None = None
     cdl_number: str | None = None
-    external_driver_id: str | None = None
 
     @field_validator("full_name")
     @classmethod
@@ -81,9 +83,8 @@ class DriverCreate(BaseModel):
 class DriverUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    driver_code: str | None = None
+    driver_number: str | None = None
     cdl_number: str | None = None
-    external_driver_id: str | None = None
     driver_status: str | None = None
 
     @field_validator("driver_status")

@@ -59,7 +59,7 @@ def test_driver_self_disposition_is_limited_to_transfer_create():
     assert transfer.permission_codes == ()
     assert transfer.special_policy == "app.transfer.service.create_driver_transfer_request"
     assert transfer.resource_scope == "RESOURCE_SPECIFIC"
-    assert transfer.ownership_policy == "app.access.policy.resolve_driver_self_profile"
+    assert transfer.ownership_policy == "app.access.policy.resolve_driver_self"
 
 
 def test_inventory_rejects_missing_auth_policy_classification():
@@ -73,7 +73,7 @@ def test_inventory_rejects_missing_auth_policy_classification():
 
 def test_inventory_rejects_allow_own_without_ownership_policy():
     malformed = RouteAuthorization(
-        "AUTHENTICATED", "SPECIAL_POLICY", (), "app.access.policy.resolve_driver_self_profile",
+        "AUTHENTICATED", "SPECIAL_POLICY", (), "app.access.policy.resolve_driver_self",
         "SELF", "ALLOW_OWN", None, None,
     )
     assert "ALLOW_OWN requires ownership policy" in " ".join(

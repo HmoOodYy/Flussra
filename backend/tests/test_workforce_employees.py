@@ -9,6 +9,7 @@ import httpx
 import pytest
 from sqlalchemy import text
 
+from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
 from tests.db_state import (
     FINAL_LINE_IMMUTABLE_TRIGGER,
     allow_final_line_insert,
@@ -67,17 +68,24 @@ async def test_staff_employee_without_user_and_generated_key(
 
 
 @pytest.mark.asyncio
-async def test_driver_employee_without_user_has_profile_and_audit(
+async def test_driver_employee_without_user_has_driver_assignment_and_audit(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id,
-        driver_profile={"driver_code": f"P1B-{suffix()}"},
+        driver={"driver_number": f"P1B-{suffix()}"},
     )
-    profile = employee["current_or_pending_driver"]
+    driver = employee["driver"]
+    assignment = employee["current_or_pending_assignment"]
     assert employee["driver_state"] == "current"
-    assert profile["effective_from_at"] is not None
-    assert profile["branch_id"] == hq_branch_id
+    assert driver["driver_status"] == "Active"
+    assert assignment["driver_id"] == driver["driver_id"]
+    assert assignment["effective_from_at"] is not None
+    assert assignment["effective_to_at"] is None and assignment["end_reason"] is None
+    assert assignment["branch_id"] == hq_branch_id
+    assert [a["driver_assignment_id"] for a in employee["driver_assignments"]] == [
+        assignment["driver_assignment_id"]
+    ]
     assert employee["employee_key"] == f"E{employee['employee_id']:06d}"
     assert (await direct_db.execute(
         text("SELECT COUNT(*) FROM sec.Users WHERE EmployeeID = :id"), {"id": employee["employee_id"]},
@@ -90,15 +98,15 @@ async def test_driver_employee_without_user_has_profile_and_audit(
              AND ActionCode = 'EMPLOYEE_CREATED')
             OR
             (EntityName = 'Drivers' AND EntityID = :driver_id
-             AND ActionCode = 'DRIVER_PROFILE_CREATED')
+             AND ActionCode = 'DRIVER_CREATED')
           )
-    """), {"employee_id": str(employee["employee_id"]), "driver_id": str(profile["driver_id"])})).mappings().all()
+    """), {"employee_id": str(employee["employee_id"]), "driver_id": str(driver["driver_id"])})).mappings().all()
     assert {
         (row["entityname"], row["actioncode"], int(row["entityid"]))
         for row in audits
     } == {
         ("Employees", "EMPLOYEE_CREATED", employee["employee_id"]),
-        ("Drivers", "DRIVER_PROFILE_CREATED", profile["driver_id"]),
+        ("Drivers", "DRIVER_CREATED", driver["driver_id"]),
     }
     assert all(row["entityschema"] == "core" for row in audits)
     employee_audit = next(row for row in audits if row["entityname"] == "Employees")
@@ -106,7 +114,7 @@ async def test_driver_employee_without_user_has_profile_and_audit(
 
 
 @pytest.mark.asyncio
-async def test_workforce_create_rejects_retired_employee_type_and_profile_branch(
+async def test_workforce_create_rejects_retired_employee_type_and_driver_branch(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int,
 ):
     retired_field = await client.post(
@@ -118,8 +126,8 @@ async def test_workforce_create_rejects_retired_employee_type_and_profile_branch
 
     employee = await create_employee(client, auth_token, hq_branch_id)
     branch_override = await client.post(
-        f"/workforce/employees/{employee['employee_id']}/driver-profiles",
-        json={"driver_code": f"P1B-{suffix()}", "branch_id": hq_branch_id},
+        f"/workforce/employees/{employee['employee_id']}/driver",
+        json={"driver_number": f"P1B-{suffix()}", "branch_id": hq_branch_id},
         headers=auth(auth_token),
     )
     assert branch_override.status_code == 422
@@ -156,7 +164,7 @@ async def test_non_driver_employee_can_be_terminated_but_driver_lifecycle_edits_
     assert terminated.json()["termination_date"] == termination_date
 
     driver = await create_employee(
-        client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}"},
+        client, auth_token, hq_branch_id, driver={"driver_number": f"P1B-{suffix()}"},
     )
     rejected = await client.patch(
         f"/workforce/employees/{driver['employee_id']}",
@@ -167,26 +175,25 @@ async def test_non_driver_employee_can_be_terminated_but_driver_lifecycle_edits_
 
 
 @pytest.mark.asyncio
-async def test_historical_driver_profile_edits_are_rejected_but_pending_edits_work(
+async def test_driver_without_current_or_pending_assignment_cannot_be_edited_but_pending_can(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     historical = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
+        driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
-    historical_profile = historical["current_or_pending_driver"]
-    await direct_db.execute(text("""
-        UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveToAt = TIMESTAMPTZ '2001-01-01T00:00:00Z'
-        WHERE DriverID = :driver_id
-    """), {"driver_id": historical_profile["driver_id"]})
+    historical_driver = historical["driver"]
+    await end_driver_assignment(
+        direct_db, historical["current_or_pending_assignment"]["driver_assignment_id"],
+        ended_at="2001-01-01T00:00:00Z", end_reason="Terminated",
+    )
 
     code_edit = await client.patch(
-        f"/core/drivers/{historical_profile['driver_id']}",
-        json={"driver_code": f"P1B-{suffix()}"}, headers=auth(auth_token),
+        f"/core/drivers/{historical_driver['driver_id']}",
+        json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
     )
     cdl_edit = await client.patch(
-        f"/core/drivers/{historical_profile['driver_id']}",
+        f"/core/drivers/{historical_driver['driver_id']}",
         json={"cdl_number": "HISTORICAL-CDL"}, headers=auth(auth_token),
     )
     assert code_edit.status_code == 422
@@ -194,11 +201,11 @@ async def test_historical_driver_profile_edits_are_rejected_but_pending_edits_wo
 
     pending = await create_employee(
         client, auth_token, hq_branch_id,
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2099-01-01T00:00:00Z"},
+        driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2099-01-01T00:00:00Z"},
     )
-    pending_profile = pending["current_or_pending_driver"]
+    pending_driver = pending["driver"]
     changed = await client.patch(
-        f"/core/drivers/{pending_profile['driver_id']}",
+        f"/core/drivers/{pending_driver['driver_id']}",
         json={"cdl_number": "PENDING-CDL"}, headers=auth(auth_token),
     )
     assert changed.status_code == 200, changed.text
@@ -206,30 +213,43 @@ async def test_historical_driver_profile_edits_are_rejected_but_pending_edits_wo
 
 
 @pytest.mark.asyncio
-async def test_current_instant_profile_remains_editable(
+async def test_current_instant_driver_remains_editable_through_both_surfaces(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     employee = await create_employee(
-        client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}"},
+        client, auth_token, hq_branch_id, driver={"driver_number": f"P1B-{suffix()}"},
     )
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id = employee["driver"]["driver_id"]
+    assignment_id = employee["current_or_pending_assignment"]["driver_assignment_id"]
     stored_from_at = (await direct_db.execute(text(
-        "SELECT EffectiveFromAt FROM core.Drivers WHERE DriverID = :driver_id"
-    ), {"driver_id": driver_id})).scalar_one()
+        "SELECT EffectiveFromAt FROM core.DriverAssignments WHERE DriverAssignmentID = :assignment_id"
+    ), {"assignment_id": assignment_id})).scalar_one()
     assert stored_from_at.tzinfo is not None
-    from app.workforce.effective import resolve_effective_driver_profile
+    from app.workforce.effective import resolve_effective_employee_assignment
 
-    resolved = await resolve_effective_driver_profile(1, employee["employee_id"], None, direct_db)
+    resolved = await resolve_effective_employee_assignment(1, employee["employee_id"], None, direct_db)
     assert resolved is not None
+    assert resolved["driverassignmentid"] == assignment_id
     assert resolved["driverid"] == driver_id
 
-    new_code = f"P1B-NULL-{suffix()}"
+    new_number = f"P1B-NULL-{suffix()}"
     changed = await client.patch(
         f"/core/drivers/{driver_id}",
-        json={"driver_code": new_code}, headers=auth(auth_token),
+        json={"driver_number": new_number}, headers=auth(auth_token),
     )
     assert changed.status_code == 200, changed.text
-    assert changed.json()["driver_code"] == new_code
+    assert changed.json()["driver_number"] == new_number
+    assert changed.json()["driver_assignment_id"] == assignment_id
+
+    # The Workforce surface edits the same permanent Driver.
+    workforce_edit = await client.patch(
+        f"/workforce/drivers/{driver_id}",
+        json={"cdl_number": "WF-CDL", "driver_status": "OnLeave"}, headers=auth(auth_token),
+    )
+    assert workforce_edit.status_code == 200, workforce_edit.text
+    assert workforce_edit.json()["driver"]["cdl_number"] == "WF-CDL"
+    assert workforce_edit.json()["driver"]["driver_status"] == "OnLeave"
+    assert workforce_edit.json()["driver"]["driver_number"] == new_number
 
 
 @pytest.mark.asyncio
@@ -261,18 +281,26 @@ async def test_employee_key_is_immutable(client: httpx.AsyncClient, auth_token: 
 
 
 @pytest.mark.asyncio
-async def test_first_profile_uses_employee_branch_and_database_instant(
+async def test_first_driver_uses_employee_branch_and_database_instant(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int,
 ):
     employee = await create_employee(client, auth_token, hq_branch_id, hire_date="2020-02-03")
     response = await client.post(
-        f"/workforce/employees/{employee['employee_id']}/driver-profiles",
-        json={"driver_code": f"P1B-{suffix()}"}, headers=auth(auth_token),
+        f"/workforce/employees/{employee['employee_id']}/driver",
+        json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
     )
     assert response.status_code == 201, response.text
-    profile = response.json()["current_or_pending_driver"]
-    assert profile["branch_id"] == hq_branch_id
-    assert profile["effective_from_at"] is not None
+    assignment = response.json()["current_or_pending_assignment"]
+    assert assignment["branch_id"] == hq_branch_id
+    assert assignment["effective_from_at"] is not None
+    assert response.json()["driver"]["driver_id"] == assignment["driver_id"]
+
+    # A Driver already exists: later assignments are transfers, and there is no rehire flow.
+    again = await client.post(
+        f"/workforce/employees/{employee['employee_id']}/driver",
+        json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
+    )
+    assert again.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -294,10 +322,10 @@ async def test_employee_branch_edit_rejected_with_current_or_pending_profile(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, paytest_branch_id: int,
     effective_from_at: str | None,
 ):
-    profile = {"driver_code": f"P1B-{suffix()}"}
+    profile = {"driver_number": f"P1B-{suffix()}"}
     if effective_from_at:
         profile["effective_from_at"] = effective_from_at
-    employee = await create_employee(client, auth_token, hq_branch_id, driver_profile=profile)
+    employee = await create_employee(client, auth_token, hq_branch_id, driver=profile)
     assert employee["driver_state"] == ("pending" if effective_from_at else "current")
     response = await client.patch(
         f"/workforce/employees/{employee['employee_id']}",
@@ -343,16 +371,14 @@ async def test_employee_rejects_branch_owned_by_another_company(
 async def test_driver_state_current_pending_none_and_historical_only(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
-    current = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}"})
-    pending = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2099-01-01T00:00:00Z"})
+    current = await create_employee(client, auth_token, hq_branch_id, driver={"driver_number": f"P1B-{suffix()}"})
+    pending = await create_employee(client, auth_token, hq_branch_id, driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2099-01-01T00:00:00Z"})
     none = await create_employee(client, auth_token, hq_branch_id)
-    historical = await create_employee(client, auth_token, hq_branch_id, driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"})
-    historical_driver = historical["current_or_pending_driver"]["driver_id"]
-    await direct_db.execute(text("""
-        UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveToAt = TIMESTAMPTZ '2001-01-01T00:00:00Z'
-        WHERE DriverID = :driver_id
-    """), {"driver_id": historical_driver})
+    historical = await create_employee(client, auth_token, hq_branch_id, driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"})
+    await end_driver_assignment(
+        direct_db, historical["current_or_pending_assignment"]["driver_assignment_id"],
+        ended_at="2001-01-01T00:00:00Z", end_reason="Terminated",
+    )
     reread = await client.get(f"/workforce/employees/{historical['employee_id']}", headers=auth(auth_token))
     assert reread.status_code == 200, reread.text
     assert current["driver_state"] == "current"
@@ -380,21 +406,21 @@ async def test_core_driver_patch_rejects_employee_fields_and_allows_driver_field
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id,
-        driver_profile={"driver_code": f"P1B-{suffix()}"},
+        driver={"driver_number": f"P1B-{suffix()}"},
     )
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id = employee["driver"]["driver_id"]
     rejected = await client.patch(
         f"/core/drivers/{driver_id}", json={"full_name": "Not Allowed"}, headers=auth(auth_token),
     )
     assert rejected.status_code == 422
     changed = await client.patch(
-        f"/core/drivers/{driver_id}", json={"driver_code": f"P1B-{suffix()}"}, headers=auth(auth_token),
+        f"/core/drivers/{driver_id}", json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
     )
     assert changed.status_code == 200, changed.text
 
 
 @pytest.mark.asyncio
-async def test_audit_failure_rolls_back_employee_and_initial_profile(
+async def test_audit_failure_rolls_back_employee_driver_and_first_assignment(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db, monkeypatch,
 ):
     from app.workforce import audit as workforce_audit
@@ -403,7 +429,7 @@ async def test_audit_failure_rolls_back_employee_and_initial_profile(
     original = workforce_audit.write_workforce_audit
 
     async def fail_on_profile(db, **kwargs):
-        if kwargs["action_code"] == "DRIVER_PROFILE_CREATED":
+        if kwargs["action_code"] == "DRIVER_CREATED":
             raise RuntimeError("forced Workforce audit failure")
         await original(db, **kwargs)
 
@@ -412,7 +438,7 @@ async def test_audit_failure_rolls_back_employee_and_initial_profile(
         await client.post(
             "/workforce/employees",
             json={"branch_id": hq_branch_id, "full_name": full_name,
-                  "driver_profile": {"driver_code": f"P1B-{suffix()}"}},
+                  "driver": {"driver_number": f"P1B-{suffix()}"}},
             headers=auth(auth_token),
         )
     assert (await direct_db.execute(
@@ -424,16 +450,16 @@ async def test_audit_failure_rolls_back_employee_and_initial_profile(
 
 
 @pytest.mark.asyncio
-async def test_profile_insert_conflict_rolls_back_employee_and_audits(
+async def test_driver_number_conflict_rolls_back_employee_and_audits(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db, monkeypatch,
 ):
     from app.workforce import audit as workforce_audit
 
-    driver_code = f"P1B-DUP-{suffix()}"
+    driver_number = f"P1B-DUP-{suffix()}"
     existing = await create_employee(
-        client, auth_token, hq_branch_id, driver_profile={"driver_code": driver_code},
+        client, auth_token, hq_branch_id, driver={"driver_number": driver_number},
     )
-    failed_name = f"Profile conflict {suffix()}"
+    failed_name = f"Driver number conflict {suffix()}"
     audit_calls: list[tuple[str, int]] = []
     original = workforce_audit.write_workforce_audit
 
@@ -446,7 +472,7 @@ async def test_profile_insert_conflict_rolls_back_employee_and_audits(
     conflict = await client.post(
         "/workforce/employees",
         json={"branch_id": hq_branch_id, "full_name": failed_name,
-              "driver_profile": {"driver_code": driver_code}},
+              "driver": {"driver_number": driver_number}},
         headers=auth(auth_token),
     )
     assert conflict.status_code == 409, conflict.text
@@ -454,8 +480,8 @@ async def test_profile_insert_conflict_rolls_back_employee_and_audits(
         "SELECT COUNT(*) FROM core.Employees WHERE FullName = :name"
     ), {"name": failed_name})).scalar_one() == 0
     assert (await direct_db.execute(text(
-        "SELECT COUNT(*) FROM core.Drivers WHERE CompanyID = 1 AND DriverCode = :code"
-    ), {"code": driver_code})).scalar_one() == 1
+        "SELECT COUNT(*) FROM core.Drivers WHERE CompanyID = 1 AND DriverNumber = :number"
+    ), {"number": driver_number})).scalar_one() == 1
 
     failed_employee_ids = [entity_id for action, entity_id in audit_calls if action == "EMPLOYEE_CREATED"]
     assert len(failed_employee_ids) == 1
@@ -470,38 +496,35 @@ async def test_profile_insert_conflict_rolls_back_employee_and_audits(
           )
     """), {"employee_id": failed_employee_id})).scalar_one()
     assert leftover_audits == 0
-    assert existing["current_or_pending_driver"]["driver_code"] == driver_code
+    assert existing["driver"]["driver_number"] == driver_number
 
 
 @pytest.mark.asyncio
-async def test_hire_date_guard_uses_nonvoid_daily_draft_lines_across_driver_history(
+async def test_hire_date_guard_uses_nonvoid_daily_draft_lines_across_assignment_history(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int,
     created_period_id: int, direct_db,
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
+        driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
-    source_id = employee["current_or_pending_driver"]["driver_id"]
-    await direct_db.execute(text("""
-        UPDATE core.Drivers
-        SET DriverStatus = 'Transferred', EffectiveToAt = TIMESTAMPTZ '2020-01-01T00:00:00Z'
-        WHERE DriverID = :driver_id
-    """), {"driver_id": source_id})
-    target_id = (await direct_db.execute(text("""
-        INSERT INTO core.Drivers
-            (CompanyID, BranchID, EmployeeID, DriverCode, DriverStatus, EffectiveFromAt)
-        VALUES (1, :branch_id, :employee_id, :code, 'Active', TIMESTAMPTZ '2020-01-01T00:00:00Z')
-        RETURNING DriverID
-    """), {"branch_id": hq_branch_id, "employee_id": employee["employee_id"], "code": f"P1B-{suffix()}"})).scalar_one()
+    source_id = employee["current_or_pending_assignment"]["driver_assignment_id"]
+    await end_driver_assignment(
+        direct_db, source_id, ended_at="2020-01-01T00:00:00Z", end_reason="Transferred",
+    )
+    target_id = await insert_driver_assignment(
+        direct_db, company_id=1, branch_id=hq_branch_id, employee_id=employee["employee_id"],
+        driver_id=employee["driver"]["driver_id"],
+        effective_from_at="2020-01-01T00:00:00Z", transferred_from_assignment_id=source_id,
+    )
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType,
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
              Quantity, SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :driver_id, DATE '2018-06-01',
+        VALUES (1, :branch_id, :period_id, :assignment_id, DATE '2018-06-01',
                 :line_type, 1, 'Manual', 'Active')
     """), {"branch_id": hq_branch_id, "period_id": created_period_id,
-           "driver_id": source_id, "line_type": f"P1B-{suffix()}"})
+           "assignment_id": source_id, "line_type": f"P1B-{suffix()}"})
 
     response = await client.patch(
         f"/workforce/employees/{employee['employee_id']}",
@@ -518,17 +541,17 @@ async def test_hire_date_guard_ignores_void_draft_line(
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
+        driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    assignment_id = employee["current_or_pending_assignment"]["driver_assignment_id"]
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType,
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
              Quantity, SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :driver_id, DATE '2018-06-01',
+        VALUES (1, :branch_id, :period_id, :assignment_id, DATE '2018-06-01',
                 :line_type, 1, 'Manual', 'Void')
     """), {"branch_id": hq_branch_id, "period_id": created_period_id,
-           "driver_id": driver_id, "line_type": f"P1B-{suffix()}"})
+           "assignment_id": assignment_id, "line_type": f"P1B-{suffix()}"})
     response = await client.patch(
         f"/workforce/employees/{employee['employee_id']}",
         json={"hire_date": "2018-06-02"}, headers=auth(auth_token),
@@ -543,19 +566,21 @@ async def test_hire_date_guard_protects_final_line_dates(
 ):
     employee = await create_employee(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
-        driver_profile={"driver_code": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
+        driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
-    driver_id = employee["current_or_pending_driver"]["driver_id"]
+    driver_id = employee["driver"]["driver_id"]
+    assignment_id = employee["current_or_pending_assignment"]["driver_assignment_id"]
     async with allow_final_line_insert(direct_db):
         final_line_id = (await direct_db.execute(text("""
             INSERT INTO payroll.PayrollFinalLines
-                (CompanyID, BranchID, PayrollPeriodID, DriverID, WorkDate, LineType,
+                (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, DriverID, WorkDate, LineType,
                  Quantity, FinalAmount, SourceType, LineScope, CurrencyCode, CurrencyMinorUnitDigits)
-            VALUES (1, :branch_id, :period_id, :driver_id, DATE '2018-06-01',
+            VALUES (1, :branch_id, :period_id, :assignment_id, :driver_id, DATE '2018-06-01',
                     :line_type, 1, 1, 'Manual', 'Daily', 'USD', 2)
             RETURNING FinalLineID
         """), {"branch_id": hq_branch_id, "period_id": created_period_id,
-               "driver_id": driver_id, "line_type": f"P1B-{suffix()}"})).scalar_one()
+               "assignment_id": assignment_id, "driver_id": driver_id,
+               "line_type": f"P1B-{suffix()}"})).scalar_one()
     try:
         response = await client.patch(
             f"/workforce/employees/{employee['employee_id']}",
@@ -629,7 +654,7 @@ async def test_driver_role_requires_employee_link_before_assignment(
 
 
 @pytest.mark.asyncio
-async def test_admin_driver_assignment_uses_explicit_workforce_profile(
+async def test_admin_driver_assignment_uses_explicit_workforce_driver(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     tag = suffix()
@@ -640,7 +665,7 @@ async def test_admin_driver_assignment_uses_explicit_workforce_profile(
     user_id = created.json()["user_id"]
     employee = await create_employee(
         client, auth_token, hq_branch_id,
-        driver_profile={"driver_code": f"P1B-{tag}"},
+        driver={"driver_number": f"P1B-{tag}"},
     )
     linked = await client.put(
         f"/admin/users/{user_id}/employee-link",
