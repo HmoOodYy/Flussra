@@ -290,13 +290,14 @@ async def create_bonus_event(
 
     await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    # CP-3A: snapshot-aware period eligibility guard.
+    # Currency lock first (global lock order), then the period row lock; the snapshot-aware
+    # eligibility guard (CP-3A) runs under that lock so a concurrent boundary change
+    # cannot commit between the check and the insert.
+    await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await _lock_period_for_mutation(period_id, company_id, db)
     await _assert_driver_eligible_for_period_via_snapshot(
         company_id, period.branch_id, period_id, data.driver_assignment_id, db
     )
-
-    await lock_and_get_company_currency_for_monetary_write(company_id, db)
-    await _lock_period_for_mutation(period_id, company_id, db)
 
     insert_result = await db.execute(
         text("""

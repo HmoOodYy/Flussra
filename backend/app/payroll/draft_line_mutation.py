@@ -134,7 +134,12 @@ async def add_draft_line(
         period.payroll_period_id, data.work_date,
         period.start_date, period.end_date, db,
     )
-    # Creating new source: an out-of-window driver is not rescued.
+    # Take the period row lock first, then authorize the write against the roster and
+    # the assignment window as they are under that lock. A boundary change (transfer
+    # reschedule, cancel, termination) holds the same lock, so it either waits for this
+    # write or commits first and is seen here. Creating new source: an out-of-window
+    # driver is not rescued.
+    await _lock_period_for_mutation(period_id, company_id, db)
     await _assert_driver_eligible_for_workdate_via_snapshot(
         company_id, period.branch_id, period_id, data.driver_assignment_id, data.work_date, db,
         allow_existing_source_rescue=False,
@@ -161,9 +166,6 @@ async def add_draft_line(
                 "Update the existing line instead."
             ),
         )
-
-    # Recheck period status under a row-level lock before writing.
-    await _lock_period_for_mutation(period_id, company_id, db)
 
     line_id: int = (await db.execute(
         text("""
@@ -245,9 +247,6 @@ async def update_draft_line(
         _require_usable_definition(definition)
         if data.quantity is not None:
             _require_valid_quantity(definition, data.quantity)
-        await _assert_driver_eligible_for_workdate_via_snapshot(
-            company_id, period.branch_id, period_id, line.driver_assignment_id, line.work_date, db,
-        )
 
     fields: dict[str, Any] = {}
     if data.quantity is not None:
@@ -259,6 +258,13 @@ async def update_draft_line(
 
     if fields:
         await _lock_period_for_mutation(period_id, company_id, db)
+    if not is_void_only:
+        # Authorized under the period lock (see add_draft_line) so a concurrent
+        # boundary change cannot slip between the check and the write.
+        await _assert_driver_eligible_for_workdate_via_snapshot(
+            company_id, period.branch_id, period_id, line.driver_assignment_id, line.work_date, db,
+        )
+    if fields:
         set_clause = ", ".join(f"{col} = :{col}" for col in fields)
         await db.execute(
             text(

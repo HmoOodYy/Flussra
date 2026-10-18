@@ -641,13 +641,7 @@ async def save_day_grid(
     # P1 #3: status key validation (invalid/inactive → 422 before writes)
     # This preserves all-or-nothing atomicity.
 
-    # Each row: (save_row, driver_assignment_id, parsed_values, validated_status_key, key_row)
-    parsed_rows: list[tuple] = []
-
-    for save_row in data.rows:
-        driver_assignment_id = save_row.driver_assignment_id
-
-        # CP-2E: use snapshot-based eligibility when available; legacy fallback otherwise.
+    async def _assert_row_eligible(driver_assignment_id: int) -> None:
         try:
             await _assert_driver_eligible_for_workdate_via_snapshot(
                 company_id, branch_id, period.payroll_period_id, driver_assignment_id, work_date, db
@@ -657,6 +651,16 @@ async def save_day_grid(
                 status_code=422,
                 detail=f"Driver {driver_assignment_id} is not eligible for this branch or work date.",
             )
+
+    # Each row: (save_row, driver_assignment_id, parsed_values, validated_status_key, key_row)
+    parsed_rows: list[tuple] = []
+
+    for save_row in data.rows:
+        driver_assignment_id = save_row.driver_assignment_id
+
+        # CP-2E: snapshot-based eligibility, evaluated early for a fast 422. The write is
+        # authorized again under the period lock below.
+        await _assert_row_eligible(driver_assignment_id)
 
         # Parse and validate every quantity before any write so the batch is
         # rejected atomically. A key is a PayrollPeriodDefinitionID, never a code.
@@ -727,6 +731,14 @@ async def save_day_grid(
     # the count-then-write below is serialized per Period and no longer relies
     # on any Company-level lock.
     await _lock_period_for_mutation(period_id, company_id, db)
+
+    # Re-authorize every row against the roster and assignment windows as they are under
+    # the period lock: a transfer reschedule/cancel or termination holds the same lock, so
+    # a boundary change either waited for this save or committed before it and is seen
+    # here. (The currency lock above precedes the period lock in the global lock order,
+    # so the early check cannot simply move below it.)
+    for save_row in data.rows:
+        await _assert_row_eligible(save_row.driver_assignment_id)
 
     # ── Status key usage limit enforcement (under the Period lock) ─────── #
     # All existence/active checks passed. Enforce configured usage limits
