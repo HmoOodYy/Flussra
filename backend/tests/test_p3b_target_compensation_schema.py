@@ -6,7 +6,7 @@ import json
 import pytest
 from psycopg2 import errors
 
-from tests.p3b_fixtures import (
+from tests.compensation_database_fixtures import (
     Ordinal,
     Scalar,
     add_driver,

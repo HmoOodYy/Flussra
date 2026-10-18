@@ -1,6 +1,6 @@
 """Shared fixtures for the target Compensation authoring tests.
 
-The tests run against the disposable database built by p3b_fixtures, with their
+The tests run against the disposable database built by compensation_database_fixtures, with their
 own Company tenants, roles, users and Drivers, so they never touch the shared
 application test data. Approved assignments and request history are
 intentionally undeletable, so nothing is cleaned up.
@@ -18,7 +18,7 @@ import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from tests.p3b_fixtures import make_branch, make_company, make_driver
+from tests.compensation_database_fixtures import make_branch, make_company, make_driver
 
 PERMISSIONS = ["payitems.view", "payitems.edit", "payrates.view", "payrates.edit"]
 

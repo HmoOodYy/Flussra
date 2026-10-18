@@ -1,7 +1,8 @@
+import { makeAuthority, makeBranchAccess as makeBranch } from './authorityTestFixtures.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { toUserProfile } from '../src/store/authStore.ts';
-import type { BranchAccess, PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
+import type { UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
 import {
   canManagePayDefinitionsForBranch,
   canGovernPayDefinitionsCompanyWide,
@@ -11,27 +12,7 @@ import {
   canViewDailyPayItems,
 } from '../src/lib/permissions.ts';
 
-// ── Fixture helpers (duplicated from authAuthority.test.ts / peopleRolesAuthority.test.ts —
-// see project notes: those files are already oversized, so this suite keeps its own copies) ──
-
-function makeAuthority(overrides: Partial<PermissionAuthority> = {}): PermissionAuthority {
-  return {
-    company_permissions: [],
-    branch_permissions: [],
-    ...overrides,
-  };
-}
-
-function makeBranch(overrides: Partial<BranchAccess> = {}): BranchAccess {
-  return {
-    branch_id: 10,
-    branch_name: 'Branch 10',
-    scope: 'SpecificBranch',
-    role_code: 'BRANCH_MANAGER',
-    role_name: 'Branch Manager',
-    ...overrides,
-  };
-}
+// Authority and BranchAccess defaults are shared; this suite keeps its admin profile local.
 
 function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserInfoResponse {
   return {

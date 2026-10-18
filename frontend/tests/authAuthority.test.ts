@@ -1,7 +1,8 @@
+import { makeAuthority, makeBranchAccess as makeBranch } from './authorityTestFixtures.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hasAuthorityPermission, toUserProfile } from '../src/store/authStore.ts';
-import type { BranchAccess, PermissionAuthority, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
+import type { BranchAccess, UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
 import {
   isDriverUser,
   canCreatePeriod,
@@ -14,14 +15,6 @@ import {
   canViewPayrollReports,
   canPreviewCalculation,
 } from '../src/lib/permissions.ts';
-
-function makeAuthority(overrides: Partial<PermissionAuthority> = {}): PermissionAuthority {
-  return {
-    company_permissions: [],
-    branch_permissions: [],
-    ...overrides,
-  };
-}
 
 function makeUserInfoResponse(overrides: Partial<UserInfoResponse> = {}): UserInfoResponse {
   return {
@@ -212,17 +205,6 @@ test('canDecideReview: a grant scoped to branch A does not authorize branch B', 
 });
 
 // ── canEditTransfers / canEditPayRates: branch-aware authority ──────────────
-
-function makeBranch(overrides: Partial<BranchAccess> = {}): BranchAccess {
-  return {
-    branch_id: 10,
-    branch_name: 'Branch 10',
-    scope: 'SpecificBranch',
-    role_code: 'BRANCH_MANAGER',
-    role_name: 'Branch Manager',
-    ...overrides,
-  };
-}
 
 /** User granted `code` only for `grantBranchId` — active_permissions deliberately still contains it. */
 function scopedUser(code: string, grantBranchId: number, branchOverrides: Partial<BranchAccess> = {}): UserProfile {

@@ -18,7 +18,7 @@ from app.settings import audit as settings_audit
 from app.settings import company
 from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
-from tests.p3a_currency_fixtures import (
+from tests.currency_test_helpers import (
     INSERT_DRIVER_RATE,
     create_branch_and_driver,
     first_rate_type_id,
