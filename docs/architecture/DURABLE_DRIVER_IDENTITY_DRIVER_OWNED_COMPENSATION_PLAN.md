@@ -105,6 +105,7 @@ After Stage 1, `DriverID` means only the permanent Driver. Everything that store
 
 - `Driver.DriverStatus` is `Active`, `Inactive` or `OnLeave`: the durable work state of the person-driver. It survives transfers.
 - `DriverAssignment.EndReason` is `NULL`, `Transferred` or `Terminated`, written together with `EffectiveToAt`. `Employee.EmploymentStatus` is unchanged.
+- Termination does not change `Driver.DriverStatus`; `Employee.EmploymentStatus` and the `Terminated` assignment window govern.
 - An assignment is lifecycle-eligible for payroll when it has an `EndReason` (historical) or its Driver is `Active`. Eligibility classification derives from `EndReason`, and the Driver status is snapshotted.
 
 **Transfer lifecycle**

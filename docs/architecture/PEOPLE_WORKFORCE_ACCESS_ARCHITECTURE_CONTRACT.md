@@ -262,7 +262,7 @@ Employee:                         EmploymentStatus = Terminated, TerminationDate
 Current DriverAssignment:         EffectiveToAt    = end of D in its Branch, EndReason = Terminated
 ```
 
-Both changes succeed or fail together. The terminated Employee's DriverAssignments never become current after that cap (computed by the Branch Timezone Authority contract's local-day boundary); §8.8 defines how a pending assignment and any in-flight transfer are closed.
+Both changes succeed or fail together. Termination does not change `Driver.DriverStatus`: the Driver's work state is unaffected, and `Employee.EmploymentStatus` plus the `Terminated` assignment window govern. The terminated Employee's DriverAssignments never become current after that cap (computed by the Branch Timezone Authority contract's local-day boundary); §8.8 defines how a pending assignment and any in-flight transfer are closed.
 
 Historical integrity:
 
