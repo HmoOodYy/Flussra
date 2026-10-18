@@ -1,6 +1,7 @@
 import type { DriverTransferRequest } from '../../../types/transfer';
 import { statusKind, statusLabel, TRANSFER_TERMINAL } from '../../../types/transfer';
 import { fmtDate, fmtDateTime, fmtEffectiveAt } from './transferRequestsView';
+import { canCancelRequest, canCompleteRequest, canRescheduleRequest, driverLabel } from './transferActions';
 import { buildTimeline } from './transferTimeline';
 import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
@@ -11,21 +12,26 @@ interface DetailProps {
   canDecideTarget: boolean;
   canComplete: boolean;
   canCancel: boolean;
+  canReschedule: boolean;
   actionLoading: boolean;
   actionError: string | null;
   onApproveSource(): void;
   onDecide(d: 'Approved' | 'Rejected' | 'Returned'): void;
   onComplete(): void;
   onCancel(): void;
+  onReschedule(): void;
   onClearError(): void;
 }
 
 export function TransferDetail({
-  req, canApproveSource, canDecideTarget, canComplete, canCancel, actionLoading, actionError,
-  onApproveSource, onDecide, onComplete, onCancel, onClearError,
+  req, canApproveSource, canDecideTarget, canComplete, canCancel, canReschedule, actionLoading, actionError,
+  onApproveSource, onDecide, onComplete, onCancel, onReschedule, onClearError,
 }: DetailProps) {
   const isTerminal = TRANSFER_TERMINAL.has(req.status);
   const kind = statusKind(req.status);
+  // Availability comes from the server-reported status/instant, never a client-derived status.
+  const showCancel = canCancel && canCancelRequest(req);
+  const showReschedule = canReschedule && canRescheduleRequest(req);
 
   return (
     <div className={styles.detail}>
@@ -39,7 +45,7 @@ export function TransferDetail({
         </div>
         <div className={styles.dHeaderInfo}>
           <div className={styles.dName}>
-            {req.driver_name ?? `Driver #${req.driver_id}`}
+            {driverLabel(req)}
             <span className={`${trStyles.badge} ${trStyles[`badge_${kind}`]}`}>
               {statusLabel(req.status)}
             </span>
@@ -56,7 +62,7 @@ export function TransferDetail({
           </div>
 
           {/* Action buttons */}
-          {!isTerminal && (canApproveSource || canDecideTarget || canComplete || canCancel) && (
+          {!isTerminal && (canApproveSource || canDecideTarget || canComplete || showCancel || showReschedule) && (
             <div className={styles.dActions}>
               {canApproveSource && (req.status === 'PendingSourceApproval' || req.status === 'Returned') && (
                 <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={onApproveSource} disabled={actionLoading}>
@@ -76,14 +82,19 @@ export function TransferDetail({
                   </button>
                 </>
               )}
-              {canComplete && req.status === 'Approved' && (
+              {canComplete && canCompleteRequest(req) && (
                 <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={onComplete} disabled={actionLoading}>
                   {actionLoading ? 'Completing…' : '🚀 Complete Transfer'}
                 </button>
               )}
-              {canCancel && (
+              {showReschedule && (
+                <button className={styles.actBtn} onClick={onReschedule} disabled={actionLoading}>
+                  Reschedule
+                </button>
+              )}
+              {showCancel && (
                 <button className={`${styles.actBtn} ${styles.actBtnDanger}`} onClick={onCancel} disabled={actionLoading}>
-                  Cancel Request
+                  {req.status === 'Scheduled' ? 'Cancel Scheduled Transfer' : 'Cancel Request'}
                 </button>
               )}
             </div>
@@ -112,7 +123,7 @@ export function TransferDetail({
           <span>#{req.transfer_request_id}</span>
 
           <span className={styles.fl}>Driver</span>
-          <span>{req.driver_name ?? `Driver #${req.driver_id}`}</span>
+          <span>{driverLabel(req)}</span>
 
           <span className={styles.fl}>Source branch</span>
           <span>{req.source_branch_name ?? `Branch ${req.source_branch_id}`}</span>
@@ -122,6 +133,13 @@ export function TransferDetail({
 
           <span className={styles.fl}>Effective time</span>
           <span>{fmtEffectiveAt(req.effective_at)}</span>
+
+          {req.scheduled_at_utc && (
+            <>
+              <span className={styles.fl}>Scheduled</span>
+              <span>{fmtDateTime(req.scheduled_at_utc)}</span>
+            </>
+          )}
 
           <span className={styles.fl}>Requested by</span>
           <span>{req.requested_by_name ?? `User ${req.requested_by_user_id}`}</span>
@@ -154,12 +172,6 @@ export function TransferDetail({
             <>
               <span className={styles.fl}>Cancel reason</span>
               <span>{req.cancel_reason}</span>
-            </>
-          )}
-          {req.new_driver_id && (
-            <>
-              <span className={styles.fl}>New driver ID</span>
-              <span>#{req.new_driver_id} (created in {req.target_branch_name})</span>
             </>
           )}
         </div>

@@ -1,12 +1,19 @@
+/**
+ * Matches backend core DriverSummary — the permanent Driver plus the Branch of its
+ * current (else pending, else latest) assignment. Payroll and Pay Rates address the
+ * assignment (`driver_assignment_id`); the Driver identity is `driver_id`/`driver_number`.
+ */
 export interface DriverSummary {
   driver_id: number;
   employee_id: number;
+  driver_assignment_id: number | null;
   branch_id: number;
   branch_name: string;
   full_name: string;
   preferred_name: string | null;
   employee_key: string | null;
-  driver_code: string | null;
+  driver_number: string | null;
+  cdl_number: string | null;
   driver_status: string;
   employment_status: string;
 }
@@ -25,7 +32,8 @@ export interface PersonSummary {
   primary_phone: string | null;
   hire_date: string | null;
   driver_id: number | null;
-  driver_code: string | null;
+  driver_assignment_id: number | null;
+  driver_number: string | null;
   driver_status: string | null;
   cdl_number: string | null;
 }

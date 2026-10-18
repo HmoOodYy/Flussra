@@ -143,9 +143,9 @@ export function DriversOffDialog({
                 </thead>
                 <tbody>
                   {entries.map((e) => (
-                    <tr key={e.driver_id}>
+                    <tr key={e.driver_assignment_id}>
                       <td className={styles.driverCell}>{e.driver_name}</td>
-                      <td className={styles.codeCell}>{e.driver_code ?? '—'}</td>
+                      <td className={styles.codeCell}>{e.driver_number ?? '—'}</td>
                       <td>{e.status_label ?? e.status_code ?? '—'}</td>
                       <td className={styles.notesCell}>{e.note ?? '—'}</td>
                     </tr>

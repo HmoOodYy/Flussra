@@ -73,7 +73,7 @@ test('period pages carry no PayItem identity', () => {
 test('dirty-row construction preserves driver identity, existing definition keys, string quantities, status, and notes', () => {
   const grid = {
     rows: [{
-      driver_id: 42,
+      driver_assignment_id: 42,
       values: {
         '7': { quantity: '0' },
         '8': { quantity: '1.234567890123' },
@@ -85,7 +85,7 @@ test('dirty-row construction preserves driver identity, existing definition keys
   } as unknown as DayGridResponse;
 
   assert.deepEqual(buildSaveRowFromGrid(grid, 42), {
-    driver_id: 42,
+    driver_assignment_id: 42,
     values: { '7': '0', '8': '1.234567890123', '9': '' },
     status_key: 'OFF',
     notes: 'existing note',
@@ -94,11 +94,11 @@ test('dirty-row construction preserves driver identity, existing definition keys
 
 test('dirty-row construction converts nullish quantities to empty strings and preserves null status/notes', () => {
   const grid = {
-    rows: [{ driver_id: 7, values: { '12': { quantity: null }, '15': { quantity: '3.50' } }, status_key: null, notes: null }],
+    rows: [{ driver_assignment_id: 7, values: { '12': { quantity: null }, '15': { quantity: '3.50' } }, status_key: null, notes: null }],
   } as unknown as DayGridResponse;
 
   assert.deepEqual(buildSaveRowFromGrid(grid, 7), {
-    driver_id: 7,
+    driver_assignment_id: 7,
     values: { '12': '', '15': '3.50' },
     status_key: null,
     notes: null,
@@ -107,20 +107,20 @@ test('dirty-row construction converts nullish quantities to empty strings and pr
 
 test('dirty-row construction defaults a missing grid or driver row without losing the requested id', () => {
   assert.deepEqual(buildSaveRowFromGrid(null, 99), {
-    driver_id: 99, values: {}, status_key: null, notes: null,
+    driver_assignment_id: 99, values: {}, status_key: null, notes: null,
   });
   assert.deepEqual(buildSaveRowFromGrid({ rows: [] } as unknown as DayGridResponse, 100), {
-    driver_id: 100, values: {}, status_key: null, notes: null,
+    driver_assignment_id: 100, values: {}, status_key: null, notes: null,
   });
 });
 
 test('dirty-row construction preserves empty Status and notes and converts undefined quantities', () => {
   const grid = {
-    rows: [{ driver_id: 8, values: { '20': { quantity: undefined } }, status_key: '', notes: '' }],
+    rows: [{ driver_assignment_id: 8, values: { '20': { quantity: undefined } }, status_key: '', notes: '' }],
   } as unknown as DayGridResponse;
 
   assert.deepEqual(buildSaveRowFromGrid(grid, 8), {
-    driver_id: 8,
+    driver_assignment_id: 8,
     values: { '20': '' },
     status_key: '',
     notes: '',

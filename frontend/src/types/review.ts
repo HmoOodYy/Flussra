@@ -44,8 +44,9 @@ export interface ReviewItemDetail extends ReviewItemSummary {
 }
 
 export interface ReviewPayrollSnapshotDriverTotal {
+  driver_assignment_id: number;
   driver_id: number;
-  driver_code_snapshot: string | null;
+  driver_number_snapshot: string | null;
   driver_name_snapshot: string | null;
   daily_pay: string;
   status_pay: string;
@@ -56,7 +57,7 @@ export interface ReviewPayrollSnapshotDriverTotal {
 }
 
 export interface ReviewPayrollSnapshotLine {
-  driver_id: number;
+  driver_assignment_id: number;
   source_type: string;
   line_type: string;
   line_scope: string | null;

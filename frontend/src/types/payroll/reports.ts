@@ -63,14 +63,15 @@ export interface ReportPaySection {
   total_pay: string;
   gross_pay: string;
   definition_amounts: DefinitionAmount[];
-  driver_code: string | null;
+  driver_number: string | null;
   driver_name: string | null;
   financial_lines: Record<string, unknown>[];
 }
 
 export interface ReportDriver {
+  driver_assignment_id: number;
   driver_id: number;
-  driver_code: string | null;
+  driver_number: string | null;
   driver_name: string | null;
   work: ReportWorkSection;
   pay: ReportPaySection | null;

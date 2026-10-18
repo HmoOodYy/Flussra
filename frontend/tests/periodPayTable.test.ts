@@ -21,14 +21,14 @@ function makePay(overrides: Partial<ReportPaySection> = {}): ReportPaySection {
   return {
     daily_pay: '0.00', status_pay: '0.00', minimum_adjustment: '0.00',
     maximum_adjustment: '0.00', bonus_total: '0.00', total_pay: '0.00', gross_pay: '0.00',
-    definition_amounts: [], driver_code: null, driver_name: null, financial_lines: [],
+    definition_amounts: [], driver_number: null, driver_name: null, financial_lines: [],
     ...overrides,
   };
 }
 
 function makeDriver(overrides: Partial<ReportDriver> = {}): ReportDriver {
   return {
-    driver_id: 1, driver_code: null, driver_name: null,
+    driver_assignment_id: 1, driver_number: null, driver_name: null,
     work: { daily_rows: [], status_entries: [], status_summaries: [] },
     pay: makePay(), bonus_events: [],
     ...overrides,
@@ -97,18 +97,19 @@ test('buildPeriodPayTable: a column with no matching DefinitionAmount maps to nu
 // ── 6. Driver identity ───────────────────────────────────────────────────────
 
 test('driverLabel: uses driver_name when present', () => {
-  assert.equal(driverLabel({ driver_id: 9, driver_name: 'Ada Operator' }), 'Ada Operator');
+  assert.equal(driverLabel({ driver_name: 'Ada Operator', driver_number: 'D-9' }), 'Ada Operator');
 });
 
-test('driverLabel: falls back to "Driver #<id>" when driver_name is null', () => {
-  assert.equal(driverLabel({ driver_id: 9, driver_name: null }), 'Driver #9');
+test('driverLabel: falls back to the Driver number, then a neutral label, when driver_name is null', () => {
+  assert.equal(driverLabel({ driver_name: null, driver_number: 'D-9' }), 'D-9');
+  assert.equal(driverLabel({ driver_name: null }), 'Unnamed driver');
 });
 
-test('buildPeriodPayTable: row carries driver_code separately from the display label', () => {
-  const driver = makeDriver({ driver_id: 5, driver_name: 'Ada Operator', driver_code: 'D-005' });
+test('buildPeriodPayTable: row carries driver_number separately from the display label', () => {
+  const driver = makeDriver({ driver_assignment_id: 5, driver_name: 'Ada Operator', driver_number: 'D-005' });
   const [row] = buildPeriodPayTable([], [driver], null, null).rows;
   assert.equal(row.driver_label, 'Ada Operator');
-  assert.equal(row.driver_code, 'D-005');
+  assert.equal(row.driver_number, 'D-005');
 });
 
 // ── 7. Footer ─────────────────────────────────────────────────────────────
@@ -116,8 +117,8 @@ test('buildPeriodPayTable: row carries driver_code separately from the display l
 test('buildPeriodPayTable: footer item totals come from definition_totals, aligned by id, never summed from rows', () => {
   const columns = [makeColumn({ payroll_period_definition_id: 10 }), makeColumn({ payroll_period_definition_id: 20 })];
   const drivers = [
-    makeDriver({ driver_id: 1, pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '5.00' }, { payroll_period_definition_id: 20, amount: '3.00' }] }) }),
-    makeDriver({ driver_id: 2, pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '7.00' }, { payroll_period_definition_id: 20, amount: '1.00' }] }) }),
+    makeDriver({ driver_assignment_id: 1, pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '5.00' }, { payroll_period_definition_id: 20, amount: '3.00' }] }) }),
+    makeDriver({ driver_assignment_id: 2, pay: makePay({ definition_amounts: [{ payroll_period_definition_id: 10, amount: '7.00' }, { payroll_period_definition_id: 20, amount: '1.00' }] }) }),
   ];
   // Deliberately NOT the row sum (12.00 / 4.00) -- proves the footer reads
   // the backend total verbatim rather than deriving it from the rows above.

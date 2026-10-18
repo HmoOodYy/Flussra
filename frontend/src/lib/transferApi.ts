@@ -12,6 +12,7 @@ import type {
   SourceApprovalRequest,
   TargetDecisionRequest,
   CancelRequest,
+  RescheduleRequest,
 } from '../types/transfer';
 
 
@@ -72,6 +73,18 @@ export async function cancelTransfer(
 ): Promise<DriverTransferRequest> {
   const r = await apiClient.post<DriverTransferRequest>(
     `/driver-transfers/${id}/cancel`,
+    data,
+  );
+  return r.data;
+}
+
+/** Move a request's EffectiveAt to another future instant (Scheduled requests move both boundaries). */
+export async function rescheduleTransfer(
+  id: number,
+  data: RescheduleRequest,
+): Promise<DriverTransferRequest> {
+  const r = await apiClient.post<DriverTransferRequest>(
+    `/driver-transfers/${id}/reschedule`,
     data,
   );
   return r.data;

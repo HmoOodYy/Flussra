@@ -35,7 +35,7 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
 
   const {
     selectedDate, grid, loading, error, dirtyRows, saving, saveError,
-    notesOpenDriverId, setNotesOpenDriverId, fetchGrid, atStart, atEnd, prevDay, nextDay,
+    notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId, fetchGrid, atStart, atEnd, prevDay, nextDay,
     isEditable, canEdit, handleSave, handleCellChange, handleStatusChange, handleNotesChange,
     getCellValue, getStatusValue, getNotesValue,
   } = useDailyEntryController({ periodId, user, formatSaveError: dialogSaveError });
@@ -199,10 +199,10 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                 </thead>
                 <tbody>
                   {grid.rows.map((row) => {
-                    const isDirty = dirtyRows.has(row.driver_id);
+                    const isDirty = dirtyRows.has(row.driver_assignment_id);
                     const isOff = row.is_off;
                     return (
-                      <tr key={row.driver_id} className={isOff ? styles.offRow : undefined}>
+                      <tr key={row.driver_assignment_id} className={isOff ? styles.offRow : undefined}>
                         <td className={styles.driverName}>
                           {row.driver_name}
                           {isDirty && <span className={styles.dirtyDot}>●</span>}
@@ -212,7 +212,7 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                             className={styles.statusSelect}
                             value={getStatusValue(row)}
                             disabled={!canEdit}
-                            onChange={(e) => handleStatusChange(row.driver_id, e.target.value || null)}
+                            onChange={(e) => handleStatusChange(row.driver_assignment_id, e.target.value || null)}
                           >
                             <option value="">—</option>
                             {grid.status_keys.map((sk) => (
@@ -242,27 +242,27 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                                 value={getCellValue(row, key)}
                                 disabled={!canEdit}
                                 onChange={(e) =>
-                                  handleCellChange(row.driver_id, key, e.target.value)
+                                  handleCellChange(row.driver_assignment_id, key, e.target.value)
                                 }
                               />
                             </td>
                           );
                         })}
                         <td>
-                          {notesOpenDriverId === row.driver_id ? (
+                          {notesOpenDriverAssignmentId === row.driver_assignment_id ? (
                             <input
                               type="text"
                               className={styles.notesInput}
                               value={getNotesValue(row)}
                               disabled={!canEdit}
-                              onChange={(e) => handleNotesChange(row.driver_id, e.target.value)}
-                              onBlur={() => setNotesOpenDriverId(null)}
+                              onChange={(e) => handleNotesChange(row.driver_assignment_id, e.target.value)}
+                              onBlur={() => setNotesOpenDriverAssignmentId(null)}
                               autoFocus
                             />
                           ) : (
                             <button
                               className={`${styles.notesBtn} ${getNotesValue(row) ? styles.notesBtnActive : ''}`}
-                              onClick={() => canEdit ? setNotesOpenDriverId(row.driver_id) : undefined}
+                              onClick={() => canEdit ? setNotesOpenDriverAssignmentId(row.driver_assignment_id) : undefined}
                               title={getNotesValue(row) || (canEdit ? 'Add note' : 'Read-only')}
                             >
                               {getNotesValue(row) ? '📝' : (canEdit ? '+' : '—')}

@@ -2,6 +2,7 @@ import type { Dispatch } from 'react';
 import type { DriverTransferRequest } from '../../../types/transfer';
 import { statusKind, statusLabel, TRANSFER_ACTIVE } from '../../../types/transfer';
 import { FILTER_LABELS, fmtEffectiveAt, type FilterView } from './transferRequestsView';
+import { driverLabel } from './transferActions';
 import type { TabAction, TabState } from './transferRequestsState';
 import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
@@ -87,7 +88,7 @@ function TransferCard({
 
       <div className={styles.itemBody}>
         <div className={styles.itemName}>
-          {req.driver_name ?? `Driver #${req.driver_id}`}
+          {driverLabel(req)}
           <span className={`${trStyles.badge} ${trStyles[`badge_${kind}`]}`}>
             {statusLabel(req.status)}
           </span>

@@ -77,8 +77,18 @@ export function buildTimeline(req: DriverTransferRequest): TimelineStep[] {
     if (s === 'Completed') {
       return {
         label: 'Transfer Completed',
-        sublabel: req.completed_at_utc ? fmtDateTime(req.completed_at_utc) : null,
+        // A Scheduled request the server now reports Completed took effect at its EffectiveAt.
+        sublabel: req.completed_at_utc
+          ? fmtDateTime(req.completed_at_utc)
+          : req.effective_at ? fmtDateTime(req.effective_at) : null,
         state: 'done' as const,
+      };
+    }
+    if (s === 'Scheduled') {
+      return {
+        label: 'Transfer Scheduled',
+        sublabel: req.effective_at ? `Takes effect ${fmtDateTime(req.effective_at)}` : null,
+        state: 'active' as const,
       };
     }
     if (s === 'Cancelled') {

@@ -285,10 +285,10 @@ export async function getFinalizationPreview(
 
 export async function getFinalLines(
   periodId: number,
-  driverId?: number,
+  driverAssignmentId?: number,
 ): Promise<FinalLineSummary[]> {
   const params: Record<string, string> = {};
-  if (driverId != null) params.driver_id = String(driverId);
+  if (driverAssignmentId != null) params.driver_assignment_id = String(driverAssignmentId);
   const resp = await apiClient.get<FinalLineSummary[]>(
     `/payroll/periods/${periodId}/final-lines`,
     { params },

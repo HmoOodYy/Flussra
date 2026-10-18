@@ -6,7 +6,7 @@
 
 export interface BonusEvent {
   bonus_event_id: number;
-  driver_id: number;
+  driver_assignment_id: number;
   amount: string;
   reason: string | null;
   notes: string | null;
@@ -28,7 +28,7 @@ export interface BonusEventResponse extends BonusEvent {
 }
 
 export interface BonusBatchItem {
-  driver_id: number;
+  driver_assignment_id: number;
   amount: string;
   reason?: string | null;
   notes?: string | null;
@@ -62,8 +62,9 @@ export interface BonusSummaryCapabilities {
 }
 
 export interface BonusSummaryDriver {
+  driver_assignment_id: number;
   driver_id: number;
-  driver_code: string | null;
+  driver_number: string | null;
   driver_name: string | null;
   eligibility_reason_code: string;
   total_bonus: string;

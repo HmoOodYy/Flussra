@@ -43,7 +43,7 @@ export interface UserAdmin {
   company_role_scope: 'AllCompanyBranches' | 'SpecificBranch' | 'Self' | null;
   company_role_branch_id: number | null;
   company_role_branch_name: string | null;
-  // ── Driver profile ──
+  // ── Permanent Driver (null when the user is not linked to a Driver) ──
   driver_id: number | null;
   // ── Permissions ──
   /** Permission codes granted by the current company role */

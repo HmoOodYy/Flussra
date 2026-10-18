@@ -33,7 +33,7 @@ function fmtQty(v: string | null | undefined): string {
 // Display-only grouping of immutable FinalLines. Financial authority remains
 // the persisted FinalLine rows and period aggregates returned by the backend.
 interface DriverTotal {
-  driver_id: number;
+  driver_assignment_id: number;
   driver_name: string;
   daily_pay: number;
   status_pay: number;
@@ -65,9 +65,9 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
   const map = new Map<number, DriverTotal>();
   for (const line of lines) {
     const amt = Number(line.final_amount);
-    if (!map.has(line.driver_id)) {
-      map.set(line.driver_id, {
-        driver_id: line.driver_id,
+    if (!map.has(line.driver_assignment_id)) {
+      map.set(line.driver_assignment_id, {
+        driver_assignment_id: line.driver_assignment_id,
         driver_name: line.driver_name,
         daily_pay: 0,
         status_pay: 0,
@@ -77,7 +77,7 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
         line_count: 0,
       });
     }
-    const dt = map.get(line.driver_id)!;
+    const dt = map.get(line.driver_assignment_id)!;
     if (!Number.isFinite(amt)) continue;
     switch (lineComponent(line)) {
       case 'sys_adjustment': dt.sys_adjustment += amt; break;
@@ -154,7 +154,7 @@ function DriverTotalsTable({ rows, code, digits }: { rows: DriverTotal[]; code: 
       </thead>
       <tbody>
         {rows.map((r) => (
-          <tr key={r.driver_id}>
+          <tr key={r.driver_assignment_id}>
             <td className={styles.nameCell}>{r.driver_name}</td>
             <td className={styles.numCol}>{fmt(r.daily_pay, code, digits)}</td>
             <td className={styles.numCol}>{fmt(r.status_pay, code, digits)}</td>

@@ -47,7 +47,7 @@ export function PeriodDetailPage() {
 
   const {
     selectedDate, grid, loading, error, dirtyRows, saving, saveError,
-    notesOpenDriverId, setNotesOpenDriverId, fetchGrid, atStart, atEnd, prevDay, nextDay,
+    notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId, fetchGrid, atStart, atEnd, prevDay, nextDay,
     isEditable, canEdit, handleSave, handleCellChange, handleStatusChange, handleNotesChange,
     getCellValue, getStatusValue, getNotesValue,
   } = useDailyEntryController({ periodId: numericPeriodId, user, formatSaveError: pageSaveError });
@@ -201,10 +201,10 @@ export function PeriodDetailPage() {
             </thead>
             <tbody>
               {rows.map((row) => {
-                const isDirty = dirtyRows.has(row.driver_id);
+                const isDirty = dirtyRows.has(row.driver_assignment_id);
                 const isOff = row.is_off;
                 return (
-                  <tr key={row.driver_id} className={isOff ? styles.offRow : undefined}>
+                  <tr key={row.driver_assignment_id} className={isOff ? styles.offRow : undefined}>
                     <td className={styles.driverName}>
                       {row.driver_name}
                       {isDirty && <span style={{ color: '#f59e0b', marginLeft: 4 }}>●</span>}
@@ -232,7 +232,7 @@ export function PeriodDetailPage() {
                           className={styles.statusSelect}
                           value={getStatusValue(row)}
                           disabled={!canEdit}
-                          onChange={(e) => handleStatusChange(row.driver_id, e.target.value || null)}
+                          onChange={(e) => handleStatusChange(row.driver_assignment_id, e.target.value || null)}
                         >
                           <option value="">—</option>
                           {status_keys.map((sk) => (
@@ -260,26 +260,26 @@ export function PeriodDetailPage() {
                             min={inputProps.min}
                             value={getCellValue(row, key)}
                             disabled={!canEdit}
-                            onChange={(e) => handleCellChange(row.driver_id, key, e.target.value)}
+                            onChange={(e) => handleCellChange(row.driver_assignment_id, key, e.target.value)}
                           />
                         </td>
                       );
                     })}
                     <td>
-                      {notesOpenDriverId === row.driver_id ? (
+                      {notesOpenDriverAssignmentId === row.driver_assignment_id ? (
                         <input
                           type="text"
                           style={{ width: 150, fontSize: '0.78rem', padding: '0.2rem' }}
                           value={getNotesValue(row)}
                           disabled={!canEdit}
-                          onChange={(e) => handleNotesChange(row.driver_id, e.target.value)}
-                          onBlur={() => setNotesOpenDriverId(null)}
+                          onChange={(e) => handleNotesChange(row.driver_assignment_id, e.target.value)}
+                          onBlur={() => setNotesOpenDriverAssignmentId(null)}
                           autoFocus
                         />
                       ) : (
                         <button
                           className={`${styles.notesBtn} ${getNotesValue(row) ? styles.notesBtnActive : ''}`}
-                          onClick={() => canEdit ? setNotesOpenDriverId(row.driver_id) : undefined}
+                          onClick={() => canEdit ? setNotesOpenDriverAssignmentId(row.driver_assignment_id) : undefined}
                           title={getNotesValue(row) || (canEdit ? 'Add note' : 'Read-only')}
                         >
                           {getNotesValue(row) ? '📝' : (canEdit ? '+' : '—')}

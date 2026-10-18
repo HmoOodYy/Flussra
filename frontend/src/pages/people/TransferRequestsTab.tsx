@@ -15,6 +15,7 @@ export function TransferRequestsTab({ branches }: Props) {
     st, dispatch, canEditAnyBranch, filtered, selected,
     canApproveSource, canDecideTarget, canActOnEitherBranch,
     openCreate, submitCreate, submitApproveSource, submitDecide, doComplete, submitCancel,
+    submitReschedule,
   } = useTransferRequests(branches);
 
   if (st.loading) return <div className={styles.splash}>Loading transfer requests…</div>;
@@ -56,12 +57,14 @@ export function TransferRequestsTab({ branches }: Props) {
             canDecideTarget={canDecideTarget}
             canComplete={canActOnEitherBranch}
             canCancel={canActOnEitherBranch}
+            canReschedule={canActOnEitherBranch}
             actionLoading={st.actionLoading}
             actionError={st.actionError}
             onApproveSource={() => dispatch({ type: 'APPROVE_OPEN' })}
             onDecide={(d) => dispatch({ type: 'DECIDE_OPEN', decision: d })}
             onComplete={doComplete}
             onCancel={() => dispatch({ type: 'CANCEL_OPEN' })}
+            onReschedule={() => dispatch({ type: 'RESCHEDULE_OPEN' })}
             onClearError={() => dispatch({ type: 'ACTION_ERR', err: null })}
           />
         )}
@@ -72,7 +75,7 @@ export function TransferRequestsTab({ branches }: Props) {
       <TransferRequestDialogs
         st={st} selected={selected} branches={branches} dispatch={dispatch}
         submitCreate={submitCreate} submitApproveSource={submitApproveSource}
-        submitDecide={submitDecide} submitCancel={submitCancel}
+        submitDecide={submitDecide} submitCancel={submitCancel} submitReschedule={submitReschedule}
       />
     </div>
   );

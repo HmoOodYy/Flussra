@@ -31,7 +31,7 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [notesOpenDriverId, setNotesOpenDriverId] = useState<number | null>(null);
+  const [notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId] = useState<number | null>(null);
 
   const fetchGrid = useCallback(async (date: string | null) => {
     setLoading(true);
@@ -87,47 +87,47 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
     }
   }
 
-  function handleCellChange(driverId: number, key: string, value: string) {
+  function handleCellChange(driverAssignmentId: number, key: string, value: string) {
     setDirtyRows((prev) => {
       const m = new Map(prev);
-      const existing = m.get(driverId) ?? buildSaveRowFromGrid(grid, driverId);
-      m.set(driverId, { ...existing, values: { ...existing.values, [key]: value } });
+      const existing = m.get(driverAssignmentId) ?? buildSaveRowFromGrid(grid, driverAssignmentId);
+      m.set(driverAssignmentId, { ...existing, values: { ...existing.values, [key]: value } });
       return m;
     });
   }
 
-  function handleStatusChange(driverId: number, statusKey: string | null) {
+  function handleStatusChange(driverAssignmentId: number, statusKey: string | null) {
     setDirtyRows((prev) => {
       const m = new Map(prev);
-      const existing = m.get(driverId) ?? buildSaveRowFromGrid(grid, driverId);
-      m.set(driverId, { ...existing, status_key: statusKey });
+      const existing = m.get(driverAssignmentId) ?? buildSaveRowFromGrid(grid, driverAssignmentId);
+      m.set(driverAssignmentId, { ...existing, status_key: statusKey });
       return m;
     });
   }
 
-  function handleNotesChange(driverId: number, notes: string) {
+  function handleNotesChange(driverAssignmentId: number, notes: string) {
     setDirtyRows((prev) => {
       const m = new Map(prev);
-      const existing = m.get(driverId) ?? buildSaveRowFromGrid(grid, driverId);
-      m.set(driverId, { ...existing, notes: notes || null });
+      const existing = m.get(driverAssignmentId) ?? buildSaveRowFromGrid(grid, driverAssignmentId);
+      m.set(driverAssignmentId, { ...existing, notes: notes || null });
       return m;
     });
   }
 
   function getCellValue(row: DayGridRow, key: string): string {
-    const dirty = dirtyRows.get(row.driver_id);
+    const dirty = dirtyRows.get(row.driver_assignment_id);
     if (dirty) return dirty.values[key] ?? '';
     return row.values[key]?.quantity ?? '';
   }
 
   function getStatusValue(row: DayGridRow): string {
-    const dirty = dirtyRows.get(row.driver_id);
+    const dirty = dirtyRows.get(row.driver_assignment_id);
     if (dirty) return dirty.status_key ?? '';
     return row.status_key ?? '';
   }
 
   function getNotesValue(row: DayGridRow): string {
-    const dirty = dirtyRows.get(row.driver_id);
+    const dirty = dirtyRows.get(row.driver_assignment_id);
     if (dirty) return dirty.notes ?? '';
     return row.notes ?? '';
   }
@@ -140,8 +140,8 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
     dirtyRows,
     saving,
     saveError,
-    notesOpenDriverId,
-    setNotesOpenDriverId,
+    notesOpenDriverAssignmentId,
+    setNotesOpenDriverAssignmentId,
     fetchGrid,
     atStart,
     atEnd,

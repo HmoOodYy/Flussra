@@ -11,11 +11,11 @@ type PayRateDriverListProps = {
   branches: Branch[];
   loadingDrivers: boolean;
   filteredDrivers: DriverSummary[];
-  selectedDriverId: number | null;
-  selectDriver: (driverId: number) => void;
+  selectedDriverAssignmentId: number | null;
+  selectDriver: (driverAssignmentId: number) => void;
 };
 
-export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter, branches, loadingDrivers, filteredDrivers, selectedDriverId, selectDriver }: PayRateDriverListProps) {
+export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter, branches, loadingDrivers, filteredDrivers, selectedDriverAssignmentId, selectDriver }: PayRateDriverListProps) {
   return (
     <div className={styles.left}>
       <div className={styles.filters}>
@@ -40,10 +40,10 @@ export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFi
           <div className={styles.emptyList}>No drivers found.</div>
         ) : (
           filteredDrivers.map((d) => (
-            <button key={d.driver_id} className={`${styles.item} ${selectedDriverId === d.driver_id ? styles.itemActive : ''}`} onClick={() => selectDriver(d.driver_id)}>
+            <button key={d.driver_assignment_id!} className={`${styles.item} ${selectedDriverAssignmentId === d.driver_assignment_id ? styles.itemActive : ''}`} onClick={() => selectDriver(d.driver_assignment_id!)}>
               <div className={styles.itemBody}>
                 <div className={styles.itemName}>{d.full_name}</div>
-                <div className={styles.itemMeta}>{d.driver_code ?? 'No code'} &middot; {d.branch_name}</div>
+                <div className={styles.itemMeta}>{d.driver_number ?? 'No number'} &middot; {d.branch_name}</div>
               </div>
               <span className={d.driver_status === 'Active' ? styles.okChip : styles.statusBadge}>{d.driver_status}</span>
             </button>

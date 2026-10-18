@@ -150,21 +150,21 @@ export async function listBranchPayDefinitionHistory(
 // ── Driver rate assignments ───────────────────────────────────────────────────
 
 export async function listDriverPayRates(
-  driverId: number,
+  driverAssignmentId: number,
   asOf?: string,
 ): Promise<DriverPayRateRow[]> {
   const resp = await apiClient.get<DriverPayRateRow[]>(
-    `/compensation/drivers/${driverId}/pay-rates`,
+    `/compensation/driver-assignments/${driverAssignmentId}/pay-rates`,
     { params: asOf ? { as_of: asOf } : {} });
   return resp.data;
 }
 
 export async function listAssignmentHistory(
-  driverId: number,
+  driverAssignmentId: number,
   rateDefinitionId: number,
 ): Promise<AssignmentSummary[]> {
   const resp = await apiClient.get<AssignmentSummary[]>(
-    `/compensation/drivers/${driverId}/rate-definitions/${rateDefinitionId}/assignments`);
+    `/compensation/driver-assignments/${driverAssignmentId}/rate-definitions/${rateDefinitionId}/assignments`);
   return resp.data;
 }
 

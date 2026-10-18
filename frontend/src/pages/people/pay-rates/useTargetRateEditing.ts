@@ -3,7 +3,7 @@ import { approveAssignment, createAssignment, replaceAssignmentValues, updateAss
 import type { DriverPayRateRow } from '../../../types/compensation';
 import { apiError, type EditRow } from './payRatesView';
 
-export function useTargetRateEditing(selectedDriverId: number | null, refreshTargetRows: (driverId: number) => Promise<void>, referenceDate: string | undefined) {
+export function useTargetRateEditing(selectedDriverAssignmentId: number | null, refreshTargetRows: (driverAssignmentId: number) => Promise<void>, referenceDate: string | undefined) {
   const [targetDrafts, setTargetDrafts] = useState<Record<number, EditRow>>({});
   const [targetSavingId, setTargetSavingId] = useState<number | null>(null);
   const [targetErrors, setTargetErrors] = useState<Record<number, string>>({});
@@ -37,8 +37,8 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
   async function saveTargetRow(row: DriverPayRateRow, approve: boolean) {
     const id = row.rate_definition_id;
     const draft = targetDrafts[id];
-    if (!selectedDriverId || !draft || draft.amount === '' || !draft.effective_from) return;
-    const driverId = selectedDriverId;
+    if (!selectedDriverAssignmentId || !draft || draft.amount === '' || !draft.effective_from) return;
+    const driverAssignmentId = selectedDriverAssignmentId;
     setTargetSavingId(id);
     setTargetErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
     let phase: 'save' | 'approve' = 'save';
@@ -51,7 +51,7 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
         }
       } else {
         const created = await createAssignment({
-          driver_id: driverId, rate_definition_id: id, effective_from: draft.effective_from,
+          driver_assignment_id: driverAssignmentId, rate_definition_id: id, effective_from: draft.effective_from,
         });
         assignmentId = created.driver_rate_assignment_id;
       }
@@ -75,7 +75,7 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
         setTargetErrors((prev) => ({ ...prev, [id]: `${row.definition_name}: ${apiError(err)}` }));
       }
     } finally {
-      await refreshTargetRows(driverId);
+      await refreshTargetRows(driverAssignmentId);
       setTargetSavingId(null);
     }
   }

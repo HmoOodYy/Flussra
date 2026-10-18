@@ -10,7 +10,9 @@ export interface FinalLineSummary {
   final_line_id: number;
   period_id: number;
   branch_id: number;
+  driver_assignment_id: number;
   driver_id: number;
+  driver_number: string | null;
   driver_name: string;
   draft_line_id: number | null;
   work_date: string | null;
@@ -40,7 +42,7 @@ export interface FinalLineSummary {
 export interface FinalizationPreviewLine {
   draft_line_id: number | null;
   source_key: string;
-  driver_id: number;
+  driver_assignment_id: number;
   driver_name: string | null;
   work_date: string | null;
   line_type: string;
@@ -54,7 +56,7 @@ export interface FinalizationPreviewLine {
 }
 
 export interface FinalizationPreviewSysAdjustment {
-  driver_id: number;
+  driver_assignment_id: number;
   driver_name: string | null;
   adjustment_type: string; // "SYS_MIN_TOPUP" | "SYS_MAX_CAP"
   gross_before: string;
@@ -63,7 +65,9 @@ export interface FinalizationPreviewSysAdjustment {
 }
 
 export interface FinalizationPreviewDriverTotal {
+  driver_assignment_id: number;
   driver_id: number;
+  driver_number: string | null;
   driver_name: string | null;
   daily_pay: string;
   status_pay: string;

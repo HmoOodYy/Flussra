@@ -151,9 +151,9 @@ export function PeoplePage() {
               onEditExtraPerms={() => dispatch({ type: 'EP_OPEN', person: selected })}
               onTransfer={() => dispatch({ type: 'TRANSFER_OPEN', targetId: selected.user_id })}
               onGoPayRates={() => navigate(
-                selected.driver_id
-                  ? `/people/pay-rates?driverId=${selected.driver_id}`
-                  : `/people/pay-rates?driverUserId=${selected.user_id}`
+                // Pay Rates is assignment-addressed; the user lookup resolves the Driver's
+                // current assignment.
+                `/people/pay-rates?driverUserId=${selected.user_id}`
               )}
             />
           )}

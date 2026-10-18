@@ -42,10 +42,10 @@ export function PeriodPayMatrix({ table, emptyState, formatCell }: PeriodPayMatr
         </thead>
         <tbody>
           {table.rows.map((row) => (
-            <tr key={row.driver_id}>
+            <tr key={row.driver_assignment_id}>
               <th scope="row" className={styles.periodPayDriverCol}>
                 <strong>{row.driver_label}</strong>
-                {row.driver_code && <span>{row.driver_code}</span>}
+                {row.driver_number && <span>{row.driver_number}</span>}
               </th>
               {row.items.map((item) => (
                 <td key={item.payroll_period_definition_id} className={styles.numeric}>{formatCell(item.amount)}</td>

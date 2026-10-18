@@ -8,18 +8,30 @@ export type TransferStatus =
   | 'Returned'
   | 'Rejected'
   | 'Approved'
+  | 'Scheduled'
   | 'Completed'
   | 'Cancelled';
 
 export interface DriverTransferRequest {
   transfer_request_id: number;
   company_id: number;
+  /** The permanent Driver. */
   driver_id: number;
+  driver_number: string | null;
+  /** The home-Branch tenure the Driver is leaving / joining. */
+  source_driver_assignment_id: number;
+  destination_driver_assignment_id: number | null;
   source_branch_id: number;
   target_branch_id: number;
   requested_by_user_id: number;
   initiated_by: 'Driver' | 'SourceBranch';
+  /**
+   * Effective status reported by the server. A Scheduled request reads `Completed`
+   * once its EffectiveAt has passed; the client never derives this.
+   */
   status: TransferStatus;
+  /** Status as stored (a Scheduled request stays `Scheduled` in storage). */
+  stored_status: TransferStatus;
   effective_at: string | null;     // ISO instant; null until an immediate request completes
   reason: string | null;
   notes: string | null;
@@ -28,7 +40,8 @@ export interface DriverTransferRequest {
   target_decided_by_user_id: number | null;
   target_decided_at_utc: string | null;
   target_decision_notes: string | null;
-  new_driver_id: number | null;
+  scheduled_at_utc: string | null;
+  scheduled_by_user_id: number | null;
   completed_at_utc: string | null;
   completed_by_user_id: number | null;
   cancelled_at_utc: string | null;
@@ -70,6 +83,11 @@ export interface CancelRequest {
   cancel_reason?: string;
 }
 
+/** Move a request's EffectiveAt to another future instant (aware ISO instant). */
+export interface RescheduleRequest {
+  effective_at: string;
+}
+
 // ── Display helpers ──────────────────────────────────────────────────────────
 
 export const TRANSFER_TERMINAL: ReadonlySet<TransferStatus> = new Set([
@@ -77,7 +95,7 @@ export const TRANSFER_TERMINAL: ReadonlySet<TransferStatus> = new Set([
 ]);
 
 export const TRANSFER_ACTIVE: ReadonlySet<TransferStatus> = new Set([
-  'PendingSourceApproval', 'PendingTargetApproval', 'Returned', 'Approved',
+  'PendingSourceApproval', 'PendingTargetApproval', 'Returned', 'Approved', 'Scheduled',
 ]);
 
 export function statusLabel(s: TransferStatus): string {
@@ -86,13 +104,14 @@ export function statusLabel(s: TransferStatus): string {
     case 'PendingTargetApproval': return 'Awaiting Target Decision';
     case 'Returned':              return 'Returned to Source';
     case 'Approved':              return 'Approved — Ready to Complete';
+    case 'Scheduled':             return 'Scheduled';
     case 'Rejected':              return 'Rejected';
     case 'Completed':             return 'Completed';
     case 'Cancelled':             return 'Cancelled';
   }
 }
 
-export type StatusBadgeKind = 'pending' | 'returned' | 'approved' | 'done' | 'rejected' | 'cancelled';
+export type StatusBadgeKind = 'pending' | 'returned' | 'approved' | 'scheduled' | 'done' | 'rejected' | 'cancelled';
 
 export function statusKind(s: TransferStatus): StatusBadgeKind {
   switch (s) {
@@ -100,6 +119,7 @@ export function statusKind(s: TransferStatus): StatusBadgeKind {
     case 'PendingTargetApproval': return 'pending';
     case 'Returned':              return 'returned';
     case 'Approved':              return 'approved';
+    case 'Scheduled':             return 'scheduled';
     case 'Completed':             return 'done';
     case 'Rejected':              return 'rejected';
     case 'Cancelled':             return 'cancelled';

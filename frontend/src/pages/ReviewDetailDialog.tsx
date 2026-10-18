@@ -172,8 +172,8 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
   const decisionHistory = detail?.decisions ?? [];
   const finalReason = detail?.final_decision_reason ?? item.final_decision_reason;
   const driverNames = new Map(snapshot?.driver_totals.map((driver) => [
-    driver.driver_id,
-    driver.driver_name_snapshot ?? driver.driver_code_snapshot ?? `Driver ${driver.driver_id}`,
+    driver.driver_assignment_id,
+    driver.driver_name_snapshot ?? driver.driver_number_snapshot ?? 'Unnamed driver',
   ]));
 
   return (
@@ -240,8 +240,8 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                       </thead>
                       <tbody>
                         {snapshot.driver_totals.map((driver) => (
-                          <tr key={driver.driver_id}>
-                            <td>{driver.driver_name_snapshot ?? driver.driver_code_snapshot ?? `Driver ${driver.driver_id}`}</td>
+                          <tr key={driver.driver_assignment_id}>
+                            <td>{driver.driver_name_snapshot ?? driver.driver_number_snapshot ?? 'Unnamed driver'}</td>
                             <td className={styles.right}>{formatMoney(driver.daily_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                             <td className={styles.right}>{formatMoney(driver.status_pay, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
                             <td className={styles.right}>{formatMoney(driver.minimum_adjustment, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
@@ -276,8 +276,8 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                       </thead>
                       <tbody>
                         {snapshot.lines.map((line, index) => (
-                          <tr key={`${line.driver_id}-${line.source_type}-${line.line_type}-${index}`}>
-                            <td>{driverNames.get(line.driver_id) ?? `Driver ${line.driver_id}`}</td>
+                          <tr key={`${line.driver_assignment_id}-${line.source_type}-${line.line_type}-${index}`}>
+                            <td>{driverNames.get(line.driver_assignment_id) ?? 'Unnamed driver'}</td>
                             <td>{line.source_type}</td>
                             <td>{lineLabel(line)}</td>
                             <td>{formatDate(line.work_date)}</td>

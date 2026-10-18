@@ -3,7 +3,7 @@ import type { AxiosPromise } from 'axios';
 
 export interface DriverPayRule {
   driver_pay_rule_id: number;
-  driver_id: number;
+  driver_assignment_id: number;
   rule_type: string;
   amount: string;
   effective_from: string;
@@ -14,7 +14,7 @@ export interface DriverPayRule {
 }
 
 export interface DriverPayRuleCreatePayload {
-  driver_id: number;
+  driver_assignment_id: number;
   rule_type: 'MinimumPay' | 'MaximumPay';
   amount: string;
   effective_from: string;
@@ -25,8 +25,8 @@ export interface DriverPayRuleEndPayload {
   effective_to: string;
 }
 
-export function getDriverPayRules(driverId: number): AxiosPromise<DriverPayRule[]> {
-  return apiClient.get<DriverPayRule[]>(`/payroll/drivers/${driverId}/pay-rules`);
+export function getDriverPayRules(driverAssignmentId: number): AxiosPromise<DriverPayRule[]> {
+  return apiClient.get<DriverPayRule[]>(`/payroll/driver-assignments/${driverAssignmentId}/pay-rules`);
 }
 
 export function createDriverPayRule(payload: DriverPayRuleCreatePayload): AxiosPromise<DriverPayRule> {

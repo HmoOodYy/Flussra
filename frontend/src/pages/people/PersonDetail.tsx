@@ -136,12 +136,12 @@ export function PersonDetail({ person, allPerms, amOwner, canEditProfile, canTog
             <h3 className={styles.secTitle}>Driver</h3>
             {person.driver_id ? (
               <div className={styles.grid2}>
-                <span className={styles.fl}>Driver profile</span><span>Linked (ID {person.driver_id})</span>
+                <span className={styles.fl}>Driver</span><span>Linked</span>
                 <span className={styles.fl}>Pay rates</span><span><button className={styles.linkBtn} onClick={onGoPayRates}>Go to Pay Rates →</button></span>
               </div>
             ) : (
               <div className={styles.driverGapBox}>
-                <p>Driver profile not linked yet. Pay rates require a driver profile to be created separately via the Drivers module.</p>
+                <p>Driver not linked yet. Pay rates require a Driver to be created separately via the Drivers module.</p>
               </div>
             )}
           </section>

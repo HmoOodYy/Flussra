@@ -15,7 +15,7 @@ export interface CalculationPreviewLine {
   definition_name: string | null;
   calculation_status: string | null;
   rate_column_id: number | null;
-  driver_id: number;
+  driver_assignment_id: number;
   quantity: string | null;
   resolved_rate: string | null;
   calculated_amount: string | null;
@@ -24,7 +24,9 @@ export interface CalculationPreviewLine {
 }
 
 export interface CalculationPreviewDriver {
+  driver_assignment_id: number;
   driver_id: number;
+  driver_number: string | null;
   driver_name: string | null;
   daily_pay: string;
   status_pay: string;

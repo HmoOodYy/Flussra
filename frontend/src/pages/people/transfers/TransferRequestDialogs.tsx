@@ -6,7 +6,7 @@ import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
 
 interface Props {
-  st: Pick<TabState, 'create' | 'approveDialog' | 'decideDialog' | 'cancelDialog'>;
+  st: Pick<TabState, 'create' | 'approveDialog' | 'decideDialog' | 'cancelDialog' | 'rescheduleDialog'>;
   selected: DriverTransferRequest | null;
   branches: Branch[];
   dispatch: Dispatch<TabAction>;
@@ -14,9 +14,10 @@ interface Props {
   submitApproveSource(e: FormEvent): void;
   submitDecide(e: FormEvent): void;
   submitCancel(e: FormEvent): void;
+  submitReschedule(e: FormEvent): void;
 }
 
-export function TransferRequestDialogs({ st, selected, branches, dispatch, submitCreate, submitApproveSource, submitDecide, submitCancel }: Props) {
+export function TransferRequestDialogs({ st, selected, branches, dispatch, submitCreate, submitApproveSource, submitDecide, submitCancel, submitReschedule }: Props) {
   return (
     <>
       {/* ── Create dialog ── */}
@@ -41,7 +42,7 @@ export function TransferRequestDialogs({ st, selected, branches, dispatch, submi
                   <option value="">— Select a driver —</option>
                   {st.create.drivers.map(d => (
                     <option key={d.driver_id} value={d.driver_id!}>
-                      {d.full_name} · {d.branch_name}
+                      {d.full_name}{d.driver_number ? ` (${d.driver_number})` : ''} · {d.branch_name}
                     </option>
                   ))}
                 </select>
@@ -161,6 +162,38 @@ export function TransferRequestDialogs({ st, selected, branches, dispatch, submi
         </TrModal>
       )}
 
+      {/* ── Reschedule dialog (Scheduled requests that have not taken effect) ── */}
+      {st.rescheduleDialog.open && selected && (
+        <TrModal
+          title="Reschedule Transfer"
+          onClose={() => dispatch({ type: 'RESCHEDULE_CLOSE' })}
+        >
+          <form onSubmit={submitReschedule} className={styles.form}>
+            <p className={styles.helpTxt}>
+              Move the transfer of <strong>{selected.driver_name}</strong> to a new future time. The
+              driver stays in <strong>{selected.source_branch_name}</strong> until then and joins
+              <strong> {selected.target_branch_name}</strong> at the new time.
+            </p>
+            <TrField label="New effective time (UTC) *">
+              <input
+                className={styles.inp}
+                type="datetime-local"
+                step={60}
+                value={st.rescheduleDialog.effectiveAt}
+                required
+                onChange={e => dispatch({ type: 'RESCHEDULE_AT', val: e.target.value })}
+              />
+            </TrField>
+            {st.rescheduleDialog.error && <ErrMsg msg={st.rescheduleDialog.error} />}
+            <TrModalFoot
+              onCancel={() => dispatch({ type: 'RESCHEDULE_CLOSE' })}
+              loading={st.rescheduleDialog.loading}
+              label="Reschedule"
+            />
+          </form>
+        </TrModal>
+      )}
+
       {/* ── Cancel dialog ── */}
       {st.cancelDialog.open && selected && (
         <TrModal
@@ -170,7 +203,8 @@ export function TransferRequestDialogs({ st, selected, branches, dispatch, submi
           <form onSubmit={submitCancel} className={styles.form}>
             <p className={styles.helpTxt}>
               Cancel the transfer request for <strong>{selected.driver_name}</strong>.
-              This cannot be undone. The driver will remain in <strong>{selected.source_branch_name}</strong>.
+              This cannot be undone. The driver will remain in <strong>{selected.source_branch_name}</strong>
+              {selected.status === 'Scheduled' ? ' and the scheduled assignment will be removed' : ''}.
             </p>
             <TrField label="Reason (optional)">
               <input
@@ -217,7 +251,7 @@ function DecideBody({ decision, req }: { decision: DecideDialogState['decision']
         <p className={styles.helpTxt}>
           Approve the transfer of <strong>{req.driver_name}</strong> from{' '}
           <strong>{req.source_branch_name}</strong> to <strong>{req.target_branch_name}</strong>.
-          After approval, an authorized user can complete the transfer to create the new driver profile.
+          After approval, an authorized user can complete the transfer to schedule or apply the new assignment.
         </p>
       );
     case 'Rejected':

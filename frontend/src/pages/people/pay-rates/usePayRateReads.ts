@@ -5,173 +5,173 @@ import { apiError, type HistoryRow } from './payRatesView';
 import { getStatusRateMatrix, type StatusRateMatrix } from './statusRatesApi';
 import { getDriverPayRules, type DriverPayRule } from './driverPayRulesApi';
 
-export function usePayRateReads(selectedDriverId: number | null) {
-  const selectedDriverRef = useRef(selectedDriverId);
+export function usePayRateReads(selectedDriverAssignmentId: number | null) {
+  const selectedDriverRef = useRef(selectedDriverAssignmentId);
   useLayoutEffect(() => {
-    selectedDriverRef.current = selectedDriverId;
-  }, [selectedDriverId]);
+    selectedDriverRef.current = selectedDriverAssignmentId;
+  }, [selectedDriverAssignmentId]);
   const ratesRequest = useRef(0);
   const rulesRequest = useRef(0);
   const historyRequest = useRef(0);
   const [rowsState, setRowsState] = useState<DriverPayRateRow[]>([]);
-  const [ratesDriverId, setRatesDriverId] = useState<number | null>(null);
+  const [ratesDriverAssignmentId, setRatesDriverAssignmentId] = useState<number | null>(null);
   const [loadingRows, setLoadingRows] = useState(false);
-  const [loadingRowsDriverId, setLoadingRowsDriverId] = useState<number | null>(null);
+  const [loadingRowsDriverAssignmentId, setLoadingRowsDriverAssignmentId] = useState<number | null>(null);
   const [rowsError, setRowsError] = useState('');
-  const [rowsErrorDriverId, setRowsErrorDriverId] = useState<number | null>(null);
+  const [rowsErrorDriverAssignmentId, setRowsErrorDriverAssignmentId] = useState<number | null>(null);
   const [statusMatrixState, setStatusMatrixState] = useState<StatusRateMatrix | null>(null);
-  const [statusDriverId, setStatusDriverId] = useState<number | null>(null);
+  const [statusDriverAssignmentId, setStatusDriverAssignmentId] = useState<number | null>(null);
   const [historyRowsState, setHistoryRows] = useState<HistoryRow[]>([]);
-  const [historyDriverId, setHistoryDriverId] = useState<number | null>(null);
+  const [historyDriverAssignmentId, setHistoryDriverAssignmentId] = useState<number | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [loadingHistoryDriverId, setLoadingHistoryDriverId] = useState<number | null>(null);
+  const [loadingHistoryDriverAssignmentId, setLoadingHistoryDriverAssignmentId] = useState<number | null>(null);
   const [historyLoadedState, setHistoryLoaded] = useState(false);
   const [payRulesState, setPayRules] = useState<DriverPayRule[]>([]);
-  const [payRulesDriverId, setPayRulesDriverId] = useState<number | null>(null);
+  const [payRulesDriverAssignmentId, setPayRulesDriverAssignmentId] = useState<number | null>(null);
   const [loadingPayRules, setLoadingPayRules] = useState(false);
-  const [loadingPayRulesDriverId, setLoadingPayRulesDriverId] = useState<number | null>(null);
+  const [loadingPayRulesDriverAssignmentId, setLoadingPayRulesDriverAssignmentId] = useState<number | null>(null);
   const [payRulesLoadedState, setPayRulesLoaded] = useState(false);
   const [payRulesErrorState, setPayRulesError] = useState('');
 
-  const loadRates = useCallback(async (driverId: number) => {
-    if (selectedDriverRef.current !== driverId) return;
+  const loadRates = useCallback(async (driverAssignmentId: number) => {
+    if (selectedDriverRef.current !== driverAssignmentId) return;
     const request = ++ratesRequest.current;
     setLoadingRows(true);
-    setLoadingRowsDriverId(driverId);
+    setLoadingRowsDriverAssignmentId(driverAssignmentId);
     setRowsError('');
-    setRowsErrorDriverId(null);
+    setRowsErrorDriverAssignmentId(null);
     setRowsState([]);
-    setRatesDriverId(null);
+    setRatesDriverAssignmentId(null);
     setStatusMatrixState(null);
-    setStatusDriverId(null);
+    setStatusDriverAssignmentId(null);
     try {
-      const values = await listDriverPayRates(driverId);
-      if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
+      const values = await listDriverPayRates(driverAssignmentId);
+      if (request === ratesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setRowsState(values);
-        setRatesDriverId(driverId);
+        setRatesDriverAssignmentId(driverAssignmentId);
       }
     } catch (err) {
-      if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
+      if (request === ratesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setRowsError(apiError(err));
-        setRowsErrorDriverId(driverId);
+        setRowsErrorDriverAssignmentId(driverAssignmentId);
       }
     }
     try {
-      const res = await getStatusRateMatrix(driverId);
-      if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
+      const res = await getStatusRateMatrix(driverAssignmentId);
+      if (request === ratesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setStatusMatrixState(res.data);
-        setStatusDriverId(driverId);
+        setStatusDriverAssignmentId(driverAssignmentId);
       }
     } catch {
-      if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
+      if (request === ratesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setStatusMatrixState(null);
-        setStatusDriverId(driverId);
+        setStatusDriverAssignmentId(driverAssignmentId);
       }
     } finally {
-      if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
+      if (request === ratesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setLoadingRows(false);
-        setLoadingRowsDriverId(null);
+        setLoadingRowsDriverAssignmentId(null);
       }
     }
   }, []);
 
-  const loadPayRules = useCallback(async (driverId: number) => {
-    if (selectedDriverRef.current !== driverId) return;
+  const loadPayRules = useCallback(async (driverAssignmentId: number) => {
+    if (selectedDriverRef.current !== driverAssignmentId) return;
     const request = ++rulesRequest.current;
     setLoadingPayRules(true);
-    setLoadingPayRulesDriverId(driverId);
+    setLoadingPayRulesDriverAssignmentId(driverAssignmentId);
     setPayRulesError('');
-    setPayRulesDriverId(null);
+    setPayRulesDriverAssignmentId(null);
     setPayRulesLoaded(false);
     try {
-      const res = await getDriverPayRules(driverId);
-      if (request === rulesRequest.current && selectedDriverRef.current === driverId) {
+      const res = await getDriverPayRules(driverAssignmentId);
+      if (request === rulesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setPayRules(res.data);
-        setPayRulesDriverId(driverId);
+        setPayRulesDriverAssignmentId(driverAssignmentId);
         setPayRulesLoaded(true);
       }
     } catch (err) {
-      if (request === rulesRequest.current && selectedDriverRef.current === driverId) {
+      if (request === rulesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setPayRulesError(apiError(err));
         setPayRules([]);
-        setPayRulesDriverId(driverId);
+        setPayRulesDriverAssignmentId(driverAssignmentId);
         setPayRulesLoaded(true);
       }
     } finally {
-      if (request === rulesRequest.current && selectedDriverRef.current === driverId) {
+      if (request === rulesRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setLoadingPayRules(false);
-        setLoadingPayRulesDriverId(null);
+        setLoadingPayRulesDriverAssignmentId(null);
       }
     }
   }, []);
 
-  const loadHistory = useCallback(async (driverId: number, current: DriverPayRateRow[]) => {
-    if (selectedDriverRef.current !== driverId) return;
+  const loadHistory = useCallback(async (driverAssignmentId: number, current: DriverPayRateRow[]) => {
+    if (selectedDriverRef.current !== driverAssignmentId) return;
     const request = ++historyRequest.current;
     setLoadingHistory(true);
-    setLoadingHistoryDriverId(driverId);
-    setHistoryDriverId(null);
+    setLoadingHistoryDriverAssignmentId(driverAssignmentId);
+    setHistoryDriverAssignmentId(null);
     setHistoryLoaded(false);
     try {
       const lists = await Promise.all(current.map(async (row) => {
-        const items = await listAssignmentHistory(driverId, row.rate_definition_id);
+        const items = await listAssignmentHistory(driverAssignmentId, row.rate_definition_id);
         return items.map((item) => ({
           ...item, definition_name: row.definition_name, unit: row.unit,
         }));
       }));
-      if (request === historyRequest.current && selectedDriverRef.current === driverId) {
+      if (request === historyRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setHistoryRows(lists.flat().sort((a, b) => b.effective_from.localeCompare(a.effective_from)));
-        setHistoryDriverId(driverId);
+        setHistoryDriverAssignmentId(driverAssignmentId);
         setHistoryLoaded(true);
       }
     } catch {
-      if (request === historyRequest.current && selectedDriverRef.current === driverId) {
+      if (request === historyRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setHistoryRows([]);
-        setHistoryDriverId(driverId);
+        setHistoryDriverAssignmentId(driverAssignmentId);
         setHistoryLoaded(true);
       }
     } finally {
-      if (request === historyRequest.current && selectedDriverRef.current === driverId) {
+      if (request === historyRequest.current && selectedDriverRef.current === driverAssignmentId) {
         setLoadingHistory(false);
-        setLoadingHistoryDriverId(null);
+        setLoadingHistoryDriverAssignmentId(null);
       }
     }
   }, []);
 
-  const reloadAll = useCallback(async (driverId: number) => {
-    if (selectedDriverRef.current !== driverId) return;
-    await loadRates(driverId);
-    if (selectedDriverRef.current === driverId) {
+  const reloadAll = useCallback(async (driverAssignmentId: number) => {
+    if (selectedDriverRef.current !== driverAssignmentId) return;
+    await loadRates(driverAssignmentId);
+    if (selectedDriverRef.current === driverAssignmentId) {
       setHistoryLoaded(false);
-      setHistoryDriverId(null);
+      setHistoryDriverAssignmentId(null);
     }
-    if (payRulesDriverId === driverId) await loadPayRules(driverId);
-  }, [loadRates, loadPayRules, payRulesDriverId]);
+    if (payRulesDriverAssignmentId === driverAssignmentId) await loadPayRules(driverAssignmentId);
+  }, [loadRates, loadPayRules, payRulesDriverAssignmentId]);
 
-  const refreshTargetRows = useCallback(async (driverId: number) => {
-    if (selectedDriverRef.current !== driverId) return;
-    await loadRates(driverId);
-    if (selectedDriverRef.current === driverId) {
+  const refreshTargetRows = useCallback(async (driverAssignmentId: number) => {
+    if (selectedDriverRef.current !== driverAssignmentId) return;
+    await loadRates(driverAssignmentId);
+    if (selectedDriverRef.current === driverAssignmentId) {
       setHistoryLoaded(false);
-      setHistoryDriverId(null);
+      setHistoryDriverAssignmentId(null);
     }
   }, [loadRates]);
 
-  const rows = ratesDriverId === selectedDriverId ? rowsState : [];
-  const visibleRowsError = rowsErrorDriverId === selectedDriverId ? rowsError : '';
-  const statusMatrix = statusDriverId === selectedDriverId ? statusMatrixState : null;
-  const historyRows = historyDriverId === selectedDriverId ? historyRowsState : [];
-  const historyLoaded = historyDriverId === selectedDriverId && historyLoadedState;
-  const payRules = payRulesDriverId === selectedDriverId ? payRulesState : [];
-  const payRulesLoaded = payRulesDriverId === selectedDriverId && payRulesLoadedState;
-  const payRulesError = payRulesDriverId === selectedDriverId ? payRulesErrorState : '';
+  const rows = ratesDriverAssignmentId === selectedDriverAssignmentId ? rowsState : [];
+  const visibleRowsError = rowsErrorDriverAssignmentId === selectedDriverAssignmentId ? rowsError : '';
+  const statusMatrix = statusDriverAssignmentId === selectedDriverAssignmentId ? statusMatrixState : null;
+  const historyRows = historyDriverAssignmentId === selectedDriverAssignmentId ? historyRowsState : [];
+  const historyLoaded = historyDriverAssignmentId === selectedDriverAssignmentId && historyLoadedState;
+  const payRules = payRulesDriverAssignmentId === selectedDriverAssignmentId ? payRulesState : [];
+  const payRulesLoaded = payRulesDriverAssignmentId === selectedDriverAssignmentId && payRulesLoadedState;
+  const payRulesError = payRulesDriverAssignmentId === selectedDriverAssignmentId ? payRulesErrorState : '';
 
   return {
-    rows, loadingRows: loadingRows && loadingRowsDriverId === selectedDriverId,
+    rows, loadingRows: loadingRows && loadingRowsDriverAssignmentId === selectedDriverAssignmentId,
     rowsError: visibleRowsError, statusMatrix, historyRows,
-    loadingHistory: loadingHistory && loadingHistoryDriverId === selectedDriverId,
+    loadingHistory: loadingHistory && loadingHistoryDriverAssignmentId === selectedDriverAssignmentId,
     historyLoaded, setHistoryRows, setHistoryLoaded,
-    payRules, loadingPayRules: loadingPayRules && loadingPayRulesDriverId === selectedDriverId,
+    payRules, loadingPayRules: loadingPayRules && loadingPayRulesDriverAssignmentId === selectedDriverAssignmentId,
     payRulesLoaded, setPayRules, setPayRulesLoaded, payRulesError, setPayRulesError,
     loadRates, loadPayRules, loadHistory, reloadAll, refreshTargetRows,
   };
