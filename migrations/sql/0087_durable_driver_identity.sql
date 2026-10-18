@@ -205,27 +205,40 @@ FOR EACH ROW EXECUTE FUNCTION core.trg_DriverAssignments_IdentityImmutable();
 --   * The origin lineage (TransferredFromAssignmentID) never changes after insert.
 --   * EffectiveFromAt changes only for a not-yet-started assignment, to another
 --     future instant, under transfer_reschedule.
---   * An ended assignment (EffectiveToAt <= NOW()) is immutable, except that
+--   * An ended assignment (EffectiveToAt <= now) is immutable, except that
 --     termination may cap a transferred assignment at the Branch-local cutoff.
---   * Closing an open assignment needs no operation when the end is NOW() or later
---     (immediate and scheduled transfer); a past cap requires terminate.
+--   * Closing an open assignment needs no operation when the end is the transaction
+--     start or later (immediate and scheduled transfer); a past cap requires terminate.
 --   * A future end changes only under transfer_cancel or transfer_reschedule (to
 --     NULL or a later future instant) or under terminate.
 --   * TransferredToAssignmentID changes only together with an end change.
--- Deletion is limited to a never-effective destination removed by transfer cancel;
--- foreign keys stop any other delete.
+--   * An assignment of a Terminated Employee is never reopened (its end and end
+--     reason are never cleared), whatever the workforce operation.
+-- Deletion is limited to a never-effective destination removed by a transfer cancel
+-- or by the termination that disposes of that transfer; foreign keys stop any other
+-- delete.
+--
+-- Clock: every "has it started / has it ended / is it still in the future" test uses
+-- clock_timestamp(), not NOW(). NOW() is the transaction start, so a transaction that
+-- waited on a lock would otherwise judge a boundary that has since passed as future.
+-- The application takes its own decision instant (clock_timestamp()) after its locks;
+-- the trigger runs later, so the database is at least as strict as that decision. The
+-- one bound that keeps NOW() is the no-backdating rule for closing an open assignment:
+-- an immediate close is taken at the application's decision instant, which is never
+-- earlier than the transaction start.
 CREATE FUNCTION core.trg_DriverAssignments_HistoryImmutable()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_WorkforceOp TEXT := current_setting('flussra.workforce_op', TRUE);
+    v_Clock TIMESTAMPTZ := clock_timestamp();
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        IF v_WorkforceOp = 'transfer_cancel' AND OLD.EffectiveFromAt > NOW() THEN
+        IF v_WorkforceOp IN ('transfer_cancel', 'terminate') AND OLD.EffectiveFromAt > v_Clock THEN
             RETURN OLD;
         END IF;
-        RAISE EXCEPTION 'A DriverAssignment can be deleted only when a transfer cancel removes a never-effective destination';
+        RAISE EXCEPTION 'A DriverAssignment can be deleted only when a transfer cancel or the termination that disposes of the transfer removes a never-effective destination';
     END IF;
 
     IF NEW.EffectiveFromAt IS NOT DISTINCT FROM OLD.EffectiveFromAt
@@ -240,8 +253,20 @@ BEGIN
         RAISE EXCEPTION 'DriverAssignment origin lineage is immutable';
     END IF;
 
+    -- Termination is authoritative: a terminated Employee's assignment end is never
+    -- cleared, so no cancel or reschedule can reopen authority after termination.
+    IF ((OLD.EffectiveToAt IS NOT NULL AND NEW.EffectiveToAt IS NULL)
+        OR (OLD.EndReason IS NOT NULL AND NEW.EndReason IS NULL))
+       AND EXISTS (
+           SELECT 1 FROM core.Employees e
+           WHERE e.EmployeeID = OLD.EmployeeID AND e.EmploymentStatus = 'Terminated'
+       ) THEN
+        RAISE EXCEPTION 'A DriverAssignment of a terminated Employee cannot be reopened';
+    END IF;
+
     -- Termination may cap a transferred assignment at the Branch-local end of
-    -- the termination date and mark it Terminated.
+    -- the termination date and mark it Terminated. When it disposes of the
+    -- never-effective destination, the transfer link is cleared in the same update.
     IF v_WorkforceOp = 'terminate'
        AND OLD.EndReason = 'Transferred'
        AND NEW.EndReason = 'Terminated'
@@ -262,13 +287,14 @@ BEGIN
                  ))
              )
        )
-       AND NEW.TransferredToAssignmentID IS NOT DISTINCT FROM OLD.TransferredToAssignmentID THEN
+       AND (NEW.TransferredToAssignmentID IS NOT DISTINCT FROM OLD.TransferredToAssignmentID
+            OR NEW.TransferredToAssignmentID IS NULL) THEN
         RETURN NEW;
     END IF;
 
     IF NEW.EffectiveFromAt IS DISTINCT FROM OLD.EffectiveFromAt
-       AND NOT (OLD.EffectiveFromAt > NOW()
-                AND NEW.EffectiveFromAt > NOW()
+       AND NOT (OLD.EffectiveFromAt > v_Clock
+                AND NEW.EffectiveFromAt > v_Clock
                 AND v_WorkforceOp = 'transfer_reschedule') THEN
         RAISE EXCEPTION 'DriverAssignment start changes only for a not-yet-started assignment under transfer reschedule';
     END IF;
@@ -284,14 +310,16 @@ BEGIN
             IF NEW.EffectiveToAt IS NULL THEN
                 RAISE EXCEPTION 'An open DriverAssignment changes its end reason or transfer link only by closing';
             END IF;
+            -- Transaction start on purpose: an immediate close is taken at the
+            -- application's clock-based decision instant, which is >= NOW().
             IF NEW.EffectiveToAt < NOW() AND v_WorkforceOp IS DISTINCT FROM 'terminate' THEN
                 RAISE EXCEPTION 'A DriverAssignment is closed in the past only by termination';
             END IF;
-        ELSIF OLD.EffectiveToAt <= NOW() THEN
+        ELSIF OLD.EffectiveToAt <= v_Clock THEN
             RAISE EXCEPTION 'Historical DriverAssignment window, end reason, and lineage are immutable';
         ELSIF NOT (v_WorkforceOp = 'terminate'
                    OR (v_WorkforceOp IN ('transfer_cancel', 'transfer_reschedule')
-                       AND (NEW.EffectiveToAt IS NULL OR NEW.EffectiveToAt > NOW()))) THEN
+                       AND (NEW.EffectiveToAt IS NULL OR NEW.EffectiveToAt > v_Clock))) THEN
             RAISE EXCEPTION 'A future DriverAssignment end changes only through transfer cancel, reschedule or termination';
         END IF;
     END IF;
@@ -415,7 +443,9 @@ ALTER TABLE core.DriverTransferRequests
     ADD CONSTRAINT ck_DTR_CompletedScheduledDestination
         CHECK (Status NOT IN ('Completed', 'Scheduled') OR DestinationDriverAssignmentID IS NOT NULL),
     ADD CONSTRAINT ck_DTR_ScheduledAudit
-        CHECK (Status <> 'Scheduled' OR ScheduledAtUtc IS NOT NULL);
+        CHECK (Status <> 'Scheduled' OR ScheduledAtUtc IS NOT NULL),
+    ADD CONSTRAINT ck_DTR_CancelledNoDestination
+        CHECK (Status <> 'Cancelled' OR DestinationDriverAssignmentID IS NULL);
 
 CREATE INDEX ix_DTR_SourceAssignment ON core.DriverTransferRequests (SourceDriverAssignmentID);
 CREATE INDEX ix_DTR_DestinationAssignment ON core.DriverTransferRequests (DestinationDriverAssignmentID)

@@ -755,14 +755,18 @@ def test_only_transfer_cancel_deletes_and_only_a_never_effective_assignment(cur)
     destination = _assignment(cur, p["company"], p["branches"][1], p["employee"], p["driver"], FUTURE_START)
     delete = "DELETE FROM core.driverassignments WHERE driverassignmentid = %s"
 
-    for op in ("", "transfer_reschedule", "terminate"):
+    for op in ("", "transfer_reschedule"):
         _set_op(cur, op) if op else _clear_op(cur)
         with rejected(cur, errors.RaiseException):
             cur.execute(delete, (destination,))
 
-    _set_op(cur, "transfer_cancel")
-    with rejected(cur, errors.RaiseException):
-        cur.execute(delete, (source,))  # already effective: history, never deletable
+    # Cancel and the termination that disposes of the transfer may remove it; neither
+    # may remove an assignment that already took effect.
+    for op in ("transfer_cancel", "terminate"):
+        _set_op(cur, op)
+        with rejected(cur, errors.RaiseException):
+            cur.execute(delete, (source,))  # already effective: history, never deletable
+    _set_op(cur, "terminate")
     cur.execute(delete, (destination,))
     assert cur.rowcount == 1
 
@@ -1055,3 +1059,111 @@ def test_eligibility_ownership_trigger_checks_the_assignment_branch(cur):
         cur.execute(insert, (w["company"], w["source_branch"], period, w["other_assignment"], PAST_START, "Terminated", None))
     with rejected(cur, errors.CheckViolation):
         cur.execute(insert, (w["company"], w["source_branch"], period, w["other_assignment"], PAST_START, "Active", "Resigned"))
+
+
+# ---------------------------------------------------------------------------
+# Correction pass: termination authority, wall-clock decisions, Cancelled shape
+# ---------------------------------------------------------------------------
+
+def test_a_terminated_employees_assignment_is_never_reopened_even_under_transfer_cancel(cur):
+    p = _person(cur)
+    source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                         PAST_START, FUTURE_START, "Transferred")
+    cur.execute("""
+        UPDATE core.employees SET employmentstatus = 'Terminated', terminationdate = DATE '2020-06-10'
+        WHERE employeeid = %s
+    """, (p["employee"],))
+    reopen = ("UPDATE core.driverassignments SET effectivetoat = NULL, endreason = NULL "
+              "WHERE driverassignmentid = %s")
+    for op in ("transfer_cancel", "transfer_reschedule", "terminate"):
+        _set_op(cur, op)
+        with rejected(cur, errors.RaiseException) as info:
+            cur.execute(reopen, (source,))
+        assert "terminated Employee" in str(info.value)
+    # Clearing only the reason, or only the end, is a reopen attempt too.
+    _set_op(cur, "transfer_cancel")
+    with rejected(cur, errors.Error):
+        cur.execute("UPDATE core.driverassignments SET endreason = NULL WHERE driverassignmentid = %s", (source,))
+
+
+def test_termination_disposes_of_a_never_effective_destination_and_caps_the_source(cur):
+    p = _person(cur)
+    source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                         PAST_START, FUTURE_START, "Transferred")
+    destination = _assignment(cur, p["company"], p["branches"][1], p["employee"], p["driver"], FUTURE_START)
+    cur.execute("""
+        UPDATE core.employees SET employmentstatus = 'Terminated', terminationdate = DATE '2020-06-10'
+        WHERE employeeid = %s
+    """, (p["employee"],))
+    cap = ("UPDATE core.driverassignments SET effectivetoat = %s, endreason = 'Terminated', "
+           "transferredtoassignmentid = NULL WHERE driverassignmentid = %s")
+    _set_op(cur, "terminate")
+    cur.execute(cap, ("2020-06-11 00:00+00", source))
+    assert cur.rowcount == 1
+    cur.execute("DELETE FROM core.driverassignments WHERE driverassignmentid = %s", (destination,))
+    assert cur.rowcount == 1
+    _settle_exclusion(cur)
+
+
+def test_boundary_decisions_use_the_wall_clock_not_the_transaction_start(cur):
+    """A future end that passes inside one long transaction can no longer be reopened."""
+    p = _person(cur)
+    source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                         PAST_START, None, None)
+    cur.execute("""
+        UPDATE core.driverassignments
+        SET effectivetoat = clock_timestamp() + INTERVAL '1500 milliseconds', endreason = 'Transferred'
+        WHERE driverassignmentid = %s
+    """, (source,))
+    cur.execute("SELECT pg_sleep(2)")
+    # The transaction started before the boundary, but the boundary has passed by the clock.
+    cur.execute("SELECT clock_timestamp() >= (SELECT effectivetoat FROM core.driverassignments "
+                "WHERE driverassignmentid = %s), now() < (SELECT effectivetoat FROM "
+                "core.driverassignments WHERE driverassignmentid = %s)", (source, source))
+    passed_by_clock, before_by_transaction_start = cur.fetchone()
+    assert passed_by_clock and before_by_transaction_start
+    reopen = ("UPDATE core.driverassignments SET effectivetoat = NULL, endreason = NULL "
+              "WHERE driverassignmentid = %s")
+    _set_op(cur, "transfer_cancel")
+    with rejected(cur, errors.RaiseException):
+        cur.execute(reopen, (source,))
+    # Nor can the passed end be moved to another future instant.
+    _set_op(cur, "transfer_reschedule")
+    with rejected(cur, errors.RaiseException):
+        cur.execute("UPDATE core.driverassignments SET effectivetoat = %s WHERE driverassignmentid = %s",
+                    (FUTURE_LATER, source))
+
+
+def test_a_cancelled_transfer_request_cannot_keep_a_destination_assignment(cur):
+    p = _person(cur)
+    source = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
+                         PAST_START, FUTURE_START, "Transferred")
+    destination = _assignment(cur, p["company"], p["branches"][1], p["employee"], p["driver"], FUTURE_START)
+    cur.execute("""
+        INSERT INTO sec.users (companyid, username, displayname, passwordhash, isactive)
+        VALUES (%s, %s, 'Requester', 'x', TRUE) RETURNING userid
+    """, (p["company"], "u" + uuid4().hex[:8]))
+    user_id = cur.fetchone()[0]
+    insert = """
+        INSERT INTO core.drivertransferrequests
+            (companyid, driverid, sourcedriverassignmentid, destinationdriverassignmentid,
+             sourcebranchid, targetbranchid, requestedbyuserid, initiatedby, status, effectiveat,
+             scheduledatutc)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'SourceBranch', %s, %s, NOW())
+        RETURNING transferrequestid
+    """
+    args = (p["company"], p["driver"], source, destination, p["branches"][0], p["branches"][1],
+            user_id)
+    with rejected(cur, errors.CheckViolation) as info:
+        cur.execute(insert, (*args, "Cancelled", FUTURE_START))
+    assert "ck_dtr_cancelledno" in str(info.value).lower()
+    cur.execute(insert, (*args, "Scheduled", FUTURE_START))
+    request_id = cur.fetchone()[0]
+    with rejected(cur, errors.CheckViolation):
+        cur.execute("UPDATE core.drivertransferrequests SET status = 'Cancelled' "
+                    "WHERE transferrequestid = %s", (request_id,))
+    cur.execute("""
+        UPDATE core.drivertransferrequests
+        SET status = 'Cancelled', destinationdriverassignmentid = NULL WHERE transferrequestid = %s
+    """, (request_id,))
+    assert cur.rowcount == 1
