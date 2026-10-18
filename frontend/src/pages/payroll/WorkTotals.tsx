@@ -5,7 +5,7 @@
  * definition columns. Which totals appear depends only on the period's definitions;
  * no code or name is given any special meaning.
  */
-import type { DefinitionQuantity, ReportColumn } from '../../types/payroll';
+import type { DefinitionQuantity, ReportColumn } from '../../types/payroll/reports';
 
 export function WorkTotals({
   totals,

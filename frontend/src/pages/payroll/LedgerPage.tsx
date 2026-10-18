@@ -13,7 +13,8 @@ import { useSearchParams } from 'react-router-dom';
 import apiClient from '../../lib/apiClient';
 import { getFinalizedPeriods } from '../../lib/payrollApi';
 import type { Branch } from '../../types/core';
-import type { FinalizedPeriodListItem, PeriodSummary } from '../../types/payroll';
+import type { FinalizedPeriodListItem } from '../../types/payroll/finalized';
+import type { PeriodSummary } from '../../types/payroll/periods';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { FinalSummaryDialog } from './FinalSummaryDialog';
 import {

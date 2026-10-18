@@ -5,7 +5,8 @@ import {
   isDiscoveryForbidden,
 } from '../src/pages/payroll/ledgerDiscovery.ts';
 import type { LedgerDiscoveryDeps } from '../src/pages/payroll/ledgerDiscovery.ts';
-import type { FinalizedPeriodListItem, PeriodSummary } from '../src/types/payroll.ts';
+import type { FinalizedPeriodListItem } from '../src/types/payroll/finalized.ts';
+import type { PeriodSummary } from '../src/types/payroll/periods.ts';
 
 function makeFinalized(overrides: Partial<FinalizedPeriodListItem> = {}): FinalizedPeriodListItem {
   return {

@@ -10,7 +10,7 @@ import {
   getBonusSummary,
   voidBonusEvent,
 } from '../../lib/payrollApi';
-import type { BonusBatchItem, BonusSummary } from '../../types/payroll';
+import type { BonusBatchItem, BonusSummary } from '../../types/payroll/bonus';
 import styles from './BonusDialog.module.css';
 import { useAuth } from '../../store/authStore';
 import { formatMoney } from '../../lib/money';

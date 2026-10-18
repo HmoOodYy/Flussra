@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildPeriodPayTable, driverLabel } from '../src/pages/payroll/periodPayTable.ts';
-import type { DefinitionAmount, ReportColumn, ReportDriver, ReportPaySection } from '../src/types/payroll.ts';
+import type {
+  DefinitionAmount,
+  ReportColumn,
+  ReportDriver,
+  ReportPaySection,
+} from '../src/types/payroll/reports.ts';
 
 function makeColumn(overrides: Partial<ReportColumn> = {}): ReportColumn {
   return {
@@ -182,24 +187,50 @@ test('periodPayTable.ts source contains no hard-coded Daily Pay Item names', () 
 
 test('both dialogs align money through the shared buildPeriodPayTable helper', () => {
   for (const file of ['CurrentPayrollReportsDialog.tsx', 'FinalizedPayrollLibraryDialog.tsx']) {
-    const source = readFileSync(new URL(`../src/pages/payroll/${file}`, import.meta.url), 'utf8');
-    assert.ok(source.includes("from './periodPayTable'"), `${file}: expected an import from ./periodPayTable`);
-    assert.ok(source.includes('buildPeriodPayTable('), `${file}: expected a call to buildPeriodPayTable`);
+    const source = readFileSync(new URL('../src/pages/payroll/' + file, import.meta.url), 'utf8');
+    if (file === 'FinalizedPayrollLibraryDialog.tsx') {
+      const reportBody = readFileSync(new URL('../src/pages/payroll/finalizedLibrary/ReportBody.tsx', import.meta.url), 'utf8');
+      assert.ok(source.includes("from './finalizedLibrary/ReportBody'"), file + ': expected to render the ReportBody owner');
+      assert.ok(reportBody.includes("from '../periodPayTable'"), 'ReportBody: expected an import from ../periodPayTable');
+      assert.ok(reportBody.includes('buildPeriodPayTable('), 'ReportBody: expected a call to buildPeriodPayTable');
+    } else {
+      assert.ok(source.includes("from './periodPayTable'"), file + ': expected an import from ./periodPayTable');
+      assert.ok(source.includes('buildPeriodPayTable('), file + ': expected a call to buildPeriodPayTable');
+    }
   }
 });
 
 test('both dialogs render period-pay through the shared PeriodPayMatrix component, not separate markup', () => {
   for (const file of ['CurrentPayrollReportsDialog.tsx', 'FinalizedPayrollLibraryDialog.tsx']) {
-    const source = readFileSync(new URL(`../src/pages/payroll/${file}`, import.meta.url), 'utf8');
-    assert.ok(source.includes("from './PeriodPayMatrix'"), `${file}: expected an import from ./PeriodPayMatrix`);
-    assert.ok(source.includes('<PeriodPayMatrix'), `${file}: expected a <PeriodPayMatrix> usage`);
+    const source = readFileSync(new URL('../src/pages/payroll/' + file, import.meta.url), 'utf8');
+    if (file === 'FinalizedPayrollLibraryDialog.tsx') {
+      const reportBody = readFileSync(new URL('../src/pages/payroll/finalizedLibrary/ReportBody.tsx', import.meta.url), 'utf8');
+      assert.ok(source.includes("from './finalizedLibrary/ReportBody'"), file + ': expected to render the ReportBody owner');
+      assert.ok(reportBody.includes("from '../PeriodPayMatrix'"), 'ReportBody: expected an import from ../PeriodPayMatrix');
+      assert.ok(reportBody.includes('<PeriodPayMatrix'), 'ReportBody: expected a <PeriodPayMatrix> usage');
+    } else {
+      assert.ok(source.includes("from './PeriodPayMatrix'"), file + ': expected an import from ./PeriodPayMatrix');
+      assert.ok(source.includes('<PeriodPayMatrix'), file + ': expected a <PeriodPayMatrix> usage');
+    }
   }
 });
 
 test('neither dialog performs its own financial summation (Array.reduce) for official money', () => {
+  const finalizedOwners = [
+    'FinalizedPayrollLibraryDialog.tsx',
+    'finalizedLibrary/OverviewBody.tsx',
+    'finalizedLibrary/ReportBody.tsx',
+    'finalizedLibrary/OffStatusBody.tsx',
+    'finalizedLibrary/RatesUsedBody.tsx',
+    'finalizedLibrary/AuditBody.tsx',
+    'finalizedLibrary/formatting.ts',
+    'finalizedLibrary/EvidencePresentation.tsx',
+  ];
   for (const file of ['CurrentPayrollReportsDialog.tsx', 'FinalizedPayrollLibraryDialog.tsx']) {
-    const source = readFileSync(new URL(`../src/pages/payroll/${file}`, import.meta.url), 'utf8');
-    assert.ok(!/\.reduce\(/.test(source), `${file} must not use Array.reduce for financial totals`);
+    const source = file === 'FinalizedPayrollLibraryDialog.tsx'
+      ? finalizedOwners.map((owner) => readFileSync(new URL('../src/pages/payroll/' + owner, import.meta.url), 'utf8')).join('\n')
+      : readFileSync(new URL('../src/pages/payroll/' + file, import.meta.url), 'utf8');
+    assert.ok(!/\.reduce\(/.test(source), file + ' must not use Array.reduce for financial totals');
   }
 });
 

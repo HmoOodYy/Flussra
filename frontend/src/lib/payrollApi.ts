@@ -6,30 +6,34 @@ import apiClient from './apiClient';
 import type {
   DayGridResponse,
   DayGridSaveRequest,
+  SelectedDayOffDriversResponse,
+} from '../types/payroll/entry';
+import type {
   BonusEvent,
   BonusBatchCreate,
   BonusBatchResponse,
   BonusSummary,
+} from '../types/payroll/bonus';
+import type {
   PeriodSummary,
-  SelectedDayOffDriversResponse,
-  FinalizationPreviewResponse,
-  CalculationPreviewResponse,
-  FinalLineSummary,
   CurrentWorkflow,
   CurrentPayrollHub,
   PeriodCandidateMode,
   PeriodCandidatePreview,
   PeriodCreationResult,
-  CalculationReportResponse,
-  CalculationReportView,
+} from '../types/payroll/periods';
+import type { FinalizationPreviewResponse, FinalLineSummary } from '../types/payroll/finalization';
+import type { CalculationPreviewResponse } from '../types/payroll/calculation';
+import type { CalculationReportResponse, CalculationReportView } from '../types/payroll/reports';
+import type {
   FinalizedCalculationReportResponse,
   FinalizedPeriodListItem,
   FinalizedOverviewResponse,
   FinalizedReportView,
   FinalizedOffDriversResponse,
   FinalizedRatesUsedResponse,
-  FinalizedAuditResponse,
-} from '../types/payroll';
+} from '../types/payroll/finalized';
+import type { FinalizedAuditResponse } from '../types/payroll/finalizedEvidence';
 
 // ---------------------------------------------------------------------------
 // Current workflow and candidate-based period creation

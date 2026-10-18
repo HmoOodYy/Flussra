@@ -98,10 +98,18 @@ test('financial screens have no known USD-specific formatting assumptions', () =
     '../src/pages/payroll/FinalizationPreviewDialog.tsx',
     '../src/pages/payroll/FinalSummaryDialog.tsx',
     '../src/pages/payroll/FinalizedPayrollLibraryDialog.tsx',
+    '../src/pages/payroll/finalizedLibrary/OverviewBody.tsx',
+    '../src/pages/payroll/finalizedLibrary/ReportBody.tsx',
+    '../src/pages/payroll/finalizedLibrary/OffStatusBody.tsx',
+    '../src/pages/payroll/finalizedLibrary/RatesUsedBody.tsx',
+    '../src/pages/payroll/finalizedLibrary/AuditBody.tsx',
+    '../src/pages/payroll/finalizedLibrary/formatting.ts',
+    '../src/pages/payroll/finalizedLibrary/EvidencePresentation.tsx',
     '../src/pages/payroll/LedgerPage.tsx',
     '../src/pages/payroll/PeriodsListPage.tsx',
     '../src/pages/payroll/grossDisplay.ts',
     '../src/pages/payroll/PeriodDetailPage.tsx',
+    '../src/pages/payroll/useDailyEntryController.ts',
   ];
   const payRatesFeatureFiles = [
     '../src/pages/people/pay-rates/PayRatesPage.tsx',

@@ -10,7 +10,8 @@
  */
 import { useEffect, useState } from 'react';
 import { getFinalLines } from '../../lib/payrollApi';
-import type { FinalLineSummary, PeriodSummary } from '../../types/payroll';
+import type { FinalLineSummary } from '../../types/payroll/finalization';
+import type { PeriodSummary } from '../../types/payroll/periods';
 import styles from './FinalSummaryDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 

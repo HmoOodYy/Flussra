@@ -19,7 +19,7 @@ import type {
   FinalizationPreviewDriverTotal,
   FinalizationPreviewSysAdjustment,
   FinalizationPreviewLine,
-} from '../../types/payroll';
+} from '../../types/payroll/finalization';
 import { finalizedLedgerPath } from './finalizedNavigation';
 import styles from './FinalizationPreviewDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';

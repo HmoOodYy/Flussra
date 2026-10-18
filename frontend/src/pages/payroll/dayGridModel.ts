@@ -6,7 +6,12 @@
  * that id (as a string), never by a code or a name. Code and label are display metadata
  * and have no behavior here.
  */
-import type { DayGridColumn, DayGridSummary } from '../../types/payroll';
+import type {
+  DayGridColumn,
+  DayGridResponse,
+  DayGridSaveRow,
+  DayGridSummary,
+} from '../../types/payroll/entry';
 
 /** The stable key for a column in value maps and save payloads. */
 export function columnKey(column: Pick<DayGridColumn, 'payroll_period_definition_id'>): string {
@@ -47,4 +52,17 @@ export function quantityTotalViews(
     unit: column.unit,
     quantity: byId.get(column.payroll_period_definition_id) ?? '0',
   }));
+}
+
+/** Build a dirty row from the current grid, preserving its definition-keyed values. */
+export function buildSaveRowFromGrid(grid: DayGridResponse | null, driverId: number): DayGridSaveRow {
+  const row = grid?.rows.find((r) => r.driver_id === driverId);
+  return {
+    driver_id: driverId,
+    values: Object.fromEntries(
+      Object.entries(row?.values ?? {}).map(([k, v]) => [k, v.quantity ?? '']),
+    ),
+    status_key: row?.status_key ?? null,
+    notes: row?.notes ?? null,
+  };
 }

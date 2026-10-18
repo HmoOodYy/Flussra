@@ -5,16 +5,23 @@ import { test } from 'node:test';
 const DIR = '../src/pages/settings/payroll/';
 const source = readFileSync(new URL(`${DIR}PolicyDetailPanel.tsx`, import.meta.url), 'utf8');
 
+const headerSource = readFileSync(new URL(DIR + 'PolicyDetailHeader.tsx', import.meta.url), 'utf8');
+const lowerSource = readFileSync(new URL(DIR + 'PolicyDetailLowerSections.tsx', import.meta.url), 'utf8');
+const dialogsSource = readFileSync(new URL(DIR + 'PolicyDetailDialogs.tsx', import.meta.url), 'utf8');
+const dataSource = readFileSync(new URL(DIR + 'usePolicyDetailData.ts', import.meta.url), 'utf8');
+const typesSource = readFileSync(new URL(DIR + 'policyDetailTypes.ts', import.meta.url), 'utf8');
+const timelineSource = readFileSync(new URL(DIR + 'VersionTimelineSection.tsx', import.meta.url), 'utf8');
+const featureSource = [source, headerSource, lowerSource, dialogsSource, dataSource, timelineSource].join('\n');
+
 function countOf(re: RegExp): number {
-  return (source.match(re) ?? []).length;
+  return (featureSource.match(re) ?? []).length;
 }
 
-const headerStart = source.indexOf('Header: name');
 const lowerGateIdx = source.indexOf('{showLowerSections && (');
-const confirmIdx = source.indexOf('Confirm dialogs (policy-level)');
+const confirmIdx = source.indexOf('<PolicyDetailDialogs');
 
 test('the header renders the policy name and the friendly usage label from usageState (never raw status); no code and no ids', () => {
-  const header = source.slice(headerStart, lowerGateIdx);
+  const header = headerSource;
   assert.match(header, /styles\.policyTitle\}>\{selectedPolicy\.setup_name\}/);
   assert.match(header, /usageState === 'Active'/);
   assert.match(header, /\{usageStateLabel\(usageState\)\}/);
@@ -25,21 +32,21 @@ test('the header renders the policy name and the friendly usage label from usage
 });
 
 test('the header shows "Default for new branches" only for the company default policy', () => {
-  const header = source.slice(headerStart, lowerGateIdx);
+  const header = headerSource;
   assert.match(header, /selectedPolicy\.setup_id === defaultSetupId && \(\s*<span[^>]*>Default for new branches<\/span>/);
 });
 
 test('Set as default keeps the old gates (canAssign + Active + not default), goes through openConfirm, and the old wording is gone', () => {
-  const header = source.slice(headerStart, lowerGateIdx);
+  const header = headerSource;
   assert.match(
     header,
     /canAssign && selectedPolicy\.status === 'Active' && selectedPolicy\.setup_id !== defaultSetupId && \(\s*<button[\s\S]*?openConfirm\('set-default'\)[\s\S]*?>\s*Set as default\s*<\/button>/,
   );
-  assert.doesNotMatch(source, /Use for new branches|Use as default/);
+  assert.doesNotMatch(featureSource, /Use for new branches|Use as default/);
 });
 
 test('Set as default is disabled without a Published Version and explains why (frontend prerequisite mirrors the backend rule)', () => {
-  const header = source.slice(headerStart, lowerGateIdx);
+  const header = headerSource;
   assert.match(source, /hasPublishedVersion\(versions, selectedPolicy\.setup_id\)/);
   assert.match(source, /const versionsLoaded = !versionsLoading && !versionsError;/);
   assert.match(header, /disabled=\{mutating \|\| !defaultPrerequisiteMet\}/);
@@ -54,7 +61,7 @@ test('Set as default is disabled without a Published Version and explains why (f
 });
 
 test('Clear company default requires the default policy + canAssign and goes through openConfirm', () => {
-  const header = source.slice(headerStart, lowerGateIdx);
+  const header = headerSource;
   assert.match(
     header,
     /selectedPolicy\.setup_id === defaultSetupId && canAssign && \(\s*<button[\s\S]*?openConfirm\('clear-default'\)[\s\S]*?>\s*Clear company default/,
@@ -62,7 +69,7 @@ test('Clear company default requires the default policy + canAssign and goes thr
 });
 
 test('Edit details keeps its gate (canManage + Active) and reuses openEditModal', () => {
-  const header = source.slice(headerStart, lowerGateIdx);
+  const header = headerSource;
   assert.match(
     header,
     /canManage && selectedPolicy\.status === 'Active' && \(\s*<button[^>]*onClick=\{openEditModal\}[^>]*>\s*Edit details/,
@@ -77,29 +84,29 @@ test('set/clear default requests exist exactly once each (no duplicate requests 
 });
 
 test('existing confirm-dialog copy is unchanged', () => {
-  assert.match(source, /title="Set company default\?"/);
-  assert.match(source, /message="Affects only branches created later; existing branch assignments never change\."/);
-  assert.match(source, /title="Clear company default\?"/);
-  assert.match(source, /Existing branch assignments are unchanged\./);
+  assert.match(dialogsSource, /title="Set company default\?"/);
+  assert.match(dialogsSource, /message="Affects only branches created later; existing branch assignments never change\."/);
+  assert.match(dialogsSource, /title="Clear company default\?"/);
+  assert.match(dialogsSource, /Existing branch assignments are unchanged\./);
 });
 
 test('Payroll schedule card: renamed, fields come from the current version only, Custom interval is conditional', () => {
   assert.match(source, /policyScheduleFields\(\s*selectedPolicy \? currentVersion\(versions, selectedPolicy\.setup_id\) : null,?\s*\)/);
-  assert.match(source, /<h3 className=\{styles\.policyDetailsTitle\}>Payroll schedule<\/h3>/);
-  assert.doesNotMatch(source, />Policy details</);
+  assert.match(headerSource, /<h3 className=\{styles\.policyDetailsTitle\}>Payroll schedule<\/h3>/);
+  assert.doesNotMatch(featureSource, />Policy details</);
   for (const label of ['Payroll frequency', 'First payroll period starts on', 'Custom interval', 'Regular days off']) {
-    assert.match(source, new RegExp(`<dt>${label}</dt>`), `missing label ${label}`);
+    assert.match(headerSource, new RegExp(`<dt>${label}</dt>`), `missing label ${label}`);
   }
-  assert.doesNotMatch(source, /<dt>Interval<\/dt>/);
-  assert.match(source, /scheduleFields\.interval !== null && \(\s*<div[^>]*>\s*<dt>Custom interval<\/dt>/);
-  const card = source.slice(source.indexOf('Payroll schedule: the currently effective'), lowerGateIdx);
+  assert.doesNotMatch(featureSource, /<dt>Interval<\/dt>/);
+  assert.match(headerSource, /scheduleFields\.interval !== null && \(\s*<div[^>]*>\s*<dt>Custom interval<\/dt>/);
+  const cardStart = headerSource.indexOf('Payroll schedule: the currently effective');
+  const card = headerSource.slice(cardStart);
   assert.doesNotMatch(card, /Anchor/);
   assert.doesNotMatch(card, /[Ll]ocked/);
 });
 
 test('no current version: one intentional empty state, no placeholder dash values', () => {
-  const planningStart = source.indexOf('<VersionPlanningSection');
-  const card = source.slice(source.indexOf('Payroll schedule: the currently effective'), planningStart);
+  const card = headerSource;
   assert.match(card, /scheduleFields === null \? \(/);
   assert.match(card, /<p className=\{styles\.scheduleEmptyTitle\}>No payroll schedule is active yet<\/p>/);
   assert.match(card, /Publish a schedule to start using this policy\./);
@@ -110,13 +117,16 @@ test('no current version: one intentional empty state, no placeholder dash value
 });
 
 test('lower sections render only behind showLowerSections (default false); dialogs and modals stay outside it', () => {
+  assert.match(typesSource, /showLowerSections\?: boolean/);
   assert.match(source, /showLowerSections = false,/);
+  const lowerGate = source.match(/\{showLowerSections && \(\s*<PolicyDetailLowerSections[\s\S]*?\/>\s*\)\}/);
+  assert.ok(lowerGate);
   assert.notEqual(lowerGateIdx, -1);
-  assert.ok(confirmIdx > lowerGateIdx);
+  assert.equal((source.match(/<PolicyDetailLowerSections\b/g) ?? []).length, 1);
+  assert.ok(confirmIdx > lowerGateIdx + lowerGate[0].length, 'dialogs must remain after the lower-sections gate closes');
   for (const marker of ['title="Draft schedules"', '<SectionCard title="Publish">', 'title="Policy updates"', 'title="Assigned branches"', '<p className={styles.label}>Next steps</p>']) {
-    const idx = source.indexOf(marker);
-    assert.ok(idx > lowerGateIdx && idx < confirmIdx, `${marker} must sit inside the showLowerSections gate`);
+    assert.ok(lowerSource.includes(marker), marker + ' must remain in the lower owner');
   }
-  // Header + Policy details render before the gate.
-  assert.ok(headerStart < lowerGateIdx);
+  assert.ok(source.indexOf('<PolicyDetailHeader') < lowerGateIdx);
+  assert.ok(source.indexOf('<VersionTimelineSection') < lowerGateIdx);
 });

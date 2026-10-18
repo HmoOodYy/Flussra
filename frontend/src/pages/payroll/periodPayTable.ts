@@ -10,7 +10,7 @@
  * either a backend string passed through unchanged or `null` when the
  * backend contract did not supply one.
  */
-import type { DefinitionAmount, ReportColumn, ReportDriver } from '../../types/payroll';
+import type { DefinitionAmount, ReportColumn, ReportDriver } from '../../types/payroll/reports';
 
 export interface PeriodPayColumn {
   payroll_period_definition_id: number;

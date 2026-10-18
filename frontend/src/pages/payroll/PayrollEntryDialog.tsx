@@ -4,48 +4,17 @@
  * Extracted from PeriodDetailPage.tsx. Opens with a periodId prop, fetches
  * its own data via getDayGrid, and cleans up on close.
  */
-import { useEffect, useState, useCallback } from 'react';
-import {
-  getDayGrid,
-  saveDayGrid,
-} from '../../lib/payrollApi';
-import type {
-  DayGridResponse,
-  DayGridRow,
-  DayGridSaveRow,
-} from '../../types/payroll';
+import { useEffect } from 'react';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
-import { canEntryPayroll } from '../../lib/permissions';
 import { columnKey, quantityInputProps, quantityTotalViews } from './dayGridModel';
+import { formatDayLabel, useDailyEntryController } from './useDailyEntryController';
 import { formatGrossTotal } from './grossDisplay';
 import styles from './PayrollEntryDialog.module.css';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
-
-// ---------------------------------------------------------------------------
-// Date helpers
-// ---------------------------------------------------------------------------
-
-function subtractDay(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  dt.setDate(dt.getDate() - 1);
-  return dt.toISOString().slice(0, 10);
-}
-
-function addDay(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  dt.setDate(dt.getDate() + 1);
-  return dt.toISOString().slice(0, 10);
-}
-
-function formatDayLabel(d: string): string {
-  const dt = new Date(d + 'T00:00:00');
-  return dt.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+function dialogSaveError(e: unknown): string {
+  return (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+    'Save failed.';
 }
 
 // ---------------------------------------------------------------------------
@@ -64,138 +33,17 @@ interface PayrollEntryDialogProps {
 export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProps) {
   const { user } = useAuth();
 
-  const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [grid, setGrid] = useState<DayGridResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const [dirtyRows, setDirtyRows] = useState<Map<number, DayGridSaveRow>>(new Map());
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  const [notesOpenDriverId, setNotesOpenDriverId] = useState<number | null>(null);
-
-  // ── Fetch grid ──────────────────────────────────────────────────────────── //
-  const fetchGrid = useCallback(async (date: string | null) => {
-    setLoading(true);
-    setError(null);
-    setDirtyRows(new Map());
-    setSaveError(null);
-    try {
-      const data = await getDayGrid(periodId, date ?? undefined);
-      setGrid(data);
-      setSelectedDate(data.work_date);
-    } catch (e: unknown) {
-      const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to load grid.';
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
-  }, [periodId]);
+  const {
+    selectedDate, grid, loading, error, dirtyRows, saving, saveError,
+    notesOpenDriverId, setNotesOpenDriverId, fetchGrid, atStart, atEnd, prevDay, nextDay,
+    isEditable, canEdit, handleSave, handleCellChange, handleStatusChange, handleNotesChange,
+    getCellValue, getStatusValue, getNotesValue,
+  } = useDailyEntryController({ periodId, user, formatSaveError: dialogSaveError });
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchGrid(selectedDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, periodId]);
-
-  // ── Day navigation ──────────────────────────────────────────────────────── //
-  const atStart = grid && selectedDate ? selectedDate <= grid.period.start_date : true;
-  const atEnd   = grid && selectedDate ? selectedDate >= grid.period.end_date   : true;
-
-  function prevDay() {
-    setSelectedDate((d) => d ? subtractDay(d) : d);
-  }
-  function nextDay() {
-    setSelectedDate((d) => d ? addDay(d) : d);
-  }
-
-  // ── Save ────────────────────────────────────────────────────────────────── //
-  const isEditable = grid ? EDITABLE_STATUSES.has(grid.period.status) : false;
-  // canEdit = period status allows edits AND user has payroll.entry for this period's branch.
-  // payroll.view-only users must not see editable inputs or the save bar.
-  const canEdit = isEditable && grid !== null && user !== null && canEntryPayroll(user, grid.period.branch_id);
-
-  async function handleSave() {
-    if (dirtyRows.size === 0 || !grid || !selectedDate) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const resp = await saveDayGrid(periodId, {
-        work_date: selectedDate,
-        rows: Array.from(dirtyRows.values()),
-      });
-      setGrid(resp);
-      setDirtyRows(new Map());
-    } catch (e: unknown) {
-      const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Save failed.';
-      setSaveError(msg);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // ── Cell change helpers ─────────────────────────────────────────────────── //
-  function buildSaveRowFromGrid(driverId: number): DayGridSaveRow {
-    const row = grid?.rows.find((r) => r.driver_id === driverId);
-    return {
-      driver_id: driverId,
-      values: Object.fromEntries(
-        Object.entries(row?.values ?? {}).map(([k, v]) => [k, v.quantity ?? '']),
-      ),
-      status_key: row?.status_key ?? null,
-      notes: row?.notes ?? null,
-    };
-  }
-
-  function handleCellChange(driverId: number, key: string, value: string) {
-    setDirtyRows((prev) => {
-      const m = new Map(prev);
-      const existing = m.get(driverId) ?? buildSaveRowFromGrid(driverId);
-      m.set(driverId, { ...existing, values: { ...existing.values, [key]: value } });
-      return m;
-    });
-  }
-
-  function handleStatusChange(driverId: number, statusKey: string | null) {
-    setDirtyRows((prev) => {
-      const m = new Map(prev);
-      const existing = m.get(driverId) ?? buildSaveRowFromGrid(driverId);
-      m.set(driverId, { ...existing, status_key: statusKey });
-      return m;
-    });
-  }
-
-  function handleNotesChange(driverId: number, notes: string) {
-    setDirtyRows((prev) => {
-      const m = new Map(prev);
-      const existing = m.get(driverId) ?? buildSaveRowFromGrid(driverId);
-      m.set(driverId, { ...existing, notes: notes || null });
-      return m;
-    });
-  }
-
-  function getCellValue(row: DayGridRow, key: string): string {
-    const dirty = dirtyRows.get(row.driver_id);
-    if (dirty) return dirty.values[key] ?? '';
-    return row.values[key]?.quantity ?? '';
-  }
-
-  function getStatusValue(row: DayGridRow): string {
-    const dirty = dirtyRows.get(row.driver_id);
-    if (dirty) return dirty.status_key ?? '';
-    return row.status_key ?? '';
-  }
-
-  function getNotesValue(row: DayGridRow): string {
-    const dirty = dirtyRows.get(row.driver_id);
-    if (dirty) return dirty.notes ?? '';
-    return row.notes ?? '';
-  }
 
   // ── Close on Escape ──────────────────────────────────────────────────────── //
   useEffect(() => {

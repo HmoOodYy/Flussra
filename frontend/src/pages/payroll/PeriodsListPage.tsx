@@ -6,7 +6,14 @@ import { useAuth } from '../../store/authStore';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';
 import { canCreatePeriod, canEntryPayroll, canFinalizePayroll, canViewPayrollReports, canPreviewCalculation } from '../../lib/permissions';
 import type { Branch } from '../../types/core';
-import type { CurrentPayrollHub, CurrentPayrollHubBranch, CurrentPayrollHubPeriodSlot, PeriodSummary, PeriodWorkflowCapabilities, WorkflowAlert } from '../../types/payroll';
+import type {
+  CurrentPayrollHub,
+  CurrentPayrollHubBranch,
+  CurrentPayrollHubPeriodSlot,
+  PeriodSummary,
+  PeriodWorkflowCapabilities,
+  WorkflowAlert,
+} from '../../types/payroll/periods';
 import type { ReviewItemDetail } from '../../types/review';
 import { getPeriodWorkflowCapabilities, isHubActiveWorkflowStatus, resolveCapabilityGate } from './workflowCapabilityGate';
 import { RETURN_REASON_UNAVAILABLE_MESSAGE, resolveReturnReasonDisplay, shouldFetchReturnReason } from './returnedReason';

@@ -4,7 +4,7 @@ import type {
   CalculationReportResponse,
   CalculationReportView,
   ReportDriver,
-} from '../../types/payroll';
+} from '../../types/payroll/reports';
 import { buildPeriodPayTable } from './periodPayTable';
 import { PeriodPayMatrix } from './PeriodPayMatrix';
 import { WorkTotals } from './WorkTotals';

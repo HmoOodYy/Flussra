@@ -1,8 +1,10 @@
 /**
- * API client functions for the Driver Transfer workflow.
- * All routes are under /driver-transfers (backend app/transfer/router.py).
+ * Driver Transfer lifecycle operations and its current-Driver People picker.
+ * Lifecycle routes are under /driver-transfers (backend app/transfer/router.py).
  */
 import apiClient from './apiClient';
+import type { AxiosPromise } from 'axios';
+import type { PersonSummary } from '../types/core';
 import type {
   DriverTransferRequest,
   TransferListResponse,
@@ -11,6 +13,11 @@ import type {
   TargetDecisionRequest,
   CancelRequest,
 } from '../types/transfer';
+
+
+export function listTransferDriverPickerPeople(): AxiosPromise<PersonSummary[]> {
+  return apiClient.get<PersonSummary[]>('/core/people?driver_state=current');
+}
 
 export async function listTransfers(params?: {
   branch_id?: number;
