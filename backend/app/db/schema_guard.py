@@ -611,6 +611,28 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     ):
         if not _trigger_exists_and_enabled(cur, trigger_name, "core", trigger_table):
             temporal_errors.append(f"Missing or disabled Driver identity trigger core.{trigger_name}.")
+    cur.execute(
+        "SELECT to_regprocedure(%s)", ("core.trg_compensationassignmentwritable()",)
+    )
+    if cur.fetchone()[0] is None:
+        temporal_errors.append(
+            "Missing ended-assignment compensation guard function "
+            "core.trg_CompensationAssignmentWritable()."
+        )
+    for comp_table in (
+        "driverrateassignments",
+        "driverratevalues",
+        "driverpayrules",
+        "driverrates",
+        "driverratetiers",
+    ):
+        if not _trigger_exists_and_enabled(
+            cur, "trg_compensationassignmentwritable", "payroll", comp_table
+        ):
+            temporal_errors.append(
+                "Missing or disabled ended-assignment compensation trigger "
+                f"trg_CompensationAssignmentWritable on payroll.{comp_table}."
+            )
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text as _text
 
 from tests.db_state import (
+    COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS,
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
     FINALIZED_HISTORY_TRIGGERS,
     suspended_test_triggers,
@@ -389,8 +390,26 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
     await runner.execute(db, "DELETE FROM payroll.payrollbonusevents WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete BonusEvents")
     await runner.execute(db, "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete PPDES")
     await runner.execute(db, "DELETE FROM payroll.payrollperioddrivereligibility WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete PPDE")
-    await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverRates")
-    await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverPayRules")
+    # Compensation of an ended assignment is read-only at the database; only a driver that
+    # owns such an assignment needs the exact compensation guards suspended to be retired.
+    has_ended_assignment = bool(assignment_ids) and (await db.execute(
+        _text("""
+            SELECT EXISTS (
+                SELECT 1 FROM core.driverassignments
+                WHERE driverassignmentid = ANY(:ids)
+                  AND effectivetoat IS NOT NULL AND effectivetoat <= clock_timestamp()
+            )
+        """), {"ids": assignment_ids},
+    )).scalar_one()
+
+    async def _delete_compensation() -> None:
+        await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverRates")
+        await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverPayRules")
+    if has_ended_assignment:
+        async with suspended_test_triggers(db, COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS):
+            await _delete_compensation()
+    else:
+        await _delete_compensation()
     await runner.execute(db, "DELETE FROM core.drivertransferrequests WHERE driverid = :id", {"id": driver_id}, label="delete TransferRequests")
     await runner.execute(db,
         "DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid", {"eid": str(driver_id)},

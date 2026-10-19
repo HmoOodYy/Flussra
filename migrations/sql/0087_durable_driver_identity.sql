@@ -922,6 +922,114 @@ END
 $function$;
 
 -- ---------------------------------------------------------------------------
+-- 7b. Compensation of an ENDED DriverAssignment is read-only, decided at the
+--     mutation instant.
+-- ---------------------------------------------------------------------------
+-- An ended assignment (EffectiveToAt IS NOT NULL AND EffectiveToAt <= now) is
+-- historical. The application refuses early (require_writable_driver_assignment),
+-- but a writer can still BLOCK afterwards (advisory lock, row lock, unique-index
+-- wait), and a Scheduled source assignment's future end can pass during that wait.
+-- FOR SHARE freezes the EffectiveToAt value, not time. So the database re-decides
+-- here: an AFTER ROW trigger runs after the statement has finished every wait of its
+-- own, and compares with clock_timestamp() (never NOW(), the transaction start), the
+-- same clock as trg_DriverAssignments_HistoryImmutable. Whatever blocked before it,
+-- a mutation executed after the boundary is refused.
+--
+-- Covered: every compensation table keyed to a DriverAssignment, directly
+-- (DriverRateAssignments, DriverPayRules, DriverRates) or through its parent
+-- (DriverRateValues -> DriverRateAssignments, DriverRateTiers -> DriverRates).
+-- Evidence, draft, final and eligibility tables are payroll history, not
+-- compensation authoring, and keep their own guards.
+--
+-- A child row whose parent is already gone (foreign-key cascade of a parent delete)
+-- resolves to no assignment and is allowed: the parent's own trigger decided.
+-- SQLSTATE FL001 is a custom class unused by PostgreSQL; the application maps it to
+-- HTTP 409 DRIVER_ASSIGNMENT_ENDED in one place.
+CREATE FUNCTION core.trg_CompensationAssignmentWritable()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_Old INTEGER;
+    v_New INTEGER;
+    v_AssignmentID INTEGER;
+    v_EndedAt TIMESTAMPTZ;
+BEGIN
+    IF TG_TABLE_NAME IN ('driverrateassignments', 'driverpayrules', 'driverrates') THEN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            v_Old := OLD.DriverAssignmentID;
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            v_New := NEW.DriverAssignmentID;
+        END IF;
+    ELSIF TG_TABLE_NAME = 'driverratevalues' THEN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            SELECT a.DriverAssignmentID INTO v_Old
+            FROM payroll.DriverRateAssignments a
+            WHERE a.DriverRateAssignmentID = OLD.DriverRateAssignmentID;
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            SELECT a.DriverAssignmentID INTO v_New
+            FROM payroll.DriverRateAssignments a
+            WHERE a.DriverRateAssignmentID = NEW.DriverRateAssignmentID;
+        END IF;
+    ELSIF TG_TABLE_NAME = 'driverratetiers' THEN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            SELECT r.DriverAssignmentID INTO v_Old
+            FROM payroll.DriverRates r
+            WHERE r.DriverRateID = OLD.DriverRateID;
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            SELECT r.DriverAssignmentID INTO v_New
+            FROM payroll.DriverRates r
+            WHERE r.DriverRateID = NEW.DriverRateID;
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'trg_CompensationAssignmentWritable is not defined for %.%',
+            TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END IF;
+
+    -- A row that moves between assignments is a write to both.
+    FOR v_AssignmentID IN
+        SELECT DISTINCT t.x FROM (VALUES (v_Old), (v_New)) AS t(x) WHERE t.x IS NOT NULL
+    LOOP
+        SELECT a.EffectiveToAt INTO v_EndedAt
+        FROM core.DriverAssignments a
+        WHERE a.DriverAssignmentID = v_AssignmentID;
+
+        IF v_EndedAt IS NOT NULL AND v_EndedAt <= clock_timestamp() THEN
+            RAISE EXCEPTION 'DRIVER_ASSIGNMENT_ENDED: compensation of an ended DriverAssignment is read-only'
+                USING ERRCODE = 'FL001',
+                      DETAIL = format('DriverAssignmentID=%s Table=%s Operation=%s',
+                                      v_AssignmentID, TG_TABLE_NAME, TG_OP);
+        END IF;
+    END LOOP;
+
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER trg_CompensationAssignmentWritable
+AFTER INSERT OR UPDATE OR DELETE ON payroll.DriverRateAssignments
+FOR EACH ROW EXECUTE FUNCTION core.trg_CompensationAssignmentWritable();
+
+CREATE TRIGGER trg_CompensationAssignmentWritable
+AFTER INSERT OR UPDATE OR DELETE ON payroll.DriverRateValues
+FOR EACH ROW EXECUTE FUNCTION core.trg_CompensationAssignmentWritable();
+
+CREATE TRIGGER trg_CompensationAssignmentWritable
+AFTER INSERT OR UPDATE OR DELETE ON payroll.DriverPayRules
+FOR EACH ROW EXECUTE FUNCTION core.trg_CompensationAssignmentWritable();
+
+CREATE TRIGGER trg_CompensationAssignmentWritable
+AFTER INSERT OR UPDATE OR DELETE ON payroll.DriverRates
+FOR EACH ROW EXECUTE FUNCTION core.trg_CompensationAssignmentWritable();
+
+CREATE TRIGGER trg_CompensationAssignmentWritable
+AFTER INSERT OR UPDATE OR DELETE ON payroll.DriverRateTiers
+FOR EACH ROW EXECUTE FUNCTION core.trg_CompensationAssignmentWritable();
+
+-- ---------------------------------------------------------------------------
 -- 8. app.vw_PayrollPeriodList against the renamed columns (same output columns).
 -- ---------------------------------------------------------------------------
 
