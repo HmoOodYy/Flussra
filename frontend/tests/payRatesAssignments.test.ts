@@ -65,7 +65,11 @@ test('the Pay Rates roster is built from the assignment roster grouped by Driver
 test('ordinary rates and pay rules are read and written by driver_id; Status rates by assignment', () => {
   const reads = read('usePayRateReads.ts');
   assert.match(reads, /listDriverPayRates\(driverId\)/);
-  assert.match(reads, /listScheduleHistory\(driverId, row\.rate_definition_id\)/);
+  // History is discovered from the Driver's schedule summary, never from the Active-only matrix.
+  assert.match(reads, /listDriverRateSummary\(driverId\)/);
+  assert.match(reads, /listScheduleHistory\(driverId, item\.rate_definition_id\)/);
+  assert.match(reads, /buildHistoryRows\(items, lists\)/);
+  assert.doesNotMatch(reads.slice(reads.indexOf('const loadHistory')), /listDriverPayRates|current\.map/);
   assert.match(reads, /getDriverPayRules\(driverId\)/);
   assert.match(reads, /getCompensationAccess\(driverId\)/);
   assert.match(reads, /getStatusRateMatrix\(driverAssignmentId\)/);

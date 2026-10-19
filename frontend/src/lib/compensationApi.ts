@@ -15,6 +15,7 @@ import type {
   BulkBranchConfigUpdatePayload,
   CompensationAccess,
   DriverPayRateRow,
+  DriverRateSummaryItem,
   PayDefinitionDirectCreatePayload,
   PayDefinitionRequestCreatePayload,
   PayDefinitionRequestDecisionPayload,
@@ -157,6 +158,12 @@ export async function listDriverPayRates(
   const resp = await apiClient.get<DriverPayRateRow[]>(
     `/compensation/drivers/${driverId}/pay-rates`,
     { params: asOf ? { as_of: asOf } : {} });
+  return resp.data;
+}
+
+export async function listDriverRateSummary(driverId: number): Promise<DriverRateSummaryItem[]> {
+  const resp = await apiClient.get<DriverRateSummaryItem[]>(
+    `/compensation/drivers/${driverId}/rate-schedules/summary`);
   return resp.data;
 }
 

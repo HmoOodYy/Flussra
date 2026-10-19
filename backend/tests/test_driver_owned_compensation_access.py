@@ -87,3 +87,55 @@ async def test_company_wide_callers_keep_their_standing_after_every_tenure_ended
         "full_history": False, "can_discard_pending": False, "has_current_or_pending_tenure": False}
     await _expect(await client.get(
         f"/compensation/drivers/{w.driver_id}/rate-schedules/summary", headers=auth(old_reader)), 200)
+
+
+# ---------------------------------------------------------------------------
+# History is discovered from the Driver's schedules, not from the authoring matrix
+# ---------------------------------------------------------------------------
+
+async def test_schedules_of_a_retired_pay_definition_stay_discoverable_but_not_authorable(
+    client, auth_token, direct_db,
+):
+    from tests.test_driver_owned_rate_schedules import LONG_AGO, _author, _create
+    from tests.test_ended_assignment_write_guard import _definition
+
+    w = await _world(client, auth_token, direct_db)
+    retired = await _definition(client, auth_token)
+    active = await _definition(client, auth_token)
+    schedule = await _author(client, w.old_manager, w, retired, LONG_AGO)
+    other = await _author(client, w.old_manager, w, active, LONG_AGO)
+    viewer_role = await create_company_role_with_permissions(
+        client, auth_token, f"DOS history {sfx()}", ["drivers.view", "payrates.view"])
+    old_reader = await _manager(client, auth_token, viewer_role, w.old_branch)
+    company_reader = await _company_wide(client, auth_token, ["drivers.view", "payrates.view"])
+
+    # The real retirement path allows a definition that has approved schedules.
+    done = await client.post(
+        f"/compensation/pay-definitions/{retired['pay_definition_id']}/retire", headers=auth(auth_token))
+    await _expect(done, 200)
+    await _transfer(client, w)  # the old tenure ends
+
+    for token in (old_reader, company_reader, auth_token):
+        summary = (await _expect(await client.get(
+            f"/compensation/drivers/{w.driver_id}/rate-schedules/summary", headers=auth(token)), 200)).json()
+        by_definition = {row["rate_definition_id"]: row for row in summary}
+        item = by_definition[retired["rate_definition_id"]]
+        assert item["pay_definition_status"] == "Retired"
+        assert item["definition_name"] == retired["definition_name"]
+        assert item["definition_code"] == retired["definition_code"]
+        assert item["approved_schedule_id"] == schedule
+        assert by_definition[active["rate_definition_id"]]["pay_definition_status"] == "Active"
+        history = (await _expect(await client.get(
+            f"/compensation/drivers/{w.driver_id}/rate-definitions/{retired['rate_definition_id']}"
+            "/rate-schedules", headers=auth(token)), 200)).json()
+        assert [row["driver_rate_schedule_id"] for row in history] == [schedule]
+        assert other in {row["approved_schedule_id"] for row in summary}
+
+    # The authoring matrix stays Active-only, and a retired definition cannot be authored.
+    for token in (old_reader, company_reader, auth_token):
+        matrix = (await _expect(await client.get(
+            f"/compensation/drivers/{w.driver_id}/pay-rates", headers=auth(token)), 200)).json()
+        assert retired["pay_definition_id"] not in {row["pay_definition_id"] for row in matrix}
+    refused = await _create(client, w.new_manager, w, retired, "2026-12-01")
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "PAY_DEFINITION_NOT_ACTIVE"

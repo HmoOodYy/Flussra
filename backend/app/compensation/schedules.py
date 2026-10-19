@@ -517,6 +517,9 @@ async def history(
 async def driver_summary(
     company_id: int, user_id: int, driver_id: int, db: AsyncConnection,
 ) -> list[DriverRateSummaryItem]:
+    """Every rate definition the Driver has schedules for, grouped per definition regardless
+    of its PayDefinition's status (the history source), limited to what the caller may read:
+    past-Branch readers see only overlapping rows and never a Pending one."""
     scope = await driver_compensation_read_scope(company_id, user_id, driver_id, db)
     params: dict = {"cid": company_id, "did": driver_id}
     rows = (await db.execute(
@@ -524,6 +527,9 @@ async def driver_summary(
             SELECT s.ratedefinitionid AS rate_definition_id,
                    rd.paydefinitionid AS pay_definition_id,
                    pd.definitioncode AS definition_code,
+                   pd.definitionname AS definition_name,
+                   pd.unit AS unit,
+                   pd.status AS pay_definition_status,
                    max(s.driverratescheduleid) FILTER (WHERE s.status = 'Approved')
                        AS approved_schedule_id,
                    max(s.effectivefrom) FILTER (WHERE s.status = 'Approved')
@@ -535,8 +541,9 @@ async def driver_summary(
             LEFT JOIN payroll.paydefinitions pd ON pd.paydefinitionid = rd.paydefinitionid
             WHERE  s.companyid = :cid AND s.driverid = :did
               {scope.row_filter("s", params)}
-            GROUP  BY s.ratedefinitionid, rd.paydefinitionid, pd.definitioncode
-            ORDER  BY s.ratedefinitionid
+            GROUP  BY s.ratedefinitionid, rd.paydefinitionid, pd.definitioncode,
+                      pd.definitionname, pd.unit, pd.status
+            ORDER  BY lower(pd.definitionname), s.ratedefinitionid
         """),
         params,
     )).mappings().all()

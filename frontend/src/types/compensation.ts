@@ -199,6 +199,20 @@ export interface ScheduleBrief {
   amount: string | null;
 }
 
+/** One rate definition the Driver has schedules for, whatever its PayDefinition's status. */
+export interface DriverRateSummaryItem {
+  rate_definition_id: number;
+  pay_definition_id: number | null;
+  definition_code: string | null;
+  definition_name: string | null;
+  unit: string | null;
+  /** 'Active' definitions are authorable; anything else (Retired) is history only. */
+  pay_definition_status: string | null;
+  approved_schedule_id: number | null;
+  approved_effective_from: string | null;
+  pending_schedule_id: number | null;
+}
+
 export interface DriverPayRateRow {
   pay_definition_id: number;
   definition_code: string;

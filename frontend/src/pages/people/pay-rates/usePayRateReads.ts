@@ -1,7 +1,10 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { getCompensationAccess, listDriverPayRates, listScheduleHistory } from '../../../lib/compensationApi';
+import {
+  getCompensationAccess, listDriverPayRates, listDriverRateSummary, listScheduleHistory,
+} from '../../../lib/compensationApi';
 import type { CompensationAccess, DriverPayRateRow } from '../../../types/compensation';
-import { apiError, type HistoryRow } from './payRatesView';
+import { apiError } from './payRatesView';
+import { buildHistoryRows, type HistoryRow } from './payRatesHistory';
 import { getStatusRateMatrix, type StatusRateMatrix } from './statusRatesApi';
 import { getDriverPayRules, type DriverPayRule } from './driverPayRulesApi';
 
@@ -130,7 +133,8 @@ export function usePayRateReads(
     }
   }, []);
 
-  const loadHistory = useCallback(async (driverId: number, current: DriverPayRateRow[]) => {
+  /** History comes from the Driver's schedule summary, not from the Active-only authoring matrix. */
+  const loadHistory = useCallback(async (driverId: number) => {
     if (selectedDriverRef.current !== driverId) return;
     const request = ++historyRequest.current;
     setLoadingHistory(true);
@@ -138,14 +142,11 @@ export function usePayRateReads(
     setHistoryDriverId(null);
     setHistoryLoaded(false);
     try {
-      const lists = await Promise.all(current.map(async (row) => {
-        const items = await listScheduleHistory(driverId, row.rate_definition_id);
-        return items.map((item) => ({
-          ...item, definition_name: row.definition_name, unit: row.unit,
-        }));
-      }));
+      const items = await listDriverRateSummary(driverId);
+      const lists = await Promise.all(
+        items.map((item) => listScheduleHistory(driverId, item.rate_definition_id)));
       if (request === historyRequest.current && selectedDriverRef.current === driverId) {
-        setHistoryRows(lists.flat().sort((a, b) => b.effective_from.localeCompare(a.effective_from)));
+        setHistoryRows(buildHistoryRows(items, lists));
         setHistoryDriverId(driverId);
         setHistoryLoaded(true);
       }

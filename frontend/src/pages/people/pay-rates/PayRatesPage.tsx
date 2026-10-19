@@ -65,7 +65,7 @@ export function PayRatesPage() {
   const actions = useRateScheduleActions(selectedDriverId, reads.reloadAll);
   const rules = useDriverPayRules(selectedDriverId, reads.loadPayRules, reads.setPayRulesError);
   const { activeTab } = driver;
-  const { rows, loadingRows, historyLoaded, loadingHistory, payRulesLoaded, loadingPayRules, setHistoryRows, setHistoryLoaded, setPayRules, setPayRulesLoaded, setPayRulesError, loadRates, loadStatus, loadHistory, loadPayRules } = reads;
+  const { loadingRows, historyLoaded, loadingHistory, payRulesLoaded, loadingPayRules, setHistoryRows, setHistoryLoaded, setPayRules, setPayRulesLoaded, setPayRulesError, loadRates, loadStatus, loadHistory, loadPayRules } = reads;
   const { setPendingActionError } = actions;
   const { setTargetDrafts, setTargetErrors } = target;
   const { setStatusEditMode, setStatusDrafts, setStatusOriginal, setStatusSaveError } = status;
@@ -111,8 +111,8 @@ export function PayRatesPage() {
   useEffect(() => {
     if (activeTab !== 'history' || selectedDriverId == null || historyLoaded || loadingHistory || loadingRows) return;
     const driverId = selectedDriverId;
-    void (async () => { await loadHistory(driverId, rows); })();
-  }, [activeTab, selectedDriverId, historyLoaded, loadingHistory, loadingRows, rows, loadHistory]);
+    void (async () => { await loadHistory(driverId); })();
+  }, [activeTab, selectedDriverId, historyLoaded, loadingHistory, loadingRows, loadHistory]);
 
   useEffect(() => {
     if (activeTab !== 'pay-rules' || selectedDriverId == null || payRulesLoaded || loadingPayRules) return;

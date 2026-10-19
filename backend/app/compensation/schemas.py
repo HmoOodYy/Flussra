@@ -273,9 +273,19 @@ class ScheduleSummary(BaseModel):
 
 
 class DriverRateSummaryItem(BaseModel):
+    """One rate definition the Driver has schedules for, whatever its PayDefinition's status.
+
+    History is discovered from the Driver's actual schedules (read-scope filtered), not from
+    the authoring matrix, so a retired PayDefinition's schedules stay discoverable; only
+    ``pay_definition_status == 'Active'`` definitions are authorable.
+    """
+
     rate_definition_id: int
     pay_definition_id: int | None = None
     definition_code: str | None = None
+    definition_name: str | None = None
+    unit: str | None = None
+    pay_definition_status: str | None = None
     approved_schedule_id: int | None = None
     approved_effective_from: date | None = None
     pending_schedule_id: int | None = None

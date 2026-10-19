@@ -1,6 +1,5 @@
 import styles from './PayRatesPage.module.css';
 import { formatRate } from '../../../lib/money';
-import type { ScheduleSummary } from '../../../types/compensation';
 import type { PayRateTab } from './payRatesDrivers';
 import { compensationErrorMessage } from './payRatesErrors';
 
@@ -11,10 +10,7 @@ export interface EditRow {
 
 export type ActiveTab = PayRateTab;
 
-export interface HistoryRow extends ScheduleSummary {
-  definition_name: string;
-  unit: string | null;
-}
+export type { HistoryRow } from './payRatesHistory';
 
 export type RuleForm = {
   ruleType: 'MinimumPay' | 'MaximumPay';
