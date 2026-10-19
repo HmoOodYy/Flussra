@@ -17,7 +17,7 @@ function RateDefinitionTable({ response }: { response: FinalizedRatesUsedRespons
         <thead><tr><th>Driver</th><th>Pay item</th><th>Definition</th><th>Rate / behavior</th><th>Rule metadata</th><th>Effective</th><th>Used</th></tr></thead>
         <tbody>
           {response.used_rate_definitions.map((definition) => {
-            const driver = definition.driver_name || `Driver #${definition.driver_id}`;
+            const driver = definition.driver_name || 'Unnamed driver';
             const payItem = definition.pay_item_label || definition.pay_item_code || (definition.pay_item_id == null ? 'Not provided' : `PayItem #${definition.pay_item_id}`);
             const rateType = definition.rate_type_name || definition.rate_type_code;
             const rateDetails = [rateType, definition.unit_name, definition.rate_behavior, definition.rate_status].filter(Boolean).join(' · ');
@@ -27,7 +27,7 @@ function RateDefinitionTable({ response }: { response: FinalizedRatesUsedRespons
               : 'Not provided';
             return (
               <tr key={definition.used_rate_definition_id}>
-                <td>{driver}<small>{definition.driver_code ?? `ID ${definition.driver_id}`}</small></td>
+                <td>{driver}<small>{definition.driver_number ?? '—'}</small></td>
                 <td>{payItem}<small>{definition.pay_item_id == null ? 'ID not provided' : `ID ${definition.pay_item_id}`}</small></td>
                 <td>{rateDefinitionLabel(definition)}<small>{definition.source_type}</small></td>
                 <td>{definition.rate_amount == null ? 'Not provided' : formatMoney(definition.rate_amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}<small>{rateDetails || 'Details not provided'}</small></td>
@@ -52,7 +52,7 @@ function BonusEvidenceTable({ response }: { response: FinalizedRatesUsedResponse
         <tbody>
           {response.bonus_events.map((event) => (
             <tr key={event.bonus_event_id}>
-              <td>{event.driver_name || `Driver #${event.driver_id}`}<small>{event.driver_code ?? `ID ${event.driver_id}`}</small></td>
+              <td>{event.driver_name || 'Unnamed driver'}<small>{event.driver_number ?? '—'}</small></td>
               <td className={styles.numeric}>{formatMoney(event.amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}</td>
               <td>{event.reason ?? 'Not provided'}</td>
               <td>{event.notes ?? 'Not provided'}</td>

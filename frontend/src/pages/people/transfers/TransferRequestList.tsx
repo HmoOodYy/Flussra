@@ -2,6 +2,8 @@ import type { Dispatch } from 'react';
 import type { DriverTransferRequest } from '../../../types/transfer';
 import { statusKind, statusLabel, TRANSFER_ACTIVE } from '../../../types/transfer';
 import { FILTER_LABELS, fmtEffectiveAt, type FilterView } from './transferRequestsView';
+import { driverLabel, terminationWarning } from './transferActions';
+import type { Branch } from '../../../types/core';
 import type { TabAction, TabState } from './transferRequestsState';
 import styles from '../PeoplePage.module.css';
 import trStyles from '../TransferRequestsTab.module.css';
@@ -9,10 +11,11 @@ import trStyles from '../TransferRequestsTab.module.css';
 interface Props {
   st: Pick<TabState, 'requests' | 'selectedId' | 'search' | 'filter'>;
   filtered: DriverTransferRequest[];
+  branches: Branch[];
   dispatch: Dispatch<TabAction>;
 }
 
-export function TransferRequestList({ st, filtered, dispatch }: Props) {
+export function TransferRequestList({ st, filtered, branches, dispatch }: Props) {
   return (
       <aside className={styles.left}>
         <div className={styles.filters}>
@@ -54,6 +57,8 @@ export function TransferRequestList({ st, filtered, dispatch }: Props) {
               key={req.transfer_request_id}
               req={req}
               active={st.selectedId === req.transfer_request_id}
+              warning={terminationWarning(
+                req, branches.find(b => b.branch_id === req.source_branch_id)?.time_zone_id)}
               onClick={() => dispatch({ type: 'SELECT', id: req.transfer_request_id })}
             />
           ))}
@@ -66,10 +71,12 @@ export function TransferRequestList({ st, filtered, dispatch }: Props) {
 function TransferCard({
   req,
   active,
+  warning,
   onClick,
 }: {
   req: DriverTransferRequest;
   active: boolean;
+  warning: string | null;
   onClick(): void;
 }) {
   const kind = statusKind(req.status);
@@ -87,7 +94,7 @@ function TransferCard({
 
       <div className={styles.itemBody}>
         <div className={styles.itemName}>
-          {req.driver_name ?? `Driver #${req.driver_id}`}
+          {driverLabel(req)}
           <span className={`${trStyles.badge} ${trStyles[`badge_${kind}`]}`}>
             {statusLabel(req.status)}
           </span>
@@ -103,6 +110,7 @@ function TransferCard({
           </span>
           <span className={styles.scopeChip}>Effective {fmtEffectiveAt(req.effective_at)}</span>
         </div>
+        {warning && <div className={styles.itemMeta}>{warning}</div>}
       </div>
     </button>
   );

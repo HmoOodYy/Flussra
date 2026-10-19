@@ -27,7 +27,9 @@ _RATE_SELECT = """
         dr.driverrateid,
         dr.companyid,
         dr.branchid,
-        dr.driverid,
+        dr.driverassignmentid,
+        a.driverid,
+        dv.drivernumber,
         e.fullname       AS drivername,
         dr.ratetypeid,
         rt.ratecode,
@@ -46,8 +48,9 @@ _RATE_SELECT = """
         dr.roundingrule
     FROM   payroll.driverrates      dr
     JOIN   payroll.ratetypes        rt ON rt.ratetypeid  = dr.ratetypeid
-    JOIN   core.drivers              d  ON d.driverid    = dr.driverid
-    JOIN   core.employees            e  ON e.employeeid  = d.employeeid
+    JOIN   core.driverassignments    a  ON a.driverassignmentid = dr.driverassignmentid
+    JOIN   core.drivers              dv ON dv.driverid   = a.driverid
+    JOIN   core.employees            e  ON e.employeeid  = a.employeeid
 """
 
 
@@ -56,7 +59,9 @@ def _rate_row_to_summary(r: Any) -> DriverRateSummary:
         driver_rate_id=r["driverrateid"],
         company_id=r["companyid"],
         branch_id=r["branchid"],
+        driver_assignment_id=r["driverassignmentid"],
         driver_id=r["driverid"],
+        driver_number=r["drivernumber"],
         driver_name=r["drivername"],
         rate_type_id=r["ratetypeid"],
         rate_code=r["ratecode"],
@@ -185,7 +190,7 @@ async def get_rates(
     db: AsyncConnection,
     *,
     branch_id: int | None = None,
-    driver_id: int | None = None,
+    driver_assignment_id: int | None = None,
     rate_status: str | None = None,
     limit: int = 100,
     offset: int = 0,
@@ -217,9 +222,9 @@ async def get_rates(
         conditions.append(f"dr.branchid IN ({in_clause})")
         params.update(in_params)
 
-    if driver_id is not None:
-        conditions.append("dr.driverid = :driver_id")
-        params["driver_id"] = driver_id
+    if driver_assignment_id is not None:
+        conditions.append("dr.driverassignmentid = :driver_assignment_id")
+        params["driver_assignment_id"] = driver_assignment_id
 
     if rate_status is not None:
         conditions.append("dr.status = :rate_status")
@@ -264,7 +269,7 @@ async def get_rate_by_id(
 
 
 async def resolve_rate_for_date(
-    driver_id: int,
+    driver_assignment_id: int,
     rate_type_id: int,
     work_date: date,
     company_id: int,
@@ -272,7 +277,7 @@ async def resolve_rate_for_date(
     db: AsyncConnection,
 ) -> "DriverRateSummary | None":
     """
-    Return the rate row that applies to *driver_id* / *rate_type_id* on *work_date*.
+    Return the rate row that applies to *driver_assignment_id* / *rate_type_id* on *work_date*.
 
     Both **Approved** and **Superseded** rows are considered.  Superseded rows
     represent historically-closed rates whose effective date range is still valid
@@ -291,8 +296,8 @@ async def resolve_rate_for_date(
     # Step 1 â€” driver lookup (company-scoped; cross-company driver â†’ None, not 403).
     # Done first so we have the branch_id for the permission check below.
     drv_lookup = await db.execute(
-        text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": driver_id, "cid": company_id},
+        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :did AND companyid = :cid"),
+        {"did": driver_assignment_id, "cid": company_id},
     )
     drv_lookup_row = drv_lookup.mappings().first()
     if drv_lookup_row is None:
@@ -327,7 +332,7 @@ async def resolve_rate_for_date(
         text(f"""
             {_RATE_SELECT}
             WHERE  dr.companyid    = :company_id
-              AND  dr.driverid     = :driver_id
+              AND  dr.driverassignmentid     = :driver_assignment_id
               AND  dr.ratetypeid   = :rate_type_id
               AND  dr.status       IN ('Approved', 'Superseded')
               AND  dr.effectivefrom <= CAST(:work_date AS date)
@@ -337,7 +342,7 @@ async def resolve_rate_for_date(
         """),
         {
             "company_id":    company_id,
-            "driver_id":     driver_id,
+            "driver_assignment_id":     driver_assignment_id,
             "rate_type_id":  rate_type_id,
             "work_date":     work_date,
         },
@@ -347,7 +352,7 @@ async def resolve_rate_for_date(
 
 
 async def get_driver_rate_matrix(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     user_id: int,
     as_of_date: date | None,
@@ -363,17 +368,18 @@ async def get_driver_rate_matrix(
     # Step 1 â€” driver + branch
     drv_result = await db.execute(
         text("""
-            SELECT d.driverid, d.drivercode, d.driverstatus,
+            SELECT a.driverassignmentid, a.driverid, d.drivernumber, d.driverstatus,
                    e.fullname AS drivername,
-                   d.branchid,
+                   a.branchid,
                    b.branchname
-            FROM   core.drivers   d
-            JOIN   core.employees e ON e.employeeid = d.employeeid
-            JOIN   core.branches  b ON b.branchid   = d.branchid
-            WHERE  d.driverid  = :did
-              AND  d.companyid = :cid
+            FROM   core.driverassignments a
+            JOIN   core.drivers   d ON d.driverid   = a.driverid
+            JOIN   core.employees e ON e.employeeid = a.employeeid
+            JOIN   core.branches  b ON b.branchid   = a.branchid
+            WHERE  a.driverassignmentid  = :did
+              AND  a.companyid = :cid
         """),
-        {"did": driver_id, "cid": company_id},
+        {"did": driver_assignment_id, "cid": company_id},
     )
     drv_row = drv_result.mappings().first()
     if drv_row is None:
@@ -424,7 +430,7 @@ async def get_driver_rate_matrix(
             text("""
                 SELECT driverrateid, amount, effectivefrom, effectiveto, status
                 FROM   payroll.driverrates
-                WHERE  driverid       = :did
+                WHERE  driverassignmentid       = :did
                   AND  companyid      = :cid
                   AND  ratetypeid     = :rtid
                   AND  status         IN ('Approved', 'Superseded')
@@ -433,7 +439,7 @@ async def get_driver_rate_matrix(
                 ORDER BY effectivefrom DESC
                 LIMIT 1
             """),
-            {"did": driver_id, "cid": company_id, "rtid": src_rate_type_id, "as_of": as_of_date},
+            {"did": driver_assignment_id, "cid": company_id, "rtid": src_rate_type_id, "as_of": as_of_date},
         )
         src_approved = approved_result2.mappings().first()
 
@@ -441,14 +447,14 @@ async def get_driver_rate_matrix(
             text("""
                 SELECT driverrateid, amount, effectivefrom, effectiveto, status
                 FROM   payroll.driverrates
-                WHERE  driverid   = :did
+                WHERE  driverassignmentid   = :did
                   AND  companyid  = :cid
                   AND  ratetypeid = :rtid
                   AND  status     = 'PendingApproval'
                 ORDER BY effectivefrom DESC
                 LIMIT 1
             """),
-            {"did": driver_id, "cid": company_id, "rtid": src_rate_type_id},
+            {"did": driver_assignment_id, "cid": company_id, "rtid": src_rate_type_id},
         )
         src_pending = pending_result2.mappings().first()
 
@@ -494,9 +500,10 @@ async def get_driver_rate_matrix(
         )
 
     return DriverRateMatrix(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
+        driver_id=drv_row["driverid"],
         driver_name=drv_row["drivername"],
-        driver_code=drv_row["drivercode"],
+        driver_number=drv_row["drivernumber"],
         branch_id=branch_id,
         branch_name=drv_row["branchname"],
         as_of=as_of_date,
@@ -505,7 +512,7 @@ async def get_driver_rate_matrix(
 
 
 async def get_driver_rates_summary(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     user_id: int,
     db: AsyncConnection,
@@ -519,11 +526,11 @@ async def get_driver_rates_summary(
     missing_required_count uses the same INNER JOIN logic as get_driver_rate_matrix
     (PayItems.IsDefaultBranchActive).
     """
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
+    await _check_driver_read_access(driver_assignment_id, company_id, user_id, db)
 
     branch_id = (await db.execute(text("""
-        SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid
-    """), {"did": driver_id, "cid": company_id})).scalar_one()
+        SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :did AND companyid = :cid
+    """), {"did": driver_assignment_id, "cid": company_id})).scalar_one()
     from app.business_clock import branch_today
     as_of = await branch_today(company_id, branch_id, db)
 
@@ -537,11 +544,11 @@ async def get_driver_rates_summary(
                           AND effectivefrom > :as_of THEN 1 ELSE 0 END)
                     AS future_approved_count
             FROM payroll.driverrates
-            WHERE driverid  = :did
+            WHERE driverassignmentid  = :did
               AND companyid = :cid
               AND status IN ('PendingApproval', 'Approved')
         """),
-        {"did": driver_id, "cid": company_id, "as_of": as_of},
+        {"did": driver_assignment_id, "cid": company_id, "as_of": as_of},
     )
     counts_row = counts_result.mappings().first()
     pending_count: int       = int(counts_row["pending_count"] or 0)
@@ -560,7 +567,7 @@ async def get_driver_rates_summary(
                  ON rt.ratetypeid = pirm.ratetypeid AND rt.isactive = TRUE
             LEFT JOIN LATERAL (
                 SELECT driverrateid FROM payroll.driverrates
-                WHERE  driverid      = :did
+                WHERE  driverassignmentid      = :did
                   AND  companyid     = :cid
                   AND  ratetypeid    = pirm.ratetypeid
                   AND  status        IN ('Approved', 'Superseded')
@@ -574,7 +581,7 @@ async def get_driver_rates_summary(
               AND (pi.companyid IS NULL OR pi.companyid = :cid)
               AND pi.isdefaultbranchactive = TRUE
         """),
-        {"did": driver_id, "cid": company_id, "as_of": as_of},
+        {"did": driver_assignment_id, "cid": company_id, "as_of": as_of},
     )
     missing_row = missing_result.mappings().first()
     if missing_row is not None:
@@ -585,7 +592,7 @@ async def get_driver_rates_summary(
         missing_required_count = None
 
     return DriverRatesSummary(
-        driver_id=driver_id,
+        driver_assignment_id=driver_assignment_id,
         pending_count=pending_count,
         future_approved_count=future_approved_count,
         missing_required_count=missing_required_count,
@@ -593,7 +600,7 @@ async def get_driver_rates_summary(
 
 
 async def get_driver_rates_pending(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     user_id: int,
     db: AsyncConnection,
@@ -604,23 +611,23 @@ async def get_driver_rates_pending(
     Security: same as get_driver_rates_summary (_check_driver_read_access).
     Returns 404 if the driver doesn't exist in this company.
     """
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
+    await _check_driver_read_access(driver_assignment_id, company_id, user_id, db)
 
     result = await db.execute(
         text(
             f"{_RATE_SELECT} "
-            "WHERE dr.driverid  = :did "
+            "WHERE dr.driverassignmentid  = :did "
             "  AND dr.companyid = :cid "
             "  AND dr.status    = 'PendingApproval' "
             "ORDER BY dr.createdatutc DESC"
         ),
-        {"did": driver_id, "cid": company_id},
+        {"did": driver_assignment_id, "cid": company_id},
     )
     return [_rate_row_to_summary(r) for r in result.mappings().all()]
 
 
 async def get_driver_rates_history(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     user_id: int,
     db: AsyncConnection,
@@ -637,17 +644,17 @@ async def get_driver_rates_history(
     Security: same as get_driver_rates_summary (_check_driver_read_access).
     Returns 404 if the driver doesn't exist in this company.
     """
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
+    await _check_driver_read_access(driver_assignment_id, company_id, user_id, db)
 
     result = await db.execute(
         text(
             f"{_RATE_SELECT} "
-            "WHERE dr.driverid  = :did "
+            "WHERE dr.driverassignmentid  = :did "
             "  AND dr.companyid = :cid "
             "ORDER BY dr.effectivefrom DESC, dr.createdatutc DESC "
             "LIMIT :limit OFFSET :offset"
         ),
-        {"did": driver_id, "cid": company_id, "limit": limit, "offset": offset},
+        {"did": driver_assignment_id, "cid": company_id, "limit": limit, "offset": offset},
     )
     return [_rate_row_to_summary(r) for r in result.mappings().all()]
 
@@ -692,35 +699,35 @@ async def get_bulk_driver_rates_summary(
         drv_params["filter_bid"] = branch_id
     where = " AND ".join(drv_q_parts)
     drv_result = await db.execute(
-        text(f"SELECT driverid, branchid FROM core.drivers WHERE {where}"),
+        text(f"SELECT driverassignmentid, branchid FROM core.driverassignments WHERE {where}"),
         drv_params,
     )
     accessible_rows = drv_result.mappings().all()
-    accessible_driver_ids = [r["driverid"] for r in accessible_rows]
+    accessible_driver_assignment_ids = [r["driverassignmentid"] for r in accessible_rows]
 
-    if not accessible_driver_ids:
+    if not accessible_driver_assignment_ids:
         return []
 
-    in_clause2, params2 = build_in_clause(accessible_driver_ids, "did")
+    in_clause2, params2 = build_in_clause(accessible_driver_assignment_ids, "did")
 
     counts_result = await db.execute(
         text(f"""
             SELECT
-                d.driverid,
+                d.driverassignmentid,
                 SUM(CASE WHEN status = 'PendingApproval' THEN 1 ELSE 0 END) AS pending_count,
                 SUM(CASE WHEN status = 'Approved'
                           AND effectivefrom > core.fn_BranchToday(d.companyid, d.branchid, NOW()) THEN 1 ELSE 0 END) AS future_approved_count
             FROM payroll.driverrates r
-            JOIN core.drivers d ON d.driverid = r.driverid AND d.companyid = r.companyid
+            JOIN core.driverassignments d ON d.driverassignmentid = r.driverassignmentid AND d.companyid = r.companyid
             WHERE r.companyid = :cid
-              AND r.driverid IN ({in_clause2})
+              AND r.driverassignmentid IN ({in_clause2})
               AND r.status IN ('PendingApproval', 'Approved')
-            GROUP BY d.driverid, d.companyid, d.branchid
+            GROUP BY d.driverassignmentid, d.companyid, d.branchid
         """),
         {"cid": company_id, **params2},
     )
     counts_map: dict[int, dict] = {
-        r["driverid"]: {
+        r["driverassignmentid"]: {
             "pending_count": int(r["pending_count"] or 0),
             "future_approved_count": int(r["future_approved_count"] or 0),
         }
@@ -729,11 +736,11 @@ async def get_bulk_driver_rates_summary(
 
     return [
         DriverRatesSummary(
-            driver_id=did,
+            driver_assignment_id=did,
             pending_count=counts_map.get(did, {}).get("pending_count", 0),
             future_approved_count=counts_map.get(did, {}).get("future_approved_count", 0),
             missing_required_count=None,
         )
-        for did in accessible_driver_ids
+        for did in accessible_driver_assignment_ids
     ]
 

@@ -39,13 +39,13 @@ function createIdempotencyKey(): string {
 
 interface BonusDraftRow {
   rowId: number;
-  driverId: string;
+  driverAssignmentId: string;
   amount: string;
   reason: string;
 }
 
 function newBonusDraftRow(rowId: number): BonusDraftRow {
-  return { rowId, driverId: '', amount: '', reason: '' };
+  return { rowId, driverAssignmentId: '', amount: '', reason: '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
     e.preventDefault();
     if (
       !summary ||
-      addRows.some((row) => !row.driverId || !row.amount || !row.reason.trim())
+      addRows.some((row) => !row.driverAssignmentId || !row.amount || !row.reason.trim())
     ) return;
     setAddSaving(true);
     setAddError(null);
@@ -118,7 +118,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
     idempotencyKey.current = requestKey;
     try {
       const items: BonusBatchItem[] = addRows.map((row) => ({
-        driver_id: Number(row.driverId),
+        driver_assignment_id: Number(row.driverAssignmentId),
         amount: row.amount,
         reason: row.reason.trim(),
       }));
@@ -167,7 +167,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
       .filter((event) => event.status === 'Active')
       .map((event) => ({
         event,
-        driverName: driver.driver_name ?? driver.driver_code ?? `Driver ${driver.driver_id}`,
+        driverName: driver.driver_name ?? driver.driver_number ?? 'Unnamed driver',
         canVoid: driver.capabilities.can_void,
       })),
   ) ?? [];
@@ -320,14 +320,14 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                             Driver
                             <select
                               className={styles.formSelect}
-                              value={row.driverId}
-                              onChange={(e) => updateAddRow(row.rowId, 'driverId', e.target.value)}
+                              value={row.driverAssignmentId}
+                              onChange={(e) => updateAddRow(row.rowId, 'driverAssignmentId', e.target.value)}
                               required
                             >
                               <option value="">— select driver —</option>
                               {eligibleDrivers.map((driver) => (
-                                <option key={driver.driver_id} value={String(driver.driver_id)}>
-                                  {driver.driver_name ?? driver.driver_code ?? `Driver ${driver.driver_id}`}
+                                <option key={driver.driver_assignment_id} value={String(driver.driver_assignment_id)}>
+                                  {driver.driver_name ?? driver.driver_number ?? 'Unnamed driver'}
                                 </option>
                               ))}
                             </select>
@@ -386,7 +386,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                       <button
                         type="submit"
                         className={styles.primaryBtn}
-                        disabled={addSaving || addRows.some((row) => !row.driverId || !row.amount || !row.reason.trim())}
+                        disabled={addSaving || addRows.some((row) => !row.driverAssignmentId || !row.amount || !row.reason.trim())}
                       >
                         {addSaving ? 'Saving…' : `Save ${addRows.length} bonus${addRows.length === 1 ? '' : 'es'}`}
                       </button>

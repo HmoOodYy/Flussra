@@ -113,7 +113,7 @@ def test_company_is_valid_with_zero_pay_definitions(cur):
 def test_any_code_or_name_behaves_identically_for_either_method(cur, code, method):
     company_id = make_company(cur)
     branch_id = make_branch(cur, company_id)
-    driver_id = make_driver(cur, company_id, branch_id)
+    driver_assignment_id = make_driver(cur, company_id, branch_id)
     pay_definition_id = make_pay_definition(cur, company_id, code=code, name=code.lower(),
                                             method=method)
     rate_definition_id = make_rate_definition(cur, pay_definition_id)
@@ -126,9 +126,9 @@ def test_any_code_or_name_behaves_identically_for_either_method(cur, code, metho
 
     cur.execute("""
         INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverid, ratedefinitionid, effectivefrom)
+            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
         VALUES (%s, %s, %s, %s, '2026-01-01') RETURNING driverrateassignmentid
-    """, (company_id, branch_id, driver_id, rate_definition_id))
+    """, (company_id, branch_id, driver_assignment_id, rate_definition_id))
     assignment_id = cur.fetchone()[0]
     for component_id, amount in zip(components, amounts, strict=True):
         set_value(cur, assignment_id, rate_definition_id, component_id, amount)
@@ -192,15 +192,15 @@ def test_assignment_rejects_driver_company_branch_mismatch(cur):
     foreign_branch = make_branch(cur, other_company)
     insert = """
         INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverid, ratedefinitionid, effectivefrom)
+            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
         VALUES (%s, %s, %s, %s, '2026-01-01')
     """
     with rejected(errors.ForeignKeyViolation):  # Driver belongs to a different Branch
-        cur.execute(insert, (fx.company_id, other_branch, fx.driver_id, fx.rate_definition_id))
+        cur.execute(insert, (fx.company_id, other_branch, fx.driver_assignment_id, fx.rate_definition_id))
     with rejected(errors.ForeignKeyViolation):  # Branch belongs to another Company
-        cur.execute(insert, (fx.company_id, foreign_branch, fx.driver_id, fx.rate_definition_id))
+        cur.execute(insert, (fx.company_id, foreign_branch, fx.driver_assignment_id, fx.rate_definition_id))
     with rejected(errors.ForeignKeyViolation):  # Company differs from Driver and RateDefinition
-        cur.execute(insert, (other_company, fx.branch_id, fx.driver_id, fx.rate_definition_id))
+        cur.execute(insert, (other_company, fx.branch_id, fx.driver_assignment_id, fx.rate_definition_id))
 
 
 def test_assignment_rejects_rate_definition_from_another_company(cur):
@@ -215,7 +215,7 @@ def test_assignment_identity_is_immutable(cur):
     pending = make_pending(cur, fx)
     other_driver = add_driver(cur, fx)
     with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_IDENTITY_IMMUTABLE"):
-        cur.execute("UPDATE payroll.driverrateassignments SET driverid = %s "
+        cur.execute("UPDATE payroll.driverrateassignments SET driverassignmentid = %s "
                     "WHERE driverrateassignmentid = %s", (other_driver, pending))
 
 
@@ -267,7 +267,7 @@ def test_dormant_status_owner_keeps_branch_and_scalar_integrity(cur):
     with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_BRANCH_MISMATCH"):
         cur.execute("""
             INSERT INTO payroll.driverrateassignments
-                (companyid, branchid, driverid, ratedefinitionid, effectivefrom)
+                (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
             VALUES (%s, %s, %s, %s, '2026-01-01')
         """, (fx.company_id, other_branch, other_branch_driver, status_rate_definition))
     make_pending(cur, fx, rate_definition_id=status_rate_definition)
@@ -441,10 +441,10 @@ def test_assignment_must_be_created_pending(cur):
     with rejected(errors.CheckViolation):
         cur.execute("""
             INSERT INTO payroll.driverrateassignments
-                (companyid, branchid, driverid, ratedefinitionid, effectivefrom, status,
+                (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom, status,
                  approvedbyuserid, approvedatutc)
             VALUES (%s, %s, %s, %s, '2026-01-01', 'Approved', %s, NOW())
-        """, (fx.company_id, fx.branch_id, fx.driver_id, fx.rate_definition_id, user_id(cur)))
+        """, (fx.company_id, fx.branch_id, fx.driver_assignment_id, fx.rate_definition_id, user_id(cur)))
 
 
 def test_approval_requires_approver_metadata(cur):
@@ -463,15 +463,15 @@ def test_first_approval_sets_the_single_structure_lock(cur):
     make_pending(cur, fx)
     assert structure_locked_at(cur, fx.rate_definition_id) is None  # Pending never locks
 
-    approved_scalar(cur, fx, driver_id=fx.driver_ids[1])
+    approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])
     first_lock = structure_locked_at(cur, fx.rate_definition_id)
     assert first_lock is not None
 
     cur.execute("SELECT pg_sleep(0.05)")
     cur.execute("""
         SELECT driverrateassignmentid FROM payroll.driverrateassignments
-        WHERE driverid = %s AND status = 'Pending'
-    """, (fx.driver_ids[0],))
+        WHERE driverassignmentid = %s AND status = 'Pending'
+    """, (fx.driver_assignment_ids[0],))
     assignment = cur.fetchone()[0]
     set_value(cur, assignment, fx.rate_definition_id, fx.component_id, "2")
     approve(cur, assignment)
@@ -527,7 +527,7 @@ def test_lifecycle_transitions(cur):
              WHERE driverrateassignmentid = %s
         """, (pending_to_void,))
 
-    approved = approved_scalar(cur, fx, driver_id=fx.driver_ids[1])
+    approved = approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])
     with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_INVALID_TRANSITION"):
         cur.execute("UPDATE payroll.driverrateassignments SET status = 'Pending' "
                     "WHERE driverrateassignmentid = %s", (approved,))
@@ -617,8 +617,8 @@ def test_supersession_closes_the_previous_window_before_the_next_approval(cur):
 
 def test_windows_are_independent_per_driver_and_per_rate_definition(cur):
     fx = Scalar(cur, driver_count=2)
-    approved_scalar(cur, fx, driver_id=fx.driver_ids[0])
-    approved_scalar(cur, fx, driver_id=fx.driver_ids[1])  # same window, other Driver
+    approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[0])
+    approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])  # same window, other Driver
 
     other_pay_definition = make_pay_definition(cur, fx.company_id)
     other_definition = make_rate_definition(cur, other_pay_definition)
@@ -653,10 +653,10 @@ def test_effective_window_must_be_ordered(cur):
 
 def test_one_pending_assignment_per_logical_identity(cur):
     fx = Scalar(cur, driver_count=2)
-    make_pending(cur, fx, driver_id=fx.driver_ids[0])
+    make_pending(cur, fx, driver_assignment_id=fx.driver_assignment_ids[0])
     with rejected(errors.UniqueViolation):
-        make_pending(cur, fx, driver_id=fx.driver_ids[0], effective_from="2027-01-01")
-    make_pending(cur, fx, driver_id=fx.driver_ids[1])  # other Driver is a different identity
+        make_pending(cur, fx, driver_assignment_id=fx.driver_assignment_ids[0], effective_from="2027-01-01")
+    make_pending(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])  # other Driver is a different identity
 
 
 def test_discard_deletes_pending_with_values_and_audits_the_full_value_set(cur):
@@ -912,8 +912,8 @@ def test_legacy_monetary_authority_is_unchanged_by_the_target_schema(cur):
     rate_type_id = cur.fetchone()[0]
     cur.execute("""
         INSERT INTO payroll.driverrates
-            (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status)
+            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
         VALUES (%s, %s, %s, %s, 10, '2099-01-01', 'PendingApproval')
-    """, (fx.company_id, fx.branch_id, fx.driver_id, rate_type_id))
+    """, (fx.company_id, fx.branch_id, fx.driver_assignment_id, rate_type_id))
     assert _durable(cur, fx.company_id) is True
     assert _durable(cur, make_company(cur)) is False

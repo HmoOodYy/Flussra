@@ -21,7 +21,9 @@ export interface StatusRateGroup {
 }
 
 export interface StatusRateMatrix {
+  driver_assignment_id: number;
   driver_id: number;
+  driver_number: string | null;
   as_of: string;
   groups: StatusRateGroup[];
 }
@@ -35,12 +37,12 @@ export interface StatusRateBatchPayload {
   }>;
 }
 
-export function getStatusRateMatrix(driverId: number): AxiosPromise<StatusRateMatrix> {
-  return apiClient.get<StatusRateMatrix>(`/payroll/drivers/${driverId}/rate-matrix`);
+export function getStatusRateMatrix(driverAssignmentId: number): AxiosPromise<StatusRateMatrix> {
+  return apiClient.get<StatusRateMatrix>(`/payroll/driver-assignments/${driverAssignmentId}/rate-matrix`);
 }
 
-export function saveStatusRateBatch(driverId: number, payload: StatusRateBatchPayload): AxiosPromise<void> {
-  return apiClient.post<void>(`/payroll/drivers/${driverId}/rates/batch`, payload);
+export function saveStatusRateBatch(driverAssignmentId: number, payload: StatusRateBatchPayload): AxiosPromise<void> {
+  return apiClient.post<void>(`/payroll/driver-assignments/${driverAssignmentId}/rates/batch`, payload);
 }
 
 export function approveStatusRate(rateId: number): AxiosPromise<void> {

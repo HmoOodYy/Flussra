@@ -178,7 +178,7 @@ async def m14_terminal_state(
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(
+async def paytest_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -191,15 +191,15 @@ async def paytest_driver_id(
             "branch_id": paytest_branch_id,
             "full_name": f"M14 owned driver {marker}",
             "hire_date": "1990-01-01",
-            "driver_profile": {
-                "driver_code": f"M14D-{marker[:10]}",
+            "driver": {
+                "driver_number": f"M14D-{marker[:10]}",
                 "effective_from_at": "2000-01-01T00:00:00Z",
             },
         },
         headers=auth(auth_token),
     )
     assert created.status_code == 201, f"M14 Driver create failed: {created.text}"
-    return int(created.json()["current_or_pending_driver"]["driver_id"])
+    return int(created.json()["current_or_pending_assignment"]["driver_assignment_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -229,14 +229,14 @@ class TestBonusCreate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         m14_open_period: dict,
     ):
         """CP-3A: amount=0 is rejected by the /bonuses endpoint (schema-level validation)."""
         pid = m14_open_period["payroll_period_id"]
         resp = await session_client.post(
             f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "0"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "0"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 422
@@ -254,7 +254,7 @@ class TestBonusUpdate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         m14_open_period: dict,
     ):
         """CP-3A: PATCH /bonuses amount → amount updated to new value immediately."""
@@ -262,7 +262,7 @@ class TestBonusUpdate:
 
         add = await session_client.post(
             f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "100.00"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "100.00"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201, add.text
@@ -281,7 +281,7 @@ class TestBonusUpdate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         m14_open_period: dict,
     ):
         """CP-3A: PATCH /bonuses amount=0 is rejected (schema-level validation)."""
@@ -289,7 +289,7 @@ class TestBonusUpdate:
 
         add = await session_client.post(
             f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "100.00"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "100.00"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201, add.text
@@ -306,7 +306,7 @@ class TestBonusUpdate:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         m14_open_period: dict,
     ):
         """CP-3A: PATCH /bonuses notes only → amount unchanged, notes updated."""
@@ -314,7 +314,7 @@ class TestBonusUpdate:
 
         add = await session_client.post(
             f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "25.00"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "25.00"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201, add.text
@@ -341,7 +341,7 @@ class TestBonusVoid:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         m14_open_period: dict,
     ):
         """CP-3A: DELETE /bonuses/{id} → status becomes 'Voided'."""
@@ -349,7 +349,7 @@ class TestBonusVoid:
 
         add = await session_client.post(
             f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "50.00"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "50.00"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201, add.text
@@ -366,7 +366,7 @@ class TestBonusVoid:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         m14_open_period: dict,
     ):
         """CP-3A: Voiding an already-voided bonus event succeeds without error (idempotent)."""
@@ -374,7 +374,7 @@ class TestBonusVoid:
 
         add = await session_client.post(
             f"/payroll/periods/{pid}/bonuses",
-            json={"driver_id": paytest_driver_id, "amount": "30.00"},
+            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "30.00"},
             headers=auth(auth_token),
         )
         assert add.status_code == 201, add.text

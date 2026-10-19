@@ -1,5 +1,12 @@
-import type { Branch, DriverSummary } from '../../../types/core';
+import type { Branch, DriverAssignmentRosterRow } from '../../../types/core';
 import styles from './PayRatesPage.module.css';
+import {
+  ASSIGNMENT_FILTER_LABELS,
+  assignmentWindow,
+  rosterIdentity,
+  stateBadgeLabel,
+  type AssignmentFilter,
+} from './payRatesAssignments';
 
 type PayRateDriverListProps = {
   search: string;
@@ -8,14 +15,16 @@ type PayRateDriverListProps = {
   setBranchFilter: (value: string) => void;
   statusFilter: string;
   setStatusFilter: (value: string) => void;
+  assignmentFilter: AssignmentFilter;
+  setAssignmentFilter: (value: AssignmentFilter) => void;
   branches: Branch[];
   loadingDrivers: boolean;
-  filteredDrivers: DriverSummary[];
-  selectedDriverId: number | null;
-  selectDriver: (driverId: number) => void;
+  filteredRows: DriverAssignmentRosterRow[];
+  selectedDriverAssignmentId: number | null;
+  selectAssignment: (driverAssignmentId: number) => void;
 };
 
-export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter, branches, loadingDrivers, filteredDrivers, selectedDriverId, selectDriver }: PayRateDriverListProps) {
+export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter, assignmentFilter, setAssignmentFilter, branches, loadingDrivers, filteredRows, selectedDriverAssignmentId, selectAssignment }: PayRateDriverListProps) {
   return (
     <div className={styles.left}>
       <div className={styles.filters}>
@@ -32,25 +41,44 @@ export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFi
             <option value="Terminated">Terminated</option>
           </select>
         </div>
+        <div className={styles.filterRow}>
+          <select
+            className={styles.sel}
+            aria-label="Assignment state"
+            value={assignmentFilter}
+            onChange={(e) => setAssignmentFilter(e.target.value as AssignmentFilter)}
+          >
+            {(Object.keys(ASSIGNMENT_FILTER_LABELS) as AssignmentFilter[]).map((key) => (
+              <option key={key} value={key}>{ASSIGNMENT_FILTER_LABELS[key]}</option>
+            ))}
+          </select>
+        </div>
       </div>
       <div className={styles.list}>
         {loadingDrivers ? (
           <div className={styles.emptyList}>Loading drivers...</div>
-        ) : filteredDrivers.length === 0 ? (
-          <div className={styles.emptyList}>No drivers found.</div>
+        ) : filteredRows.length === 0 ? (
+          <div className={styles.emptyList}>No assignments found.</div>
         ) : (
-          filteredDrivers.map((d) => (
-            <button key={d.driver_id} className={`${styles.item} ${selectedDriverId === d.driver_id ? styles.itemActive : ''}`} onClick={() => selectDriver(d.driver_id)}>
+          filteredRows.map((row) => (
+            <button
+              key={row.driver_assignment_id}
+              className={`${styles.item} ${selectedDriverAssignmentId === row.driver_assignment_id ? styles.itemActive : ''}`}
+              onClick={() => selectAssignment(row.driver_assignment_id)}
+            >
               <div className={styles.itemBody}>
-                <div className={styles.itemName}>{d.full_name}</div>
-                <div className={styles.itemMeta}>{d.driver_code ?? 'No code'} &middot; {d.branch_name}</div>
+                <div className={styles.itemName}>{row.full_name}</div>
+                <div className={styles.itemMeta}>{rosterIdentity(row)}</div>
+                <div className={styles.itemMeta}>{assignmentWindow(row)}</div>
               </div>
-              <span className={d.driver_status === 'Active' ? styles.okChip : styles.statusBadge}>{d.driver_status}</span>
+              <span className={row.state === 'ended' ? styles.statusBadge : styles.okChip}>
+                {stateBadgeLabel(row.state)}
+              </span>
             </button>
           ))
         )}
       </div>
-      <div className={styles.listFoot}>{filteredDrivers.length} driver{filteredDrivers.length !== 1 ? 's' : ''}</div>
+      <div className={styles.listFoot}>{filteredRows.length} assignment{filteredRows.length !== 1 ? 's' : ''}</div>
     </div>
   );
 }

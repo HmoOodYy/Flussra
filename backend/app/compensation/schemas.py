@@ -205,7 +205,7 @@ class PayDefinitionSummary(BaseModel):
 
 
 class AssignmentCreate(BaseModel):
-    driver_id: int
+    driver_assignment_id: int
     rate_definition_id: int
     effective_from: date
     effective_to: date | None = None
@@ -254,7 +254,7 @@ class AssignmentSummary(BaseModel):
     driver_rate_assignment_id: int
     company_id: int
     branch_id: int
-    driver_id: int
+    driver_assignment_id: int
     rate_definition_id: int
     effective_from: date
     effective_to: date | None = None
@@ -292,7 +292,7 @@ class ResolvedComponent(BaseModel):
 
 class ResolvedCompensation(BaseModel):
     company_id: int
-    driver_id: int
+    driver_assignment_id: int
     branch_id: int
     pay_definition_id: int | None = None
     rate_definition_id: int

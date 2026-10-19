@@ -224,7 +224,7 @@ export interface AssignmentSummary {
   driver_rate_assignment_id: number;
   company_id: number;
   branch_id: number;
-  driver_id: number;
+  driver_assignment_id: number;
   rate_definition_id: number;
   effective_from: string;
   effective_to: string | null;
@@ -243,7 +243,7 @@ export interface AssignmentSummary {
 }
 
 export interface AssignmentCreatePayload {
-  driver_id: number;
+  driver_assignment_id: number;
   rate_definition_id: number;
   effective_from: string;
   effective_to?: string | null;

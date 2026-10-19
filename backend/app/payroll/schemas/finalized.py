@@ -31,7 +31,9 @@ class FinalLineSummary(BaseModel):
     currency_minor_unit_digits: int
     period_id: int
     branch_id: int
+    driver_assignment_id: int
     driver_id: int
+    driver_number: str | None = None
     driver_name: str
     draft_line_id: int | None = None
     work_date: date | None = None
@@ -160,9 +162,10 @@ class FinalizedCalculationReportResponse(BaseModel):
 
 class FinalizedOffStatusEntry(BaseModel):
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
     driver_name: str | None = None
-    driver_code: str | None = None
+    driver_number: str | None = None
     work_date: date
     status_key_id: int
     status_code: str
@@ -202,9 +205,10 @@ class FinalizedOffDriversResponse(BaseModel):
 class FinalizedUsedRateDefinition(BaseModel):
     __module__ = "app.payroll.schemas"
     used_rate_definition_id: int
+    driver_assignment_id: int
     driver_id: int
     driver_name: str | None = None
-    driver_code: str | None = None
+    driver_number: str | None = None
     evidence_kind: str
     source_type: str
     pay_item_id: int | None = None
@@ -235,9 +239,10 @@ class FinalizedUsedRateDefinition(BaseModel):
 class FinalizedBonusEventEvidence(BaseModel):
     __module__ = "app.payroll.schemas"
     bonus_event_id: int
+    driver_assignment_id: int
     driver_id: int
     driver_name: str | None = None
-    driver_code: str | None = None
+    driver_number: str | None = None
     amount: Decimal
     reason: str | None = None
     notes: str | None = None
@@ -290,6 +295,7 @@ class FinalizedAuditEvent(BaseModel):
     source_entity_type: str
     source_entity_id: str
     review_item_id: int | None = None
+    driver_assignment_id: int | None = None
     driver_id: int | None = None
     work_date: date | None = None
     pay_item_id: int | None = None

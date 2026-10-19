@@ -3,7 +3,7 @@ tests/test_driver_transfer.py — Driver branch immutability guard tests.
 
 Protects the current DRIVER/Self boundary:
   - legacy branch-scoped DRIVER assignments return 422
-  - the linked Workforce DriverID and branch remain unchanged
+  - the linked Workforce DriverID, its DriverAssignment and branch remain unchanged
 
 The current Access authority requires a linked Employee and Self scope for
 DRIVER assignments. Legacy branch-scoped requests are rejected before they
@@ -113,24 +113,25 @@ class _OwnedPeriodLines:
         self.final_line_ids: list[int] = []
 
     async def add_draft_line(
-        self, company_id: int, branch_id: int, period_id: int, driver_id: int, source: str,
+        self, company_id: int, branch_id: int, period_id: int, assignment_id: int, source: str,
     ) -> int:
         line_id = (await self._db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
                      workdate, linetype, quantity, sourcetype)
-                VALUES (:cid, :bid, :period_id, :driver_id, DATE '2090-01-01', 'REGULAR', 1, :source)
+                VALUES (:cid, :bid, :period_id, :assignment_id, DATE '2090-01-01', 'REGULAR', 1, :source)
                 RETURNING draftlineid
             """),
             {"cid": company_id, "bid": branch_id, "period_id": period_id,
-             "driver_id": driver_id, "source": source},
+             "assignment_id": assignment_id, "source": source},
         )).scalar_one()
         self.draft_line_ids.append(line_id)
         return line_id
 
     async def add_final_line(
-        self, company_id: int, branch_id: int, period_id: int, driver_id: int, source: str,
+        self, company_id: int, branch_id: int, period_id: int, assignment_id: int,
+        driver_id: int, source: str,
     ) -> int:
         # Phase 6: direct FinalLine setup is authorised by a GUC that is
         # revoked as soon as the INSERT returns.
@@ -138,13 +139,13 @@ class _OwnedPeriodLines:
             line_id = (await self._db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                          linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :period_id, :driver_id, 'REGULAR', 1, 100, :source, 'USD', 2)
+                    VALUES (:cid, :bid, :period_id, :assignment_id, :driver_id, 'REGULAR', 1, 100, :source, 'USD', 2)
                     RETURNING finallineid
                 """),
                 {"cid": company_id, "bid": branch_id, "period_id": period_id,
-                 "driver_id": driver_id, "source": source},
+                 "assignment_id": assignment_id, "driver_id": driver_id, "source": source},
             )).scalar_one()
         self.final_line_ids.append(line_id)
         return line_id
@@ -190,7 +191,7 @@ async def owned_lines(direct_db):
 
 
 # ---------------------------------------------------------------------------
-# Helper: create a fresh driver user on a branch, return (user_id, driver_id)
+# Helper: create a fresh driver user on a branch, return (user_id, driver_id, assignment_id)
 # ---------------------------------------------------------------------------
 
 async def _make_fresh_driver(
@@ -198,7 +199,7 @@ async def _make_fresh_driver(
     token: str,
     branch_id: int,
     driver_role_id: int,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     suffix = random.randint(100000, 999999)
     user = await create_provisioned_test_user(
         client, token, f"xfr_{suffix}", driver_role_id,
@@ -206,8 +207,8 @@ async def _make_fresh_driver(
     )
     user_id = int(user["user_id"])
     profile = await _get_driver_profile(client, token, user_id)
-    assert profile["has_driver_profile"] is True
-    return user_id, profile["driver_id"]
+    assert profile["has_driver"] is True
+    return user_id, profile["driver_id"], profile["driver_assignment_id"]
 
 
 # ===========================================================================
@@ -226,7 +227,7 @@ class TestDriverBranchReassignment:
     ):
         """A valid DRIVER/Self identity rejects a legacy branch assignment."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id = await _make_fresh_driver(
+        user_id, driver_id, assignment_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
 
@@ -243,6 +244,7 @@ class TestDriverBranchReassignment:
         profile = await _get_driver_profile(session_client, auth_token, user_id)
         assert profile["branch_id"] == hq_branch_id
         assert profile["driver_id"] == driver_id
+        assert profile["driver_assignment_id"] == assignment_id
 
     async def test_driver_with_draft_lines_cannot_be_reassigned(
         self,
@@ -256,14 +258,14 @@ class TestDriverBranchReassignment:
     ):
         """Driver with DraftLines returns 422 when reassigned to another branch."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id = await _make_fresh_driver(
+        user_id, driver_id, assignment_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
         # Inject a DraftLine for this driver (consistent branch)
         await owned_lines.add_draft_line(
-            company_id, hq_branch_id, created_period_id, driver_id, "TransferTest",
+            company_id, hq_branch_id, created_period_id, assignment_id, "TransferTest",
         )
 
         # Attempt reassignment → must fail with 422
@@ -295,14 +297,14 @@ class TestDriverBranchReassignment:
     ):
         """Driver with FinalLines returns 422 when reassigned to another branch."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id = await _make_fresh_driver(
+        user_id, driver_id, assignment_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
         # Inject a FinalLine (Phase 6: authorised by a GUC that is revoked immediately)
         await owned_lines.add_final_line(
-            company_id, hq_branch_id, created_period_id, driver_id, "TransferTest",
+            company_id, hq_branch_id, created_period_id, assignment_id, driver_id, "TransferTest",
         )
 
         r = await _assign_driver_role(
@@ -325,7 +327,7 @@ class TestDriverBranchReassignment:
     ):
         """Driver with DriverRates returns 422 when reassigned to another branch."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id = await _make_fresh_driver(
+        user_id, driver_id, assignment_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
@@ -334,15 +336,15 @@ class TestDriverBranchReassignment:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.driverrates
-                    (companyid, branchid, driverid, ratetypeid,
+                    (companyid, branchid, driverassignmentid, ratetypeid,
                      amount, effectivefrom, status)
                 VALUES
-                    (:cid, :bid, :driver_id, :rt_id, 22.00, '2030-01-01', 'PendingApproval')
+                    (:cid, :bid, :assignment_id, :rt_id, 22.00, '2030-01-01', 'PendingApproval')
             """),
             {
                 "cid": company_id,
                 "bid": hq_branch_id,
-                "driver_id": driver_id,
+                "assignment_id": assignment_id,
                 "rt_id": rate_type_id,
             },
         )
@@ -367,7 +369,7 @@ class TestDriverBranchReassignment:
     ):
         """Driver with DriverPayRules returns 422 when reassigned to another branch."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id = await _make_fresh_driver(
+        user_id, driver_id, assignment_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
@@ -375,15 +377,15 @@ class TestDriverBranchReassignment:
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.driverpayrules
-                    (companyid, branchid, driverid, ruletype,
+                    (companyid, branchid, driverassignmentid, ruletype,
                      amount, effectivefrom, status)
                 VALUES
-                    (:cid, :bid, :driver_id, 'MinimumPay', 600.00, '2030-01-01', 'Active')
+                    (:cid, :bid, :assignment_id, 'MinimumPay', 600.00, '2030-01-01', 'Active')
             """),
             {
                 "cid": company_id,
                 "bid": hq_branch_id,
-                "driver_id": driver_id,
+                "assignment_id": assignment_id,
             },
         )
 
@@ -409,13 +411,13 @@ class TestDriverBranchReassignment:
     ):
         """422 detail explains that branch changes require Driver Transfer."""
         driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id = await _make_fresh_driver(
+        user_id, driver_id, assignment_id = await _make_fresh_driver(
             session_client, auth_token, hq_branch_id, driver_role_id
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
         await owned_lines.add_draft_line(
-            company_id, hq_branch_id, created_period_id, driver_id, "MsgTest",
+            company_id, hq_branch_id, created_period_id, assignment_id, "MsgTest",
         )
 
         r = await _assign_driver_role(

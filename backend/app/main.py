@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from app.admin.router import router as admin_router
 from app.auth.router import router as auth_router
@@ -20,6 +21,10 @@ from app.payroll_setup.router import router as payroll_setup_router
 from app.review.router import router as review_router
 from app.settings.router import router as settings_router
 from app.transfer.router import router as transfer_router
+from app.workforce.effective import (
+    driver_assignment_ended_detail,
+    is_driver_assignment_ended_error,
+)
 from app.workforce.router import router as workforce_router
 
 DEV_CORS_ORIGINS = [
@@ -85,6 +90,23 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=status_code,
             content={"detail": {"code": code, "message": str(exc)}},
+        )
+
+    @app.exception_handler(DBAPIError)
+    async def driver_assignment_ended_handler(
+        request: Request, exc: DBAPIError
+    ) -> JSONResponse:
+        """Map the database's ended-assignment refusal (SQLSTATE FL001) to the API 409.
+
+        The single place that translates ``core.trg_CompensationAssignmentWritable``;
+        every other database error is re-raised unchanged.
+        """
+        del request
+        if not is_driver_assignment_ended_error(exc):
+            raise exc
+        return JSONResponse(
+            status_code=409,
+            content={"detail": driver_assignment_ended_detail()},
         )
 
     app.add_middleware(

@@ -50,7 +50,9 @@ class DraftLineSummary(BaseModel):
     draft_line_id: int
     period_id: int
     branch_id: int
+    driver_assignment_id: int
     driver_id: int
+    driver_number: str | None = None
     driver_name: str
     work_date: date
     payroll_period_definition_id: int | None = None
@@ -77,7 +79,9 @@ class DraftLineSummary(BaseModel):
 class DriverPeriodSummary(BaseModel):
     """Aggregated live totals per driver x period definition for one period."""
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
+    driver_number: str | None = None
     driver_name: str
     period_id: int
     period_name: str
@@ -99,7 +103,7 @@ class DraftLineCreate(BaseModel):
     __module__ = "app.payroll.schemas"
     model_config = ConfigDict(extra="forbid")
 
-    driver_id: int
+    driver_assignment_id: int
     work_date: date
     payroll_period_definition_id: int
     quantity: Decimal = Decimal("0")
@@ -189,9 +193,10 @@ class DayGridLineValue(BaseModel):
 
 class DayGridRow(BaseModel):
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
     driver_name: str
-    driver_code: str | None = None
+    driver_number: str | None = None
     status_key: str | None = None
     status_label: str | None = None
     is_off: bool = False
@@ -252,7 +257,7 @@ class DayGridResponse(BaseModel):
 
 class DayGridSaveRow(BaseModel):
     __module__ = "app.payroll.schemas"
-    driver_id: int
+    driver_assignment_id: int
     # Keyed by str(payroll_period_definition_id); never by code or name.
     values: dict[str, str] = {}
     status_key: str | None = None
@@ -273,9 +278,10 @@ class DayGridSaveRequest(BaseModel):
 
 class DriversOffEntry(BaseModel):
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
     driver_name: str
-    driver_code: str | None = None
+    driver_number: str | None = None
     work_date: date
     status_key_code: str
     status_label: str | None = None
@@ -303,9 +309,10 @@ class DriversOffResponse(BaseModel):
 
 class FullyOffDriverSummary(BaseModel):
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
     driver_name: str
-    driver_code: str | None = None
+    driver_number: str | None = None
     eligible_scheduled_day_count: int
     off_day_count: int
 
@@ -330,9 +337,10 @@ class OffDriversSummaryResponse(BaseModel):
 
 class SelectedDayOffDriver(BaseModel):
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
     driver_name: str
-    driver_code: str | None = None
+    driver_number: str | None = None
     work_date: date
     day_name: str
     status_key_id: int | None = None

@@ -37,6 +37,7 @@ from app.payroll.calculation.per_unit import (
     PerUnitInput,
     calculate_per_unit,
 )
+from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
 
 # ---------------------------------------------------------------------------
 # 1. Pure-core tests (no database)
@@ -374,35 +375,43 @@ async def _delete_period_and_children(db, period_id: int) -> None:
     ), f"Residue check failed for period {period_id}: {dict(residue)}"
 
 
-async def _delete_driver_and_residue(db, driver_id: int, employee_id: int | None) -> None:
+async def _delete_driver_and_residue(db, driver_assignment_id: int, employee_id: int | None) -> None:
     """
     Hard-deletes exactly the test-owned driver/employee pair (never a broad
     table-wide delete) and any dependent rows scoped to this exact
-    `driver_id`/`employee_id` that a caller's own cleanup (period/rate
+    `driver_assignment_id`/`employee_id` that a caller's own cleanup (period/rate
     ownership) may not have reached yet -- idempotent: a partial setup that
     never got as far as creating a rate/period still cleans safely, since
     each DELETE is a no-op when nothing matches.
 
-    FK order: DraftLines/FinalLines/DriverRates (reference DriverID) before
+    FK order: DraftLines/FinalLines/DriverRates (reference DriverAssignmentID) before
     core.Drivers, then core.Drivers (references EmployeeID) before
     core.Employees (`fk_Drivers_Employee`, migrations/sql/0001_initial_schema.sql).
     """
     await db.execute(
-        _text("DELETE FROM payroll.payrollfinallines WHERE driverid = :id"), {"id": driver_id},
+        _text("DELETE FROM payroll.payrollfinallines WHERE driverassignmentid = :id"), {"id": driver_assignment_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.payrolldraftlines WHERE driverid = :id"), {"id": driver_id},
+        _text("DELETE FROM payroll.payrolldraftlines WHERE driverassignmentid = :id"), {"id": driver_assignment_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.driverrates WHERE driverid = :id"), {"id": driver_id},
+        _text("DELETE FROM payroll.driverrates WHERE driverassignmentid = :id"), {"id": driver_assignment_id},
     )
     await db.execute(
         _text("DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid"),
-        {"eid": str(driver_id)},
+        {"eid": str(driver_assignment_id)},
     )
-    await db.execute(
-        _text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": driver_id},
-    )
+    driver_id = (await db.execute(
+        _text("SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :id"),
+        {"id": driver_assignment_id},
+    )).scalar_one_or_none()
+    async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+        await db.execute(
+            _text("DELETE FROM core.driverassignments WHERE driverassignmentid = :id"),
+            {"id": driver_assignment_id},
+        )
+    if driver_id is not None:
+        await db.execute(_text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": driver_id})
     if employee_id is not None:
         await db.execute(
             _text("DELETE FROM audit.auditlog WHERE entityname = 'Employees' AND entityid = :eid"),
@@ -419,13 +428,13 @@ async def _owned_driver(session_client, auth_token, branch_id, direct_db, *, nam
     Exception-safe driver lifecycle. `name` MUST be a globally-unique marker
     (the caller appends a `uuid4` suffix) chosen BEFORE this context manager
     is entered -- it is the recovery key this `finally` uses to find the
-    created driver/employee even when the local `driver_id`/`employee_id`
+    created driver/employee even when the local `driver_assignment_id`/`employee_id`
     variables were never assigned (P1-B: a 201 response whose body then
-    fails to parse, or whose `driver_id`/`employee_id` keys are missing,
+    fails to parse, or whose `driver_assignment_id`/`employee_id` keys are missing,
     still leaves the row committed server-side; recovery here does not
     depend on the local variables reaching that assignment).
     """
-    driver_id = None
+    driver_assignment_id = None
     employee_id = None
     try:
         r = await session_client.post(
@@ -433,31 +442,31 @@ async def _owned_driver(session_client, auth_token, branch_id, direct_db, *, nam
         )
         assert r.status_code == 201, f"Create driver failed: {r.text}"
         body = r.json()
-        driver_id = body["driver_id"]
+        driver_assignment_id = body["driver_assignment_id"]
         employee_id = body["employee_id"]
-        yield driver_id
+        yield driver_assignment_id
     finally:
-        if driver_id is None or employee_id is None:
+        if driver_assignment_id is None or employee_id is None:
             # Recovery path: the write may have committed even though the
             # local variables above were never reached.
             row = (await direct_db.execute(
                 _text("""
-                    SELECT d.driverid, d.employeeid
-                    FROM   core.drivers d
+                    SELECT d.driverassignmentid, d.employeeid
+                    FROM   core.driverassignments d
                     JOIN   core.employees e ON e.employeeid = d.employeeid
                     WHERE  e.fullname = :name AND d.branchid = :bid
                 """),
                 {"name": name, "bid": branch_id},
             )).mappings().first()
             if row is not None:
-                driver_id = row["driverid"]
+                driver_assignment_id = row["driverassignmentid"]
                 employee_id = row["employeeid"]
-        if driver_id is not None:
-            await _delete_driver_and_residue(direct_db, driver_id, employee_id)
+        if driver_assignment_id is not None:
+            await _delete_driver_and_residue(direct_db, driver_assignment_id, employee_id)
             residue = (await direct_db.execute(
                 _text("""
                     SELECT
-                        (SELECT COUNT(*) FROM core.drivers WHERE driverid = :did) AS drivers,
+                        (SELECT COUNT(*) FROM core.driverassignments WHERE driverassignmentid = :did) AS drivers,
                         (SELECT COUNT(*) FROM core.employees WHERE employeeid = :eid) AS employees,
                         (SELECT COUNT(*) FROM audit.auditlog
                             WHERE entityname = 'Drivers' AND entityid = :did_s) AS driver_audit,
@@ -465,12 +474,12 @@ async def _owned_driver(session_client, auth_token, branch_id, direct_db, *, nam
                             WHERE entityname = 'Employees' AND entityid = :eid_s) AS employee_audit
                 """),
                 {
-                    "did": driver_id, "eid": employee_id if employee_id is not None else -1,
-                    "did_s": str(driver_id), "eid_s": str(employee_id) if employee_id is not None else "-1",
+                    "did": driver_assignment_id, "eid": employee_id if employee_id is not None else -1,
+                    "did_s": str(driver_assignment_id), "eid_s": str(employee_id) if employee_id is not None else "-1",
                 },
             )).mappings().first()
-            assert residue["drivers"] == 0, f"Driver {driver_id} was not removed"
-            assert residue["driver_audit"] == 0, f"Driver {driver_id} audit residue was not removed"
+            assert residue["drivers"] == 0, f"Driver {driver_assignment_id} was not removed"
+            assert residue["driver_audit"] == 0, f"Driver {driver_assignment_id} audit residue was not removed"
             if employee_id is not None:
                 assert residue["employees"] == 0, f"Employee {employee_id} was not removed"
                 assert residue["employee_audit"] == 0, f"Employee {employee_id} audit residue was not removed"
@@ -487,7 +496,7 @@ async def _get_hourly_rate_type_id(client, token) -> int:
 
 @contextlib.asynccontextmanager
 async def _owned_driver_rate(
-    direct_db, session_client, auth_token, driver_id, rate_type_id, amount, effective_from,
+    direct_db, session_client, auth_token, driver_assignment_id, rate_type_id, amount, effective_from,
     *, _inject_failure_after_write: bool = False,
 ):
     """
@@ -497,8 +506,8 @@ async def _owned_driver_rate(
     try/finally, so a 201-then-parse-failure, or a failure in the
     subsequent approve call, never entered the `finally` at all).
 
-    Recovery key: the exact `(driver_id, rate_type_id, effective_from)`
-    tuple is unique to this test (`driver_id` is a freshly-created,
+    Recovery key: the exact `(driver_assignment_id, rate_type_id, effective_from)`
+    tuple is unique to this test (`driver_assignment_id` is a freshly-created,
     test-owned driver), so cleanup can recover the created `DriverRateID`
     via `direct_db` even if the HTTP response was never successfully parsed.
     A unique `notes` marker (a real, schema-supported `DriverRateCreate`
@@ -517,7 +526,7 @@ async def _owned_driver_rate(
         rc = await session_client.post(
             "/payroll/rates",
             json={
-                "driver_id": driver_id, "rate_type_id": rate_type_id, "amount": amount,
+                "driver_assignment_id": driver_assignment_id, "rate_type_id": rate_type_id, "amount": amount,
                 "effective_from": effective_from, "notes": marker,
             },
             headers=auth(auth_token),
@@ -536,10 +545,10 @@ async def _owned_driver_rate(
             row = (await direct_db.execute(
                 _text("""
                     SELECT driverrateid FROM payroll.driverrates
-                    WHERE driverid = :did AND ratetypeid = :rtid
+                    WHERE driverassignmentid = :did AND ratetypeid = :rtid
                       AND (effectivefrom = :eff OR notes = :marker)
                 """),
-                {"did": driver_id, "rtid": rate_type_id, "eff": eff_date, "marker": marker},
+                {"did": driver_assignment_id, "rtid": rate_type_id, "eff": eff_date, "marker": marker},
             )).mappings().first()
             if row is not None:
                 rate_id = row["driverrateid"]
@@ -737,19 +746,19 @@ async def _perunit_period(session_client, auth_token, paytest_branch_id, direct_
     unique_driver_name = f"{driver_name} {uuid.uuid4().hex[:8]}"
     async with _owned_driver(
         session_client, auth_token, paytest_branch_id, direct_db, name=unique_driver_name,
-    ) as driver_id:
+    ) as driver_assignment_id:
         hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
         async with contextlib.AsyncExitStack() as stack:
             rate_id = await stack.enter_async_context(
                 _owned_driver_rate(
-                    direct_db, session_client, auth_token, driver_id, hourly_rt_id,
+                    direct_db, session_client, auth_token, driver_assignment_id, hourly_rt_id,
                     amount=rate_amount, effective_from=effective_from,
                 )
             )
             pid = await stack.enter_async_context(
                 _owned_period_scenario(session_client, auth_token, paytest_branch_id, direct_db, suffix=suffix)
             )
-            yield driver_id, pid, rate_id
+            yield driver_assignment_id, pid, rate_id
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 

@@ -33,7 +33,9 @@ _LINE_SELECT = """
         dl.draftlineid,
         dl.payrollperiodid,
         dl.branchid,
-        dl.driverid,
+        dl.driverassignmentid,
+        a.driverid,
+        dr.drivernumber,
         e.fullname         AS drivername,
         dl.workdate,
         dl.payrollperioddefinitionid,
@@ -54,8 +56,9 @@ _LINE_SELECT = """
         dl.addedbyuserid,
         dl.addedatutc
     FROM   payroll.payrolldraftlines dl
-    JOIN   core.drivers              d  ON d.driverid   = dl.driverid
-    JOIN   core.employees            e  ON e.employeeid = d.employeeid
+    JOIN   core.driverassignments    a  ON a.driverassignmentid = dl.driverassignmentid
+    JOIN   core.drivers              dr ON dr.driverid  = a.driverid
+    JOIN   core.employees            e  ON e.employeeid = a.employeeid
     LEFT JOIN payroll.payrollperioddefinitions ppd
            ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
 """
@@ -72,7 +75,9 @@ def _line_row_to_summary(r: Any) -> DraftLineSummary:
         draft_line_id=r["draftlineid"],
         period_id=r["payrollperiodid"],
         branch_id=r["branchid"],
+        driver_assignment_id=r["driverassignmentid"],
         driver_id=r["driverid"],
+        driver_number=r["drivernumber"],
         driver_name=r["drivername"],
         work_date=r["workdate"],
         payroll_period_definition_id=r["payrollperioddefinitionid"],
@@ -124,7 +129,7 @@ async def get_period_lines(
     user_id: int,
     db: AsyncConnection,
     *,
-    driver_id: int | None = None,
+    driver_assignment_id: int | None = None,
     work_date: date | None = None,
     line_status: str | None = None,
 ) -> list[DraftLineSummary]:
@@ -146,9 +151,9 @@ async def get_period_lines(
         conditions.append("dl.sourcetype != 'System'")
         conditions.append("dl.linetype IS DISTINCT FROM 'STATUS_PAYMENT'")
 
-    if driver_id is not None:
-        conditions.append("dl.driverid = :driver_id")
-        params["driver_id"] = driver_id
+    if driver_assignment_id is not None:
+        conditions.append("dl.driverassignmentid = :driver_assignment_id")
+        params["driver_assignment_id"] = driver_assignment_id
 
     if work_date is not None:
         conditions.append("dl.workdate = :work_date")
@@ -161,7 +166,7 @@ async def get_period_lines(
     where = " AND ".join(conditions)
     result = await db.execute(
         text(f"{_LINE_SELECT} WHERE {where} "
-             "ORDER BY dl.workdate, dl.driverid, ppd.sortorder NULLS LAST, dl.linetype, "
+             "ORDER BY dl.workdate, dl.driverassignmentid, ppd.sortorder NULLS LAST, dl.linetype, "
              "dl.draftlineid"),
         params,
     )
@@ -173,7 +178,7 @@ async def get_period_lines(
             line.draft_line_id: line
             for line in await load_live_source_lines(
                 period_id, company_id, db,
-                driver_ids=[driver_id] if driver_id is not None else None,
+                driver_assignment_ids=[driver_assignment_id] if driver_assignment_id is not None else None,
                 work_date=work_date,
             )
         }
@@ -231,14 +236,16 @@ async def get_period_draft_summary(
             detail="Lines summary is not available for Prepared (Draft) periods.",
         )
 
-    names = {
-        int(r["driverid"]): r["fullname"]
+    people = {
+        int(r["driverassignmentid"]): r
         for r in (await db.execute(
             text("""
-                SELECT d.driverid, e.fullname
-                FROM   core.drivers d JOIN core.employees e ON e.employeeid = d.employeeid
-                WHERE  d.companyid = :cid
-                  AND  d.driverid IN (SELECT driverid FROM payroll.payrolldraftlines
+                SELECT a.driverassignmentid, a.driverid, dr.drivernumber, e.fullname
+                FROM   core.driverassignments a
+                JOIN   core.drivers dr ON dr.driverid = a.driverid
+                JOIN   core.employees e ON e.employeeid = a.employeeid
+                WHERE  a.companyid = :cid
+                  AND  a.driverassignmentid IN (SELECT driverassignmentid FROM payroll.payrolldraftlines
                                       WHERE payrollperiodid = :pid AND companyid = :cid)
             """),
             {"cid": company_id, "pid": period_id},
@@ -248,7 +255,7 @@ async def get_period_draft_summary(
     totals: dict[tuple[int, int], dict] = {}
     for line in await load_live_source_lines(period_id, company_id, db):
         entry = totals.setdefault(
-            (line.driver_id, line.definition.payroll_period_definition_id),
+            (line.driver_assignment_id, line.definition.payroll_period_definition_id),
             {"line": line, "quantity": Decimal("0"), "amount": Decimal("0"),
              "count": 0, "attention": 0},
         )
@@ -261,8 +268,10 @@ async def get_period_draft_summary(
 
     summaries = [
         DriverPeriodSummary(
-            driver_id=driver_id,
-            driver_name=names.get(driver_id, ""),
+            driver_assignment_id=driver_assignment_id,
+            driver_id=people[driver_assignment_id]["driverid"],
+            driver_number=people[driver_assignment_id]["drivernumber"],
+            driver_name=people[driver_assignment_id]["fullname"],
             period_id=period_id,
             period_name=period.period_name,
             payroll_period_definition_id=definition_id,
@@ -273,7 +282,7 @@ async def get_period_draft_summary(
             line_count=entry["count"],
             lines_needing_attention=entry["attention"],
         )
-        for (driver_id, definition_id), entry in totals.items()
+        for (driver_assignment_id, definition_id), entry in totals.items()
     ]
-    summaries.sort(key=lambda r: (r.driver_name, r.definition_name or "", r.driver_id))
+    summaries.sort(key=lambda r: (r.driver_name, r.definition_name or "", r.driver_assignment_id))
     return summaries

@@ -15,6 +15,7 @@ from tests.currency_test_helpers import (
     create_branch_and_driver,
     first_rate_type_id,
 )
+from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
 
 
 async def _company_and_driver(engine):
@@ -24,9 +25,9 @@ async def _company_and_driver(engine):
             INSERT INTO core.companies(companycode, companyname, currencycode)
             VALUES (:code, 'P3a race', 'USD') RETURNING companyid
         """), {"code": code})).scalar_one()
-        branch_id, driver_id = await create_branch_and_driver(db, company_id, code[-12:])
+        branch_id, driver_assignment_id = await create_branch_and_driver(db, company_id, code[-12:])
         rate_type_id = await first_rate_type_id(db)
-    return {"cid": company_id, "bid": branch_id, "did": driver_id,
+    return {"cid": company_id, "bid": branch_id, "did": driver_assignment_id,
             "rid": rate_type_id, "amount": "1.2345"}
 
 
@@ -36,6 +37,8 @@ async def _cleanup(engine, params):
         # A monetary row permanently locks the Company currency; remove the
         # whole disposable test company (rates, driver, employee, branch).
         await db.execute(text("DELETE FROM payroll.driverrates WHERE companyid=:cid"), {"cid": cid})
+        async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+            await db.execute(text("DELETE FROM core.driverassignments WHERE companyid=:cid"), {"cid": cid})
         await db.execute(text("DELETE FROM core.drivers WHERE companyid=:cid"), {"cid": cid})
         await db.execute(text("DELETE FROM core.employees WHERE companyid=:cid"), {"cid": cid})
         await db.execute(text("DELETE FROM core.branches WHERE companyid=:cid"), {"cid": cid})

@@ -18,6 +18,7 @@ from app.payroll.guards import (
     check_not_in_finalized_period,
 )
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
+from app.workforce.effective import require_writable_driver_assignment
 
 # ===========================================================================
 # M15 — Driver Pay Rules (Minimum / Maximum Pay)
@@ -77,7 +78,7 @@ _RULE_SELECT = """
         r.driverpayruleid,
         r.companyid,
         r.branchid,
-        r.driverid,
+        r.driverassignmentid,
         r.ruletype,
         r.amount,
         r.effectivefrom,
@@ -97,7 +98,7 @@ def _rule_row_to_summary(r: Any) -> DriverPayRuleSummary:
         driver_pay_rule_id=r["driverpayruleid"],
         company_id=r["companyid"],
         branch_id=r["branchid"],
-        driver_id=r["driverid"],
+        driver_assignment_id=r["driverassignmentid"],
         rule_type=r["ruletype"],
         amount=r["amount"],
         effective_from=r["effectivefrom"],
@@ -128,7 +129,7 @@ async def _get_rule_by_id_internal(
 
 
 async def _count_finalized_periods_in_rule_range(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     effective_from: date,
     effective_to: "date | None",
@@ -157,12 +158,12 @@ async def _count_finalized_periods_in_rule_range(
                   SELECT 1
                   FROM   payroll.payrollfinallines fl
                   WHERE  fl.payrollperiodid = pp.payrollperiodid
-                    AND  fl.driverid        = :driver_id
+                    AND  fl.driverassignmentid        = :driver_assignment_id
               )
         """),
         {
             "company_id": company_id,
-            "driver_id":  driver_id,
+            "driver_assignment_id":  driver_assignment_id,
             "eff_from":   effective_from,
             "eff_to":     effective_to,
         },
@@ -171,7 +172,7 @@ async def _count_finalized_periods_in_rule_range(
 
 
 async def _latest_finalized_period_start_in_range(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     effective_from: date,
     effective_to: "date | None",
@@ -196,12 +197,12 @@ async def _latest_finalized_period_start_in_range(
                   SELECT 1
                   FROM   payroll.payrollfinallines fl
                   WHERE  fl.payrollperiodid = pp.payrollperiodid
-                    AND  fl.driverid        = :driver_id
+                    AND  fl.driverassignmentid        = :driver_assignment_id
               )
         """),
         {
             "company_id": company_id,
-            "driver_id":  driver_id,
+            "driver_assignment_id":  driver_assignment_id,
             "eff_from":   effective_from,
             "eff_to":     effective_to,
         },
@@ -232,8 +233,8 @@ async def create_driver_pay_rule(
     """
     await _require_non_driver_rate_subject(company_id, user_id, db)
     drv_result = await db.execute(
-        text("SELECT driverid, branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": data.driver_id, "cid": company_id},
+        text("SELECT driverassignmentid, branchid FROM core.driverassignments WHERE driverassignmentid = :did AND companyid = :cid"),
+        {"did": data.driver_assignment_id, "cid": company_id},
     )
     drv_row = drv_result.mappings().first()
     if drv_row is None:
@@ -252,7 +253,7 @@ async def create_driver_pay_rule(
             SELECT driverpayruleid
             FROM   payroll.driverpayrules
             WHERE  companyid     = :cid
-              AND  driverid      = :did
+              AND  driverassignmentid      = :did
               AND  ruletype      = :rtype
               AND  status        IN ('Active', 'Ended')
               AND  effectivefrom <= COALESCE(:eff_to, '9999-12-31'::date)
@@ -261,7 +262,7 @@ async def create_driver_pay_rule(
         """),
         {
             "cid":     company_id,
-            "did":     data.driver_id,
+            "did":     data.driver_assignment_id,
             "rtype":   data.rule_type,
             "eff_from": data.effective_from,
             "eff_to":   data.effective_to,
@@ -284,10 +285,11 @@ async def create_driver_pay_rule(
     )
 
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, data.driver_assignment_id, db)
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.driverpayrules
-                (companyid, branchid, driverid, ruletype, amount,
+                (companyid, branchid, driverassignmentid, ruletype, amount,
                  effectivefrom, effectiveto, status, createdbyuserid, notes)
             VALUES
                 (:cid, :bid, :did, :rtype, :amount,
@@ -297,7 +299,7 @@ async def create_driver_pay_rule(
         {
             "cid":      company_id,
             "bid":      driver_branch_id,
-            "did":      data.driver_id,
+            "did":      data.driver_assignment_id,
             "rtype":    data.rule_type,
             "amount":   data.amount,
             "eff_from": data.effective_from,
@@ -318,7 +320,7 @@ async def create_driver_pay_rule(
         rule_id=rule_id,
         action_code="DRIVER_PAY_RULE_CREATED",
         new_value={
-            "driver_id":      data.driver_id,
+            "driver_assignment_id":      data.driver_assignment_id,
             "rule_type":      data.rule_type,
             "amount":         str(persisted_amount),
             "effective_from": str(data.effective_from),
@@ -337,17 +339,17 @@ async def create_driver_pay_rule(
 async def get_driver_pay_rules(
     company_id: int,
     user_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     db: AsyncConnection,
     *,
     rule_type: str | None = None,
     rule_status: str | None = None,
 ) -> list[DriverPayRuleSummary]:
     """Return all pay rules for a driver after branch and DRIVER checks."""
-    await _check_driver_read_access(driver_id, company_id, user_id, db)
+    await _check_driver_read_access(driver_assignment_id, company_id, user_id, db)
 
-    conditions = ["r.companyid = :cid", "r.driverid = :did"]
-    params: dict[str, Any] = {"cid": company_id, "did": driver_id}
+    conditions = ["r.companyid = :cid", "r.driverassignmentid = :did"]
+    params: dict[str, Any] = {"cid": company_id, "did": driver_assignment_id}
 
     if rule_type is not None:
         conditions.append("r.ruletype = :rtype")
@@ -422,7 +424,7 @@ async def end_driver_pay_rule(
 
     # Guard: cannot close the rule before the latest finalized period that relied on it.
     latest = await _latest_finalized_period_start_in_range(
-        rule.driver_id, company_id, rule.effective_from, rule.effective_to, db
+        rule.driver_assignment_id, company_id, rule.effective_from, rule.effective_to, db
     )
     if latest is not None and effective_to < latest:
         raise HTTPException(
@@ -435,6 +437,7 @@ async def end_driver_pay_rule(
         )
 
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, rule.driver_assignment_id, db)
     await db.execute(
         text("""
             UPDATE payroll.driverpayrules
@@ -486,6 +489,7 @@ async def update_driver_pay_rule_notes(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
+    await require_writable_driver_assignment(company_id, rule.driver_assignment_id, db)
 
     await db.execute(
         text("""
@@ -541,9 +545,10 @@ async def void_driver_pay_rule(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
+    await require_writable_driver_assignment(company_id, rule.driver_assignment_id, db)
 
     governed = await _count_finalized_periods_in_rule_range(
-        rule.driver_id, company_id, rule.effective_from, rule.effective_to, db
+        rule.driver_assignment_id, company_id, rule.effective_from, rule.effective_to, db
     )
     if governed > 0:
         raise HTTPException(

@@ -152,8 +152,9 @@ export interface CurrentPayrollHubMetrics {
 }
 
 export interface CurrentPayrollHubDriverSummary {
+  driver_assignment_id: number;
   driver_id: number;
-  driver_code: string | null;
+  driver_number: string | null;
   driver_name: string | null;
   expected_pay: string;
 }

@@ -10,9 +10,9 @@ function OffDriverTable({ response }: { response: FinalizedOffDriversResponse })
         <thead><tr><th>Driver</th><th>Code</th><th>Eligible days</th><th>Off days</th></tr></thead>
         <tbody>
           {response.fully_off_drivers.map((driver) => (
-            <tr key={driver.driver_id}>
-              <td>{driver.driver_name || `Driver #${driver.driver_id}`}</td>
-              <td>{driver.driver_code ?? 'Not provided'}</td>
+            <tr key={driver.driver_assignment_id}>
+              <td>{driver.driver_name || 'Unnamed driver'}</td>
+              <td>{driver.driver_number ?? 'Not provided'}</td>
               <td className={styles.numeric}>{driver.eligible_scheduled_day_count}</td>
               <td className={styles.numeric}>{driver.off_day_count}</td>
             </tr>
@@ -31,10 +31,10 @@ function StatusEvidenceTable({ response }: { response: FinalizedOffDriversRespon
         <thead><tr><th>Date</th><th>Driver</th><th>Code</th><th>Status code</th><th>Status</th><th>Off reason</th></tr></thead>
         <tbody>
           {response.status_entries.map((entry, index) => (
-            <tr key={`${entry.driver_id}-${entry.work_date}-${entry.status_key_id}-${index}`}>
+            <tr key={`${entry.driver_assignment_id}-${entry.work_date}-${entry.status_key_id}-${index}`}>
               <td>{entry.work_date}</td>
-              <td>{entry.driver_name ?? `Driver #${entry.driver_id}`}</td>
-              <td>{entry.driver_code ?? 'Not provided'}</td>
+              <td>{entry.driver_name ?? 'Unnamed driver'}</td>
+              <td>{entry.driver_number ?? 'Not provided'}</td>
               <td>{entry.status_code}</td>
               <td>{entry.status_label}</td>
               <td>{entry.is_off_reason ? 'Yes' : 'No'}</td>

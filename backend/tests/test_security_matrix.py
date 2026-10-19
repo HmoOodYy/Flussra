@@ -178,12 +178,12 @@ async def _create_driver(
         json={
             "branch_id": branch_id,
             "full_name": f"SM Driver {suffix}",
-            "driver_code": f"SMD-{suffix}",
+            "driver_number": f"SMD-{suffix}",
         },
         headers=_hdr(token),
     )
     assert resp.status_code == 201, f"Create driver failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 async def _cancel_branch_active_periods(
@@ -307,7 +307,7 @@ async def sm_paytest_period_id(
 
 
 @pytest_asyncio.fixture(scope="module")
-async def sm_paytest_driver_id(
+async def sm_paytest_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     sm_paytest_id: int,
@@ -317,7 +317,7 @@ async def sm_paytest_driver_id(
 
 
 @pytest_asyncio.fixture(scope="module")
-async def sm_hq_driver_id(
+async def sm_hq_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     sm_hq_id: int,
@@ -655,7 +655,7 @@ class TestSecurityMatrix:
         sm_hq_id: int,
         sm_driver_role_id: int,
         sm_hq_period_id: int,
-        sm_hq_driver_id: int,
+        sm_hq_driver_assignment_id: int,
     ):
         """Driver+SpecificBranch cannot add draft lines."""
         tok = await _make_driver_self_user(
@@ -664,7 +664,7 @@ class TestSecurityMatrix:
         resp = await session_client.post(
             f"/payroll/periods/{sm_hq_period_id}/lines",
             json={
-                "driver_id": sm_hq_driver_id,
+                "driver_assignment_id": sm_hq_driver_assignment_id,
                 "work_date": "2096-01-08",
                 "payroll_period_definition_id": 1,
                 "quantity": "8.00",
@@ -703,7 +703,7 @@ class TestSecurityMatrix:
         sm_hq_id: int,
         sm_driver_role_id: int,
         sm_hq_period_id: int,
-        sm_hq_driver_id: int,
+        sm_hq_driver_assignment_id: int,
     ):
         """DRIVER/Self user cannot add draft lines."""
         tok = await _make_driver_self_user(
@@ -712,7 +712,7 @@ class TestSecurityMatrix:
         resp = await session_client.post(
             f"/payroll/periods/{sm_hq_period_id}/lines",
             json={
-                "driver_id": sm_hq_driver_id,
+                "driver_assignment_id": sm_hq_driver_assignment_id,
                 "work_date": "2096-01-08",
                 "payroll_period_definition_id": 1,
                 "quantity": "8.00",

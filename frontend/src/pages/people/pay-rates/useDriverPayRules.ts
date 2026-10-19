@@ -3,8 +3,8 @@ import { apiError, type RuleForm } from './payRatesView';
 import { createDriverPayRule, endDriverPayRule, voidDriverPayRule } from './driverPayRulesApi';
 
 export function useDriverPayRules(
-  selectedDriverId: number | null,
-  loadPayRules: (driverId: number) => Promise<void>,
+  selectedDriverAssignmentId: number | null,
+  loadPayRules: (driverAssignmentId: number) => Promise<void>,
   setPayRulesError: (error: string) => void,
 ) {
   const [ruleForm, setRuleForm] = useState<RuleForm | null>(null);
@@ -12,12 +12,12 @@ export function useDriverPayRules(
   const [ruleFormError, setRuleFormError] = useState('');
 
   async function voidPayRule(ruleId: number) {
-    if (!selectedDriverId) return;
+    if (!selectedDriverAssignmentId) return;
     setSavingRule(true);
     setRuleFormError('');
     try {
       await voidDriverPayRule(ruleId);
-      await loadPayRules(selectedDriverId);
+      await loadPayRules(selectedDriverAssignmentId);
     } catch (err) {
       setPayRulesError(apiError(err));
     } finally {
@@ -26,19 +26,19 @@ export function useDriverPayRules(
   }
 
   async function createPayRule() {
-    if (!selectedDriverId || !ruleForm || ruleForm.action !== 'add') return;
+    if (!selectedDriverAssignmentId || !ruleForm || ruleForm.action !== 'add') return;
     setSavingRule(true);
     setRuleFormError('');
     try {
       await createDriverPayRule({
-        driver_id: selectedDriverId,
+        driver_assignment_id: selectedDriverAssignmentId,
         rule_type: ruleForm.ruleType,
         amount: ruleForm.amount,
         effective_from: ruleForm.effectiveFrom,
         notes: ruleForm.notes || null,
       });
       setRuleForm(null);
-      await loadPayRules(selectedDriverId);
+      await loadPayRules(selectedDriverAssignmentId);
     } catch (err) {
       setRuleFormError(apiError(err));
     } finally {
@@ -47,7 +47,7 @@ export function useDriverPayRules(
   }
 
   async function endPayRule(ruleId: number) {
-    if (!selectedDriverId || !ruleForm || ruleForm.action !== 'end') return;
+    if (!selectedDriverAssignmentId || !ruleForm || ruleForm.action !== 'end') return;
     setSavingRule(true);
     setRuleFormError('');
     try {
@@ -55,7 +55,7 @@ export function useDriverPayRules(
         effective_to: ruleForm.effectiveTo,
       });
       setRuleForm(null);
-      await loadPayRules(selectedDriverId);
+      await loadPayRules(selectedDriverAssignmentId);
     } catch (err) {
       setRuleFormError(apiError(err));
     } finally {

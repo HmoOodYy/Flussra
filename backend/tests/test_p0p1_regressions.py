@@ -38,7 +38,7 @@ async def paytest_branch_id(session_client, auth_token, session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+async def paytest_driver_assignment_id(session_client, auth_token, paytest_branch_id) -> int:
     """Module-owned Driver on the module-owned branch."""
     return await create_owned_driver(session_client, auth_token, paytest_branch_id, "P0P1")
 
@@ -106,10 +106,10 @@ async def _create_open_period(
     return row["payrollperiodid"]
 
 
-async def _add_line(client, token, pid, driver_id, work_date):
+async def _add_line(client, token, pid, driver_assignment_id, work_date):
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
-        json={"driver_id": driver_id, "line_type": "DailyNote",
+        json={"driver_assignment_id": driver_assignment_id, "line_type": "DailyNote",
               "quantity": 1, "work_date": work_date, "source_type": "Manual", "notes": "filler"},
         headers=_auth(token),
     )
@@ -445,7 +445,7 @@ class TestDriverPayRulesArchivedProtection:
         auth_token: str,
         direct_db,
         paytest_branch_id: int,
-        owned_driver_id: int,
+        owned_driver_assignment_id: int,
     ):
         """
         Voiding a pay rule must be blocked if an Archived period (not just Locked)
@@ -461,7 +461,7 @@ class TestDriverPayRulesArchivedProtection:
         rule_resp = await client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_id":      owned_driver_id,
+                "driver_assignment_id":      owned_driver_assignment_id,
                 "rule_type":      "MinimumPay",
                 "amount":         "100.00",
                 "effective_from": "2022-01-01",
@@ -491,12 +491,12 @@ class TestDriverPayRulesArchivedProtection:
             await direct_db.execute(
                 text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                          linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), 'Miles', 100, 55.00, 'Manual', 'USD', 2)
                 """),
                 {"cid": company_id, "bid": paytest_branch_id,
-                 "pid": arch_pid, "did": owned_driver_id},
+                 "pid": arch_pid, "did": owned_driver_assignment_id},
             )
 
         try:
@@ -530,7 +530,7 @@ class TestDriverPayRulesArchivedProtection:
         auth_token: str,
         direct_db,
         paytest_branch_id: int,
-        owned_driver_id: int,
+        owned_driver_assignment_id: int,
     ):
         """Ending a rule before an Archived period's start_date must be blocked."""
         result = await direct_db.execute(
@@ -542,7 +542,7 @@ class TestDriverPayRulesArchivedProtection:
         rule_resp = await client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_id":      owned_driver_id,
+                "driver_assignment_id":      owned_driver_assignment_id,
                 "rule_type":      "MaximumPay",
                 "amount":         "500.00",
                 "effective_from": "2022-01-01",
@@ -571,12 +571,12 @@ class TestDriverPayRulesArchivedProtection:
             await direct_db.execute(
                 text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                          linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, 'Miles', 100, 55.00, 'Manual', 'USD', 2)
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), 'Miles', 100, 55.00, 'Manual', 'USD', 2)
                 """),
                 {"cid": company_id, "bid": paytest_branch_id,
-                 "pid": arch_pid, "did": owned_driver_id},
+                 "pid": arch_pid, "did": owned_driver_assignment_id},
             )
 
         try:

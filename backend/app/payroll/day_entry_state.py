@@ -82,7 +82,7 @@ async def _upsert_entry_state(
     company_id: int,
     branch_id: int,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: "date",
     user_id: int,
     db: AsyncConnection,
@@ -110,8 +110,8 @@ async def _upsert_entry_state(
         FROM payroll.payrollperioddriverdayentrystate e
         LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
         WHERE e.companyid = :cid AND e.payrollperiodid = :pid
-          AND e.driverid = :did AND e.workdate = :dt
-    """), {"cid": company_id, "pid": period_id, "did": driver_id, "dt": work_date})).mappings().first()
+          AND e.driverassignmentid = :did AND e.workdate = :dt
+    """), {"cid": company_id, "pid": period_id, "did": driver_assignment_id, "dt": work_date})).mappings().first()
 
     day_id_result = await db.execute(
         text(
@@ -149,13 +149,13 @@ async def _upsert_entry_state(
         text(f"""
             INSERT INTO payroll.payrollperioddriverdayentrystate
                 (companyid, branchid, payrollperiodid, payrollperioddayid,
-                 workdate, driverid, statuskeyid, notetext, isvoided,
+                 workdate, driverassignmentid, statuskeyid, notetext, isvoided,
                  createdbyuserid, updatedbyuserid, createdatutc, updatedatutc)
             VALUES
                 (:cid, :bid, :pid, :day_id,
                  :dt, :did, :skid, :note, :voided,
                  :uid, :uid, NOW(), NOW())
-            ON CONFLICT (payrollperiodid, driverid, workdate) DO UPDATE SET
+            ON CONFLICT (payrollperiodid, driverassignmentid, workdate) DO UPDATE SET
                 {conflict_clause}
         """),
         {
@@ -164,7 +164,7 @@ async def _upsert_entry_state(
             "pid":    period_id,
             "day_id": day_id,
             "dt":     work_date,
-            "did":    driver_id,
+            "did":    driver_assignment_id,
             "skid":   status_key_id,
             "note":   note_text or None,
             "voided": is_voided,
@@ -177,8 +177,8 @@ async def _upsert_entry_state(
         FROM payroll.payrollperioddriverdayentrystate e
         LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
         WHERE e.companyid = :cid AND e.payrollperiodid = :pid
-          AND e.driverid = :did AND e.workdate = :dt
-    """), {"cid": company_id, "pid": period_id, "did": driver_id, "dt": work_date})).mappings().one()
+          AND e.driverassignmentid = :did AND e.workdate = :dt
+    """), {"cid": company_id, "pid": period_id, "did": driver_assignment_id, "dt": work_date})).mappings().one()
 
     def status_payload(row: Any | None) -> dict[str, Any] | None:
         if row is None or row["statuskeyid"] is None:
@@ -201,7 +201,7 @@ async def _upsert_entry_state(
             source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
             user_id=user_id, required_permission_code="payroll.entry", db=db,
             before_state=before_status, after_state=after_status,
-            driver_id=driver_id, work_date=work_date,
+            driver_assignment_id=driver_assignment_id, work_date=work_date,
         )
     before_note = None if before_row is None else before_row["notetext"]
     after_note = after_row["notetext"]
@@ -216,14 +216,14 @@ async def _upsert_entry_state(
             user_id=user_id, required_permission_code="payroll.entry", db=db,
             before_state=None if before_note is None else {"note": before_note},
             after_state=None if after_note is None else {"note": after_note},
-            driver_id=driver_id, work_date=work_date,
+            driver_assignment_id=driver_assignment_id, work_date=work_date,
         )
 
 
 async def _void_entry_state_field(
     period_id: int,
     company_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: "date",
     user_id: int,
     db: AsyncConnection,
@@ -246,8 +246,8 @@ async def _void_entry_state_field(
         FROM payroll.payrollperioddriverdayentrystate e
         LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
         WHERE e.companyid = :cid AND e.payrollperiodid = :pid
-          AND e.driverid = :did AND e.workdate = :dt AND e.isvoided = FALSE
-    """), {"cid": company_id, "pid": period_id, "did": driver_id, "dt": work_date})).mappings().first()
+          AND e.driverassignmentid = :did AND e.workdate = :dt AND e.isvoided = FALSE
+    """), {"cid": company_id, "pid": period_id, "did": driver_assignment_id, "dt": work_date})).mappings().first()
 
     if clear_status and clear_note:
         set_clause = "statuskeyid = NULL, notetext = NULL, isvoided = TRUE"
@@ -264,11 +264,11 @@ async def _void_entry_state_field(
                    updatedatutc    = NOW()
             WHERE  payrollperiodid = :pid
               AND  companyid       = :cid
-              AND  driverid        = :did
+              AND  driverassignmentid        = :did
               AND  workdate        = :dt
               AND  isvoided          = FALSE
         """),
-        {"pid": period_id, "cid": company_id, "did": driver_id, "dt": work_date, "uid": user_id},
+        {"pid": period_id, "cid": company_id, "did": driver_assignment_id, "dt": work_date, "uid": user_id},
     )
     if before_row is None:
         return
@@ -285,7 +285,7 @@ async def _void_entry_state_field(
             before_state={
                 "status_key_id": before_row["statuskeyid"], "status_code": before_row["statuscode"],
                 "status_label": before_row["statuslabel"],
-            }, after_state=None, driver_id=driver_id, work_date=work_date,
+            }, after_state=None, driver_assignment_id=driver_assignment_id, work_date=work_date,
         )
     if clear_note and before_row["notetext"]:
         await capture_period_audit_evidence(
@@ -294,7 +294,7 @@ async def _void_entry_state_field(
             source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
             user_id=user_id, required_permission_code="payroll.entry", db=db,
             before_state={"note": before_row["notetext"]}, after_state=None,
-            driver_id=driver_id, work_date=work_date,
+            driver_assignment_id=driver_assignment_id, work_date=work_date,
         )
 
 
@@ -304,7 +304,7 @@ async def _enforce_status_key_limits(
     period_id: int,
     company_id: int,
     work_date: "date",
-    batch_driver_ids: list[int],
+    batch_driver_assignment_ids: list[int],
     all_batch_pairs: list[tuple],
     db: AsyncConnection,
 ) -> None:
@@ -316,7 +316,7 @@ async def _enforce_status_key_limits(
 
     Counting rules:
       - Only active (non-Void) DailyStatus lines are counted.
-      - The batch's own (driver_id, work_date) pairs are excluded from
+      - The batch's own (driver_assignment_id, work_date) pairs are excluded from
         existing counts (those slots are being overwritten).
       - The batch's new contributions are counted separately and added.
       - Per-period:  total row count in period ≤ LimitUsesPerPeriod
@@ -335,14 +335,14 @@ async def _enforce_status_key_limits(
     if not any_limit:
         return
 
-    batch_count = len(batch_driver_ids)
+    batch_count = len(batch_driver_assignment_ids)
 
-    # Build exclusion clause: exclude all (driver_id, work_date) pairs in
+    # Build exclusion clause: exclude all (driver_assignment_id, work_date) pairs in
     # this batch because those slots will be overwritten regardless.
     pair_params: dict = {}
     if all_batch_pairs:
         pair_conds = " OR ".join(
-            f"(driverid = :ex_did_{i} AND workdate = :ex_wdt_{i})"
+            f"(driverassignmentid = :ex_did_{i} AND workdate = :ex_wdt_{i})"
             for i in range(len(all_batch_pairs))
         )
         for i, (did, wdt) in enumerate(all_batch_pairs):
@@ -388,19 +388,19 @@ async def _enforce_status_key_limits(
     # ── Per-driver limit ─────────────────────────────────────────────── #
     if key_row["limitusesperdriverenabled"]:
         limit = key_row["limitusesperdriver"]
-        for driver_id in batch_driver_ids:
+        for driver_assignment_id in batch_driver_assignment_ids:
             r = await db.execute(
                 text(f"""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
                     WHERE payrollperiodid = :period_id
                       AND companyid      = :company_id
-                      AND driverid       = :driver_id
+                      AND driverassignmentid       = :driver_assignment_id
                       AND linetype       = 'DailyStatus'
                       AND status        != 'Void'
                       AND notes          = :status_code
                       {excl}
                 """),
-                {"driver_id": driver_id, **base_params},
+                {"driver_assignment_id": driver_assignment_id, **base_params},
             )
             existing = r.scalar_one()
             if existing + 1 > limit:
@@ -409,7 +409,7 @@ async def _enforce_status_key_limits(
                     detail=(
                         f"Status key '{status_code}' has reached its per-driver limit "
                         f"of {limit} use(s) per period. "
-                        f"Driver {driver_id} already has {existing} use(s) in this period."
+                        f"Driver {driver_assignment_id} already has {existing} use(s) in this period."
                     ),
                 )
 
@@ -419,15 +419,15 @@ async def _enforce_status_key_limits(
         # Compute total distinct drivers after the batch by unioning:
         #   existing rows (excl. batch pairs) UNION batch drivers setting this key.
         # This correctly handles drivers who appear in both (counted once).
-        if batch_driver_ids:
+        if batch_driver_assignment_ids:
             new_selects = " UNION ALL ".join(
-                f"SELECT :new_did_{i} AS driverid"
-                for i in range(len(batch_driver_ids))
+                f"SELECT :new_did_{i} AS driverassignmentid"
+                for i in range(len(batch_driver_assignment_ids))
             )
-            new_params = {f"new_did_{i}": d for i, d in enumerate(batch_driver_ids)}
+            new_params = {f"new_did_{i}": d for i, d in enumerate(batch_driver_assignment_ids)}
             combined_query = f"""
-                SELECT COUNT(DISTINCT driverid) FROM (
-                    SELECT driverid FROM payroll.payrolldraftlines
+                SELECT COUNT(DISTINCT driverassignmentid) FROM (
+                    SELECT driverassignmentid FROM payroll.payrolldraftlines
                     WHERE payrollperiodid = :period_id
                       AND companyid      = :company_id
                       AND linetype       = 'DailyStatus'
@@ -441,8 +441,8 @@ async def _enforce_status_key_limits(
         else:
             new_params = {}
             combined_query = f"""
-                SELECT COUNT(DISTINCT driverid) FROM (
-                    SELECT driverid FROM payroll.payrolldraftlines
+                SELECT COUNT(DISTINCT driverassignmentid) FROM (
+                    SELECT driverassignmentid FROM payroll.payrolldraftlines
                     WHERE payrollperiodid = :period_id
                       AND companyid      = :company_id
                       AND linetype       = 'DailyStatus'

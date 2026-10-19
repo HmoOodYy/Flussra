@@ -4,6 +4,16 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
+
+
+async def _insert_permanent_driver(db, company_id: int, employee_id: int, number: str) -> int:
+    return (await db.execute(text("""
+        INSERT INTO core.drivers (companyid, employeeid, drivernumber, driverstatus)
+        VALUES (:cid, :eid, :number, 'Active')
+        RETURNING driverid
+    """), {"cid": company_id, "eid": employee_id, "number": number})).scalar_one()
+
 
 async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
     branch_timezone = await db_conn.execute(text("""
@@ -31,7 +41,7 @@ async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
     temporal_contract = await db_conn.execute(text("""
         SELECT table_name, column_name, data_type
         FROM information_schema.columns
-        WHERE (table_schema = 'core' AND table_name = 'drivers'
+        WHERE (table_schema = 'core' AND table_name = 'driverassignments'
                AND column_name IN ('effectivefromat', 'effectivetoat'))
            OR (table_schema = 'core' AND table_name = 'drivertransferrequests'
                AND column_name = 'effectiveat')
@@ -47,8 +57,8 @@ async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
     """))
     observed = {(row["table_name"], row["column_name"]): row["data_type"]
                 for row in temporal_contract.mappings().all()}
-    assert observed[("drivers", "effectivefromat")] == "timestamp with time zone"
-    assert observed[("drivers", "effectivetoat")] == "timestamp with time zone"
+    assert observed[("driverassignments", "effectivefromat")] == "timestamp with time zone"
+    assert observed[("driverassignments", "effectivetoat")] == "timestamp with time zone"
     assert observed[("drivertransferrequests", "effectiveat")] == "timestamp with time zone"
     assert observed[("employees", "hiredate")] == "date"
     assert observed[("employees", "terminationdate")] == "date"
@@ -174,16 +184,16 @@ async def test_captured_workdate_zone_survives_branch_zone_edit_for_live_eligibi
         RETURNING employeeid
     """), {"cid": company_id, "bid": branch_id,
           "name": f"Frozen zone {suffix}", "hire_date": work_date})).scalar_one()
-    driver_id = (await db_conn.execute(text("""
-        INSERT INTO core.drivers
-            (companyid, branchid, employeeid, drivercode, driverstatus,
-             effectivefromat, effectivetoat)
-        VALUES (:cid, :bid, :eid, :code, 'Active',
-                TIMESTAMPTZ '2026-10-18 04:30:00+00',
-                TIMESTAMPTZ '2026-10-18 05:00:00+00')
-        RETURNING driverid
-    """), {"cid": company_id, "bid": branch_id, "eid": employee_id,
-          "code": f"TZF-{suffix}"})).scalar_one()
+    permanent_driver_id = await _insert_permanent_driver(
+        db_conn, company_id, employee_id, f"TZF-{suffix}",
+    )
+    # The assignment window is entirely in the Branch-local 2026-10-18 day for New York.
+    driver_id = await insert_driver_assignment(
+        db_conn, company_id=company_id, branch_id=branch_id, employee_id=employee_id,
+        driver_id=permanent_driver_id,
+        effective_from_at="2026-10-18T04:30:00+00:00", effective_to_at="2026-10-18T05:00:00+00:00",
+        end_reason="Terminated",
+    )
     period_id = (await db_conn.execute(text("""
         INSERT INTO payroll.payrollperiods
             (companyid, branchid, periodcode, periodname, periodtype, startdate, enddate, status)
@@ -205,7 +215,7 @@ async def test_captured_workdate_zone_survives_branch_zone_edit_for_live_eligibi
             SELECT branchtimezoneidsnapshot, eligibleworkdates,
                    drivereffectivefromatsnapshot, drivereffectivetoatsnapshot
             FROM payroll.payrollperioddrivereligibility
-            WHERE payrollperiodid = :pid AND driverid = :did
+            WHERE payrollperiodid = :pid AND driverassignmentid = :did
         """), {"pid": period_id, "did": driver_id})).one()
         assert captured == (
             "America/New_York", [work_date],
@@ -228,7 +238,7 @@ async def test_captured_workdate_zone_survives_branch_zone_edit_for_live_eligibi
         snapshot = (await db_conn.execute(text("""
             SELECT branchtimezoneidsnapshot, eligibleworkdates
             FROM payroll.payrollperioddrivereligibility
-            WHERE payrollperiodid = :pid AND driverid = :did
+            WHERE payrollperiodid = :pid AND driverassignmentid = :did
         """), {"pid": period_id, "did": driver_id})).one()
         assert snapshot == ("America/New_York", [work_date])
     finally:
@@ -265,24 +275,28 @@ async def test_midday_transfer_overlap_allows_each_branch_local_workdate(
         RETURNING employeeid
     """), {"cid": company_id, "bid": source_branch_id,
           "name": f"Midday transfer {suffix}"})).scalar_one()
-    source_id = (await db_conn.execute(text("""
-        INSERT INTO core.drivers
-            (companyid, branchid, employeeid, drivercode, driverstatus, effectivefromat, effectivetoat)
-        VALUES (:cid, :bid, :eid, :code, 'Transferred',
-                TIMESTAMPTZ '2026-11-17 05:00:00+00', TIMESTAMPTZ '2026-11-17 08:30:00+00')
-        RETURNING driverid
-    """), {"cid": company_id, "bid": source_branch_id, "eid": employee_id,
-          "code": f"TZ-S-{suffix}"})).scalar_one()
-    destination_id = (await db_conn.execute(text("""
-        INSERT INTO core.drivers
-            (companyid, branchid, employeeid, drivercode, driverstatus, effectivefromat)
-        VALUES (:cid, :bid, :eid, :code, 'Active', TIMESTAMPTZ '2026-11-17 08:30:00+00')
-        RETURNING driverid
-    """), {"cid": company_id, "bid": target_branch_id, "eid": employee_id,
-          "code": f"TZ-D-{suffix}"})).scalar_one()
+    permanent_driver_id = await _insert_permanent_driver(
+        db_conn, company_id, employee_id, f"TZ-{suffix}",
+    )
+    # One permanent Driver, two consecutive home-Branch assignments sharing the boundary instant.
+    source_id = await insert_driver_assignment(
+        db_conn, company_id=company_id, branch_id=source_branch_id, employee_id=employee_id,
+        driver_id=permanent_driver_id,
+        effective_from_at="2026-11-17T05:00:00+00:00", effective_to_at="2026-11-17T08:30:00+00:00",
+        end_reason="Transferred",
+    )
+    destination_id = await insert_driver_assignment(
+        db_conn, company_id=company_id, branch_id=target_branch_id, employee_id=employee_id,
+        driver_id=permanent_driver_id, effective_from_at="2026-11-17T08:30:00+00:00",
+        transferred_from_assignment_id=source_id,
+    )
+    await end_driver_assignment(
+        db_conn, source_id, ended_at="2026-11-17T08:30:00+00:00", end_reason="Transferred",
+        transferred_to_assignment_id=destination_id,
+    )
     overlap = (await db_conn.execute(text("""
-        SELECT core.fn_DriverCoversWorkDate(:cid, :source, :source_branch, DATE '2026-11-17') AS source_day,
-               core.fn_DriverCoversWorkDate(:cid, :destination, :target_branch, DATE '2026-11-17') AS target_day
+        SELECT core.fn_DriverAssignmentCoversWorkDate(:cid, :source, :source_branch, DATE '2026-11-17') AS source_day,
+               core.fn_DriverAssignmentCoversWorkDate(:cid, :destination, :target_branch, DATE '2026-11-17') AS target_day
     """), {"cid": company_id, "source": source_id, "source_branch": source_branch_id,
           "destination": destination_id, "target_branch": target_branch_id})).mappings().one()
     assert overlap["source_day"] is True

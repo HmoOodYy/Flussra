@@ -1,4 +1,4 @@
-"""Workforce Employee and Driver-profile API."""
+"""Workforce Employee, Driver and Driver-assignment API."""
 
 from typing import Annotated
 
@@ -8,11 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.dependencies import get_current_user, get_db
 from app.workforce import service
 from app.workforce.schemas import (
-    DriverProfileCreate,
+    DriverCreate,
+    DriverUpdate,
     EmployeeCreate,
     EmployeeDetail,
     EmployeeSummary,
     EmployeeTermination,
+    EmployeeTerminationResult,
     EmployeeUpdate,
 )
 
@@ -59,29 +61,46 @@ async def update_employee(
     return await service.update_employee(int(token["cid"]), int(token["sub"]), employee_id, body, db)
 
 
-@router.post("/employees/{employee_id}/terminate", response_model=EmployeeDetail)
+@router.post("/employees/{employee_id}/terminate", response_model=EmployeeTerminationResult)
 async def terminate_employee(
     employee_id: int,
     body: EmployeeTermination,
     token: TokenDep,
     db: DbDep,
-) -> EmployeeDetail:
+) -> EmployeeTerminationResult:
     return await service.terminate_driver_employee(
         int(token["cid"]), int(token["sub"]), employee_id, body, db,
     )
 
 
 @router.post(
-    "/employees/{employee_id}/driver-profiles",
+    "/employees/{employee_id}/driver",
     response_model=EmployeeDetail,
     status_code=201,
 )
-async def create_first_driver_profile(
+async def create_driver(
     employee_id: int,
-    body: DriverProfileCreate,
+    body: DriverCreate,
     token: TokenDep,
     db: DbDep,
 ) -> EmployeeDetail:
-    return await service.create_first_driver_profile(
+    """Create the Employee's permanent Driver together with its first assignment."""
+    return await service.create_driver(
         int(token["cid"]), int(token["sub"]), employee_id, body, db,
+    )
+
+
+@router.patch("/drivers/{driver_id}", response_model=EmployeeDetail)
+async def update_driver(
+    driver_id: int,
+    body: DriverUpdate,
+    token: TokenDep,
+    db: DbDep,
+) -> EmployeeDetail:
+    """Edit the permanent Driver's number, CDL number or work status."""
+    driver = await service.update_driver(
+        int(token["cid"]), int(token["sub"]), driver_id, body, db,
+    )
+    return await service.get_employee(
+        int(token["cid"]), int(token["sub"]), driver["employeeid"], db, require_view=False,
     )

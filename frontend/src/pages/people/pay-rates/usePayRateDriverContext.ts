@@ -1,23 +1,38 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import apiClient from '../../../lib/apiClient';
-import type { DriverSummary, Branch } from '../../../types/core';
+import type { Branch, DriverAssignmentRosterRow } from '../../../types/core';
 import type { ActiveTab } from './payRatesView';
+import { listDriverAssignmentRoster } from './driverAssignmentsApi';
+import {
+  DEFAULT_ASSIGNMENT_FILTER,
+  driverAssignmentsOf,
+  filterRoster,
+  type AssignmentFilter,
+} from './payRatesAssignments';
 
+/**
+ * Pay Rates context. The roster is assignment-centric: one row per DriverAssignment the
+ * user may read (GET /core/driver-assignments), so a transferred Driver's ended assignment
+ * stays reachable from the old Branch. The selected row IS the viewed assignment.
+ */
 export function usePayRateDriverContext(user: { company_id?: number } | null) {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [drivers, setDrivers] = useState<DriverSummary[]>([]);
+  const [roster, setRoster] = useState<DriverAssignmentRosterRow[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [loadingDrivers, setLoadingDrivers] = useState(true);
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('Active');
+  const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>(DEFAULT_ASSIGNMENT_FILTER);
 
-  const initialDriverId = searchParams.get('driverId')
-    ? parseInt(searchParams.get('driverId')!, 10)
+  // Pay Rates addresses a DriverAssignment (the Branch tenure that owns the rates).
+  const initialDriverAssignmentId = searchParams.get('driverAssignmentId')
+    ? parseInt(searchParams.get('driverAssignmentId')!, 10)
     : null;
-  const [selectedDriverId, setSelectedDriverId] = useState<number | null>(initialDriverId);
+  const [selectedDriverAssignmentId, setSelectedDriverAssignmentId] =
+    useState<number | null>(initialDriverAssignmentId);
   const [activeTab, setActiveTab] = useState<ActiveTab>('current');
   const [noProfile, setNoProfile] = useState(false);
 
@@ -28,29 +43,29 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
     void apiClient
       .get(`/admin/users/${driverUserIdParam}/driver`)
       .then((res) => {
-        const data = res.data as { has_driver_profile: boolean; driver_id: number | null };
-        if (!data.has_driver_profile || data.driver_id == null) {
+        const data = res.data as { has_driver: boolean; driver_assignment_id: number | null };
+        if (!data.has_driver || data.driver_assignment_id == null) {
           setNoProfile(true);
         } else {
           const newParams = new URLSearchParams(searchParams);
           newParams.delete('driverUserId');
-          newParams.set('driverId', String(data.driver_id));
+          newParams.set('driverAssignmentId', String(data.driver_assignment_id));
           navigate({ search: newParams.toString() }, { replace: true });
-          setSelectedDriverId(data.driver_id);
+          setSelectedDriverAssignmentId(data.driver_assignment_id);
         }
       })
       .catch(() => setNoProfile(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Load drivers ───────────────────────────────────────────────────────────
+  // ── Load the assignment roster ─────────────────────────────────────────────
   useEffect(() => {
     if (!user?.company_id) return;
     void (async () => {
       setLoadingDrivers(true);
       try {
-        const res = await apiClient.get('/core/drivers', { params: { company_id: user.company_id } });
-        setDrivers(res.data as DriverSummary[]);
+        const res = await listDriverAssignmentRoster();
+        setRoster(res.data);
       } catch {
         // silent
       } finally {
@@ -68,30 +83,30 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
       .catch(() => {});
   }, [user?.company_id]);
 
-  function selectDriver(driverId: number) {
-    setSelectedDriverId(driverId);
+  function selectAssignment(driverAssignmentId: number) {
+    setSelectedDriverAssignmentId(driverAssignmentId);
     setActiveTab('current');
     const newParams = new URLSearchParams(searchParams);
-    newParams.set('driverId', String(driverId));
+    newParams.set('driverAssignmentId', String(driverAssignmentId));
     setSearchParams(newParams, { replace: true });
     setNoProfile(false);
   }
 
-  const filteredDrivers = drivers.filter((d) => {
-    const q = search.toLowerCase();
-    const matchSearch =
-      !q ||
-      d.full_name.toLowerCase().includes(q) ||
-      (d.driver_code ?? '').toLowerCase().includes(q);
-    const matchBranch = !branchFilter || String(d.branch_id) === branchFilter;
-    const matchStatus = !statusFilter || d.driver_status === statusFilter;
-    return matchSearch && matchBranch && matchStatus;
+  const filteredRows = filterRoster(roster, {
+    search, branchId: branchFilter, driverStatus: statusFilter, assignment: assignmentFilter,
   });
 
-  const selectedDriver = drivers.find((d) => d.driver_id === selectedDriverId) ?? null;
+  // The viewed assignment is looked up in the whole roster, so a deep link to (or a pick of)
+  // an ended assignment works whatever the list filter shows.
+  const viewedAssignment =
+    roster.find((row) => row.driver_assignment_id === selectedDriverAssignmentId) ?? null;
+  // The picker offers the same Driver's other readable assignments (same authorization).
+  const assignments = driverAssignmentsOf(roster, viewedAssignment?.driver_id ?? null);
 
   return {
-    branches, loadingDrivers, search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter,
-    selectedDriverId, activeTab, setActiveTab, noProfile, selectDriver, filteredDrivers, selectedDriver,
+    branches, loadingDrivers, search, setSearch, branchFilter, setBranchFilter,
+    statusFilter, setStatusFilter, assignmentFilter, setAssignmentFilter,
+    selectedDriverAssignmentId, assignments, viewedAssignment, selectAssignment,
+    activeTab, setActiveTab, noProfile, filteredRows,
   };
 }

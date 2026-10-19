@@ -3,9 +3,9 @@ import { apiError, type EditRow } from './payRatesView';
 import { saveStatusRateBatch, type StatusRateGroup, type StatusRateMatrix } from './statusRatesApi';
 
 export function useStatusRateEditing(
-  selectedDriverId: number | null,
+  selectedDriverAssignmentId: number | null,
   statusMatrix: StatusRateMatrix | null,
-  loadRates: (driverId: number) => Promise<void>,
+  loadRates: (driverAssignmentId: number) => Promise<void>,
   referenceDate: string | undefined,
 ) {
   const [statusEditMode, setStatusEditMode] = useState(false);
@@ -48,8 +48,8 @@ export function useStatusRateEditing(
   }
 
   async function saveStatusRates() {
-    if (!selectedDriverId) return;
-    const driverId = selectedDriverId;
+    if (!selectedDriverAssignmentId) return;
+    const driverAssignmentId = selectedDriverAssignmentId;
     setStatusSaving(true);
     setStatusSaveError('');
     try {
@@ -58,7 +58,7 @@ export function useStatusRateEditing(
       if (dates.size > 1) {
         throw new Error('All changed Status pay rates must share one effective date.');
       }
-      await saveStatusRateBatch(driverId, {
+      await saveStatusRateBatch(driverAssignmentId, {
         effective_from: [...dates][0],
         changes: statusChanges.map((g) => ({
           status_rate_column_id: g.status_rate_column_id,
@@ -67,10 +67,10 @@ export function useStatusRateEditing(
         })),
       });
       cancelStatusEdit();
-      await loadRates(driverId);
+      await loadRates(driverAssignmentId);
     } catch (err) {
       setStatusSaveError(err instanceof Error ? err.message : apiError(err));
-      await loadRates(driverId);
+      await loadRates(driverAssignmentId);
     } finally {
       setStatusSaving(false);
     }

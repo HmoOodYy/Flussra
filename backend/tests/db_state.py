@@ -56,6 +56,26 @@ BONUS_EVENT_OWNERSHIP_TRIGGER = TriggerIdentity(
 PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER = TriggerIdentity(
     "payroll", "payitemratetypemap", "trg_guard_payitemratetypemap_ownership"
 )
+# Deleting a DriverAssignment is allowed only for a never-effective transfer destination
+# removed by transfer cancel. Test teardown of test-owned Drivers suspends exactly this
+# guard (never DISABLE TRIGGER ALL) to remove effective assignments.
+DRIVER_ASSIGNMENT_HISTORY_TRIGGER = TriggerIdentity(
+    "core", "driverassignments", "trg_driverassignments_historyimmutable"
+)
+# Compensation tables of an ENDED DriverAssignment are read-only at the database
+# (core.trg_CompensationAssignmentWritable). A test that seeds or tears down
+# compensation on an assignment it has already ended suspends exactly these triggers,
+# never DISABLE TRIGGER ALL, through suspended_test_triggers.
+COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS = tuple(
+    TriggerIdentity("payroll", table, "trg_compensationassignmentwritable")
+    for table in (
+        "driverrateassignments",
+        "driverratevalues",
+        "driverpayrules",
+        "driverrates",
+        "driverratetiers",
+    )
+)
 # The pair historically suspended to retire finalized history or force a status.
 FINALIZED_HISTORY_TRIGGERS = (FINAL_LINE_IMMUTABLE_TRIGGER, PERIOD_STATUS_REVERT_TRIGGER)
 

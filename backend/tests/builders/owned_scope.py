@@ -32,7 +32,7 @@ async def create_owned_driver(
         json={
             "branch_id": branch_id,
             "full_name": full_name or f"{label} owned driver {marker}",
-            "driver_code": f"{label[:3].upper()}-{marker[:10]}",
+            "driver_number": f"{label[:3].upper()}-{marker[:10]}",
         },
         headers={"Authorization": f"Bearer {token}"},
     )

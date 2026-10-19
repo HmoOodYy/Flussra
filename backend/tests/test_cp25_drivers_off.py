@@ -4,7 +4,7 @@ CP-2.5 — Period-level Drivers Off endpoint tests.
 Tests for GET /payroll/periods/{period_id}/drivers-off
 
 This module owns its Branch and Driver (the module-level `paytest_branch_id` /
-`paytest_driver_id` fixtures below shadow the shared ones), so it never lists,
+`paytest_driver_assignment_id` fixtures below shadow the shared ones), so it never lists,
 cancels or mutates another module's periods; dates are not isolation. Cleanup
 failures fail the test, and an autouse fixture requires the owned branch to end
 every test with no mutable workflow period.
@@ -62,7 +62,7 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(
+async def paytest_driver_assignment_id(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -73,12 +73,12 @@ async def paytest_driver_id(
         json={
             "branch_id": paytest_branch_id,
             "full_name": "CP25 Isolated Driver",
-            "driver_code": f"C25-D-{uuid4().hex[:10]}",
+            "driver_number": f"C25-D-{uuid4().hex[:10]}",
         },
         headers=auth(auth_token),
     )
     assert resp.status_code == 201, f"CP25 driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -199,7 +199,7 @@ async def _insert_daily_status_line(
     company_id: int,
     branch_id: int,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: str,   # "YYYY-MM-DD"
     status_key_code: str,
 ) -> int:
@@ -209,7 +209,7 @@ async def _insert_daily_status_line(
     result = await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid,
+                (companyid, branchid, payrollperiodid, driverassignmentid,
                  workdate, linetype, quantity,
                  rateamount, calculatedamount, sourcetype,
                  status, needsmanagerreview, notes, addedbyuserid)
@@ -224,7 +224,7 @@ async def _insert_daily_status_line(
             "cid": company_id,
             "bid": branch_id,
             "pid": period_id,
-            "did": driver_id,
+            "did": driver_assignment_id,
             "workdate": dt,
             "status_code": status_key_code,
         },
@@ -237,7 +237,7 @@ async def _insert_daily_note_line(
     company_id: int,
     branch_id: int,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: str,   # "YYYY-MM-DD"
     note_text: str,
 ) -> int:
@@ -247,7 +247,7 @@ async def _insert_daily_note_line(
     result = await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid,
+                (companyid, branchid, payrollperiodid, driverassignmentid,
                  workdate, linetype, quantity,
                  rateamount, calculatedamount, sourcetype,
                  status, needsmanagerreview, notes, addedbyuserid)
@@ -262,7 +262,7 @@ async def _insert_daily_note_line(
             "cid": company_id,
             "bid": branch_id,
             "pid": period_id,
-            "did": driver_id,
+            "did": driver_assignment_id,
             "workdate": dt,
             "note_text": note_text,
         },
@@ -281,7 +281,7 @@ class TestDriversOff:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         paytest_branch_id: int,
         direct_db,
     ):
@@ -303,11 +303,11 @@ class TestDriversOff:
             # Insert off-status for day 1 and day 5
             await _insert_daily_status_line(
                 direct_db, company_id, paytest_branch_id, pid,
-                paytest_driver_id, "2084-01-01", off_code,
+                paytest_driver_assignment_id, "2084-01-01", off_code,
             )
             await _insert_daily_status_line(
                 direct_db, company_id, paytest_branch_id, pid,
-                paytest_driver_id, "2084-01-05", off_code,
+                paytest_driver_assignment_id, "2084-01-05", off_code,
             )
 
             resp = await session_client.get(
@@ -332,7 +332,7 @@ class TestDriversOff:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         paytest_branch_id: int,
         direct_db,
     ):
@@ -356,7 +356,7 @@ class TestDriversOff:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid,
                          workdate, linetype, quantity,
                          rateamount, calculatedamount, sourcetype,
                          status, needsmanagerreview, notes, addedbyuserid)
@@ -368,14 +368,14 @@ class TestDriversOff:
                 """),
                 {
                     "cid": company_id, "bid": paytest_branch_id,
-                    "pid": pid, "did": paytest_driver_id,
+                    "pid": pid, "did": paytest_driver_assignment_id,
                     "dt": _date(2084, 1, 8),
                 },
             )
             # Insert a real off line on a different day (should appear)
             await _insert_daily_status_line(
                 direct_db, company_id, paytest_branch_id, pid,
-                paytest_driver_id, "2084-01-09", off_code,
+                paytest_driver_assignment_id, "2084-01-09", off_code,
             )
 
             resp = await session_client.get(
@@ -397,7 +397,7 @@ class TestDriversOff:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         paytest_branch_id: int,
         direct_db,
     ):
@@ -416,11 +416,11 @@ class TestDriversOff:
         try:
             await _insert_daily_status_line(
                 direct_db, company_id, paytest_branch_id, pid,
-                paytest_driver_id, "2084-01-15", off_code,
+                paytest_driver_assignment_id, "2084-01-15", off_code,
             )
             await _insert_daily_note_line(
                 direct_db, company_id, paytest_branch_id, pid,
-                paytest_driver_id, "2084-01-15", note_text,
+                paytest_driver_assignment_id, "2084-01-15", note_text,
             )
 
             resp = await session_client.get(
@@ -431,7 +431,7 @@ class TestDriversOff:
             entries = resp.json()["entries"]
             entry = next(
                 (e for e in entries
-                 if e["work_date"] == "2084-01-15" and e["driver_id"] == paytest_driver_id),
+                 if e["work_date"] == "2084-01-15" and e["driver_assignment_id"] == paytest_driver_assignment_id),
                 None,
             )
             assert entry is not None, "Expected entry for 2084-01-15 not found"
@@ -538,7 +538,7 @@ class TestDriversOff:
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         paytest_branch_id: int,
         direct_db,
     ):
@@ -560,7 +560,7 @@ class TestDriversOff:
         # Insert off record in period A
         await _insert_daily_status_line(
             direct_db, company_id, paytest_branch_id, pid_a,
-            paytest_driver_id, "2084-02-15", off_code,
+            paytest_driver_assignment_id, "2084-02-15", off_code,
         )
 
         # Cancel period A, then create period B
@@ -682,20 +682,20 @@ async def _insert_finalized_period(
 
 
 async def _save_day_grid_status(
-    client: httpx.AsyncClient, token: str, period_id: int, driver_id: int,
+    client: httpx.AsyncClient, token: str, period_id: int, driver_assignment_id: int,
     work_date: _date, status_key_code: str,
 ) -> None:
     resp = await client.post(
         f"/payroll/periods/{period_id}/day-grid",
         headers=auth(token),
         json={"work_date": work_date.isoformat(),
-              "rows": [{"driver_id": driver_id, "values": {}, "status_key": status_key_code}]},
+              "rows": [{"driver_assignment_id": driver_assignment_id, "values": {}, "status_key": status_key_code}]},
     )
     assert resp.status_code == 200, resp.text
 
 
 async def _submit_approve_finalize(
-    client: httpx.AsyncClient, token: str, period_id: int, driver_id: int, work_date: _date,
+    client: httpx.AsyncClient, token: str, period_id: int, driver_assignment_id: int, work_date: _date,
 ) -> None:
     """Drive Open -> InReview -> Approved -> Locked through the real HTTP
     workflow, capturing immutable Status evidence at Submit (same sequence
@@ -708,7 +708,7 @@ async def _submit_approve_finalize(
         await client.post(
             f"/payroll/periods/{period_id}/lines",
             headers=headers,
-            json={"driver_id": driver_id, "work_date": work_date.isoformat(),
+            json={"driver_assignment_id": driver_assignment_id, "work_date": work_date.isoformat(),
                   "line_type": "DailyNote", "notes": "filler"},
         )
     submit = await client.patch(
@@ -760,7 +760,7 @@ async def _insert_approved_review_item(
 class TestDriversOffFinalized:
 
     async def test_locked_period_legacy_snapshot_status_evidence_unavailable(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         """Case C: a Locked period whose authoritative snapshot predates
         CP-5C (ReportEvidenceVersion IS NULL) must report status_evidence as
@@ -791,14 +791,14 @@ class TestDriversOffFinalized:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                          approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                             'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                 """),
                 {
-                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
                     "wdate": start,
                     "snap": (
                         f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
@@ -823,7 +823,7 @@ class TestDriversOffFinalized:
             await _clean_finalized(direct_db, paytest_branch_id)
 
     async def test_locked_period_captured_snapshot_zero_status_rows_is_empty(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         """Case D: a Locked period whose authoritative snapshot IS versioned
         (captured) but has zero PayrollCalculationSnapshotStatusEntries rows
@@ -857,14 +857,14 @@ class TestDriversOffFinalized:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                          approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                             'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
                 """),
                 {
-                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
                     "wdate": start,
                     "snap": (
                         f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
@@ -887,7 +887,7 @@ class TestDriversOffFinalized:
             await _clean_finalized(direct_db, paytest_branch_id)
 
     async def test_locked_period_missing_snapshot_provenance_is_unavailable(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_id, direct_db,
+        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
         """Case E: a Locked period with no Approved PeriodApproval review
         item bound to a snapshot must report status_evidence as UNAVAILABLE/
@@ -902,14 +902,14 @@ class TestDriversOffFinalized:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
                          linescope, quantity, finalamount, sourcetype, approvedbyuserid,
                          approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, :wdate, 'HOURS', 'Daily', 1, 12.0000,
+                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
                             'DraftLine', 1, NOW(), NOW(), 'USD', 2)
                 """),
                 {
-                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_id,
+                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
                     "wdate": start,
                 },
             )

@@ -3,8 +3,8 @@ import { voidAssignment } from '../../../lib/compensationApi';
 import { apiError, type HistoryRow } from './payRatesView';
 
 export function useRateAssignmentActions(
-  selectedDriverId: number | null,
-  reloadAll: (driverId: number) => Promise<void>,
+  selectedDriverAssignmentId: number | null,
+  reloadAll: (driverAssignmentId: number) => Promise<void>,
 ) {
   const [actioningId, setActioningId] = useState<number | null>(null);
   const [pendingActionError, setPendingActionError] = useState('');
@@ -14,12 +14,12 @@ export function useRateAssignmentActions(
   const [voiding, setVoiding] = useState(false);
 
   async function runPendingAction(id: number, action: () => Promise<unknown>) {
-    if (!selectedDriverId) return;
+    if (!selectedDriverAssignmentId) return;
     setActioningId(id);
     setPendingActionError('');
     try {
       await action();
-      await reloadAll(selectedDriverId);
+      await reloadAll(selectedDriverAssignmentId);
     } catch (err) {
       setPendingActionError(apiError(err));
     } finally {
@@ -28,7 +28,7 @@ export function useRateAssignmentActions(
   }
 
   async function executeVoid() {
-    if (!voidTarget || !selectedDriverId) return;
+    if (!voidTarget || !selectedDriverAssignmentId) return;
     if (!voidReason.trim()) {
       setVoidError('A reason is required.');
       return;
@@ -39,7 +39,7 @@ export function useRateAssignmentActions(
       await voidAssignment(voidTarget.driver_rate_assignment_id, voidReason.trim());
       setVoidTarget(null);
       setVoidReason('');
-      await reloadAll(selectedDriverId);
+      await reloadAll(selectedDriverAssignmentId);
     } catch (err) {
       setVoidError(apiError(err));
     } finally {

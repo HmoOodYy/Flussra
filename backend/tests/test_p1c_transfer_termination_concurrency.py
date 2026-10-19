@@ -29,22 +29,27 @@ async def branch_today(db, branch_id: int):
     )).scalar_one()
 
 
-async def create_driver(client, token: str, branch_id: int) -> tuple[int, int]:
+async def create_driver(client, token: str, branch_id: int) -> tuple[int, int, int]:
+    """Create an Employee with a Driver: (EmployeeID, permanent DriverID, first DriverAssignmentID)."""
     response = await client.post(
         "/workforce/employees",
         json={
             "branch_id": branch_id,
             "full_name": f"P1C Race {suffix()}",
             "hire_date": "2020-01-01",
-            "driver_profile": {
-                "driver_code": f"P1C-RACE-{suffix()}",
+            "driver": {
+                "driver_number": f"P1C-RACE-{suffix()}",
             },
         },
         headers=auth(token),
     )
     assert response.status_code == 201, response.text
     data = response.json()
-    return data["employee_id"], data["current_or_pending_driver"]["driver_id"]
+    return (
+        data["employee_id"],
+        data["driver"]["driver_id"],
+        data["current_or_pending_assignment"]["driver_assignment_id"],
+    )
 
 
 async def create_transfer(
@@ -79,7 +84,7 @@ async def test_two_completions_create_exactly_one_destination(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
     effective_at = await current_instant(direct_db) + timedelta(days=30, hours=3, minutes=17)
-    employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
+    employee_id, driver_id, _ = await create_driver(client, auth_token, paytest_branch_id)
     request_id = await create_transfer(client, auth_token, driver_id, hq_branch_id, effective_at)
     await approve(client, auth_token, request_id)
 
@@ -90,12 +95,16 @@ async def test_two_completions_create_exactly_one_destination(
 
     first, second = await asyncio.gather(complete(), complete())
     assert sorted([first.status_code, second.status_code]) == [200, 422]
+    # One permanent Driver, exactly two assignments (source and one destination).
     assert (await direct_db.execute(text("""
         SELECT COUNT(*) FROM core.Drivers WHERE EmployeeID = :employee_id
+    """), {"employee_id": employee_id})).scalar_one() == 1
+    assert (await direct_db.execute(text("""
+        SELECT COUNT(*) FROM core.DriverAssignments WHERE EmployeeID = :employee_id
     """), {"employee_id": employee_id})).scalar_one() == 2
     assert (await direct_db.execute(text("""
         SELECT COUNT(*) FROM core.DriverTransferRequests
-        WHERE TransferRequestID = :request_id AND Status = 'Completed'
+        WHERE TransferRequestID = :request_id AND Status = 'Scheduled'
     """), {"request_id": request_id})).scalar_one() == 1
 
 
@@ -105,7 +114,7 @@ async def test_two_transfer_creations_for_employee_serialize(
     direct_db,
 ):
     effective_at = await current_instant(direct_db) + timedelta(days=45, hours=2, minutes=13)
-    _, driver_id = await create_driver(client, auth_token, paytest_branch_id)
+    _, driver_id, _ = await create_driver(client, auth_token, paytest_branch_id)
 
     async def create(target):
         return await client.post(
@@ -124,16 +133,17 @@ async def test_two_transfer_creations_for_employee_serialize(
     assert sorted([first.status_code, second.status_code]) == [201, 422]
     assert (await direct_db.execute(text("""
         SELECT COUNT(*) FROM core.DriverTransferRequests
-        WHERE DriverID = :driver_id AND Status NOT IN ('Completed', 'Cancelled', 'Rejected')
+        WHERE DriverID = :driver_id
+          AND core.fn_DriverTransferStatus(Status, EffectiveAt) NOT IN ('Completed', 'Cancelled', 'Rejected')
     """), {"driver_id": driver_id})).scalar_one() == 1
 
 
 @pytest.mark.asyncio
-async def test_transfer_completion_and_termination_serialize_without_partial_profiles(
+async def test_transfer_completion_and_termination_serialize_without_partial_assignments(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
     current_date = await branch_today(direct_db, paytest_branch_id)
-    employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
+    employee_id, driver_id, _ = await create_driver(client, auth_token, paytest_branch_id)
     request_id = await create_transfer(
         client, auth_token, driver_id, hq_branch_id,
         await current_instant(direct_db) + timedelta(days=25, hours=1, minutes=19),
@@ -156,14 +166,14 @@ async def test_transfer_completion_and_termination_serialize_without_partial_pro
     assert termination.status_code == 200, termination.text
     assert completion.status_code in (200, 422)
     rows = (await direct_db.execute(text("""
-        SELECT DriverID, EffectiveFromAt, EffectiveToAt, DriverStatus
-        FROM core.Drivers WHERE EmployeeID = :employee_id ORDER BY DriverID
+        SELECT DriverAssignmentID, EffectiveFromAt, EffectiveToAt, EndReason
+        FROM core.DriverAssignments WHERE EmployeeID = :employee_id ORDER BY DriverAssignmentID
     """), {"employee_id": employee_id})).mappings().all()
     assert len(rows) in (1, 2)
     assert all(
         row["effectivetoat"] is None
         or row["effectivetoat"] > row["effectivefromat"]
-        or (row["driverstatus"] == "Terminated"
+        or (row["endreason"] == "Terminated"
             and row["effectivetoat"] == row["effectivefromat"])
         for row in rows
     )
@@ -173,29 +183,33 @@ async def test_transfer_completion_and_termination_serialize_without_partial_pro
     if len(rows) == 2:
         now = await current_instant(direct_db)
         future = next(row for row in rows if row["effectivefromat"] > now)
-        assert (future["driverstatus"], future["effectivetoat"]) == (
+        assert (future["endreason"], future["effectivetoat"]) == (
             "Terminated", future["effectivefromat"],
         )
+        # A Scheduled transfer at or after the termination cap is cancelled with it.
+        assert (await direct_db.execute(text(
+            "SELECT Status FROM core.DriverTransferRequests WHERE TransferRequestID = :id"
+        ), {"id": request_id})).scalar_one() == "Cancelled"
 
 
 @pytest.mark.asyncio
 async def test_driver_edit_and_transfer_completion_do_not_lose_update(
     client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, hq_branch_id: int, direct_db,
 ):
-    employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
-    original_code = (await direct_db.execute(text(
-        "SELECT DriverCode FROM core.Drivers WHERE DriverID = :id"
+    employee_id, driver_id, _ = await create_driver(client, auth_token, paytest_branch_id)
+    original_number = (await direct_db.execute(text(
+        "SELECT DriverNumber FROM core.Drivers WHERE DriverID = :id"
     ), {"id": driver_id})).scalar_one()
     request_id = await create_transfer(
         client, auth_token, driver_id, hq_branch_id,
         await current_instant(direct_db) + timedelta(days=30, hours=4, minutes=11),
     )
     await approve(client, auth_token, request_id)
-    new_code = f"P1C-EDIT-{suffix()}"
+    new_number = f"P1C-EDIT-{suffix()}"
 
     async def edit():
         return await client.patch(
-            f"/core/drivers/{driver_id}", json={"driver_code": new_code}, headers=auth(auth_token),
+            f"/core/drivers/{driver_id}", json={"driver_number": new_number}, headers=auth(auth_token),
         )
 
     async def complete():
@@ -207,12 +221,12 @@ async def test_driver_edit_and_transfer_completion_do_not_lose_update(
     assert complete_response.status_code == 200, complete_response.text
     assert edit_response.status_code in (200, 422)
     stored = (await direct_db.execute(text(
-        "SELECT DriverCode FROM core.Drivers WHERE DriverID = :id"
+        "SELECT DriverNumber FROM core.Drivers WHERE DriverID = :id"
     ), {"id": driver_id})).scalar_one()
     if edit_response.status_code == 200:
-        assert stored == new_code
+        assert stored == new_number
     else:
-        assert stored == original_code
+        assert stored == original_number
 
 
 @pytest.mark.asyncio
@@ -220,7 +234,7 @@ async def test_two_termination_attempts_apply_one_lifecycle_transition(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     today_date = await branch_today(direct_db, hq_branch_id)
-    employee_id, driver_id = await create_driver(client, auth_token, hq_branch_id)
+    employee_id, _, assignment_id = await create_driver(client, auth_token, hq_branch_id)
 
     async def terminate(reason):
         return await client.post(
@@ -237,8 +251,8 @@ async def test_two_termination_attempts_apply_one_lifecycle_transition(
           AND ActionCode = 'DRIVER_EMPLOYEE_TERMINATED'
     """), {"id": str(employee_id)})).scalar_one() == 1
     assert (await direct_db.execute(text(
-        "SELECT DriverStatus FROM core.Drivers WHERE DriverID = :id"
-    ), {"id": driver_id})).scalar_one() == "Terminated"
+        "SELECT EndReason FROM core.DriverAssignments WHERE DriverAssignmentID = :id"
+    ), {"id": assignment_id})).scalar_one() == "Terminated"
 
 
 @pytest.mark.asyncio
@@ -281,7 +295,7 @@ async def test_driver_no_key_update_lock_allows_snapshot_foreign_key_capture(
     from app.payroll.eligibility import _create_period_driver_eligibility_rows
     from app.transfer.service import _lock_employee_for_transfer_create, _lock_transfer_lifecycle
 
-    employee_id, driver_id = await create_driver(client, auth_token, paytest_branch_id)
+    employee_id, driver_id, assignment_id = await create_driver(client, auth_token, paytest_branch_id)
     branch_today_date = await branch_today(direct_db, paytest_branch_id)
     company_id = (await direct_db.execute(text(
         "SELECT companyid FROM core.branches WHERE branchid = :bid"
@@ -317,7 +331,7 @@ async def test_driver_no_key_update_lock_allows_snapshot_foreign_key_capture(
                 await asyncio.wait_for(
                     _create_period_driver_eligibility_rows(
                         period_id, company_id, paytest_branch_id, capture_conn,
-                        snapshot_source="Generated", freeze=True, only_driver_id=driver_id,
+                        snapshot_source="Generated", freeze=True, only_driver_assignment_id=assignment_id,
                     ),
                     timeout=5,
                 )
@@ -326,5 +340,5 @@ async def test_driver_no_key_update_lock_allows_snapshot_foreign_key_capture(
 
     assert (await direct_db.execute(text("""
         SELECT COUNT(*) FROM payroll.PayrollPeriodDriverEligibility
-        WHERE PayrollPeriodID = :pid AND DriverID = :did
-    """), {"pid": period_id, "did": driver_id})).scalar_one() == 1
+        WHERE PayrollPeriodID = :pid AND DriverAssignmentID = :aid
+    """), {"pid": period_id, "aid": assignment_id})).scalar_one() == 1

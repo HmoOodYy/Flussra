@@ -51,8 +51,8 @@ def _day(period, offset=0) -> str:
     return (date.fromisoformat(period["start_date"]) + timedelta(days=offset)).isoformat()
 
 
-def _body(driver_id, ppd, work_date, quantity="5", **extra) -> dict:
-    return {"driver_id": driver_id, "work_date": work_date,
+def _body(driver_assignment_id, ppd, work_date, quantity="5", **extra) -> dict:
+    return {"driver_assignment_id": driver_assignment_id, "work_date": work_date,
             "payroll_period_definition_id": ppd, "quantity": quantity, **extra}
 
 
@@ -68,9 +68,9 @@ async def _two_definition_period(client, engine, tenant):
     return period, ids
 
 
-async def _add(client, tenant, period, driver_id, ppd, offset, quantity="5"):
+async def _add(client, tenant, period, driver_assignment_id, ppd, offset, quantity="5"):
     response = await client.post(
-        _lines(period), json=_body(driver_id, ppd, _day(period, offset), quantity),
+        _lines(period), json=_body(driver_assignment_id, ppd, _day(period, offset), quantity),
         headers=tenant.admin)
     assert response.status_code == 201, response.text
     return response.json()
@@ -103,12 +103,12 @@ async def test_lines_filter_by_driver_work_date_and_status(p3c_client, p3c_engin
         return p3c_client.get(_lines(period), params=params, headers=tenant.admin)
 
     assert len((await listed()).json()) == 3
-    assert {line["driver_id"] for line in (await listed(driver_id=tenant.driver_a2)).json()} \
+    assert {line["driver_assignment_id"] for line in (await listed(driver_assignment_id=tenant.driver_a2)).json()} \
         == {tenant.driver_a2}
     assert len((await listed(work_date=_day(period, 1))).json()) == 1
     assert [line["status"] for line in (await listed(status="Void")).json()] == ["Void"]
     assert {line["status"] for line in (await listed(status="Active")).json()} == {"Active"}
-    assert (await listed(driver_id=tenant.driver_b)).json() == []
+    assert (await listed(driver_assignment_id=tenant.driver_b)).json() == []
 
 
 async def test_the_summary_aggregates_live_money_per_driver_and_definition_without_voids(
@@ -124,7 +124,7 @@ async def test_the_summary_aggregates_live_money_per_driver_and_definition_witho
     summary = (await p3c_client.get(
         f"{_lines(period)}/summary", headers=tenant.admin)).json()
     by_definition = {
-        (row["driver_id"], row["definition_code"]): row for row in summary}
+        (row["driver_assignment_id"], row["definition_code"]): row for row in summary}
     assert set(by_definition) == {(tenant.driver_a, "ALPHA"), (tenant.driver_a, "BETA")}
     alpha = by_definition[(tenant.driver_a, "ALPHA")]
     assert Decimal(alpha["total_quantity"]) == 5
@@ -143,7 +143,7 @@ async def test_invalid_input_is_rejected_on_create(p3c_client, p3c_engine, tenan
     cases = {
         "negative quantity": _body(tenant.driver_a, ppd, _day(period), "-1"),
         "unknown source type": _body(tenant.driver_a, ppd, _day(period), source_type="Bogus"),
-        "missing definition": {"driver_id": tenant.driver_a, "work_date": _day(period)},
+        "missing definition": {"driver_assignment_id": tenant.driver_a, "work_date": _day(period)},
         "wrong-branch driver": _body(tenant.driver_b, ppd, _day(period)),
         "unknown driver": _body(tenant.driver_b + 5000, ppd, _day(period)),
     }

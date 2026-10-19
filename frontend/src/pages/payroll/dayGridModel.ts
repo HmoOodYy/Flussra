@@ -55,10 +55,10 @@ export function quantityTotalViews(
 }
 
 /** Build a dirty row from the current grid, preserving its definition-keyed values. */
-export function buildSaveRowFromGrid(grid: DayGridResponse | null, driverId: number): DayGridSaveRow {
-  const row = grid?.rows.find((r) => r.driver_id === driverId);
+export function buildSaveRowFromGrid(grid: DayGridResponse | null, driverAssignmentId: number): DayGridSaveRow {
+  const row = grid?.rows.find((r) => r.driver_assignment_id === driverAssignmentId);
   return {
-    driver_id: driverId,
+    driver_assignment_id: driverAssignmentId,
     values: Object.fromEntries(
       Object.entries(row?.values ?? {}).map(([k, v]) => [k, v.quantity ?? '']),
     ),

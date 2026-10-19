@@ -31,7 +31,7 @@ from app.compensation.schemas import ResolvedCompensation, ResolvedComponent
 class ResolutionKey(NamedTuple):
     """The identity of one resolution: a Driver, a RateDefinition and a WorkDate."""
 
-    driver_id: int
+    driver_assignment_id: int
     rate_definition_id: int
     work_date: date
 
@@ -50,24 +50,24 @@ async def resolve_many(
     belong to the Company, and CompensationIntegrityError when more than one
     authoritative schedule applies to one key (which the database makes impossible).
     """
-    distinct = sorted(set(keys), key=lambda k: (k.driver_id, k.rate_definition_id, k.work_date))
+    distinct = sorted(set(keys), key=lambda k: (k.driver_assignment_id, k.rate_definition_id, k.work_date))
     if not distinct:
         return {}
 
-    driver_ids = sorted({k.driver_id for k in distinct})
+    driver_assignment_ids = sorted({k.driver_assignment_id for k in distinct})
     rate_definition_ids = sorted({k.rate_definition_id for k in distinct})
 
     drivers = {
-        row["driverid"]: row["branchid"]
+        row["driverassignmentid"]: row["branchid"]
         for row in (await db.execute(
             text("""
-                SELECT driverid, branchid FROM core.drivers
-                WHERE  companyid = :cid AND driverid = ANY(:driver_ids)
+                SELECT driverassignmentid, branchid FROM core.driverassignments
+                WHERE  companyid = :cid AND driverassignmentid = ANY(:driver_assignment_ids)
             """),
-            {"cid": company_id, "driver_ids": driver_ids},
+            {"cid": company_id, "driver_assignment_ids": driver_assignment_ids},
         )).mappings().all()
     }
-    if set(driver_ids) - drivers.keys():
+    if set(driver_assignment_ids) - drivers.keys():
         raise CompensationOwnershipError("Driver does not belong to the Company.")
 
     definitions = {
@@ -87,15 +87,15 @@ async def resolve_many(
 
     matches = (await db.execute(
         text("""
-            SELECT k.driverid, k.ratedefinitionid, k.workdate,
+            SELECT k.driverassignmentid, k.ratedefinitionid, k.workdate,
                    a.driverrateassignmentid, a.status, a.effectivefrom, a.effectiveto
-            FROM   unnest(CAST(:driver_ids AS integer[]),
+            FROM   unnest(CAST(:driver_assignment_ids AS integer[]),
                           CAST(:rids AS integer[]),
                           CAST(:dates AS date[]))
-                   AS k(driverid, ratedefinitionid, workdate)
+                   AS k(driverassignmentid, ratedefinitionid, workdate)
             JOIN   payroll.driverrateassignments a
                    ON  a.companyid        = :cid
-                   AND a.driverid         = k.driverid
+                   AND a.driverassignmentid         = k.driverassignmentid
                    AND a.ratedefinitionid = k.ratedefinitionid
                    AND a.status IN ('Approved', 'Superseded')
                    AND a.effectivefrom   <= k.workdate
@@ -103,7 +103,7 @@ async def resolve_many(
         """),
         {
             "cid": company_id,
-            "driver_ids": [k.driver_id for k in distinct],
+            "driver_assignment_ids": [k.driver_assignment_id for k in distinct],
             "rids": [k.rate_definition_id for k in distinct],
             "dates": [k.work_date for k in distinct],
         },
@@ -111,7 +111,7 @@ async def resolve_many(
 
     selected: dict[ResolutionKey, dict] = {}
     for row in matches:
-        key = ResolutionKey(row["driverid"], row["ratedefinitionid"], row["workdate"])
+        key = ResolutionKey(row["driverassignmentid"], row["ratedefinitionid"], row["workdate"])
         if key in selected:
             raise CompensationIntegrityError(
                 "More than one authoritative assignment applies on the requested date.")
@@ -152,8 +152,8 @@ async def resolve_many(
         definition = definitions[key.rate_definition_id]
         results[key] = ResolvedCompensation(
             company_id=company_id,
-            driver_id=key.driver_id,
-            branch_id=drivers[key.driver_id],
+            driver_assignment_id=key.driver_assignment_id,
+            branch_id=drivers[key.driver_assignment_id],
             pay_definition_id=definition["paydefinitionid"],
             rate_definition_id=key.rate_definition_id,
             rate_shape=definition["shape"],
@@ -169,11 +169,11 @@ async def resolve_many(
 
 async def resolve(
     company_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_definition_id: int,
     work_date: date,
     db: AsyncConnection,
 ) -> ResolvedCompensation | None:
     """Return the schedule effective on work_date, or None when none exists."""
-    key = ResolutionKey(driver_id, rate_definition_id, work_date)
+    key = ResolutionKey(driver_assignment_id, rate_definition_id, work_date)
     return (await resolve_many(company_id, [key], db))[key]

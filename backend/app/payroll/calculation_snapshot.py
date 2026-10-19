@@ -40,7 +40,8 @@ async def _load_report_evidence(
         text("""
             SELECT
                 ppdes.payrollperioddriverdayentrystateid,
-                ppdes.driverid,
+                ppdes.driverassignmentid,
+                a.driverid,
                 ppdes.workdate,
                 ppdes.statuskeyid,
                 sk.statuscode,
@@ -48,13 +49,14 @@ async def _load_report_evidence(
                 sk.isoffreason
             FROM payroll.payrollperioddriverdayentrystate ppdes
             JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = ppdes.statuskeyid
+            JOIN core.driverassignments a ON a.driverassignmentid = ppdes.driverassignmentid
             WHERE ppdes.payrollperiodid = :pid
               AND ppdes.companyid = :cid
               AND ppdes.branchid = :bid
               AND ppdes.isvoided = FALSE
               AND ppdes.statuskeyid IS NOT NULL
               AND ppdes.workdate BETWEEN :period_start AND :period_end
-            ORDER BY ppdes.driverid, ppdes.workdate,
+            ORDER BY ppdes.driverassignmentid, ppdes.workdate,
                      ppdes.payrollperioddriverdayentrystateid
         """),
         {
@@ -68,6 +70,7 @@ async def _load_report_evidence(
     status_entries = [
         {
             "PayrollPeriodDriverDayEntryStateID": int(row["payrollperioddriverdayentrystateid"]),
+            "DriverAssignmentID": int(row["driverassignmentid"]),
             "DriverID": int(row["driverid"]),
             "WorkDate": row["workdate"],
             "StatusKeyID": int(row["statuskeyid"]),
@@ -80,6 +83,7 @@ async def _load_report_evidence(
     bonus_events = [
         {
             "PayrollBonusEventID": int(row["payrollbonuseventid"]),
+            "DriverAssignmentID": int(row["driverassignmentid"]),
             "DriverID": int(row["driverid"]),
             "Amount": Decimal(str(row["amount"])),
             "Reason": row["reason"],
@@ -104,8 +108,9 @@ def _packet_driver_totals_for_hash(
     """Project the shared live packet into CP-4C's hash contract."""
     return [
         {
+            "DriverAssignmentID": driver.driver_assignment_id,
             "DriverID": driver.driver_id,
-            "DriverCodeSnapshot": driver.driver_code,
+            "DriverNumberSnapshot": driver.driver_number,
             "DriverNameSnapshot": driver.driver_name,
             "DailyPay": driver.daily_pay,
             "StatusPay": driver.status_pay,
@@ -186,7 +191,7 @@ async def _capture_calculation_snapshot(
     snapshot_bonus_lines = sorted(
         (
             line.bonus_event_id,
-            line.driver_id,
+            line.driver_assignment_id,
             line.snapshot_calculated_amount
             if line.snapshot_calculated_amount is not None
             else line.calculated_amount,
@@ -196,7 +201,7 @@ async def _capture_calculation_snapshot(
         if line.source_type == "BonusEvent" and line.bonus_event_id is not None
     )
     evidence_bonus_lines = sorted(
-        (event["PayrollBonusEventID"], event["DriverID"], event["Amount"])
+        (event["PayrollBonusEventID"], event["DriverAssignmentID"], event["Amount"])
         for event in bonus_events
     )
     if snapshot_bonus_lines != evidence_bonus_lines:
@@ -214,14 +219,18 @@ async def _capture_calculation_snapshot(
 
     eligibility_rows = (await db.execute(
         text("""
-            SELECT driverid, iseligibleforperiod, eligibilityreasoncode,
+            SELECT driverassignmentid,
+                   (SELECT a.driverid FROM core.driverassignments a
+                     WHERE a.driverassignmentid = payroll.payrollperioddrivereligibility.driverassignmentid)
+                       AS driverid,
+                   iseligibleforperiod, eligibilityreasoncode,
                    hiredatesnapshot, terminationdatesnapshot,
                    drivereffectivefromatsnapshot, drivereffectivetoatsnapshot,
                    branchtimezoneidsnapshot, eligibleworkdates,
-                   drivercodesnapshot, drivernamesnapshot
+                   drivernumbersnapshot, drivernamesnapshot
             FROM payroll.payrollperioddrivereligibility
             WHERE payrollperiodid = :pid AND companyid = :cid AND branchid = :bid
-            ORDER BY driverid
+            ORDER BY driverassignmentid
         """),
         {"pid": period.payroll_period_id, "cid": company_id, "bid": period.branch_id},
     )).mappings().all()
@@ -244,6 +253,7 @@ async def _capture_calculation_snapshot(
         "Eligibility": [dict(row) for row in eligibility_rows],
         "Sources": [
             {
+                "DriverAssignmentID": driver.driver_assignment_id,
                 "DriverID": driver.driver_id,
                 "Lines": [
                     {
@@ -316,7 +326,11 @@ async def _capture_calculation_snapshot(
     )
     snapshot_id = int(header_result.scalar_one())
     snapshot_lines = [
-        {**line, "DriverID": hash_total["DriverID"]}
+        {
+            **line,
+            "DriverAssignmentID": hash_total["DriverAssignmentID"],
+            "DriverID": hash_total["DriverID"],
+        }
         for hash_total in hash_totals
         for line in hash_total["Lines"]
     ]
@@ -335,12 +349,13 @@ async def _capture_calculation_snapshot(
         driver_result = await db.execute(
             text("""
                 INSERT INTO payroll.payrollcalculationdrivertotals
-                    (payrollcalculationsnapshotid, companyid, branchid, driverid,
-                     drivercodesnapshot, drivernamesnapshot, dailypay, statuspay,
+                    (payrollcalculationsnapshotid, companyid, branchid, driverassignmentid,
+                     driverid, drivernumbersnapshot, drivernamesnapshot, dailypay, statuspay,
                      minimumadjustment, maximumadjustment, bonustotal,
                      expectedpay)
                 VALUES
-                    (:snapshot_id, :cid, :bid, :driver_id, :driver_code, :driver_name,
+                    (:snapshot_id, :cid, :bid, :driver_assignment_id, :driver_id,
+                     :driver_number, :driver_name,
                      :daily, :status, :minimum, :maximum, :bonus, :expected)
                 RETURNING payrollcalculationdrivertotalid
             """),
@@ -348,8 +363,9 @@ async def _capture_calculation_snapshot(
                 "snapshot_id": snapshot_id,
                 "cid": company_id,
                 "bid": period.branch_id,
+                "driver_assignment_id": driver.driver_assignment_id,
                 "driver_id": driver.driver_id,
-                "driver_code": driver.driver_code,
+                "driver_number": driver.driver_number,
                 "driver_name": driver.driver_name,
                 "daily": driver.daily_pay,
                 "status": driver.status_pay,
@@ -399,12 +415,12 @@ async def _capture_calculation_snapshot(
             text("""
                 INSERT INTO payroll.payrollcalculationsnapshotstatusentries
                     (payrollcalculationsnapshotid, companyid, branchid,
-                     payrollperiodid, driverid, workdate,
+                     payrollperiodid, driverassignmentid, driverid, workdate,
                      payrollperioddriverdayentrystateid, statuskeyid,
                      statuscodesnapshot, statuslabelsnapshot,
                      statusisoffreasonsnapshot)
                 VALUES
-                    (:snapshot_id, :cid, :bid, :pid, :driver_id, :work_date,
+                    (:snapshot_id, :cid, :bid, :pid, :driver_assignment_id, :driver_id, :work_date,
                      :entry_state_id, :status_key_id, :status_code,
                      :status_label, :status_is_off_reason)
             """),
@@ -413,6 +429,7 @@ async def _capture_calculation_snapshot(
                 "cid": company_id,
                 "bid": period.branch_id,
                 "pid": period.payroll_period_id,
+                "driver_assignment_id": entry["DriverAssignmentID"],
                 "driver_id": entry["DriverID"],
                 "work_date": entry["WorkDate"],
                 "entry_state_id": entry["PayrollPeriodDriverDayEntryStateID"],
@@ -428,13 +445,13 @@ async def _capture_calculation_snapshot(
             text("""
                 INSERT INTO payroll.payrollcalculationsnapshotbonusevents
                     (payrollcalculationsnapshotid, companyid, branchid,
-                     payrollperiodid, payrollbonuseventid, driverid, amount,
+                     payrollperiodid, payrollbonuseventid, driverassignmentid, driverid, amount,
                      reason, notes, datarevision, createdbyuserid,
                      creatordisplaynamesnapshot, createdatutc,
                      currencycodesnapshot, currencyminorunitdigitssnapshot)
                 VALUES
-                    (:snapshot_id, :cid, :bid, :pid, :bonus_event_id, :driver_id,
-                     :amount, :reason, :notes, :data_revision, :created_by_user_id,
+                    (:snapshot_id, :cid, :bid, :pid, :bonus_event_id, :driver_assignment_id,
+                     :driver_id, :amount, :reason, :notes, :data_revision, :created_by_user_id,
                      :creator_display_name, :created_at,
                      :currency_code, :currency_minor)
             """),
@@ -444,6 +461,7 @@ async def _capture_calculation_snapshot(
                 "bid": period.branch_id,
                 "pid": period.payroll_period_id,
                 "bonus_event_id": event["PayrollBonusEventID"],
+                "driver_assignment_id": event["DriverAssignmentID"],
                 "driver_id": event["DriverID"],
                 "amount": event["Amount"],
                 "reason": event["Reason"],

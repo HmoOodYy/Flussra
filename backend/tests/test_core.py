@@ -215,7 +215,7 @@ class TestDriversList:
         assert resp.status_code == 200
         results = resp.json()
         assert any(
-            (d.get("driver_code") or "").upper() == "TD-001"
+            (d.get("driver_number") or "").upper() == "TD-001"
             for d in results
         )
 
@@ -265,7 +265,7 @@ class TestDriverGet:
         body = resp.json()
         assert body["driver_id"] == created_driver_id
         assert body["full_name"] == "Test Driver One"
-        assert body["driver_code"] == "TD-001"
+        assert body["driver_number"] == "TD-001"
         assert body["cdl_number"] == "CDL-TEST-001"
         assert body["driver_status"] == "Active"
         assert body["employment_status"] == "Active"
@@ -295,8 +295,8 @@ class TestDriverGet:
         assert resp.status_code == 200
         body = resp.json()
         required = {
-            "driver_id", "employee_id", "branch_id", "branch_name",
-            "full_name", "driver_status", "employment_status",
+            "driver_id", "driver_assignment_id", "employee_id", "branch_id", "branch_name",
+            "full_name", "driver_number", "driver_status", "employment_status",
         }
         for field in required:
             assert field in body, f"Missing field: {field}"
@@ -347,9 +347,8 @@ class TestDriverCreate:
                 "email": "ffd@example.com",
                 "primary_phone": "555-0001",
                 "hire_date": "2024-03-15",
-                "driver_code": "FFD-001",
+                "driver_number": "FFD-001",
                 "cdl_number": "CDL-FULL-01",
-                "external_driver_id": "EXT-FULL-01",
             },
             headers=auth(auth_token),
         )
@@ -359,9 +358,9 @@ class TestDriverCreate:
         assert body["preferred_name"] == "FFD"
         assert body["employee_key"] == "EK-FULL-01"
         assert body["email"] == "ffd@example.com"
-        assert body["driver_code"] == "FFD-001"
+        assert body["driver_number"] == "FFD-001"
         assert body["cdl_number"] == "CDL-FULL-01"
-        assert body["external_driver_id"] == "EXT-FULL-01"
+        assert "external_driver_id" not in body
         assert body["hire_date"] == "2024-03-15"
 
     async def test_create_driver_blank_name_returns_422(
@@ -433,7 +432,7 @@ class TestDriverPatch:
         )
         assert resp.status_code == 401
 
-    async def test_patch_driver_updates_driver_code(
+    async def test_patch_driver_updates_driver_number(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -442,24 +441,24 @@ class TestDriverPatch:
         url = f"/core/drivers/{created_driver_id}"
         before = await client.get(url, headers=auth(auth_token))
         assert before.status_code == 200
-        original_driver_code = before.json()["driver_code"]
+        original_driver_number = before.json()["driver_number"]
 
         try:
             resp = await client.patch(
                 url,
-                json={"driver_code": "Patched-TD1"},
+                json={"driver_number": "Patched-TD1"},
                 headers=auth(auth_token),
             )
             assert resp.status_code == 200
-            assert resp.json()["driver_code"] == "Patched-TD1"
+            assert resp.json()["driver_number"] == "Patched-TD1"
         finally:
             restored = await client.patch(
                 url,
-                json={"driver_code": original_driver_code},
+                json={"driver_number": original_driver_number},
                 headers=auth(auth_token),
             )
             assert restored.status_code == 200
-            assert restored.json()["driver_code"] == original_driver_code
+            assert restored.json()["driver_number"] == original_driver_number
 
     async def test_patch_driver_updates_status(
         self,
@@ -509,7 +508,7 @@ class TestDriverPatch:
     ):
         resp = await client.patch(
             "/core/drivers/999999",
-            json={"driver_code": "Ghost"},
+            json={"driver_number": "Ghost"},
             headers=auth(auth_token),
         )
         assert resp.status_code == 404

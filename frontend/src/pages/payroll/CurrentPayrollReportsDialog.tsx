@@ -260,10 +260,10 @@ function DriverCard({
     <article className={styles.driverCard}>
       <div className={styles.driverHeading}>
         <div>
-          <strong>{driver.driver_name ?? `Driver #${driver.driver_id}`}</strong>
-          <span>{driver.driver_code ?? `ID ${driver.driver_id}`}</span>
+          <strong>{driver.driver_name ?? 'Unnamed driver'}</strong>
+          <span>{driver.driver_number ?? '—'}</span>
         </div>
-        <span className={styles.driverId}>Driver ID {driver.driver_id}</span>
+        <span className={styles.driverAssignmentId}>Driver ID {driver.driver_assignment_id}</span>
       </div>
       {showWork && <WorkSection driver={driver} evidenceAvailable={evidenceAvailable} />}
       {showPay && <PaySection driver={driver} code={code} digits={digits} />}
@@ -325,7 +325,7 @@ function ReportBody({ report, view }: { report: CalculationReportResponse; view:
               <div className={styles.driverList}>
                 {report.drivers.map((driver) => (
                   <DriverCard
-                    key={driver.driver_id}
+                    key={driver.driver_assignment_id}
                     driver={driver}
                     showWork={showWork}
                     showPay={showPay}

@@ -77,16 +77,16 @@ async def seed_period_definition(
 
 
 async def seed_approved_rate(
-    db: AsyncConnection, *, definition: SeededDefinition, driver_id: int, branch_id: int,
+    db: AsyncConnection, *, definition: SeededDefinition, driver_assignment_id: int, branch_id: int,
     amount: str | Decimal, effective_from: date | str = "2000-01-01",
     effective_to: date | str | None = None, company_id: int = COMPANY_ID, approver_id: int = 1,
 ) -> int:
     """An Approved scalar assignment for the Driver (Pending, valued, then approved)."""
     assignment_id = (await db.execute(text("""
         INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverid, ratedefinitionid, effectivefrom, effectiveto)
+            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom, effectiveto)
         VALUES (:cid, :bid, :did, :rd, :efrom, :eto) RETURNING driverrateassignmentid
-    """), {"cid": company_id, "bid": branch_id, "did": driver_id,
+    """), {"cid": company_id, "bid": branch_id, "did": driver_assignment_id,
            "rd": definition.rate_definition_id, "efrom": _date(effective_from),
            "eto": _date(effective_to)})).scalar_one()
     await db.execute(text("""
@@ -104,7 +104,7 @@ async def seed_approved_rate(
 
 
 async def seed_target_line(
-    db: AsyncConnection, *, period_id: int, branch_id: int, driver_id: int,
+    db: AsyncConnection, *, period_id: int, branch_id: int, driver_assignment_id: int,
     definition: SeededDefinition | int, quantity: Decimal | int | str, work_date: date | str,
     company_id: int = COMPANY_ID, source_type: str = "Manual", user_id: int = 1,
 ) -> int:
@@ -113,11 +113,11 @@ async def seed_target_line(
               else definition.payroll_period_definition_id)
     return int((await db.execute(text("""
         INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverid, workdate,
+            (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
              payrollperioddefinitionid, quantity, sourcetype, status, addedbyuserid)
         VALUES (:cid, :bid, :pid, :did, :wd, :ppd, :qty, :src, 'Active', :uid)
         RETURNING draftlineid
-    """), {"cid": company_id, "bid": branch_id, "pid": period_id, "did": driver_id,
+    """), {"cid": company_id, "bid": branch_id, "pid": period_id, "did": driver_assignment_id,
            "wd": _date(work_date), "ppd": ppd_id, "qty": Decimal(str(quantity)),
            "src": source_type, "uid": user_id})).scalar_one())
 

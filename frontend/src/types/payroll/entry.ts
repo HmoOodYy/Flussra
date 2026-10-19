@@ -36,9 +36,10 @@ export interface DayGridLineValue {
 }
 
 export interface DayGridRow {
+  driver_assignment_id: number;
   driver_id: number;
   driver_name: string;
-  driver_code: string | null;
+  driver_number: string | null;
   status_key: string | null;
   status_label: string | null;
   is_off: boolean;
@@ -93,7 +94,7 @@ export interface DayGridResponse {
 }
 
 export interface DayGridSaveRow {
-  driver_id: number;
+  driver_assignment_id: number;
   /** Keyed by String(payroll_period_definition_id), never by code or name. */
   values: Record<string, string>;
   status_key: string | null;
@@ -110,9 +111,10 @@ export interface DayGridSaveRequest {
 // ---------------------------------------------------------------------------
 
 export interface SelectedDayOffDriver {
+  driver_assignment_id: number;
   driver_id: number;
   driver_name: string;
-  driver_code: string | null;
+  driver_number: string | null;
   work_date: string;
   day_name: string;
   status_key_id: number | null;

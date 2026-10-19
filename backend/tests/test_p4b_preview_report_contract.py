@@ -57,7 +57,7 @@ async def _entered(client, engine, tenant, quantity="8"):
     saved = await client.post(
         f"/payroll/periods/{period['payroll_period_id']}/day-grid",
         json={"work_date": period["start_date"], "rows": [
-            {"driver_id": tenant.driver_a, "values": {str(ppd): quantity}}]},
+            {"driver_assignment_id": tenant.driver_a, "values": {str(ppd): quantity}}]},
         headers=tenant.admin)
     assert saved.status_code == 200, saved.text
     return period, ppd
@@ -124,14 +124,14 @@ async def test_bonus_events_join_the_preview_once_and_voided_ones_drop_out(
 
     async def drivers():
         preview = (await p3c_client.get(_preview(period), headers=tenant.admin)).json()
-        return {d["driver_id"]: d for d in preview["drivers"]}, preview
+        return {d["driver_assignment_id"]: d for d in preview["drivers"]}, preview
 
     first = await p3c_client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": tenant.driver_a, "amount": "15.5"}, headers=tenant.admin)
+        json={"driver_assignment_id": tenant.driver_a, "amount": "15.5"}, headers=tenant.admin)
     second = await p3c_client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_id": tenant.driver_a2, "amount": "7"}, headers=tenant.admin)
+        json={"driver_assignment_id": tenant.driver_a2, "amount": "7"}, headers=tenant.admin)
     assert first.status_code == second.status_code == 201
     by_driver, preview = await drivers()
     # A bonus-only driver is included once; a multi-source driver is still a single row.
@@ -155,7 +155,7 @@ async def test_an_eligible_driver_without_financial_source_is_not_in_the_preview
 ):
     period, _ = await _entered(p3c_client, p3c_engine, tenant)
     preview = (await p3c_client.get(_preview(period), headers=tenant.admin)).json()
-    assert [d["driver_id"] for d in preview["drivers"]] == [tenant.driver_a]
+    assert [d["driver_assignment_id"] for d in preview["drivers"]] == [tenant.driver_a]
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ async def test_live_reports_reconcile_with_the_preview(p3c_client, p3c_engine, t
     period, ppd = await _entered(p3c_client, p3c_engine, tenant, "3")
     created = await p3c_client.post(
         f"/payroll/periods/{period['payroll_period_id']}/bonuses",
-        json={"driver_id": tenant.driver_a, "amount": "1.2345"}, headers=tenant.admin)
+        json={"driver_assignment_id": tenant.driver_a, "amount": "1.2345"}, headers=tenant.admin)
     assert created.status_code == 201
     from app.payroll import bonus
 

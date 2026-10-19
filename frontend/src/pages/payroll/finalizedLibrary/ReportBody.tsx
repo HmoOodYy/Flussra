@@ -125,8 +125,8 @@ function DriverReport({
   return (
     <article className={styles.driverCard}>
       <div className={styles.driverHeading}>
-        <div><strong>{driver.driver_name ?? `Driver #${driver.driver_id}`}</strong><span>{driver.driver_code ?? `ID ${driver.driver_id}`}</span></div>
-        <span className={styles.driverId}>Driver ID {driver.driver_id}</span>
+        <div><strong>{driver.driver_name ?? 'Unnamed driver'}</strong><span>{driver.driver_number ?? '—'}</span></div>
+        <span className={styles.driverAssignmentId}>Driver ID {driver.driver_assignment_id}</span>
       </div>
       {showWork && (
         <section className={styles.subsection}>
@@ -219,7 +219,7 @@ export function ReportBody({ report, view }: { report: FinalizedCalculationRepor
             <h3>Drivers</h3>
             {report.drivers.length === 0 ? <StateMessage>No driver records are available.</StateMessage> : (
               <div className={styles.driverList}>
-                {report.drivers.map((driver) => <DriverReport key={driver.driver_id} driver={driver} showWork={showWork} showPay={showPay} evidenceMessage={evidenceMessage} code={code} digits={digits} />)}
+                {report.drivers.map((driver) => <DriverReport key={driver.driver_assignment_id} driver={driver} showWork={showWork} showPay={showPay} evidenceMessage={evidenceMessage} code={code} digits={digits} />)}
               </div>
             )}
           </section>

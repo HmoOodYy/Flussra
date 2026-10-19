@@ -134,9 +134,14 @@ async def add_draft_line(
         period.payroll_period_id, data.work_date,
         period.start_date, period.end_date, db,
     )
-    # Creating new source: an out-of-window driver is not rescued.
+    # Take the period row lock first, then authorize the write against the roster and
+    # the assignment window as they are under that lock. A boundary change (transfer
+    # reschedule, cancel, termination) holds the same lock, so it either waits for this
+    # write or commits first and is seen here. Creating new source: an out-of-window
+    # driver is not rescued.
+    await _lock_period_for_mutation(period_id, company_id, db)
     await _assert_driver_eligible_for_workdate_via_snapshot(
-        company_id, period.branch_id, period_id, data.driver_id, data.work_date, db,
+        company_id, period.branch_id, period_id, data.driver_assignment_id, data.work_date, db,
         allow_existing_source_rescue=False,
     )
 
@@ -145,12 +150,12 @@ async def add_draft_line(
             SELECT draftlineid
             FROM   payroll.payrolldraftlines
             WHERE  companyid = :company_id AND payrollperiodid = :period_id
-              AND  driverid = :driver_id AND workdate = :work_date
+              AND  driverassignmentid = :driver_assignment_id AND workdate = :work_date
               AND  payrollperioddefinitionid = :ppd
               AND  status != 'Void'
             LIMIT 1
         """),
-        {"company_id": company_id, "period_id": period_id, "driver_id": data.driver_id,
+        {"company_id": company_id, "period_id": period_id, "driver_assignment_id": data.driver_assignment_id,
          "work_date": data.work_date, "ppd": definition.payroll_period_definition_id},
     )
     if duplicate.scalar_one_or_none() is not None:
@@ -162,22 +167,19 @@ async def add_draft_line(
             ),
         )
 
-    # Recheck period status under a row-level lock before writing.
-    await _lock_period_for_mutation(period_id, company_id, db)
-
     line_id: int = (await db.execute(
         text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, workdate,
+                (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
                  payrollperioddefinitionid, quantity, sourcetype, status, notes, addedbyuserid)
             VALUES
-                (:company_id, :branch_id, :period_id, :driver_id, :work_date,
+                (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date,
                  :ppd, :quantity, :source_type, 'Active', :notes, :added_by)
             RETURNING draftlineid
         """),
         {
             "company_id": company_id, "branch_id": period.branch_id, "period_id": period_id,
-            "driver_id": data.driver_id, "work_date": data.work_date,
+            "driver_assignment_id": data.driver_assignment_id, "work_date": data.work_date,
             "ppd": definition.payroll_period_definition_id, "quantity": data.quantity,
             "source_type": data.source_type, "notes": data.notes, "added_by": user_id,
         },
@@ -187,7 +189,7 @@ async def add_draft_line(
         db, company_id=company_id, branch_id=period.branch_id, user_id=user_id,
         line_id=line_id, action_code="DRAFT_LINE_ADDED",
         new_value={
-            "period_id": period_id, "driver_id": data.driver_id,
+            "period_id": period_id, "driver_assignment_id": data.driver_assignment_id,
             "payroll_period_definition_id": definition.payroll_period_definition_id,
             "quantity": float(data.quantity), "source_type": data.source_type,
         },
@@ -198,7 +200,7 @@ async def add_draft_line(
         before_state=None,
         after_state={"quantity": data.quantity, "source_type": data.source_type,
                      "status": "Active", "notes": data.notes},
-        driver_id=data.driver_id, work_date=data.work_date, definition=definition,
+        driver_assignment_id=data.driver_assignment_id, work_date=data.work_date, definition=definition,
     )
     return await _get_line_by_id(line_id, company_id, db)
 
@@ -245,9 +247,6 @@ async def update_draft_line(
         _require_usable_definition(definition)
         if data.quantity is not None:
             _require_valid_quantity(definition, data.quantity)
-        await _assert_driver_eligible_for_workdate_via_snapshot(
-            company_id, period.branch_id, period_id, line.driver_id, line.work_date, db,
-        )
 
     fields: dict[str, Any] = {}
     if data.quantity is not None:
@@ -259,6 +258,13 @@ async def update_draft_line(
 
     if fields:
         await _lock_period_for_mutation(period_id, company_id, db)
+    if not is_void_only:
+        # Authorized under the period lock (see add_draft_line) so a concurrent
+        # boundary change cannot slip between the check and the write.
+        await _assert_driver_eligible_for_workdate_via_snapshot(
+            company_id, period.branch_id, period_id, line.driver_assignment_id, line.work_date, db,
+        )
+    if fields:
         set_clause = ", ".join(f"{col} = :{col}" for col in fields)
         await db.execute(
             text(
@@ -281,7 +287,7 @@ async def update_draft_line(
             company_id=company_id, branch_id=period.branch_id, period_id=period_id,
             user_id=user_id, line_id=draft_line_id, action_code="SOURCE_UPDATED", db=db,
             before_state=before_state, after_state={**before_state, **fields},
-            driver_id=line.driver_id, work_date=line.work_date, definition=definition,
+            driver_assignment_id=line.driver_assignment_id, work_date=line.work_date, definition=definition,
         )
 
     return await _get_line_by_id(draft_line_id, company_id, db)
@@ -342,6 +348,6 @@ async def void_draft_line(
         user_id=user_id, line_id=draft_line_id, action_code="SOURCE_VOIDED", db=db,
         before_state={"quantity": line.quantity, "source_type": line.source_type,
                       "status": line.status, "notes": line.notes},
-        after_state={"status": "Void"}, driver_id=line.driver_id,
+        after_state={"status": "Void"}, driver_assignment_id=line.driver_assignment_id,
         work_date=line.work_date, definition=definition,
     )

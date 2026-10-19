@@ -69,8 +69,8 @@ function DriverTotals({ drivers, code, digits }: { drivers: CalculationPreviewDr
         </thead>
         <tbody>
           {drivers.map((driver) => (
-            <tr key={driver.driver_id} className={driver.needs_manager_review ? styles.reviewRow : undefined}>
-              <td>{driver.driver_name ?? `Driver #${driver.driver_id}`}</td>
+            <tr key={driver.driver_assignment_id} className={driver.needs_manager_review ? styles.reviewRow : undefined}>
+              <td>{driver.driver_name ?? 'Unnamed driver'}</td>
               <td className={styles.numeric}>{formatMoney(driver.daily_pay, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.status_pay, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.minimum_adjustment, code, digits)}</td>
@@ -106,8 +106,8 @@ function FinancialLines({ drivers, code, digits }: { drivers: CalculationPreview
         </thead>
         <tbody>
           {rows.map(({ driver, line, index }) => (
-            <tr key={`${driver.driver_id}-${line.source_type}-${line.source_id ?? index}`} className={line.needs_manager_review ? styles.reviewRow : undefined}>
-              <td>{driver.driver_name ?? `Driver #${driver.driver_id}`}</td>
+            <tr key={`${driver.driver_assignment_id}-${line.source_type}-${line.source_id ?? index}`} className={line.needs_manager_review ? styles.reviewRow : undefined}>
+              <td>{driver.driver_name ?? 'Unnamed driver'}</td>
               <td>{line.source_type}</td>
               <td>{lineLabel(line)}</td>
               <td>{line.work_date ?? '-'}</td>

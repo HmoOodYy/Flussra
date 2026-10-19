@@ -19,7 +19,11 @@ import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
-from tests.db_state import allow_final_line_insert
+from tests.db_state import (
+    DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
+    allow_final_line_insert,
+    suspended_test_triggers,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,7 +103,7 @@ async def _drop_temp_company_and_branch(direct_db, cmp_id: int, br_id: int) -> N
 
 @pytest.mark.asyncio
 class TestParentRootBranchIntegrity:
-    """core.Drivers and payroll.PayrollPeriods must have (BranchID, CompanyID)
+    """core.DriverAssignments and payroll.PayrollPeriods must have (BranchID, CompanyID)
     that matches an actual row in core.Branches (parent-root integrity)."""
 
     async def test_driver_cross_company_branch_rejected(
@@ -107,9 +111,9 @@ class TestParentRootBranchIntegrity:
         direct_db,
         hq_branch_id: int,
     ):
-        """Insert a Driver where BranchID belongs to Company B but CompanyID is Company A.
-        Individual FKs (fk_Drivers_Company, fk_Drivers_Branch, fk_Drivers_Employee) all
-        pass; only the composite FK fk_Drivers_Branch_Company fires."""
+        """Insert a DriverAssignment where BranchID belongs to Company B but CompanyID is A.
+        The Driver FK passes (the permanent Driver is in Company A); only the composite
+        FK fk_DriverAssignments_Branch_Company fires."""
         company_a_id = await _get_company_id(direct_db, hq_branch_id)
         cmp_b_id, branch_b_id = await _create_temp_company_and_branch(direct_db, "DRV")
 
@@ -125,27 +129,37 @@ class TestParentRootBranchIntegrity:
             {"cid": company_a_id, "bid": hq_branch_id},
         )
         emp_id = emp.scalar_one()
+        drv_id = (await direct_db.execute(
+            _text("""
+                INSERT INTO core.drivers (companyid, employeeid, drivernumber, driverstatus)
+                VALUES (:cid, :eid, 'DRV-CROSS-TEST', 'Active')
+                RETURNING driverid
+            """),
+            {"cid": company_a_id, "eid": emp_id},
+        )).scalar_one()
 
         try:
-            # companyid=company_a_id → fk_Drivers_Company    PASSES ✓
-            # branchid=branch_b_id  → fk_Drivers_Branch      PASSES ✓ (branch_B exists)
-            # employeeid=emp_id     → fk_Drivers_Employee     PASSES ✓
-            # (branch_b_id, company_a_id) not in Branches → fk_Drivers_Branch_Company FAILS ✗
+            # companyid=company_a_id → driver FK              PASSES ✓
+            # branchid=branch_b_id  → fk_DriverAssignments_Branch PASSES ✓ (branch_B exists)
+            # (branch_b_id, company_a_id) not in Branches → fk_DriverAssignments_Branch_Company FAILS ✗
             with pytest.raises(IntegrityError) as exc_info:
                 await direct_db.execute(
                     _text("""
-                        INSERT INTO core.drivers
-                            (companyid, branchid, employeeid, drivercode, driverstatus)
+                        INSERT INTO core.driverassignments
+                            (companyid, branchid, employeeid, driverid, effectivefromat)
                         VALUES
-                            (:cid_a, :bid_b, :eid, 'DRV-CROSS-TEST', 'Active')
+                            (:cid_a, :bid_b, :eid, :did, NOW())
                     """),
-                    {"cid_a": company_a_id, "bid_b": branch_b_id, "eid": emp_id},
+                    {"cid_a": company_a_id, "bid_b": branch_b_id, "eid": emp_id, "did": drv_id},
                 )
             assert _is_fk_violation(exc_info.value), (
-                f"Expected FK violation (23503) from fk_Drivers_Branch_Company, "
+                f"Expected FK violation (23503) from fk_DriverAssignments_Branch_Company, "
                 f"got: {exc_info.value}"
             )
         finally:
+            await direct_db.execute(
+                _text("DELETE FROM core.drivers WHERE driverid = :did"), {"did": drv_id}
+            )
             await direct_db.execute(
                 _text("DELETE FROM core.employees WHERE employeeid = :eid"), {"eid": emp_id}
             )
@@ -190,7 +204,7 @@ class TestParentRootBranchIntegrity:
         direct_db,
         hq_branch_id: int,
     ):
-        """Regression: a Driver where (BranchID, CompanyID) matches core.Branches is accepted."""
+        """Regression: an assignment where (BranchID, CompanyID) matches core.Branches is accepted."""
         company_a_id = await _get_company_id(direct_db, hq_branch_id)
 
         emp = await direct_db.execute(
@@ -208,18 +222,31 @@ class TestParentRootBranchIntegrity:
         try:
             drv = await direct_db.execute(
                 _text("""
-                    INSERT INTO core.drivers
-                        (companyid, branchid, employeeid, drivercode, driverstatus)
-                    VALUES
-                        (:cid, :bid, :eid, 'DRV-REGR-TEST', 'Active')
+                    INSERT INTO core.drivers (companyid, employeeid, drivernumber, driverstatus)
+                    VALUES (:cid, :eid, 'DRV-REGR-TEST', 'Active')
                     RETURNING driverid
                 """),
-                {"cid": company_a_id, "bid": hq_branch_id, "eid": emp_id},
+                {"cid": company_a_id, "eid": emp_id},
             )
             drv_id = drv.scalar_one()
             assert drv_id is not None
+            assignment_id = (await direct_db.execute(
+                _text("""
+                    INSERT INTO core.driverassignments
+                        (companyid, branchid, employeeid, driverid, effectivefromat)
+                    VALUES (:cid, :bid, :eid, :did, NOW())
+                    RETURNING driverassignmentid
+                """),
+                {"cid": company_a_id, "bid": hq_branch_id, "eid": emp_id, "did": drv_id},
+            )).scalar_one()
+            assert assignment_id is not None
+            async with suspended_test_triggers(direct_db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+                await direct_db.execute(
+                    _text("DELETE FROM core.driverassignments WHERE driverassignmentid = :id"),
+                    {"id": assignment_id},
+                )
             await direct_db.execute(
-                _text("DELETE FROM core.drivers   WHERE driverid  = :id"), {"id": drv_id}
+                _text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": drv_id}
             )
         finally:
             await direct_db.execute(
@@ -267,7 +294,7 @@ class TestDraftLinePeriodIntegrity:
         direct_db,
         hq_branch_id: int,
         paytest_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
         created_period_id: int,
     ):
         """Insert a DraftLine whose BranchID disagrees with its Period's BranchID."""
@@ -276,17 +303,17 @@ class TestDraftLinePeriodIntegrity:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid,
                          workdate, linetype, quantity, sourcetype)
                     VALUES
-                        (:cid, :bad_branch, :period_id, :driver_id,
+                        (:cid, :bad_branch, :period_id, :assignment_id,
                          DATE '2090-01-01', 'REGULAR', 1, 'Test')
                 """),
                 {
                     "cid": company_id,
                     "bad_branch": paytest_branch_id,
                     "period_id": created_period_id,
-                    "driver_id": created_driver_id,
+                    "assignment_id": created_driver_assignment_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -297,7 +324,7 @@ class TestDraftLinePeriodIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
         created_period_id: int,
     ):
         """Insert a DraftLine whose CompanyID disagrees with its Period's CompanyID."""
@@ -305,17 +332,17 @@ class TestDraftLinePeriodIntegrity:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid,
                          workdate, linetype, quantity, sourcetype)
                     VALUES
-                        (:bad_cid, :branch_id, :period_id, :driver_id,
+                        (:bad_cid, :branch_id, :period_id, :assignment_id,
                          DATE '2090-01-01', 'REGULAR', 1, 'Test')
                 """),
                 {
                     "bad_cid": 99999,
                     "branch_id": hq_branch_id,
                     "period_id": created_period_id,
-                    "driver_id": created_driver_id,
+                    "assignment_id": created_driver_assignment_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -335,7 +362,7 @@ class TestDraftLineDriverIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         created_period_id: int,
     ):
         """Insert a DraftLine whose BranchID disagrees with its Driver's BranchID."""
@@ -344,17 +371,17 @@ class TestDraftLineDriverIntegrity:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid,
+                        (companyid, branchid, payrollperiodid, driverassignmentid,
                          workdate, linetype, quantity, sourcetype)
                     VALUES
-                        (:cid, :hq_branch, :period_id, :driver_id,
+                        (:cid, :hq_branch, :period_id, :assignment_id,
                          DATE '2090-01-01', 'REGULAR', 1, 'Test')
                 """),
                 {
                     "cid": company_id,
                     "hq_branch": hq_branch_id,
                     "period_id": created_period_id,
-                    "driver_id": paytest_driver_id,
+                    "assignment_id": paytest_driver_assignment_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -365,7 +392,7 @@ class TestDraftLineDriverIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
         created_period_id: int,
     ):
         """Regression: a consistent DraftLine (all same branch) must be accepted."""
@@ -373,10 +400,10 @@ class TestDraftLineDriverIntegrity:
         result = await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverid,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
                      workdate, linetype, quantity, sourcetype)
                 VALUES
-                    (:cid, :bid, :period_id, :driver_id,
+                    (:cid, :bid, :period_id, :assignment_id,
                      DATE '2090-01-01', 'REGULAR', 1, 'IntegrityTest')
                 RETURNING draftlineid
             """),
@@ -384,7 +411,7 @@ class TestDraftLineDriverIntegrity:
                 "cid": company_id,
                 "bid": hq_branch_id,
                 "period_id": created_period_id,
-                "driver_id": created_driver_id,
+                "assignment_id": created_driver_assignment_id,
             },
         )
         inserted_id = result.scalar_one()
@@ -408,7 +435,7 @@ class TestFinalLinePeriodIntegrity:
         direct_db,
         hq_branch_id: int,
         paytest_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
         created_period_id: int,
     ):
         company_id = await _get_company_id(direct_db, hq_branch_id)
@@ -418,17 +445,18 @@ class TestFinalLinePeriodIntegrity:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverid,
+                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                              linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                         VALUES
-                            (:cid, :bad_branch, :period_id, :driver_id,
+                            (:cid, :bad_branch, :period_id, :assignment_id,
+                             (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :assignment_id),
                              'REGULAR', 1, 100, 'Test', 'USD', 2)
                     """),
                     {
                         "cid": company_id,
                         "bad_branch": paytest_branch_id,
                         "period_id": created_period_id,
-                        "driver_id": created_driver_id,
+                        "assignment_id": created_driver_assignment_id,
                     },
                 )
         assert _is_fk_violation(exc_info.value), (
@@ -439,7 +467,7 @@ class TestFinalLinePeriodIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
         created_period_id: int,
     ):
         # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
@@ -448,17 +476,18 @@ class TestFinalLinePeriodIntegrity:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverid,
+                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                              linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                         VALUES
-                            (:bad_cid, :branch_id, :period_id, :driver_id,
+                            (:bad_cid, :branch_id, :period_id, :assignment_id,
+                             (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :assignment_id),
                              'REGULAR', 1, 100, 'Test', 'USD', 2)
                     """),
                     {
                         "bad_cid": 99999,
                         "branch_id": hq_branch_id,
                         "period_id": created_period_id,
-                        "driver_id": created_driver_id,
+                        "assignment_id": created_driver_assignment_id,
                     },
                 )
         assert _is_fk_violation(exc_info.value), (
@@ -478,7 +507,7 @@ class TestFinalLineDriverIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
         created_period_id: int,
     ):
         company_id = await _get_company_id(direct_db, hq_branch_id)
@@ -488,17 +517,18 @@ class TestFinalLineDriverIntegrity:
                 await direct_db.execute(
                     _text("""
                         INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverid,
+                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                              linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
                         VALUES
-                            (:cid, :hq_branch, :period_id, :driver_id,
+                            (:cid, :hq_branch, :period_id, :assignment_id,
+                             (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :assignment_id),
                              'REGULAR', 1, 100, 'Test', 'USD', 2)
                     """),
                     {
                         "cid": company_id,
                         "hq_branch": hq_branch_id,
                         "period_id": created_period_id,
-                        "driver_id": paytest_driver_id,
+                        "assignment_id": paytest_driver_assignment_id,
                     },
                 )
         assert _is_fk_violation(exc_info.value), (
@@ -518,7 +548,7 @@ class TestDriverRateIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
     ):
         """Insert a DriverRate for a PAYTEST driver but claim HQ branch.
         Uses Status='PendingApproval' (exempt from excl_DriverRates_no_date_overlap)
@@ -529,16 +559,16 @@ class TestDriverRateIntegrity:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverid, ratetypeid,
+                        (companyid, branchid, driverassignmentid, ratetypeid,
                          amount, effectivefrom, status)
                     VALUES
-                        (:cid, :hq_branch, :driver_id, :rt_id,
+                        (:cid, :hq_branch, :assignment_id, :rt_id,
                          25.00, '2030-01-01', 'PendingApproval')
                 """),
                 {
                     "cid": company_id,
                     "hq_branch": hq_branch_id,
-                    "driver_id": paytest_driver_id,
+                    "assignment_id": paytest_driver_assignment_id,
                     "rt_id": rate_type_id,
                 },
             )
@@ -550,7 +580,7 @@ class TestDriverRateIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
     ):
         """Insert a DriverRate with a non-existent company."""
         rate_type_id = await _get_any_rate_type_id(direct_db)
@@ -558,16 +588,16 @@ class TestDriverRateIntegrity:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverid, ratetypeid,
+                        (companyid, branchid, driverassignmentid, ratetypeid,
                          amount, effectivefrom, status)
                     VALUES
-                        (:bad_cid, :branch_id, :driver_id, :rt_id,
+                        (:bad_cid, :branch_id, :assignment_id, :rt_id,
                          25.00, '2030-01-01', 'PendingApproval')
                 """),
                 {
                     "bad_cid": 99999,
                     "branch_id": hq_branch_id,
-                    "driver_id": created_driver_id,
+                    "assignment_id": created_driver_assignment_id,
                     "rt_id": rate_type_id,
                 },
             )
@@ -592,7 +622,7 @@ class TestDriverPayRuleIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        paytest_driver_id: int,
+        paytest_driver_assignment_id: int,
     ):
         """Insert a DriverPayRule for a PAYTEST driver but claim HQ branch.
 
@@ -607,16 +637,16 @@ class TestDriverPayRuleIntegrity:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.driverpayrules
-                        (companyid, branchid, driverid,
+                        (companyid, branchid, driverassignmentid,
                          ruletype, amount, effectivefrom, status)
                     VALUES
-                        (:cid, :hq_branch, :driver_id,
+                        (:cid, :hq_branch, :assignment_id,
                          'MinimumPay', 500.00, '2030-01-01', 'Voided')
                 """),
                 {
                     "cid": company_id,
                     "hq_branch": hq_branch_id,
-                    "driver_id": paytest_driver_id,
+                    "assignment_id": paytest_driver_assignment_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -628,24 +658,24 @@ class TestDriverPayRuleIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
-        created_driver_id: int,
+        created_driver_assignment_id: int,
     ):
         """Regression: a consistent DriverPayRule must be accepted."""
         company_id = await _get_company_id(direct_db, hq_branch_id)
         result = await direct_db.execute(
             _text("""
                 INSERT INTO payroll.driverpayrules
-                    (companyid, branchid, driverid,
+                    (companyid, branchid, driverassignmentid,
                      ruletype, amount, effectivefrom, status)
                 VALUES
-                    (:cid, :bid, :driver_id,
+                    (:cid, :bid, :assignment_id,
                      'MinimumPay', 500.00, '2030-06-01', 'Active')
                 RETURNING driverpayruleid
             """),
             {
                 "cid": company_id,
                 "bid": hq_branch_id,
-                "driver_id": created_driver_id,
+                "assignment_id": created_driver_assignment_id,
             },
         )
         inserted_id = result.scalar_one()

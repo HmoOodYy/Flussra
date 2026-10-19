@@ -20,7 +20,7 @@ class DriverTransferCreate(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    driver_id: int
+    driver_id: int  # the permanent Driver; the source is its current assignment
     target_branch_id: int
     effective_at: AwareDatetime | None = None
     initiated_by: Literal["Driver", "SourceBranch"]
@@ -43,6 +43,13 @@ class CancelRequest(BaseModel):
     cancel_reason: str | None = None
 
 
+class RescheduleRequest(BaseModel):
+    """Move a request's EffectiveAt to another future instant."""
+    model_config = ConfigDict(extra="forbid")
+
+    effective_at: AwareDatetime
+
+
 # ---------------------------------------------------------------------------
 # Response schemas
 # ---------------------------------------------------------------------------
@@ -51,11 +58,15 @@ class DriverTransferResponse(BaseModel):
     transfer_request_id: int
     company_id: int
     driver_id: int
+    driver_number: str | None = None
+    source_driver_assignment_id: int
+    destination_driver_assignment_id: int | None
     source_branch_id: int
     target_branch_id: int
     requested_by_user_id: int
     initiated_by: str
-    status: str
+    status: str  # effective status: a Scheduled request reads Completed from its EffectiveAt
+    stored_status: str
     effective_at: datetime | None
     reason: str | None
     notes: str | None
@@ -64,7 +75,8 @@ class DriverTransferResponse(BaseModel):
     target_decided_by_user_id: int | None
     target_decided_at_utc: datetime | None
     target_decision_notes: str | None
-    new_driver_id: int | None
+    scheduled_at_utc: datetime | None
+    scheduled_by_user_id: int | None
     completed_at_utc: datetime | None
     completed_by_user_id: int | None
     cancelled_at_utc: datetime | None

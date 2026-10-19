@@ -11,10 +11,11 @@ Tests:
   6.  Target-branch manager can reject → Rejected.
   7.  Target-branch manager can return → Returned (→ back to PendingSourceApproval).
   8.  Deciding on non-pending-target request returns 422.
-  9.  Complete an Approved future request: destination profile stays pending,
-      source stays effective until its end, Employee branch follows current profile.
+  9.  Complete an Approved future request: the request is Scheduled, the destination
+      assignment of the SAME Driver stays pending, the source stays effective until its
+      end, Employee branch follows the current assignment.
   10. Completing a non-Approved request returns 422.
-  11. Old payroll history is still attached to the OLD driver_id after completion.
+  11. Old payroll history is still attached to the OLD DriverAssignmentID after completion.
   12. DRIVER/Self user cannot list/approve/decide/complete/cancel transfers.
   13. Second transfer request on a driver with active request returns 422.
   14. Cancel in-flight request → Cancelled.
@@ -41,6 +42,7 @@ from tests.builders.owned_scope import (
     create_owned_branch,
 )
 from tests.builders.workforce import create_driver_employee_record
+from tests.builders.workforce_db import current_driver_assignment_id
 from tests.db_state import allow_final_line_insert
 
 
@@ -102,12 +104,13 @@ async def _create_driver(
     *,
     suffix: str = "",
 ) -> int:
+    """Create an Employee with a Driver and its first assignment; return the permanent DriverID."""
     r = await client.post(
         "/core/drivers",
         json={
             "branch_id":   branch_id,
             "full_name":   f"Transfer WF Driver {suffix or _rnd()}",
-            "driver_code": f"TWF-{suffix or _rnd()}",
+            "driver_number": f"TWF-{suffix or _rnd()}",
         },
         headers=auth(token),
     )
@@ -261,6 +264,10 @@ async def test_source_branch_initiated_goes_to_pending_target(
     assert data["status"] == "PendingTargetApproval"
     assert data["initiated_by"] == "SourceBranch"
     assert data["driver_id"] == drv_id
+    assert data["driver_number"].startswith("TWF-")
+    assert data["source_driver_assignment_id"] is not None
+    assert data["destination_driver_assignment_id"] is None
+    assert data["stored_status"] == "PendingTargetApproval"
     assert data["source_branch_id"] == paytest_branch_id
     assert data["target_branch_id"] == hq_branch_id
     assert data["source_approved_by_user_id"] is not None
@@ -421,7 +428,7 @@ async def test_decide_target_wrong_status_422(
 
 
 @pytest.mark.asyncio
-async def test_complete_transfer_creates_new_profile(
+async def test_complete_future_transfer_schedules_a_destination_assignment_of_the_same_driver(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -429,11 +436,13 @@ async def test_complete_transfer_creates_new_profile(
     direct_db,
 ):
     """
-    Complete an Approved transfer:
-    - New driver profile is created in target branch with status=Active.
-    - Old driver profile is set to Transferred.
-    - Employee.BranchID remains the source branch until the future transfer is effective.
-    - Request.NewDriverID is set.
+    Complete an Approved transfer whose EffectiveAt is in the future:
+    - The request is Scheduled (not Completed) and records who scheduled it and when.
+    - A destination DriverAssignment of the SAME Driver is created in the target branch,
+      starting at EffectiveAt (pending), with lineage to the source assignment.
+    - The source assignment ends at EffectiveAt with EndReason Transferred.
+    - Employee.BranchID remains the source branch until the transfer is effective.
+    - The Driver, driver number and CDL number never change; no DRV-TR code is generated.
     """
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=_rnd()
@@ -452,37 +461,70 @@ async def test_complete_transfer_creates_new_profile(
     r3 = await _complete(session_client, auth_token, tid)
     assert r3.status_code == 200, r3.text
     data = r3.json()
-    assert data["status"] == "Completed"
-    assert data["new_driver_id"] is not None
-    new_did = data["new_driver_id"]
+    assert data["status"] == "Scheduled"
+    assert data["stored_status"] == "Scheduled"
+    assert data["scheduled_at_utc"] is not None
+    assert data["scheduled_by_user_id"] is not None
+    assert data["completed_at_utc"] is None
+    assert data["driver_id"] == drv_id
+    new_assignment_id = data["destination_driver_assignment_id"]
+    old_assignment_id = data["source_driver_assignment_id"]
+    assert new_assignment_id is not None and new_assignment_id != old_assignment_id
 
-    # Verify new profile
-    new_drv = await direct_db.execute(
-        _text("SELECT driverid, branchid, driverstatus, transferredfromdriverid "
-              "FROM core.drivers WHERE driverid = :did"),
-        {"did": new_did},
-    )
-    new_row = new_drv.mappings().first()
-    assert new_row is not None
+    # The destination is a pending assignment of the same Driver starting at EffectiveAt.
+    new_row = (await direct_db.execute(
+        _text("""
+            SELECT a.driverid, a.branchid, a.endreason, a.effectivetoat,
+                   a.transferredfromassignmentid, a.effectivefromat = r.effectiveat AS starts_at_effective_at,
+                   a.effectivefromat > NOW() AS pending
+            FROM core.driverassignments a
+            JOIN core.drivertransferrequests r ON r.destinationdriverassignmentid = a.driverassignmentid
+            WHERE a.driverassignmentid = :aid
+        """),
+        {"aid": new_assignment_id},
+    )).mappings().one()
     assert new_row["branchid"] == hq_branch_id
-    assert new_row["driverstatus"] == "Active"
-    assert new_row["transferredfromdriverid"] == drv_id
+    assert new_row["driverid"] == drv_id
+    assert new_row["endreason"] is None and new_row["effectivetoat"] is None
+    assert new_row["transferredfromassignmentid"] == old_assignment_id
+    assert new_row["starts_at_effective_at"] is True
+    assert new_row["pending"] is True
 
-    # Verify old profile
-    old_drv = await direct_db.execute(
-        _text("SELECT driverstatus, transferredtodriverid FROM core.drivers WHERE driverid = :did"),
+    # The source ends at the same instant with EndReason Transferred.
+    old_row = (await direct_db.execute(
+        _text("""
+            SELECT a.endreason, a.transferredtoassignmentid, a.driverid,
+                   a.effectivetoat = r.effectiveat AS ends_at_effective_at
+            FROM core.driverassignments a
+            JOIN core.drivertransferrequests r ON r.sourcedriverassignmentid = a.driverassignmentid
+            WHERE a.driverassignmentid = :aid
+        """),
+        {"aid": old_assignment_id},
+    )).mappings().one()
+    assert old_row["endreason"] == "Transferred"
+    assert old_row["transferredtoassignmentid"] == new_assignment_id
+    assert old_row["driverid"] == drv_id
+    assert old_row["ends_at_effective_at"] is True
+
+    # The Driver identity is unchanged and no per-assignment code was generated.
+    driver_row = (await direct_db.execute(
+        _text("SELECT drivernumber, cdlnumber, driverstatus FROM core.drivers WHERE driverid = :did"),
         {"did": drv_id},
-    )
-    old_row = old_drv.mappings().first()
-    assert old_row["driverstatus"] == "Transferred"
-    assert old_row["transferredtodriverid"] == new_did
+    )).mappings().one()
+    assert driver_row["drivernumber"].startswith("TWF-")
+    assert not driver_row["drivernumber"].startswith("DRV-TR")
+    assert driver_row["driverstatus"] == "Active"
+    assert (await direct_db.execute(
+        _text("SELECT COUNT(*) FROM core.drivers d JOIN core.driverassignments a ON a.driverid = d.driverid "
+              "WHERE d.driverid = :did"), {"did": drv_id},
+    )).scalar_one() == 2
 
     # Future destination stays pending; Employee branch follows today's source.
     emp = await direct_db.execute(
         _text("SELECT e.branchid FROM core.employees e "
               "JOIN core.drivers d ON d.employeeid = e.employeeid "
               "WHERE d.driverid = :did"),
-        {"did": new_did},
+        {"did": drv_id},
     )
     emp_row = emp.mappings().first()
     assert emp_row["branchid"] == paytest_branch_id
@@ -510,14 +552,14 @@ async def test_complete_non_approved_422(
 
 
 @pytest.mark.asyncio
-async def test_old_history_stays_on_old_driver(
+async def test_old_history_stays_on_old_driver_assignment(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
     direct_db,
 ):
-    """After transfer completion, draft lines on the old driver_id are untouched.
+    """After transfer completion, draft lines on the old DriverAssignmentID are untouched.
 
     This test is fully self-contained: it creates its own driver AND its own
     payroll period so it passes when run in isolation or inside the full suite.
@@ -542,24 +584,26 @@ async def test_old_history_stays_on_old_driver(
     )
     company_id: int = cid_row.scalar_one()
 
+    old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
+
     # Insert a fake draft line directly — bypasses period-status checks
     # intentionally so we can attach history to a Draft-status period.
     # Required NOT NULL cols: companyid, branchid, payrollperiodid,
-    #                         driverid, linetype, sourcetype, status.
+    #                         driverassignmentid, linetype, sourcetype, status.
     await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrolldraftlines
-                (payrollperiodid, companyid, branchid, driverid,
+                (payrollperiodid, companyid, branchid, driverassignmentid,
                  linetype, workdate, status, sourcetype)
             VALUES
-                (:pid, :cid, :bid, :did,
-                 'HistoryTest', '2092-01-15', 'Active', 'Manual')
+                (:pid, :cid, :bid, :aid,
+                 'HistoryTest', '2089-12-31', 'Active', 'Manual')
         """),
         {
             "pid": period_id,
             "cid": company_id,
             "bid": paytest_branch_id,
-            "did": drv_id,
+            "aid": old_assignment_id,
         },
     )
 
@@ -575,26 +619,26 @@ async def test_old_history_stays_on_old_driver(
 
     r3 = await _complete(session_client, auth_token, tid)
     assert r3.status_code == 200, r3.text
-    new_did = r3.json()["new_driver_id"]
+    new_assignment_id = r3.json()["destination_driver_assignment_id"]
 
-    # Old draft line still points to old driver_id — transfer must not touch it.
+    # Old draft line still points to the old assignment — transfer must not touch it.
     lines_old = await direct_db.execute(
         _text("""
             SELECT COUNT(*) FROM payroll.payrolldraftlines
-            WHERE driverid = :did AND linetype = 'HistoryTest'
+            WHERE driverassignmentid = :aid AND linetype = 'HistoryTest'
         """),
-        {"did": drv_id},
+        {"aid": old_assignment_id},
     )
     assert lines_old.scalar_one() == 1, \
-        "Draft line was removed or migrated away from the old driver — should not happen."
+        "Draft line was removed or migrated away from the old assignment — should not happen."
 
-    # New driver profile must have zero draft lines.
+    # New assignment must have zero draft lines.
     lines_new = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE driverid = :did"),
-        {"did": new_did},
+        _text("SELECT COUNT(*) FROM payroll.payrolldraftlines WHERE driverassignmentid = :aid"),
+        {"aid": new_assignment_id},
     )
     assert lines_new.scalar_one() == 0, \
-        "New driver profile already has draft lines — history was incorrectly copied."
+        "New assignment already has draft lines — history was incorrectly copied."
 
 
 @pytest.mark.asyncio
@@ -965,7 +1009,7 @@ async def test_user_without_drivers_permission_gets_403_on_list(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_get_user_driver_info_returns_active_after_transfer(
+async def test_get_user_driver_info_follows_the_same_driver_to_its_new_assignment(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -973,8 +1017,8 @@ async def test_get_user_driver_info_returns_active_after_transfer(
     direct_db,
 ):
     """
-    After a transfer completes, GET /admin/users/{uid}/driver returns the new
-    Active driver profile, not the old Transferred one.
+    After an immediate transfer, GET /admin/users/{uid}/driver returns the SAME
+    permanent Driver with its new current assignment and Branch.
     """
     sfx = _rnd()
     drv_id = await _create_driver(
@@ -1006,18 +1050,21 @@ async def test_get_user_driver_info_returns_active_after_transfer(
 
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    assert r_c.json()["status"] == "Completed"
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # GET /admin/users/{uid}/driver → should return the new Active profile
+    # GET /admin/users/{uid}/driver → the same Driver, now on its new assignment
     r_info = await session_client.get(
         f"/admin/users/{uid}/driver",
         headers=auth(auth_token),
     )
     assert r_info.status_code == 200, r_info.text
     info = r_info.json()
-    assert info["driver_id"] == new_drv_id, (
-        f"Expected new driver_id={new_drv_id}, got {info.get('driver_id')}"
+    assert info["driver_id"] == drv_id, (
+        f"Expected the same permanent driver_id={drv_id}, got {info.get('driver_id')}"
     )
+    assert info["driver_assignment_id"] == new_assignment_id
+    assert info["branch_id"] == hq_branch_id
     assert info["driver_status"] in ("Active",), (
         f"Expected Active status, got {info.get('driver_status')}"
     )
@@ -1032,9 +1079,9 @@ async def test_people_list_no_duplicate_after_transfer(
     direct_db,
 ):
     """
-    _fetch_driver_ids_for_users must not return the old Transferred driver_id.
-    After transfer, the People list endpoint should show the user once with
-    the new driver_id, not duplicated.
+    _fetch_driver_ids_for_users returns the permanent DriverID, which a transfer never
+    changes. After transfer, the People list endpoint should show the user once with
+    the same driver_id, not duplicated.
     """
     sfx = _rnd()
     employee = await create_driver_employee_record(
@@ -1042,10 +1089,10 @@ async def test_people_list_no_duplicate_after_transfer(
         auth_token,
         branch_id=paytest_branch_id,
         full_name=f"Driver Self Transfer {sfx}",
-        driver_code=f"DST-{sfx}",
+        driver_number=f"DST-{sfx}",
         hire_date="2000-01-01",
     )
-    drv_id = employee["current_or_pending_driver"]["driver_id"]
+    drv_id = employee["driver"]["driver_id"]
     emp_id = employee["employee_id"]
 
     uname = f"people_dup_{sfx}"
@@ -1062,9 +1109,9 @@ async def test_people_list_no_duplicate_after_transfer(
     assert r_d.status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # Verify _fetch_driver_ids_for_users returns new (not old) driver_id
+    # Verify _fetch_driver_ids_for_users returns the same permanent driver_id
     # We test this indirectly via the people list, looking for this user
     r_people = await session_client.get(
         "/admin/users",
@@ -1076,11 +1123,10 @@ async def test_people_list_no_duplicate_after_transfer(
     user_list = users_resp if isinstance(users_resp, list) else (users_resp.get("items") or [])
     user_rows = [u for u in user_list if u.get("user_id") == uid]
     if user_rows:
-        drv_field = user_rows[0].get("driver_id")
-        if drv_field is not None:
-            assert drv_field == new_drv_id, (
-                f"People list shows old driver_id={drv_field}, expected {new_drv_id}"
-            )
+        assert user_rows[0].get("driver_id") == drv_id, (
+            f"People list shows driver_id={user_rows[0].get('driver_id')}, expected {drv_id}"
+        )
+    assert new_assignment_id is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1229,7 +1275,7 @@ async def test_driver_initiated_flow_requires_source_then_target_approval(
     1. DRIVER/Self creates → PendingSourceApproval
     2. Source manager approves → PendingTargetApproval
     3. Target manager approves → Approved
-    4. Complete → Completed
+    4. Complete (future EffectiveAt) → Scheduled
     """
     oda_token, drv_id = driver_self_with_driver
 
@@ -1254,7 +1300,7 @@ async def test_driver_initiated_flow_requires_source_then_target_approval(
     # 4. Complete
     r4 = await _complete(session_client, auth_token, tid)
     assert r4.status_code == 200, r4.text
-    assert r4.json()["status"] == "Completed"
+    assert r4.json()["status"] == "Scheduled"
 
 
 # ---------------------------------------------------------------------------
@@ -1299,14 +1345,14 @@ async def test_returned_request_can_be_re_approved_by_source(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_completion_preserves_final_lines_on_old_driver(
+async def test_completion_preserves_final_lines_on_old_assignment(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
     direct_db,
 ):
-    """Transfer completion does not move PayrollFinalLines to new driver_id."""
+    """Transfer completion does not move PayrollFinalLines to the new assignment."""
     sfx = _rnd()
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=sfx
@@ -1322,20 +1368,22 @@ async def test_completion_preserves_final_lines_on_old_driver(
         session_client, auth_token, paytest_branch_id,
         "2092-07-01", "2092-07-07", direct_db,
     )
+    old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
 
-    # Insert a FinalLine for the old driver
+    # Insert a FinalLine for the old assignment
     # Phase 6: authorise via session-level GUC for test setup.
     async with allow_final_line_insert(direct_db):
         await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrollfinallines
-                    (payrollperiodid, companyid, branchid, driverid,
+                    (payrollperiodid, companyid, branchid, driverassignmentid, driverid,
                      linetype, sourcetype, finalamount, CurrencyCode, CurrencyMinorUnitDigits)
                 VALUES
-                    (:pid, :cid, :bid, :did,
+                    (:pid, :cid, :bid, :aid, :did,
                      'FinalHistTest', 'Manual', 100.00, 'USD', 2)
             """),
-            {"pid": period_id, "cid": company_id, "bid": paytest_branch_id, "did": drv_id},
+            {"pid": period_id, "cid": company_id, "bid": paytest_branch_id,
+             "aid": old_assignment_id, "did": drv_id},
         )
 
     # Complete transfer
@@ -1347,25 +1395,26 @@ async def test_completion_preserves_final_lines_on_old_driver(
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # Old final line still on old driver
+    # Old final line still on the old assignment
     cnt_old = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverid = :did AND linetype='FinalHistTest'"),
-        {"did": drv_id},
+        _text("SELECT COUNT(*) FROM payroll.payrollfinallines "
+              "WHERE driverassignmentid = :aid AND linetype='FinalHistTest'"),
+        {"aid": old_assignment_id},
     )
     assert cnt_old.scalar_one() == 1
 
-    # New driver has zero final lines
+    # The new assignment has zero final lines
     cnt_new = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverid = :did"),
-        {"did": new_drv_id},
+        _text("SELECT COUNT(*) FROM payroll.payrollfinallines WHERE driverassignmentid = :aid"),
+        {"aid": new_assignment_id},
     )
     assert cnt_new.scalar_one() == 0
 
 
 @pytest.mark.asyncio
-async def test_completion_preserves_driver_rates_on_old_driver(
+async def test_completion_preserves_driver_rates_on_old_assignment(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
@@ -1373,7 +1422,7 @@ async def test_completion_preserves_driver_rates_on_old_driver(
     paytest_rate_type_id: int,
     direct_db,
 ):
-    """Transfer completion does not move DriverRates to new driver_id."""
+    """Transfer completion does not move DriverRates to the new assignment."""
     sfx = _rnd()
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=sfx
@@ -1385,20 +1434,22 @@ async def test_completion_preserves_driver_rates_on_old_driver(
     )
     company_id = cid_r.scalar_one()
 
+    old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
+
     # Insert a DriverRate (valid statuses: PendingApproval|Approved|Superseded|Voided)
     await direct_db.execute(
         _text("""
             INSERT INTO payroll.driverrates
-                (companyid, branchid, driverid, ratetypeid,
+                (companyid, branchid, driverassignmentid, ratetypeid,
                  amount, effectivefrom, status)
             VALUES
-                (:cid, :bid, :did, :rtid,
+                (:cid, :bid, :aid, :rtid,
                  25.00, '2090-01-01', 'Approved')
         """),
         {
             "cid": company_id,
             "bid": paytest_branch_id,
-            "did": drv_id,
+            "aid": old_assignment_id,
             "rtid": paytest_rate_type_id,
         },
     )
@@ -1412,32 +1463,32 @@ async def test_completion_preserves_driver_rates_on_old_driver(
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # Rate still on old driver
+    # Rate still on the old assignment; the transfer copies nothing
     cnt_old = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.driverrates WHERE driverid = :did"),
-        {"did": drv_id},
+        _text("SELECT COUNT(*) FROM payroll.driverrates WHERE driverassignmentid = :aid"),
+        {"aid": old_assignment_id},
     )
     assert cnt_old.scalar_one() == 1
 
-    # New driver has zero rates
+    # The new assignment has zero rates
     cnt_new = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.driverrates WHERE driverid = :did"),
-        {"did": new_drv_id},
+        _text("SELECT COUNT(*) FROM payroll.driverrates WHERE driverassignmentid = :aid"),
+        {"aid": new_assignment_id},
     )
     assert cnt_new.scalar_one() == 0
 
 
 @pytest.mark.asyncio
-async def test_completion_preserves_driver_pay_rules_on_old_driver(
+async def test_completion_preserves_driver_pay_rules_on_old_assignment(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
     direct_db,
 ):
-    """Transfer completion does not move DriverPayRules to new driver_id."""
+    """Transfer completion does not move DriverPayRules to the new assignment."""
     sfx = _rnd()
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=sfx
@@ -1449,17 +1500,19 @@ async def test_completion_preserves_driver_pay_rules_on_old_driver(
     )
     company_id = cid_r.scalar_one()
 
+    old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
+
     # Insert a DriverPayRule
     await direct_db.execute(
         _text("""
             INSERT INTO payroll.driverpayrules
-                (companyid, branchid, driverid,
+                (companyid, branchid, driverassignmentid,
                  ruletype, amount, effectivefrom, status)
             VALUES
-                (:cid, :bid, :did,
+                (:cid, :bid, :aid,
                  'MinimumPay', 500.00, '2090-01-01', 'Active')
         """),
-        {"cid": company_id, "bid": paytest_branch_id, "did": drv_id},
+        {"cid": company_id, "bid": paytest_branch_id, "aid": old_assignment_id},
     )
 
     # Complete transfer
@@ -1471,19 +1524,19 @@ async def test_completion_preserves_driver_pay_rules_on_old_driver(
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # Rule still on old driver
+    # Rule still on the old assignment; the transfer copies nothing
     cnt_old = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did"),
-        {"did": drv_id},
+        _text("SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = :aid"),
+        {"aid": old_assignment_id},
     )
     assert cnt_old.scalar_one() == 1
 
-    # New driver has zero rules
+    # The new assignment has zero rules
     cnt_new = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did"),
-        {"did": new_drv_id},
+        _text("SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = :aid"),
+        {"aid": new_assignment_id},
     )
     assert cnt_new.scalar_one() == 0
 
@@ -1501,26 +1554,28 @@ async def test_db_composite_fk_blocks_cross_company_driver(
     direct_db,
 ):
     """
-    Migration 0028 fk_DTR_Driver_Company: inserting a DTR row with a driver_id
-    that belongs to a DIFFERENT company than the companyid in the row → FK violation.
+    fk_DTR_Driver: inserting a DTR row with a driver_id that belongs to a DIFFERENT
+    company than the companyid in the row → FK violation.
 
-    We use companyid=0 (non-existent) while using a real driver_id to trigger
-    the composite FK (DriverID, CompanyID) → core.Drivers(DriverID, CompanyID).
+    We use companyid=0 (non-existent) while using a real driver_id and its real source
+    assignment to trigger the composite FK (DriverID, CompanyID) → core.Drivers(DriverID, CompanyID).
     """
 
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=_rnd()
     )
+    source_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
 
     try:
         await direct_db.execute(
             _text("""
                 INSERT INTO core.drivertransferrequests
-                    (companyid, driverid, sourcebranchid, targetbranchid,
+                    (companyid, driverid, sourcedriverassignmentid, sourcebranchid, targetbranchid,
                      requestedbyuserid, initiatedby, status)
                 SELECT
                     0,
                     :did,
+                    :said,
                     :sbid,
                     :tbid,
                     u.userid,
@@ -1529,11 +1584,12 @@ async def test_db_composite_fk_blocks_cross_company_driver(
                 FROM sec.users u WHERE u.username = 'admin'
                 LIMIT 1
             """),
-            {"did": drv_id, "sbid": paytest_branch_id, "tbid": hq_branch_id},
+            {"did": drv_id, "said": source_assignment_id,
+             "sbid": paytest_branch_id, "tbid": hq_branch_id},
         )
         pytest.fail(
             "Expected a FK/integrity violation but INSERT succeeded — "
-            "migration 0028 composite FK may not be active."
+            "the DTR composite Driver FK may not be active."
         )
     except Exception as exc:
         # Accept any DB integrity error (FK violation, not-null, etc.)
@@ -1598,8 +1654,8 @@ async def test_people_surfaces_effective_source_until_future_transfer_date(
     hq_branch_id: int,
 ):
     """
-    A completed future-dated transfer does not make its destination current
-    early. The source remains current until the effective date.
+    A scheduled future-dated transfer does not make its destination current
+    early. The same Driver stays on its source assignment until the effective date.
     """
     sfx = _rnd()
     old_drv_id = await _create_driver(
@@ -1615,7 +1671,8 @@ async def test_people_surfaces_effective_source_until_future_transfer_date(
     assert r_d.status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
+    old_assignment_id = r_c.json()["source_driver_assignment_id"]
 
     r_p = await session_client.get("/core/people", headers=auth(auth_token))
     assert r_p.status_code == 200
@@ -1625,14 +1682,16 @@ async def test_people_surfaces_effective_source_until_future_transfer_date(
     assert len(matching) == 1
     row = matching[0]
 
-    assert row.get("driver_id") == old_drv_id
-    assert row.get("driver_status") == "Transferred"
+    assert row.get("driver_id") == old_drv_id  # the permanent Driver never changes
+    assert row.get("driver_assignment_id") == old_assignment_id
+    assert row.get("driver_assignment_id") != new_assignment_id
+    assert row.get("driver_status") == "Active"
     assert row.get("driver_state") == "current"
-    assert row.get("driver_id") != new_drv_id
+    assert row.get("branch_id") == paytest_branch_id
 
 
 # ===========================================================================
-# Phase 2B — Day-grid eligibility after transfer (Tests 8, 9, 10)
+# Phase 2B — Assignment window coverage and roster after transfer (Tests 8, 9, 10)
 # ===========================================================================
 #
 # These tests verify how transfer completion affects day-grid eligibility.
@@ -1640,20 +1699,26 @@ async def test_people_surfaces_effective_source_until_future_transfer_date(
 # rest of this file.
 # ===========================================================================
 
-async def _get_day_grid_driver_ids(
-    client: httpx.AsyncClient,
-    token: str,
-    period_id: int,
-    work_date: str,
-) -> list[int]:
-    """Return list of driver_ids visible in the day-grid for a given date."""
-    r = await client.get(
-        f"/payroll/periods/{period_id}/day-grid",
-        params={"work_date": work_date},
-        headers=auth(token),
+async def _roster_assignment_ids(direct_db, period_id: int, work_date: str) -> list[int]:
+    """DriverAssignmentIDs a period can accept source for on a WorkDate.
+
+    This is the eligibility rule the payroll grid applies: the assignment is on the
+    period's frozen roster for that exact WorkDate AND its live instant window still
+    covers the Branch-local WorkDate.
+    """
+    rows = await direct_db.execute(
+        _text("""
+            SELECT pde.driverassignmentid
+            FROM payroll.payrollperioddrivereligibility pde
+            WHERE pde.payrollperiodid = :pid
+              AND CAST(:wd AS DATE) = ANY(pde.eligibleworkdates)
+              AND core.fn_DriverAssignmentCoversWorkDate(
+                    pde.companyid, pde.driverassignmentid, pde.branchid, CAST(:wd AS DATE))
+            ORDER BY pde.driverassignmentid
+        """),
+        {"pid": period_id, "wd": datetime.date.fromisoformat(work_date)},
     )
-    assert r.status_code == 200, f"day-grid GET failed: {r.text}"
-    return [row["driver_id"] for row in r.json()["rows"]]
+    return [row[0] for row in rows.all()]
 
 
 async def _cancel_all_branch_periods(
@@ -1759,16 +1824,15 @@ async def test_post_transfer_source_branch_driver_absent_from_grid(
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
+    old_assignment_id = r.json()["source_driver_assignment_id"]
 
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200, r_c.text
 
     # Old driver (Transferred) must NOT appear in source branch day-grid
-    ids = await _get_day_grid_driver_ids(
-        session_client, auth_token, source_pid, "2093-01-08"
-    )
-    assert old_drv_id not in ids, (
+    ids = await _roster_assignment_ids(direct_db, source_pid, "2093-01-08")
+    assert old_assignment_id not in ids, (
         "Old (Transferred) driver must NOT appear in source branch day-grid after completion"
     )
 
@@ -1820,14 +1884,12 @@ async def test_post_transfer_target_branch_driver_present_in_grid(
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200, r_c.text
-    new_drv_id = r_c.json()["new_driver_id"]
-    assert new_drv_id is not None
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
+    assert new_assignment_id is not None
 
     # New driver (Active in PAYTEST) MUST appear in PAYTEST day-grid
-    ids = await _get_day_grid_driver_ids(
-        session_client, auth_token, target_pid, "2093-02-05"
-    )
-    assert new_drv_id in ids, (
+    ids = await _roster_assignment_ids(direct_db, target_pid, "2093-02-05")
+    assert new_assignment_id in ids, (
         "New (Active) driver must appear in target branch day-grid immediately after transfer completion"
     )
 
@@ -1879,31 +1941,28 @@ async def test_effective_date_defers_target_activation(
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
+    old_assignment_id = r.json()["source_driver_assignment_id"]
 
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200, r_c.text
-    new_drv_id = r_c.json()["new_driver_id"]
-    assert new_drv_id is not None
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
+    assert new_assignment_id is not None
 
     # Before effective_date: old profile visible in source (PAYTEST) grid
-    ids_before = await _get_day_grid_driver_ids(
-        session_client, auth_token, period_pid, "2094-07-14"
-    )
-    assert old_drv_id in ids_before, (
+    ids_before = await _roster_assignment_ids(direct_db, period_pid, "2094-07-14")
+    assert old_assignment_id in ids_before, (
         "Old profile MUST appear in PAYTEST source grid on 2094-07-14 (before effective_date 2094-07-15)"
     )
 
     # New profile belongs to HQ — must NOT appear in PAYTEST source grid at any date
-    assert new_drv_id not in ids_before, (
+    assert new_assignment_id not in ids_before, (
         "New (HQ) profile must NOT appear in PAYTEST source grid"
     )
 
     # On effective_date: old profile gone from source (PAYTEST) grid
-    ids_on = await _get_day_grid_driver_ids(
-        session_client, auth_token, period_pid, "2094-07-15"
-    )
-    assert old_drv_id not in ids_on, (
+    ids_on = await _roster_assignment_ids(direct_db, period_pid, "2094-07-15")
+    assert old_assignment_id not in ids_on, (
         "Old profile must NOT appear in PAYTEST source grid on 2094-07-15 (effective_date reached)"
     )
 
@@ -1946,13 +2005,12 @@ async def test_future_transfer_source_visible_before_effective(
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
+    old_assignment_id = r.json()["source_driver_assignment_id"]
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     assert (await _complete(session_client, auth_token, tid)).status_code == 200
 
-    ids = await _get_day_grid_driver_ids(
-        session_client, auth_token, source_pid, "2095-07-31"
-    )
-    assert old_drv_id in ids, (
+    ids = await _roster_assignment_ids(direct_db, source_pid, "2095-07-31")
+    assert old_assignment_id in ids, (
         "Old profile must appear in source grid on 2095-07-31 (one day before effective_date 2095-08-01)"
     )
 
@@ -1998,21 +2056,17 @@ async def test_future_transfer_target_hidden_before_effective(
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
     # One day before effective_date — new profile must be absent
-    ids_before = await _get_day_grid_driver_ids(
-        session_client, auth_token, target_pid, "2095-09-14"
-    )
-    assert new_drv_id not in ids_before, (
+    ids_before = await _roster_assignment_ids(direct_db, target_pid, "2095-09-14")
+    assert new_assignment_id not in ids_before, (
         "New profile must NOT appear in target grid on 2095-09-14 (before effective_date 2095-09-15)"
     )
 
     # On effective_date — new profile must appear
-    ids_on = await _get_day_grid_driver_ids(
-        session_client, auth_token, target_pid, "2095-09-15"
-    )
-    assert new_drv_id in ids_on, (
+    ids_on = await _roster_assignment_ids(direct_db, target_pid, "2095-09-15")
+    assert new_assignment_id in ids_on, (
         "New profile MUST appear in target grid on 2095-09-15 (effective_date)"
     )
 
@@ -2055,13 +2109,12 @@ async def test_source_hidden_on_effective_date(
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
+    old_assignment_id = r.json()["source_driver_assignment_id"]
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     assert (await _complete(session_client, auth_token, tid)).status_code == 200
 
-    ids = await _get_day_grid_driver_ids(
-        session_client, auth_token, source_pid, "2096-03-01"
-    )
-    assert old_drv_id not in ids, (
+    ids = await _roster_assignment_ids(direct_db, source_pid, "2096-03-01")
+    assert old_assignment_id not in ids, (
         "Old profile must NOT appear in source grid on 2096-03-01 (effective_date reached, effectiveto=2096-02-29)"
     )
 
@@ -2106,12 +2159,10 @@ async def test_target_visible_on_effective_date(
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    ids = await _get_day_grid_driver_ids(
-        session_client, auth_token, target_pid, "2096-05-01"
-    )
-    assert new_drv_id in ids, (
+    ids = await _roster_assignment_ids(direct_db, target_pid, "2096-05-01")
+    assert new_assignment_id in ids, (
         "New profile MUST appear in target grid on 2096-05-01 (effective_date)"
     )
 
@@ -2164,23 +2215,20 @@ async def test_mid_period_transfer_split_visibility(
     )
     assert r.status_code == 201, r.text
     tid = r.json()["transfer_request_id"]
+    old_assignment_id = r.json()["source_driver_assignment_id"]
     assert (await _decide_target(session_client, auth_token, tid, "Approved")).status_code == 200
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200
-    new_drv_id = r_c.json()["new_driver_id"]
+    new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
     # Source (PAYTEST): before effective_date — old profile present
-    src_before = await _get_day_grid_driver_ids(
-        session_client, auth_token, source_pid, "2097-01-26"
-    )
-    assert old_drv_id in src_before, "Old profile must be in source (PAYTEST) grid on 2097-01-26"
-    assert new_drv_id not in src_before, "New (HQ) profile must NOT appear in PAYTEST grid"
+    src_before = await _roster_assignment_ids(direct_db, source_pid, "2097-01-26")
+    assert old_assignment_id in src_before, "Old profile must be in source (PAYTEST) grid on 2097-01-26"
+    assert new_assignment_id not in src_before, "New (HQ) profile must NOT appear in PAYTEST grid"
 
     # Source (PAYTEST): on effective_date — old profile absent
-    src_on = await _get_day_grid_driver_ids(
-        session_client, auth_token, source_pid, "2097-01-27"
-    )
-    assert old_drv_id not in src_on, "Old profile must be ABSENT from source grid on 2097-01-27"
+    src_on = await _roster_assignment_ids(direct_db, source_pid, "2097-01-27")
+    assert old_assignment_id not in src_on, "Old profile must be ABSENT from source grid on 2097-01-27"
 
     await session_client.patch(
         f"/payroll/periods/{source_pid}/status",

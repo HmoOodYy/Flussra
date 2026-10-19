@@ -9,9 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 _AUDIT_REASONS = {
     "EMPLOYEE_CREATED": "Workforce Employee created",
     "EMPLOYEE_UPDATED": "Workforce Employee updated",
-    "DRIVER_PROFILE_CREATED": "Workforce Driver profile created",
-    "DRIVER_PROFILE_UPDATED": "Workforce Driver profile updated",
+    "DRIVER_CREATED": "Workforce Driver and first assignment created",
+    "DRIVER_UPDATED": "Workforce Driver updated",
     "DRIVER_TRANSFER_COMPLETED": "Workforce Driver transfer completed",
+    "DRIVER_TRANSFER_SCHEDULED": "Workforce Driver transfer scheduled",
+    "DRIVER_TRANSFER_CANCELLED": "Workforce Driver transfer cancelled",
+    "DRIVER_TRANSFER_RESCHEDULED": "Workforce Driver transfer rescheduled",
     "DRIVER_EMPLOYEE_TERMINATED": "Workforce Driver Employee terminated",
 }
 

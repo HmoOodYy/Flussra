@@ -74,15 +74,15 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_driver_id(session_client, auth_token, paytest_branch_id) -> int:
+async def paytest_driver_assignment_id(session_client, auth_token, paytest_branch_id) -> int:
     response = await session_client.post(
         "/core/drivers",
         json={"branch_id": paytest_branch_id, "full_name": "P4S2 Driver",
-              "driver_code": f"P4S2-{uuid.uuid4().hex[:10]}"},
+              "driver_number": f"P4S2-{uuid.uuid4().hex[:10]}"},
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert response.status_code == 201, response.text
-    return int(response.json()["driver_id"])
+    return int(response.json()["driver_assignment_id"])
 
 _PERIOD_CODE_PREFIX = "P4S2-"
 
@@ -193,7 +193,7 @@ async def _create_driver(
         headers=auth(token),
     )
     assert r.status_code == 201, f"Create driver failed: {r.text}"
-    return r.json()["driver_id"]
+    return r.json()["driver_assignment_id"]
 
 
 async def _get_status_pay_rate_type_id(client: httpx.AsyncClient, token: str) -> int:
@@ -396,7 +396,7 @@ async def _insert_status_pay_rate(
     direct_db,
     company_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_type_id: int,
     amount: str,
     effective_from: str,
@@ -406,12 +406,12 @@ async def _insert_status_pay_rate(
     row = (await direct_db.execute(
         _text("""
             INSERT INTO payroll.driverrates
-                (companyid, branchid, driverid, ratetypeid, amount, status, effectivefrom, effectiveto)
+                (companyid, branchid, driverassignmentid, ratetypeid, amount, status, effectivefrom, effectiveto)
             VALUES (:cid, :bid, :did, :rtid, :amt, :status, :eff, :eff_to)
             RETURNING driverrateid
         """),
         {
-            "cid": company_id, "bid": branch_id, "did": driver_id, "rtid": rate_type_id,
+            "cid": company_id, "bid": branch_id, "did": driver_assignment_id, "rtid": rate_type_id,
             "amt": Decimal(amount), "status": status,
             "eff": datetime.date.fromisoformat(effective_from),
             "eff_to": datetime.date.fromisoformat(effective_to) if effective_to else None,
@@ -453,7 +453,7 @@ async def _owned_driver_rate(
     direct_db,
     company_id: int,
     branch_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     rate_type_id: int,
     amount: str,
     effective_from: str,
@@ -464,7 +464,7 @@ async def _owned_driver_rate(
     `_owned_status_key`: the `try` begins immediately after the INSERT
     returns an ID."""
     rate_id = await _insert_status_pay_rate(
-        direct_db, company_id, branch_id, driver_id, rate_type_id,
+        direct_db, company_id, branch_id, driver_assignment_id, rate_type_id,
         amount, effective_from, status=status, effective_to=effective_to,
     )
     try:
@@ -492,7 +492,7 @@ async def _save_day_grid(
     client: httpx.AsyncClient,
     token: str,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: str,
     status_key_code: str | None,
 ) -> httpx.Response:
@@ -500,7 +500,7 @@ async def _save_day_grid(
         f"/payroll/periods/{period_id}/day-grid",
         json={
             "work_date": work_date,
-            "rows": [{"driver_id": driver_id, "status_key": status_key_code, "values": {}}],
+            "rows": [{"driver_assignment_id": driver_assignment_id, "status_key": status_key_code, "values": {}}],
         },
         headers=auth(token),
     )
@@ -519,31 +519,31 @@ async def _get_day_grid(
     )
 
 
-async def _get_entry_state_row(direct_db, period_id: int, driver_id: int, work_date: str) -> dict | None:
+async def _get_entry_state_row(direct_db, period_id: int, driver_assignment_id: int, work_date: str) -> dict | None:
     row = (await direct_db.execute(
         _text("""
             SELECT payrollperioddriverdayentrystateid, statuskeyid, isvoided,
-                   companyid, branchid, payrollperiodid, driverid, workdate
+                   companyid, branchid, payrollperiodid, driverassignmentid, workdate
             FROM   payroll.payrollperioddriverdayentrystate
-            WHERE  payrollperiodid = :pid AND driverid = :did AND workdate = :wd
+            WHERE  payrollperiodid = :pid AND driverassignmentid = :did AND workdate = :wd
         """),
-        {"pid": period_id, "did": driver_id, "wd": datetime.date.fromisoformat(work_date)},
+        {"pid": period_id, "did": driver_assignment_id, "wd": datetime.date.fromisoformat(work_date)},
     )).mappings().first()
     return dict(row) if row else None
 
 
-async def _get_status_pay_lines(direct_db, period_id: int, driver_id: int | None = None) -> list[dict]:
+async def _get_status_pay_lines(direct_db, period_id: int, driver_assignment_id: int | None = None) -> list[dict]:
     query = """
-        SELECT draftlineid, driverid, workdate, linetype, quantity,
+        SELECT draftlineid, driverassignmentid, workdate, linetype, quantity,
                calculatedamount, sourcetype, sourceid, status, needsmanagerreview
         FROM   payroll.payrolldraftlines
         WHERE  payrollperiodid = :pid
           AND  sourceid LIKE 'STATUS_PAYMENT:%'
     """
     params = {"pid": period_id}
-    if driver_id is not None:
-        query += " AND driverid = :did"
-        params["did"] = driver_id
+    if driver_assignment_id is not None:
+        query += " AND driverassignmentid = :did"
+        params["did"] = driver_assignment_id
     rows = (await direct_db.execute(_text(query), params)).mappings().all()
     return [dict(r) for r in rows]
 
@@ -851,7 +851,7 @@ async def _owned_driver_pay_rule(
     auth_token: str,
     direct_db,
     *,
-    driver_id: int,
+    driver_assignment_id: int,
     branch_id: int,
     rule_type: str,
     amount: str,
@@ -868,7 +868,7 @@ async def _owned_driver_pay_rule(
     committed the row must still be cleaned up. Two independent, schema-real
     ownership signals are snapshotted BEFORE the create request is sent, and
     the `try` begins before that request too:
-      1. The exact (DriverID, RuleType) row-ID set for this test's own driver
+      1. The exact (DriverAssignmentID, RuleType) row-ID set for this test's own driver
          (each test uses a freshly-created driver, so this set is inherently
          test-scoped -- no other test/process can add a row to it).
       2. A unique `P4S2-DPR-<hex>` marker written into `DriverPayRules.Notes`
@@ -896,9 +896,9 @@ async def _owned_driver_pay_rule(
         r["driverpayruleid"] for r in (await direct_db.execute(
             _text(
                 "SELECT driverpayruleid FROM payroll.driverpayrules "
-                "WHERE driverid = :did AND ruletype = :rtype"
+                "WHERE driverassignmentid = :did AND ruletype = :rtype"
             ),
-            {"did": driver_id, "rtype": rule_type},
+            {"did": driver_assignment_id, "rtype": rule_type},
         )).mappings().all()
     }
     audit_watermark = (await direct_db.execute(
@@ -910,7 +910,7 @@ async def _owned_driver_pay_rule(
         resp = await session_client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_id": driver_id, "branch_id": branch_id,
+                "driver_assignment_id": driver_assignment_id, "branch_id": branch_id,
                 "rule_type": rule_type, "amount": amount,
                 "effective_from": effective_from, "effective_to": effective_to,
                 "notes": marker,
@@ -926,9 +926,9 @@ async def _owned_driver_pay_rule(
         post_rows = (await direct_db.execute(
             _text(
                 "SELECT driverpayruleid FROM payroll.driverpayrules "
-                "WHERE driverid = :did AND ruletype = :rtype"
+                "WHERE driverassignmentid = :did AND ruletype = :rtype"
             ),
-            {"did": driver_id, "rtype": rule_type},
+            {"did": driver_assignment_id, "rtype": rule_type},
         )).mappings().all()
         owned_ids = {r["driverpayruleid"] for r in post_rows} - pre_rule_ids
         marker_rows = (await direct_db.execute(
@@ -990,13 +990,13 @@ async def _owned_driver_pay_rule(
             r["driverpayruleid"] for r in (await direct_db.execute(
                 _text(
                     "SELECT driverpayruleid FROM payroll.driverpayrules "
-                    "WHERE driverid = :did AND ruletype = :rtype"
+                    "WHERE driverassignmentid = :did AND ruletype = :rtype"
                 ),
-                {"did": driver_id, "rtype": rule_type},
+                {"did": driver_assignment_id, "rtype": rule_type},
             )).mappings().all()
         }
         assert final_rule_ids == pre_rule_ids | retained_ids, (
-            f"DriverPayRule scope residue for driver={driver_id} rule_type={rule_type}: "
+            f"DriverPayRule scope residue for driver={driver_assignment_id} rule_type={rule_type}: "
             f"expected {pre_rule_ids | retained_ids}, got {final_rule_ids} -- "
             "only immutable-evidence-referenced test rows may remain"
         )
@@ -1034,7 +1034,7 @@ async def _status_pay_scenario(
     Shared setup/teardown: fresh driver + Open period + a StatusKey wired to
     the branch's default (or test-owned fallback) StatusRateColumn +
     (optionally) an Approved DriverRate for STATUS_PAY. Yields
-    (driver_id, pid, status_key_id).
+    (driver_assignment_id, pid, status_key_id).
 
     Exception safety (P1 fix): every resource is wrapped in its own owning
     context (`_owned_status_key`, `_owned_driver_rate`, `_owned_period`)
@@ -1046,7 +1046,7 @@ async def _status_pay_scenario(
     dependent StatusKey has already been removed (FK RESTRICT).
     """
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-    driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, driver_name)
+    driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, driver_name)
     async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
         async with contextlib.AsyncExitStack() as stack:
             status_key_id = await stack.enter_async_context(
@@ -1059,7 +1059,7 @@ async def _status_pay_scenario(
                 status_pay_rt_id = await _get_status_pay_rate_type_id(session_client, auth_token)
                 await stack.enter_async_context(
                     _owned_driver_rate(
-                        direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                        direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                         rate_amount, rate_effective_from,
                     )
                 )
@@ -1069,7 +1069,7 @@ async def _status_pay_scenario(
                     period_start, period_end, direct_db, suffix=period_suffix,
                 )
             )
-            yield driver_id, pid, status_key_id
+            yield driver_assignment_id, pid, status_key_id
     await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 
@@ -1097,9 +1097,9 @@ class TestCanonicalStatusSource:
             period_start=PERIOD_A_START, period_end=PERIOD_A_END,
             driver_name="P4S2 Canonical A", status_code=f"P4S2CANON{id(self)}",
             hours="8.00", rate_amount=None, rate_effective_from=None,
-        ) as (driver_id, pid, status_key_id):
+        ) as (driver_assignment_id, pid, status_key_id):
             resp = await _save_day_grid(
-                session_client, auth_token, pid, driver_id, DATE_FEB02,
+                session_client, auth_token, pid, driver_assignment_id, DATE_FEB02,
                 status_key_code=None,
             )
             # Re-fetch the exact status_code (server-generated, unknown to us
@@ -1111,12 +1111,12 @@ class TestCanonicalStatusSource:
             status_code = code_row["statuscode"]
 
             resp = await _save_day_grid(
-                session_client, auth_token, pid, driver_id, DATE_FEB02,
+                session_client, auth_token, pid, driver_assignment_id, DATE_FEB02,
                 status_key_code=status_code,
             )
             assert resp.status_code == 200, f"Day grid save failed: {resp.text}"
 
-            row = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+            row = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
             assert row is not None, "PayrollPeriodDriverDayEntryState row must exist after save"
             assert row["statuskeyid"] == status_key_id, (
                 f"Canonical StatusKeyID must be {status_key_id}; got {row['statuskeyid']}"
@@ -1137,7 +1137,7 @@ class TestCanonicalStatusSource:
         `TestDailyStatusProjectionNotSourceOfTruth::test_write_side_projection_refreshes_on_statuskey_replacement`
         below, which is a distinct contract from this canonical-row proof."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 Replace")
+        driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 Replace")
         async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
             async with contextlib.AsyncExitStack() as stack:
                 key_a = await stack.enter_async_context(
@@ -1161,15 +1161,15 @@ class TestCanonicalStatusSource:
                     {"id": key_b},
                 )).mappings().first()["statuscode"]
 
-                r1 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, code_a)
+                r1 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, code_a)
                 assert r1.status_code == 200
-                row1 = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+                row1 = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
                 assert row1["statuskeyid"] == key_a
                 first_row_id = row1["payrollperioddriverdayentrystateid"]
 
-                r2 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, code_b)
+                r2 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, code_b)
                 assert r2.status_code == 200
-                row2 = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+                row2 = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
                 assert row2["statuskeyid"] == key_b, "Canonical row must now reflect key_b"
                 assert row2["payrollperioddriverdayentrystateid"] == first_row_id, (
                     "Replacing the StatusKey must update the SAME canonical row "
@@ -1179,9 +1179,9 @@ class TestCanonicalStatusSource:
                 count_row = (await direct_db.execute(
                     _text(
                         "SELECT COUNT(*) AS cnt FROM payroll.payrollperioddriverdayentrystate "
-                        "WHERE payrollperiodid = :pid AND driverid = :did AND workdate = :wd"
+                        "WHERE payrollperiodid = :pid AND driverassignmentid = :did AND workdate = :wd"
                     ),
-                    {"pid": pid, "did": driver_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
+                    {"pid": pid, "did": driver_assignment_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
                 )).mappings().first()
                 assert count_row["cnt"] == 1, "Exactly one canonical row must exist for this driver/day"
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
@@ -1201,22 +1201,22 @@ class TestCanonicalStatusSource:
             driver_name="P4S2 Clear", status_code=f"P4S2CLR{id(self)}",
             hours="8.00", rate_amount=None, rate_effective_from=None,
             period_suffix="-clr",
-        ) as (driver_id, pid, status_key_id):
+        ) as (driver_assignment_id, pid, status_key_id):
             code_row = (await direct_db.execute(
                 _text("SELECT statuscode FROM payroll.payrollstatuskeys WHERE statuskeyid = :id"),
                 {"id": status_key_id},
             )).mappings().first()
             status_code = code_row["statuscode"]
 
-            r1 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, status_code)
+            r1 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, status_code)
             assert r1.status_code == 200
-            row1 = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+            row1 = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
             assert row1["statuskeyid"] == status_key_id
             assert row1["isvoided"] is False
 
-            r2 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, None)
+            r2 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, None)
             assert r2.status_code == 200
-            row2 = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+            row2 = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
             assert row2["statuskeyid"] is None, "Clearing must set StatusKeyID to NULL"
             assert row2["isvoided"] is True, (
                 "Current behavior: clearing status (with no note) sets IsVoided=TRUE"
@@ -1299,7 +1299,7 @@ class TestDailyStatusProjectionNotSourceOfTruth:
         resubmission in between.
         """
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 WriteRefresh")
+        driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 WriteRefresh")
         async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
             async with contextlib.AsyncExitStack() as stack:
                 key_a = await stack.enter_async_context(
@@ -1324,21 +1324,21 @@ class TestDailyStatusProjectionNotSourceOfTruth:
                 )).mappings().first()["statuscode"]
 
                 # 1. Save Status A through the supported day-grid endpoint.
-                r1 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, code_a)
+                r1 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, code_a)
                 assert r1.status_code == 200, f"Save Status A failed: {r1.text}"
 
                 # 2. Capture the canonical row and the DailyStatus projection
                 #    line's exact identity for Status A.
-                canonical_a = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+                canonical_a = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
                 assert canonical_a is not None and canonical_a["statuskeyid"] == key_a
                 daily_status_a = (await direct_db.execute(
                     _text("""
                         SELECT draftlineid, linetype, sourcetype, status, notes
                         FROM   payroll.payrolldraftlines
-                        WHERE  payrollperiodid = :pid AND driverid = :did
+                        WHERE  payrollperiodid = :pid AND driverassignmentid = :did
                           AND  workdate = :wd AND linetype = 'DailyStatus'
                     """),
-                    {"pid": pid, "did": driver_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
+                    {"pid": pid, "did": driver_assignment_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
                 )).mappings().first()
                 assert daily_status_a is not None, "DailyStatus projection line must exist after save"
                 assert daily_status_a["notes"] == code_a, "Projection notes must carry Status A's code"
@@ -1349,7 +1349,7 @@ class TestDailyStatusProjectionNotSourceOfTruth:
 
                 # 3. Replace Status A with Status B through the SAME
                 #    supported day-grid endpoint -- one request.
-                r2 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, code_b)
+                r2 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, code_b)
                 assert r2.status_code == 200, f"Save Status B failed: {r2.text}"
 
                 # 4. Read the database immediately -- no separate refresh
@@ -1357,7 +1357,7 @@ class TestDailyStatusProjectionNotSourceOfTruth:
                 #    resubmission. "The supported save flow returns only
                 #    after both canonical state and compatibility
                 #    projection reflect the replacement Status."
-                canonical_b = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+                canonical_b = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
                 assert canonical_b is not None
                 assert canonical_b["statuskeyid"] == key_b, (
                     "Canonical entry-state must reflect Status B immediately after the save"
@@ -1370,10 +1370,10 @@ class TestDailyStatusProjectionNotSourceOfTruth:
                     _text("""
                         SELECT draftlineid, linetype, sourcetype, status, notes
                         FROM   payroll.payrolldraftlines
-                        WHERE  payrollperiodid = :pid AND driverid = :did
+                        WHERE  payrollperiodid = :pid AND driverassignmentid = :did
                           AND  workdate = :wd AND linetype = 'DailyStatus'
                     """),
-                    {"pid": pid, "did": driver_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
+                    {"pid": pid, "did": driver_assignment_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
                 )).mappings().first()
                 assert daily_status_b is not None, "DailyStatus projection line must still exist"
                 assert daily_status_b["draftlineid"] == projection_line_id, (
@@ -1395,10 +1395,10 @@ class TestDailyStatusProjectionNotSourceOfTruth:
                 active_count = (await direct_db.execute(
                     _text("""
                         SELECT COUNT(*) AS cnt FROM payroll.payrolldraftlines
-                        WHERE  payrollperiodid = :pid AND driverid = :did
+                        WHERE  payrollperiodid = :pid AND driverassignmentid = :did
                           AND  workdate = :wd AND linetype = 'DailyStatus' AND status = 'Active'
                     """),
-                    {"pid": pid, "did": driver_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
+                    {"pid": pid, "did": driver_assignment_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
                 )).mappings().first()
                 assert active_count["cnt"] == 1, (
                     f"Exactly one Active DailyStatus projection must exist for this "
@@ -1434,7 +1434,7 @@ class TestDailyStatusProjectionNotSourceOfTruth:
             driver_name="P4S2 Projection", status_code=f"P4S2PROJ{id(self)}",
             hours="8.00", rate_amount=None, rate_effective_from=None,
             period_suffix="-proj",
-        ) as (driver_id, pid, status_key_id):
+        ) as (driver_assignment_id, pid, status_key_id):
             code_row = (await direct_db.execute(
                 _text("SELECT statuscode FROM payroll.payrollstatuskeys WHERE statuskeyid = :id"),
                 {"id": status_key_id},
@@ -1442,7 +1442,7 @@ class TestDailyStatusProjectionNotSourceOfTruth:
             status_code = code_row["statuscode"]
 
             save_resp = await _save_day_grid(
-                session_client, auth_token, pid, driver_id, DATE_FEB02, status_code,
+                session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, status_code,
             )
             assert save_resp.status_code == 200
 
@@ -1452,16 +1452,16 @@ class TestDailyStatusProjectionNotSourceOfTruth:
                 _text("""
                     UPDATE payroll.payrolldraftlines
                     SET notes = 'CORRUPTED_NOT_A_REAL_CODE'
-                    WHERE payrollperiodid = :pid AND driverid = :did
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                       AND workdate = :wd AND linetype = 'DailyStatus'
                 """),
-                {"pid": pid, "did": driver_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
+                {"pid": pid, "did": driver_assignment_id, "wd": datetime.date.fromisoformat(DATE_FEB02)},
             )
 
             grid_resp = await _get_day_grid(session_client, auth_token, pid, DATE_FEB02)
             assert grid_resp.status_code == 200, f"Get day grid failed: {grid_resp.text}"
             row = next(
-                (r for r in grid_resp.json()["rows"] if r["driver_id"] == driver_id), None,
+                (r for r in grid_resp.json()["rows"] if r["driver_assignment_id"] == driver_assignment_id), None,
             )
             assert row is not None
             assert row["status_key"] == status_code, (
@@ -1509,7 +1509,7 @@ class TestStatusPaymentFormula:
             driver_name=f"P4S2 Formula {case_name}", status_code=f"P4S2F{case_name[:6]}{id(self)}",
             hours=hours, rate_amount=rate, rate_effective_from=DATE_FEB02,
             period_suffix=f"-{case_name}",
-        ) as (driver_id, pid, status_key_id):
+        ) as (driver_assignment_id, pid, status_key_id):
             code_row = (await direct_db.execute(
                 _text("SELECT statuscode FROM payroll.payrollstatuskeys WHERE statuskeyid = :id"),
                 {"id": status_key_id},
@@ -1517,11 +1517,11 @@ class TestStatusPaymentFormula:
             status_code = code_row["statuscode"]
 
             resp = await _save_day_grid(
-                session_client, auth_token, pid, driver_id, DATE_FEB02, status_code,
+                session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, status_code,
             )
             assert resp.status_code == 200, f"Day grid save failed: {resp.text}"
 
-            lines = await _get_status_pay_lines(direct_db, pid, driver_id)
+            lines = await _get_status_pay_lines(direct_db, pid, driver_assignment_id)
             assert len(lines) == 1
             assert Decimal(str(lines[0]["calculatedamount"])) == Decimal(expected), (
                 f"Expected {hours} x {rate} exact product, ROUND_HALF_EVEN -> {expected}; "
@@ -1578,7 +1578,7 @@ class TestStatusPaymentFormula:
 class TestStatusRateResolution:
     """
     Rate resolution query (service.py `_sync_status_payment_for_entry_state`):
-    `WHERE driverid=:did AND ratetypeid=:rtid AND companyid=:cid
+    `WHERE driverassignmentid=:did AND ratetypeid=:rtid AND companyid=:cid
        AND status IN ('Approved','Superseded')
        AND effectivefrom <= :dt AND (effectiveto IS NULL OR effectiveto >= :dt)
      ORDER BY effectivefrom DESC LIMIT 1`
@@ -1598,16 +1598,16 @@ class TestStatusRateResolution:
 
     Note on branch isolation (section 10.F, P2 evidence gap -- deliberately
     NOT force-tested here): the resolution query above filters ONLY by
-    `driverid`, `ratetypeid`, and `companyid` -- it has NO `BranchID`
+    `driverassignmentid`, `ratetypeid`, and `companyid` -- it has NO `BranchID`
     predicate at all (confirmed by reading the exact query, not assumed).
     Branch ownership is therefore entirely INDIRECT: `core.Drivers.BranchID`
     is `NOT NULL` and a driver permanently belongs to exactly one branch, so
-    a query scoped to `driverid=:did` can never match another branch's
+    a query scoped to `driverassignmentid=:did` can never match another branch's
     DriverRate row for a DIFFERENT driver. A "meaningful direct cross-branch
     candidate" (per this fix-forward's instructions) is not constructible
     through valid schema state here: the only way to make a Branch-B rate
     row visible to this query would be to insert it with the Branch-A
-    driver's own DriverID -- which is not "another driver's rate in a
+    driver's own DriverAssignmentID -- which is not "another driver's rate in a
     different branch" at all, just the same driver's rate, and proves
     nothing about branch isolation. Manufacturing a DriverRates row with a
     BranchID column value that mismatches the driver's actual branch would
@@ -1625,7 +1625,7 @@ class TestStatusRateResolution:
         paytest_branch_id: int, direct_db,
     ):
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 TieBreak")
+        driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 TieBreak")
         async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
             async with contextlib.AsyncExitStack() as stack:
                 status_key_id = await stack.enter_async_context(
@@ -1634,13 +1634,13 @@ class TestStatusRateResolution:
                 status_pay_rt_id = await _get_status_pay_rate_type_id(session_client, auth_token)
                 await stack.enter_async_context(
                     _owned_driver_rate(
-                        direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                        direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                         "10.0000", "2098-01-01", status="Superseded", effective_to="2098-01-31",
                     )
                 )
                 await stack.enter_async_context(
                     _owned_driver_rate(
-                        direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                        direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                         "30.0000", "2098-02-01", status="Approved",
                     )
                 )
@@ -1657,11 +1657,11 @@ class TestStatusRateResolution:
                 status_code = code_row["statuscode"]
 
                 resp = await _save_day_grid(
-                    session_client, auth_token, pid, driver_id, DATE_FEB02, status_code,
+                    session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, status_code,
                 )
                 assert resp.status_code == 200, f"Day grid save failed: {resp.text}"
 
-                lines = await _get_status_pay_lines(direct_db, pid, driver_id)
+                lines = await _get_status_pay_lines(direct_db, pid, driver_assignment_id)
                 assert len(lines) == 1
                 # 5.00 x 30.0000 = 150.0000 (rate B, the later effectivefrom).
                 assert Decimal(str(lines[0]["calculatedamount"])) == Decimal("150.0000"), (
@@ -1678,7 +1678,7 @@ class TestStatusRateResolution:
         """A PendingApproval DriverRate must NOT be used — the resolution
         query filters `status IN ('Approved', 'Superseded')` only."""
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 Pending")
+        driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 Pending")
         async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
             async with contextlib.AsyncExitStack() as stack:
                 status_key_id = await stack.enter_async_context(
@@ -1687,7 +1687,7 @@ class TestStatusRateResolution:
                 status_pay_rt_id = await _get_status_pay_rate_type_id(session_client, auth_token)
                 await stack.enter_async_context(
                     _owned_driver_rate(
-                        direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                        direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                         "99.0000", "2098-01-01", status="PendingApproval",
                     )
                 )
@@ -1704,11 +1704,11 @@ class TestStatusRateResolution:
                 status_code = code_row["statuscode"]
 
                 resp = await _save_day_grid(
-                    session_client, auth_token, pid, driver_id, DATE_FEB02, status_code,
+                    session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, status_code,
                 )
                 assert resp.status_code == 200, f"Day grid save failed: {resp.text}"
 
-                lines = await _get_status_pay_lines(direct_db, pid, driver_id)
+                lines = await _get_status_pay_lines(direct_db, pid, driver_assignment_id)
                 assert len(lines) == 1
                 assert lines[0]["calculatedamount"] is None, (
                     "A PendingApproval rate must not be resolved -> no calculated amount"
@@ -1785,13 +1785,13 @@ class TestPtoStatusProhibitionSlice2:
         paytest_branch_id: int, direct_db,
     ):
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 PTO Probe")
+        driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 PTO Probe")
         async with _owned_period(
             session_client, auth_token, paytest_branch_id,
             PERIOD_A_START, PERIOD_A_END, direct_db, suffix="-pto",
         ) as pid:
             resp = await _save_day_grid(
-                session_client, auth_token, pid, driver_id, DATE_FEB02, "PTO_STATUS",
+                session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, "PTO_STATUS",
             )
             assert resp.status_code == 422, (
                 f"'PTO_STATUS' is not an active StatusKey code in this test database, "
@@ -1856,7 +1856,7 @@ class TestStatusNotAPayItem:
     @pytest.mark.asyncio
     async def test_generic_draft_line_endpoint_rejects_status_pay_as_line_type(
         self, session_client: httpx.AsyncClient, auth_token: str,
-        paytest_branch_id: int, paytest_driver_id: int, direct_db,
+        paytest_branch_id: int, paytest_driver_assignment_id: int, direct_db,
     ):
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
         async with _owned_period(
@@ -1866,7 +1866,7 @@ class TestStatusNotAPayItem:
             resp = await session_client.post(
                 f"/payroll/periods/{pid}/lines",
                 json={
-                    "driver_id": paytest_driver_id,
+                    "driver_assignment_id": paytest_driver_assignment_id,
                     "work_date": DATE_FEB02,
                     "line_type": "STATUS_PAY",
                     "quantity": "8",
@@ -1900,13 +1900,13 @@ class TestDacAndFutureRuleBoundary:
         paytest_branch_id: int, direct_db,
     ):
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 DAC Boundary")
+        driver_assignment_id = await _create_driver(session_client, auth_token, paytest_branch_id, "P4S2 DAC Boundary")
         async with _status_rate_column(direct_db, 1, paytest_branch_id) as src_col_id:
             async with contextlib.AsyncExitStack() as stack:
                 status_pay_rt_id = await _get_status_pay_rate_type_id(session_client, auth_token)
                 await stack.enter_async_context(
                     _owned_driver_rate(
-                        direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                        direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                         "15.0000", "2098-01-01",
                     )
                 )
@@ -1940,14 +1940,14 @@ class TestDacAndFutureRuleBoundary:
                     {"id": key_with_allowance},
                 )).mappings().first()["statuscode"]
 
-                r1 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB02, code_no)
+                r1 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, code_no)
                 assert r1.status_code == 200
-                r2 = await _save_day_grid(session_client, auth_token, pid, driver_id, DATE_FEB03, code_yes)
+                r2 = await _save_day_grid(session_client, auth_token, pid, driver_assignment_id, DATE_FEB03, code_yes)
                 assert r2.status_code == 200
 
-                lines_1 = await _get_status_pay_lines(direct_db, pid, driver_id)
+                lines_1 = await _get_status_pay_lines(direct_db, pid, driver_assignment_id)
                 lines_1 = [line for line in lines_1 if line["workdate"] == datetime.date.fromisoformat(DATE_FEB02)]
-                lines_2 = await _get_status_pay_lines(direct_db, pid, driver_id)
+                lines_2 = await _get_status_pay_lines(direct_db, pid, driver_assignment_id)
                 lines_2 = [line for line in lines_2 if line["workdate"] == datetime.date.fromisoformat(DATE_FEB03)]
                 assert len(lines_1) == 1 and len(lines_2) == 1
                 amt_1 = Decimal(str(lines_1[0]["calculatedamount"]))
@@ -2005,7 +2005,7 @@ class TestCleanupIsExceptionSafe:
         class _DeliberateTestFailure(Exception):
             pass
 
-        driver_id = await _create_driver(
+        driver_assignment_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "P4S2 Cleanup Failure",
         )
         status_key_id = None
@@ -2022,7 +2022,7 @@ class TestCleanupIsExceptionSafe:
                     status_pay_rt_id = await _get_status_pay_rate_type_id(session_client, auth_token)
                     rate_id = await stack.enter_async_context(
                         _owned_driver_rate(
-                            direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                            direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                             "15.0000", "2098-01-01",
                         )
                     )
@@ -2054,14 +2054,14 @@ class TestCleanupIsExceptionSafe:
         class _DeliberateTestFailure(Exception):
             pass
 
-        driver_id = await _create_driver(
+        driver_assignment_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "P4S2 PayRule Cleanup Failure",
         )
         rule_id = None
         with pytest.raises(_DeliberateTestFailure):
             async with _owned_driver_pay_rule(
                 session_client, auth_token, direct_db,
-                driver_id=driver_id, branch_id=paytest_branch_id,
+                driver_assignment_id=driver_assignment_id, branch_id=paytest_branch_id,
                 rule_type="MinimumPay", amount="200.00",
                 effective_from=PERIOD_A_START, effective_to=PERIOD_A_END,
             ) as rule_id:
@@ -2103,7 +2103,7 @@ class TestCleanupIsExceptionSafe:
             pass
 
         await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-        driver_id = await _create_driver(
+        driver_assignment_id = await _create_driver(
             session_client, auth_token, paytest_branch_id, "P4S2 Period Cleanup Failure",
         )
         status_key_id = None
@@ -2121,7 +2121,7 @@ class TestCleanupIsExceptionSafe:
                     status_pay_rt_id = await _get_status_pay_rate_type_id(session_client, auth_token)
                     rate_id = await stack.enter_async_context(
                         _owned_driver_rate(
-                            direct_db, 1, paytest_branch_id, driver_id, status_pay_rt_id,
+                            direct_db, 1, paytest_branch_id, driver_assignment_id, status_pay_rt_id,
                             "20.0000", "2098-01-01",
                         )
                     )
@@ -2136,12 +2136,12 @@ class TestCleanupIsExceptionSafe:
                         {"id": status_key_id},
                     )).mappings().first()
                     save_resp = await _save_day_grid(
-                        session_client, auth_token, pid, driver_id, DATE_FEB02, code_row["statuscode"],
+                        session_client, auth_token, pid, driver_assignment_id, DATE_FEB02, code_row["statuscode"],
                     )
                     assert save_resp.status_code == 200, f"Day grid save failed: {save_resp.text}"
-                    entry_state = await _get_entry_state_row(direct_db, pid, driver_id, DATE_FEB02)
+                    entry_state = await _get_entry_state_row(direct_db, pid, driver_assignment_id, DATE_FEB02)
                     assert entry_state is not None, "Canonical entry-state row must exist before the failure"
-                    lines = await _get_status_pay_lines(direct_db, pid, driver_id)
+                    lines = await _get_status_pay_lines(direct_db, pid, driver_assignment_id)
                     assert len(lines) == 1, "Real STATUS_PAY DraftLine must exist before the failure"
 
                     raise _DeliberateTestFailure("simulated failure after Period + entry-state exist")

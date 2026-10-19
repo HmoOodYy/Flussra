@@ -82,10 +82,10 @@ async def _create_and_open_period(client, token, branch_id, direct_db) -> tuple[
     return row["payrollperiodid"], start_str
 
 
-async def _add_line(client, token, pid, driver_id, work_date) -> None:
+async def _add_line(client, token, pid, driver_assignment_id, work_date) -> None:
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
-        json={"driver_id": driver_id, "work_date": work_date,
+        json={"driver_assignment_id": driver_assignment_id, "work_date": work_date,
               "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
         headers=_auth(token),
     )
@@ -121,10 +121,10 @@ async def _reject_to_returned(client, token, ri_id) -> None:
 
 async def _create_cp1b_driver(client, token: str, branch_id: int) -> int:
     """
-    Create a CP-1B-owned driver on the given branch; return its driver_id.
+    Create a CP-1B-owned driver on the given branch; return its driver_assignment_id.
 
     TestDeterministicConcurrency seeds an approved HOURLY rate for its driver.
-    Doing that on the session-scoped paytest_driver_id leaked a future-dated
+    Doing that on the session-scoped paytest_driver_assignment_id leaked a future-dated
     Approved rate into later tests (e.g. backdated approvals then hit the
     future-approved-rate conflict guard), so the rate-dependent scenarios use
     their own driver instead.
@@ -135,11 +135,11 @@ async def _create_cp1b_driver(client, token: str, branch_id: int) -> int:
         headers=_auth(token),
     )
     assert r.status_code == 201, f"create CP-1B driver: {r.text}"
-    return r.json()["driver_id"]
+    return r.json()["driver_assignment_id"]
 
 
 async def _ensure_hourly_rate(
-    session_client, auth_token: str, driver_id: int, direct_db
+    session_client, auth_token: str, driver_assignment_id: int, direct_db
 ) -> None:
     """
     Ensure an approved HOURLY rate (25.00/hr, effective only through 2094) exists for driver.
@@ -149,14 +149,14 @@ async def _ensure_hourly_rate(
         _text("""
             SELECT 1 FROM payroll.driverrates dr
             JOIN payroll.ratetypes rt ON rt.ratetypeid = dr.ratetypeid
-            WHERE dr.driverid = :did
+            WHERE dr.driverassignmentid = :did
               AND rt.ratecode = 'HOURLY'
               AND dr.status = 'Approved'
               AND dr.effectivefrom <= '2094-12-31'
               AND (dr.effectiveto IS NULL OR dr.effectiveto >= '2094-01-01')
             LIMIT 1
         """),
-        {"did": driver_id},
+        {"did": driver_assignment_id},
     )).first()
     if existing is not None:
         return
@@ -172,7 +172,7 @@ async def _ensure_hourly_rate(
     rate_resp = await session_client.post(
         "/payroll/rates",
         json={
-            "driver_id": driver_id,
+            "driver_assignment_id": driver_assignment_id,
             "rate_type_id": hourly_rt["rate_type_id"],
             "amount": "25.00",
             "effective_from": "2094-01-01",
@@ -192,12 +192,12 @@ async def _ensure_hourly_rate(
 
 
 async def _add_hours_line(
-    client, token: str, pid: int, driver_id: int, work_date: str
+    client, token: str, pid: int, driver_assignment_id: int, work_date: str
 ) -> int:
     """Add an HOURS (PerUnit, rate-dependent) draft line. Returns draft_line_id."""
     r = await client.post(
         f"/payroll/periods/{pid}/lines",
-        json={"driver_id": driver_id, "work_date": work_date,
+        json={"driver_assignment_id": driver_assignment_id, "work_date": work_date,
               "line_type": "HOURS", "quantity": 8},
         headers=_auth(token),
     )
@@ -251,8 +251,8 @@ class TestMigration:
             f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
             f"{result.stdout}\n{result.stderr}"
         )
-        assert "0086" in lines[0], (
-            f"Expected head 0086, got: {lines[0]}\n{result.stderr}"
+        assert "0087" in lines[0], (
+            f"Expected head 0087, got: {lines[0]}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio

@@ -101,6 +101,7 @@ If an issue is officially moved to a different work unit:
 * `FLUSSRA\_UNIFIED\_REFOUNDATION\_EXECUTION\_PLAN.md`
 * `PEOPLE\_WORKFORCE\_ACCESS\_ARCHITECTURE\_CONTRACT.md`
 * `PEOPLE\_AND\_ACCESS\_REFOUNDATION\_MASTER\_PLAN.md`
+* `DURABLE\_DRIVER\_IDENTITY\_DRIVER\_OWNED\_COMPENSATION\_PLAN.md` (active execution document for Durable Driver Stages 1–3)
 
 **P1a:** CLOSED / merged.
 
@@ -126,13 +127,17 @@ If an issue is officially moved to a different work unit:
 
 **P4a:** CLOSED / merged (PR #48; `main` at `83234d46b5ab357c1e7062d77aff4e4ad3d9e711`; generic PayDefinition / Branch Configuration authority cutover; migration `0084`).
 
-**P4b:** Current implementation work unit (Target Period Definition Runtime + PerUnit Cutover; migration `0085`).
+**P4b:** CLOSED / merged (PR #49; `main` at `85644f599e09c958a366c08554978010d2738434`; Target Period Definition Runtime + PerUnit Cutover; migration `0085`).
+
+**Branch timezone authority:** CLOSED / merged (PR #56; `main` at `8da533a5310485a790eac3da6a5ec040a60381ae`; migration `0086`).
+
+**Durable Driver Stage 1:** Current implementation work unit (permanent Driver + DriverAssignments; Stages 1–3 precede P4c; P6a is retired).
 
 **Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`. P3b merge baseline: `main` at the PR #46 merge, `edcf871f59d0616e194a8e752d9b6ba23f42b8a2`. P3c merge baseline: `main` at the PR #47 merge, `3f389499bbb1a0a70935360f32230f8e0aae4a7c`.
 
 **Test Hygiene:** PR #29 merged after P2c.
 
-**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c `0083`; P4a advanced it to `0084`; P4b advances it to `0085`.
+**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c `0083`; P4a advanced it to `0084`; P4b to `0085`; the Branch timezone authority to `0086`; Durable Driver Stage 1 advances it next.
 
 **Important rule:** Anything below marked `NOT YET` remains intentional architectural/product debt until the entry itself is updated to `YES`.
 
@@ -594,19 +599,19 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 * **P3c** target authoring/resolver
 * **P4a–P4c** runtime authority + snapshots/calculation/evidence
 * **P5a–P5b** Status compensation + OrdinalTier
-* **P6a** transfer compensation copy
+* **P6a** transfer compensation copy — RETIRED (2026-10-18); superseded by Durable Driver Stages 1–3, which precede P4c
 
 **Why Deferred:**  
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
 
 **Current State:**  
-P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45). P3b is closed (PR #46): it established a dormant target persistence model and database invariants beside the legacy compensation model. P3c made the dormant model authorable and resolvable (generic PayDefinition governance and provenance, PerUnit assignment authoring, canonical resolver) without switching any operational path. P4a (closed, PR #48) cut the definition, branch-applicability and PerUnit rate authoring authority over to the target model and retired the legacy CDPI/PayItem writers and the ordinary legacy DriverRate writers. P4b (current, migration `0085`) is the clean pre-production runtime cutover: PayrollPeriodDefinitions replace the period PayItem snapshot, ordinary DraftLines become source facts keyed by `PayrollPeriodDefinitionID`, live PerUnit money is derived by the backend through `resolve_many` and the method-owned calculation boundary, and submit/resubmit/finalize stay closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c. Zero PayDefinitions is valid and never falls back to PayItems; development databases that contain periods must be reset before `0085` applies. This debt is not resolved by P3b, P3c or P4a: the target period snapshots, calculation and evidence (P4b–P4c), Status and OrdinalTier (P5), transfer copy (P6) and removal of the inert legacy layer remain.
+P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45). P3b is closed (PR #46): it established a dormant target persistence model and database invariants beside the legacy compensation model. P3c made the dormant model authorable and resolvable (generic PayDefinition governance and provenance, PerUnit assignment authoring, canonical resolver) without switching any operational path. P4a (closed, PR #48) cut the definition, branch-applicability and PerUnit rate authoring authority over to the target model and retired the legacy CDPI/PayItem writers and the ordinary legacy DriverRate writers. P4b (closed, PR #49, migration `0085`) is the clean pre-production runtime cutover: PayrollPeriodDefinitions replace the period PayItem snapshot, ordinary DraftLines become source facts keyed by `PayrollPeriodDefinitionID`, live PerUnit money is derived by the backend through `resolve_many` and the method-owned calculation boundary, and submit/resubmit/finalize stay closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c. Zero PayDefinitions is valid and never falls back to PayItems; development databases that contain periods must be reset before `0085` applies. This debt is not resolved by P3b, P3c or P4a: the target period snapshots, calculation and evidence (P4b–P4c), Status and OrdinalTier (P5), transfer copy (P6, since retired) and removal of the inert legacy layer remain. Update 2026-10-18: Durable Driver Stages 1–3 (permanent Driver and DriverAssignments, Driver-owned compensation, payable rounding and proration) now precede P4c, and P6a is retired because compensation follows the Driver.
 
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-07
+**Last Updated:** 2026-10-18
 
 \---
 
@@ -619,7 +624,7 @@ When a Driver moves to a new Branch, the product will eventually need an explici
 Transfer architecture planning.
 
 **Deferred To:**  
-**P6a — Target compensation copy on transfer.**
+**SUPERSEDED (2026-10-18) — Durable Driver Stage 2 (Driver-owned compensation).** Originally P6a — Target compensation copy on transfer, now retired.
 
 **Why Deferred:**  
 Copying legacy DriverRates now and replacing them soon afterward would duplicate work and create another dependency on architecture that is already scheduled for retirement.
@@ -627,11 +632,13 @@ Copying legacy DriverRates now and replacing them soon afterward would duplicate
 **Current State:**  
 Transfers before P6a must not silently introduce new compensation-copy semantics.
 
+Update 2026-10-18: The copy design is superseded and P6a is retired. Compensation will be owned by the permanent Driver (Durable Driver Stage 2), so a permanent transfer carries rates and Min/Max automatically; the transfer copy, its Yes/No choice and the legacy copy route are retired. Durable Driver Stage 1 introduces the permanent Driver and DriverAssignments and adds no compensation-copy semantics. The underlying need (a transferred Driver keeps its compensation) is delivered by Stage 2, so this entry stays NOT YET until Stage 2 is accepted.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Last Updated:** 2026-10-18
 
 \---
 
@@ -777,11 +784,63 @@ The feature requires explicit payroll-eligibility, Driver-profile-history, and r
 **Current State:**  
 Generic PATCH operations must not perform Driver→non-Driver transitions or reactivate historical/terminated Driver profiles.
 
+Update 2026-10-18: Durable Driver Stage 1 makes the Driver permanent (0..1 per Employee, created with its first DriverAssignment), so a driver who stops driving and returns later reuses the same Driver with a new DriverAssignment. The rehire/return flow itself, the Driver→non-Driver transition and their payroll-eligibility semantics remain undefined and unbuilt.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Last Updated:** 2026-10-18
+
+\---
+
+## DWR-023 — External Driver Identifiers and Aliases Are Deferred to C2 Import
+
+**Issue:**  
+Durable Driver Stage 1 drops `ExternalDriverID` (no defined meaning, no UI consumer) and `core.DriverAliases` (no application consumer). Mapping external or source-system driver identities to a Driver still needs a designed home.
+
+**Discovered In:**  
+Durable Driver Stage 1 identity design.
+
+**Deferred To:**  
+**C2 Import design** (source system + external key + Driver).
+
+**Why Deferred:**  
+The meaning of an external driver identity depends on the import contract. Keeping an undefined column or an unused alias table would preserve ambiguity.
+
+**Current State:**  
+Neither structure exists after Stage 1. `import.ImportRows.MatchedDriverID` refers to the permanent Driver. No generic alias or external-ID system is built.
+
+**Issue Resolved?:** NOT YET
+
+**Resolved In:** —  
+**Resolution Evidence:** —  
+**Last Updated:** 2026-10-18
+
+\---
+
+## DWR-024 — Temporary Loan / Worked-for-Branch Feature Is Not Built
+
+**Issue:**  
+A Driver temporarily working for another Branch has no record or eligibility path. The architecture only fixes the rule that a temporary loan is not a home DriverAssignment and never changes the Driver's home Branch or Min/Max home pay calendar.
+
+**Discovered In:**  
+Durable Driver identity plan (permanent transfer versus temporary loan semantics).
+
+**Deferred To:**  
+**Future explicit product definition — no authorized work unit currently exists.**
+
+**Why Deferred:**  
+A concrete loan record, eligibility path and UI need their own design. Modelling a loan as a permanent transfer would corrupt the home Branch and the Min/Max calendar.
+
+**Current State:**  
+Documentation-only rule. Evidence design (P4c) must not make separate home-Branch and host/work-Branch provenance impossible.
+
+**Issue Resolved?:** NOT YET
+
+**Resolved In:** —  
+**Resolution Evidence:** —  
+**Last Updated:** 2026-10-18
 
 \---
 
@@ -795,13 +854,15 @@ Generic PATCH operations must not perform Driver→non-Driver transitions or rea
 |**P2b**|DWR-008|
 |**P2c**|DWR-006, DWR-009|
 |**P3a–P5b**|DWR-015|
-|**P6a**|DWR-016|
+|**Durable Driver Stage 2** (P6a retired)|DWR-016|
 |**P7a**|DWR-005 consumer migration, DWR-017|
 |**P7c**|DWR-012, DWR-018|
 |**P8a**|DWR-003, DWR-004, DWR-005 final deletion, DWR-019|
 |**P8b**|DWR-013, DWR-014, DWR-020|
 |**P8c**|DWR-021|
 |**Unscheduled future lifecycle**|DWR-022|
+|**Unscheduled future temporary-loan feature**|DWR-024|
+|**C2 Import design**|DWR-023|
 
 \---
 

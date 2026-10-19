@@ -51,13 +51,13 @@ async def require_rate_read(
 
 
 async def load_company_driver_branch(
-    company_id: int, user_id: int, driver_id: int, db: AsyncConnection,
+    company_id: int, user_id: int, driver_assignment_id: int, db: AsyncConnection,
 ) -> int:
     """Return the Driver's BranchID or raise 404 when it is not in the Company."""
     await require_non_driver_subject(company_id, user_id, db)
     branch_id = (await db.execute(
-        text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": driver_id, "cid": company_id},
+        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :did AND companyid = :cid"),
+        {"did": driver_assignment_id, "cid": company_id},
     )).scalar_one_or_none()
     if branch_id is None:
         raise compensation_error("DRIVER_NOT_FOUND", "Driver not found.", 404)

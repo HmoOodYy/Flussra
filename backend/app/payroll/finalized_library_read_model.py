@@ -208,7 +208,7 @@ async def list_finalized_periods(
 async def _financial_summary(period: dict[str, Any], db: AsyncConnection) -> dict[str, Any]:
     row = (await db.execute(text("""
         SELECT COUNT(*) AS final_line_count,
-               COUNT(DISTINCT driverid) AS driver_count,
+               COUNT(DISTINCT driverassignmentid) AS driver_count,
                COALESCE(SUM(finalamount), 0) AS total_pay
         FROM payroll.payrollfinallines
         WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
@@ -255,11 +255,11 @@ def classify_final_line_component(row: Any) -> str:
 
 async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
     rows = (await db.execute(text("""
-        SELECT driverid, linetype, linescope, workdate, payitemid, quantity,
+        SELECT driverassignmentid, driverid, linetype, linescope, workdate, payitemid, quantity,
                resolvedrateamount, finalamount, sourcetype, sourceid, bonuseventid
         FROM payroll.payrollfinallines
         WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-        ORDER BY driverid, finallineid
+        ORDER BY driverassignmentid, finallineid
     """), {
         "period_id": period["payrollperiodid"], "company_id": period["companyid"],
         "branch_id": period["branchid"],
@@ -271,13 +271,14 @@ async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[lis
     })
     lines: list[dict[str, Any]] = []
     for row in rows:
-        driver_id = int(row["driverid"])
+        driver_assignment_id = int(row["driverassignmentid"])
         amount = Decimal(str(row["finalamount"]))
-        total = totals[driver_id]
+        total = totals[driver_assignment_id]
+        total["driver_id"] = int(row["driverid"])
         total["total_pay"] += amount
         total[classify_final_line_component(row)] += amount
         lines.append({
-            "driver_id": driver_id, "source_type": row["sourcetype"],
+            "driver_assignment_id": driver_assignment_id, "source_type": row["sourcetype"],
             "source_id": row["sourceid"], "line_type": row["linetype"],
             "line_scope": row["linescope"], "work_date": row["workdate"],
             "pay_item_id": row["payitemid"], "quantity": row["quantity"],
@@ -313,19 +314,21 @@ async def _snapshot_evidence(snapshot_id: int, period: dict[str, Any], db: Async
         period_id=int(header["payrollperiodid"]),
     )
     statuses = [{
-        "driver_id": row["driver_id"], "work_date": row["work_date"],
+        "driver_assignment_id": row["driver_assignment_id"], "driver_id": row["driver_id"],
+        "work_date": row["work_date"],
         "status_key_id": row["status_key_id"], "code": row["status_code"],
         "label": row["status_label"], "is_off": row["is_off_reason"],
     } for row in status_rows]
     bonuses = (await db.execute(text("""
-        SELECT payrollbonuseventid, driverid, amount, reason, notes, datarevision,
+        SELECT payrollbonuseventid, driverassignmentid, driverid, amount, reason, notes, datarevision,
                createdbyuserid, creatordisplaynamesnapshot, createdatutc
         FROM payroll.payrollcalculationsnapshotbonusevents
         WHERE payrollcalculationsnapshotid = :snapshot_id
-        ORDER BY driverid, payrollbonuseventid
+        ORDER BY driverassignmentid, payrollbonuseventid
     """), {"snapshot_id": snapshot_id})).mappings().all()
     return True, int(version), str(header["reportevidencehash"]), statuses, [
-        {"bonus_event_id": int(r["payrollbonuseventid"]), "driver_id": int(r["driverid"]),
+        {"bonus_event_id": int(r["payrollbonuseventid"]), "driver_assignment_id": int(r["driverassignmentid"]),
+         "driver_id": int(r["driverid"]),
          "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
          "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
          "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]} for r in bonuses
@@ -336,14 +339,14 @@ async def _snapshot_work_and_drivers(
     snapshot_id: int, period: dict[str, Any], db: AsyncConnection,
 ) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
     rows = (await db.execute(text("""
-        SELECT dt.driverid, dt.drivercodesnapshot, dt.drivernamesnapshot,
+        SELECT dt.driverassignmentid, dt.driverid, dt.drivernumbersnapshot, dt.drivernamesnapshot,
                sl.sourcetype, sl.linetype, sl.linescope, sl.workdate, sl.payitemid, sl.quantity
         FROM payroll.payrollcalculationdrivertotals dt
         LEFT JOIN payroll.payrollcalculationsnapshotlines sl
           ON sl.payrollcalculationdrivertotalid = dt.payrollcalculationdrivertotalid
         WHERE dt.payrollcalculationsnapshotid = :snapshot_id
           AND dt.companyid = :company_id AND dt.branchid = :branch_id
-        ORDER BY dt.driverid, sl.payrollcalculationsnapshotlineid
+        ORDER BY dt.driverassignmentid, sl.payrollcalculationsnapshotlineid
     """), {
         "snapshot_id": snapshot_id, "company_id": period["companyid"],
         "branch_id": period["branchid"],
@@ -351,14 +354,15 @@ async def _snapshot_work_and_drivers(
     drivers: dict[int, dict[str, Any]] = {}
     work_rows: list[dict[str, Any]] = []
     for row in rows:
-        driver_id = int(row["driverid"])
-        drivers.setdefault(driver_id, {
-            "driver_id": driver_id, "driver_code": row["drivercodesnapshot"],
+        driver_assignment_id = int(row["driverassignmentid"])
+        drivers.setdefault(driver_assignment_id, {
+            "driver_assignment_id": driver_assignment_id, "driver_id": int(row["driverid"]),
+            "driver_number": row["drivernumbersnapshot"],
             "driver_name": row["drivernamesnapshot"],
         })
         if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
             work_rows.append({
-                "driver_id": driver_id, "work_date": row["workdate"],
+                "driver_assignment_id": driver_assignment_id, "work_date": row["workdate"],
                 "line_type": row["linetype"], "pay_item_id": row["payitemid"],
                 "quantity": row["quantity"], "line_scope": row["linescope"],
             })
@@ -458,8 +462,8 @@ async def _finalized_used_rate_definitions(
               AND sl.usedratedefinitionid IS NOT NULL
             GROUP BY sl.usedratedefinitionid
         )
-        SELECT d.payrollcalculationsnapshotusedratedefinitionid, d.driverid,
-               dt.drivernamesnapshot, dt.drivercodesnapshot,
+        SELECT d.payrollcalculationsnapshotusedratedefinitionid, d.driverassignmentid, d.driverid,
+               dt.drivernamesnapshot, dt.drivernumbersnapshot,
                d.evidencekind, d.sourcetypesnapshot, d.payitemid,
                NULL::varchar AS payitemcode, NULL::varchar AS payitemlabel,
                d.ratetypeid, d.ratetypecodesnapshot, d.ratetypenamesnapshot, d.unitnamesnapshot,
@@ -472,11 +476,11 @@ async def _finalized_used_rate_definitions(
         JOIN usage u ON u.usedratedefinitionid = d.payrollcalculationsnapshotusedratedefinitionid
         LEFT JOIN payroll.payrollcalculationdrivertotals dt
           ON dt.payrollcalculationsnapshotid = d.payrollcalculationsnapshotid
-         AND dt.companyid = d.companyid AND dt.branchid = d.branchid AND dt.driverid = d.driverid
+         AND dt.companyid = d.companyid AND dt.branchid = d.branchid AND dt.driverassignmentid = d.driverassignmentid
         WHERE d.payrollcalculationsnapshotid = :snapshot_id
           AND d.companyid = :company_id AND d.branchid = :branch_id
           AND d.payrollperiodid = :period_id
-        ORDER BY d.driverid, d.evidencekind, d.payitemid NULLS LAST,
+        ORDER BY d.driverassignmentid, d.evidencekind, d.payitemid NULLS LAST,
                  d.effectivefromsnapshot NULLS LAST,
                  d.payrollcalculationsnapshotusedratedefinitionid
     """), {
@@ -500,8 +504,9 @@ async def _finalized_used_rate_definitions(
         return [], _availability("UNAVAILABLE", "RATE_EVIDENCE_LINKAGE_UNAVAILABLE")
     definitions = [{
         "used_rate_definition_id": int(row["payrollcalculationsnapshotusedratedefinitionid"]),
-        "driver_id": int(row["driverid"]), "driver_name": row["drivernamesnapshot"],
-        "driver_code": row["drivercodesnapshot"], "evidence_kind": row["evidencekind"],
+        "driver_assignment_id": int(row["driverassignmentid"]), "driver_id": int(row["driverid"]),
+        "driver_name": row["drivernamesnapshot"],
+        "driver_number": row["drivernumbersnapshot"], "evidence_kind": row["evidencekind"],
         "source_type": row["sourcetypesnapshot"], "pay_item_id": row["payitemid"],
         "pay_item_code": row["payitemcode"], "pay_item_label": row["payitemlabel"],
         "rate_type_id": row["ratetypeid"], "rate_type_code": row["ratetypecodesnapshot"],
@@ -528,25 +533,26 @@ async def _finalized_bonus_evidence(
     if snapshot["reportevidenceversion"] is None:
         return [], _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
     rows = (await db.execute(text("""
-        SELECT b.payrollbonuseventid, b.driverid, dt.drivernamesnapshot, dt.drivercodesnapshot,
+        SELECT b.payrollbonuseventid, b.driverassignmentid, b.driverid, dt.drivernamesnapshot, dt.drivernumbersnapshot,
                b.amount, b.reason, b.notes, b.datarevision, b.createdbyuserid,
                b.creatordisplaynamesnapshot, b.createdatutc
         FROM payroll.payrollcalculationsnapshotbonusevents b
         LEFT JOIN payroll.payrollcalculationdrivertotals dt
           ON dt.payrollcalculationsnapshotid = b.payrollcalculationsnapshotid
-         AND dt.companyid = b.companyid AND dt.branchid = b.branchid AND dt.driverid = b.driverid
+         AND dt.companyid = b.companyid AND dt.branchid = b.branchid AND dt.driverassignmentid = b.driverassignmentid
         WHERE b.payrollcalculationsnapshotid = :snapshot_id
           AND b.companyid = :company_id AND b.branchid = :branch_id
           AND b.payrollperiodid = :period_id
-        ORDER BY b.driverid, b.payrollbonuseventid
+        ORDER BY b.driverassignmentid, b.payrollbonuseventid
     """), {
         "snapshot_id": snapshot["payrollcalculationsnapshotid"],
         "period_id": period["payrollperiodid"], "company_id": period["companyid"],
         "branch_id": period["branchid"],
     })).mappings().all()
     return [{
-        "bonus_event_id": int(row["payrollbonuseventid"]), "driver_id": int(row["driverid"]),
-        "driver_name": row["drivernamesnapshot"], "driver_code": row["drivercodesnapshot"],
+        "bonus_event_id": int(row["payrollbonuseventid"]), "driver_assignment_id": int(row["driverassignmentid"]),
+        "driver_id": int(row["driverid"]),
+        "driver_name": row["drivernamesnapshot"], "driver_number": row["drivernumbersnapshot"],
         "amount": row["amount"], "reason": row["reason"], "notes": row["notes"],
         "data_revision": int(row["datarevision"]), "creator_user_id": row["createdbyuserid"],
         "creator_display_name": row["creatordisplaynamesnapshot"],
@@ -672,27 +678,31 @@ async def build_finalized_report(
             else _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
         )
     drivers = dict(frozen_drivers)
-    for driver_id in financial_totals:
-        drivers.setdefault(driver_id, {"driver_id": driver_id, "driver_code": None, "driver_name": None})
+    for driver_assignment_id in financial_totals:
+        drivers.setdefault(driver_assignment_id, {
+            "driver_assignment_id": driver_assignment_id,
+            "driver_id": financial_totals[driver_assignment_id].get("driver_id"),
+            "driver_number": None, "driver_name": None,
+        })
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)
     by_driver_lines: dict[int, list[dict[str, Any]]] = defaultdict(list)
     by_driver_status: dict[int, list[dict[str, Any]]] = defaultdict(list)
     by_driver_bonus: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in work_rows:
-        by_driver_work[row["driver_id"]].append(row)
+        by_driver_work[row["driver_assignment_id"]].append(row)
     for line in final_lines:
-        by_driver_lines[line["driver_id"]].append(line)
+        by_driver_lines[line["driver_assignment_id"]].append(line)
     for item in statuses:
-        by_driver_status[item["driver_id"]].append(item)
+        by_driver_status[item["driver_assignment_id"]].append(item)
     for item in bonuses:
-        by_driver_bonus[item["driver_id"]].append(item)
+        by_driver_bonus[item["driver_assignment_id"]].append(item)
     summaries = summarize_status_entries(statuses)
     result_drivers = []
-    for driver_id in sorted(drivers):
-        total = financial_totals.get(driver_id)
+    for driver_assignment_id in sorted(drivers):
+        total = financial_totals.get(driver_assignment_id)
         pay = None
         if total is not None:
-            item_amounts = per_driver_definitions.get(driver_id, {})
+            item_amounts = per_driver_definitions.get(driver_assignment_id, {})
             gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
                 **total,
@@ -705,17 +715,17 @@ async def build_finalized_report(
                      "amount": item_amounts.get(cid, Decimal("0"))}
                     for cid in definition_column_ids
                 ],
-                "financial_lines": by_driver_lines[driver_id],
+                "financial_lines": by_driver_lines[driver_assignment_id],
             }
         result_drivers.append({
-            **drivers[driver_id],
+            **drivers[driver_assignment_id],
             "work": {
-                "daily_rows": by_driver_work[driver_id],
-                "status_entries": by_driver_status[driver_id],
-                "status_summaries": summaries.get(driver_id, []),
+                "daily_rows": by_driver_work[driver_assignment_id],
+                "status_entries": by_driver_status[driver_assignment_id],
+                "status_summaries": summaries.get(driver_assignment_id, []),
             },
             "pay": pay,
-            "bonus_events": by_driver_bonus[driver_id],
+            "bonus_events": by_driver_bonus[driver_assignment_id],
         })
     financial_state = "AVAILABLE" if final_lines else "EMPTY"
     return {
@@ -780,22 +790,25 @@ async def _finalized_eligible_driver_days(
     if marker is None:
         return None, _availability("UNAVAILABLE", "ELIGIBILITY_SNAPSHOT_UNAVAILABLE")
     rows = (await db.execute(text("""
-        SELECT pde.driverid, pde.drivercodesnapshot, pde.drivernamesnapshot,
+        SELECT pde.driverassignmentid,
+               (SELECT a.driverid FROM core.driverassignments a
+                 WHERE a.driverassignmentid = pde.driverassignmentid) AS permanentdriverid,
+               pde.drivernumbersnapshot, pde.drivernamesnapshot,
                pde.iseligibleforperiod, pde.eligibilityreasoncode,
                pde.hiredatesnapshot, pde.terminationdatesnapshot,
                pde.drivereffectivefromatsnapshot, pde.drivereffectivetoatsnapshot,
                pde.branchtimezoneidsnapshot, pde.eligibleworkdates,
-               dt.drivercodesnapshot AS total_driver_code,
+               dt.drivernumbersnapshot AS total_driver_number,
                dt.drivernamesnapshot AS total_driver_name
         FROM payroll.payrollperioddrivereligibility pde
         LEFT JOIN payroll.payrollcalculationdrivertotals dt
           ON dt.payrollcalculationsnapshotid = :snapshot_id
          AND dt.companyid = pde.companyid AND dt.branchid = pde.branchid
-         AND dt.driverid = pde.driverid
+         AND dt.driverassignmentid = pde.driverassignmentid
         WHERE pde.payrollperiodid = :period_id
           AND pde.companyid = :company_id AND pde.branchid = :branch_id
           AND pde.iseligibleforperiod = TRUE
-        ORDER BY pde.driverid
+        ORDER BY pde.driverassignmentid
     """), {
         "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
         "company_id": period["companyid"], "branch_id": period["branchid"],
@@ -812,10 +825,11 @@ async def _finalized_eligible_driver_days(
             if _is_snapshot_row_eligible_for_workdate(eligibility, work_date)
         }
         if days:
-            driver_id = int(row["driverid"])
-            result[driver_id] = {
-                "driver_id": driver_id,
-                "driver_code": row["drivercodesnapshot"] or row["total_driver_code"],
+            driver_assignment_id = int(row["driverassignmentid"])
+            result[driver_assignment_id] = {
+                "driver_assignment_id": driver_assignment_id,
+                "driver_id": int(row["permanentdriverid"]),
+                "driver_number": row["drivernumbersnapshot"] or row["total_driver_number"],
                 "driver_name": row["drivernamesnapshot"] or row["total_driver_name"],
                 "eligible_days": days,
             }
@@ -866,14 +880,14 @@ async def build_finalized_off_drivers(
 
     drivers = eligibility or {}
     identities = {
-        driver_id: (driver["driver_name"], driver["driver_code"])
-        for driver_id, driver in drivers.items()
+        driver_assignment_id: (driver["driver_name"], driver["driver_number"])
+        for driver_assignment_id, driver in drivers.items()
     }
-    status_by_driver_day = {(row["driver_id"], row["work_date"]): row for row in statuses}
+    status_by_driver_day = {(row["driver_assignment_id"], row["work_date"]): row for row in statuses}
     frozen_statuses = [{
         **row,
-        "driver_name": identities.get(row["driver_id"], (None, None))[0],
-        "driver_code": identities.get(row["driver_id"], (None, None))[1],
+        "driver_name": identities.get(row["driver_assignment_id"], (None, None))[0],
+        "driver_number": identities.get(row["driver_assignment_id"], (None, None))[1],
     } for row in statuses]
 
     can_resolve_off = (
@@ -886,13 +900,14 @@ async def build_finalized_off_drivers(
             days = driver["eligible_days"]
             off_days = sum(
                 1 for work_date in days
-                if status_by_driver_day.get((driver["driver_id"], work_date), {}).get("is_off_reason")
-                and (driver["driver_id"], work_date) not in normal_work
+                if status_by_driver_day.get((driver["driver_assignment_id"], work_date), {}).get("is_off_reason")
+                and (driver["driver_assignment_id"], work_date) not in normal_work
             )
             if off_days == len(days):
                 fully_off.append({
-                    "driver_id": driver["driver_id"], "driver_name": driver["driver_name"] or "",
-                    "driver_code": driver["driver_code"], "eligible_scheduled_day_count": len(days),
+                    "driver_assignment_id": driver["driver_assignment_id"], "driver_id": driver["driver_id"],
+                    "driver_name": driver["driver_name"] or "",
+                    "driver_number": driver["driver_number"], "eligible_scheduled_day_count": len(days),
                     "off_day_count": off_days,
                 })
     off_availability = (

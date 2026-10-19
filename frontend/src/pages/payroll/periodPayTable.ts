@@ -35,9 +35,9 @@ export interface PeriodPayFixedValues {
 }
 
 export interface PeriodPayRow extends PeriodPayFixedValues {
-  driver_id: number;
+  driver_assignment_id: number;
   driver_label: string;
-  driver_code: string | null;
+  driver_number: string | null;
   /** Dense, ordered exactly like PeriodPayTableModel.columns. */
   items: PeriodPayCell[];
 }
@@ -52,9 +52,9 @@ export interface PeriodPayTableModel {
   footer: PeriodPayFooter;
 }
 
-/** `driver.driver_name`, falling back to a stable `Driver #<id>` label. */
-export function driverLabel(driver: { driver_id: number; driver_name: string | null }): string {
-  return driver.driver_name ?? `Driver #${driver.driver_id}`;
+/** `driver.driver_name`, falling back to the Driver number, then a neutral label. */
+export function driverLabel(driver: { driver_name: string | null; driver_number?: string | null }): string {
+  return driver.driver_name ?? driver.driver_number ?? 'Unnamed driver';
 }
 
 function lookupAmount(amounts: DefinitionAmount[] | null | undefined, definitionId: number): string | null {
@@ -84,9 +84,9 @@ export function buildPeriodPayTable(
   const rows: PeriodPayRow[] = drivers.map((driver) => {
     const pay = driver.pay;
     return {
-      driver_id: driver.driver_id,
+      driver_assignment_id: driver.driver_assignment_id,
       driver_label: driverLabel(driver),
-      driver_code: driver.driver_code,
+      driver_number: driver.driver_number,
       items: alignItems(columns, pay?.definition_amounts),
       status_pay: pay?.status_pay ?? null,
       gross_pay: pay?.gross_pay ?? null,

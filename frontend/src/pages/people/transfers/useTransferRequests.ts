@@ -4,11 +4,11 @@ import type { Branch } from '../../../types/core';
 import { canEditTransfers } from '../../../lib/permissions';
 import {
   listTransfers, approveSource, decideTarget, completeTransfer, cancelTransfer, createTransfer,
-  listTransferDriverPickerPeople,
+  rescheduleTransfer, listTransferDriverPickerPeople,
 } from '../../../lib/transferApi';
 import type { TargetDecisionRequest } from '../../../types/transfer';
 import { useAuth } from '../../../store/authStore';
-import { apiError, matchesFilter, normalizeUtcDateTimeLocal } from './transferRequestsView';
+import { apiError, fmtEffectiveAt, matchesFilter, normalizeUtcDateTimeLocal } from './transferRequestsView';
 import { INITIAL, reducer } from './transferRequestsState';
 
 export function useTransferRequests(branches: Branch[]) {
@@ -44,7 +44,7 @@ export function useTransferRequests(branches: Branch[]) {
     if (!matchesFilter(r, st.filter)) return false;
     if (q) {
       const hay = [
-        r.driver_name, r.source_branch_name, r.target_branch_name, r.requested_by_name,
+        r.driver_name, r.driver_number, r.source_branch_name, r.target_branch_name, r.requested_by_name,
       ].map(s => (s ?? '').toLowerCase()).join(' ');
       if (!hay.includes(q)) return false;
     }
@@ -152,7 +152,10 @@ export function useTransferRequests(branches: Branch[]) {
       const updated = await completeTransfer(selected.transfer_request_id);
       dispatch({ type: 'UPDATE', req: updated });
       dispatch({ type: 'ACTION_LOADING', val: false });
-      showToast(`Transfer for ${updated.driver_name ?? 'driver'} completed. New profile created in ${updated.target_branch_name ?? 'target branch'}.`);
+      // The server decides: a future EffectiveAt is Scheduled, an immediate one Completed.
+      showToast(updated.status === 'Scheduled'
+        ? `Transfer for ${updated.driver_name ?? 'driver'} scheduled for ${fmtEffectiveAt(updated.effective_at)}.`
+        : `Transfer for ${updated.driver_name ?? 'driver'} completed. Now assigned to ${updated.target_branch_name ?? 'target branch'}.`);
     } catch (e) {
       dispatch({ type: 'ACTION_ERR', err: apiError(e) });
     }
@@ -175,9 +178,32 @@ export function useTransferRequests(branches: Branch[]) {
     }
   }, [selected, st.cancelDialog]);
 
+  // ── Reschedule (Scheduled requests only; the new instant must be in the future) ──
+  const submitReschedule = useCallback(async (e: FormEvent) => {
+    e.preventDefault();
+    if (!selected) return;
+    const effectiveAt = st.rescheduleDialog.effectiveAt
+      ? normalizeUtcDateTimeLocal(st.rescheduleDialog.effectiveAt)
+      : null;
+    if (!effectiveAt) {
+      dispatch({ type: 'RESCHEDULE_ERR', err: 'Enter a valid effective time in UTC.' });
+      return;
+    }
+    dispatch({ type: 'RESCHEDULE_LOADING', val: true });
+    try {
+      const updated = await rescheduleTransfer(selected.transfer_request_id, { effective_at: effectiveAt });
+      dispatch({ type: 'UPDATE', req: updated });
+      dispatch({ type: 'RESCHEDULE_CLOSE' });
+      showToast(`Transfer rescheduled for ${fmtEffectiveAt(updated.effective_at)}.`);
+    } catch (e) {
+      dispatch({ type: 'RESCHEDULE_ERR', err: apiError(e) });
+    }
+  }, [selected, st.rescheduleDialog]);
+
   return {
     st, dispatch, canEditAnyBranch, filtered, selected,
     canApproveSource, canDecideTarget, canActOnEitherBranch,
     openCreate, submitCreate, submitApproveSource, submitDecide, doComplete, submitCancel,
+    submitReschedule,
   };
 }

@@ -46,7 +46,7 @@ export function normalizeUtcDateTimeLocal(value: string): string | null {
 
 // ─── Filter types ─────────────────────────────────────────────────────────────
 
-export type FilterView = 'all' | 'active' | 'pending_source' | 'pending_target' | 'returned' | 'approved' | 'completed' | 'terminal';
+export type FilterView = 'all' | 'active' | 'pending_source' | 'pending_target' | 'returned' | 'approved' | 'scheduled' | 'completed' | 'terminal';
 
 export const FILTER_LABELS: Record<FilterView, string> = {
   all:            'All',
@@ -55,6 +55,7 @@ export const FILTER_LABELS: Record<FilterView, string> = {
   pending_target: 'Awaiting Target',
   returned:       'Returned',
   approved:       'Ready to Complete',
+  scheduled:      'Scheduled',
   completed:      'Completed',
   terminal:       'Closed',
 };
@@ -67,6 +68,7 @@ export function matchesFilter(req: DriverTransferRequest, filter: FilterView): b
     case 'pending_target': return req.status === 'PendingTargetApproval';
     case 'returned':       return req.status === 'Returned';
     case 'approved':       return req.status === 'Approved';
+    case 'scheduled':      return req.status === 'Scheduled';
     case 'completed':      return req.status === 'Completed';
     case 'terminal':       return TRANSFER_TERMINAL.has(req.status);
   }

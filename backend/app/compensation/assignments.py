@@ -48,12 +48,13 @@ from app.compensation.schemas import (
 )
 from app.payroll.guards import check_not_in_finalized_period
 from app.rate_definition_concurrency import lock_rate_definition_structure
+from app.workforce.effective import require_writable_driver_assignment
 
 _ASSIGNMENT_COLUMNS = """
     a.driverrateassignmentid AS driver_rate_assignment_id,
     a.companyid              AS company_id,
     a.branchid               AS branch_id,
-    a.driverid               AS driver_id,
+    a.driverassignmentid               AS driver_assignment_id,
     a.ratedefinitionid       AS rate_definition_id,
     a.effectivefrom          AS effective_from,
     a.effectiveto            AS effective_to,
@@ -125,6 +126,7 @@ async def _lock_monetary_pending_assignment(
         raise compensation_error(
             "ASSIGNMENT_CHANGED", "The assignment changed during the request.", 409)
     _require_pending(row, action)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     return row
 
 
@@ -206,7 +208,7 @@ def _validate_window(effective_from: date, effective_to: date | None) -> None:
 async def create_pending(
     company_id: int, user_id: int, data: AssignmentCreate, db: AsyncConnection,
 ) -> AssignmentSummary:
-    branch_id = await load_company_driver_branch(company_id, user_id, data.driver_id, db)
+    branch_id = await load_company_driver_branch(company_id, user_id, data.driver_assignment_id, db)
     await require_rate_edit(company_id, user_id, branch_id, db)
     await _authorable_rate_definition(company_id, data.rate_definition_id, db)
     _validate_window(data.effective_from, data.effective_to)
@@ -214,16 +216,17 @@ async def create_pending(
     await lock_rate_definition_structure(data.rate_definition_id, db)
     await _require_authoring_authority(
         company_id, data.rate_definition_id, branch_id, data.effective_from, db)
+    await require_writable_driver_assignment(company_id, data.driver_assignment_id, db)
     try:
         assignment_id = (await db.execute(
             text("""
                 INSERT INTO payroll.driverrateassignments
-                    (companyid, branchid, driverid, ratedefinitionid, effectivefrom,
+                    (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom,
                      effectiveto, notes, createdbyuserid)
                 VALUES (:cid, :bid, :did, :rid, :efrom, :eto, :notes, :uid)
                 RETURNING driverrateassignmentid
             """),
-            {"cid": company_id, "bid": branch_id, "did": data.driver_id,
+            {"cid": company_id, "bid": branch_id, "did": data.driver_assignment_id,
              "rid": data.rate_definition_id, "efrom": data.effective_from,
              "eto": data.effective_to, "notes": data.notes, "uid": user_id},
         )).scalar_one()
@@ -236,7 +239,7 @@ async def get_assignment(
     company_id: int, user_id: int, assignment_id: int, db: AsyncConnection,
 ) -> AssignmentSummary:
     row = await _load_assignment_row(company_id, assignment_id, db)
-    await load_company_driver_branch(company_id, user_id, row["driver_id"], db)
+    await load_company_driver_branch(company_id, user_id, row["driver_assignment_id"], db)
     await require_rate_read(company_id, user_id, row["branch_id"], db)
     return await _summary(company_id, assignment_id, db)
 
@@ -254,6 +257,7 @@ async def update_pending(
 ) -> AssignmentSummary:
     row = await _lock_and_load(company_id, assignment_id, db)
     await require_rate_edit(company_id, user_id, row["branch_id"], db)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     _require_pending(row, "edited")
 
     effective_from = data.effective_from if "effective_from" in data.model_fields_set \
@@ -357,10 +361,10 @@ async def approve(
         text("""
             SELECT driverrateassignmentid, effectivefrom, effectiveto
             FROM   payroll.driverrateassignments
-            WHERE  driverid = :did AND ratedefinitionid = :rid AND status = 'Approved'
+            WHERE  driverassignmentid = :did AND ratedefinitionid = :rid AND status = 'Approved'
             FOR UPDATE
         """),
-        {"did": row["driver_id"], "rid": row["rate_definition_id"]},
+        {"did": row["driver_assignment_id"], "rid": row["rate_definition_id"]},
     )).mappings().first()
 
     try:
@@ -400,6 +404,7 @@ async def discard(
 ) -> None:
     row = await _lock_and_load(company_id, assignment_id, db)
     await require_rate_edit(company_id, user_id, row["branch_id"], db)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     _require_pending(row, "discarded")
     await db.execute(
         text("SELECT set_config('flussra.actor_user_id', :uid, true)"),
@@ -444,6 +449,7 @@ async def void(
 ) -> AssignmentSummary:
     row = await _lock_and_load(company_id, assignment_id, db)
     await require_rate_edit(company_id, user_id, row["branch_id"], db)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     if row["status"] == "Pending":
         raise compensation_error(
             "PENDING_CANNOT_BE_VOIDED",
@@ -469,10 +475,10 @@ async def void(
 
 
 async def history(
-    company_id: int, user_id: int, driver_id: int, rate_definition_id: int,
+    company_id: int, user_id: int, driver_assignment_id: int, rate_definition_id: int,
     db: AsyncConnection,
 ) -> list[AssignmentSummary]:
-    branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
+    branch_id = await load_company_driver_branch(company_id, user_id, driver_assignment_id, db)
     await require_rate_read(company_id, user_id, branch_id, db)
     owned = (await db.execute(
         text("SELECT 1 FROM payroll.ratedefinitions WHERE ratedefinitionid = :rid AND companyid = :cid"),
@@ -483,18 +489,18 @@ async def history(
     ids = (await db.execute(
         text("""
             SELECT driverrateassignmentid FROM payroll.driverrateassignments
-            WHERE  companyid = :cid AND driverid = :did AND ratedefinitionid = :rid
+            WHERE  companyid = :cid AND driverassignmentid = :did AND ratedefinitionid = :rid
             ORDER  BY effectivefrom DESC, driverrateassignmentid DESC
         """),
-        {"cid": company_id, "did": driver_id, "rid": rate_definition_id},
+        {"cid": company_id, "did": driver_assignment_id, "rid": rate_definition_id},
     )).scalars().all()
     return [await _summary(company_id, int(i), db) for i in ids]
 
 
 async def driver_summary(
-    company_id: int, user_id: int, driver_id: int, db: AsyncConnection,
+    company_id: int, user_id: int, driver_assignment_id: int, db: AsyncConnection,
 ) -> list[DriverRateSummaryItem]:
-    branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
+    branch_id = await load_company_driver_branch(company_id, user_id, driver_assignment_id, db)
     await require_rate_read(company_id, user_id, branch_id, db)
     rows = (await db.execute(
         text("""
@@ -510,18 +516,18 @@ async def driver_summary(
             FROM   payroll.driverrateassignments a
             JOIN   payroll.ratedefinitions rd ON rd.ratedefinitionid = a.ratedefinitionid
             LEFT JOIN payroll.paydefinitions pd ON pd.paydefinitionid = rd.paydefinitionid
-            WHERE  a.companyid = :cid AND a.driverid = :did
+            WHERE  a.companyid = :cid AND a.driverassignmentid = :did
             GROUP  BY a.ratedefinitionid, rd.paydefinitionid, pd.definitioncode
             ORDER  BY a.ratedefinitionid
         """),
-        {"cid": company_id, "did": driver_id},
+        {"cid": company_id, "did": driver_assignment_id},
     )).mappings().all()
     return [DriverRateSummaryItem.model_validate(dict(row)) for row in rows]
 
 
 
 async def driver_pay_rates(
-    company_id: int, user_id: int, driver_id: int, as_of: date | None, db: AsyncConnection,
+    company_id: int, user_id: int, driver_assignment_id: int, as_of: date | None, db: AsyncConnection,
 ) -> list[DriverPayRateRow]:
     """Branch-applicable scalar PayDefinitions and the Driver's rate state for each.
 
@@ -529,7 +535,7 @@ async def driver_pay_rates(
     active on the reference date. Rates are configuration only; nothing is
     calculated here.
     """
-    branch_id = await load_company_driver_branch(company_id, user_id, driver_id, db)
+    branch_id = await load_company_driver_branch(company_id, user_id, driver_assignment_id, db)
     await require_rate_read(company_id, user_id, branch_id, db)
     reference = as_of or await branch_today(company_id, branch_id, db)
 
@@ -568,11 +574,11 @@ async def driver_pay_rates(
             FROM   payroll.driverrateassignments a
             LEFT JOIN payroll.driverratevalues v
                    ON v.driverrateassignmentid = a.driverrateassignmentid
-            WHERE  a.companyid = :cid AND a.driverid = :did
+            WHERE  a.companyid = :cid AND a.driverassignmentid = :did
               AND  a.ratedefinitionid = ANY(:rids) AND a.status <> 'Voided'
             ORDER  BY a.effectivefrom, a.driverrateassignmentid
         """),
-        {"cid": company_id, "did": driver_id,
+        {"cid": company_id, "did": driver_assignment_id,
          "rids": [d["rate_definition_id"] for d in definitions]},
     )).mappings().all()
     by_definition: dict[int, list[AssignmentBrief]] = {}

@@ -77,13 +77,13 @@ async def _validate_period_can_finalize(
     # ── 1. Duplicate active source lines ──────────────────────────────────────
     dup_rows = (await db.execute(
         text("""
-            SELECT driverid, workdate, payrollperioddefinitionid, COUNT(*) AS cnt
+            SELECT driverassignmentid, workdate, payrollperioddefinitionid, COUNT(*) AS cnt
             FROM   payroll.payrolldraftlines
             WHERE  payrollperiodid = :period_id
               AND  companyid       = :company_id
               AND  status         != 'Void'
               AND  payrollperioddefinitionid IS NOT NULL
-            GROUP BY driverid, workdate, payrollperioddefinitionid
+            GROUP BY driverassignmentid, workdate, payrollperioddefinitionid
             HAVING COUNT(*) > 1
             LIMIT 5
         """),
@@ -91,7 +91,7 @@ async def _validate_period_can_finalize(
     )).mappings().all()
     if dup_rows:
         examples = "; ".join(
-            f"driver {r['driverid']} {r['workdate']} definition "
+            f"driver {r['driverassignmentid']} {r['workdate']} definition "
             f"{r['payrollperioddefinitionid']} x{r['cnt']}"
             for r in dup_rows
         )
@@ -106,20 +106,20 @@ async def _validate_period_can_finalize(
     await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
     elig_rows = (await db.execute(
         text("""
-            SELECT dl.draftlineid, dl.driverid, dl.workdate
+            SELECT dl.draftlineid, dl.driverassignmentid, dl.workdate
             FROM payroll.payrolldraftlines dl
             WHERE dl.payrollperiodid = :period_id AND dl.companyid = :company_id
               AND dl.status != 'Void' AND dl.payrollperioddefinitionid IS NOT NULL
               AND NOT EXISTS (
                     SELECT 1 FROM payroll.payrollperioddrivereligibility ppde
                     WHERE ppde.payrollperiodid = dl.payrollperiodid
-                      AND ppde.driverid = dl.driverid AND ppde.iseligibleforperiod = TRUE
+                      AND ppde.driverassignmentid = dl.driverassignmentid AND ppde.iseligibleforperiod = TRUE
               )
             LIMIT 5
         """), {"period_id": period_id, "company_id": company_id},
     )).mappings().all()
     if elig_rows:
-        examples = "; ".join(f"driver {r['driverid']} {r['workdate']}" for r in elig_rows)
+        examples = "; ".join(f"driver {r['driverassignmentid']} {r['workdate']}" for r in elig_rows)
         blockers.append(
             f"Cannot finalize: {len(elig_rows)} source line(s) reference "
             f"driver/date combinations that are no longer eligible "
@@ -157,7 +157,7 @@ class _CalculationPacketLine:
     line_type: str | None
     line_scope: str | None
     work_date: date | None
-    driver_id: int
+    driver_assignment_id: int
     quantity: Decimal | None
     resolved_rate_amount: Decimal | None
     calculated_amount: Decimal | None
@@ -180,8 +180,9 @@ class _CalculationPacketLine:
 
 @dataclass(frozen=True)
 class _CalculationPacketDriverTotal:
+    driver_assignment_id: int
     driver_id: int
-    driver_code: str | None
+    driver_number: str | None
     driver_name: str | None
     daily_pay: Decimal
     status_pay: Decimal
@@ -234,7 +235,7 @@ async def _validate_legacy_status_canonicalized(
     """
     rows = (await db.execute(
         text("""
-            SELECT DISTINCT ds.driverid, ds.workdate
+            SELECT DISTINCT ds.driverassignmentid, ds.workdate
             FROM   payroll.payrolldraftlines ds
             WHERE  ds.payrollperiodid = :pid
               AND  ds.companyid       = :cid
@@ -246,12 +247,12 @@ async def _validate_legacy_status_canonicalized(
                        FROM   payroll.payrollperioddriverdayentrystate e
                        WHERE  e.payrollperiodid = ds.payrollperiodid
                          AND  e.companyid       = ds.companyid
-                         AND  e.driverid        = ds.driverid
+                         AND  e.driverassignmentid        = ds.driverassignmentid
                          AND  e.workdate        = ds.workdate
                          AND  e.statuskeyid    IS NOT NULL
                          AND  e.isvoided        = FALSE
                    )
-            ORDER BY ds.driverid, ds.workdate
+            ORDER BY ds.driverassignmentid, ds.workdate
             LIMIT 5
         """),
         {
@@ -264,7 +265,7 @@ async def _validate_legacy_status_canonicalized(
     if not rows:
         return []
 
-    examples = "; ".join(f"driver {r['driverid']} on {r['workdate']}" for r in rows)
+    examples = "; ".join(f"driver {r['driverassignmentid']} on {r['workdate']}" for r in rows)
     return [
         "LEGACY_STATUS_NOT_CANONICAL: one or more days have a Status set only "
         "through the legacy Daily Status representation, with no matching "
@@ -321,7 +322,8 @@ async def _build_live_calculation_packet(
     # (never from a stored column). The persisted STATUS_PAYMENT/STATUS_PAY
     # compatibility projection is not a target ordinary line and is excluded.
     driver_names: dict[int, str | None] = {}
-    driver_codes: dict[int, str | None] = {}
+    driver_numbers: dict[int, str | None] = {}
+    driver_permanent_ids: dict[int, int] = {}
     driver_daily: dict[int, Decimal] = {}
     driver_status: dict[int, Decimal] = {}
     driver_bonus: dict[int, Decimal] = {}
@@ -329,7 +331,7 @@ async def _build_live_calculation_packet(
     driver_lines: dict[int, list[_CalculationPacketLine]] = {}
 
     for line in await load_live_source_lines(period_id, company_id, db):
-        drv = line.driver_id
+        drv = line.driver_assignment_id
         driver_lines.setdefault(drv, [])
         calc = line.calculation
         if calc.needs_attention:
@@ -344,7 +346,7 @@ async def _build_live_calculation_packet(
             line_type=None,
             line_scope="Daily",
             work_date=line.work_date,
-            driver_id=drv,
+            driver_assignment_id=drv,
             quantity=line.quantity,
             resolved_rate_amount=None,
             calculated_amount=calc.amount,
@@ -376,7 +378,7 @@ async def _build_live_calculation_packet(
         period_id, company_id, period.branch_id, db,
     )
     for sl in live_status_lines:
-        drv = sl.driver_id
+        drv = sl.driver_assignment_id
         driver_names.setdefault(drv, None)
         driver_lines.setdefault(drv, [])
 
@@ -392,7 +394,7 @@ async def _build_live_calculation_packet(
             line_type=sl.line_type,
             line_scope="Daily",
             work_date=sl.work_date,
-            driver_id=drv,
+            driver_assignment_id=drv,
             quantity=sl.hours_value,
             resolved_rate_amount=sl.resolved_rate_amount,
             calculated_amount=sl.calculated_amount,
@@ -421,9 +423,10 @@ async def _build_live_calculation_packet(
 
     # ── Canonical Active bonus (never Voided).
     for b in await payroll_bonus._load_active_bonus_events(period_id, company_id, db):
-        drv = int(b["driverid"])
+        drv = int(b["driverassignmentid"])
         driver_names.setdefault(drv, b["drivername"])
-        driver_codes.setdefault(drv, b["drivercode"])
+        driver_numbers.setdefault(drv, b["drivernumber"])
+        driver_permanent_ids.setdefault(drv, int(b["driverid"]))
         driver_lines.setdefault(drv, [])
         amt = Decimal(str(b["amount"]))
         driver_bonus[drv] = driver_bonus.get(drv, Decimal("0")) + amt
@@ -433,7 +436,7 @@ async def _build_live_calculation_packet(
             line_type="BONUS",
             line_scope="Period",
             work_date=None,
-            driver_id=drv,
+            driver_assignment_id=drv,
             quantity=None,
             resolved_rate_amount=None,
             calculated_amount=amt,
@@ -451,26 +454,28 @@ async def _build_live_calculation_packet(
         ))
 
     # ── Financial-source-driven driver union (CP-4B: not a full roster).
-    all_driver_ids = (
+    all_driver_assignment_ids = (
         set(driver_daily) | set(driver_status) | set(driver_bonus)
     )
 
-    if not all_driver_ids:
+    if not all_driver_assignment_ids:
         warnings.append("No current financial source lines for this period.")
     else:
-        driver_identity_result = await db.execute(
+        driver_assignment_identity_result = await db.execute(
             text("""
-                SELECT d.driverid, d.drivercode, e.fullname
-                FROM core.drivers d
-                JOIN core.employees e ON e.employeeid = d.employeeid
-                WHERE d.companyid = :cid
-                  AND d.driverid = ANY(:driver_ids)
+                SELECT a.driverassignmentid, a.driverid, d.drivernumber, e.fullname
+                FROM core.driverassignments a
+                JOIN core.drivers d ON d.driverid = a.driverid
+                JOIN core.employees e ON e.employeeid = a.employeeid
+                WHERE a.companyid = :cid
+                  AND a.driverassignmentid = ANY(:driver_assignment_ids)
             """),
-            {"cid": company_id, "driver_ids": sorted(all_driver_ids)},
+            {"cid": company_id, "driver_assignment_ids": sorted(all_driver_assignment_ids)},
         )
-        for identity in driver_identity_result.mappings().all():
-            driver_names.setdefault(int(identity["driverid"]), identity["fullname"])
-            driver_codes.setdefault(int(identity["driverid"]), identity["drivercode"])
+        for identity in driver_assignment_identity_result.mappings().all():
+            driver_names.setdefault(int(identity["driverassignmentid"]), identity["fullname"])
+            driver_numbers.setdefault(int(identity["driverassignmentid"]), identity["drivernumber"])
+            driver_permanent_ids.setdefault(int(identity["driverassignmentid"]), int(identity["driverid"]))
 
     # ── Minimum/maximum: same as-of-period-start rule and ordering as
     # get_finalization_preview — normal base excludes bonus by construction;
@@ -482,7 +487,7 @@ async def _build_live_calculation_packet(
     driver_min_rule: dict[int, Any] = {}
     driver_max_rule: dict[int, Any] = {}
 
-    for drv_id in all_driver_ids:
+    for drv_id in all_driver_assignment_ids:
         normal_base = (
             driver_daily.get(drv_id, Decimal("0"))
             + driver_status.get(drv_id, Decimal("0"))
@@ -492,7 +497,7 @@ async def _build_live_calculation_packet(
             text("""
                 SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
                 FROM payroll.driverpayrules
-                WHERE  driverid      = :did
+                WHERE  driverassignmentid      = :did
                   AND  companyid     = :cid
                   AND  ruletype      = 'MinimumPay'
                   AND  status        IN ('Active', 'Ended')
@@ -507,7 +512,7 @@ async def _build_live_calculation_packet(
             text("""
                 SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
                 FROM payroll.driverpayrules
-                WHERE  driverid      = :did
+                WHERE  driverassignmentid      = :did
                   AND  companyid     = :cid
                   AND  ruletype      = 'MaximumPay'
                   AND  status        IN ('Active', 'Ended')
@@ -547,7 +552,7 @@ async def _build_live_calculation_packet(
 
     # ── Assemble driver totals.
     driver_totals: list[_CalculationPacketDriverTotal] = []
-    for drv_id in sorted(all_driver_ids):
+    for drv_id in sorted(all_driver_assignment_ids):
         daily = driver_daily.get(drv_id, Decimal("0"))
         status_pay = driver_status.get(drv_id, Decimal("0"))
         normal_base = daily + status_pay
@@ -566,7 +571,7 @@ async def _build_live_calculation_packet(
                 line_type="SYS_MIN_TOPUP",
                 line_scope="Period",
                 work_date=None,
-                driver_id=drv_id,
+                driver_assignment_id=drv_id,
                 quantity=Decimal("1"),
                 resolved_rate_amount=None,
                 calculated_amount=min_adj,
@@ -590,7 +595,7 @@ async def _build_live_calculation_packet(
                 line_type="SYS_MAX_CAP",
                 line_scope="Period",
                 work_date=None,
-                driver_id=drv_id,
+                driver_assignment_id=drv_id,
                 quantity=Decimal("1"),
                 resolved_rate_amount=None,
                 calculated_amount=max_adj,
@@ -608,8 +613,9 @@ async def _build_live_calculation_packet(
             ))
 
         driver_totals.append(_CalculationPacketDriverTotal(
-            driver_id=drv_id,
-            driver_code=driver_codes.get(drv_id),
+            driver_assignment_id=drv_id,
+            driver_id=driver_permanent_ids[drv_id],
+            driver_number=driver_numbers.get(drv_id),
             driver_name=driver_names.get(drv_id),
             daily_pay=daily,
             status_pay=status_pay,
@@ -686,7 +692,9 @@ async def get_calculation_preview(
         warnings=packet.warnings,
         drivers=[
             CalculationPreviewDriverTotal(
+                driver_assignment_id=driver.driver_assignment_id,
                 driver_id=driver.driver_id,
+                driver_number=driver.driver_number,
                 driver_name=driver.driver_name,
                 daily_pay=driver.daily_pay,
                 status_pay=driver.status_pay,
@@ -708,7 +716,7 @@ async def get_calculation_preview(
                         definition_name=line.definition_name,
                         calculation_status=line.calculation_status,
                         rate_column_id=line.rate_column_id,
-                        driver_id=line.driver_id,
+                        driver_assignment_id=line.driver_assignment_id,
                         quantity=line.quantity,
                         resolved_rate=line.resolved_rate_amount,
                         calculated_amount=line.calculated_amount,

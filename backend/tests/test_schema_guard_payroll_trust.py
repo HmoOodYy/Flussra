@@ -386,11 +386,11 @@ def test_branch_temporal_constraint_drift_blocks_production_startup(apply_schema
     cur = conn.cursor()
     replaced = False
     try:
-        cur.execute("ALTER TABLE core.Drivers DROP CONSTRAINT excl_Drivers_Employee_AssignmentWindow")
+        cur.execute("ALTER TABLE core.DriverAssignments DROP CONSTRAINT excl_DriverAssignments_Driver_Window")
         cur.execute("""
-            ALTER TABLE core.Drivers ADD CONSTRAINT excl_Drivers_Employee_AssignmentWindow
+            ALTER TABLE core.DriverAssignments ADD CONSTRAINT excl_DriverAssignments_Driver_Window
             EXCLUDE USING gist (
-                EmployeeID WITH =,
+                DriverID WITH =,
                 core.fn_DriverEffectiveRange(EffectiveFromAt, EffectiveToAt) WITH &&
             ) NOT DEFERRABLE
         """)
@@ -400,11 +400,11 @@ def test_branch_temporal_constraint_drift_blocks_production_startup(apply_schema
         assert "must be DEFERRABLE INITIALLY DEFERRED" in str(exc_info.value)
     finally:
         if replaced:
-            cur.execute("ALTER TABLE core.Drivers DROP CONSTRAINT excl_Drivers_Employee_AssignmentWindow")
+            cur.execute("ALTER TABLE core.DriverAssignments DROP CONSTRAINT excl_DriverAssignments_Driver_Window")
             cur.execute("""
-                ALTER TABLE core.Drivers ADD CONSTRAINT excl_Drivers_Employee_AssignmentWindow
+                ALTER TABLE core.DriverAssignments ADD CONSTRAINT excl_DriverAssignments_Driver_Window
                 EXCLUDE USING gist (
-                    EmployeeID WITH =,
+                    DriverID WITH =,
                     core.fn_DriverEffectiveRange(EffectiveFromAt, EffectiveToAt) WITH &&
                 ) DEFERRABLE INITIALLY DEFERRED
             """)

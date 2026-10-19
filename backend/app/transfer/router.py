@@ -12,6 +12,7 @@ from app.transfer.schemas import (
     CancelRequest,
     DriverTransferCreate,
     DriverTransferResponse,
+    RescheduleRequest,
     SourceApprovalRequest,
     TargetDecisionRequest,
     TransferListResponse,
@@ -111,13 +112,31 @@ async def complete_transfer(
     db: DbDep,
 ) -> DriverTransferResponse:
     """
-    Complete an Approved transfer: creates new driver profile in target branch,
-    closes old profile, updates employee branch.
+    Complete an Approved transfer. An immediate request (no EffectiveAt) closes the
+    source assignment and opens the destination assignment of the same Driver now;
+    a future EffectiveAt materializes the same windows and the request is Scheduled.
     """
     return await service.complete_driver_transfer(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         transfer_request_id=transfer_request_id,
+        db=db,
+    )
+
+
+@router.post("/{transfer_request_id}/reschedule", response_model=DriverTransferResponse)
+async def reschedule_transfer(
+    transfer_request_id: int,
+    data: RescheduleRequest,
+    token: TokenDep,
+    db: DbDep,
+) -> DriverTransferResponse:
+    """Move EffectiveAt to another future instant (a Scheduled transfer only before it takes effect)."""
+    return await service.reschedule_driver_transfer(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        transfer_request_id=transfer_request_id,
+        data=data,
         db=db,
     )
 

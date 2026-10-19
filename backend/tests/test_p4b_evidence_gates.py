@@ -70,7 +70,7 @@ async def _open_period_with_source(client, engine, tenant) -> dict:
     saved = await client.post(
         f"/payroll/periods/{period['payroll_period_id']}/day-grid",
         json={"work_date": grid["work_date"], "rows": [
-            {"driver_id": tenant.driver_a, "values": {str(ppd): "8"}}]},
+            {"driver_assignment_id": tenant.driver_a, "values": {str(ppd): "8"}}]},
         headers=tenant.admin)
     assert saved.status_code == 200, saved.text
     return period

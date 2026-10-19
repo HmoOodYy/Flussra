@@ -20,6 +20,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
+from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -50,7 +52,7 @@ async def paytest_driver_id(
         json={
             "branch_id": paytest_branch_id,
             "full_name": "Dashboard Isolated Driver",
-            "driver_code": f"M17-D-{uuid4().hex[:10]}",
+            "driver_number": f"M17-D-{uuid4().hex[:10]}",
         },
         headers={"Authorization": f"Bearer {auth_token}"},
     )
@@ -579,13 +581,22 @@ class TestDashboardSetupWarnings:
 
         result = await direct_db.execute(
             text("""
-                INSERT INTO core.drivers (companyid, branchid, employeeid, driverstatus)
-                VALUES (:cid, :bid, :eid, 'Active')
+                INSERT INTO core.drivers (companyid, employeeid, driverstatus)
+                VALUES (:cid, :eid, 'Active')
                 RETURNING driverid
             """),
-            {"cid": company_id, "bid": paytest_branch_id, "eid": emp_id},
+            {"cid": company_id, "eid": emp_id},
         )
         drv_id = result.scalar_one()
+        assignment_id = (await direct_db.execute(
+            text("""
+                INSERT INTO core.driverassignments
+                    (companyid, branchid, employeeid, driverid, effectivefromat)
+                VALUES (:cid, :bid, :eid, :did, NOW() - INTERVAL '1 day')
+                RETURNING driverassignmentid
+            """),
+            {"cid": company_id, "bid": paytest_branch_id, "eid": emp_id, "did": drv_id},
+        )).scalar_one()
 
         try:
             resp = await _get_dashboard(client, auth_token)
@@ -593,6 +604,11 @@ class TestDashboardSetupWarnings:
             codes = [w["code"] for w in resp.json()["setup_warnings"]]
             assert "DRIVERS_NO_APPROVED_RATE" in codes
         finally:
+            async with suspended_test_triggers(direct_db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+                await direct_db.execute(
+                    text("DELETE FROM core.driverassignments WHERE driverassignmentid = :aid"),
+                    {"aid": assignment_id},
+                )
             await direct_db.execute(
                 text("DELETE FROM core.drivers WHERE driverid = :did"), {"did": drv_id}
             )
@@ -626,14 +642,16 @@ class TestDashboardSetupWarnings:
         # Check HQ has no active drivers without approved rates
         result = await direct_db.execute(
             text("""
-                SELECT COUNT(*) FROM core.drivers d
-                JOIN core.employees e ON e.employeeid = d.employeeid
-                WHERE d.branchid = :bid
+                SELECT COUNT(*) FROM core.driverassignments a
+                JOIN core.drivers d ON d.driverid = a.driverid
+                JOIN core.employees e ON e.employeeid = a.employeeid
+                WHERE a.branchid = :bid
+                  AND a.effectivetoat IS NULL
                   AND d.driverstatus = 'Active'
                   AND e.employmentstatus = 'Active'
                   AND NOT EXISTS (
                       SELECT 1 FROM payroll.driverrates dr
-                      WHERE dr.driverid = d.driverid AND dr.status = 'Approved'
+                      WHERE dr.driverassignmentid = a.driverassignmentid AND dr.status = 'Approved'
                   )
             """),
             {"bid": hq_branch_id},

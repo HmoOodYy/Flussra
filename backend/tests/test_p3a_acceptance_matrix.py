@@ -63,9 +63,14 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 INSERT INTO core.employees(companyid, branchid, fullname, employeetype, employmentstatus, createdbyuserid)
                 VALUES (:cid, :bid, 'P3a acceptance', 'Driver', 'Active', 1) RETURNING employeeid
             """), {"cid": company_id, "bid": branch_id})).scalar_one())
-            driver_id = int((await db.execute(text("""
-                INSERT INTO core.drivers(companyid, branchid, employeeid, drivercode, driverstatus)
-                VALUES (:cid, :bid, :eid, :code, 'Active') RETURNING driverid
+            driver_assignment_id = int((await db.execute(text("""
+                WITH d AS (
+                    INSERT INTO core.drivers(companyid, employeeid, drivernumber, driverstatus)
+                    VALUES (:cid, :eid, :code, 'Active') RETURNING driverid
+                )
+                INSERT INTO core.driverassignments(companyid, branchid, employeeid, driverid, effectivefromat)
+                SELECT :cid, :bid, :eid, d.driverid, NOW() - INTERVAL '1 day' FROM d
+                RETURNING driverassignmentid
             """), {"cid": company_id, "bid": branch_id, "eid": employee_id, "code": f"P3AD_{marker}"})).scalar_one())
             period_id = int((await db.execute(text("""
                 INSERT INTO payroll.payrollperiods
@@ -78,14 +83,14 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 company_id, 1, CompanyUpdate(company_name="P3a acceptance", currency_code="USD"), db,
             )
 
-            params = {"cid": company_id, "bid": branch_id, "did": driver_id,
+            params = {"cid": company_id, "bid": branch_id, "did": driver_assignment_id,
                       "eid": employee_id, "pid": period_id,
                       "rid": rate_type_id, "uid": 1, "state": state,
                       "hash": "a" * 64, "code": f"P3A_{marker}"}
             if state_kind in {"driver_rate", "driver_rate_tier"}:
                 row_id = int((await db.execute(text("""
                     INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverid, ratetypeid, amount, effectivefrom, status,
+                        (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
                          createdbyuserid, approvedbyuserid, approvedatutc)
                     VALUES (:cid,:bid,:did,:rid,10,DATE '2099-01-01',:state,1,1,NOW())
                     RETURNING driverrateid
@@ -98,7 +103,7 @@ async def test_each_durable_monetary_state_locks_company_currency(
             elif state_kind == "bonus":
                 row_id = int((await db.execute(text("""
                     INSERT INTO payroll.payrollbonusevents
-                        (companyid, branchid, payrollperiodid, driverid, amount, reason, status,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, amount, reason, status,
                          createdbyuserid, voidedbyuserid, voidedatutc, voidreason)
                     VALUES (:cid,:bid,:pid,:did,10,'P3a',CAST(:state AS VARCHAR(30)),1,
                             CASE WHEN CAST(:state AS TEXT)='Voided' THEN 1 END,
@@ -109,7 +114,7 @@ async def test_each_durable_monetary_state_locks_company_currency(
             elif state_kind == "pay_rule":
                 row_id = int((await db.execute(text("""
                     INSERT INTO payroll.driverpayrules
-                        (companyid, branchid, driverid, ruletype, amount, effectivefrom, effectiveto, status)
+                        (companyid, branchid, driverassignmentid, ruletype, amount, effectivefrom, effectiveto, status)
                     VALUES (:cid,:bid,:did,'MinimumPay',10,DATE '2099-01-01',
                             CASE WHEN CAST(:state AS TEXT)='Ended' THEN DATE '2099-01-07' END,CAST(:state AS VARCHAR(30)))
                     RETURNING driverpayruleid
@@ -119,7 +124,7 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 status = "Void" if state_kind == "draft_voided" else "Active"
                 row_id = int((await db.execute(text(f"""
                     INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype,
                          {amount}, sourcetype, sourceid, status)
                     VALUES (:cid,:bid,:pid,:did,DATE '2099-01-01','OTHER',10,'P3a',:code,:status)
                     RETURNING draftlineid
@@ -137,10 +142,10 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 await db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert','true',true)"))
                 row_id = int((await db.execute(text("""
                     INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverid, linetype, linescope,
+                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, linetype, linescope,
                          finalamount, sourcetype, approvedbyuserid, approvedatutc, currencycode,
                          currencyminorunitdigits)
-                    VALUES (:cid,:bid,:pid,:did,'OTHER','Period',10,'P3a',1,NOW(),'USD',2)
+                    VALUES (:cid,:bid,:pid,:did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did),'OTHER','Period',10,'P3a',1,NOW(),'USD',2)
                     RETURNING finallineid
                 """), params)).scalar_one())
 
@@ -173,9 +178,9 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
             cid = int((await db.execute(text("INSERT INTO core.companies(companycode,companyname) VALUES (:c,'P3a invalid') RETURNING companyid"), {"c": f"P3AI_{marker}"})).scalar_one())
             bid = int((await db.execute(text("INSERT INTO core.branches(companyid,branchcode,branchname,status,isdefault, timezoneid) VALUES (:c,:b,'P3a invalid','Active',TRUE, 'UTC') RETURNING branchid"), {"c": cid, "b": f"P3AIB_{marker}"})).scalar_one())
             eid = int((await db.execute(text("INSERT INTO core.employees(companyid,branchid,fullname,employeetype,employmentstatus,createdbyuserid) VALUES (:c,:b,'P3a invalid','Driver','Active',1) RETURNING employeeid"), {"c": cid, "b": bid})).scalar_one())
-            did = int((await db.execute(text("INSERT INTO core.drivers(companyid,branchid,employeeid,drivercode,driverstatus) VALUES (:c,:b,:e,:d,'Active') RETURNING driverid"), {"c": cid, "b": bid, "e": eid, "d": f"P3AID_{marker}"})).scalar_one())
+            did = int((await db.execute(text("WITH x AS (INSERT INTO core.drivers(companyid,employeeid,drivernumber,driverstatus) VALUES (:c,:e,:d,'Active') RETURNING driverid) INSERT INTO core.driverassignments(companyid,branchid,employeeid,driverid,effectivefromat) SELECT :c,:b,:e,x.driverid,NOW() - INTERVAL '1 day' FROM x RETURNING driverassignmentid"), {"c": cid, "b": bid, "e": eid, "d": f"P3AID_{marker}"})).scalar_one())
             period_id = int((await db.execute(text("INSERT INTO payroll.payrollperiods(companyid,branchid,status,periodcode,periodname,periodtype,startdate,enddate) VALUES (:c,:b,'Open',:p,'P3a invalid','Week',DATE '2099-01-01',DATE '2099-01-07') RETURNING payrollperiodid"), {"c": cid, "b": bid, "p": f"P3AIP_{marker}"})).scalar_one())
-            await db.execute(text("INSERT INTO payroll.payrolldraftlines(companyid,branchid,payrollperiodid,driverid,workdate,linetype,rateamount,sourcetype,sourceid) VALUES (:c,:b,:p,:d,DATE '2099-01-01','OTHER',10,'P3a',:s)"), {"c":cid,"b":bid,"p":period_id,"d":did,"s":marker})
+            await db.execute(text("INSERT INTO payroll.payrolldraftlines(companyid,branchid,payrollperiodid,driverassignmentid,workdate,linetype,rateamount,sourcetype,sourceid) VALUES (:c,:b,:p,:d,DATE '2099-01-01','OTHER',10,'P3a',:s)"), {"c":cid,"b":bid,"p":period_id,"d":did,"s":marker})
             with pytest.raises(HTTPException) as profile_error:
                 await company.get_company_profile(cid, 1, db)
             assert profile_error.value.detail["code"] == "COMPANY_CURRENCY_INVARIANT_VIOLATION"
@@ -261,7 +266,7 @@ async def test_unauthorized_rate_request_cannot_probe_company_currency(monkeypat
     monkeypatch.setattr(rates_service, "_require_non_driver_rate_subject", deny_driver_subject)
     monkeypatch.setattr(rates_service, "lock_and_get_company_currency_for_monetary_write", currency_probe)
     request = DriverRateCreate(
-        driver_id=1, rate_type_id=1, amount=10, effective_from=date(2099, 1, 1),
+        driver_assignment_id=1, rate_type_id=1, amount=10, effective_from=date(2099, 1, 1),
     )
     with pytest.raises(HTTPException) as denied:
         await rates_service.create_rate(1, 2, request, db=object())
@@ -306,7 +311,7 @@ class _StatusPaymentWithoutCurrencyDB:
 async def test_status_payment_without_currency_keeps_source_and_clears_stale_money():
     db = _StatusPaymentWithoutCurrencyDB({"draftlineid": 31, "sourceid": "STATUS_PAYMENT:7:3:4"})
     await status_payment_sync._sync_status_payment_for_entry_state(
-        company_id=1, branch_id=2, period_id=3, driver_id=4,
+        company_id=1, branch_id=2, period_id=3, driver_assignment_id=4,
         work_date=date(2099, 1, 1), status_key_id=3, user_id=5, db=db,
         currency=None,
     )
@@ -316,7 +321,7 @@ async def test_status_payment_without_currency_keeps_source_and_clears_stale_mon
 
     fresh = _StatusPaymentWithoutCurrencyDB(None)
     await status_payment_sync._sync_status_payment_for_entry_state(
-        company_id=1, branch_id=2, period_id=3, driver_id=4,
+        company_id=1, branch_id=2, period_id=3, driver_assignment_id=4,
         work_date=date(2099, 1, 1), status_key_id=3, user_id=5, db=fresh,
         currency=None,
     )

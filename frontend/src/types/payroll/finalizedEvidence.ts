@@ -18,6 +18,7 @@ export interface FinalizedAuditEvent {
   source_entity_type: string;
   source_entity_id: string;
   review_item_id: number | null;
+  driver_assignment_id: number | null;
   driver_id: number | null;
   work_date: string | null;
   pay_item_id: number | null;

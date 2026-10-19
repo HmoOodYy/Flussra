@@ -48,7 +48,7 @@ def _lines_url(period: dict) -> str:
 
 
 def _body(tenant, ppd: int, work_date: str, quantity="5", **extra) -> dict:
-    return {"driver_id": tenant.driver_a, "work_date": work_date,
+    return {"driver_assignment_id": tenant.driver_a, "work_date": work_date,
             "payroll_period_definition_id": ppd, "quantity": quantity, **extra}
 
 
@@ -232,7 +232,7 @@ async def test_the_day_grid_is_keyed_by_definition_identity_and_idempotent(
                                "calculation_method"}
     ids = [c["payroll_period_definition_id"] for c in columns]
     payload = {"work_date": grid["work_date"], "rows": [
-        {"driver_id": tenant.driver_a, "values": {str(ids[0]): "4", str(ids[1]): "6"}}]}
+        {"driver_assignment_id": tenant.driver_a, "values": {str(ids[0]): "4", str(ids[1]): "6"}}]}
     first = await p3c_client.post(url, json=payload, headers=tenant.admin)
     second = await p3c_client.post(url, json=payload, headers=tenant.admin)
     assert first.status_code == second.status_code == 200
@@ -242,7 +242,7 @@ async def test_the_day_grid_is_keyed_by_definition_identity_and_idempotent(
     # Codes do not route a save.
     by_code = await p3c_client.post(
         url, json={"work_date": grid["work_date"], "rows": [
-            {"driver_id": tenant.driver_a, "values": {"AAA_FIRST": "1"}}]},
+            {"driver_assignment_id": tenant.driver_a, "values": {"AAA_FIRST": "1"}}]},
         headers=tenant.admin)
     assert by_code.status_code == 422
     async with p3c_engine.connect() as conn:
@@ -257,10 +257,10 @@ async def test_clearing_a_cell_voids_the_line(p3c_client, p3c_engine, tenant):
     url = f"/payroll/periods/{period['payroll_period_id']}/day-grid"
     base = {"work_date": start}
     await p3c_client.post(
-        url, json={**base, "rows": [{"driver_id": tenant.driver_a, "values": {str(ppd): "5"}}]},
+        url, json={**base, "rows": [{"driver_assignment_id": tenant.driver_a, "values": {str(ppd): "5"}}]},
         headers=tenant.admin)
     cleared = await p3c_client.post(
-        url, json={**base, "rows": [{"driver_id": tenant.driver_a, "values": {str(ppd): ""}}]},
+        url, json={**base, "rows": [{"driver_assignment_id": tenant.driver_a, "values": {str(ppd): ""}}]},
         headers=tenant.admin)
     assert cleared.status_code == 200
     assert cleared.json()["rows"][0]["values"] == {}
@@ -281,7 +281,7 @@ async def test_draft_periods_accept_source_but_show_no_money(p3c_client, p3c_eng
     saved = await p3c_client.post(
         f"/payroll/periods/{prepared['payroll_period_id']}/day-grid",
         json={"work_date": grid["work_date"], "rows": [
-            {"driver_id": tenant.driver_a, "values": {str(ppd): "8"}}]},
+            {"driver_assignment_id": tenant.driver_a, "values": {str(ppd): "8"}}]},
         headers=tenant.admin)
     assert saved.status_code == 200, saved.text
     body = saved.json()

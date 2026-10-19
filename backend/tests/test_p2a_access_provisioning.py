@@ -29,7 +29,7 @@ async def employee(
 ) -> dict:
     profile = None
     if driver:
-        profile = {"driver_code": f"P2A-{uuid4().hex[:10]}"}
+        profile = {"driver_number": f"P2A-{uuid4().hex[:10]}"}
         if future:
             profile["effective_from_at"] = (await db.execute(
                 text("SELECT NOW() + INTERVAL '365 days'")
@@ -39,7 +39,7 @@ async def employee(
     response = await client.post(
         "/workforce/employees",
         json={"branch_id": 1, "full_name": f"P2a Employee {uuid4().hex[:8]}",
-              "hire_date": "2000-01-01", "driver_profile": profile},
+              "hire_date": "2000-01-01", "driver": profile},
         headers=auth(token),
     )
     assert response.status_code == 201, response.text

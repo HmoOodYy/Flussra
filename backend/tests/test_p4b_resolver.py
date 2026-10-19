@@ -97,7 +97,7 @@ async def test_resolve_many_returns_each_drivers_own_schedule(p3c_client, p3c_en
     await authored_assignment(p3c_client, tenant, definition, "25", effective_from="2026-01-01")
     other = add_driver(tenant)
     await authored_assignment(p3c_client, tenant, definition, "40",
-                              effective_from="2026-01-01", driver_id=other)
+                              effective_from="2026-01-01", driver_assignment_id=other)
     rd = definition["rate_definition_id"]
     keys = [ResolutionKey(tenant.driver_a, rd, date(2026, 2, 1)),
             ResolutionKey(other, rd, date(2026, 2, 1))]
@@ -154,7 +154,7 @@ def _seed_ordinal_schedule(tenant) -> tuple[int, list[int], int]:
                 component_ids.append(cur.fetchone()[0])
             cur.execute("""
                 INSERT INTO payroll.driverrateassignments
-                    (companyid, branchid, driverid, ratedefinitionid, effectivefrom)
+                    (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
                 VALUES (%s, %s, %s, %s, DATE '2026-01-01') RETURNING driverrateassignmentid
             """, (tenant.company_id, tenant.branch_a, tenant.driver_a, rate_definition_id))
             assignment_id = cur.fetchone()[0]
@@ -210,7 +210,7 @@ def _definition(
 
 def _resolved(*amounts, shape="Scalar", method="PerUnit") -> ResolvedCompensation:
     return ResolvedCompensation(
-        company_id=1, driver_id=1, branch_id=1, pay_definition_id=2, rate_definition_id=3,
+        company_id=1, driver_assignment_id=1, branch_id=1, pay_definition_id=2, rate_definition_id=3,
         rate_shape=shape, calculation_method=method, driver_rate_assignment_id=11,
         assignment_status="Approved", effective_from=date(2026, 1, 1),
         components=[ResolvedComponent(

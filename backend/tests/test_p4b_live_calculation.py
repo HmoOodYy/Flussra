@@ -50,11 +50,11 @@ def _day(period: dict, offset: int = 0) -> str:
     return (date.fromisoformat(period["start_date"]) + timedelta(days=offset)).isoformat()
 
 
-async def _save(client, tenant, period, values: dict, *, offset=0, driver_id=None):
+async def _save(client, tenant, period, values: dict, *, offset=0, driver_assignment_id=None):
     return await client.post(
         f"/payroll/periods/{period['payroll_period_id']}/day-grid",
         json={"work_date": _day(period, offset),
-              "rows": [{"driver_id": driver_id or tenant.driver_a, "values": values}]},
+              "rows": [{"driver_assignment_id": driver_assignment_id or tenant.driver_a, "values": values}]},
         headers=tenant.admin)
 
 
@@ -66,8 +66,8 @@ async def _grid(client, tenant, period, offset=0) -> dict:
     return response.json()
 
 
-def _cell(grid: dict, definition_id: int, driver_id: int) -> dict:
-    row = next(r for r in grid["rows"] if r["driver_id"] == driver_id)
+def _cell(grid: dict, definition_id: int, driver_assignment_id: int) -> dict:
+    row = next(r for r in grid["rows"] if r["driver_assignment_id"] == driver_assignment_id)
     return row["values"][str(definition_id)]
 
 
@@ -358,7 +358,7 @@ async def test_the_frozen_version_not_live_metadata_controls_calculation_and_ent
     next_day = _day(period, 1)
     blocked = await p3c_client.post(
         f"/payroll/periods/{period_id}/lines",
-        json={"driver_id": tenant.driver_a, "work_date": next_day,
+        json={"driver_assignment_id": tenant.driver_a, "work_date": next_day,
               "payroll_period_definition_id": ppd, "quantity": "1"}, headers=tenant.admin)
     assert blocked.status_code == 409
     assert blocked.json()["detail"]["code"] == "CALCULATION_METHOD_NOT_READY"

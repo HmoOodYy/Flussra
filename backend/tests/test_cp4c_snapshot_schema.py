@@ -51,7 +51,7 @@ async def snapshot_db(test_database_url) -> AsyncIterator[SimpleNamespace]:
                 "name": f"CP4C isolated {uuid4().hex[:8]}",
             })).scalar_one()
             period_id = await _insert_period(conn, tenant["companyid"], branch_id)
-            driver_id = await _insert_driver(
+            driver_assignment_id = await _insert_driver(
                 conn, tenant["companyid"], branch_id, tenant["userid"]
             )
             yield SimpleNamespace(
@@ -60,7 +60,7 @@ async def snapshot_db(test_database_url) -> AsyncIterator[SimpleNamespace]:
                 branch_id=branch_id,
                 user_id=tenant["userid"],
                 period_id=period_id,
-                driver_id=driver_id,
+                driver_assignment_id=driver_assignment_id,
             )
         finally:
             await outer.rollback()
@@ -102,15 +102,25 @@ async def _insert_driver(
         "name": f"CP4C Employee {marker}",
         "user_id": user_id,
     })).scalar_one()
-    return (await conn.execute(text("""
-        INSERT INTO core.drivers (companyid, branchid, employeeid, drivercode, driverstatus)
-        VALUES (:company_id, :branch_id, :employee_id, :code, 'Active')
+    driver_id = (await conn.execute(text("""
+        INSERT INTO core.drivers (companyid, employeeid, drivernumber, driverstatus)
+        VALUES (:company_id, :employee_id, :code, 'Active')
         RETURNING driverid
+    """), {
+        "company_id": company_id,
+        "employee_id": employee_id,
+        "code": f"CP4C-{marker}",
+    })).scalar_one()
+    return (await conn.execute(text("""
+        INSERT INTO core.driverassignments
+            (companyid, branchid, employeeid, driverid, effectivefromat)
+        VALUES (:company_id, :branch_id, :employee_id, :driver_id, NOW() - INTERVAL '1 day')
+        RETURNING driverassignmentid
     """), {
         "company_id": company_id,
         "branch_id": branch_id,
         "employee_id": employee_id,
-        "code": f"CP4C-{marker}",
+        "driver_id": driver_id,
     })).scalar_one()
 
 
@@ -132,8 +142,8 @@ async def _insert_other_company_driver(
         "code": f"C{marker[:12]}",
         "name": f"CP4C Branch {marker}",
     })).scalar_one()
-    driver_id = await _insert_driver(conn, company_id, branch_id, user_id)
-    return company_id, branch_id, driver_id
+    driver_assignment_id = await _insert_driver(conn, company_id, branch_id, user_id)
+    return company_id, branch_id, driver_assignment_id
 
 
 async def _insert_snapshot(
@@ -164,17 +174,17 @@ async def _insert_driver_total(
     db: SimpleNamespace,
     snapshot_id: int,
     *,
-    driver_id: int | None = None,
+    driver_assignment_id: int | None = None,
     company_id: int | None = None,
     branch_id: int | None = None,
 ) -> int:
     return (await db.conn.execute(text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
-            (payrollcalculationsnapshotid, companyid, branchid, driverid,
-             drivercodesnapshot, drivernamesnapshot, dailypay, statuspay,
+            (payrollcalculationsnapshotid, companyid, branchid, driverassignmentid, driverid,
+             drivernumbersnapshot, drivernamesnapshot, dailypay, statuspay,
              minimumadjustment, maximumadjustment, bonustotal, expectedpay)
         VALUES
-            (:snapshot_id, :company_id, :branch_id, :driver_id,
+            (:snapshot_id, :company_id, :branch_id, :driver_assignment_id, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :driver_assignment_id),
              'CP4C', 'CP4C Driver', :daily, :status, :minimum, :maximum,
              :bonus, :expected)
         RETURNING payrollcalculationdrivertotalid
@@ -182,7 +192,7 @@ async def _insert_driver_total(
         "snapshot_id": snapshot_id,
         "company_id": db.company_id if company_id is None else company_id,
         "branch_id": db.branch_id if branch_id is None else branch_id,
-        "driver_id": db.driver_id if driver_id is None else driver_id,
+        "driver_assignment_id": db.driver_assignment_id if driver_assignment_id is None else driver_assignment_id,
         "daily": Decimal("100.0000"),
         "status": Decimal("10.0000"),
         "minimum": Decimal("8.0000"),
@@ -283,9 +293,9 @@ async def test_snapshot_constraints_and_indexes_exist(snapshot_db):
           AND conname IN (
               'uq_payrollcalculationsnapshots_period_revision',
               'uq_payrollcalculationsnapshots_id_company_branch',
-              'uq_payrollcalculationdrivertotals_snapshot_driver',
+              'uq_payrollcalculationdrivertotals_snapshot_assignment',
               'fk_payrollcalculationdrivertotals_snapshot_company_branch',
-              'fk_payrollcalculationdrivertotals_driver_company_branch',
+              'fk_payrollcalculationdrivertotals_assignment_scope',
               'fk_payrollcalculationsnapshotlines_drivertotal'
           )
     """))).scalars().all()
@@ -370,19 +380,19 @@ async def test_driver_total_requires_matching_snapshot_and_driver_tenant(snapsho
     total_id = await _insert_driver_total(snapshot_db, snapshot_id)
     assert total_id > 0
 
-    _, _, other_driver_id = await _insert_other_company_driver(snapshot_db.conn, snapshot_db.user_id)
+    _, _, other_driver_assignment_id = await _insert_other_company_driver(snapshot_db.conn, snapshot_db.user_id)
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
-            (payrollcalculationsnapshotid, companyid, branchid, driverid,
+            (payrollcalculationsnapshotid, companyid, branchid, driverassignmentid, driverid,
              dailypay, statuspay, minimumadjustment, maximumadjustment,
              bonustotal, expectedpay)
-        VALUES (:snapshot_id, :company_id, :branch_id, :driver_id,
+        VALUES (:snapshot_id, :company_id, :branch_id, :driver_assignment_id, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :driver_assignment_id),
                 0, 0, 0, 0, 0, 0)
     """), {
         "snapshot_id": snapshot_id,
         "company_id": snapshot_db.company_id,
         "branch_id": snapshot_db.branch_id,
-        "driver_id": other_driver_id,
+        "driver_assignment_id": other_driver_assignment_id,
     })
 
     other_branch = (await snapshot_db.conn.execute(text("""
@@ -394,16 +404,16 @@ async def test_driver_total_requires_matching_snapshot_and_driver_tenant(snapsho
     )
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
-            (payrollcalculationsnapshotid, companyid, branchid, driverid,
+            (payrollcalculationsnapshotid, companyid, branchid, driverassignmentid, driverid,
              dailypay, statuspay, minimumadjustment, maximumadjustment,
              bonustotal, expectedpay)
-        VALUES (:snapshot_id, :company_id, :branch_id, :driver_id,
+        VALUES (:snapshot_id, :company_id, :branch_id, :driver_assignment_id, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :driver_assignment_id),
                 0, 0, 0, 0, 0, 0)
     """), {
         "snapshot_id": snapshot_id,
         "company_id": snapshot_db.company_id,
         "branch_id": snapshot_db.branch_id,
-        "driver_id": other_branch_driver,
+        "driver_assignment_id": other_branch_driver,
     })
 
 
@@ -412,16 +422,16 @@ async def test_driver_total_is_unique_per_snapshot_and_driver(snapshot_db):
     await _insert_driver_total(snapshot_db, snapshot_id)
     await _expect_integrity_error(snapshot_db.conn, text("""
         INSERT INTO payroll.payrollcalculationdrivertotals
-            (payrollcalculationsnapshotid, companyid, branchid, driverid,
+            (payrollcalculationsnapshotid, companyid, branchid, driverassignmentid, driverid,
              dailypay, statuspay, minimumadjustment, maximumadjustment,
              bonustotal, expectedpay)
-        VALUES (:snapshot_id, :company_id, :branch_id, :driver_id,
+        VALUES (:snapshot_id, :company_id, :branch_id, :driver_assignment_id, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :driver_assignment_id),
                 0, 0, 0, 0, 0, 0)
     """), {
         "snapshot_id": snapshot_id,
         "company_id": snapshot_db.company_id,
         "branch_id": snapshot_db.branch_id,
-        "driver_id": snapshot_db.driver_id,
+        "driver_assignment_id": snapshot_db.driver_assignment_id,
     })
 
 
@@ -587,11 +597,11 @@ def _line(**overrides):
     return line
 
 
-def _total(driver_id: int, *lines):
+def _total(driver_assignment_id: int, *lines):
     return {
-        "DriverID": driver_id,
-        "DriverCodeSnapshot": f"D{driver_id}",
-        "DriverNameSnapshot": f"Driver {driver_id}",
+        "DriverAssignmentID": driver_assignment_id,
+        "DriverNumberSnapshot": f"D{driver_assignment_id}",
+        "DriverNameSnapshot": f"Driver {driver_assignment_id}",
         "DailyPay": Decimal("1.0000"),
         "StatusPay": Decimal("2.0000"),
         "MinimumAdjustment": Decimal("0"),

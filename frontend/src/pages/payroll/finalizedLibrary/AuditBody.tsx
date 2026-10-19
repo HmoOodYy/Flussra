@@ -73,7 +73,7 @@ function AuditEventCard({ event }: { event: FinalizedAuditEvent }) {
         <div><dt>Revision</dt><dd>{event.revision_number ?? 'Not provided'}</dd></div>
         <div><dt>Snapshot</dt><dd>{event.snapshot_id ?? 'Not provided'}</dd></div>
         <div><dt>Source</dt><dd>{event.source_entity_type} · {event.source_entity_id}</dd></div>
-        {event.driver_id != null && <div><dt>Driver</dt><dd>{event.driver_id}</dd></div>}
+        {event.driver_assignment_id != null && <div><dt>Driver</dt><dd>{event.driver_assignment_id}</dd></div>}
         {event.work_date != null && <div><dt>Work date</dt><dd>{event.work_date}</dd></div>}
         {event.review_item_id != null && <div><dt>Review item</dt><dd>{event.review_item_id}</dd></div>}
         {event.reason != null && <div><dt>Reason</dt><dd>{event.reason}</dd></div>}

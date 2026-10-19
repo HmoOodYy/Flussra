@@ -44,10 +44,14 @@ async def get_people(
             email=employee.email,
             primary_phone=employee.primary_phone,
             hire_date=employee.hire_date,
-            driver_id=employee.current_or_pending_driver.driver_id if employee.current_or_pending_driver else None,
-            driver_code=employee.current_or_pending_driver.driver_code if employee.current_or_pending_driver else None,
-            driver_status=employee.current_or_pending_driver.driver_status if employee.current_or_pending_driver else None,
-            cdl_number=employee.current_or_pending_driver.cdl_number if employee.current_or_pending_driver else None,
+            driver_id=employee.driver.driver_id if employee.driver else None,
+            driver_assignment_id=(
+                employee.current_or_pending_assignment.driver_assignment_id
+                if employee.current_or_pending_assignment else None
+            ),
+            driver_number=employee.driver.driver_number if employee.driver else None,
+            driver_status=employee.driver.driver_status if employee.driver else None,
+            cdl_number=employee.driver.cdl_number if employee.driver else None,
         )
         for employee in employees
     ]
@@ -59,8 +63,9 @@ async def create_driver(
     data: DriverCreate,
     db: AsyncConnection,
 ) -> DriverSummary:
-    """Compatibility alias to canonical Workforce Employee/profile creation."""
-    from app.workforce.schemas import DriverProfileCreate, EmployeeCreate
+    """Compatibility alias to canonical Workforce Employee, Driver and first-assignment creation."""
+    from app.workforce.schemas import DriverCreate as WorkforceDriverCreate
+    from app.workforce.schemas import EmployeeCreate
     from app.workforce.service import create_employee
 
     employee = await create_employee(
@@ -74,29 +79,29 @@ async def create_driver(
             email=data.email,
             primary_phone=data.primary_phone,
             hire_date=data.hire_date,
-            driver_profile=DriverProfileCreate(
-                driver_code=data.driver_code,
+            driver=WorkforceDriverCreate(
+                driver_number=data.driver_number,
                 cdl_number=data.cdl_number,
-                external_driver_id=data.external_driver_id,
             ),
         ),
         db,
     )
-    profile = employee.current_or_pending_driver
-    if profile is None:
-        raise HTTPException(status_code=500, detail="Workforce creation did not return its Driver profile.")
+    driver = employee.driver
+    assignment = employee.current_or_pending_assignment
+    if driver is None or assignment is None:
+        raise HTTPException(status_code=500, detail="Workforce creation did not return its Driver.")
     return DriverSummary(
-        driver_id=profile.driver_id,
+        driver_id=driver.driver_id,
         employee_id=employee.employee_id,
-        branch_id=profile.branch_id,
-        branch_name=profile.branch_name,
+        driver_assignment_id=assignment.driver_assignment_id,
+        branch_id=assignment.branch_id,
+        branch_name=assignment.branch_name,
         full_name=employee.full_name,
         preferred_name=employee.preferred_name,
         employee_key=employee.employee_key,
-        driver_code=profile.driver_code,
-        cdl_number=profile.cdl_number,
-        external_driver_id=profile.external_driver_id,
-        driver_status=profile.driver_status,
+        driver_number=driver.driver_number,
+        cdl_number=driver.cdl_number,
+        driver_status=driver.driver_status,
         employment_status=employee.employment_status,
         email=employee.email,
         primary_phone=employee.primary_phone,
@@ -112,32 +117,32 @@ async def update_driver(
     data: DriverUpdate,
     db: AsyncConnection,
 ) -> DriverSummary:
-    """Compatibility alias to canonical Workforce Driver-profile update."""
-    from app.workforce.schemas import DriverProfileUpdate
-    from app.workforce.service import update_driver_profile
+    """Compatibility alias to the canonical Workforce permanent-Driver update."""
+    from app.workforce.schemas import DriverUpdate as WorkforceDriverUpdate
+    from app.workforce.service import update_driver as workforce_update_driver
 
-    profile = await update_driver_profile(
+    driver = await workforce_update_driver(
         company_id,
         user_id,
         driver_id,
-        DriverProfileUpdate(**data.model_dump(exclude_unset=True)),
+        WorkforceDriverUpdate(**data.model_dump(exclude_unset=True)),
         db,
     )
     return DriverSummary(
-        driver_id=profile["driverid"],
-        employee_id=profile["employeeid"],
-        branch_id=profile["branchid"],
-        branch_name=profile["branchname"],
-        full_name=profile["fullname"],
-        preferred_name=profile["preferredname"],
-        employee_key=profile["employeekey"],
-        driver_code=profile["drivercode"],
-        cdl_number=profile["cdlnumber"],
-        external_driver_id=profile["externaldriverid"],
-        driver_status=profile["driverstatus"],
-        employment_status=profile["employmentstatus"],
-        email=profile["email"],
-        primary_phone=profile["primaryphone"],
-        hire_date=profile["hiredate"],
-        termination_date=profile["terminationdate"],
+        driver_id=driver["driverid"],
+        employee_id=driver["employeeid"],
+        driver_assignment_id=driver["driverassignmentid"],
+        branch_id=driver["branchid"],
+        branch_name=driver["branchname"],
+        full_name=driver["fullname"],
+        preferred_name=driver["preferredname"],
+        employee_key=driver["employeekey"],
+        driver_number=driver["drivernumber"],
+        cdl_number=driver["cdlnumber"],
+        driver_status=driver["driverstatus"],
+        employment_status=driver["employmentstatus"],
+        email=driver["email"],
+        primary_phone=driver["primaryphone"],
+        hire_date=driver["hiredate"],
+        termination_date=driver["terminationdate"],
     )

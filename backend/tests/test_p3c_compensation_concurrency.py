@@ -119,7 +119,7 @@ def _code(result) -> str:
 async def test_concurrent_pending_creation_for_one_identity_admits_one(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a)
-    body = {"driver_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
+    body = {"driver_assignment_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
             "effective_from": "2026-01-01"}
     results = await asyncio.gather(
         p3c_client.post(BASE, json=body, headers=tenant.admin),
@@ -142,8 +142,8 @@ async def test_concurrent_approval_of_one_assignment_admits_one(p3c_client, tena
 
 async def test_concurrent_approvals_for_different_drivers_both_commit(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await _filled_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a)
-    second = await _filled_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a2)
+    first = await _filled_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a)
+    second = await _filled_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a2)
     results = await asyncio.gather(
         approve_assignment(p3c_client, tenant, first),
         approve_assignment(p3c_client, tenant, second))
@@ -222,7 +222,7 @@ async def test_unrelated_rate_definitions_do_not_contend(p3c_client, p3c_engine,
     async def create_other(conn):
         return await assignments.create_pending(
             tenant.company_id, tenant.owner,
-            AssignmentCreate(driver_id=tenant.driver_a,
+            AssignmentCreate(driver_assignment_id=tenant.driver_a,
                              rate_definition_id=second["rate_definition_id"],
                              effective_from="2026-01-01"), conn)
 
@@ -230,7 +230,7 @@ async def test_unrelated_rate_definitions_do_not_contend(p3c_client, p3c_engine,
         async with holder.begin():
             await assignments.create_pending(
                 tenant.company_id, tenant.owner,
-                AssignmentCreate(driver_id=tenant.driver_a,
+                AssignmentCreate(driver_assignment_id=tenant.driver_a,
                                  rate_definition_id=first["rate_definition_id"],
                                  effective_from="2026-01-01"), holder)
             pids: list[int] = []
@@ -246,7 +246,7 @@ async def test_same_definition_drivers_serialize_without_failing(p3c_client, p3c
     async def create_second(conn):
         return await assignments.create_pending(
             tenant.company_id, tenant.owner,
-            AssignmentCreate(driver_id=tenant.driver_a2,
+            AssignmentCreate(driver_assignment_id=tenant.driver_a2,
                              rate_definition_id=definition["rate_definition_id"],
                              effective_from="2026-01-01"), conn)
 
@@ -254,7 +254,7 @@ async def test_same_definition_drivers_serialize_without_failing(p3c_client, p3c
         async with holder.begin():
             await assignments.create_pending(
                 tenant.company_id, tenant.owner,
-                AssignmentCreate(driver_id=tenant.driver_a,
+                AssignmentCreate(driver_assignment_id=tenant.driver_a,
                                  rate_definition_id=definition["rate_definition_id"],
                                  effective_from="2026-01-01"), holder)
             second_task = await _blocked(p3c_engine, create_second)

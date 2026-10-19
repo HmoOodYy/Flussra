@@ -191,7 +191,7 @@ async def capture_snapshot_used_rate_definitions(
         rate_rows = {
             int(row["driverrateid"]): row
             for row in (await db.execute(text("""
-                SELECT dr.driverrateid, dr.companyid, dr.branchid, dr.driverid,
+                SELECT dr.driverrateid, dr.companyid, dr.branchid, dr.driverassignmentid,
                        dr.ratetypeid, dr.amount, dr.effectivefrom, dr.effectiveto,
                        dr.status, dr.blocksize, dr.roundingrule,
                        rt.ratecode, rt.ratename, rt.unitname
@@ -211,7 +211,7 @@ async def capture_snapshot_used_rate_definitions(
         rule_rows = {
             int(row["driverpayruleid"]): row
             for row in (await db.execute(text("""
-                SELECT driverpayruleid, companyid, branchid, driverid, ruletype,
+                SELECT driverpayruleid, companyid, branchid, driverassignmentid, ruletype,
                        amount, effectivefrom, effectiveto, status
                 FROM payroll.driverpayrules
                 WHERE driverpayruleid = ANY(:rule_ids)
@@ -235,7 +235,7 @@ async def capture_snapshot_used_rate_definitions(
 
         if driver_rate_id is not None:
             rate = rate_rows.get(int(driver_rate_id))
-            if rate is None or int(rate["driverid"]) != int(line["DriverID"]):
+            if rate is None or int(rate["driverassignmentid"]) != int(line["DriverAssignmentID"]):
                 raise HTTPException(
                     status_code=422,
                     detail="Cannot submit: used DriverRate evidence is outside the snapshot scope.",
@@ -243,6 +243,7 @@ async def capture_snapshot_used_rate_definitions(
             descriptor = {
                 "EvidenceKind": "DriverRate",
                 "SourceType": line["SourceType"],
+                "DriverAssignmentID": int(line["DriverAssignmentID"]),
                 "DriverID": int(line["DriverID"]),
                 "PayItemID": line.get("PayItemID"),
                 "RateTypeID": int(rate["ratetypeid"]),
@@ -260,7 +261,7 @@ async def capture_snapshot_used_rate_definitions(
             }
         else:
             rule = rule_rows.get(int(rule_id))
-            if rule is None or int(rule["driverid"]) != int(line["DriverID"]):
+            if rule is None or int(rule["driverassignmentid"]) != int(line["DriverAssignmentID"]):
                 raise HTTPException(
                     status_code=422,
                     detail="Cannot submit: used DriverPayRule evidence is outside the snapshot scope.",
@@ -268,6 +269,7 @@ async def capture_snapshot_used_rate_definitions(
             descriptor = {
                 "EvidenceKind": "DriverPayRule",
                 "SourceType": line["SourceType"],
+                "DriverAssignmentID": int(line["DriverAssignmentID"]),
                 "DriverID": int(line["DriverID"]),
                 "PayItemID": line.get("PayItemID"),
                 "DriverPayRuleID": int(rule["driverpayruleid"]),
@@ -285,7 +287,7 @@ async def capture_snapshot_used_rate_definitions(
             result = await db.execute(text("""
                 INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
                     (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-                     driverid, definitionfingerprint, evidencekind, sourcetypesnapshot,
+                     driverassignmentid, driverid, definitionfingerprint, evidencekind, sourcetypesnapshot,
                      payitemid, ratetypeid, driverrateid, driverpayruleid,
                      ratebehaviorsnapshot, ratetypecodesnapshot, ratetypenamesnapshot,
                      unitnamesnapshot, rateamountsnapshot, effectivefromsnapshot,
@@ -295,7 +297,7 @@ async def capture_snapshot_used_rate_definitions(
                      currencyminorunitdigitssnapshot)
                 VALUES
                     (:snapshot_id, :company_id, :branch_id, :period_id,
-                     :driver_id, :fingerprint, :evidence_kind, :source_type,
+                     :driver_assignment_id, :driver_id, :fingerprint, :evidence_kind, :source_type,
                      :pay_item_id, :rate_type_id, :driver_rate_id, :driver_pay_rule_id,
                      :rate_behavior, :rate_type_code, :rate_type_name, :unit_name,
                      :rate_amount, :effective_from, :effective_to, :rate_status,
@@ -307,6 +309,7 @@ async def capture_snapshot_used_rate_definitions(
                 "company_id": company_id,
                 "branch_id": branch_id,
                 "period_id": period_id,
+                "driver_assignment_id": descriptor["DriverAssignmentID"],
                 "driver_id": descriptor["DriverID"],
                 "fingerprint": fingerprint,
                 "evidence_kind": descriptor["EvidenceKind"],

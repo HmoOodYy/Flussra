@@ -89,17 +89,19 @@ export interface FinalizedCalculationReportResponse {
 export type FinalizedReportView = CalculationReportView;
 
 export interface FinalizedFullyOffDriver {
+  driver_assignment_id: number;
   driver_id: number;
   driver_name: string;
-  driver_code: string | null;
+  driver_number: string | null;
   eligible_scheduled_day_count: number;
   off_day_count: number;
 }
 
 export interface FinalizedOffStatusEntry {
+  driver_assignment_id: number;
   driver_id: number;
   driver_name: string | null;
-  driver_code: string | null;
+  driver_number: string | null;
   work_date: string;
   status_key_id: number;
   status_code: string;
@@ -133,9 +135,10 @@ export interface FinalizedOffDriversResponse {
 
 export interface FinalizedUsedRateDefinition {
   used_rate_definition_id: number;
+  driver_assignment_id: number;
   driver_id: number;
   driver_name: string | null;
-  driver_code: string | null;
+  driver_number: string | null;
   evidence_kind: string;
   source_type: string;
   pay_item_id: number | null;
@@ -164,9 +167,10 @@ export interface FinalizedUsedRateDefinition {
 
 export interface FinalizedBonusEventEvidence {
   bonus_event_id: number;
+  driver_assignment_id: number;
   driver_id: number;
   driver_name: string | null;
-  driver_code: string | null;
+  driver_number: string | null;
   amount: string;
   reason: string | null;
   notes: string | null;

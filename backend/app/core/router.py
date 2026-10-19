@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.core import service, workforce_adapters
 from app.core.schemas import (
     BranchSummary,
+    DriverAssignmentRosterRow,
+    DriverAssignmentSummary,
     DriverCreate,
     DriverSummary,
     DriverUpdate,
@@ -81,7 +83,7 @@ async def list_people(
 @router.get(
     "/drivers",
     response_model=list[DriverSummary],
-    summary="List drivers in the user's scope",
+    summary="List permanent Drivers in the user's scope",
 )
 async def list_drivers(
     token: TokenDep,
@@ -89,9 +91,9 @@ async def list_drivers(
     branch_id: int | None = Query(None),
     driver_status: str | None = Query(
         None,
-        description="Active | Inactive | Terminated | OnLeave",
+        description="Active | Inactive | OnLeave",
     ),
-    q: str | None = Query(None, description="Search by name, driver code, or email"),
+    q: str | None = Query(None, description="Search by name, driver number, or email"),
 ) -> list[DriverSummary]:
     return await service.get_drivers(
         company_id=int(token["cid"]),
@@ -118,6 +120,49 @@ async def get_driver(
     db: DbDep,
 ) -> DriverSummary:
     return await service.get_driver_by_id(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        driver_id=driver_id,
+        db=db,
+    )
+
+
+@router.get(
+    "/driver-assignments",
+    response_model=list[DriverAssignmentRosterRow],
+    summary="List DriverAssignments the user may read (assignment-centric roster)",
+    responses={403: {"description": "No Branch in which the user may read Drivers"}},
+)
+async def list_assignments(
+    token: TokenDep,
+    db: DbDep,
+    branch_id: int | None = Query(None),
+    state: str | None = Query(None, description="current | pending | ended"),
+) -> list[DriverAssignmentRosterRow]:
+    return await service.list_driver_assignments(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
+        branch_id=branch_id,
+        state=state,
+    )
+
+
+@router.get(
+    "/drivers/{driver_id}/assignments",
+    response_model=list[DriverAssignmentSummary],
+    summary="List a Driver's home-Branch assignments the user may read",
+    responses={
+        403: {"description": "No readable assignment"},
+        404: {"description": "Driver not found"},
+    },
+)
+async def list_driver_assignments(
+    driver_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> list[DriverAssignmentSummary]:
+    return await service.get_driver_assignments(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         driver_id=driver_id,

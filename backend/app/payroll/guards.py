@@ -67,7 +67,7 @@ async def check_not_in_finalized_period(
 
 
 async def _check_driver_read_access(
-    driver_id: int,
+    driver_assignment_id: int,
     company_id: int,
     user_id: int,
     db: AsyncConnection,
@@ -89,8 +89,8 @@ async def _check_driver_read_access(
     """
     await _require_non_driver_rate_subject(company_id, user_id, db)
     drv_result = await db.execute(
-        text("SELECT branchid FROM core.drivers WHERE driverid = :did AND companyid = :cid"),
-        {"did": driver_id, "cid": company_id},
+        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :did AND companyid = :cid"),
+        {"did": driver_assignment_id, "cid": company_id},
     )
     drv_row = drv_result.mappings().first()
     if drv_row is None:

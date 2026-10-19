@@ -1,4 +1,4 @@
-"""Admin user reads, role-assignment projections, and driver-profile reads."""
+"""Admin user reads, role-assignment projections, and Driver reads."""
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -131,7 +131,7 @@ async def _fetch_driver_ids_for_users(
     db: AsyncConnection,
 ) -> dict[int, int]:
     """
-    Return {user_id: driver_id} for users who are linked to a core.Drivers row.
+    Return {user_id: driver_id} for users linked to a permanent core.Drivers row.
     The link path is: sec.Users.EmployeeID → core.Employees.EmployeeID → core.Drivers.EmployeeID.
     """
     if not user_ids:
@@ -150,9 +150,6 @@ async def _fetch_driver_ids_for_users(
                                       AND e.companyid = u.companyid
             JOIN   core.drivers     d ON d.employeeid = e.employeeid
                                       AND d.companyid = e.companyid
-                                      AND d.driverid = core.fn_EffectiveDriverProfile(
-                                          e.companyid, e.employeeid
-                                      )
             WHERE  u.companyid = :cid
               AND  u.userid    IN ({placeholders})
         """),
@@ -406,14 +403,14 @@ async def get_user_driver_info(
     db: AsyncConnection,
 ) -> dict:
     """
-    Return driver profile info for a user (target: user_id).
+    Return the permanent Driver and its current assignment for a user (target: user_id).
 
     Security rules:
       1. DRIVER/Self subjects are denied generic Driver administration.
       2. Caller must have one of: users.view, payrates.view, payrates.edit,
          settings.manage, setup.manage.
       3. If caller has SpecificBranch scope, they may only see targets whose
-         driver profile belongs to their allowed branch.
+         current Driver assignment belongs to their allowed branch.
     """
     await require_non_driver_subject(company_id, caller_user_id, db)
     # Rule 1 — permission gate
@@ -430,19 +427,21 @@ async def get_user_driver_info(
                 u.employeeid,
                 d.driverid,
                 e.fullname       AS driver_name,
-                d.drivercode,
+                d.drivernumber,
                 d.driverstatus,
-                d.branchid,
+                a.driverassignmentid,
+                a.branchid,
                 b.branchname
             FROM   sec.users         u
             LEFT JOIN core.employees e ON e.employeeid = u.employeeid
                                       AND e.companyid  = :cid
             LEFT JOIN core.drivers   d ON d.employeeid = e.employeeid
                                       AND d.companyid  = :cid
-                                      AND d.driverid = core.fn_EffectiveDriverProfile(
-                                          e.companyid, e.employeeid
+            LEFT JOIN core.driverassignments a
+                                      ON a.driverassignmentid = core.fn_EffectiveDriverAssignment(
+                                          d.companyid, d.driverid
                                       )
-            LEFT JOIN core.branches  b ON b.branchid   = d.branchid
+            LEFT JOIN core.branches  b ON b.branchid   = a.branchid
             WHERE  u.userid    = :uid
               AND  u.companyid = :cid
         """),
@@ -462,15 +461,16 @@ async def get_user_driver_info(
                 detail="Access denied to this driver's branch.",
             )
 
-    has_profile = row["driverid"] is not None
+    has_driver = row["driverid"] is not None
     return {
-        "user_id":          user_id,
-        "employee_id":      row["employeeid"],
-        "driver_id":        row["driverid"],
-        "driver_name":      row["driver_name"],
-        "driver_code":      row["drivercode"],
-        "branch_id":        row["branchid"],
-        "branch_name":      row["branchname"],
-        "driver_status":    row["driverstatus"],
-        "has_driver_profile": has_profile,
+        "user_id":            user_id,
+        "employee_id":        row["employeeid"],
+        "driver_id":          row["driverid"],
+        "driver_assignment_id": row["driverassignmentid"],
+        "driver_name":        row["driver_name"],
+        "driver_number":      row["drivernumber"],
+        "branch_id":          row["branchid"],
+        "branch_name":        row["branchname"],
+        "driver_status":      row["driverstatus"],
+        "has_driver":         has_driver,
     }

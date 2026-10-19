@@ -512,6 +512,34 @@
 }
 
 /* Summary badges in header */
+.assignmentPicker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  color: #475569;
+}
+
+.assignmentPicker select {
+  max-width: 28rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  background: #fff;
+}
+
+.readOnlyBanner {
+  margin: 0.5rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: #475569;
+}
+
 .summaryBadges {
   display: flex;
   gap: 0.35rem;

@@ -21,9 +21,9 @@ from tests.compensation_database_fixtures import (
 )
 
 
-def _insert_pending(fx, driver_id, effective_from="2026-01-01"):
+def _insert_pending(fx, driver_assignment_id, effective_from="2026-01-01"):
     def run(cursor):
-        make_pending(cursor, fx, driver_id=driver_id, effective_from=effective_from)
+        make_pending(cursor, fx, driver_assignment_id=driver_assignment_id, effective_from=effective_from)
     return run
 
 
@@ -43,14 +43,14 @@ def test_concurrent_pending_creation_for_one_identity_admits_exactly_one(p3b_dsn
     try:
         with first.cursor() as txn:
             make_pending(txn, fx)
-            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id, "2027-01-01"))
+            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id, "2027-01-01"))
             second.wait_for_lock(cur)
         first.commit()
         assert isinstance(second.finish(), errors.UniqueViolation)
     finally:
         first.close()
     cur.execute("SELECT count(*) FROM payroll.driverrateassignments "
-                "WHERE driverid = %s AND status = 'Pending'", (fx.driver_id,))
+                "WHERE driverassignmentid = %s AND status = 'Pending'", (fx.driver_assignment_id,))
     assert cur.fetchone()[0] == 1
 
 
@@ -80,7 +80,7 @@ def test_structure_change_then_pending_creation_serializes_in_that_order(p3b_dsn
         with mutator.cursor() as txn:
             txn.execute("DELETE FROM payroll.ratecomponentdefinitions "
                         "WHERE ratecomponentdefinitionid = %s", (fx.component_ids[2],))
-            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id))
+            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id))
             creation.wait_for_lock(cur)
         mutator.commit()
         assert creation.finish() is None
@@ -155,7 +155,7 @@ def test_method_change_vs_pending_creation_cannot_both_commit(p3b_dsn, cur):
                     (ratedefinitionid, shape, sequenceno, ordinalfrom, ordinalto)
                 VALUES (%s, 'OrdinalTierSchedule', 1, 1, NULL)
             """, (fx.rate_definition_id,))
-            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id))
+            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id))
             creation.wait_for_lock(cur)
         changer.commit()
         assert creation.finish() is None  # Pending is created against the final structure
@@ -291,8 +291,8 @@ def test_same_rate_definition_different_drivers_serialize_but_both_commit(p3b_ds
     holder = connect(p3b_dsn)
     try:
         with holder.cursor() as txn:
-            make_pending(txn, fx, driver_id=fx.driver_ids[0])
-            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_ids[1]))
+            make_pending(txn, fx, driver_assignment_id=fx.driver_assignment_ids[0])
+            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_ids[1]))
             second.wait_for_lock(cur)
         holder.commit()
         assert second.finish() is None
@@ -358,11 +358,11 @@ async def test_application_lock_helper_takes_the_same_row_lock(p3b_dsn, cur):
     try:
         async with engine.begin() as db:
             assert await lock_rate_definition_structure(fx.rate_definition_id, db) is False
-            blocked = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id))
+            blocked = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id))
             await asyncio.to_thread(blocked.wait_for_lock, cur)
         assert blocked.finish() is None
         approved_driver = add_driver(cur, fx)
-        approved_scalar(cur, fx, driver_id=approved_driver)
+        approved_scalar(cur, fx, driver_assignment_id=approved_driver)
         async with engine.begin() as db:
             assert await lock_rate_definition_structure(fx.rate_definition_id, db) is True
     finally:

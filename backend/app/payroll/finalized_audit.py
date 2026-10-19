@@ -73,7 +73,7 @@ async def build_finalized_audit(
 
     event_rows = (await db.execute(text("""
         SELECT e.payrollperiodauditevidenceeventid, e.evidencedomain, e.actioncode,
-               e.sourceentitytype, e.sourceentityid, e.reviewitemid, e.driverid, e.workdate, e.payitemid,
+               e.sourceentitytype, e.sourceentityid, e.reviewitemid, e.driverassignmentid, e.driverid, e.workdate, e.payitemid,
                e.beforestatejson, e.afterstatejson, e.actoruserid,
                e.actordisplaynamesnapshot, e.responsibilitycontextsnapshot,
                e.reasonsnapshot, e.correlationid, e.sourcerevision, e.occurredatutc,
@@ -97,7 +97,8 @@ async def build_finalized_audit(
         "domain": row["evidencedomain"], "action_code": row["actioncode"],
         "source_entity_type": row["sourceentitytype"], "source_entity_id": row["sourceentityid"],
         "review_item_id": row["reviewitemid"],
-        "driver_id": row["driverid"], "work_date": row["workdate"], "pay_item_id": row["payitemid"],
+        "driver_assignment_id": row["driverassignmentid"], "driver_id": row["driverid"],
+        "work_date": row["workdate"], "pay_item_id": row["payitemid"],
         "before_state": row["beforestatejson"], "after_state": row["afterstatejson"],
         "actor_user_id": int(row["actoruserid"]), "actor_display_name": row["actordisplaynamesnapshot"],
         "responsibility_context": row["responsibilitycontextsnapshot"], "reason": row["reasonsnapshot"],

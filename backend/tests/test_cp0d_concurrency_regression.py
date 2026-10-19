@@ -134,14 +134,14 @@ async def _add_draft_line(
     client: httpx.AsyncClient,
     token: str,
     period_id: int,
-    driver_id: int,
+    driver_assignment_id: int,
     work_date: str,
 ) -> int:
     """Add a DailyNote draft line while period is Open. Returns draft_line_id."""
     r = await client.post(
         f"/payroll/periods/{period_id}/lines",
         json={
-            "driver_id":   driver_id,
+            "driver_assignment_id":   driver_assignment_id,
             "work_date":   work_date,
             "line_type":   "DailyNote",
             "quantity":    1,

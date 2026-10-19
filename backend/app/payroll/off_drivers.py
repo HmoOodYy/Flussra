@@ -30,9 +30,10 @@ _FINALIZED_STATUSES = ("Locked", "Archived")
 
 @dataclass(frozen=True)
 class _DriverIdentity:
+    driver_assignment_id: int
     driver_id: int
     driver_name: str
-    driver_code: str | None
+    driver_number: str | None
 
 
 @dataclass(frozen=True)
@@ -110,16 +111,18 @@ async def _eligible_driver_days(
     if not eligible_dates:
         return {}
     rows = (await db.execute(text("""
-        SELECT pde.driverid,
+        SELECT pde.driverassignmentid,
+               (SELECT a.driverid FROM core.driverassignments a
+                 WHERE a.driverassignmentid = pde.driverassignmentid) AS permanentdriverid,
                COALESCE(pde.drivernamesnapshot, '') AS drivername,
-               pde.drivercodesnapshot AS drivercode,
+               pde.drivernumbersnapshot AS drivernumber,
                pde.iseligibleforperiod, pde.eligibilityreasoncode,
                pde.eligibleworkdates
         FROM payroll.payrollperioddrivereligibility pde
         WHERE pde.payrollperiodid = :period_id AND pde.companyid = :company_id
           AND pde.branchid = :branch_id AND pde.iseligibleforperiod = TRUE
         ORDER BY COALESCE(pde.drivernamesnapshot, ''),
-                 pde.drivercodesnapshot, pde.driverid
+                 pde.drivernumbersnapshot, pde.driverassignmentid
     """), {
         "period_id": _period_id(period), "company_id": company_id,
         "branch_id": period.branch_id,
@@ -132,9 +135,12 @@ async def _eligible_driver_days(
             if _is_snapshot_row_eligible_for_workdate(snapshot, work_date)
         }
         if eligible_days:
-            driver_id = int(row["driverid"])
-            output[driver_id] = (
-                _DriverIdentity(driver_id, row["drivername"], row["drivercode"]),
+            driver_assignment_id = int(row["driverassignmentid"])
+            output[driver_assignment_id] = (
+                _DriverIdentity(
+                    driver_assignment_id, int(row["permanentdriverid"]),
+                    row["drivername"], row["drivernumber"],
+                ),
                 eligible_days,
             )
     return output
@@ -163,7 +169,7 @@ async def _finalized_status_entries(
     # Locked (Locked/Archived are in schemas._WRITE_BLOCKED_STATUSES).
     note_rows = (await db.execute(
         text("""
-            SELECT driverid, workdate, notetext
+            SELECT driverassignmentid, workdate, notetext
             FROM payroll.payrollperioddriverdayentrystate
             WHERE payrollperiodid = :period_id
               AND companyid = :company_id
@@ -172,7 +178,7 @@ async def _finalized_status_entries(
         {"period_id": period_id, "company_id": company_id},
     )).mappings().all()
     notes_by_day = {
-        (int(row["driverid"]), row["workdate"]): row["notetext"] for row in note_rows
+        (int(row["driverassignmentid"]), row["workdate"]): row["notetext"] for row in note_rows
     }
 
     if snapshot is None:
@@ -190,7 +196,7 @@ async def _finalized_status_entries(
     evidence_state = status_evidence.status_evidence_availability(snapshot, evidence_rows)
     entries: dict[tuple[int, date], _StatusEntry] = {}
     for row in evidence_rows:
-        key = (row["driver_id"], row["work_date"])
+        key = (row["driver_assignment_id"], row["work_date"])
         entries[key] = _StatusEntry(
             status_key_id=row["status_key_id"],
             status_code=row["status_code"],
@@ -218,7 +224,7 @@ async def _status_entries(
 
     canonical_rows = (await db.execute(
         text("""
-            SELECT es.driverid, es.workdate, es.statuskeyid, es.notetext,
+            SELECT es.driverassignmentid, es.workdate, es.statuskeyid, es.notetext,
                    es.finalizedatutc, es.statuscodesnapshot, es.statuslabelsnapshot,
                    es.statusisoffreasonsnapshot, sk.statuscode, sk.keyname, sk.isoffreason
             FROM payroll.payrollperioddriverdayentrystate es
@@ -234,7 +240,7 @@ async def _status_entries(
         if row["statuskeyid"] is None:
             continue
         frozen = row["finalizedatutc"] is not None
-        entries[(int(row["driverid"]), row["workdate"])] = _StatusEntry(
+        entries[(int(row["driverassignmentid"]), row["workdate"])] = _StatusEntry(
             status_key_id=int(row["statuskeyid"]),
             status_code=(row["statuscodesnapshot"] if frozen else row["statuscode"]),
             status_label=(row["statuslabelsnapshot"] if frozen else row["keyname"]),
@@ -246,7 +252,7 @@ async def _status_entries(
 
     legacy_rows = (await db.execute(
         text("""
-            SELECT ds.driverid, ds.workdate, ds.notes AS statuscode,
+            SELECT ds.driverassignmentid, ds.workdate, ds.notes AS statuscode,
                    sk.statuskeyid, sk.keyname, sk.isoffreason, dn.notes AS note
             FROM payroll.payrolldraftlines ds
             LEFT JOIN payroll.payrollstatuskeys sk
@@ -255,7 +261,7 @@ async def _status_entries(
              AND sk.statuscode = ds.notes
             LEFT JOIN payroll.payrolldraftlines dn
               ON dn.payrollperiodid = ds.payrollperiodid
-             AND dn.driverid = ds.driverid
+             AND dn.driverassignmentid = ds.driverassignmentid
              AND dn.workdate = ds.workdate
              AND dn.linetype = 'DailyNote'
              AND dn.status != 'Void'
@@ -267,7 +273,7 @@ async def _status_entries(
         {"period_id": _period_id(period), "company_id": company_id},
     )).mappings().all()
     for row in legacy_rows:
-        key = (int(row["driverid"]), row["workdate"])
+        key = (int(row["driverassignmentid"]), row["workdate"])
         entries.setdefault(key, _StatusEntry(
             status_key_id=int(row["statuskeyid"]) if row["statuskeyid"] is not None else None,
             status_code=row["statuscode"],
@@ -282,7 +288,7 @@ async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> se
     """Ordinary source against an active period definition identifies work, never money."""
     rows = (await db.execute(
         text("""
-            SELECT DISTINCT dl.driverid, dl.workdate
+            SELECT DISTINCT dl.driverassignmentid, dl.workdate
             FROM payroll.payrolldraftlines dl
             JOIN payroll.payrollperioddefinitions ppd
               ON ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
@@ -306,7 +312,7 @@ async def _normal_work_pairs(period, company_id: int, db: AsyncConnection) -> se
             "period_end": period.end_date,
         },
     )).mappings().all()
-    return {(int(row["driverid"]), row["workdate"]) for row in rows}
+    return {(int(row["driverassignmentid"]), row["workdate"]) for row in rows}
 
 
 async def resolve_fully_off_drivers(
@@ -332,15 +338,16 @@ async def resolve_fully_off_drivers(
         statuses, _unused_state = await _status_entries(period, company_id, db)
     normal_work = await _normal_work_pairs(period, company_id, db)
     fully_off: list[FullyOffDriverSummary] = []
-    for driver_id, (driver, days) in eligible.items():
+    for driver_assignment_id, (driver, days) in eligible.items():
         if all(
-            statuses.get((driver_id, work_date), _StatusEntry(None, None, None, False, None)).is_off_reason
-            and (driver_id, work_date) not in normal_work
+            statuses.get((driver_assignment_id, work_date), _StatusEntry(None, None, None, False, None)).is_off_reason
+            and (driver_assignment_id, work_date) not in normal_work
             for work_date in days
         ):
             fully_off.append(FullyOffDriverSummary(
+                driver_assignment_id=driver.driver_assignment_id,
                 driver_id=driver.driver_id,
-                driver_code=driver.driver_code,
+                driver_number=driver.driver_number,
                 driver_name=driver.driver_name,
                 eligible_scheduled_day_count=len(days),
                 off_day_count=len(days),
@@ -385,15 +392,16 @@ async def get_selected_day_off_drivers(
     )
     statuses, finalized_state = await _status_entries(period, company_id, db)
     drivers: list[SelectedDayOffDriver] = []
-    for driver_id, (driver, eligible_days) in eligible.items():
+    for driver_assignment_id, (driver, eligible_days) in eligible.items():
         if work_date not in eligible_days:
             continue
-        status = statuses.get((driver_id, work_date))
+        status = statuses.get((driver_assignment_id, work_date))
         if status is None or not status.is_off_reason:
             continue
         drivers.append(SelectedDayOffDriver(
+            driver_assignment_id=driver.driver_assignment_id,
             driver_id=driver.driver_id,
-            driver_code=driver.driver_code,
+            driver_number=driver.driver_number,
             driver_name=driver.driver_name,
             work_date=work_date,
             day_name=work_date.strftime("%A"),
@@ -404,7 +412,7 @@ async def get_selected_day_off_drivers(
             has_note=bool(status.note),
             note=status.note,
         ))
-    drivers.sort(key=lambda item: (item.driver_name or "", item.driver_code or "", item.driver_id))
+    drivers.sort(key=lambda item: (item.driver_name or "", item.driver_number or "", item.driver_assignment_id))
     return SelectedDayOffDriversResponse(
         period_id=_period_id(period),
         work_date=work_date,
@@ -467,18 +475,19 @@ async def _finalized_drivers_off_entries(
     if not off_rows:
         return [], evidence_state
 
-    driver_ids = sorted({row["driver_id"] for row in off_rows})
+    driver_assignment_ids = sorted({row["driver_assignment_id"] for row in off_rows})
     identity_rows = (await db.execute(
         text("""
-            SELECT d.driverid, e.fullname AS drivername, d.drivercode
-            FROM core.drivers d
-            JOIN core.employees e ON e.employeeid = d.employeeid
-            WHERE d.companyid = :company_id
-              AND d.driverid  = ANY(:driver_ids)
+            SELECT a.driverassignmentid, a.driverid, e.fullname AS drivername, d.drivernumber
+            FROM core.driverassignments a
+            JOIN core.drivers d ON d.driverid = a.driverid
+            JOIN core.employees e ON e.employeeid = a.employeeid
+            WHERE a.companyid = :company_id
+              AND a.driverassignmentid  = ANY(:driver_assignment_ids)
         """),
-        {"company_id": company_id, "driver_ids": driver_ids},
+        {"company_id": company_id, "driver_assignment_ids": driver_assignment_ids},
     )).mappings().all()
-    identities = {int(r["driverid"]): r for r in identity_rows}
+    identities = {int(r["driverassignmentid"]): r for r in identity_rows}
 
     # NoteText is not part of the immutable Status-evidence table's contract
     # (see status_evidence.read_status_entries) -- read it separately from
@@ -486,7 +495,7 @@ async def _finalized_drivers_off_entries(
     # Locked (Locked/Archived are in _WRITE_BLOCKED_STATUSES).
     note_rows = (await db.execute(
         text("""
-            SELECT driverid, workdate, notetext
+            SELECT driverassignmentid, workdate, notetext
             FROM payroll.payrollperioddriverdayentrystate
             WHERE payrollperiodid = :period_id
               AND companyid = :company_id
@@ -495,22 +504,23 @@ async def _finalized_drivers_off_entries(
         {"period_id": period.payroll_period_id, "company_id": company_id},
     )).mappings().all()
     notes_by_day = {
-        (int(row["driverid"]), row["workdate"]): row["notetext"] for row in note_rows
+        (int(row["driverassignmentid"]), row["workdate"]): row["notetext"] for row in note_rows
     }
 
     entries: list[dict] = []
-    for row in sorted(off_rows, key=lambda r: (r["work_date"], r["driver_id"])):
-        identity = identities.get(row["driver_id"])
+    for row in sorted(off_rows, key=lambda r: (r["work_date"], r["driver_assignment_id"])):
+        identity = identities.get(row["driver_assignment_id"])
         if identity is None:
             continue
         entries.append({
-            "driver_id":       row["driver_id"],
+            "driver_assignment_id":       row["driver_assignment_id"],
+            "driver_id":       int(identity["driverid"]),
             "driver_name":     identity["drivername"],
-            "driver_code":     identity["drivercode"],
+            "driver_number":     identity["drivernumber"],
             "work_date":       row["work_date"],
             "status_key_code": row["status_code"],
             "status_label":    row["status_label"],
-            "notes":           notes_by_day.get((row["driver_id"], row["work_date"])),
+            "notes":           notes_by_day.get((row["driver_assignment_id"], row["work_date"])),
         })
     return entries, evidence_state
 
@@ -555,16 +565,18 @@ async def get_drivers_off(
     result = await db.execute(
         text("""
             SELECT
-                d.driverid,
+                a.driverassignmentid,
+                a.driverid,
                 e.fullname       AS drivername,
-                d.drivercode,
+                d.drivernumber,
                 dl.workdate,
                 dl.notes         AS status_key_code,
                 sk.keyname       AS status_label,
                 dn.notes         AS driver_notes
             FROM payroll.payrolldraftlines dl
-            JOIN core.drivers   d  ON d.driverid  = dl.driverid
-            JOIN core.employees e  ON e.employeeid = d.employeeid
+            JOIN core.driverassignments a ON a.driverassignmentid = dl.driverassignmentid
+            JOIN core.drivers   d  ON d.driverid  = a.driverid
+            JOIN core.employees e  ON e.employeeid = a.employeeid
             JOIN payroll.payrollstatuskeys sk
                 ON  sk.companyid  = dl.companyid
                 AND sk.branchid   = dl.branchid
@@ -573,7 +585,7 @@ async def get_drivers_off(
                 AND sk.isactive    = TRUE
             LEFT JOIN payroll.payrolldraftlines dn
                 ON  dn.payrollperiodid = dl.payrollperiodid
-                AND dn.driverid        = dl.driverid
+                AND dn.driverassignmentid        = dl.driverassignmentid
                 AND dn.workdate        = dl.workdate
                 AND dn.linetype        = 'DailyNote'
                 AND dn.status         != 'Void'
@@ -589,9 +601,10 @@ async def get_drivers_off(
     rows = result.mappings().all()
     return [
         {
+            "driver_assignment_id":        int(r["driverassignmentid"]),
             "driver_id":        int(r["driverid"]),
             "driver_name":      r["drivername"],
-            "driver_code":      r["drivercode"],
+            "driver_number":      r["drivernumber"],
             "work_date":        r["workdate"],
             "status_key_code":  r["status_key_code"],
             "status_label":     r["status_label"],

@@ -52,8 +52,9 @@ async def _load_active_bonus_events(
         text("""
             SELECT
                 be.payrollbonuseventid,
-                be.driverid,
-                d.drivercode,
+                be.driverassignmentid,
+                a.driverid,
+                dr.drivernumber,
                 e.fullname AS drivername,
                 be.amount,
                 be.reason,
@@ -63,13 +64,14 @@ async def _load_active_bonus_events(
                 creator.displayname AS creatordisplaynamesnapshot,
                 be.createdatutc
             FROM payroll.payrollbonusevents be
-            LEFT JOIN core.drivers d ON d.driverid = be.driverid
-            LEFT JOIN core.employees e ON e.employeeid = d.employeeid
+            LEFT JOIN core.driverassignments a ON a.driverassignmentid = be.driverassignmentid
+            LEFT JOIN core.drivers dr ON dr.driverid = a.driverid
+            LEFT JOIN core.employees e ON e.employeeid = a.employeeid
             LEFT JOIN sec.users creator ON creator.userid = be.createdbyuserid
             WHERE be.payrollperiodid = :period_id
               AND be.companyid = :company_id
               AND be.status = 'Active'
-            ORDER BY be.driverid, be.payrollbonuseventid
+            ORDER BY be.driverassignmentid, be.payrollbonuseventid
         """),
         {"period_id": period_id, "company_id": company_id},
     )
@@ -95,7 +97,7 @@ async def _get_bonus_event_by_id(
                 be.payrollperiodid,
                 be.companyid,
                 be.branchid,
-                be.driverid,
+                be.driverassignmentid,
                 be.amount,
                 be.reason,
                 be.notes,
@@ -122,7 +124,7 @@ async def _get_bonus_event_by_id(
         period_id=int(row["payrollperiodid"]),
         company_id=int(row["companyid"]),
         branch_id=int(row["branchid"]),
-        driver_id=int(row["driverid"]),
+        driver_assignment_id=int(row["driverassignmentid"]),
         amount=Decimal(str(row["amount"])),
         reason=row["reason"],
         notes=row["notes"],
@@ -144,7 +146,7 @@ async def list_bonus_events(
     user_id: int,
     db: AsyncConnection,
     *,
-    driver_id: int | None = None,
+    driver_assignment_id: int | None = None,
 ) -> list[BonusEventResponse]:
     await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
@@ -152,9 +154,9 @@ async def list_bonus_events(
 
     params: dict = {"period_id": period_id, "company_id": company_id}
     driver_filter = ""
-    if driver_id is not None:
-        driver_filter = "AND be.driverid = :driver_id"
-        params["driver_id"] = driver_id
+    if driver_assignment_id is not None:
+        driver_filter = "AND be.driverassignmentid = :driver_assignment_id"
+        params["driver_assignment_id"] = driver_assignment_id
 
     result = await db.execute(
         text(f"""
@@ -163,7 +165,7 @@ async def list_bonus_events(
                 be.payrollperiodid,
                 be.companyid,
                 be.branchid,
-                be.driverid,
+                be.driverassignmentid,
                 be.amount,
                 be.reason,
                 be.notes,
@@ -180,7 +182,7 @@ async def list_bonus_events(
             WHERE be.payrollperiodid = :period_id
               AND be.companyid       = :company_id
               {driver_filter}
-            ORDER BY be.driverid, be.payrollbonuseventid
+            ORDER BY be.driverassignmentid, be.payrollbonuseventid
         """),
         params,
     )
@@ -191,7 +193,7 @@ async def list_bonus_events(
             period_id=int(r["payrollperiodid"]),
             company_id=int(r["companyid"]),
             branch_id=int(r["branchid"]),
-            driver_id=int(r["driverid"]),
+            driver_assignment_id=int(r["driverassignmentid"]),
             amount=Decimal(str(r["amount"])),
             reason=r["reason"],
             notes=r["notes"],
@@ -288,22 +290,23 @@ async def create_bonus_event(
 
     await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    # CP-3A: snapshot-aware period eligibility guard.
-    await _assert_driver_eligible_for_period_via_snapshot(
-        company_id, period.branch_id, period_id, data.driver_id, db
-    )
-
+    # Currency lock first (global lock order), then the period row lock; the snapshot-aware
+    # eligibility guard (CP-3A) runs under that lock so a concurrent boundary change
+    # cannot commit between the check and the insert.
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await _lock_period_for_mutation(period_id, company_id, db)
+    await _assert_driver_eligible_for_period_via_snapshot(
+        company_id, period.branch_id, period_id, data.driver_assignment_id, db
+    )
 
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.payrollbonusevents
-                (companyid, branchid, payrollperiodid, driverid,
+                (companyid, branchid, payrollperiodid, driverassignmentid,
                  amount, reason, notes, status,
                  createdbyuserid, createdatutc, datarevision)
             VALUES
-                (:company_id, :branch_id, :period_id, :driver_id,
+                (:company_id, :branch_id, :period_id, :driver_assignment_id,
                  :amount, :reason, :notes, 'Active',
                  :user_id, NOW(), 1)
             RETURNING payrollbonuseventid
@@ -312,7 +315,7 @@ async def create_bonus_event(
             "company_id": company_id,
             "branch_id":  period.branch_id,
             "period_id":  period_id,
-            "driver_id":  data.driver_id,
+            "driver_assignment_id":  data.driver_assignment_id,
             "amount":     data.amount,
             "reason":     data.reason,
             "notes":      data.notes,
@@ -334,7 +337,7 @@ async def create_bonus_event(
         line_id=new_id,
         action_code="BONUS_EVENT_ADDED",
         old_value=None,
-        new_value={"driver_id": data.driver_id, "amount": str(data.amount)},
+        new_value={"driver_assignment_id": data.driver_assignment_id, "amount": str(data.amount)},
         entity_name="PayrollBonusEvents",
     )
     await capture_period_audit_evidence(
@@ -342,9 +345,9 @@ async def create_bonus_event(
         domain="BONUS", action_code="BONUS_CREATED", source_entity_type="PayrollBonusEvents",
         source_entity_id=new_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
         after_state={
-            "driver_id": data.driver_id, "amount": data.amount, "reason": data.reason,
+            "driver_assignment_id": data.driver_assignment_id, "amount": data.amount, "reason": data.reason,
             "notes": data.notes, "status": "Active", "data_revision": 1,
-        }, driver_id=data.driver_id, source_revision=1,
+        }, driver_assignment_id=data.driver_assignment_id, source_revision=1,
     )
 
     return await _get_bonus_event_by_id(new_id, company_id, db)
@@ -486,16 +489,16 @@ async def update_bonus_event(
         domain="BONUS", action_code="BONUS_UPDATED", source_entity_type="PayrollBonusEvents",
         source_entity_id=bonus_event_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
         before_state={
-            "driver_id": event.driver_id, "amount": event.amount, "reason": event.reason,
+            "driver_assignment_id": event.driver_assignment_id, "amount": event.amount, "reason": event.reason,
             "notes": event.notes, "status": event.status, "data_revision": event.data_revision,
         },
         after_state={
-            "driver_id": event.driver_id,
+            "driver_assignment_id": event.driver_assignment_id,
             "amount": data.amount if data.amount is not None else event.amount,
             "reason": data.reason if data.reason is not None else event.reason,
             "notes": data.notes if data.notes is not None else event.notes,
             "status": "Active", "data_revision": event.data_revision + 1,
-        }, driver_id=event.driver_id, source_revision=event.data_revision + 1,
+        }, driver_assignment_id=event.driver_assignment_id, source_revision=event.data_revision + 1,
     )
 
     return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
@@ -583,11 +586,11 @@ async def void_bonus_event(
         domain="BONUS", action_code="BONUS_VOIDED", source_entity_type="PayrollBonusEvents",
         source_entity_id=bonus_event_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
         before_state={
-            "driver_id": event.driver_id, "amount": event.amount, "reason": event.reason,
+            "driver_assignment_id": event.driver_assignment_id, "amount": event.amount, "reason": event.reason,
             "notes": event.notes, "status": event.status, "data_revision": event.data_revision,
         },
         after_state={"status": "Voided", "data_revision": event.data_revision + 1},
-        driver_id=event.driver_id, source_revision=event.data_revision + 1,
+        driver_assignment_id=event.driver_assignment_id, source_revision=event.data_revision + 1,
     )
 
     return await _get_bonus_event_by_id(bonus_event_id, company_id, db)
@@ -609,7 +612,7 @@ def _bonus_batch_canonical_payload(
         "expected_bonus_data_revision": expected_bonus_data_revision,
         "items": [
             {
-                "driver_id": it.driver_id,
+                "driver_assignment_id": it.driver_assignment_id,
                 "amount":    f"{it.amount:.4f}",
                 "reason":    it.reason,
                 "notes":     it.notes,
@@ -629,7 +632,7 @@ def _bonus_batch_legacy_v1_payload(
         if item.amount != item.amount.quantize(Decimal("0.01")):
             return None
         legacy_items.append({
-            "driver_id": item.driver_id,
+            "driver_assignment_id": item.driver_assignment_id,
             "amount": f"{item.amount:.2f}",
             "reason": item.reason,
             "notes": item.notes,
@@ -795,12 +798,12 @@ async def apply_bonus_batch(
     for idx, item in enumerate(data.items):
         try:
             await _assert_driver_eligible_for_period_via_snapshot(
-                company_id, branch_id, period_id, item.driver_id, db
+                company_id, branch_id, period_id, item.driver_assignment_id, db
             )
         except HTTPException as exc:
             raise HTTPException(
                 status_code=exc.status_code,
-                detail=f"items[{idx}] (driver {item.driver_id}): {exc.detail}",
+                detail=f"items[{idx}] (driver {item.driver_assignment_id}): {exc.detail}",
             )
 
     # Predicated revision bump — 409 if the caller's expected revision is stale.
@@ -823,7 +826,7 @@ async def apply_bonus_batch(
         ins = await db.execute(
             text("""
                 INSERT INTO payroll.payrollbonusevents
-                    (companyid, branchid, payrollperiodid, driverid,
+                    (companyid, branchid, payrollperiodid, driverassignmentid,
                      amount, reason, notes, status,
                      batchcorrelationid, idempotencykey,
                      createdbyuserid, createdatutc, datarevision)
@@ -838,7 +841,7 @@ async def apply_bonus_batch(
                 "cid":    company_id,
                 "bid":    branch_id,
                 "pid":    period_id,
-                "did":    item.driver_id,
+                "did":    item.driver_assignment_id,
                 "amount": item.amount,
                 "reason": item.reason,
                 "notes":  item.notes,
@@ -905,7 +908,7 @@ async def apply_bonus_batch(
             line_id=created_id,
             action_code="BONUS_EVENT_ADDED",
             old_value=None,
-            new_value={"driver_id": item.driver_id, "amount": str(item.amount)},
+            new_value={"driver_assignment_id": item.driver_assignment_id, "amount": str(item.amount)},
             entity_name="PayrollBonusEvents",
             correlation_id=batch_correlation_id,
         )
@@ -915,9 +918,9 @@ async def apply_bonus_batch(
             source_entity_id=created_id, user_id=user_id, required_permission_code="payroll.entry",
             db=db,
             after_state={
-                "driver_id": item.driver_id, "amount": item.amount, "reason": item.reason,
+                "driver_assignment_id": item.driver_assignment_id, "amount": item.amount, "reason": item.reason,
                 "notes": item.notes, "status": "Active", "data_revision": 1,
-            }, driver_id=item.driver_id, correlation_id=batch_correlation_id, source_revision=1,
+            }, driver_assignment_id=item.driver_assignment_id, correlation_id=batch_correlation_id, source_revision=1,
         )
 
     # One batch-level audit row, same correlation id.
@@ -1015,8 +1018,10 @@ async def get_bonus_summary(
     # ── Roster: snapshot rows only ─────────────────────────────────────────── #
     roster_result = await db.execute(
         text("""
-            SELECT ppde.driverid,
-                   ppde.drivercodesnapshot,
+            SELECT ppde.driverassignmentid,
+                   (SELECT a.driverid FROM core.driverassignments a
+                     WHERE a.driverassignmentid = ppde.driverassignmentid) AS permanentdriverid,
+                   ppde.drivernumbersnapshot,
                    ppde.drivernamesnapshot,
                    ppde.eligibilityreasoncode
             FROM   payroll.payrollperioddrivereligibility ppde
@@ -1038,7 +1043,7 @@ async def get_bonus_summary(
         text("""
             SELECT
                 be.payrollbonuseventid,
-                be.driverid,
+                be.driverassignmentid,
                 be.amount,
                 be.reason,
                 be.notes,
@@ -1057,16 +1062,16 @@ async def get_bonus_summary(
             WHERE be.payrollperiodid = :period_id
               AND be.companyid       = :company_id
               AND be.branchid        = :branch_id
-            ORDER BY be.driverid, be.payrollbonuseventid
+            ORDER BY be.driverassignmentid, be.payrollbonuseventid
         """),
         {"period_id": period_id, "company_id": company_id, "branch_id": period.branch_id},
     )
     events_by_driver: dict[int, list[BonusSummaryEvent]] = {}
     for r in events_result.mappings().fetchall():
-        events_by_driver.setdefault(int(r["driverid"]), []).append(
+        events_by_driver.setdefault(int(r["driverassignmentid"]), []).append(
             BonusSummaryEvent(
                 bonus_event_id=int(r["payrollbonuseventid"]),
-                driver_id=int(r["driverid"]),
+                driver_assignment_id=int(r["driverassignmentid"]),
                 amount=Decimal(str(r["amount"])),
                 reason=r["reason"],
                 notes=r["notes"],
@@ -1100,9 +1105,9 @@ async def get_bonus_summary(
     # ── Aggregate events onto the snapshot roster, with per-driver capabilities #
     drivers: list[BonusSummaryDriver] = []
     for row in roster_rows:
-        driver_id = int(row["driverid"])
+        driver_assignment_id = int(row["driverassignmentid"])
         reason_code = row["eligibilityreasoncode"]
-        events = events_by_driver.get(driver_id, [])
+        events = events_by_driver.get(driver_assignment_id, [])
         active_events = [e for e in events if e.status == "Active"]
 
         reason_codes = list(period_reason_codes)
@@ -1120,8 +1125,9 @@ async def get_bonus_summary(
 
         drivers.append(
             BonusSummaryDriver(
-                driver_id=driver_id,
-                driver_code=row["drivercodesnapshot"],
+                driver_assignment_id=driver_assignment_id,
+                driver_id=row["permanentdriverid"],
+                driver_number=row["drivernumbersnapshot"],
                 driver_name=row["drivernamesnapshot"],
                 eligibility_reason_code=reason_code,
                 total_bonus=sum((e.amount for e in active_events), Decimal("0")),
@@ -1143,8 +1149,8 @@ async def get_bonus_summary(
             0 if d.total_bonus > 0 else 1,
             -d.total_bonus,
             d.driver_name or "",
-            d.driver_code or "",
-            d.driver_id,
+            d.driver_number or "",
+            d.driver_assignment_id,
         )
     )
 

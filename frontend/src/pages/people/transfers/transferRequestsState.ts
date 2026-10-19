@@ -16,6 +16,7 @@ export interface TabState {
   // Action dialogs
   decideDialog: DecideDialogState;
   cancelDialog: CancelDialogState;
+  rescheduleDialog: RescheduleDialogState;
   approveDialog: { open: boolean; loading: boolean; error: string | null; notes: string };
 
   // Per-action loading for detail panel buttons
@@ -48,6 +49,11 @@ interface CancelDialogState {
   reason: string;
 }
 
+interface RescheduleDialogState {
+  open: boolean; loading: boolean; error: string | null;
+  effectiveAt: string;
+}
+
 const CREATE0: CreateState = {
   open: false, loading: false, error: null,
   drivers: [], driversLoading: false,
@@ -56,6 +62,7 @@ const CREATE0: CreateState = {
 };
 const DECIDE0: DecideDialogState = { open: false, loading: false, error: null, decision: 'Approved', notes: '' };
 const CANCEL0: CancelDialogState = { open: false, loading: false, error: null, reason: '' };
+const RESCHEDULE0: RescheduleDialogState = { open: false, loading: false, error: null, effectiveAt: '' };
 const APPROVE0 = { open: false, loading: false, error: null, notes: '' };
 
 export const INITIAL: TabState = {
@@ -64,6 +71,7 @@ export const INITIAL: TabState = {
   create: CREATE0,
   decideDialog: DECIDE0,
   cancelDialog: CANCEL0,
+  rescheduleDialog: RESCHEDULE0,
   approveDialog: APPROVE0,
   actionLoading: false, actionError: null,
   toast: null,
@@ -105,7 +113,13 @@ export type TabAction =
   | { type: 'CANCEL_CLOSE' }
   | { type: 'CANCEL_LOADING'; val: boolean }
   | { type: 'CANCEL_ERR'; err: string | null }
-  | { type: 'CANCEL_REASON'; val: string };
+  | { type: 'CANCEL_REASON'; val: string }
+  // Reschedule dialog
+  | { type: 'RESCHEDULE_OPEN' }
+  | { type: 'RESCHEDULE_CLOSE' }
+  | { type: 'RESCHEDULE_LOADING'; val: boolean }
+  | { type: 'RESCHEDULE_ERR'; err: string | null }
+  | { type: 'RESCHEDULE_AT'; val: string };
 
 export function reducer(st: TabState, a: TabAction): TabState {
   switch (a.type) {
@@ -149,6 +163,12 @@ export function reducer(st: TabState, a: TabAction): TabState {
     case 'CANCEL_LOADING': return { ...st, cancelDialog: { ...st.cancelDialog, loading: a.val } };
     case 'CANCEL_ERR': return { ...st, cancelDialog: { ...st.cancelDialog, error: a.err, loading: false } };
     case 'CANCEL_REASON': return { ...st, cancelDialog: { ...st.cancelDialog, reason: a.val } };
+    // Reschedule
+    case 'RESCHEDULE_OPEN': return { ...st, rescheduleDialog: { ...RESCHEDULE0, open: true } };
+    case 'RESCHEDULE_CLOSE': return { ...st, rescheduleDialog: { ...st.rescheduleDialog, open: false } };
+    case 'RESCHEDULE_LOADING': return { ...st, rescheduleDialog: { ...st.rescheduleDialog, loading: a.val } };
+    case 'RESCHEDULE_ERR': return { ...st, rescheduleDialog: { ...st.rescheduleDialog, error: a.err, loading: false } };
+    case 'RESCHEDULE_AT': return { ...st, rescheduleDialog: { ...st.rescheduleDialog, effectiveAt: a.val } };
     default: return st;
   }
 }

@@ -91,7 +91,7 @@ class ReportPaySection(BaseModel):
     total_pay: Decimal
     gross_pay: Decimal
     definition_amounts: list[DefinitionAmount] = []
-    driver_code: str | None = None
+    driver_number: str | None = None
     driver_name: str | None = None
     financial_lines: list[dict] = []
 
@@ -99,8 +99,9 @@ class ReportPaySection(BaseModel):
 
 class ReportDriver(BaseModel):
     __module__ = "app.payroll.schemas"
+    driver_assignment_id: int
     driver_id: int
-    driver_code: str | None = None
+    driver_number: str | None = None
     driver_name: str | None = None
     work: ReportWorkSection
     pay: ReportPaySection | None = None

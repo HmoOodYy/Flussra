@@ -134,8 +134,8 @@ function DriverTotalsTable({ rows, code, digits }: { rows: FinalizationPreviewDr
       </thead>
       <tbody>
         {rows.map((r) => (
-          <tr key={r.driver_id}>
-            <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
+          <tr key={r.driver_assignment_id}>
+            <td className={styles.nameCell}>{r.driver_name ?? 'Unnamed driver'}</td>
             <td className={styles.numCol}>{fmt(r.daily_pay, code, digits)}</td>
             <td className={styles.numCol}>{fmt(r.status_pay, code, digits)}</td>
             <td className={`${styles.numCol} ${hasNonZero(r.sys_adjustment) ? styles.adjCell : ''}`}>
@@ -167,7 +167,7 @@ function SysAdjustmentsTable({ rows, code, digits }: { rows: FinalizationPreview
       <tbody>
         {rows.map((r, i) => (
           <tr key={i}>
-            <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
+            <td className={styles.nameCell}>{r.driver_name ?? 'Unnamed driver'}</td>
             <td>
               <span className={`${styles.typePill} ${r.adjustment_type === 'SYS_MIN_TOPUP' ? styles.topupPill : styles.capPill}`}>
                 {r.adjustment_type === 'SYS_MIN_TOPUP' ? 'Min Top-Up' : 'Max Cap'}
@@ -202,7 +202,7 @@ function LineDetailsTable({ rows, code, digits }: { rows: FinalizationPreviewLin
       <tbody>
         {rows.map((r) => (
           <tr key={r.source_key}>
-            <td className={styles.nameCell}>{r.driver_name ?? `Driver #${r.driver_id}`}</td>
+            <td className={styles.nameCell}>{r.driver_name ?? 'Unnamed driver'}</td>
             <td className={styles.dateCell}>{r.work_date ?? '-'}</td>
             <td>{lineLabel(r)}</td>
             <td>{r.line_scope}</td>

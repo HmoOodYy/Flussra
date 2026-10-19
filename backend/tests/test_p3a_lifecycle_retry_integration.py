@@ -43,8 +43,13 @@ async def _seed_tenant(engine, status, currency_code="USD"):
             VALUES (:cid, :bid, 'P3a Driver', 'Driver', 'Active', :uid) RETURNING employeeid
         """), {"cid": cid, "bid": bid, "uid": uid})).scalar_one()
         did = (await db.execute(text("""
-            INSERT INTO core.drivers(companyid, branchid, employeeid, drivercode, driverstatus)
-            VALUES (:cid, :bid, :eid, :code, 'Active') RETURNING driverid
+            WITH d AS (
+                INSERT INTO core.drivers(companyid, employeeid, drivernumber, driverstatus)
+                VALUES (:cid, :eid, :code, 'Active') RETURNING driverid
+            )
+            INSERT INTO core.driverassignments(companyid, branchid, employeeid, driverid, effectivefromat)
+            SELECT :cid, :bid, :eid, d.driverid, NOW() - INTERVAL '1 day' FROM d
+            RETURNING driverassignmentid
         """), {"cid": cid, "bid": bid, "eid": eid, "code": "P3AR_" + marker})).scalar_one()
         pid = (await db.execute(text("""
             INSERT INTO payroll.payrollperiods
@@ -75,7 +80,7 @@ async def _seed_tenant(engine, status, currency_code="USD"):
             """), {"rid": review_id, "pid": pid})
         await db.execute(text("""
             INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverid, workdate, linetype,
+                (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype,
                  quantity, sourcetype, sourceid, status, needsmanagerreview)
             VALUES (:cid, :bid, :pid, :did, DATE '2099-01-01', 'DailyNote',
                     1, 'User', :source, 'Active', FALSE)
