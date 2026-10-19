@@ -335,6 +335,68 @@ async def test_a_finalized_period_in_another_branch_of_the_driver_blocks_across_
             ).status_code == 201
 
 
+async def test_extending_a_rule_across_a_finalized_period_start_in_another_branch_is_refused(
+    client, auth_token, direct_db,
+):
+    """Extending a bounded rule newly governs old_to+1..new_to, so a Locked period that starts
+    there (here in the Scheduled destination Branch) would silently change selection."""
+    w = await _world(client, auth_token, direct_db)
+    await _calendars(direct_db, w)
+    await scheduled_transfer(client, auth_token, w.driver_id, w.new_branch,
+                             await db_now(direct_db) + timedelta(days=3))
+    today = await branch_today(direct_db, w.old_branch)
+    rule = await _make(client, w.old_manager, w, today, today + timedelta(days=1))
+    start = _next_monday(today + timedelta(days=5))
+    period = await open_period(direct_db, w.new_branch, start, start + timedelta(days=6), "Locked")
+    url = f"{RULES}/{rule['driver_pay_rule_id']}/end"
+
+    refused = await client.post(url, json={"effective_to": str(start)}, headers=auth(w.old_manager))
+    assert refused.status_code == 422, refused.text
+    assert _code(refused) == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
+    assert refused.json()["detail"]["payroll_period_ids"] == [period]
+    assert (await _rules(client, auth_token, w.driver_id)).json()[0]["effective_to"] == str(
+        today + timedelta(days=1))
+    # Stopping the day before the finalized start leaves selection there untouched.
+    kept = await client.post(url, json={"effective_to": str(start - timedelta(days=1))},
+                             headers=auth(w.old_manager))
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["effective_to"] == str(start - timedelta(days=1))
+
+
+async def test_extending_a_rule_with_no_finalized_period_succeeds_and_shortening_is_unchanged(
+    client, auth_token, direct_db,
+):
+    w = await _world(client, auth_token, direct_db)
+    await _calendars(direct_db, w)
+    rule = await _make(client, w.old_manager, w, "2026-04-01", "2026-04-30")
+    url = f"{RULES}/{rule['driver_pay_rule_id']}/end"
+    extended = await client.post(url, json={"effective_to": "2026-06-30"}, headers=auth(w.old_manager))
+    assert extended.status_code == 200, extended.text
+    assert extended.json()["effective_to"] == "2026-06-30" and extended.json()["status"] == "Ended"
+
+    # Shortening and ending an open rule keep guarding the dates they release.
+    second = await _make(client, w.old_manager, w, "2026-07-01", rule_type="MaximumPay")
+    period = await open_period(direct_db, w.old_branch, date(2026, 8, 3), date(2026, 8, 9), "Locked")
+    second_url = f"{RULES}/{second['driver_pay_rule_id']}/end"
+    blocked = await client.post(second_url, json={"effective_to": "2026-07-31"},
+                                headers=auth(w.old_manager))
+    assert blocked.status_code == 422 and blocked.json()["detail"]["payroll_period_ids"] == [period]
+    allowed = await client.post(second_url, json={"effective_to": "2026-08-31"},
+                                headers=auth(w.old_manager))
+    assert allowed.status_code == 200, allowed.text
+
+
+async def test_extending_into_the_next_rule_is_a_clean_422(client, auth_token, direct_db):
+    w = await _world(client, auth_token, direct_db)
+    await _calendars(direct_db, w)
+    first = await _make(client, w.old_manager, w, "2026-04-01", "2026-04-30")
+    await _make(client, w.old_manager, w, "2026-05-01", "2026-05-31")
+    overlapped = await client.post(
+        f"{RULES}/{first['driver_pay_rule_id']}/end", json={"effective_to": "2026-05-15"},
+        headers=auth(w.old_manager))
+    assert overlapped.status_code == 422, overlapped.text
+
+
 async def test_an_unrelated_drivers_finalized_period_does_not_block(client, auth_token, direct_db):
     w = await _world(client, auth_token, direct_db)
     await _calendars(direct_db, w)

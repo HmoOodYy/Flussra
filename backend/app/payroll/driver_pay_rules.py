@@ -461,8 +461,9 @@ async def end_driver_pay_rule(
       - Rule must be Active (cannot end an already-Ended or Voided rule).
       - effective_to must be >= rule.effective_from.
       - Authority over the context tenure of the first date whose resolved rule changes.
-      - No Locked/Archived period of the Driver, in any Branch, may start inside
-        ``[effective_to + 1, old effective_to]`` (that would change a finalized selection).
+      - No Locked/Archived period of the Driver, in any Branch, may start inside the dates
+        whose governing rule changes: ``[LEAST(old, new) + 1, GREATEST(old, new)]`` (an open
+        old end is unbounded), so shortening and extending are both protected.
     """
     rule = await _load_rule_row(rule_id, company_id, db)
     _require_status(rule, ("Active",), "Only Active rules can be ended")
@@ -472,33 +473,50 @@ async def end_driver_pay_rule(
             detail=f"effective_to ({effective_to}) cannot be before effective_from ({rule['effectivefrom']}).",
         )
     driver_id = int(rule["driverid"])
-    old_to = rule["effectiveto"]
-    first_changed = (min(effective_to, old_to) if old_to is not None else effective_to) + timedelta(days=1)
 
-    await require_compensation_authority(company_id, user_id, driver_id, first_changed, db)
+    def changed_window(row) -> tuple[date, date | None]:
+        """The dates whose governing rule changes: between the old and the new end."""
+        old_to = row["effectiveto"]
+        if old_to is None:
+            return effective_to + timedelta(days=1), None
+        return min(effective_to, old_to) + timedelta(days=1), max(effective_to, old_to)
+
+    # Early authority check for a quick answer; the locked row below is authoritative.
+    await require_compensation_authority(
+        company_id, user_id, driver_id, changed_window(rule)[0], db)
     await lock_driver_compensation_write(
-        company_id, driver_id, None, db, monetary=True, lock_from=first_changed)
+        company_id, driver_id, None, db, monetary=True, lock_from=changed_window(rule)[0])
     rule = await _load_rule_row(rule_id, company_id, db, for_update=True)
     _require_status(rule, ("Active",), "Only Active rules can be ended")
+    if effective_to < rule["effectivefrom"]:
+        raise HTTPException(
+            status_code=422,
+            detail=f"effective_to ({effective_to}) cannot be before effective_from ({rule['effectivefrom']}).",
+        )
+    first_changed, last_changed = changed_window(rule)
     instant = await decision_instant(db)
     context = await require_compensation_authority(
         company_id, user_id, driver_id, first_changed, db, at=instant)
     await require_no_finalized_payroll(
-        company_id, driver_id, effective_to + timedelta(days=1), rule["effectiveto"],
-        "PeriodStart", db)
+        company_id, driver_id, first_changed, last_changed, "PeriodStart", db)
 
-    await db.execute(
-        text("""
-            UPDATE payroll.driverpayrules
-            SET    status        = 'Ended',
-                   effectiveto   = :eff_to,
-                   updatedbyuserid = :uid,
-                   updatedatutc  = NOW()
-            WHERE  driverpayruleid = :rid
-              AND  companyid       = :cid
-        """),
-        {"eff_to": effective_to, "uid": user_id, "rid": rule_id, "cid": company_id},
-    )
+    try:
+        await db.execute(
+            text("""
+                UPDATE payroll.driverpayrules
+                SET    status        = 'Ended',
+                       effectiveto   = :eff_to,
+                       updatedbyuserid = :uid,
+                       updatedatutc  = NOW()
+                WHERE  driverpayruleid = :rid
+                  AND  companyid       = :cid
+            """),
+            {"eff_to": effective_to, "uid": user_id, "rid": rule_id, "cid": company_id},
+        )
+    except DBAPIError as exc:  # an extension can run into the Driver's next rule of this type
+        if any(name in str(exc.orig) for name in _OVERLAP_CONSTRAINTS):
+            raise _overlap_error(rule["ruletype"], rule["effectivefrom"], effective_to) from exc
+        raise
 
     await _write_pay_rule_audit(
         db,
