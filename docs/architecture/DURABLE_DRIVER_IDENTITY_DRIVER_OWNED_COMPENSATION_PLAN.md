@@ -101,6 +101,8 @@ Recorded by the Lead on 2026-10-18 before implementation. They resolve the "impl
 
 After Stage 1, `DriverID` means only the permanent Driver. Everything that stored a branch-profile id becomes `DriverAssignmentID`: payroll drafts, day-entry state, eligibility, bonus events, final lines, calculation totals, snapshots, audit evidence, and (for Stage 1 only, unchanged in ownership) the legacy and target rate/pay-rule tables, which Stage 2 re-keys to the Driver. Evidence and final tables also carry the permanent `DriverID` (bound to the assignment by composite FK) and `DriverNumberSnapshot` in place of `DriverCodeSnapshot`. The rate-table naming collision flagged above stays with Stage 2.
 
+**Approved Stage 1 decision (2026-10-19):** Ended DriverAssignments' assignment-owned compensation is read-only through normal authoring workflows, judged at the mutation instant after lock waits. Future historical corrections require a separate explicit and auditable correction workflow; see [People / Workforce / Access contract §9.1](PEOPLE_WORKFORCE_ACCESS_ARCHITECTURE_CONTRACT.md#91-payroll-history-is-keyed-by-driverassignmentid-driverid-is-durable).
+
 **Status ownership**
 
 - `Driver.DriverStatus` is `Active`, `Inactive` or `OnLeave`: the durable work state of the person-driver. It survives transfers.

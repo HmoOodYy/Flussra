@@ -635,6 +635,10 @@ Driver compensation is owned by `DriverID` from Stage 2 (§8.4). Until then, rat
 
 This is intentional.
 
+**Approved Stage 1 business rule (2026-10-19):** Once a `DriverAssignment` has ended, its assignment-owned compensation history is read-only through normal authoring workflows, including for company-wide roles. The restriction applies to inserts, updates and deletes at the database mutation's wall-clock instant (`EffectiveToAt <= clock_timestamp()`), including operations that began earlier and waited on locks. Current assignments, pending future-effective assignments, and a Scheduled transfer's source before its actual end remain writable subject to normal authorization.
+
+This does not prohibit future historical corrections. Any such correction must use a separate explicit and auditable correction workflow rather than ordinary mutation of historical assignment state; no correction workflow is introduced by Stage 1.
+
 ### 9.2 Never rewrite history because an Employee moved
 
 A transfer must not rewrite old payroll, rates, finalized evidence, snapshots, or eligibility history to the destination DriverAssignmentID.
