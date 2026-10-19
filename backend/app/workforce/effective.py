@@ -134,7 +134,12 @@ async def require_writable_driver_assignment(
     driver_assignment_id: int,
     db: AsyncConnection,
 ) -> None:
-    """Refuse EARLY a compensation write against an already-ENDED DriverAssignment (409).
+    """Refuse EARLY a status-rate write against an already-ENDED DriverAssignment (409).
+
+    Only the legacy status rates (``payroll.DriverRates`` / ``DriverRateTiers``, in
+    ``payroll/rates.py``) are assignment-owned and call this. Ordinary rate schedules and
+    Min/Max pay rules belong to the permanent Driver and are judged by the context tenure of
+    the change's start date instead (``app.compensation.driver_context``).
 
     Ended means ``EffectiveToAt IS NOT NULL AND EffectiveToAt <= now`` at one wall-clock
     decision instant, which includes the empty never-effective window of a terminated
@@ -144,7 +149,7 @@ async def require_writable_driver_assignment(
     Acceptance here is never final. The writer can still block afterwards (advisory
     lock, row lock, unique-index wait) while a Scheduled source's future end passes, and
     ``FOR SHARE`` freezes the ``EffectiveToAt`` value, not time. The authority is the
-    database trigger ``core.trg_CompensationAssignmentWritable``: it re-decides at each
+    database trigger ``core.trg_CompensationAssignmentWritable`` (on the status-rate tables only): it re-decides at each
     mutation's own wall-clock instant, after that statement's waits, and its refusal
     reaches the client as the same 409 through the application's DBAPIError handler. This
     call refuses only what is already ended, so such a request does not wait for the

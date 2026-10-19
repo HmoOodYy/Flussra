@@ -11,8 +11,6 @@ from app.payroll import (
 from app.payroll.schemas import (
     BatchRateRequest,
     BatchRateSaveResult,
-    CopyRatesRequest,
-    CopyRatesResult,
     DriverRateCreate,
     DriverRateMatrix,
     DriverRatesSummary,
@@ -415,42 +413,4 @@ async def get_bulk_driver_rates_summary(
         user_id=int(token["sub"]),
         db=db,
         branch_id=branch_id,
-    )
-
-
-@router.post(
-    "/driver-assignments/{target_driver_assignment_id}/rates/copy-from/{source_driver_assignment_id}",
-    response_model=CopyRatesResult,
-    status_code=200,
-    summary="Copy Approved rates from one driver to another",
-    description=(
-        "Copies current Approved rates from source_driver (as-of effective_from) to "
-        "target_driver.  Requires payrates.edit on both driver branches.  "
-        "DRIVER/Self users cannot use this endpoint.\n\n"
-        "Rates become PendingApproval unless AllowSelfApproval=True, in which case "
-        "they auto-approve and supersede existing rates.\n\n"
-        "Only rates valid for the target driver's branch are copied; "
-        "rate types not configured for the target branch are silently skipped.\n\n"
-        "Set include_pay_rules=true to also copy Active MinimumPay/MaximumPay rules."
-    ),
-    responses={
-        403: {"description": "DRIVER/Self user, insufficient permission, or cross-company attempt"},
-        404: {"description": "Source or target driver not found"},
-        422: {"description": "Backdating guard, overlapping pay rule, or validation failure"},
-    },
-)
-async def copy_driver_rates(
-    target_driver_assignment_id: int,
-    source_driver_assignment_id: int,
-    body: CopyRatesRequest,
-    token: TokenDep,
-    db: DbDep,
-) -> CopyRatesResult:
-    return await rates.copy_driver_rates(
-        target_driver_assignment_id=target_driver_assignment_id,
-        source_driver_assignment_id=source_driver_assignment_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        data=body,
-        db=db,
     )

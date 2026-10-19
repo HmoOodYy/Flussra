@@ -42,8 +42,9 @@ async def check_not_in_finalized_period(
     Raise HTTP 422 when effective_from falls inside a Locked or Archived period
     for this company and branch. The date comparison includes both period bounds.
 
-    Called for rate approval, batch rate auto-approval, Compensation assignment
-    approval, and pay-rule creation to prevent retroactive finalized changes.
+    Called for legacy status-rate approval and batch auto-approval to prevent retroactive
+    finalized changes. Driver-owned compensation (rate schedules, pay rules) uses
+    ``require_no_finalized_payroll`` instead.
     """
     result = await db.execute(
         text("""

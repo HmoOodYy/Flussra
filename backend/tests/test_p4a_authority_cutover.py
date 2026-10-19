@@ -96,12 +96,29 @@ async def test_ordinary_legacy_rate_writers_are_closed(
                                 {"r": rate_id})
 
 
-async def test_copy_rates_is_unavailable(session_client, auth_token, created_driver_assignment_id):
+async def test_the_rate_copy_route_no_longer_exists(
+    session_client, auth_token, created_driver_assignment_id,
+):
+    """Compensation follows the Driver, so there is nothing to copy at transfer time and the
+    legacy copy-from route is gone (not refused: absent)."""
+    from app.main import create_app
+
+    mounted = set()
+
+    def walk(router, prefix=""):
+        for route in router.routes:
+            if hasattr(route, "methods") and hasattr(route, "path"):
+                mounted.update(f"{m} {prefix}{route.path}" for m in route.methods)
+            elif hasattr(route, "original_router") and hasattr(route, "include_context"):
+                walk(route.original_router, prefix + route.include_context.prefix)
+
+    walk(create_app().router)
+    assert not [r for r in mounted if "copy-from" in r]
+
     response = await session_client.post(
         f"/payroll/driver-assignments/{created_driver_assignment_id}/rates/copy-from/{created_driver_assignment_id}",
         headers=_auth(auth_token), json={"effective_from": "2088-01-01"})
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == "RATE_COPY_UNAVAILABLE"
+    assert response.status_code in (404, 405), response.text
 
 
 async def test_rate_matrix_exposes_only_status_rate_columns(
