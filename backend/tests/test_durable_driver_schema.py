@@ -367,6 +367,7 @@ def test_no_function_or_view_still_reads_the_profile_meaning_of_driverid(cur):
               'fn_effectivedriverassignment', 'trg_driverassignments_identityimmutable',
               -- Driver-owned compensation (0088): DriverID there is the permanent Driver.
               'fn_driverassignmentforbusinessdate', 'fn_driverfinalizedpayrolltouched',
+              'fn_driverpayrollperiodsforfootprint',
               'trg_drivercompensationcontextwritable', 'trg_driverrateschedules_beforeupdate',
               'trg_driverrateschedules_beforedelete', 'trg_driverpayrules_beforeupdate',
               'fn_guard_used_rate_definition_scope')

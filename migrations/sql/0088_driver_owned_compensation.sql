@@ -641,18 +641,21 @@ AS $$
     LIMIT 1
 $$;
 
--- Finalized payroll touched by a compensation change of a Driver, through ANY of the
--- Driver's assignments in ANY Branch: Locked or Archived periods with an eligibility row
--- of one of those assignments. Mode 'WorkDate' tests the period's work dates against the
--- footprint (rate schedules); mode 'PeriodStart' tests the period's start date (pay
--- rules, selected at period start). Callers refuse when any row is returned.
-CREATE FUNCTION payroll.fn_DriverFinalizedPayrollTouched(
+-- Payroll periods of a Driver that a compensation footprint is relevant to, through ANY of
+-- the Driver's assignments in ANY Branch, whatever the period's status: periods with an
+-- eligibility row of one of those assignments. This is the ONE predicate behind both the
+-- finalized-payroll guard and the writers' Branch workflow-lock discovery. It compares
+-- DATE ranges against frozen eligibility facts (the period's own dates and its roster), so no
+-- live Branch-timezone conversion can make it disagree with what the guard judges. Mode
+-- 'WorkDate' tests the period's work dates against the footprint (rate schedules); mode
+-- 'PeriodStart' tests the period's start date (pay rules, selected at period start).
+CREATE FUNCTION payroll.fn_DriverPayrollPeriodsForFootprint(
     p_CompanyID INTEGER,
     p_DriverID INTEGER,
     p_Footprint DATERANGE,
     p_Mode TEXT
 )
-RETURNS TABLE (PayrollPeriodID INTEGER, StartDate DATE, EndDate DATE, Status VARCHAR)
+RETURNS TABLE (PayrollPeriodID INTEGER, BranchID INTEGER, StartDate DATE, EndDate DATE, Status VARCHAR)
 LANGUAGE plpgsql
 STABLE
 AS $$
@@ -667,10 +670,9 @@ BEGIN
     END IF;
 
     RETURN QUERY
-    SELECT pp.PayrollPeriodID, pp.StartDate, pp.EndDate, pp.Status::VARCHAR
+    SELECT pp.PayrollPeriodID, pp.BranchID, pp.StartDate, pp.EndDate, pp.Status::VARCHAR
     FROM payroll.PayrollPeriods pp
     WHERE pp.CompanyID = p_CompanyID
-      AND pp.Status IN ('Locked', 'Archived')
       AND CASE p_Mode
               WHEN 'WorkDate' THEN daterange(pp.StartDate, pp.EndDate, '[]') && p_Footprint
               ELSE p_Footprint @> pp.StartDate
@@ -685,6 +687,25 @@ BEGIN
       )
     ORDER BY pp.StartDate, pp.PayrollPeriodID;
 END
+$$;
+
+-- Finalized payroll touched by a compensation change of a Driver: the periods of
+-- payroll.fn_DriverPayrollPeriodsForFootprint that are Locked or Archived. Callers refuse
+-- when any row is returned.
+CREATE FUNCTION payroll.fn_DriverFinalizedPayrollTouched(
+    p_CompanyID INTEGER,
+    p_DriverID INTEGER,
+    p_Footprint DATERANGE,
+    p_Mode TEXT
+)
+RETURNS TABLE (PayrollPeriodID INTEGER, StartDate DATE, EndDate DATE, Status VARCHAR)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT f.PayrollPeriodID, f.StartDate, f.EndDate, f.Status
+    FROM payroll.fn_DriverPayrollPeriodsForFootprint(p_CompanyID, p_DriverID, p_Footprint, p_Mode) f
+    WHERE f.Status IN ('Locked', 'Archived')
+    ORDER BY f.StartDate, f.PayrollPeriodID
 $$;
 
 -- Mutation-instant enforcement. A change that alters authoritative compensation from a

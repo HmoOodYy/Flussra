@@ -27,7 +27,9 @@ Lock order for every Driver-owned writer
     2. Company currency, FOR SHARE (monetary writers only);
     3. the Driver's ``core.DriverAssignments`` rows, FOR SHARE, in ascending id;
     4. Branch workflow advisory locks, ascending BranchID, for every Branch whose tenure
-       overlaps ``[start date, infinity)`` (writers with payroll effect only);
+       overlaps ``[start date, infinity)`` and every Branch of a payroll period (any status)
+       of the Driver reaching that range, found by the same database predicate the finalized
+       guard uses (writers with payroll effect only);
     5. the RateDefinition structure lock;
     6. the schedule / rule rows, FOR UPDATE;
     7. one decision instant (``clock_timestamp()``), then the finalized-payroll guard and the
@@ -56,6 +58,7 @@ from app.access.policy import require_non_driver_subject
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.compensation.errors import compensation_error
 from app.compensation.guards import RATE_EDIT, RATE_READ
+from app.payroll.guards import driver_payroll_period_branches
 from app.payroll.workflow_lock import acquire_branch_workflow_lock
 from app.rate_definition_concurrency import lock_rate_definition_structure
 from app.workforce.effective import driver_compensation_historical_detail
@@ -318,9 +321,12 @@ async def lock_driver_compensation_write(
     )
     if lock_from is not None:
         tenures = await load_driver_tenures(company_id, driver_id, db)
+        # Live tenures are Branch-local days under today's timezone; the finalized guard
+        # judges frozen eligibility rows. Lock both, so a Branch whose period the guard may
+        # judge is serialized against its finalize even after a timezone change.
         branches = sorted({
             t.branch_id for t in tenures if t.last_day is None or t.last_day >= lock_from
-        })
+        } | await driver_payroll_period_branches(company_id, driver_id, lock_from, db))
         for branch_id in branches:
             await acquire_branch_workflow_lock(company_id, branch_id, db)
     if rate_definition_id is not None:

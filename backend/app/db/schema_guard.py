@@ -668,6 +668,8 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     for signature, label in (
         ("core.fn_driverassignmentforbusinessdate(integer,integer,date)",
          "core.fn_DriverAssignmentForBusinessDate(INT, INT, DATE)"),
+        ("payroll.fn_driverpayrollperiodsforfootprint(integer,integer,daterange,text)",
+         "payroll.fn_DriverPayrollPeriodsForFootprint(INT, INT, DATERANGE, TEXT)"),
         ("payroll.fn_driverfinalizedpayrolltouched(integer,integer,daterange,text)",
          "payroll.fn_DriverFinalizedPayrollTouched(INT, INT, DATERANGE, TEXT)"),
         ("core.trg_drivercompensationcontextwritable()", "core.trg_DriverCompensationContextWritable()"),

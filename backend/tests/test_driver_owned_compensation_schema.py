@@ -1014,6 +1014,33 @@ def test_finalized_guard_ignores_another_drivers_periods_and_other_companies(cur
     assert _touched(cur, foreign, "[2000-01-01,)", "WorkDate", driver=w["driver"]) == []
 
 
+def test_one_predicate_serves_the_guard_and_the_lock_discovery(cur):
+    """The finalized guard is the Locked/Archived subset of the footprint-periods function,
+    which lists the periods of ANY status with their Branch (what the writers lock)."""
+    w = _transferred_driver(cur)
+    approved = _finalized_period(cur, w, w["branches"][0], w["source"], status="Approved",
+                                 start="2020-03-02", end="2020-03-08")
+    locked = _finalized_period(cur, w, w["branches"][1], w["destination"], status="Locked",
+                               start="2021-03-01", end="2021-03-07")
+    cur.execute("""
+        SELECT payrollperiodid, branchid, status
+        FROM payroll.fn_DriverPayrollPeriodsForFootprint(%s, %s, '[2000-01-01,)'::daterange, 'WorkDate')
+        ORDER BY startdate
+    """, (w["company"], w["driver"]))
+    assert cur.fetchall() == [
+        (approved, w["branches"][0], "Approved"), (locked, w["branches"][1], "Locked")]
+    assert [row[0] for row in _touched(cur, w, "[2000-01-01,)", "WorkDate")] == [locked]
+    cur.execute("""
+        SELECT payrollperiodid FROM payroll.fn_DriverPayrollPeriodsForFootprint(
+            %s, %s, '[2020-03-05,2020-03-05]'::daterange, 'PeriodStart')
+    """, (w["company"], w["driver"]))
+    assert cur.fetchall() == []  # the period started before the footprint
+    for mode in ("Both", None):
+        with rejected(cur, errors.InvalidParameterValue):
+            cur.execute("SELECT * FROM payroll.fn_DriverPayrollPeriodsForFootprint(%s, %s, "
+                        "'[2020-01-01,)'::daterange, %s)", (w["company"], w["driver"], mode))
+
+
 def test_finalized_guard_rejects_an_unknown_mode_or_a_null_footprint(cur):
     w = _world(cur)
     for mode in ("Both", "workdate", "", None):

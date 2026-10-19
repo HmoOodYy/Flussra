@@ -114,6 +114,28 @@ async def require_no_finalized_payroll(
     )
 
 
+async def driver_payroll_period_branches(
+    company_id: int, driver_id: int, from_date: date, db: AsyncConnection,
+) -> set[int]:
+    """Branches of every payroll period (any status) of the Driver that reaches ``from_date``
+    or later, through ANY of the Driver's assignments.
+
+    This is the lock-discovery twin of ``require_no_finalized_payroll``: both ask the same
+    database predicate, ``payroll.fn_DriverPayrollPeriodsForFootprint``, so a Branch whose
+    period the guard may judge is always a Branch whose workflow lock the writer took. WorkDate
+    mode over ``[from_date, infinity)`` is a superset of PeriodStart mode over the same range.
+    """
+    rows = (await db.execute(
+        text("""
+            SELECT DISTINCT branchid
+            FROM   payroll.fn_DriverPayrollPeriodsForFootprint(
+                       :cid, :did, daterange(CAST(:lo AS date), NULL, '[]'), 'WorkDate')
+        """),
+        {"cid": company_id, "did": driver_id, "lo": from_date},
+    )).scalars().all()
+    return {int(branch_id) for branch_id in rows}
+
+
 async def _check_driver_read_access(
     driver_assignment_id: int,
     company_id: int,
