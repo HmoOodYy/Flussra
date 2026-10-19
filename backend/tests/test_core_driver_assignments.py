@@ -4,8 +4,9 @@ from datetime import timedelta
 
 import pytest
 
-from tests.builders.access import create_user_with_role_token
+from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.builders.transfer_scenarios import (
+    approved_transfer,
     auth,
     branch_today,
     local_boundary,
@@ -95,4 +96,81 @@ async def test_a_user_with_no_readable_branch_is_denied_and_unknown_drivers_are_
     missing = await client.get("/core/drivers/2000000000/assignments", headers=auth(auth_token))
     assert missing.status_code == 404
     unauthenticated = await client.get(f"/core/drivers/{driver['driver_id']}/assignments")
+    assert unauthenticated.status_code in (401, 403)
+
+
+async def _immediate_transfer(client, token, driver_id, target_branch_id) -> dict:
+    request_id = await approved_transfer(client, token, driver_id, target_branch_id, None)
+    completed = await client.post(
+        f"/driver-transfers/{request_id}/complete", json={}, headers=auth(token))
+    assert completed.status_code == 200, completed.text
+    body = completed.json()
+    assert body["status"] == "Completed", body
+    return {"source_id": body["source_driver_assignment_id"],
+            "destination_id": body["destination_driver_assignment_id"]}
+
+
+async def test_the_assignment_roster_follows_branch_scope_after_a_permanent_transfer(
+    client, auth_token, direct_db,
+):
+    """HEAD had no such read: an old-Branch manager could never reach the ended assignment."""
+    old_branch, new_branch = await make_branch(direct_db), await make_branch(direct_db)
+    old_manager = await _drivers_view_token(client, auth_token, old_branch)
+    new_manager = await _drivers_view_token(client, auth_token, new_branch)
+    driver = await make_driver(client, auth_token, old_branch)
+    moved = await _immediate_transfer(client, auth_token, driver["driver_id"], new_branch)
+
+    async def roster(token, **params):
+        response = await client.get("/core/driver-assignments", params=params, headers=auth(token))
+        assert response.status_code == 200, response.text
+        return {row["driver_assignment_id"]: row for row in response.json()
+                if row["driver_id"] == driver["driver_id"]}
+
+    old_view = await roster(old_manager)
+    assert set(old_view) == {moved["source_id"]}
+    ended = old_view[moved["source_id"]]
+    assert ended["state"] == "ended" and ended["end_reason"] == "Transferred"
+    assert ended["branch_id"] == old_branch and ended["branch_name"]
+    assert ended["driver_number"].startswith("SC-") and ended["full_name"]
+    assert ended["driver_status"] == "Active"
+
+    new_view = await roster(new_manager)
+    assert set(new_view) == {moved["destination_id"]}
+    assert new_view[moved["destination_id"]]["state"] == "current"
+
+    admin_view = await roster(auth_token)
+    assert set(admin_view) == {moved["source_id"], moved["destination_id"]}
+
+    # Filters: by Branch and by state; an unknown state is a validation error.
+    assert set(await roster(auth_token, branch_id=old_branch)) == {moved["source_id"]}
+    assert set(await roster(auth_token, state="current")) == {moved["destination_id"]}
+    assert set(await roster(auth_token, state="ended")) == {moved["source_id"]}
+    assert set(await roster(old_manager, state="current")) == set()
+    invalid = await client.get("/core/driver-assignments", params={"state": "bogus"},
+                               headers=auth(auth_token))
+    assert invalid.status_code == 422
+
+
+async def test_the_assignment_roster_hides_branches_without_drivers_view_and_follows_self_reads(
+    client, auth_token, branch_user_token, direct_db,
+):
+    branch = await make_branch(direct_db)
+    driver = await make_driver(client, auth_token, branch)
+
+    # PAYROLL_VIEWER scoped to HQ has no drivers.view anywhere: denied like /core/drivers.
+    listed = await client.get("/core/drivers", headers=auth(branch_user_token))
+    roster = await client.get("/core/driver-assignments", headers=auth(branch_user_token))
+    assert roster.status_code == listed.status_code == 403, roster.text
+
+    # A Self (DRIVER) account is treated exactly like the other Core driver reads.
+    role_id = await get_company_role_id(client, auth_token, "DRIVER")
+    self_token = await create_user_with_role_token(
+        client, auth_token, f"self_{sfx()}", role_id, scope_type="Self", driver_branch_id=branch)
+    self_listed = await client.get("/core/drivers", headers=auth(self_token))
+    self_roster = await client.get("/core/driver-assignments", headers=auth(self_token))
+    assert self_roster.status_code == self_listed.status_code, (self_roster.text, self_listed.text)
+    assert driver["driver_id"] not in {row["driver_id"] for row in self_roster.json()} \
+        if self_roster.status_code == 200 else True
+
+    unauthenticated = await client.get("/core/driver-assignments")
     assert unauthenticated.status_code in (401, 403)

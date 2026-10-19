@@ -15,6 +15,7 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission, has_any_permission
 from app.core.schemas import (
     BranchSummary,
+    DriverAssignmentRosterRow,
     DriverAssignmentSummary,
     DriverSummary,
 )
@@ -205,67 +206,146 @@ async def get_drivers(
     return [_driver_summary_from_row(r) for r in result.mappings().all()]
 
 
+_ASSIGNMENT_STATES = ("current", "pending", "ended")
+
+
+async def _readable_assignment_rows(
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    driver_id: int | None = None,
+    branch_id: int | None = None,
+    state: str | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """The one filter behind every assignment read: Branch scope AND ``drivers.view``.
+
+    Returns the DriverAssignments the user may read, newest first, and whether the user can
+    read Drivers in any Branch at all. Visibility is per assignment: a Branch the user cannot
+    see (scope) or cannot read Drivers in (``drivers.view``) never contributes a row, so
+    history is not widened.
+    """
+    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
+    verdicts: dict[int, bool] = {}
+
+    async def readable(bid: int) -> bool:
+        if bid not in verdicts:
+            verdicts[bid] = (can_see_all or bid in branch_ids) and await has_any_permission(
+                company_id, user_id, bid, ["drivers.view"], db)
+        return verdicts[bid]
+
+    conditions = ["a.companyid = :company_id"]
+    params: dict[str, Any] = {"company_id": company_id}
+    if driver_id is not None:
+        conditions.append("a.driverid = :driver_id")
+        params["driver_id"] = driver_id
+    if branch_id is not None:
+        conditions.append("a.branchid = :branch_id")
+        params["branch_id"] = branch_id
+    rows = (await db.execute(
+        text(f"""
+            SELECT * FROM (
+                SELECT a.driverassignmentid, a.driverid, a.branchid, b.branchname,
+                       a.effectivefromat, a.effectivetoat, a.endreason,
+                       CASE
+                           WHEN a.driverassignmentid = core.fn_EffectiveDriverAssignment(a.companyid, a.driverid)
+                               THEN 'current'
+                           WHEN a.effectivefromat > NOW()
+                                AND (a.effectivetoat IS NULL OR a.effectivetoat > a.effectivefromat)
+                               THEN 'pending'
+                           ELSE 'ended'
+                       END AS state,
+                       dr.drivernumber, dr.driverstatus, e.fullname, e.preferredname
+                FROM   core.driverassignments a
+                JOIN   core.branches b ON b.companyid = a.companyid AND b.branchid = a.branchid
+                JOIN   core.drivers dr ON dr.driverid = a.driverid
+                JOIN   core.employees e ON e.employeeid = a.employeeid
+                WHERE  {" AND ".join(conditions)}
+            ) assignments
+            WHERE (CAST(:state AS TEXT) IS NULL OR state = CAST(:state AS TEXT))
+            ORDER  BY fullname, driverid, effectivefromat DESC, driverassignmentid DESC
+        """),
+        {**params, "state": state},
+    )).mappings().all()
+    visible = [dict(row) for row in rows if await readable(row["branchid"])]
+    if visible:
+        return visible, True
+    if can_see_all:
+        any_branch = await has_any_permission(company_id, user_id, None, ["drivers.view"], db)
+    else:
+        any_branch = any([await readable(bid) for bid in branch_ids])
+    return [], bool(any_branch)
+
+
+def _assignment_summary(row: dict[str, Any]) -> DriverAssignmentSummary:
+    return DriverAssignmentSummary(
+        driver_assignment_id=row["driverassignmentid"],
+        driver_id=row["driverid"],
+        branch_id=row["branchid"],
+        branch_name=row["branchname"],
+        effective_from_at=row["effectivefromat"],
+        effective_to_at=row["effectivetoat"],
+        end_reason=row["endreason"],
+        state=row["state"],
+    )
+
+
 async def get_driver_assignments(
     company_id: int,
     user_id: int,
     driver_id: int,
     db: AsyncConnection,
 ) -> list[DriverAssignmentSummary]:
-    """List a Driver's assignments, newest first, limited to Branches the user may read.
-
-    Visibility is per assignment: a Branch the user cannot see (scope) or cannot read
-    Drivers in (``drivers.view``) never contributes a row, so history is not widened.
-    """
-    can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
+    """List a Driver's assignments, newest first, limited to Branches the user may read."""
     exists = await db.execute(
         text("SELECT 1 FROM core.drivers WHERE driverid = :driver_id AND companyid = :company_id"),
         {"driver_id": driver_id, "company_id": company_id},
     )
     if exists.first() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Driver not found.")
-
-    rows = (await db.execute(
-        text("""
-            SELECT a.driverassignmentid, a.driverid, a.branchid, b.branchname,
-                   a.effectivefromat, a.effectivetoat, a.endreason,
-                   CASE
-                       WHEN a.driverassignmentid = core.fn_EffectiveDriverAssignment(a.companyid, a.driverid)
-                           THEN 'current'
-                       WHEN a.effectivefromat > NOW()
-                            AND (a.effectivetoat IS NULL OR a.effectivetoat > a.effectivefromat)
-                           THEN 'pending'
-                       ELSE 'ended'
-                   END AS state
-            FROM   core.driverassignments a
-            JOIN   core.branches b ON b.companyid = a.companyid AND b.branchid = a.branchid
-            WHERE  a.driverid = :driver_id AND a.companyid = :company_id
-            ORDER  BY a.effectivefromat DESC, a.driverassignmentid DESC
-        """),
-        {"driver_id": driver_id, "company_id": company_id},
-    )).mappings().all()
-
-    visible: list[DriverAssignmentSummary] = []
-    for row in rows:
-        if not can_see_all and row["branchid"] not in branch_ids:
-            continue
-        if not await has_any_permission(company_id, user_id, row["branchid"], ["drivers.view"], db):
-            continue
-        visible.append(DriverAssignmentSummary(
-            driver_assignment_id=row["driverassignmentid"],
-            driver_id=row["driverid"],
-            branch_id=row["branchid"],
-            branch_name=row["branchname"],
-            effective_from_at=row["effectivefromat"],
-            effective_to_at=row["effectivetoat"],
-            end_reason=row["endreason"],
-            state=row["state"],
-        ))
-    if not visible:
+    rows, _ = await _readable_assignment_rows(company_id, user_id, db, driver_id=driver_id)
+    if not rows:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied to this driver's assignments.",
         )
-    return visible
+    return [_assignment_summary(row) for row in rows]
+
+
+async def list_driver_assignments(
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    branch_id: int | None = None,
+    state: str | None = None,
+) -> list[DriverAssignmentRosterRow]:
+    """One row per DriverAssignment the user may read, with the permanent Driver's identity.
+
+    Assignment-centric roster (Pay Rates): the same Branch scope and ``drivers.view`` filter
+    as a Driver's own assignment list, so an old-Branch manager keeps the Driver's ended
+    assignment and never sees the destination Branch's. A user who can read Drivers in no
+    Branch at all is denied, like the other Core driver reads.
+    """
+    if state is not None and state not in _ASSIGNMENT_STATES:
+        raise HTTPException(status_code=422, detail="state must be current, pending or ended.")
+    rows, reads_any_branch = await _readable_assignment_rows(
+        company_id, user_id, db, branch_id=branch_id, state=state)
+    if not rows and not reads_any_branch:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view Drivers.",
+        )
+    return [
+        DriverAssignmentRosterRow(
+            **_assignment_summary(row).model_dump(),
+            driver_number=row["drivernumber"],
+            driver_status=row["driverstatus"],
+            full_name=row["fullname"],
+            preferred_name=row["preferredname"],
+        )
+        for row in rows
+    ]
 
 
 async def get_driver_by_id(

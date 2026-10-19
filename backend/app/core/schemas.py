@@ -72,6 +72,15 @@ class DriverAssignmentSummary(BaseModel):
     state: Literal["current", "pending", "ended"]
 
 
+class DriverAssignmentRosterRow(DriverAssignmentSummary):
+    """An assignment with the permanent Driver's identity (the assignment-centric roster)."""
+
+    driver_number: str | None = None
+    driver_status: str
+    full_name: str
+    preferred_name: str | None = None
+
+
 class DriverCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
