@@ -18,6 +18,7 @@ from app.payroll.guards import (
     check_not_in_finalized_period,
 )
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
+from app.workforce.effective import require_writable_driver_assignment
 
 # ===========================================================================
 # M15 — Driver Pay Rules (Minimum / Maximum Pay)
@@ -284,6 +285,7 @@ async def create_driver_pay_rule(
     )
 
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, data.driver_assignment_id, db)
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.driverpayrules
@@ -435,6 +437,7 @@ async def end_driver_pay_rule(
         )
 
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, rule.driver_assignment_id, db)
     await db.execute(
         text("""
             UPDATE payroll.driverpayrules
@@ -486,6 +489,7 @@ async def update_driver_pay_rule_notes(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
+    await require_writable_driver_assignment(company_id, rule.driver_assignment_id, db)
 
     await db.execute(
         text("""
@@ -541,6 +545,7 @@ async def void_driver_pay_rule(
         company_id, user_id, rule.branch_id,
         ["payrates.edit", "settings.manage", "setup.manage"], db,
     )
+    await require_writable_driver_assignment(company_id, rule.driver_assignment_id, db)
 
     governed = await _count_finalized_periods_in_rule_range(
         rule.driver_assignment_id, company_id, rule.effective_from, rule.effective_to, db

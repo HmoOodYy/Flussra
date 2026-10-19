@@ -48,6 +48,7 @@ from app.compensation.schemas import (
 )
 from app.payroll.guards import check_not_in_finalized_period
 from app.rate_definition_concurrency import lock_rate_definition_structure
+from app.workforce.effective import require_writable_driver_assignment
 
 _ASSIGNMENT_COLUMNS = """
     a.driverrateassignmentid AS driver_rate_assignment_id,
@@ -125,6 +126,7 @@ async def _lock_monetary_pending_assignment(
         raise compensation_error(
             "ASSIGNMENT_CHANGED", "The assignment changed during the request.", 409)
     _require_pending(row, action)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     return row
 
 
@@ -214,6 +216,7 @@ async def create_pending(
     await lock_rate_definition_structure(data.rate_definition_id, db)
     await _require_authoring_authority(
         company_id, data.rate_definition_id, branch_id, data.effective_from, db)
+    await require_writable_driver_assignment(company_id, data.driver_assignment_id, db)
     try:
         assignment_id = (await db.execute(
             text("""
@@ -254,6 +257,7 @@ async def update_pending(
 ) -> AssignmentSummary:
     row = await _lock_and_load(company_id, assignment_id, db)
     await require_rate_edit(company_id, user_id, row["branch_id"], db)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     _require_pending(row, "edited")
 
     effective_from = data.effective_from if "effective_from" in data.model_fields_set \
@@ -400,6 +404,7 @@ async def discard(
 ) -> None:
     row = await _lock_and_load(company_id, assignment_id, db)
     await require_rate_edit(company_id, user_id, row["branch_id"], db)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     _require_pending(row, "discarded")
     await db.execute(
         text("SELECT set_config('flussra.actor_user_id', :uid, true)"),
@@ -444,6 +449,7 @@ async def void(
 ) -> AssignmentSummary:
     row = await _lock_and_load(company_id, assignment_id, db)
     await require_rate_edit(company_id, user_id, row["branch_id"], db)
+    await require_writable_driver_assignment(company_id, row["driver_assignment_id"], db)
     if row["status"] == "Pending":
         raise compensation_error(
             "PENDING_CANNOT_BE_VOIDED",

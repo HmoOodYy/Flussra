@@ -33,6 +33,7 @@ from app.payroll.schemas import (
     OrdinalTierCreate,
     RangeTierCreate,
 )
+from app.workforce.effective import require_writable_driver_assignment
 
 # ===========================================================================
 # Pay Rates â€” authoring, lifecycle, and batch operations
@@ -598,6 +599,7 @@ async def create_rate(
             )
 
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, data.driver_assignment_id, db)
     insert_result = await db.execute(
         text("""
             INSERT INTO payroll.driverrates
@@ -753,6 +755,7 @@ async def update_rate(
         data.rounding_rule is not None,
     )):
         await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, rate.driver_assignment_id, db)
 
     fields_updated = False
     if fields:
@@ -1103,6 +1106,9 @@ async def approve_rate(
     # finalized period.  By checking under the lock the guard always sees a consistent
     # view of period status.
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    # Ended DriverAssignments are historical: refuse before the Branch advisory lock so the
+    # assignment row is locked before any Branch workflow lock (transfer/termination order).
+    await require_writable_driver_assignment(company_id, rate.driver_assignment_id, db)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(:cid, :bid)"),
         {"cid": company_id, "bid": rate.branch_id},
@@ -1233,6 +1239,10 @@ async def void_rate(
     await _require_non_driver_rate_subject(company_id, user_id, db)
 
     await _require_status_owned_rate_type(rate.rate_type_id, company_id, db)
+
+    # Ended DriverAssignments are historical; lock the assignment row before any Branch
+    # advisory lock below.
+    await require_writable_driver_assignment(company_id, rate.driver_assignment_id, db)
 
     # Serialize Approved/Superseded rate voids with the branch workflow before
     # checking finalized-line references and mutating the rate. Pending rates
@@ -1383,6 +1393,7 @@ async def batch_save_rates(
     )
 
     await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    await require_writable_driver_assignment(company_id, driver_assignment_id, db)
 
     # Step 4 â€” read AllowSelfApproval from company settings
     settings_result = await db.execute(
