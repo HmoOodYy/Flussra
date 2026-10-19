@@ -218,6 +218,19 @@ export interface DriverPayRateRow {
   pending: ScheduleBrief | null;
 }
 
+/**
+ * GET /compensation/drivers/{id}/compensation-access: the backend's own decisions about what
+ * the caller may see and do with one Driver's compensation. The client never re-derives them.
+ */
+export interface CompensationAccess {
+  /** Whole history, Pending rows included (the read scope's `full`). */
+  full_history: boolean;
+  /** May discard a Pending row (discard authority over the Driver now). */
+  can_discard_pending: boolean;
+  /** Any tenure that has not ended; false means the Driver's Pending rows are orphaned. */
+  has_current_or_pending_tenure: boolean;
+}
+
 export interface ScheduleValue {
   rate_component_definition_id: number;
   sequence_no: number;

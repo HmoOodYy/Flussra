@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { listDriverPayRates, listScheduleHistory } from '../../../lib/compensationApi';
-import type { DriverPayRateRow } from '../../../types/compensation';
+import { getCompensationAccess, listDriverPayRates, listScheduleHistory } from '../../../lib/compensationApi';
+import type { CompensationAccess, DriverPayRateRow } from '../../../types/compensation';
 import { apiError, type HistoryRow } from './payRatesView';
 import { getStatusRateMatrix, type StatusRateMatrix } from './statusRatesApi';
 import { getDriverPayRules, type DriverPayRule } from './driverPayRulesApi';
@@ -28,6 +28,8 @@ export function usePayRateReads(
   const [ratesDriverId, setRatesDriverId] = useState<number | null>(null);
   const [loadingRows, setLoadingRows] = useState(false);
   const [loadingRowsDriverId, setLoadingRowsDriverId] = useState<number | null>(null);
+  const [accessState, setAccessState] = useState<CompensationAccess | null>(null);
+  const [accessDriverId, setAccessDriverId] = useState<number | null>(null);
   const [rowsError, setRowsError] = useState('');
   const [rowsErrorDriverId, setRowsErrorDriverId] = useState<number | null>(null);
   const [statusMatrixState, setStatusMatrixState] = useState<StatusRateMatrix | null>(null);
@@ -53,11 +55,17 @@ export function usePayRateReads(
     setRowsErrorDriverId(null);
     setRowsState([]);
     setRatesDriverId(null);
+    setAccessState(null);
+    setAccessDriverId(null);
     try {
-      const values = await listDriverPayRates(driverId);
+      // The backend's own decisions (full history, discard, orphaned Pending) load with the rates.
+      const [values, access] = await Promise.all([
+        listDriverPayRates(driverId), getCompensationAccess(driverId)]);
       if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
         setRowsState(values);
         setRatesDriverId(driverId);
+        setAccessState(access);
+        setAccessDriverId(driverId);
       }
     } catch (err) {
       if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
@@ -177,6 +185,7 @@ export function usePayRateReads(
   }, [loadRates]);
 
   const rows = ratesDriverId === selectedDriverId ? rowsState : [];
+  const access = accessDriverId === selectedDriverId ? accessState : null;
   const visibleRowsError = rowsErrorDriverId === selectedDriverId ? rowsError : '';
   const statusMatrix = statusMatrixAssignmentId === statusAssignmentId ? statusMatrixState : null;
   const historyRows = historyDriverId === selectedDriverId ? historyRowsState : [];
@@ -186,7 +195,7 @@ export function usePayRateReads(
   const payRulesError = payRulesDriverId === selectedDriverId ? payRulesErrorState : '';
 
   return {
-    rows, loadingRows: loadingRows && loadingRowsDriverId === selectedDriverId,
+    rows, access, loadingRows: loadingRows && loadingRowsDriverId === selectedDriverId,
     rowsError: visibleRowsError, statusMatrix, historyRows,
     loadingHistory: loadingHistory && loadingHistoryDriverId === selectedDriverId,
     historyLoaded, setHistoryRows, setHistoryLoaded,

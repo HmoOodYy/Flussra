@@ -24,7 +24,7 @@ type PayRateDriverListProps = {
 };
 
 function tenureBadge(d: PayRateDriver): { label: string; className: string } {
-  if (d.pastOnly) return { label: 'Past Branch', className: styles.statusBadge };
+  if (d.noOpenTenure) return { label: 'Ended', className: styles.statusBadge };
   if (d.current) return { label: 'Current', className: styles.okChip };
   return { label: 'Pending', className: styles.pendingBadge };
 }

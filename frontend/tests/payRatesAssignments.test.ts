@@ -67,6 +67,7 @@ test('ordinary rates and pay rules are read and written by driver_id; Status rat
   assert.match(reads, /listDriverPayRates\(driverId\)/);
   assert.match(reads, /listScheduleHistory\(driverId, row\.rate_definition_id\)/);
   assert.match(reads, /getDriverPayRules\(driverId\)/);
+  assert.match(reads, /getCompensationAccess\(driverId\)/);
   assert.match(reads, /getStatusRateMatrix\(driverAssignmentId\)/);
   assert.match(read('useTargetRateEditing.ts'), /createSchedule\(\{\s*driver_id: driverId/);
   assert.match(read('useDriverPayRules.ts'), /driver_id: selectedDriverId/);
@@ -80,10 +81,12 @@ test('ordinary rates and pay rules are read and written by driver_id; Status rat
 
 test('the page gates edits on Driver authority and shows the read-only banner for a past Branch', () => {
   const page = read('PayRatesPage.tsx');
-  assert.match(page, /canEditDriverCompensation\(selectedDriver, canEditAtBranch\)/);
+  assert.match(page, /canEditDriverCompensation\(selectedDriver, reads\.access, canEditAtBranch\)/);
   assert.match(page, /canEditStatusRates\(statusAssignment, canEditAtBranch\)/);
-  assert.match(page, /pastOnly && <p className=\{styles\.readOnlyBanner\}>\{PAST_BRANCH_BANNER\}/);
-  assert.match(page, /visibleTabs\(selectedDriver\)/);
+  assert.match(page, /pastBranchView && <p className=\{styles\.readOnlyBanner\}>\{PAST_BRANCH_BANNER\}/);
+  assert.match(page, /isPastBranchView\(reads\.access\)/);
+  assert.match(page, /canDiscardPendingRates\(reads\.access\)/);
+  assert.match(page, /visibleTabs\(reads\.access\)/);
   assert.match(read('TargetRateSection.tsx'), /applicabilityFlag\(row\)/);
 });
 
@@ -102,4 +105,15 @@ test('no stale assignment-owned compensation route, field or type remains in the
   assert.doesNotMatch(files, /\/driver-assignments\/\$\{[^}]+\}\/(pay-rates|pay-rules|rate-definitions)/);
   assert.doesNotMatch(files, /copy-from|copyRates|copy_driver_rates/);
   assert.doesNotMatch(files, /AssignmentSummary|AssignmentBrief|AssignmentCreatePayload/);
+});
+
+test('access flags come from the backend endpoint and gate Pending actions separately', () => {
+  assert.match(readFileSync(new URL('../src/lib/compensationApi.ts', import.meta.url), 'utf8'),
+    /\/compensation\/drivers\/\$\{driverId\}\/compensation-access/);
+  const pending = read('PendingRateChanges.tsx');
+  assert.match(pending, /\{canEditDriver && <button className=\{styles\.btnApprove\}[^]*?Approve/);
+  assert.match(pending, /\{canDiscardDriver && <button className=\{styles\.btnVoid\}[^]*?Discard/);
+  // The client never re-derives scope from the roster.
+  assert.doesNotMatch(read('PayRatesPage.tsx'), /pastOnly/);
+  assert.doesNotMatch(read('payRatesDrivers.ts'), /pastOnly/);
 });

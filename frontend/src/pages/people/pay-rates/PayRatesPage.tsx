@@ -29,7 +29,9 @@ import { RateHistoryTab, VoidRateDialog } from './RateHistoryTab';
 import { DriverPayRulesTab } from './DriverPayRulesTab';
 import {
   PAST_BRANCH_BANNER,
+  canDiscardPendingRates,
   canEditDriverCompensation,
+  isPastBranchView,
   canEditStatusRates,
   driverBranchSummary,
   visibleTabs,
@@ -47,7 +49,8 @@ export function PayRatesPage() {
   // Edit controls follow the backend's authority: the Driver's current Branch for Driver-owned
   // data, the viewed assignment for Status rates. The backend stays authoritative.
   const canEditAtBranch = (branchId: number) => (user ? canEditPayRates(user, branchId) : false);
-  const canEditDriver = canEditDriverCompensation(selectedDriver, canEditAtBranch);
+  const canEditDriver = canEditDriverCompensation(selectedDriver, reads.access, canEditAtBranch);
+  const canDiscardDriver = canDiscardPendingRates(reads.access);
   const canEditStatus = canEditStatusRates(statusAssignment, canEditAtBranch);
   const authorityBranchId = (selectedDriver?.current ?? selectedDriver?.pending ?? selectedDriver?.home)?.branch_id;
   const businessDateOf = (branchId: number | undefined) =>
@@ -133,9 +136,9 @@ export function PayRatesPage() {
   const statusPending = (reads.statusMatrix?.groups ?? []).filter((g) => g.pending_rate !== null);
   const pendingCount = pendingRows.length + statusPending.length;
   const futureCount = reads.rows.filter((r) => r.future !== null).length;
-  const tabs = visibleTabs(selectedDriver);
+  const tabs = visibleTabs(reads.access);
   const tab = tabs.includes(activeTab) ? activeTab : 'current';
-  const pastOnly = selectedDriver?.pastOnly ?? false;
+  const pastBranchView = isPastBranchView(reads.access);
 
   function openTab(next: typeof activeTab) {
     driver.setActiveTab(next);
@@ -200,7 +203,7 @@ export function PayRatesPage() {
                   <div>
                     <p className={styles.dName}>{selectedDriver.fullName}</p>
                     <p className={styles.dMeta}>{selectedDriver.driverNumber ?? 'No number'} &middot; {driverBranchSummary(selectedDriver)}</p>
-                    {pastOnly && <p className={styles.readOnlyBanner}>{PAST_BRANCH_BANNER}</p>}
+                    {pastBranchView && <p className={styles.readOnlyBanner}>{PAST_BRANCH_BANNER}</p>}
                     <div className={styles.summaryBadges}>
                       {missingCount > 0 && <span className={styles.missingChip}>{missingCount} missing</span>}
                       {pendingCount > 0 && <span className={styles.pendingBadge}>{pendingCount} pending</span>}
@@ -234,7 +237,7 @@ export function PayRatesPage() {
                     isStatusDirty={status.isStatusDirty} saveStatusRates={status.saveStatusRates} cancelStatusEdit={status.cancelStatusEdit} />
                 </>}
                 {tab === 'pending' && <PendingRateChanges pendingRows={pendingRows} statusPending={statusPending} pendingCount={pendingCount}
-                  canEditDriver={canEditDriver} canEditStatus={canEditStatus} actioningId={actions.actioningId} pendingActionError={actions.pendingActionError}
+                  canEditDriver={canEditDriver} canDiscardDriver={canDiscardDriver} canEditStatus={canEditStatus} actioningId={actions.actioningId} pendingActionError={actions.pendingActionError}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} runPendingAction={actions.runPendingAction} />}
                 {tab === 'history' && <RateHistoryTab historyRows={reads.historyRows} loadingHistory={reads.loadingHistory} canEditMatrix={canEditDriver}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} setVoidTarget={actions.setVoidTarget} setVoidReason={actions.setVoidReason} setVoidError={actions.setVoidError} />}

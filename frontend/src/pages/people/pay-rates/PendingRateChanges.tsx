@@ -8,8 +8,10 @@ type PendingRateChangesProps = {
   pendingRows: DriverPayRateRow[];
   statusPending: StatusRateGroup[];
   pendingCount: number;
-  /** Driver-owned rate schedules: authority follows the Driver's current Branch. */
+  /** Approve a Pending rate: the backend's full history, a live tenure and edit permission. */
   canEditDriver: boolean;
+  /** Discard a Pending rate: the backend's discard authority (kept when the rate is orphaned). */
+  canDiscardDriver: boolean;
   /** Status rates: authority follows the viewed assignment. */
   canEditStatus: boolean;
   actioningId: number | null;
@@ -19,7 +21,7 @@ type PendingRateChangesProps = {
   runPendingAction: (id: number, action: () => Promise<unknown>) => Promise<void>;
 };
 
-export function PendingRateChanges({ pendingRows, statusPending, pendingCount, canEditDriver, canEditStatus, actioningId, pendingActionError, currencyCode, currencyDigits, runPendingAction }: PendingRateChangesProps) {
+export function PendingRateChanges({ pendingRows, statusPending, pendingCount, canEditDriver, canDiscardDriver, canEditStatus, actioningId, pendingActionError, currencyCode, currencyDigits, runPendingAction }: PendingRateChangesProps) {
   return (
     <div className={styles.section}>
       <div className={styles.sectionHead}><span className={styles.sectionTitle}>Pending Changes</span></div>
@@ -28,7 +30,7 @@ export function PendingRateChanges({ pendingRows, statusPending, pendingCount, c
         <div className={styles.emptySection}>No pending rate changes for this driver.</div>
       ) : (
         <table className={styles.rateTable}>
-          <thead><tr><th>Pay Item</th><th>Current</th><th>Pending Amount</th><th>Effective From</th>{(canEditDriver || canEditStatus) && <th>Actions</th>}</tr></thead>
+          <thead><tr><th>Pay Item</th><th>Current</th><th>Pending Amount</th><th>Effective From</th>{(canEditDriver || canDiscardDriver || canEditStatus) && <th>Actions</th>}</tr></thead>
           <tbody>
             {pendingRows.map((row) => {
               const pending = row.pending!;
@@ -39,9 +41,9 @@ export function PendingRateChanges({ pendingRows, statusPending, pendingCount, c
                   <td>{row.current ? fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits) : <span className={styles.missingText}>No current rate</span>}</td>
                   <td>{pending.amount === null ? <span className={styles.missingText}>Not set</span> : <strong>{fmtAmount(pending.amount, row.unit, currencyCode, currencyDigits)}</strong>}</td>
                   <td>{pending.effective_from}</td>
-                  {(canEditDriver || canEditStatus) && <td>{canEditDriver && <div className={styles.actionBtns}>
-                    <button className={styles.btnApprove} disabled={busy || actioningId != null || pending.amount === null} onClick={() => void runPendingAction(pending.driver_rate_schedule_id, () => approveSchedule(pending.driver_rate_schedule_id))}>{busy ? '…' : 'Approve'}</button>
-                    <button className={styles.btnVoid} disabled={busy || actioningId != null} onClick={() => void runPendingAction(pending.driver_rate_schedule_id, () => discardSchedule(pending.driver_rate_schedule_id))}>{busy ? '…' : 'Discard'}</button>
+                  {(canEditDriver || canDiscardDriver || canEditStatus) && <td>{(canEditDriver || canDiscardDriver) && <div className={styles.actionBtns}>
+                    {canEditDriver && <button className={styles.btnApprove} disabled={busy || actioningId != null || pending.amount === null} onClick={() => void runPendingAction(pending.driver_rate_schedule_id, () => approveSchedule(pending.driver_rate_schedule_id))}>{busy ? '…' : 'Approve'}</button>}
+                    {canDiscardDriver && <button className={styles.btnVoid} disabled={busy || actioningId != null} onClick={() => void runPendingAction(pending.driver_rate_schedule_id, () => discardSchedule(pending.driver_rate_schedule_id))}>{busy ? '…' : 'Discard'}</button>}
                   </div>}</td>}
                 </tr>
               );
@@ -55,7 +57,7 @@ export function PendingRateChanges({ pendingRows, statusPending, pendingCount, c
                   <td>{g.current_rate ? fmtAmount(g.current_rate.amount, g.unit_name, currencyCode, currencyDigits) : <span className={styles.missingText}>No current rate</span>}</td>
                   <td><strong>{fmtAmount(rate.amount, g.unit_name, currencyCode, currencyDigits)}</strong></td>
                   <td>{rate.effective_from}</td>
-                  {(canEditDriver || canEditStatus) && <td>{canEditStatus && <div className={styles.actionBtns}>
+                  {(canEditDriver || canDiscardDriver || canEditStatus) && <td>{canEditStatus && <div className={styles.actionBtns}>
                     <button className={styles.btnApprove} disabled={busy || actioningId != null} onClick={() => void runPendingAction(rate.driver_rate_id, () => approveStatusRate(rate.driver_rate_id))}>{busy ? '…' : 'Approve'}</button>
                     <button className={styles.btnVoid} disabled={busy || actioningId != null} onClick={() => void runPendingAction(rate.driver_rate_id, () => voidStatusRate(rate.driver_rate_id))}>{busy ? '…' : 'Void'}</button>
                   </div>}</td>}

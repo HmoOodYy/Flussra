@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { CompensationAccess } from '../src/types/compensation.ts';
 import type { DriverAssignmentRosterRow } from '../src/types/core.ts';
 import {
   DEFAULT_DRIVER_TENURE_FILTER,
@@ -7,11 +8,13 @@ import {
   PAST_BRANCH_BANNER,
   applicabilityFlag,
   canEditDriverCompensation,
+  canDiscardPendingRates,
   canEditStatusRates,
   defaultStatusAssignment,
   driverBranchSummary,
   filterDrivers,
   groupRosterByDriver,
+  isPastBranchView,
   visibleTabs,
   type DriverFilters,
 } from '../src/pages/people/pay-rates/payRatesDrivers.ts';
@@ -70,28 +73,66 @@ test('the home tenure is current, else upcoming, else the latest ended one', () 
   assert.equal(defaultStatusAssignment(null), null);
 });
 
-test('a Driver whose readable tenures all ended is shown in past-Branch mode', () => {
-  assert.equal(byId(21).pastOnly, true);
-  assert.equal(byId(9).pastOnly, false);
-  assert.equal(byId(20).pastOnly, false);
+test('the roster flags a Driver with no current or pending tenure, for presentation only', () => {
+  assert.equal(byId(21).noOpenTenure, true);
+  assert.equal(byId(9).noOpenTenure, false);
+  assert.equal(byId(20).noOpenTenure, false);
   assert.equal(PAST_BRANCH_BANNER, 'History from your Branch\'s tenure — read-only');
 });
 
-test('past-Branch mode offers no edit controls and no Pending tab; authority mode offers both', () => {
-  const allow = () => true;
-  assert.equal(canEditDriverCompensation(byId(21), allow), false);
-  assert.equal(canEditDriverCompensation(null, allow), false);
-  assert.equal(canEditDriverCompensation(byId(9), allow), true);
-  assert.deepEqual(visibleTabs(byId(21)), ['current', 'history', 'pay-rules']);
-  assert.deepEqual(visibleTabs(byId(9)), ['current', 'pending', 'history', 'pay-rules']);
+// What the backend decided for four callers of one Driver (GET .../compensation-access).
+const oldBranchReader: CompensationAccess = {
+  full_history: false, can_discard_pending: false, has_current_or_pending_tenure: true };
+const companyWideReaderAfterAllEnded: CompensationAccess = {
+  full_history: true, can_discard_pending: false, has_current_or_pending_tenure: false };
+const companyWideEditorAfterAllEnded: CompensationAccess = {
+  full_history: true, can_discard_pending: true, has_current_or_pending_tenure: false };
+const currentBranchEditor: CompensationAccess = {
+  full_history: true, can_discard_pending: true, has_current_or_pending_tenure: true };
+const allow = () => true;
+
+test('an old-Branch reader sees the read-only banner, no Pending tab and no edit or discard', () => {
+  assert.equal(isPastBranchView(oldBranchReader), true);
+  assert.deepEqual(visibleTabs(oldBranchReader), ['current', 'history', 'pay-rules']);
+  assert.equal(canEditDriverCompensation(byId(9), oldBranchReader, allow), false);
+  assert.equal(canDiscardPendingRates(oldBranchReader), false);
+});
+
+test('an unrelated-Branch reader gets no Driver at all: the roster is empty and the 403 reads as permission', () => {
+  assert.deepEqual(groupRosterByDriver([]), []);
+  assert.equal(canEditDriverCompensation(null, null, allow), false);
+  assert.equal(isPastBranchView(null), false); // nothing loaded: no banner, no access
+  assert.deepEqual(visibleTabs(null), ['current', 'history', 'pay-rules']);
+  assert.equal(canDiscardPendingRates(null), false);
+});
+
+test('a company-wide reader after every tenure ended keeps Pending visibility, no banner, no discard', () => {
+  const access = companyWideReaderAfterAllEnded;
+  assert.equal(isPastBranchView(access), false);
+  assert.deepEqual(visibleTabs(access), ['current', 'pending', 'history', 'pay-rules']);
+  assert.equal(canDiscardPendingRates(access), false);
+  assert.equal(canEditDriverCompensation(byId(21), access, allow), false);
+});
+
+test('a company-wide editor after every tenure ended may discard Pending rates but not approve or edit', () => {
+  const access = companyWideEditorAfterAllEnded;
+  assert.equal(isPastBranchView(access), false);
+  assert.deepEqual(visibleTabs(access), ['current', 'pending', 'history', 'pay-rules']);
+  assert.equal(canDiscardPendingRates(access), true);
+  assert.equal(canEditDriverCompensation(byId(21), access, allow), false); // orphaned: approval is refused
+});
+
+test('the current authority Branch keeps the full set of controls', () => {
+  assert.equal(canEditDriverCompensation(byId(9), currentBranchEditor, allow), true);
+  assert.equal(canDiscardPendingRates(currentBranchEditor), true);
 });
 
 test('Driver-owned edit authority follows the current (else upcoming) Branch, not the old one', () => {
   const onlyNorth = (branchId: number) => branchId === 3;
   const onlySouth = (branchId: number) => branchId === 4;
-  assert.equal(canEditDriverCompensation(byId(9), onlyNorth), false); // North is the past Branch
-  assert.equal(canEditDriverCompensation(byId(9), onlySouth), true);
-  assert.equal(canEditDriverCompensation(byId(20), (branchId) => branchId === 5), true);
+  assert.equal(canEditDriverCompensation(byId(9), currentBranchEditor, onlyNorth), false); // North is the past Branch
+  assert.equal(canEditDriverCompensation(byId(9), currentBranchEditor, onlySouth), true);
+  assert.equal(canEditDriverCompensation(byId(20), currentBranchEditor, (branchId) => branchId === 5), true);
 });
 
 test('Status rates stay assignment-addressed: only a current or upcoming assignment is writable', () => {

@@ -318,6 +318,29 @@ async def driver_compensation_read_scope(
 
 
 
+async def driver_compensation_access(
+    company_id: int, user_id: int, driver_id: int, db: AsyncConnection,
+) -> tuple[ReadScope, bool, bool]:
+    """(read scope, may discard a Pending row, has a current or pending tenure).
+
+    The caller's own decisions, never re-derived by a client: the read scope (403 when the
+    caller can read nothing, DRIVER/Self denied first), ``require_compensation_authority`` in
+    ``discard`` mode as a boolean, and whether any tenure has not yet ended.
+    """
+    scope = await driver_compensation_read_scope(company_id, user_id, driver_id, db)
+    instant = await decision_instant(db)
+    tenures = await load_driver_tenures(company_id, driver_id, db)
+    try:
+        await require_compensation_authority(
+            company_id, user_id, driver_id, None, db, mode="discard", at=instant)
+        can_discard = True
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+        can_discard = False
+    return scope, can_discard, any(t.is_authority(instant) for t in tenures)
+
+
 async def lock_driver_compensation_write(
     company_id: int, driver_id: int, rate_definition_id: int | None, db: AsyncConnection,
     *, monetary: bool, lock_from: date | None,

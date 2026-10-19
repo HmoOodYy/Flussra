@@ -1,5 +1,5 @@
 import type { DriverAssignmentRosterRow } from '../../../types/core.ts';
-import type { DriverPayRateRow } from '../../../types/compensation.ts';
+import type { CompensationAccess, DriverPayRateRow } from '../../../types/compensation.ts';
 
 /**
  * Pay Rates is Driver-centric: ordinary rates and Min/Max pay rules belong to the permanent
@@ -20,8 +20,9 @@ export interface PayRateDriver {
   pending: DriverAssignmentRosterRow | null;
   /** The tenure that represents the Driver: current, else pending, else the latest ended one. */
   home: DriverAssignmentRosterRow;
-  /** The user only reads ended tenures of this Driver (a past Branch, or a Driver who left). */
-  pastOnly: boolean;
+  /** No readable tenure is current or pending (a Driver who left, or a past Branch's view).
+   * Roster presentation only: what the caller may see and do comes from CompensationAccess. */
+  noOpenTenure: boolean;
 }
 
 export function groupRosterByDriver(rows: DriverAssignmentRosterRow[]): PayRateDriver[] {
@@ -46,7 +47,7 @@ export function groupRosterByDriver(rows: DriverAssignmentRosterRow[]): PayRateD
       current,
       pending,
       home,
-      pastOnly: current == null && pending == null,
+      noOpenTenure: current == null && pending == null,
     });
   }
   return drivers.sort((a, b) => a.fullName.localeCompare(b.fullName) || a.driverId - b.driverId);
@@ -73,7 +74,7 @@ export interface DriverFilters {
 export function filterDrivers(drivers: PayRateDriver[], filters: DriverFilters): PayRateDriver[] {
   const q = filters.search.trim().toLowerCase();
   return drivers.filter((d) => {
-    if (filters.tenure === 'open' && d.pastOnly) return false;
+    if (filters.tenure === 'open' && d.noOpenTenure) return false;
     if (filters.tenure === 'ended' && !d.tenures.some((t) => t.state === 'ended')) return false;
     if (filters.branchId && !d.tenures.some((t) => String(t.branch_id) === filters.branchId)) return false;
     if (filters.driverStatus && d.driverStatus !== filters.driverStatus) return false;
@@ -84,7 +85,7 @@ export function filterDrivers(drivers: PayRateDriver[], filters: DriverFilters):
 
 /** "North"; "South (was North)" after a transfer; "North (past Branch)" when only history is readable. */
 export function driverBranchSummary(d: PayRateDriver): string {
-  if (d.pastOnly) return `${d.home.branch_name} (past Branch)`;
+  if (d.noOpenTenure) return `${d.home.branch_name} (past Branch)`;
   const shown = d.current ?? d.pending!;
   const earlier = d.tenures.find((t) => t.state === 'ended' && t.branch_id !== shown.branch_id);
   const prefix = shown.state === 'pending' ? 'Upcoming: ' : '';
@@ -94,25 +95,43 @@ export function driverBranchSummary(d: PayRateDriver): string {
 export const PAST_BRANCH_BANNER = "History from your Branch's tenure — read-only";
 
 /**
- * Whether the Driver-owned panes (ordinary rates, Min/Max) may offer edit controls. Authority
- * follows the Driver's current (else upcoming) Branch; a user who only reads ended tenures
- * never edits. The backend remains authoritative.
+ * Past-Branch (read-only) view: the backend says the caller does not read the whole history,
+ * so the read-only banner is shown. A company-wide reader or editor is never in this view,
+ * even after every tenure ended; scope is never inferred from the roster.
+ */
+export function isPastBranchView(access: CompensationAccess | null): boolean {
+  return access != null && !access.full_history;
+}
+
+/**
+ * Whether the Driver-owned panes (ordinary rates, Min/Max, approving a Pending rate) may offer
+ * edit controls: the backend grants full history, a tenure is current or pending (otherwise
+ * approval is refused and the Pending rows are orphaned), and the user has the rate-edit
+ * permission on that tenure's Branch. The backend remains authoritative.
  */
 export function canEditDriverCompensation(
   d: PayRateDriver | null,
+  access: CompensationAccess | null,
   canEditAtBranch: (branchId: number) => boolean,
 ): boolean {
-  if (d == null) return false;
+  if (d == null || access == null || !access.full_history || !access.has_current_or_pending_tenure) {
+    return false;
+  }
   const authority = d.current ?? d.pending;
   return authority != null && canEditAtBranch(authority.branch_id);
 }
 
+/** Discarding a Pending row is the backend's call, and stays available when it is orphaned. */
+export function canDiscardPendingRates(access: CompensationAccess | null): boolean {
+  return access != null && access.can_discard_pending;
+}
+
 export type PayRateTab = 'current' | 'pending' | 'history' | 'pay-rules';
 
-/** Pending rows are never visible from a past Branch, so that tab is not offered there. */
-export function visibleTabs(d: PayRateDriver | null): PayRateTab[] {
+/** Pending rows are visible only with full history, so the tab is offered only then. */
+export function visibleTabs(access: CompensationAccess | null): PayRateTab[] {
   const tabs: PayRateTab[] = ['current', 'pending', 'history', 'pay-rules'];
-  return d?.pastOnly ? tabs.filter((tab) => tab !== 'pending') : tabs;
+  return access?.full_history ? tabs : tabs.filter((tab) => tab !== 'pending');
 }
 
 /** The tenure whose Status pay rates are shown first: current, else upcoming, else the latest ended. */

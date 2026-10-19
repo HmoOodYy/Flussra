@@ -16,7 +16,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response
 
 from app.compensation import branch_config, definitions, resolver, schedules
-from app.compensation.driver_context import driver_compensation_read_scope
+from app.compensation.driver_context import (
+    driver_compensation_access,
+    driver_compensation_read_scope,
+)
 from app.compensation.errors import CompensationOwnershipError, compensation_error
 from app.compensation.schemas import (
     BranchConfigUpdate,
@@ -24,6 +27,7 @@ from app.compensation.schemas import (
     BranchPayDefinitionState,
     BulkBranchConfigResult,
     BulkBranchConfigUpdate,
+    CompensationAccess,
     DriverPayRateRow,
     DriverRateSummaryItem,
     PayDefinitionDirectCreate,
@@ -312,6 +316,20 @@ async def driver_schedule_summary(
 ) -> list[DriverRateSummaryItem]:
     company_id, user_id = _ids(token)
     return await schedules.driver_summary(company_id, user_id, driver_id, db)
+
+
+@router.get("/drivers/{driver_id}/compensation-access",
+            response_model=CompensationAccess,
+            summary="What the caller may see and do with the Driver's compensation")
+async def compensation_access(
+    token: TokenDep, db: DbDep, driver_id: int,
+) -> CompensationAccess:
+    company_id, user_id = _ids(token)
+    scope, can_discard, has_tenure = await driver_compensation_access(
+        company_id, user_id, driver_id, db)
+    return CompensationAccess(
+        full_history=scope.full, can_discard_pending=can_discard,
+        has_current_or_pending_tenure=has_tenure)
 
 
 @router.get("/drivers/{driver_id}/rate-definitions/{rate_definition_id}/resolution",

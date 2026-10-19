@@ -281,6 +281,14 @@ class DriverRateSummaryItem(BaseModel):
     pending_schedule_id: int | None = None
 
 
+class CompensationAccess(BaseModel):
+    """What the caller may do with one Driver's compensation, as the backend decided it."""
+
+    full_history: bool
+    can_discard_pending: bool
+    has_current_or_pending_tenure: bool
+
+
 class ResolvedComponent(BaseModel):
     rate_component_definition_id: int
     shape: str | None = None
