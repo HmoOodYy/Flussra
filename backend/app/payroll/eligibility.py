@@ -602,10 +602,6 @@ async def assignment_payroll_fact_exists(
                     WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
          OR EXISTS (SELECT 1 FROM payroll.DriverRates
                     WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
-         OR EXISTS (SELECT 1 FROM payroll.DriverRateAssignments
-                    WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
-         OR EXISTS (SELECT 1 FROM payroll.DriverPayRules
-                    WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
     """), {"company_id": company_id, "aid": driver_assignment_id})
     return bool(result.scalar_one())
 

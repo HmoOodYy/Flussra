@@ -171,31 +171,27 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         VALUES (:rate_definition_id, 'Scalar', 1)
         RETURNING RateComponentDefinitionID
     """), {"rate_definition_id": rate_definition_id})).scalar_one()
-    source_rate_assignment_id = (await direct_db.execute(text("""
-        INSERT INTO payroll.DriverRateAssignments
-            (CompanyID, BranchID, DriverAssignmentID, RateDefinitionID, EffectiveFrom, Status)
-        VALUES (1, :branch_id, :assignment_id, :rate_definition_id, :today, 'Pending')
-        RETURNING DriverRateAssignmentID
-    """), {"branch_id": paytest_branch_id, "assignment_id": source_id,
+    driver_id = (await direct_db.execute(text(
+        "SELECT DriverID FROM core.DriverAssignments WHERE DriverAssignmentID = :a"
+    ), {"a": source_id})).scalar_one()
+    schedule_id = (await direct_db.execute(text("""
+        INSERT INTO payroll.DriverRateSchedules
+            (CompanyID, DriverID, PayDefinitionID, RateDefinitionID, EffectiveFrom, Status)
+        VALUES (1, :driver_id, :pay_definition_id, :rate_definition_id, :today, 'Pending')
+        RETURNING DriverRateScheduleID
+    """), {"driver_id": driver_id, "pay_definition_id": pay_definition_id,
           "rate_definition_id": rate_definition_id, "today": today})).scalar_one()
     await direct_db.execute(text("""
-        INSERT INTO payroll.DriverRateValues
-            (DriverRateAssignmentID, RateDefinitionID, RateComponentDefinitionID, Amount)
-        VALUES (:assignment_id, :rate_definition_id, :component_id, 42)
-    """), {"assignment_id": source_rate_assignment_id, "rate_definition_id": rate_definition_id,
+        INSERT INTO payroll.DriverRateScheduleValues
+            (DriverRateScheduleID, RateDefinitionID, RateComponentDefinitionID, Amount)
+        VALUES (:schedule_id, :rate_definition_id, :component_id, 42)
+    """), {"schedule_id": schedule_id, "rate_definition_id": rate_definition_id,
            "component_id": rate_component_id})
     await direct_db.execute(text("""
-        UPDATE payroll.DriverRateAssignments
+        UPDATE payroll.DriverRateSchedules
         SET Status = 'Approved', ApprovedByUserID = 1, ApprovedAtUtc = NOW()
-        WHERE DriverRateAssignmentID = :assignment_id
-    """), {"assignment_id": source_rate_assignment_id})
-    source_rule_id = (await direct_db.execute(text("""
-        INSERT INTO payroll.DriverPayRules
-            (CompanyID, BranchID, DriverAssignmentID, RuleType, Amount, EffectiveFrom, Status)
-        VALUES (1, :branch_id, :assignment_id, 'MinimumPay', 12.50, :today, 'Active')
-        RETURNING DriverPayRuleID
-    """), {"branch_id": paytest_branch_id, "assignment_id": source_id,
-          "today": today})).scalar_one()
+        WHERE DriverRateScheduleID = :schedule_id
+    """), {"schedule_id": schedule_id})
 
     from app.payroll.eligibility import _create_period_driver_eligibility_rows
     target_work_date = (await direct_db.execute(text("""
@@ -316,27 +312,22 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         WHERE DriverAssignmentID IN (:source_id, :destination_id)
     """), {"source_id": source_id, "destination_id": destination_id})).mappings().all()
     assert [(row["driverassignmentid"], row["driverrateid"]) for row in rates] == [(source_id, source_rate_id)]
+    # The Driver's schedule belongs to the Driver, so the transfer neither copies nor moves it:
+    # one row before, one row after, unchanged, and the destination assignment owns nothing.
     target_compensation = (await direct_db.execute(text("""
         SELECT
-          (SELECT count(*) FROM payroll.DriverRateAssignments WHERE DriverAssignmentID = :aid) AS assignments,
-          (SELECT count(*) FROM payroll.DriverPayRules WHERE DriverAssignmentID = :aid) AS pay_rules,
           (SELECT count(*) FROM payroll.DriverRates WHERE DriverAssignmentID = :aid) AS legacy_rates,
           (SELECT count(*) FROM payroll.PayrollDraftLines WHERE DriverAssignmentID = :aid) AS draft_lines,
           (SELECT count(*) FROM payroll.PayrollBonusEvents WHERE DriverAssignmentID = :aid) AS bonus_events
     """), {"aid": destination_id})).mappings().one()
-    assert tuple(target_compensation.values()) == (0, 0, 0, 0, 0)
-    source_compensation = (await direct_db.execute(text("""
-        SELECT
-          (SELECT DriverRateAssignmentID FROM payroll.DriverRateAssignments WHERE DriverAssignmentID = :aid) AS assignment_id,
-          (SELECT Status FROM payroll.DriverRateAssignments WHERE DriverAssignmentID = :aid) AS assignment_status,
-          (SELECT Amount FROM payroll.DriverRateValues v JOIN payroll.DriverRateAssignments a
-             ON a.DriverRateAssignmentID = v.DriverRateAssignmentID WHERE a.DriverAssignmentID = :aid) AS assignment_amount,
-          (SELECT DriverPayRuleID FROM payroll.DriverPayRules WHERE DriverAssignmentID = :aid) AS rule_id
-    """), {"aid": source_id})).mappings().one()
-    assert source_compensation["assignment_id"] == source_rate_assignment_id
-    assert source_compensation["assignment_status"] == "Approved"
-    assert source_compensation["assignment_amount"] == Decimal("42.0000")
-    assert source_compensation["rule_id"] == source_rule_id
+    assert tuple(target_compensation.values()) == (0, 0, 0)
+    driver_schedules = (await direct_db.execute(text("""
+        SELECT s.DriverRateScheduleID, s.Status, v.Amount
+        FROM payroll.DriverRateSchedules s
+        JOIN payroll.DriverRateScheduleValues v ON v.DriverRateScheduleID = s.DriverRateScheduleID
+        WHERE s.DriverID = :driver_id
+    """), {"driver_id": driver_id})).all()
+    assert [tuple(row) for row in driver_schedules] == [(schedule_id, "Approved", Decimal("42.0000"))]
     audit = (await direct_db.execute(text("""
         SELECT NewValueJson FROM audit.AuditLog
         WHERE EntitySchema = 'core' AND EntityName = 'DriverTransferRequests'

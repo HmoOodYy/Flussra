@@ -1,7 +1,7 @@
 """Compensation HTTP surface, mounted at /compensation.
 
 Company-owned PayDefinition governance, Branch applicability and Driver rate
-assignment authoring. These routes are the operational authority for
+schedule authoring. These routes are the operational authority for
 PayDefinitions, their Branch configuration and ordinary PerUnit rates; the
 Settings Pay Items and Pay Rates pages call them.
 
@@ -15,15 +15,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response
 
-from app.compensation import assignments, branch_config, definitions, resolver
+from app.compensation import branch_config, definitions, resolver, schedules
+from app.compensation.driver_context import driver_compensation_read_scope
 from app.compensation.errors import CompensationOwnershipError, compensation_error
-from app.compensation.guards import load_company_driver_branch, require_rate_read
 from app.compensation.schemas import (
-    AssignmentCreate,
-    AssignmentSummary,
-    AssignmentUpdate,
-    AssignmentValuesReplace,
-    AssignmentVoid,
     BranchConfigUpdate,
     BranchConfigVersion,
     BranchPayDefinitionState,
@@ -40,6 +35,11 @@ from app.compensation.schemas import (
     PayDefinitionRequestUpdate,
     PayDefinitionSummary,
     ResolvedCompensation,
+    ScheduleCreate,
+    ScheduleSummary,
+    ScheduleUpdate,
+    ScheduleValuesReplace,
+    ScheduleVoid,
 )
 from app.dependencies import get_current_user, get_db
 
@@ -220,116 +220,119 @@ async def bulk_update_branch_pay_definition(
 
 
 # ---------------------------------------------------------------------------
-# Driver rate assignments
+# Driver rate schedules (owned by the permanent Driver)
 # ---------------------------------------------------------------------------
 
-@router.post("/driver-rate-assignments", response_model=AssignmentSummary, status_code=201,
-             summary="Create a Pending Driver rate assignment")
-async def create_assignment(
-    token: TokenDep, db: DbDep, body: AssignmentCreate,
-) -> AssignmentSummary:
+@router.post("/driver-rate-schedules", response_model=ScheduleSummary, status_code=201,
+             summary="Create a Pending Driver rate schedule")
+async def create_schedule(
+    token: TokenDep, db: DbDep, body: ScheduleCreate,
+) -> ScheduleSummary:
     company_id, user_id = _ids(token)
-    return await assignments.create_pending(company_id, user_id, body, db)
+    return await schedules.create_pending(company_id, user_id, body, db)
 
 
-@router.get("/driver-rate-assignments/{assignment_id}", response_model=AssignmentSummary,
-            summary="Get a Driver rate assignment with its complete value set")
-async def get_assignment(token: TokenDep, db: DbDep, assignment_id: int) -> AssignmentSummary:
+@router.get("/driver-rate-schedules/{schedule_id}", response_model=ScheduleSummary,
+            summary="Get a Driver rate schedule with its complete value set")
+async def get_schedule(token: TokenDep, db: DbDep, schedule_id: int) -> ScheduleSummary:
     company_id, user_id = _ids(token)
-    return await assignments.get_assignment(company_id, user_id, assignment_id, db)
+    return await schedules.get_schedule(company_id, user_id, schedule_id, db)
 
 
-@router.patch("/driver-rate-assignments/{assignment_id}", response_model=AssignmentSummary,
-              summary="Edit a Pending Driver rate assignment")
-async def update_assignment(
-    token: TokenDep, db: DbDep, assignment_id: int, body: AssignmentUpdate,
-) -> AssignmentSummary:
+@router.patch("/driver-rate-schedules/{schedule_id}", response_model=ScheduleSummary,
+              summary="Edit a Pending Driver rate schedule")
+async def update_schedule(
+    token: TokenDep, db: DbDep, schedule_id: int, body: ScheduleUpdate,
+) -> ScheduleSummary:
     company_id, user_id = _ids(token)
-    return await assignments.update_pending(company_id, user_id, assignment_id, body, db)
+    return await schedules.update_pending(company_id, user_id, schedule_id, body, db)
 
 
-@router.put("/driver-rate-assignments/{assignment_id}/values", response_model=AssignmentSummary,
-            summary="Replace the value set of a Pending Driver rate assignment")
-async def replace_assignment_values(
-    token: TokenDep, db: DbDep, assignment_id: int, body: AssignmentValuesReplace,
-) -> AssignmentSummary:
+@router.put("/driver-rate-schedules/{schedule_id}/values", response_model=ScheduleSummary,
+            summary="Replace the value set of a Pending Driver rate schedule")
+async def replace_schedule_values(
+    token: TokenDep, db: DbDep, schedule_id: int, body: ScheduleValuesReplace,
+) -> ScheduleSummary:
     company_id, user_id = _ids(token)
-    return await assignments.replace_values(company_id, user_id, assignment_id, body, db)
+    return await schedules.replace_values(company_id, user_id, schedule_id, body, db)
 
 
-@router.post("/driver-rate-assignments/{assignment_id}/approve",
-             response_model=AssignmentSummary,
-             summary="Approve a Pending Driver rate assignment, superseding the current one")
-async def approve_assignment(
-    token: TokenDep, db: DbDep, assignment_id: int,
-) -> AssignmentSummary:
+@router.post("/driver-rate-schedules/{schedule_id}/approve",
+             response_model=ScheduleSummary,
+             summary="Approve a Pending Driver rate schedule, superseding the current one")
+async def approve_schedule(
+    token: TokenDep, db: DbDep, schedule_id: int,
+) -> ScheduleSummary:
     company_id, user_id = _ids(token)
-    return await assignments.approve(company_id, user_id, assignment_id, db)
+    return await schedules.approve(company_id, user_id, schedule_id, db)
 
 
-@router.post("/driver-rate-assignments/{assignment_id}/void",
-             response_model=AssignmentSummary,
-             summary="Void a previously authoritative Driver rate assignment")
-async def void_assignment(
-    token: TokenDep, db: DbDep, assignment_id: int, body: AssignmentVoid,
-) -> AssignmentSummary:
+@router.post("/driver-rate-schedules/{schedule_id}/void",
+             response_model=ScheduleSummary,
+             summary="Void a previously authoritative Driver rate schedule")
+async def void_schedule(
+    token: TokenDep, db: DbDep, schedule_id: int, body: ScheduleVoid,
+) -> ScheduleSummary:
     company_id, user_id = _ids(token)
-    return await assignments.void(company_id, user_id, assignment_id, body, db)
+    return await schedules.void(company_id, user_id, schedule_id, body, db)
 
 
-@router.delete("/driver-rate-assignments/{assignment_id}", status_code=204,
-               summary="Discard a Pending Driver rate assignment")
-async def discard_assignment(token: TokenDep, db: DbDep, assignment_id: int) -> Response:
+@router.delete("/driver-rate-schedules/{schedule_id}", status_code=204,
+               summary="Discard a Pending Driver rate schedule")
+async def discard_schedule(token: TokenDep, db: DbDep, schedule_id: int) -> Response:
     company_id, user_id = _ids(token)
-    await assignments.discard(company_id, user_id, assignment_id, db)
+    await schedules.discard(company_id, user_id, schedule_id, db)
     return Response(status_code=204)
 
 
-@router.get("/driver-assignments/{driver_assignment_id}/pay-rates", response_model=list[DriverPayRateRow],
-            summary="Branch-applicable PayDefinitions and the Driver's scalar rate state")
+@router.get("/drivers/{driver_id}/pay-rates", response_model=list[DriverPayRateRow],
+            summary="Authorable PayDefinitions and the Driver's scalar rate state")
 async def driver_pay_rates(
-    token: TokenDep, db: DbDep, driver_assignment_id: int, as_of: date | None = Query(None),
+    token: TokenDep, db: DbDep, driver_id: int, as_of: date | None = Query(None),
 ) -> list[DriverPayRateRow]:
     company_id, user_id = _ids(token)
-    return await assignments.driver_pay_rates(company_id, user_id, driver_assignment_id, as_of, db)
+    return await schedules.driver_pay_rates(company_id, user_id, driver_id, as_of, db)
 
 
-@router.get("/driver-assignments/{driver_assignment_id}/rate-definitions/{rate_definition_id}/assignments",
-            response_model=list[AssignmentSummary],
-            summary="Driver rate assignment history for one rate definition")
-async def assignment_history(
-    token: TokenDep, db: DbDep, driver_assignment_id: int, rate_definition_id: int,
-) -> list[AssignmentSummary]:
+@router.get("/drivers/{driver_id}/rate-definitions/{rate_definition_id}/rate-schedules",
+            response_model=list[ScheduleSummary],
+            summary="Driver rate schedule history for one rate definition")
+async def schedule_history(
+    token: TokenDep, db: DbDep, driver_id: int, rate_definition_id: int,
+) -> list[ScheduleSummary]:
     company_id, user_id = _ids(token)
-    return await assignments.history(company_id, user_id, driver_assignment_id, rate_definition_id, db)
+    return await schedules.history(company_id, user_id, driver_id, rate_definition_id, db)
 
 
-@router.get("/driver-assignments/{driver_assignment_id}/rate-assignments/summary",
+@router.get("/drivers/{driver_id}/rate-schedules/summary",
             response_model=list[DriverRateSummaryItem],
-            summary="Current and Pending assignment per rate definition for a Driver")
-async def driver_assignment_summary(
-    token: TokenDep, db: DbDep, driver_assignment_id: int,
+            summary="Approved and Pending schedule per rate definition for a Driver")
+async def driver_schedule_summary(
+    token: TokenDep, db: DbDep, driver_id: int,
 ) -> list[DriverRateSummaryItem]:
     company_id, user_id = _ids(token)
-    return await assignments.driver_summary(company_id, user_id, driver_assignment_id, db)
+    return await schedules.driver_summary(company_id, user_id, driver_id, db)
 
 
-@router.get("/driver-assignments/{driver_assignment_id}/rate-definitions/{rate_definition_id}/resolution",
+@router.get("/drivers/{driver_id}/rate-definitions/{rate_definition_id}/resolution",
             response_model=ResolvedCompensation,
-            summary="Resolve the whole assignment effective on a work date")
-async def resolve_assignment(
-    token: TokenDep, db: DbDep, driver_assignment_id: int, rate_definition_id: int,
+            summary="Resolve the whole schedule effective on a work date")
+async def resolve_schedule(
+    token: TokenDep, db: DbDep, driver_id: int, rate_definition_id: int,
     work_date: date = Query(...),
 ) -> ResolvedCompensation:
     company_id, user_id = _ids(token)
-    branch_id = await load_company_driver_branch(company_id, user_id, driver_assignment_id, db)
-    await require_rate_read(company_id, user_id, branch_id, db)
+    scope = await driver_compensation_read_scope(company_id, user_id, driver_id, db)
+    if not scope.covers(work_date):
+        raise compensation_error(
+            "NO_EFFECTIVE_SCHEDULE",
+            "No authoritative schedule is effective on that date.", 404)
     try:
-        resolved = await resolver.resolve(company_id, driver_assignment_id, rate_definition_id, work_date, db)
+        resolved = await resolver.resolve(company_id, driver_id, rate_definition_id, work_date, db)
     except CompensationOwnershipError as exc:
         raise compensation_error("RATE_DEFINITION_NOT_FOUND", str(exc), 404) from exc
     if resolved is None:
         raise compensation_error(
-            "NO_EFFECTIVE_ASSIGNMENT",
-            "No authoritative assignment is effective on that date.", 404)
+            "NO_EFFECTIVE_SCHEDULE",
+            "No authoritative schedule is effective on that date.", 404)
     return resolved

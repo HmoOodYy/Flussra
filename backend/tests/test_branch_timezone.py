@@ -51,7 +51,7 @@ async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
                AND column_name = 'workdate')
            OR (table_schema = 'payroll' AND table_name = 'payrollperiods'
                AND column_name IN ('startdate', 'enddate'))
-           OR (table_schema = 'payroll' AND table_name = 'driverrateassignments'
+           OR (table_schema = 'payroll' AND table_name = 'driverrateschedules'
                AND column_name IN ('effectivefrom', 'effectiveto'))
         ORDER BY table_name, column_name
     """))
@@ -65,8 +65,8 @@ async def test_head_timezone_and_temporal_catalog(db_conn: AsyncConnection):
     assert observed[("payrolldraftlines", "workdate")] == "date"
     assert observed[("payrollperiods", "startdate")] == "date"
     assert observed[("payrollperiods", "enddate")] == "date"
-    assert observed[("driverrateassignments", "effectivefrom")] == "date"
-    assert observed[("driverrateassignments", "effectiveto")] == "date"
+    assert observed[("driverrateschedules", "effectivefrom")] == "date"
+    assert observed[("driverrateschedules", "effectiveto")] == "date"
 
 
 async def test_branch_workdate_ranges_use_local_calendar_boundaries(db_conn: AsyncConnection):

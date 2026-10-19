@@ -77,30 +77,35 @@ async def seed_period_definition(
 
 
 async def seed_approved_rate(
-    db: AsyncConnection, *, definition: SeededDefinition, driver_assignment_id: int, branch_id: int,
+    db: AsyncConnection, *, definition: SeededDefinition, driver_assignment_id: int,
     amount: str | Decimal, effective_from: date | str = "2000-01-01",
     effective_to: date | str | None = None, company_id: int = COMPANY_ID, approver_id: int = 1,
 ) -> int:
-    """An Approved scalar assignment for the Driver (Pending, valued, then approved)."""
-    assignment_id = (await db.execute(text("""
-        INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom, effectiveto)
-        VALUES (:cid, :bid, :did, :rd, :efrom, :eto) RETURNING driverrateassignmentid
-    """), {"cid": company_id, "bid": branch_id, "did": driver_assignment_id,
+    """An Approved scalar schedule for the Driver of the assignment (Pending, valued, approved).
+
+    Schedules belong to the permanent Driver, so the assignment only names which Driver.
+    """
+    schedule_id = (await db.execute(text("""
+        INSERT INTO payroll.driverrateschedules
+            (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom, effectiveto)
+        SELECT :cid, da.driverid, :pd, :rd, :efrom, :eto
+        FROM core.driverassignments da WHERE da.driverassignmentid = :did
+        RETURNING driverratescheduleid
+    """), {"cid": company_id, "did": driver_assignment_id, "pd": definition.pay_definition_id,
            "rd": definition.rate_definition_id, "efrom": _date(effective_from),
            "eto": _date(effective_to)})).scalar_one()
     await db.execute(text("""
-        INSERT INTO payroll.driverratevalues
-            (driverrateassignmentid, ratedefinitionid, ratecomponentdefinitionid, amount)
-        VALUES (:aid, :rd, :component, :amount)
-    """), {"aid": assignment_id, "rd": definition.rate_definition_id,
+        INSERT INTO payroll.driverrateschedulevalues
+            (driverratescheduleid, ratedefinitionid, ratecomponentdefinitionid, amount)
+        VALUES (:sid, :rd, :component, :amount)
+    """), {"sid": schedule_id, "rd": definition.rate_definition_id,
            "component": definition.component_id, "amount": Decimal(str(amount))})
     await db.execute(text("""
-        UPDATE payroll.driverrateassignments
+        UPDATE payroll.driverrateschedules
         SET status = 'Approved', approvedbyuserid = :uid, approvedatutc = now()
-        WHERE driverrateassignmentid = :aid
-    """), {"aid": assignment_id, "uid": approver_id})
-    return int(assignment_id)
+        WHERE driverratescheduleid = :sid
+    """), {"sid": schedule_id, "uid": approver_id})
+    return int(schedule_id)
 
 
 async def seed_target_line(

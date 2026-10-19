@@ -147,7 +147,7 @@ async def _inject_normal_pay_line(
     definition = await seed_period_definition(
         db, period_id=period_id, branch_id=branch_id, name="Normal pay")
     await seed_approved_rate(
-        db, definition=definition, driver_assignment_id=driver_assignment_id, branch_id=branch_id, amount=amount)
+        db, definition=definition, driver_assignment_id=driver_assignment_id, amount=amount)
     start = (await db.execute(
         _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :p"),
         {"p": period_id})).scalar_one()

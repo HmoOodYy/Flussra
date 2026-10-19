@@ -1,7 +1,7 @@
 """DriverRate authoring, lifecycle, batch operations, and compatibility endpoint.
 
 Read-only catalog, matrix, and resolution queries live in rate_reads.
-Ordinary PayDefinition rates are authored through app.compensation assignments.
+Ordinary PayDefinition rates are authored through app.compensation schedules.
 The legacy rate-copy endpoint remains mounted but refuses copying.
 """
 import json
@@ -117,7 +117,7 @@ def _ordinary_rate_authoring_retired() -> HTTPException:
             "code": "ORDINARY_RATE_AUTHORING_RETIRED",
             "message": (
                 "Ordinary PayDefinition rates are authored through "
-                "/compensation/driver-rate-assignments. The legacy rate path remains "
+                "/compensation/driver-rate-schedules. The legacy rate path remains "
                 "available only for Status pay rates."
             ),
         },
@@ -130,7 +130,7 @@ async def _require_status_owned_rate_type(
     """Legacy rate writers accept only RateTypes owned by a Status rate column.
 
     Ordinary PayDefinition compensation has a single authoring authority, the
-    target DriverRateAssignment lifecycle, so a RateType that no active Status
+    target DriverRateSchedule lifecycle, so a RateType that no active Status
     rate column of this Company uses is rejected before any write.
     """
     owned = (await db.execute(
@@ -1456,7 +1456,7 @@ async def batch_save_rates(
             # enforced by trg_src_ratetype_owner trigger; skip redundant check here.
         else:
             # The PayItem branch of the legacy batch writer ended with the P4a cutover:
-            # ordinary rates are authored only through target DriverRateAssignments.
+            # ordinary rates are authored only through target DriverRateSchedules.
             raise _ordinary_rate_authoring_retired()
 
     # Step 7 â€” write: create or update PendingApproval rows

@@ -181,7 +181,7 @@ async def test_status_owned_rate_type_cannot_carry_a_pay_item_change_through_bat
 
 
 async def test_ordinary_authoring_still_works_on_the_target_path(
-    session_client, auth_token, hq_branch_id, created_driver_assignment_id,
+    session_client, auth_token, hq_branch_id, created_driver_id,
 ):
     headers = _auth(auth_token)
     definition = await session_client.post("/compensation/pay-definitions", headers=headers, json={
@@ -193,5 +193,5 @@ async def test_ordinary_authoring_still_works_on_the_target_path(
         headers=headers, json={"is_active": True})
     assert configured.status_code == 200, configured.text
     rows = await session_client.get(
-        f"/compensation/driver-assignments/{created_driver_assignment_id}/pay-rates", headers=headers)
+        f"/compensation/drivers/{created_driver_id}/pay-rates", headers=headers)
     assert body["pay_definition_id"] in {r["pay_definition_id"] for r in rows.json()}

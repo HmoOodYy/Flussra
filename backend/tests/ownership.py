@@ -357,8 +357,8 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
     ]
     pay_rule_ids = [
         r["driverpayruleid"] for r in (await db.execute(
-            _text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:ids)"),
-            {"ids": assignment_ids},
+            _text("SELECT driverpayruleid FROM payroll.driverpayrules WHERE driverid = :id"),
+            {"id": driver_id},
         )).mappings().all()
     ]
     transfer_ids = [
@@ -404,7 +404,8 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
 
     async def _delete_compensation() -> None:
         await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverRates")
-        await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverPayRules")
+        # Pay rules belong to the permanent Driver, not to an assignment.
+        await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverid = :id", {"id": driver_id}, label="delete DriverPayRules")
     if has_ended_assignment:
         async with suspended_test_triggers(db, COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS):
             await _delete_compensation()
@@ -442,7 +443,7 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
                     (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE driverassignmentid = ANY(:aids)) AS day_state,
                     (SELECT COUNT(*) FROM payroll.payrollperioddrivereligibility WHERE driverassignmentid = ANY(:aids)) AS eligibility,
                     (SELECT COUNT(*) FROM payroll.driverrates WHERE driverassignmentid = ANY(:aids)) AS rates,
-                    (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = ANY(:aids)) AS pay_rules,
+                    (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did) AS pay_rules,
                     (SELECT COUNT(*) FROM audit.auditlog
                      WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:dlids)) AS draft_line_audit,
                     (SELECT COUNT(*) FROM audit.auditlog

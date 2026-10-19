@@ -42,7 +42,7 @@ class DraftLineSummary(BaseModel):
 
     Ordinary PayDefinition rows carry ``payroll_period_definition_id`` (their identity)
     and no ``line_type``. Their money is never stored: ``calculated_amount`` and
-    ``needs_manager_review`` are DERIVED live from the effective DriverRateAssignment
+    ``needs_manager_review`` are DERIVED live from the effective DriverRateSchedule
     when the row is read (and are NULL / False where a read does not derive them).
     Temporary Status/internal compatibility rows carry ``line_type`` instead.
     """

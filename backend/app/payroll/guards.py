@@ -3,8 +3,11 @@ Payroll access and finalized-period guards shared with Compensation.
 
 Internal cross-area contract: ``check_not_in_finalized_period`` performs a
 read-only company/branch/date check and raises HTTP 422 when the effective
-date falls inside a Locked or Archived period (inclusive). It owns no
-authorization, lock, commit, or caller ordering.
+date falls inside a Locked or Archived period (inclusive). It serves the legacy
+assignment-owned status-rate writers. ``require_no_finalized_payroll`` is the one
+guard for Driver-owned compensation: it asks the database whether a footprint
+touches finalized payroll of the Driver in ANY Branch, through ANY of the Driver's
+assignments. Neither owns authorization, locks, commits or caller ordering.
 """
 from datetime import date
 
@@ -64,6 +67,50 @@ async def check_not_in_finalized_period(
                 f"({row['status']} period {row['startdate']} to {row['enddate']})."
             ),
         )
+
+
+async def require_no_finalized_payroll(
+    company_id: int,
+    driver_id: int,
+    footprint_from: date | None,
+    footprint_to: date | None,
+    mode: str,
+    db: AsyncConnection,
+) -> None:
+    """Refuse (422) a Driver-owned compensation change whose footprint touches finalized payroll.
+
+    A period is finalized when it is Locked or Archived and any DriverAssignment of the
+    Driver has an eligibility row in it, in any Branch. ``mode`` is ``WorkDate`` (a rate
+    schedule: the period's work dates overlap the footprint) or ``PeriodStart`` (a pay rule:
+    the period's start date is inside the footprint). The footprint is inclusive on both
+    ends; ``None`` is unbounded, and an inverted (empty) footprint touches nothing.
+    """
+    if (footprint_from is not None and footprint_to is not None
+            and footprint_from > footprint_to):
+        return
+    rows = (await db.execute(
+        text("""
+            SELECT payrollperiodid, startdate, enddate, status
+            FROM   payroll.fn_DriverFinalizedPayrollTouched(
+                       :cid, :did, daterange(CAST(:lo AS date), CAST(:hi AS date), '[]'), :mode)
+        """),
+        {"cid": company_id, "did": driver_id, "lo": footprint_from, "hi": footprint_to,
+         "mode": mode},
+    )).mappings().all()
+    if not rows:
+        return
+    first = rows[0]
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD",
+            "message": (
+                "This change touches finalized payroll "
+                f"({first['status']} period {first['startdate']} to {first['enddate']})."
+            ),
+            "payroll_period_ids": [int(row["payrollperiodid"]) for row in rows],
+        },
+    )
 
 
 async def _check_driver_read_access(

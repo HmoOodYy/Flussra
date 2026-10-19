@@ -318,7 +318,7 @@ async def _build_live_calculation_packet(
         db=db,
     ))
 
-    # ── Ordinary daily lines: live, derived from the effective DriverRateAssignment
+    # ── Ordinary daily lines: live, derived from the effective DriverRateSchedule
     # (never from a stored column). The persisted STATUS_PAYMENT/STATUS_PAY
     # compatibility projection is not a target ordinary line and is excluded.
     driver_names: dict[int, str | None] = {}
@@ -364,7 +364,7 @@ async def _build_live_calculation_packet(
                 "CalculationMethod": definition.calculation_method,
                 "CalculationMethodVersion": definition.calculation_method_version,
                 "CalculationStatus": calc.status.value,
-                "DriverRateAssignmentID": calc.driver_rate_assignment_id,
+                "DriverRateScheduleID": calc.driver_rate_schedule_id,
                 "CalculationVersion": calc.calculation_version,
             },
             snapshot_source_type="DraftLine",
@@ -497,7 +497,8 @@ async def _build_live_calculation_packet(
             text("""
                 SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
                 FROM payroll.driverpayrules
-                WHERE  driverassignmentid      = :did
+                WHERE  driverid = (SELECT da.driverid FROM core.driverassignments da
+                                   WHERE da.driverassignmentid = :did)
                   AND  companyid     = :cid
                   AND  ruletype      = 'MinimumPay'
                   AND  status        IN ('Active', 'Ended')
@@ -512,7 +513,8 @@ async def _build_live_calculation_packet(
             text("""
                 SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
                 FROM payroll.driverpayrules
-                WHERE  driverassignmentid      = :did
+                WHERE  driverid = (SELECT da.driverid FROM core.driverassignments da
+                                   WHERE da.driverassignmentid = :did)
                   AND  companyid     = :cid
                   AND  ruletype      = 'MaximumPay'
                   AND  status        IN ('Active', 'Ended')

@@ -32,7 +32,7 @@ class SetupWarning(BaseModel):
     Known codes:
       BRANCH_NO_PAYROLL_SETTINGS    — no complete canonical Payroll Setup schedule
       OPEN_PERIOD_NEEDS_MANAGER_REVIEW — open/in-review period has NeedsManagerReview draft lines
-      DRIVERS_NO_APPROVED_RATE      — active driver(s) have no Approved DriverRateAssignment
+      DRIVERS_NO_APPROVED_RATE      — active driver(s) have no Approved DriverRateSchedule
                                        (broad check — does not validate per-rate-type completeness)
     """
     severity: str          # "Error" | "Warning" | "Info"
