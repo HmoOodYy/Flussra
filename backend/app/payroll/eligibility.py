@@ -290,7 +290,15 @@ async def _create_period_driver_eligibility_rows(
     created_by_user_id: int | None = None,
     frozen_by_user_id: int | None = None,
     only_driver_assignment_id: int | None = None,
+    time_zone_id: str | None = None,
 ) -> None:
+    """Capture eligibility rows for a period.
+
+    ``time_zone_id`` is used only by re-capture of an existing assignment row: the row keeps
+    the zone it was captured under (captured timezone authority is immutable), and its dates
+    are recomputed under that zone. Brand-new rows (period creation, append) pass None and
+    use the Branch's current zone.
+    """
     now = datetime.now(UTC)
     frozen_at = now if freeze else None
 
@@ -310,7 +318,7 @@ async def _create_period_driver_eligibility_rows(
              iseligibleforperiod, eligibilityreasoncode, snapshotsource,
              createdatutc, createdbyuserid, updatedatutc, frozenatutc, frozenbyuserid)
         WITH period_context AS MATERIALIZED (
-            SELECT pp.*, b.TimeZoneId
+            SELECT pp.*, COALESCE(CAST(:zone_override AS VARCHAR), b.TimeZoneId) AS TimeZoneId
             FROM payroll.PayrollPeriods pp
             JOIN core.Branches b ON b.CompanyID = pp.CompanyID AND b.BranchID = pp.BranchID
             WHERE pp.PayrollPeriodID = :pid
@@ -375,7 +383,7 @@ async def _create_period_driver_eligibility_rows(
     """), {
         "pid": period_id, "cid": company_id, "bid": branch_id, "src": snapshot_source, "now": now,
         "uid": created_by_user_id, "frozen_at": frozen_at, "fuid": frozen_by_user_id,
-        "assignment_id": only_driver_assignment_id,
+        "assignment_id": only_driver_assignment_id, "zone_override": time_zone_id,
     })
 
 
@@ -399,7 +407,7 @@ async def _create_period_driver_eligibility_rows(
             e.employmentstatus,
             a.transferredfromassignmentid, a.transferredtoassignmentid,
             e.hiredate, e.terminationdate, a.effectivefromat, a.effectivetoat,
-            b.timezoneid, ARRAY[]::DATE[],
+            COALESCE(CAST(:zone_override AS VARCHAR), b.timezoneid), ARRAY[]::DATE[],
             TRUE, 'IncludedByExistingData', :src,
             CAST(:now AS TIMESTAMPTZ), CAST(:uid AS INTEGER), CAST(:now AS TIMESTAMPTZ), CAST(:frozen_at AS TIMESTAMPTZ), CAST(:fuid AS INTEGER)
         FROM payroll.payrollperiods pp
@@ -428,7 +436,7 @@ async def _create_period_driver_eligibility_rows(
     """), {
         "pid": period_id, "cid": company_id, "bid": branch_id, "src": snapshot_source, "now": now,
         "uid": created_by_user_id, "frozen_at": frozen_at, "fuid": frozen_by_user_id,
-        "assignment_id": only_driver_assignment_id,
+        "assignment_id": only_driver_assignment_id, "zone_override": time_zone_id,
     })
 
     # Upsert marker row — ensure period is tracked as snapshotted even if zero drivers
@@ -519,6 +527,14 @@ async def lock_boundary_periods(
 
     Lock-only mode (transfer complete, termination): every overlapping period is locked
     and returned, and no state blocks the operation.
+
+    Overlap is judged with the authority payroll itself uses. A captured roster row keeps
+    the zone it was captured under (``BranchTimeZoneIdSnapshot``) even if the Branch zone
+    is edited later, so a period overlaps a window when its WorkDate range does under ANY
+    governing zone: each distinct snapshot zone of the period's eligibility rows, plus the
+    Branch's current zone (rows appended or captured from now on use it). Judging by the
+    current zone alone would miss a period a writer is still validly writing under its
+    frozen zone.
     """
     for branch_id in sorted({window.branch_id for window in windows}):
         await acquire_branch_workflow_lock(company_id, branch_id, db)
@@ -526,8 +542,15 @@ async def lock_boundary_periods(
     params: dict = {"company_id": company_id}
     for index, window in enumerate(windows):
         clauses.append(
-            f"(pp.BranchID = :branch_{index} AND core.fn_WorkDateRange("
-            f"br.TimeZoneId, pp.StartDate, pp.EndDate) && tstzrange(:start_{index}, :end_{index}, '[)'))"
+            f"(pp.BranchID = :branch_{index} AND EXISTS ("
+            f"SELECT 1 FROM ("
+            f"SELECT br.TimeZoneId AS ZoneId "
+            f"UNION "
+            f"SELECT pde.BranchTimeZoneIdSnapshot FROM payroll.PayrollPeriodDriverEligibility pde "
+            f"WHERE pde.PayrollPeriodID = pp.PayrollPeriodID "
+            f"AND pde.BranchTimeZoneIdSnapshot IS NOT NULL"
+            f") governing WHERE core.fn_WorkDateRange(governing.ZoneId, pp.StartDate, pp.EndDate) "
+            f"&& tstzrange(:start_{index}, :end_{index}, '[)')))"
         )
         params[f"branch_{index}"] = window.branch_id
         params[f"start_{index}"] = window.start
@@ -587,36 +610,87 @@ async def assignment_payroll_fact_exists(
     return bool(result.scalar_one())
 
 
+def frozen_day_overlap_sql(window_alias: str, zone_sql: str, day_sql: str) -> str:
+    """The one predicate: the assignment window intersects a WorkDate's day in a zone.
+
+    ``_lifecycle_eligible_assignment_ids`` applies the same test (window range against
+    ``fn_WorkDateRange(frozen zone, day, day)``) to a row's captured days; the coverage
+    check below builds on this so the two cannot drift (a parity test pins them).
+    """
+    return (
+        f"core.fn_DriverEffectiveRange({window_alias}.EffectiveFromAt, {window_alias}.EffectiveToAt) "
+        f"&& core.fn_WorkDateRange({zone_sql}, {day_sql}, {day_sql})"
+    )
+
+
 async def assert_assignment_payroll_covered(
     company_id: int,
     branch_id: int,
     driver_assignment_id: int,
     db: AsyncConnection,
 ) -> None:
-    """Refuse with 409 when payroll source sits on WorkDates the assignment no longer covers.
+    """Refuse with 409 when payroll source sits where the assignment no longer covers.
 
-    Evaluated against the assignment's current window, so call it after the
-    boundary UPDATE in the same transaction; the 409 rolls the change back.
+    Evaluated against the assignment's current window, so call it after the boundary
+    UPDATE in the same transaction and under the period locks; the 409 rolls the change
+    back. Coverage is judged in the zone that governs each fact's period: the zone
+    captured on the assignment's eligibility row of that period (the Branch's current
+    zone only when the period has no row for the assignment).
+
+    * Daily facts (non-void draft lines and day-entry states, final lines) must sit on a
+      WorkDate whose day still intersects the window.
+    * Every Active Bonus event needs a captured eligible WorkDate of its period row that
+      still intersects the window, which is what lifecycle eligibility requires of a new
+      Bonus.
     """
-    result = await db.execute(text("""
-        SELECT 1
-        FROM (
-            SELECT WorkDate FROM payroll.PayrollDraftLines
+    daily = await db.execute(text(f"""
+        WITH facts AS (
+            SELECT PayrollPeriodID, WorkDate FROM payroll.PayrollDraftLines
             WHERE CompanyID = :company_id AND DriverAssignmentID = :aid AND Status <> 'Void'
             UNION
-            SELECT WorkDate FROM payroll.PayrollPeriodDriverDayEntryState
+            SELECT PayrollPeriodID, WorkDate FROM payroll.PayrollPeriodDriverDayEntryState
             WHERE CompanyID = :company_id AND DriverAssignmentID = :aid AND IsVoided = FALSE
             UNION
-            SELECT WorkDate FROM payroll.PayrollFinalLines
+            SELECT PayrollPeriodID, WorkDate FROM payroll.PayrollFinalLines
             WHERE CompanyID = :company_id AND DriverAssignmentID = :aid AND WorkDate IS NOT NULL
-        ) facts
-        WHERE NOT core.fn_DriverAssignmentCoversWorkDate(:company_id, :aid, :branch_id, facts.WorkDate)
+        )
+        SELECT 1
+        FROM facts f
+        JOIN core.DriverAssignments a
+          ON a.CompanyID = :company_id AND a.DriverAssignmentID = :aid
+        JOIN core.Branches br ON br.CompanyID = a.CompanyID AND br.BranchID = a.BranchID
+        LEFT JOIN payroll.PayrollPeriodDriverEligibility pde
+          ON pde.PayrollPeriodID = f.PayrollPeriodID AND pde.DriverAssignmentID = a.DriverAssignmentID
+        WHERE f.WorkDate IS NOT NULL
+          AND NOT ({frozen_day_overlap_sql("a", "COALESCE(pde.BranchTimeZoneIdSnapshot, br.TimeZoneId)", "f.WorkDate")})
         LIMIT 1
-    """), {"company_id": company_id, "aid": driver_assignment_id, "branch_id": branch_id})
-    if result.first() is not None:
+    """), {"company_id": company_id, "aid": driver_assignment_id})
+    if daily.first() is not None:
         raise HTTPException(status_code=409, detail={
             "code": "DRIVER_ASSIGNMENT_PAYROLL_FACTS_UNCOVERED",
             "message": "Payroll facts exist on WorkDates the changed Driver assignment window no longer covers.",
+        })
+
+    bonus = await db.execute(text(f"""
+        SELECT 1
+        FROM payroll.PayrollBonusEvents b
+        JOIN core.DriverAssignments a
+          ON a.CompanyID = b.CompanyID AND a.DriverAssignmentID = b.DriverAssignmentID
+        WHERE b.CompanyID = :company_id AND b.DriverAssignmentID = :aid AND b.Status = 'Active'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM payroll.PayrollPeriodDriverEligibility pde
+              CROSS JOIN LATERAL unnest(pde.EligibleWorkDates) AS d(WorkDate)
+              WHERE pde.PayrollPeriodID = b.PayrollPeriodID
+                AND pde.DriverAssignmentID = b.DriverAssignmentID
+                AND {frozen_day_overlap_sql("a", "pde.BranchTimeZoneIdSnapshot", "d.WorkDate")}
+          )
+        LIMIT 1
+    """), {"company_id": company_id, "aid": driver_assignment_id})
+    if bonus.first() is not None:
+        raise HTTPException(status_code=409, detail={
+            "code": "DRIVER_ASSIGNMENT_PAYROLL_FACTS_UNCOVERED",
+            "message": "An active Bonus would be left without any eligible WorkDate in the changed window.",
         })
 
 
@@ -676,6 +750,15 @@ async def recapture_assignment_eligibility(
         if period["branchid"] != branch_id:
             continue
         period_id = period["payrollperiodid"]
+        # The captured zone is immutable: the rebuilt row keeps the zone of the row it
+        # replaces and recomputes its dates under it.
+        captured_zone = (await db.execute(text("""
+            SELECT BranchTimeZoneIdSnapshot
+            FROM payroll.PayrollPeriodDriverEligibility
+            WHERE PayrollPeriodID = :pid AND CompanyID = :cid AND BranchID = :bid
+              AND DriverAssignmentID = :aid
+        """), {"pid": period_id, "cid": company_id, "bid": branch_id,
+               "aid": driver_assignment_id})).scalar_one_or_none()
         await db.execute(text("""
             DELETE FROM payroll.PayrollPeriodDriverEligibility
             WHERE PayrollPeriodID = :pid AND CompanyID = :cid AND BranchID = :bid
@@ -687,6 +770,7 @@ async def recapture_assignment_eligibility(
             snapshot_source="Generated", created_by_user_id=actor_user_id,
             freeze=frozen, frozen_by_user_id=actor_user_id if frozen else None,
             only_driver_assignment_id=driver_assignment_id,
+            time_zone_id=captured_zone,
         )
         uncovered_bonus = await db.execute(text("""
             SELECT 1
