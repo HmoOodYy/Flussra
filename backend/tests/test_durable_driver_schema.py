@@ -246,7 +246,7 @@ def test_0087_applies_over_clean_rosters_without_drivers(pre_0087_database):
             INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
             VALUES (%s, %s, 'Office Staff', 'OfficeStaff', 'Active')
         """, (company_id, branch_id))
-    assert _alembic(env, "upgrade", "head").returncode == 0
+    assert _alembic(env, "upgrade", "0087").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT version_num FROM public.alembic_version")
         assert cursor.fetchone() == ("0087",)
@@ -261,9 +261,9 @@ def test_0087_is_irreversible(head_database):
     assert "irreversible" in (result.stderr + result.stdout)
 
 
-def test_fresh_upgrade_reaches_0087_with_the_durable_driver_shape(head_database, cur):
+def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0087",)
+    assert cur.fetchone() == ("0088",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""
@@ -319,7 +319,7 @@ def test_driver_reference_columns_are_classified_with_no_unvalidated_driver_fore
         "payrollbonusevents", "payrollfinallines", "payrollcalculationdrivertotals",
         "payrollcalculationsnapshotbonusevents", "payrollcalculationsnapshotstatusentries",
         "payrollcalculationsnapshotusedratedefinitions", "payrollperiodauditevidenceevents",
-        "driverrates", "driverrateassignments", "driverpayrules",
+        "driverrates",
     ]
     with_driver_id = {
         "payrollfinallines", "payrollcalculationdrivertotals",
@@ -335,6 +335,14 @@ def test_driver_reference_columns_are_classified_with_no_unvalidated_driver_fore
         found = {row[0] for row in cur.fetchall()}
         expected = {"driverassignmentid"} | ({"driverid"} if table in with_driver_id else set())
         assert found == expected, table
+    # Driver-owned compensation (0088) carries the permanent DriverID and never an assignment.
+    for table in ("driverrateschedules", "driverpayrules"):
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'payroll' AND table_name = %s
+              AND column_name IN ('driverid', 'driverassignmentid')
+        """, (table,))
+        assert {row[0] for row in cur.fetchall()} == {"driverid"}, table
     cur.execute("""
         SELECT conrelid::regclass::TEXT, conname FROM pg_constraint
         WHERE contype = 'f' AND NOT convalidated
@@ -355,7 +363,13 @@ def test_no_function_or_view_still_reads_the_profile_meaning_of_driverid(cur):
         SELECT n.nspname || '.' || p.proname
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-          AND p.proname NOT IN ('fn_effectivedriverassignment', 'trg_driverassignments_identityimmutable')
+          AND p.proname NOT IN (
+              'fn_effectivedriverassignment', 'trg_driverassignments_identityimmutable',
+              -- Driver-owned compensation (0088): DriverID there is the permanent Driver.
+              'fn_driverassignmentforbusinessdate', 'fn_driverfinalizedpayrolltouched',
+              'trg_drivercompensationcontextwritable', 'trg_driverrateschedules_beforeupdate',
+              'trg_driverrateschedules_beforedelete', 'trg_driverpayrules_beforeupdate',
+              'fn_guard_used_rate_definition_scope')
           AND p.prosrc ~* '(\mdriverid\M|driver_id|fn_effectivedriverprofile|fn_drivercoversworkdate|drivercode)'
     """)
     assert cur.fetchall() == []

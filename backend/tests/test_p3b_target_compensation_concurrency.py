@@ -21,9 +21,9 @@ from tests.compensation_database_fixtures import (
 )
 
 
-def _insert_pending(fx, driver_assignment_id, effective_from="2026-01-01"):
+def _insert_pending(fx, driver_id, effective_from="2026-01-01"):
     def run(cursor):
-        make_pending(cursor, fx, driver_assignment_id=driver_assignment_id, effective_from=effective_from)
+        make_pending(cursor, fx, driver_id=driver_id, effective_from=effective_from)
     return run
 
 
@@ -43,14 +43,14 @@ def test_concurrent_pending_creation_for_one_identity_admits_exactly_one(p3b_dsn
     try:
         with first.cursor() as txn:
             make_pending(txn, fx)
-            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id, "2027-01-01"))
+            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id, "2027-01-01"))
             second.wait_for_lock(cur)
         first.commit()
         assert isinstance(second.finish(), errors.UniqueViolation)
     finally:
         first.close()
-    cur.execute("SELECT count(*) FROM payroll.driverrateassignments "
-                "WHERE driverassignmentid = %s AND status = 'Pending'", (fx.driver_assignment_id,))
+    cur.execute("SELECT count(*) FROM payroll.driverrateschedules "
+                "WHERE driverid = %s AND status = 'Pending'", (fx.driver_id,))
     assert cur.fetchone()[0] == 1
 
 
@@ -67,7 +67,7 @@ def test_pending_creation_then_structure_change_cannot_both_commit(p3b_dsn, cur)
     finally:
         creator.close()
     assert isinstance(error, errors.CheckViolation)
-    assert "RATE_STRUCTURE_PENDING_ASSIGNMENT" in str(error)
+    assert "RATE_STRUCTURE_PENDING_SCHEDULE" in str(error)
     cur.execute("SELECT count(*) FROM payroll.ratecomponentdefinitions WHERE ratedefinitionid = %s",
                 (fx.rate_definition_id,))
     assert cur.fetchone()[0] == 3
@@ -80,7 +80,7 @@ def test_structure_change_then_pending_creation_serializes_in_that_order(p3b_dsn
         with mutator.cursor() as txn:
             txn.execute("DELETE FROM payroll.ratecomponentdefinitions "
                         "WHERE ratecomponentdefinitionid = %s", (fx.component_ids[2],))
-            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id))
+            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id))
             creation.wait_for_lock(cur)
         mutator.commit()
         assert creation.finish() is None
@@ -89,7 +89,7 @@ def test_structure_change_then_pending_creation_serializes_in_that_order(p3b_dsn
     cur.execute("SELECT count(*) FROM payroll.ratecomponentdefinitions WHERE ratedefinitionid = %s",
                 (fx.rate_definition_id,))
     assert cur.fetchone()[0] == 2
-    cur.execute("SELECT count(*) FROM payroll.driverrateassignments "
+    cur.execute("SELECT count(*) FROM payroll.driverrateschedules "
                 "WHERE ratedefinitionid = %s AND status = 'Pending'", (fx.rate_definition_id,))
     assert cur.fetchone()[0] == 1
 
@@ -155,7 +155,7 @@ def test_method_change_vs_pending_creation_cannot_both_commit(p3b_dsn, cur):
                     (ratedefinitionid, shape, sequenceno, ordinalfrom, ordinalto)
                 VALUES (%s, 'OrdinalTierSchedule', 1, 1, NULL)
             """, (fx.rate_definition_id,))
-            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id))
+            creation = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id))
             creation.wait_for_lock(cur)
         changer.commit()
         assert creation.finish() is None  # Pending is created against the final structure
@@ -181,7 +181,7 @@ def test_pending_creation_then_method_change_fails_the_method_change(p3b_dsn, cu
     finally:
         creator.close()
     assert isinstance(error, errors.CheckViolation)
-    assert "RATE_STRUCTURE_PENDING_ASSIGNMENT" in str(error)
+    assert "RATE_STRUCTURE_PENDING_SCHEDULE" in str(error)
 
 
 def test_value_write_vs_approval_serializes_and_freezes_the_value_set(p3b_dsn, cur):
@@ -193,8 +193,8 @@ def test_value_write_vs_approval_serializes_and_freezes_the_value_set(p3b_dsn, c
         with approver.cursor() as txn:
             approve(txn, pending)
             edit = Blocked(p3b_dsn, lambda c: c.execute(
-                "UPDATE payroll.driverratevalues SET amount = 500 "
-                "WHERE driverrateassignmentid = %s", (pending,)))
+                "UPDATE payroll.driverrateschedulevalues SET amount = 500 "
+                "WHERE driverratescheduleid = %s", (pending,)))
             edit.wait_for_lock(cur)
         approver.commit()
         error = edit.finish()
@@ -202,13 +202,13 @@ def test_value_write_vs_approval_serializes_and_freezes_the_value_set(p3b_dsn, c
         approver.close()
     assert isinstance(error, errors.CheckViolation)
     assert "RATE_VALUES_IMMUTABLE_AFTER_APPROVAL" in str(error)
-    cur.execute("SELECT amount FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    cur.execute("SELECT amount FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (pending,))
     assert cur.fetchone()[0] == 1
 
 
 def test_authoritative_overlap_race_resolves_to_the_committed_window(p3b_dsn, cur):
-    """Superseding the current assignment and approving its successor race on one identity."""
+    """Superseding the current schedule and approving its successor race on one identity."""
     fx = Scalar(cur)
     current = approved_scalar(cur, fx, effective_from="2026-01-01")
     successor = make_pending(cur, fx, effective_from="2026-04-01")
@@ -217,8 +217,8 @@ def test_authoritative_overlap_race_resolves_to_the_committed_window(p3b_dsn, cu
     closer = connect(p3b_dsn)
     try:
         with closer.cursor() as txn:
-            txn.execute("UPDATE payroll.driverrateassignments SET status = 'Superseded', "
-                        "effectiveto = '2026-03-31' WHERE driverrateassignmentid = %s", (current,))
+            txn.execute("UPDATE payroll.driverrateschedules SET status = 'Superseded', "
+                        "effectiveto = '2026-03-31' WHERE driverratescheduleid = %s", (current,))
             approval = Blocked(p3b_dsn, lambda c: approve(c, successor))
             approval.wait_for_lock(cur)
         closer.commit()
@@ -237,8 +237,8 @@ def test_authoritative_overlap_race_rejects_the_overlapping_commit(p3b_dsn, cur)
     closer = connect(p3b_dsn)
     try:
         with closer.cursor() as txn:
-            txn.execute("UPDATE payroll.driverrateassignments SET status = 'Superseded', "
-                        "effectiveto = '2026-06-30' WHERE driverrateassignmentid = %s", (current,))
+            txn.execute("UPDATE payroll.driverrateschedules SET status = 'Superseded', "
+                        "effectiveto = '2026-06-30' WHERE driverratescheduleid = %s", (current,))
             approval = Blocked(p3b_dsn, lambda c: approve(c, successor))
             approval.wait_for_lock(cur)
         closer.commit()
@@ -255,17 +255,17 @@ def test_discard_vs_value_write_never_leaves_orphaned_values(p3b_dsn, cur):
     discarder = connect(p3b_dsn)
     try:
         with discarder.cursor() as txn:
-            txn.execute("DELETE FROM payroll.driverrateassignments WHERE driverrateassignmentid = %s",
+            txn.execute("DELETE FROM payroll.driverrateschedules WHERE driverratescheduleid = %s",
                         (pending,))
             edit = Blocked(p3b_dsn, lambda c: c.execute(
-                "UPDATE payroll.driverratevalues SET amount = 2 WHERE driverrateassignmentid = %s",
+                "UPDATE payroll.driverrateschedulevalues SET amount = 2 WHERE driverratescheduleid = %s",
                 (pending,)))
             edit.wait_for_lock(cur)
         discarder.commit()
         edit.finish()
     finally:
         discarder.close()
-    cur.execute("SELECT count(*) FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    cur.execute("SELECT count(*) FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (pending,))
     assert cur.fetchone()[0] == 0
 
@@ -291,8 +291,8 @@ def test_same_rate_definition_different_drivers_serialize_but_both_commit(p3b_ds
     holder = connect(p3b_dsn)
     try:
         with holder.cursor() as txn:
-            make_pending(txn, fx, driver_assignment_id=fx.driver_assignment_ids[0])
-            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_ids[1]))
+            make_pending(txn, fx, driver_id=fx.driver_ids[0])
+            second = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_ids[1]))
             second.wait_for_lock(cur)
         holder.commit()
         assert second.finish() is None
@@ -358,11 +358,11 @@ async def test_application_lock_helper_takes_the_same_row_lock(p3b_dsn, cur):
     try:
         async with engine.begin() as db:
             assert await lock_rate_definition_structure(fx.rate_definition_id, db) is False
-            blocked = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_assignment_id))
+            blocked = Blocked(p3b_dsn, _insert_pending(fx, fx.driver_id))
             await asyncio.to_thread(blocked.wait_for_lock, cur)
         assert blocked.finish() is None
         approved_driver = add_driver(cur, fx)
-        approved_scalar(cur, fx, driver_assignment_id=approved_driver)
+        approved_scalar(cur, fx, driver_id=approved_driver)
         async with engine.begin() as db:
             assert await lock_rate_definition_structure(fx.rate_definition_id, db) is True
     finally:

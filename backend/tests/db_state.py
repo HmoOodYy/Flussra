@@ -62,19 +62,20 @@ PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER = TriggerIdentity(
 DRIVER_ASSIGNMENT_HISTORY_TRIGGER = TriggerIdentity(
     "core", "driverassignments", "trg_driverassignments_historyimmutable"
 )
-# Compensation tables of an ENDED DriverAssignment are read-only at the database
+# Status-rate tables of an ENDED DriverAssignment are read-only at the database
 # (core.trg_CompensationAssignmentWritable). A test that seeds or tears down
-# compensation on an assignment it has already ended suspends exactly these triggers,
+# status rates on an assignment it has already ended suspends exactly these triggers,
 # never DISABLE TRIGGER ALL, through suspended_test_triggers.
 COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS = tuple(
     TriggerIdentity("payroll", table, "trg_compensationassignmentwritable")
-    for table in (
-        "driverrateassignments",
-        "driverratevalues",
-        "driverpayrules",
-        "driverrates",
-        "driverratetiers",
-    )
+    for table in ("driverrates", "driverratetiers")
+)
+# Driver-owned compensation (rate schedules, pay rules) is refused from a date whose home
+# tenure has ended (core.trg_DriverCompensationContextWritable, migration 0088). A test
+# that seeds or tears down such rows after ending the Driver's tenure suspends exactly these.
+DRIVER_COMPENSATION_CONTEXT_TRIGGERS = tuple(
+    TriggerIdentity("payroll", table, "trg_drivercompensationcontextwritable")
+    for table in ("driverrateschedules", "driverpayrules")
 )
 # The pair historically suspended to retire finalized history or force a status.
 FINALIZED_HISTORY_TRIGGERS = (FINAL_LINE_IMMUTABLE_TRIGGER, PERIOD_STATUS_REVERT_TRIGGER)

@@ -4,7 +4,7 @@ CP-2B: Payroll period-day calendar snapshot tests.
 Product contracts verified:
   - Migration 0052: PayrollPeriodDays table exists with all required columns,
     constraints (unique, checks, FKs), and indexes.
-  - Alembic has one current head at 0087.
+  - Alembic has one current head at 0088.
   - Candidate-created Open/Draft periods get one row per calendar day.
   - Candidate-created Prepared periods also create day rows.
   - Day rows: WorkDate range inclusive, DayOfWeek correct, NormalDaysOffMask
@@ -295,7 +295,7 @@ class TestCp2bPeriodDays:
     # ------------------------------------------------------------------ #
 
     def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0087."""
+        """D02: Migration chain is linear and head is 0088."""
         import subprocess
         import sys
         result = subprocess.run(
@@ -307,7 +307,7 @@ class TestCp2bPeriodDays:
         assert len(lines) == 1, (
             f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
         )
-        assert "0087" in lines[0], f"Expected head 0087, got: {lines[0]}"
+        assert "0088" in lines[0], f"Expected head 0088, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows

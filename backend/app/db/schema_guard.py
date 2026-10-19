@@ -619,13 +619,9 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
             "Missing ended-assignment compensation guard function "
             "core.trg_CompensationAssignmentWritable()."
         )
-    for comp_table in (
-        "driverrateassignments",
-        "driverratevalues",
-        "driverpayrules",
-        "driverrates",
-        "driverratetiers",
-    ):
+    # Status rates stay assignment-owned and keep the ended-assignment guard; ordinary
+    # rate schedules and pay rules are Driver-owned and use the context trigger below.
+    for comp_table in ("driverrates", "driverratetiers"):
         if not _trigger_exists_and_enabled(
             cur, "trg_compensationassignmentwritable", "payroll", comp_table
         ):
@@ -633,6 +629,62 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
                 "Missing or disabled ended-assignment compensation trigger "
                 f"trg_CompensationAssignmentWritable on payroll.{comp_table}."
             )
+    for moved_table in ("driverrateschedules", "driverrateschedulevalues", "driverpayrules"):
+        if _trigger_exists_and_enabled(
+            cur, "trg_compensationassignmentwritable", "payroll", moved_table
+        ):
+            temporal_errors.append(
+                "Retired ended-assignment compensation trigger "
+                f"trg_CompensationAssignmentWritable still exists on payroll.{moved_table}."
+            )
+
+    # Driver-owned compensation (migration 0088).
+    for retired_table in ("driverrateassignments", "driverratevalues"):
+        cur.execute("SELECT to_regclass(%s)", (f"payroll.{retired_table}",))
+        if cur.fetchone()[0] is not None:
+            temporal_errors.append(f"Retired assignment-owned rate table still exists: payroll.{retired_table}")
+    for table, column in (
+        ("driverrateschedules", "driverratescheduleid"),
+        ("driverrateschedules", "driverid"),
+        ("driverrateschedules", "paydefinitionid"),
+        ("driverrateschedulevalues", "driverratescheduleid"),
+        ("driverpayrules", "driverid"),
+        ("driverpayrules", "calendarfrequency"),
+        ("driverpayrules", "calendaranchorstartdate"),
+        ("driverpayrules", "calendarcustomintervaldays"),
+        ("driverpayrules", "calendarsourcebranchid"),
+        ("driverpayrules", "calendarsourcepayrollsetupversionid"),
+    ):
+        if not _column_exists(cur, "payroll", table, column):
+            temporal_errors.append(f"Missing Driver-owned compensation column payroll.{table}.{column}")
+    for table, column in (
+        ("driverrateschedules", "driverassignmentid"),
+        ("driverrateschedules", "branchid"),
+        ("driverpayrules", "driverassignmentid"),
+        ("driverpayrules", "branchid"),
+    ):
+        if _column_exists(cur, "payroll", table, column):
+            temporal_errors.append(f"Retired assignment/Branch compensation key still exists: payroll.{table}.{column}")
+    for signature, label in (
+        ("core.fn_driverassignmentforbusinessdate(integer,integer,date)",
+         "core.fn_DriverAssignmentForBusinessDate(INT, INT, DATE)"),
+        ("payroll.fn_driverfinalizedpayrolltouched(integer,integer,daterange,text)",
+         "payroll.fn_DriverFinalizedPayrollTouched(INT, INT, DATERANGE, TEXT)"),
+        ("core.trg_drivercompensationcontextwritable()", "core.trg_DriverCompensationContextWritable()"),
+    ):
+        cur.execute("SELECT to_regprocedure(%s)", (signature,))
+        if cur.fetchone()[0] is None:
+            temporal_errors.append(f"Missing Driver-owned compensation function: {label}.")
+    for context_table in ("driverrateschedules", "driverpayrules"):
+        if not _trigger_exists_and_enabled(
+            cur, "trg_drivercompensationcontextwritable", "payroll", context_table
+        ):
+            temporal_errors.append(
+                "Missing or disabled Driver compensation context trigger "
+                f"trg_DriverCompensationContextWritable on payroll.{context_table}."
+            )
+    if not _trigger_exists_and_enabled(cur, "trg_driverpayrules_beforeupdate", "payroll", "driverpayrules"):
+        temporal_errors.append("Missing or disabled pay-rule integrity trigger trg_DriverPayRules_BeforeUpdate.")
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

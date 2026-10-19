@@ -169,7 +169,7 @@ def test_fresh_database_upgrades_to_the_period_definition_model(p4b_database):
     assert _alembic(env, "upgrade", "head").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0087",)
+        assert cur.fetchone() == ("0088",)
         assert _tables(cur) == {"payrollperioddefinitions"}
         columns = _columns(cur, "payrollperioddefinitions")
         assert {"payrollperioddefinitionid", "paydefinitionid", "ratedefinitionid",
