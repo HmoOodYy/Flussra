@@ -33,7 +33,7 @@ export function PayRatesPage() {
   const { user } = useAuth();
   const driver = usePayRateDriverContext(user);
   const reads = usePayRateReads(driver.selectedDriverAssignmentId);
-  const viewedBranchId = driver.viewedAssignment?.branch_id ?? driver.selectedDriver?.branch_id;
+  const viewedBranchId = driver.viewedAssignment?.branch_id;
   const branchBusinessDate = driver.branches.find((b) => b.branch_id === viewedBranchId)?.business_date;
   const referenceDate = reads.statusMatrix?.driver_assignment_id === driver.selectedDriverAssignmentId
     ? reads.statusMatrix.as_of
@@ -123,9 +123,10 @@ export function PayRatesPage() {
           search={driver.search} setSearch={driver.setSearch}
           branchFilter={driver.branchFilter} setBranchFilter={driver.setBranchFilter}
           statusFilter={driver.statusFilter} setStatusFilter={driver.setStatusFilter}
+          assignmentFilter={driver.assignmentFilter} setAssignmentFilter={driver.setAssignmentFilter}
           branches={driver.branches} loadingDrivers={driver.loadingDrivers}
-          filteredDrivers={driver.filteredDrivers} selectedDriverAssignmentId={driver.selectedBaseAssignmentId}
-          selectDriver={driver.selectDriver}
+          filteredRows={driver.filteredRows} selectedDriverAssignmentId={driver.selectedDriverAssignmentId}
+          selectAssignment={driver.selectAssignment}
         />
 
         <div className={styles.right}>
@@ -153,14 +154,14 @@ export function PayRatesPage() {
               <div className={styles.dHeaderCard} style={{ marginBottom: '0.75rem' }}>
                 <div className={styles.dHeaderTop}>
                   <div>
-                    <p className={styles.dName}>{driver.selectedDriver?.full_name ?? 'Driver'}</p>
-                    <p className={styles.dMeta}>{driver.selectedDriver?.driver_number ?? 'No number'} &middot; {driver.viewedAssignment?.branch_name ?? driver.selectedDriver?.branch_name ?? ''}</p>
+                    <p className={styles.dName}>{driver.viewedAssignment?.full_name ?? 'Driver'}</p>
+                    <p className={styles.dMeta}>{driver.viewedAssignment?.driver_number ?? 'No number'} &middot; {driver.viewedAssignment?.branch_name ?? ''}</p>
                     {driver.assignments.length > 1 && (
                       <label className={styles.assignmentPicker}>
                         <span>Assignment</span>
                         <select
                           value={driver.selectedDriverAssignmentId ?? ''}
-                          onChange={(e) => driver.chooseAssignment(Number(e.target.value))}
+                          onChange={(e) => driver.selectAssignment(Number(e.target.value))}
                         >
                           {driver.assignments.map((a) => (
                             <option key={a.driver_assignment_id} value={a.driver_assignment_id}>

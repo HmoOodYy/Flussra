@@ -1,9 +1,10 @@
-import type { DriverAssignmentInfo } from '../../../types/core.ts';
+import type { DriverAssignmentInfo, DriverAssignmentRosterRow } from '../../../types/core.ts';
 
 /**
- * Pay Rates addresses one DriverAssignment at a time. A Driver can have several (one per
- * home-Branch tenure): the current or pending one is editable, ended ones are read-only
- * history that stays reachable after a transfer.
+ * Pay Rates is assignment-centric in Stage 1: rates and pay rules belong to one
+ * DriverAssignment (a Driver's home-Branch tenure). The roster lists every assignment the
+ * user may read, so a manager of the old Branch still reaches a transferred Driver's ended
+ * assignment. Current and pending assignments are editable; ended ones are read-only history.
  */
 
 const dayFormat: Intl.DateTimeFormatOptions = {
@@ -14,12 +15,17 @@ function day(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', dayFormat);
 }
 
-/** "North · Jan 2, 2026 – Mar 3, 2026 (Transferred)"; open windows end at "present". */
-export function assignmentLabel(a: DriverAssignmentInfo): string {
+/** "Jan 2, 2026 – Mar 3, 2026 (Transferred)"; open windows end at "present". */
+export function assignmentWindow(a: DriverAssignmentInfo): string {
   const end = a.effective_to_at ? day(a.effective_to_at) : 'present';
   const reason = a.end_reason ? ` (${a.end_reason})` : '';
+  return `${day(a.effective_from_at)} – ${end}${reason}`;
+}
+
+/** "North · Jan 2, 2026 – Mar 3, 2026 (Transferred)"; a pending one is marked "Upcoming". */
+export function assignmentLabel(a: DriverAssignmentInfo): string {
   const prefix = a.state === 'pending' ? 'Upcoming · ' : '';
-  return `${prefix}${a.branch_name} · ${day(a.effective_from_at)} – ${end}${reason}`;
+  return `${prefix}${a.branch_name} · ${assignmentWindow(a)}`;
 }
 
 /** Ended assignments are shown for reference only; rates there are never edited. */
@@ -27,26 +33,58 @@ export function isReadOnlyAssignment(a: DriverAssignmentInfo | null | undefined)
   return a != null && a.state === 'ended';
 }
 
-/** The assignment to open first: the Driver's visible one when the user may read it. */
-export function defaultAssignmentId(
-  assignments: DriverAssignmentInfo[],
-  visibleAssignmentId: number | null,
-): number | null {
-  if (visibleAssignmentId != null
-      && assignments.some((a) => a.driver_assignment_id === visibleAssignmentId)) {
-    return visibleAssignmentId;
+export function stateBadgeLabel(state: DriverAssignmentInfo['state']): string {
+  switch (state) {
+    case 'current': return 'Current';
+    case 'pending': return 'Pending';
+    case 'ended': return 'Ended';
   }
-  const current = assignments.find((a) => a.state === 'current')
-    ?? assignments.find((a) => a.state === 'pending');
-  return (current ?? assignments[0])?.driver_assignment_id ?? visibleAssignmentId;
 }
 
-/** The assignment being viewed: an explicit pick that still exists, else the default. */
-export function viewedAssignmentId(
-  assignments: DriverAssignmentInfo[],
-  picked: number | null,
-  visibleAssignmentId: number | null,
-): number | null {
-  if (picked != null && assignments.some((a) => a.driver_assignment_id === picked)) return picked;
-  return defaultAssignmentId(assignments, visibleAssignmentId);
+/** Identity of a roster row: the permanent Driver number with the Branch it belongs to. */
+export function rosterIdentity(row: DriverAssignmentRosterRow): string {
+  return `${row.driver_number ?? 'No number'} · ${row.branch_name}`;
+}
+
+export type AssignmentFilter = 'open' | 'ended' | 'all';
+
+export const ASSIGNMENT_FILTER_LABELS: Record<AssignmentFilter, string> = {
+  open: 'Current & pending',
+  ended: 'Ended',
+  all: 'All assignments',
+};
+
+export interface RosterFilters {
+  search: string;
+  branchId: string;
+  driverStatus: string;
+  assignment: AssignmentFilter;
+}
+
+/** Default view: what can be edited. Ended assignments are one filter choice away. */
+export const DEFAULT_ASSIGNMENT_FILTER: AssignmentFilter = 'open';
+
+export function filterRoster(
+  rows: DriverAssignmentRosterRow[],
+  filters: RosterFilters,
+): DriverAssignmentRosterRow[] {
+  const q = filters.search.trim().toLowerCase();
+  return rows.filter((row) => {
+    if (filters.assignment === 'open' && row.state === 'ended') return false;
+    if (filters.assignment === 'ended' && row.state !== 'ended') return false;
+    if (filters.branchId && String(row.branch_id) !== filters.branchId) return false;
+    if (filters.driverStatus && row.driver_status !== filters.driverStatus) return false;
+    if (!q) return true;
+    return row.full_name.toLowerCase().includes(q)
+      || (row.driver_number ?? '').toLowerCase().includes(q);
+  });
+}
+
+/** Every readable assignment of one permanent Driver (the picker's choices). */
+export function driverAssignmentsOf(
+  rows: DriverAssignmentRosterRow[],
+  driverId: number | null,
+): DriverAssignmentRosterRow[] {
+  if (driverId == null) return [];
+  return rows.filter((row) => row.driver_id === driverId);
 }

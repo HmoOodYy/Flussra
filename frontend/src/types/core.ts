@@ -62,3 +62,11 @@ export interface DriverAssignmentInfo {
   end_reason: string | null;
   state: 'current' | 'pending' | 'ended';
 }
+
+/** Matches backend core DriverAssignmentRosterRow — an assignment with the permanent Driver's identity. */
+export interface DriverAssignmentRosterRow extends DriverAssignmentInfo {
+  driver_number: string | null;
+  driver_status: string;
+  full_name: string;
+  preferred_name: string | null;
+}
