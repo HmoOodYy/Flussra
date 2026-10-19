@@ -237,12 +237,15 @@ async def test_pay_rules_need_the_rate_permissions_and_deny_driver_self_accounts
         assert (await p3c_client.get(f"{RULES}/{rule_id}", headers=headers)).status_code == 403
         assert (await p3c_client.post(RULES, json=_rule(tenant, start="2400-01-01"),
                                       headers=headers)).status_code == 403
-    for headers in (viewer, nobody, driver):
+    # Standing is decided before anything about the rule: a caller who can see it but cannot
+    # edit (viewer) and a DRIVER/Self account get 403; one who cannot see the rule at all
+    # (nobody) gets the 404 of a missing rule.
+    for headers, expected in ((viewer, 403), (nobody, 404), (driver, 403)):
         assert (await p3c_client.post(f"{RULES}/{rule_id}/end",
                                       json={"effective_to": "2200-01-10"},
-                                      headers=headers)).status_code == 403
+                                      headers=headers)).status_code == expected
         assert (await p3c_client.post(f"{RULES}/{rule_id}/void", headers=headers)
-                ).status_code == 403
+                ).status_code == expected
 
 
 async def test_a_branch_scoped_editor_cannot_manage_rules_of_another_branch(

@@ -169,6 +169,33 @@ def _forbidden() -> HTTPException:
     )
 
 
+async def _edit_standing(
+    company_id: int, user_id: int, tenures: list[Tenure], db: AsyncConnection,
+) -> tuple[bool, set[int]]:
+    """(company-wide?, the Driver's tenure Branches where the caller has rate-edit permission)."""
+    company_wide = await has_any_permission(company_id, user_id, None, RATE_EDIT, db)
+    permitted: set[int] = set()
+    if not company_wide:
+        for branch_id in sorted({t.branch_id for t in tenures}):
+            if await has_any_permission(company_id, user_id, branch_id, RATE_EDIT, db):
+                permitted.add(branch_id)
+    return company_wide, permitted
+
+
+async def require_compensation_edit_standing(
+    company_id: int, user_id: int, driver_id: int, db: AsyncConnection,
+) -> None:
+    """403 unless the caller has rate-edit permission company-wide or in a Branch of any of
+    the Driver's tenures. It reveals nothing about dates or state: callers run it before any
+    lifecycle validation, so a refusal never leaks a row's state."""
+    await require_non_driver_subject(company_id, user_id, db)
+    await require_driver(company_id, driver_id, db)
+    tenures = await load_driver_tenures(company_id, driver_id, db)
+    company_wide, permitted = await _edit_standing(company_id, user_id, tenures, db)
+    if not company_wide and not permitted:
+        raise _forbidden()
+
+
 async def require_compensation_authority(
     company_id: int, user_id: int, driver_id: int, start_date: date | None,
     db: AsyncConnection, *, mode: str = "write", at: datetime | None = None,
@@ -185,11 +212,10 @@ async def require_compensation_authority(
     await require_non_driver_subject(company_id, user_id, db)
     await require_driver(company_id, driver_id, db)
     instant = at if at is not None else await decision_instant(db)
-    company_wide = await has_any_permission(company_id, user_id, None, RATE_EDIT, db)
     tenures = await load_driver_tenures(company_id, driver_id, db)
 
     if mode in ("current", "discard"):
-        if company_wide:
+        if await has_any_permission(company_id, user_id, None, RATE_EDIT, db):
             return None
         for branch_id in sorted({t.branch_id for t in tenures if t.is_authority(instant)}):
             if await has_any_permission(company_id, user_id, branch_id, RATE_EDIT, db):
@@ -200,13 +226,9 @@ async def require_compensation_authority(
     if start_date is None:
         raise ValueError("start_date is required for a write")
 
-    permitted: set[int] = set()
-    if not company_wide:
-        for branch_id in sorted({t.branch_id for t in tenures}):
-            if await has_any_permission(company_id, user_id, branch_id, RATE_EDIT, db):
-                permitted.add(branch_id)
-        if not permitted:
-            raise _forbidden()
+    company_wide, permitted = await _edit_standing(company_id, user_id, tenures, db)
+    if not company_wide and not permitted:
+        raise _forbidden()
 
     context = await resolve_compensation_context(
         company_id, driver_id, start_date, db, at=instant)

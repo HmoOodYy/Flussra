@@ -427,12 +427,14 @@ async def test_an_empty_never_effective_terminated_assignment_is_read_only(
     assert window is True
 
     # No non-empty tenure is left in the Branch, so its manager has no standing over the
-    # Driver-owned schedules (403), while the assignment-owned status rates are still refused
+    # Driver-owned schedules (403; a pay-rule end/void it cannot even see is 404), while the assignment-owned status rates are still refused
     # as ended (409). A Company-wide admin is refused everywhere (409).
     await _assert_all_writers_refused(client, direct_db, seed, auth_token)
     for name, method, path, body, code in _writers(seed):
         response = await client.request(method, path, json=body, headers=auth(manager))
         expected = 403 if code == "DRIVER_COMPENSATION_HISTORICAL" else 409
+        if name in ("rule.end", "rule.void"):
+            expected = 404  # a rule the caller cannot see is indistinguishable from a missing one
         assert response.status_code == expected, (name, response.status_code, response.text)
     readable = await client.get(
         f"/payroll/driver-assignments/{driver['assignment_id']}/rates/summary", headers=auth(manager))

@@ -30,12 +30,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.access.policy import require_non_driver_subject
 from app.compensation.driver_context import (
     ReadScope,
     driver_compensation_read_scope,
     load_driver_tenures,
     lock_driver_compensation_write,
     require_compensation_authority,
+    require_compensation_edit_standing,
 )
 from app.payroll.guards import require_no_finalized_payroll
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
@@ -225,7 +227,7 @@ async def _load_rule_row(
     )
     row = result.mappings().first()
     if row is None:
-        raise HTTPException(status_code=404, detail="Driver pay rule not found.")
+        raise _rule_not_found()
     return row
 
 
@@ -244,6 +246,32 @@ def _sees(scope: ReadScope, row: Any) -> bool:
         "status": row["status"], "effective_from": row["effectivefrom"],
         "effective_to": row["effectiveto"],
     })
+
+
+async def _load_rule_for_action(rule_id: int, company_id: int, user_id: int, db: AsyncConnection) -> Any:
+    """Load a rule for a lifecycle action, deciding WHO may act before anything about the rule.
+
+    Order: DRIVER/Self denial (403, whatever the rule); then visibility with the read-scope
+    semantics of get-by-id, where a caller who cannot see the rule gets the same 404 as a
+    missing one; then rate-edit standing over the Driver (403). Only then do callers run their
+    state and date validations, so a refusal never reveals EffectiveFrom, state or existence.
+    """
+    await require_non_driver_subject(company_id, user_id, db)
+    row = await _load_rule_row(rule_id, company_id, db)
+    try:
+        scope = await driver_compensation_read_scope(company_id, user_id, int(row["driverid"]), db)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise _rule_not_found() from exc
+        raise
+    if not _sees(scope, row):
+        raise _rule_not_found()
+    await require_compensation_edit_standing(company_id, user_id, int(row["driverid"]), db)
+    return row
+
+
+def _rule_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Driver pay rule not found.")
 
 
 def _require_status(rule: Any, allowed: tuple[str, ...], message: str) -> None:
@@ -439,7 +467,7 @@ async def get_driver_pay_rule_by_id(
     row = await _load_rule_row(rule_id, company_id, db)
     scope = await driver_compensation_read_scope(company_id, user_id, int(row["driverid"]), db)
     if not _sees(scope, row):
-        raise HTTPException(status_code=404, detail="Driver pay rule not found.")
+        raise _rule_not_found()
     return (await _summaries([row], company_id, db))[0]
 
 
@@ -465,7 +493,7 @@ async def end_driver_pay_rule(
         whose governing rule changes: ``[LEAST(old, new) + 1, GREATEST(old, new)]`` (an open
         old end is unbounded), so shortening and extending are both protected.
     """
-    rule = await _load_rule_row(rule_id, company_id, db)
+    rule = await _load_rule_for_action(rule_id, company_id, user_id, db)
     _require_status(rule, ("Active",), "Only Active rules can be ended")
     if effective_to < rule["effectivefrom"]:
         raise HTTPException(
@@ -548,7 +576,7 @@ async def update_driver_pay_rule_notes(
     Rule must not be Voided. A notes edit has no payroll effect, so it needs only authority
     over the Driver now (never a historical-tenure refusal).
     """
-    rule = await _load_rule_row(rule_id, company_id, db)
+    rule = await _load_rule_for_action(rule_id, company_id, user_id, db)
     if rule["status"] == "Voided":
         raise HTTPException(status_code=422, detail="Cannot update a Voided rule.")
     driver_id = int(rule["driverid"])
@@ -608,7 +636,7 @@ async def void_driver_pay_rule(
         window: a rule that governed a finalized period cannot be voided. Use 'end' to close
         it going forward while preserving history.
     """
-    rule = await _load_rule_row(rule_id, company_id, db)
+    rule = await _load_rule_for_action(rule_id, company_id, user_id, db)
     if rule["status"] == "Voided":
         raise HTTPException(status_code=422, detail="Rule is already Voided.")
     driver_id = int(rule["driverid"])
