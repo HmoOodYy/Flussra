@@ -2,11 +2,34 @@ import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import {
   getCompensationAccess, listDriverPayRates, listDriverRateSummary, listScheduleHistory,
 } from '../../../lib/compensationApi';
-import type { CompensationAccess, DriverPayRateRow } from '../../../types/compensation';
+import type {
+  CompensationAccess, DriverPayRateRow, DriverRateSummaryItem, ScheduleSummary,
+} from '../../../types/compensation';
 import { apiError } from './payRatesView';
 import { buildHistoryRows, type HistoryRow } from './payRatesHistory';
 import { getStatusRateMatrix, type StatusRateMatrix } from './statusRatesApi';
 import { getDriverPayRules, type DriverPayRule } from './driverPayRulesApi';
+
+/** The Driver's schedule summary and the history of each definition that has a Pending schedule. */
+export interface PendingSource {
+  summary: DriverRateSummaryItem[];
+  historyByDefinition: Record<number, ScheduleSummary[]>;
+}
+
+const EMPTY_PENDING_SOURCE: PendingSource = { summary: [], historyByDefinition: {} };
+
+/**
+ * Pending schedules are discovered from the read-scope-filtered summary and history, not from
+ * the Active-only authoring matrix, so a retired definition's Pending schedule is found too.
+ */
+async function loadPendingSource(driverId: number): Promise<PendingSource> {
+  const summary = await listDriverRateSummary(driverId);
+  const historyByDefinition: Record<number, ScheduleSummary[]> = {};
+  await Promise.all(summary.filter((item) => item.pending_schedule_id != null).map(async (item) => {
+    historyByDefinition[item.rate_definition_id] = await listScheduleHistory(driverId, item.rate_definition_id);
+  }));
+  return { summary, historyByDefinition };
+}
 
 /**
  * Reads for the selected Driver. Ordinary rates, rate history and Min/Max rules are keyed by
@@ -33,6 +56,8 @@ export function usePayRateReads(
   const [loadingRowsDriverId, setLoadingRowsDriverId] = useState<number | null>(null);
   const [accessState, setAccessState] = useState<CompensationAccess | null>(null);
   const [accessDriverId, setAccessDriverId] = useState<number | null>(null);
+  const [pendingSourceState, setPendingSourceState] = useState<PendingSource>(EMPTY_PENDING_SOURCE);
+  const [pendingSourceDriverId, setPendingSourceDriverId] = useState<number | null>(null);
   const [rowsError, setRowsError] = useState('');
   const [rowsErrorDriverId, setRowsErrorDriverId] = useState<number | null>(null);
   const [statusMatrixState, setStatusMatrixState] = useState<StatusRateMatrix | null>(null);
@@ -60,15 +85,19 @@ export function usePayRateReads(
     setRatesDriverId(null);
     setAccessState(null);
     setAccessDriverId(null);
+    setPendingSourceState(EMPTY_PENDING_SOURCE);
+    setPendingSourceDriverId(null);
     try {
       // The backend's own decisions (full history, discard, orphaned Pending) load with the rates.
-      const [values, access] = await Promise.all([
-        listDriverPayRates(driverId), getCompensationAccess(driverId)]);
+      const [values, access, source] = await Promise.all([
+        listDriverPayRates(driverId), getCompensationAccess(driverId), loadPendingSource(driverId)]);
       if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
         setRowsState(values);
         setRatesDriverId(driverId);
         setAccessState(access);
         setAccessDriverId(driverId);
+        setPendingSourceState(source);
+        setPendingSourceDriverId(driverId);
       }
     } catch (err) {
       if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
@@ -187,6 +216,7 @@ export function usePayRateReads(
 
   const rows = ratesDriverId === selectedDriverId ? rowsState : [];
   const access = accessDriverId === selectedDriverId ? accessState : null;
+  const pendingSource = pendingSourceDriverId === selectedDriverId ? pendingSourceState : EMPTY_PENDING_SOURCE;
   const visibleRowsError = rowsErrorDriverId === selectedDriverId ? rowsError : '';
   const statusMatrix = statusMatrixAssignmentId === statusAssignmentId ? statusMatrixState : null;
   const historyRows = historyDriverId === selectedDriverId ? historyRowsState : [];
@@ -196,7 +226,7 @@ export function usePayRateReads(
   const payRulesError = payRulesDriverId === selectedDriverId ? payRulesErrorState : '';
 
   return {
-    rows, access, loadingRows: loadingRows && loadingRowsDriverId === selectedDriverId,
+    rows, access, pendingSource, loadingRows: loadingRows && loadingRowsDriverId === selectedDriverId,
     rowsError: visibleRowsError, statusMatrix, historyRows,
     loadingHistory: loadingHistory && loadingHistoryDriverId === selectedDriverId,
     historyLoaded, setHistoryRows, setHistoryLoaded,

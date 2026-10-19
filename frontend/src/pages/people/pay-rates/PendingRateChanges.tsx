@@ -1,11 +1,12 @@
 import { approveSchedule, discardSchedule } from '../../../lib/compensationApi';
-import type { DriverPayRateRow } from '../../../types/compensation';
 import { fmtAmount } from './payRatesView';
+import { RETIRED_LABEL } from './payRatesHistory';
+import { canApprovePendingRow, canDiscardPendingRow, type PendingScheduleRow } from './payRatesPending';
 import { approveStatusRate, voidStatusRate, type StatusRateGroup } from './statusRatesApi';
 import styles from './PayRatesPage.module.css';
 
 type PendingRateChangesProps = {
-  pendingRows: DriverPayRateRow[];
+  pendingRows: PendingScheduleRow[];
   statusPending: StatusRateGroup[];
   pendingCount: number;
   /** Approve a Pending rate: the backend's full history, a live tenure and edit permission. */
@@ -33,17 +34,21 @@ export function PendingRateChanges({ pendingRows, statusPending, pendingCount, c
           <thead><tr><th>Pay Item</th><th>Current</th><th>Pending Amount</th><th>Effective From</th>{(canEditDriver || canDiscardDriver || canEditStatus) && <th>Actions</th>}</tr></thead>
           <tbody>
             {pendingRows.map((row) => {
-              const pending = row.pending!;
-              const busy = actioningId === pending.driver_rate_schedule_id;
+              const busy = actioningId === row.scheduleId;
+              const approve = canApprovePendingRow(row, canEditDriver);
+              const discard = canDiscardPendingRow(canDiscardDriver);
               return (
-                <tr key={pending.driver_rate_schedule_id}>
-                  <td><strong>{row.definition_name}</strong></td>
-                  <td>{row.current ? fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits) : <span className={styles.missingText}>No current rate</span>}</td>
-                  <td>{pending.amount === null ? <span className={styles.missingText}>Not set</span> : <strong>{fmtAmount(pending.amount, row.unit, currencyCode, currencyDigits)}</strong>}</td>
-                  <td>{pending.effective_from}</td>
-                  {(canEditDriver || canDiscardDriver || canEditStatus) && <td>{(canEditDriver || canDiscardDriver) && <div className={styles.actionBtns}>
-                    {canEditDriver && <button className={styles.btnApprove} disabled={busy || actioningId != null || pending.amount === null} onClick={() => void runPendingAction(pending.driver_rate_schedule_id, () => approveSchedule(pending.driver_rate_schedule_id))}>{busy ? '…' : 'Approve'}</button>}
-                    {canDiscardDriver && <button className={styles.btnVoid} disabled={busy || actioningId != null} onClick={() => void runPendingAction(pending.driver_rate_schedule_id, () => discardSchedule(pending.driver_rate_schedule_id))}>{busy ? '…' : 'Discard'}</button>}
+                <tr key={row.scheduleId}>
+                  <td>
+                    <strong>{row.definitionName}</strong>
+                    {row.retired && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>{RETIRED_LABEL}</span>}
+                  </td>
+                  <td>{!row.inMatrix ? '—' : row.current ? fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits) : <span className={styles.missingText}>No current rate</span>}</td>
+                  <td>{row.amount === null ? <span className={styles.missingText}>Not set</span> : <strong>{fmtAmount(row.amount, row.unit, currencyCode, currencyDigits)}</strong>}</td>
+                  <td>{row.effectiveFrom}</td>
+                  {(canEditDriver || canDiscardDriver || canEditStatus) && <td>{(approve || discard) && <div className={styles.actionBtns}>
+                    {approve && <button className={styles.btnApprove} disabled={busy || actioningId != null || row.amount === null} onClick={() => void runPendingAction(row.scheduleId, () => approveSchedule(row.scheduleId))}>{busy ? '…' : 'Approve'}</button>}
+                    {discard && <button className={styles.btnVoid} disabled={busy || actioningId != null} onClick={() => void runPendingAction(row.scheduleId, () => discardSchedule(row.scheduleId))}>{busy ? '…' : 'Discard'}</button>}
                   </div>}</td>}
                 </tr>
               );

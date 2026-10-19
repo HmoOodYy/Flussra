@@ -115,8 +115,10 @@ test('access flags come from the backend endpoint and gate Pending actions separ
   assert.match(readFileSync(new URL('../src/lib/compensationApi.ts', import.meta.url), 'utf8'),
     /\/compensation\/drivers\/\$\{driverId\}\/compensation-access/);
   const pending = read('PendingRateChanges.tsx');
-  assert.match(pending, /\{canEditDriver && <button className=\{styles\.btnApprove\}[^]*?Approve/);
-  assert.match(pending, /\{canDiscardDriver && <button className=\{styles\.btnVoid\}[^]*?Discard/);
+  assert.match(pending, /\{approve && <button className=\{styles\.btnApprove\}[^]*?Approve/);
+  assert.match(pending, /\{discard && <button className=\{styles\.btnVoid\}[^]*?Discard/);
+  assert.match(pending, /canApprovePendingRow\(row, canEditDriver\)/);
+  assert.match(pending, /canDiscardPendingRow\(canDiscardDriver\)/);
   // The client never re-derives scope from the roster.
   assert.doesNotMatch(read('PayRatesPage.tsx'), /pastOnly/);
   assert.doesNotMatch(read('payRatesDrivers.ts'), /pastOnly/);

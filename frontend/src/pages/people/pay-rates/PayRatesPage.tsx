@@ -27,6 +27,7 @@ import { StatusRateSection } from './StatusRateSection';
 import { PendingRateChanges } from './PendingRateChanges';
 import { RateHistoryTab, VoidRateDialog } from './RateHistoryTab';
 import { DriverPayRulesTab } from './DriverPayRulesTab';
+import { buildPendingScheduleRows } from './payRatesPending';
 import {
   PAST_BRANCH_BANNER,
   canDiscardPendingRates,
@@ -132,7 +133,9 @@ export function PayRatesPage() {
   const currencyCode = user?.currency_code ?? null;
   const currencyDigits = user?.currency_minor_unit_digits ?? null;
   const missingCount = reads.rows.filter((r) => r.current === null).length;
-  const pendingRows = reads.rows.filter((r) => r.pending !== null);
+  // Pending schedules come from the schedule summary and history, not the Active-only matrix.
+  const pendingRows = buildPendingScheduleRows(
+    reads.pendingSource.summary, reads.pendingSource.historyByDefinition, reads.rows);
   const statusPending = (reads.statusMatrix?.groups ?? []).filter((g) => g.pending_rate !== null);
   const pendingCount = pendingRows.length + statusPending.length;
   const futureCount = reads.rows.filter((r) => r.future !== null).length;

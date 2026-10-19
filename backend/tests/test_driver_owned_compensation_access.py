@@ -139,3 +139,39 @@ async def test_schedules_of_a_retired_pay_definition_stay_discoverable_but_not_a
     refused = await _create(client, w.new_manager, w, retired, "2026-12-01")
     assert refused.status_code == 422
     assert refused.json()["detail"]["code"] == "PAY_DEFINITION_NOT_ACTIVE"
+
+
+async def test_a_retired_definitions_pending_schedule_is_discoverable_and_discardable_but_not_approvable(
+    client, auth_token, direct_db,
+):
+    from tests.test_driver_owned_rate_schedules import LONG_AGO, SCHEDULES, _filled
+    from tests.test_ended_assignment_write_guard import _definition
+
+    w = await _world(client, auth_token, direct_db)
+    retired = await _definition(client, auth_token)
+    pending = await _filled(client, w.old_manager, w, retired, LONG_AGO)
+    await _expect(await client.post(
+        f"/compensation/pay-definitions/{retired['pay_definition_id']}/retire", headers=auth(auth_token)), 200)
+    await end_driver_assignment(
+        direct_db, w.source, ended_at=await db_now(direct_db) - timedelta(hours=1),
+        end_reason="Terminated")
+    await direct_db.commit()  # no current or pending tenure is left: the Pending row is orphaned
+
+    # The company-wide editor's backend decisions, and the summary/history that expose the row.
+    assert _flags(await _access(client, auth_token, w.driver_id)) == {
+        "full_history": True, "can_discard_pending": True, "has_current_or_pending_tenure": False}
+    summary = (await _expect(await client.get(
+        f"/compensation/drivers/{w.driver_id}/rate-schedules/summary", headers=auth(auth_token)), 200)).json()
+    item = next(row for row in summary if row["rate_definition_id"] == retired["rate_definition_id"])
+    assert item["pending_schedule_id"] == pending and item["pay_definition_status"] == "Retired"
+    history = (await _expect(await client.get(
+        f"/compensation/drivers/{w.driver_id}/rate-definitions/{retired['rate_definition_id']}"
+        "/rate-schedules", headers=auth(auth_token)), 200)).json()
+    assert [(row["driver_rate_schedule_id"], row["status"]) for row in history] == [(pending, "Pending")]
+    assert history[0]["values"][0]["amount"] is not None
+
+    # Approval stays refused (ended tenure and retired definition); discard succeeds.
+    refused = await client.post(f"{SCHEDULES}/{pending}/approve", headers=auth(auth_token))
+    assert refused.status_code in (409, 422), refused.text
+    assert (await client.delete(f"{SCHEDULES}/{pending}", headers=auth(auth_token))).status_code == 204
+    assert (await client.get(f"{SCHEDULES}/{pending}", headers=auth(auth_token))).status_code == 404
