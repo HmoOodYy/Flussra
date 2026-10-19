@@ -17,6 +17,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import create_provisioned_test_user
+from tests.builders.pay_rules import insert_pay_rule
 from tests.db_state import (
     FINAL_LINE_IMMUTABLE_TRIGGER,
     allow_final_line_insert,
@@ -374,20 +375,9 @@ class TestDriverBranchReassignment:
         )
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.driverpayrules
-                    (companyid, branchid, driverassignmentid, ruletype,
-                     amount, effectivefrom, status)
-                VALUES
-                    (:cid, :bid, :assignment_id, 'MinimumPay', 600.00, '2030-01-01', 'Active')
-            """),
-            {
-                "cid": company_id,
-                "bid": hq_branch_id,
-                "assignment_id": assignment_id,
-            },
-        )
+        await insert_pay_rule(
+            direct_db, company_id=company_id, driver_id=driver_id, branch_id=hq_branch_id,
+            amount="600.00", start="2030-01-01")
 
         r = await _assign_driver_role(
             session_client, auth_token, user_id, driver_role_id, paytest_branch_id

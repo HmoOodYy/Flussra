@@ -20,6 +20,7 @@ from app.workforce.projection import (
     sync_company_employee_branch_projections,
     sync_employee_branch_projection,
 )
+from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
 from tests.db_state import allow_final_line_insert
 
@@ -192,6 +193,9 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         SET Status = 'Approved', ApprovedByUserID = 1, ApprovedAtUtc = NOW()
         WHERE DriverRateScheduleID = :schedule_id
     """), {"schedule_id": schedule_id})
+    source_rule_id = await insert_pay_rule(
+        direct_db, company_id=1, driver_id=driver_id, branch_id=paytest_branch_id,
+        amount="12.50", start=today)
 
     from app.payroll.eligibility import _create_period_driver_eligibility_rows
     target_work_date = (await direct_db.execute(text("""
@@ -328,6 +332,10 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         WHERE s.DriverID = :driver_id
     """), {"driver_id": driver_id})).all()
     assert [tuple(row) for row in driver_schedules] == [(schedule_id, "Approved", Decimal("42.0000"))]
+    driver_rules = (await direct_db.execute(text("""
+        SELECT DriverPayRuleID, Status, Amount FROM payroll.DriverPayRules WHERE DriverID = :driver_id
+    """), {"driver_id": driver_id})).all()
+    assert [tuple(row) for row in driver_rules] == [(source_rule_id, "Active", Decimal("12.5000"))]
     audit = (await direct_db.execute(text("""
         SELECT NewValueJson FROM audit.AuditLog
         WHERE EntitySchema = 'core' AND EntityName = 'DriverTransferRequests'

@@ -43,6 +43,7 @@ from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
 from app.payroll.status_payment_sync import (
     _resolve_live_status_payment_lines,
 )
+from app.payroll_setup.chronology import Schedule, period_matches_schedule
 
 if TYPE_CHECKING:
     from app.payroll.schemas import CalculationPreviewResponse
@@ -495,7 +496,8 @@ async def _build_live_calculation_packet(
 
         min_row = (await db.execute(
             text("""
-                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
+                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto,
+                       calendarfrequency, calendaranchorstartdate, calendarcustomintervaldays
                 FROM payroll.driverpayrules
                 WHERE  driverid = (SELECT da.driverid FROM core.driverassignments da
                                    WHERE da.driverassignmentid = :did)
@@ -511,7 +513,8 @@ async def _build_live_calculation_packet(
         )).mappings().first()
         max_row = (await db.execute(
             text("""
-                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto
+                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto,
+                       calendarfrequency, calendaranchorstartdate, calendarcustomintervaldays
                 FROM payroll.driverpayrules
                 WHERE  driverid = (SELECT da.driverid FROM core.driverassignments da
                                    WHERE da.driverassignmentid = :did)
@@ -525,6 +528,27 @@ async def _build_live_calculation_packet(
             """),
             {"did": drv_id, "cid": company_id, "as_of": period_start},
         )).mappings().first()
+
+        # A rule applies to a period only when the period is exactly one period of the
+        # calendar the rule recorded (the home pay calendar it was set for). Anything else is
+        # a blocker for this driver: never rescaled, never silently dropped or duplicated.
+        mismatched = [
+            (label, row) for label, row in (("Minimum", min_row), ("Maximum", max_row))
+            if row is not None and not period_matches_schedule(
+                Schedule(row["calendarfrequency"], row["calendaranchorstartdate"],
+                         row["calendarcustomintervaldays"], 0),
+                period.start_date, period.end_date)
+        ]
+        if mismatched:
+            for label, row in mismatched:
+                driver_blockers.setdefault(drv_id, []).append(
+                    f"MINMAX_CALENDAR_MISMATCH: the {label} pay rule {int(row['driverpayruleid'])} "
+                    f"was set for a {row['calendarfrequency']} pay calendar that does not "
+                    f"match this period ({period.start_date} to {period.end_date}). "
+                    f"End the rule and create a new one for the Driver's current calendar.")
+            driver_min_adj[drv_id] = Decimal("0")
+            driver_max_adj[drv_id] = Decimal("0")
+            continue
 
         min_amount = Decimal(str(min_row["amount"])) if min_row else None
         max_amount = Decimal(str(max_row["amount"])) if max_row else None

@@ -5,10 +5,12 @@ Two owners, two rules (People contract section 9.1):
 * Assignment-owned compensation, the legacy status rates (`DriverRates`, `DriverRateTiers`):
   once the DriverAssignment has ended, every writer is refused with
   ``DRIVER_ASSIGNMENT_ENDED`` (migration 0087, `trg_CompensationAssignmentWritable`).
-* Driver-owned compensation, ordinary rate schedules (migration 0088): a change is refused
+* Driver-owned compensation, ordinary rate schedules and Min/Max pay rules (migration 0088): a
+  change is refused
   with ``DRIVER_COMPENSATION_HISTORICAL`` when its start date falls in a tenure that has ended
-  (`trg_DriverCompensationContextWritable`). Rate schedules are owned by the permanent Driver, so
-  the transfer itself moves nothing; only dates inside the ended tenure become read-only.
+  (`trg_DriverCompensationContextWritable`). Schedules and pay rules are owned by the permanent
+  Driver, so the transfer itself moves nothing; only dates inside the ended tenure become
+  read-only. A pay rule's notes edit has no payroll effect and stays allowed.
 
 Both are enforced by the server for every writer, even for a caller whose Branch permission
 is valid and for a Company-wide admin, and both cover the empty never-effective Terminated
@@ -23,6 +25,11 @@ Writers (route -> function):
   DELETE /compensation/driver-rate-schedules/{id}             schedules.discard (a Pending row has
                                                               no payroll effect: its own rule)
   POST   /compensation/driver-rate-schedules/{id}/void        schedules.void
+  POST   /payroll/driver-pay-rules                            driver_pay_rules.create
+  POST   /payroll/driver-pay-rules/{id}/end                   driver_pay_rules.end
+  POST   /payroll/driver-pay-rules/{id}/void                  driver_pay_rules.void
+  PATCH  /payroll/driver-pay-rules/{id}                       driver_pay_rules.notes (no payroll
+                                                              effect: its own rule)
   POST   /payroll/rates                                       rates.create_rate
   PATCH  /payroll/rates/{id}                                  rates.update_rate
   POST   /payroll/rates/{id}/approve                          rates.approve_rate
@@ -33,7 +40,7 @@ Writers (route -> function):
 import asyncio
 import json
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from fastapi import HTTPException
@@ -43,6 +50,7 @@ from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
 )
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.builders.transfer_scenarios import (
     approved_transfer,
     auth,
@@ -115,6 +123,13 @@ async def _values(client, token, schedule_id, definition, amount="25"):
         headers=auth(token))
 
 
+async def _rule(client, token, driver_id, rule_type, start, end=None) -> int:
+    response = await _expect(await client.post("/payroll/driver-pay-rules", json={
+        "driver_id": driver_id, "rule_type": rule_type, "amount": "50",
+        "effective_from": start, "effective_to": end}, headers=auth(token)), 201)
+    return response.json()["driver_pay_rule_id"]
+
+
 async def _rate(client, token, assignment_id, column, effective_from=EFFECTIVE_FROM) -> int:
     response = await _expect(await client.post("/payroll/rates", json={
         "driver_assignment_id": assignment_id, "rate_type_id": column["rate_type_id"],
@@ -130,6 +145,7 @@ class Seed:
     definitions: list[dict]
     columns: list[dict]
     comp: dict[str, int] = field(default_factory=dict)
+    rules: dict[str, int] = field(default_factory=dict)
     rates: dict[str, int] = field(default_factory=dict)
 
 
@@ -146,6 +162,10 @@ async def _seed(client, admin, driver_id, assignment_id, definitions, columns) -
     await _expect(await client.post(
         f"/compensation/driver-rate-schedules/{approved}/approve", headers=auth(admin)), 200)
     seed.comp["void"] = approved
+
+    seed.rules["end"] = await _rule(client, admin, driver_id, "MinimumPay", "2026-01-01", "2026-03-31")
+    seed.rules["notes"] = await _rule(client, admin, driver_id, "MaximumPay", "2026-01-01", "2026-03-31")
+    seed.rules["void"] = await _rule(client, admin, driver_id, "MinimumPay", "2026-06-01")
 
     c_update, c_approve, c_void, _, _ = columns
     seed.rates["update"] = await _rate(client, admin, assignment_id, c_update)
@@ -178,6 +198,12 @@ def _writers(seed: Seed) -> list[tuple[str, str, str, dict | None, str]]:
             "amount": "31"}]}, hist),
         ("comp.approve", "POST", f"{comp}/{seed.comp['approve']}/approve", None, hist),
         ("comp.void", "POST", f"{comp}/{seed.comp['void']}/void", {"reason": "mistake"}, hist),
+        ("rule.create", "POST", "/payroll/driver-pay-rules", {
+            "driver_id": seed.driver_id, "rule_type": "MaximumPay", "amount": "70",
+            "effective_from": "2026-08-01", "effective_to": "2026-08-31"}, hist),
+        ("rule.end", "POST", f"/payroll/driver-pay-rules/{seed.rules['end']}/end",
+         {"effective_to": "2026-02-15"}, hist),
+        ("rule.void", "POST", f"/payroll/driver-pay-rules/{seed.rules['void']}/void", None, hist),
         ("rate.create", "POST", "/payroll/rates", {
             "driver_assignment_id": seed.assignment_id, "rate_type_id": c_create["rate_type_id"],
             "amount": "13", "effective_from": "2026-03-01"}, ended),
@@ -192,7 +218,7 @@ def _writers(seed: Seed) -> list[tuple[str, str, str, dict | None, str]]:
 
 
 async def _fingerprint(db, seed: Seed) -> str:
-    """Every compensation row of the Driver (schedules) and of the assignment (status rates)."""
+    """Every compensation row of the Driver (schedules, pay rules) and of the assignment (status rates)."""
     parts = []
     for query, key in (
         ("SELECT to_jsonb(r) FROM payroll.driverrateschedules r "
@@ -202,6 +228,8 @@ async def _fingerprint(db, seed: Seed) -> str:
          "  ON r.driverratescheduleid = v.driverratescheduleid "
          "WHERE r.driverid = :a ORDER BY v.driverratescheduleid, v.ratecomponentdefinitionid",
          seed.driver_id),
+        ("SELECT to_jsonb(p) FROM payroll.driverpayrules p "
+         "WHERE p.driverid = :a ORDER BY p.driverpayruleid", seed.driver_id),
         ("SELECT to_jsonb(d) FROM payroll.driverrates d "
          "WHERE d.driverassignmentid = :a ORDER BY d.driverrateid", seed.assignment_id),
     ):
@@ -235,6 +263,8 @@ async def _build_world(client, admin, db) -> World:
     """A Driver with seeded compensation on the old assignment, then a permanent transfer."""
     old_branch, new_branch = await make_branch(db), await make_branch(db)
     definitions = [await _definition(client, admin) for _ in range(6)]
+    for branch_id in (old_branch, new_branch):
+        await ensure_branch_pay_calendar(db, 1, branch_id)
     columns = {old_branch: await _columns(client, admin, old_branch, 5),
                new_branch: await _columns(client, admin, new_branch, 2)}
     role_id = await create_company_role_with_permissions(
@@ -305,6 +335,8 @@ async def test_the_old_branch_manager_can_still_read_the_ended_tenures_compensat
         f"/compensation/drivers/{driver}/rate-definitions/"
         f"{definition['rate_definition_id']}/resolution?work_date=2026-02-01",
         f"/compensation/driver-rate-schedules/{seed.comp['void']}",
+        f"/payroll/drivers/{driver}/pay-rules",
+        f"/payroll/driver-pay-rules/{seed.rules['end']}",
         f"/payroll/rates?branch_id={world.old_branch}&driver_assignment_id={old}",
         f"/payroll/rates/{seed.rates['void']}",
         f"/payroll/driver-assignments/{old}/rates/history",
@@ -319,6 +351,8 @@ async def test_the_old_branch_manager_can_still_read_the_ended_tenures_compensat
         f"/compensation/drivers/{driver}/rate-definitions/"
         f"{definition['rate_definition_id']}/rate-schedules", headers=headers)).json()
     assert [row["driver_rate_schedule_id"] for row in history] == [seed.comp["void"]]
+    rules = (await client.get(f"/payroll/drivers/{driver}/pay-rules", headers=headers)).json()
+    assert len(rules) == 3
     # A Pending row is never visible to a Branch whose tenure has ended.
     hidden = await client.get(
         f"/compensation/driver-rate-schedules/{seed.comp['update']}", headers=headers)
@@ -334,6 +368,21 @@ async def test_every_writer_is_refused_in_an_ended_tenure_even_for_authorized_ca
     await _assert_all_writers_refused(client, direct_db, seed, world.old_manager)
     # A Company-wide admin is refused the same way.
     await _assert_all_writers_refused(client, direct_db, seed, world.admin)
+
+
+async def test_a_pay_rule_notes_edit_has_no_payroll_effect_and_needs_only_current_authority(
+    client, auth_token, direct_db,
+):
+    world = await _build_world(client, auth_token, direct_db)
+    rule = f"/payroll/driver-pay-rules/{world.seed.rules['notes']}"
+    # The rule starts inside the ended tenure, yet its notes may be edited by the Driver's
+    # current authority Branch and by company-wide roles: it changes no payroll result.
+    for token in (world.new_manager, auth_token):
+        edited = await client.patch(rule, json={"notes": "still editable"}, headers=auth(token))
+        assert edited.status_code == 200, (token, edited.text)
+    # The past Branch holds no authority over the Driver any more.
+    refused = await client.patch(rule, json={"notes": "no"}, headers=auth(world.old_manager))
+    assert refused.status_code == 403
 
 
 async def test_an_unauthorized_caller_is_denied_before_the_ended_state_is_revealed(
@@ -353,6 +402,7 @@ async def test_an_empty_never_effective_terminated_assignment_is_read_only(
 ):
     old_branch = await make_branch(direct_db)
     definitions = [await _definition(client, auth_token) for _ in range(6)]
+    await ensure_branch_pay_calendar(direct_db, 1, old_branch)
     columns = await _columns(client, auth_token, old_branch, 5)
     role_id = await create_company_role_with_permissions(
         client, auth_token, f"EG manager {sfx()}",
@@ -415,6 +465,20 @@ async def _exercise_every_writer(
     await _expect(await _values(client, token, second, d_b, "26"), 200)
     await _expect(await client.delete(f"{comp}/{second}", headers=auth(token)), 204)
 
+    # Rules of one Driver may not overlap per type, so each exercise takes its own days.
+    day = date.fromisoformat(start)
+    first = await _rule(client, token, driver_id, "MaximumPay", str(day), str(day + timedelta(days=1)))
+    await _expect(await client.patch(
+        f"/payroll/driver-pay-rules/{first}", json={"notes": tag}, headers=auth(token)), 200)
+    await _expect(await client.post(
+        f"/payroll/driver-pay-rules/{first}/end", json={"effective_to": str(day)},
+        headers=auth(token)), 200)
+    second = await _rule(
+        client, token, driver_id, "MaximumPay", str(day + timedelta(days=2)),
+        str(day + timedelta(days=2)))
+    await _expect(await client.post(
+        f"/payroll/driver-pay-rules/{second}/void", headers=auth(token)), 200)
+
     rate = await _rate(client, token, assignment_id, c_rate)
     await _expect(await client.patch(
         f"/payroll/rates/{rate}", json={"amount": "15"}, headers=auth(token)), 200)
@@ -445,6 +509,8 @@ async def test_pending_destination_and_current_source_of_a_scheduled_transfer_st
 ):
     source_branch, target_branch = await make_branch(direct_db), await make_branch(direct_db)
     definitions = [await _definition(client, auth_token) for _ in range(2)]
+    for branch_id in (source_branch, target_branch):
+        await ensure_branch_pay_calendar(direct_db, 1, branch_id)
     source_columns = await _columns(client, auth_token, source_branch, 2)
     target_columns = await _columns(client, auth_token, target_branch, 2)
     driver = await make_driver(client, auth_token, source_branch)

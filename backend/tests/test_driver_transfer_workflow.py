@@ -41,6 +41,7 @@ from tests.builders.access import create_user_with_role_token, get_company_role_
 from tests.builders.owned_scope import (
     create_owned_branch,
 )
+from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce import create_driver_employee_record
 from tests.builders.workforce_db import current_driver_assignment_id
 from tests.db_state import allow_final_line_insert
@@ -1481,14 +1482,15 @@ async def test_completion_preserves_driver_rates_on_old_assignment(
 
 
 @pytest.mark.asyncio
-async def test_completion_preserves_driver_pay_rules_on_old_assignment(
+async def test_completion_leaves_driver_pay_rules_untouched_because_they_follow_the_driver(
     session_client: httpx.AsyncClient,
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
     direct_db,
 ):
-    """Transfer completion does not move DriverPayRules to the new assignment."""
+    """Pay rules belong to the permanent Driver: transfer completion neither moves, copies nor
+    rewrites them, and the destination assignment carries none of its own."""
     sfx = _rnd()
     drv_id = await _create_driver(
         session_client, auth_token, paytest_branch_id, suffix=sfx
@@ -1502,18 +1504,13 @@ async def test_completion_preserves_driver_pay_rules_on_old_assignment(
 
     old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
 
-    # Insert a DriverPayRule
-    await direct_db.execute(
-        _text("""
-            INSERT INTO payroll.driverpayrules
-                (companyid, branchid, driverassignmentid,
-                 ruletype, amount, effectivefrom, status)
-            VALUES
-                (:cid, :bid, :aid,
-                 'MinimumPay', 500.00, '2090-01-01', 'Active')
-        """),
-        {"cid": company_id, "bid": paytest_branch_id, "aid": old_assignment_id},
-    )
+    # Insert a DriverPayRule for the Driver
+    rule_id = await insert_pay_rule(
+        direct_db, company_id=company_id, driver_id=drv_id, branch_id=paytest_branch_id,
+        amount="500.00", start="2090-01-01")
+    before = (await direct_db.execute(
+        _text("SELECT to_jsonb(r) FROM payroll.driverpayrules r WHERE driverid = :d"),
+        {"d": drv_id})).scalars().all()
 
     # Complete transfer
     r_t = await _create_transfer(
@@ -1526,19 +1523,15 @@ async def test_completion_preserves_driver_pay_rules_on_old_assignment(
     assert r_c.status_code == 200
     new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # Rule still on the old assignment; the transfer copies nothing
-    cnt_old = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = :aid"),
-        {"aid": old_assignment_id},
-    )
-    assert cnt_old.scalar_one() == 1
-
-    # The new assignment has zero rules
-    cnt_new = await direct_db.execute(
-        _text("SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = :aid"),
-        {"aid": new_assignment_id},
-    )
-    assert cnt_new.scalar_one() == 0
+    assert new_assignment_id != old_assignment_id
+    # The Driver still owns exactly the one rule, byte for byte: nothing was created, moved
+    # or rewritten (a rule has no assignment or Branch to follow).
+    after = (await direct_db.execute(
+        _text("SELECT to_jsonb(r) FROM payroll.driverpayrules r WHERE driverid = :d"),
+        {"d": drv_id})).scalars().all()
+    assert after == before and len(after) == 1
+    assert after[0]["driverpayruleid"] == rule_id
+    assert "driverassignmentid" not in after[0] and "branchid" not in after[0]
 
 
 # ---------------------------------------------------------------------------

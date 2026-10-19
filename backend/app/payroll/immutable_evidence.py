@@ -211,16 +211,14 @@ async def capture_snapshot_used_rate_definitions(
         rule_rows = {
             int(row["driverpayruleid"]): row
             for row in (await db.execute(text("""
-                SELECT driverpayruleid, companyid, branchid, driverassignmentid, ruletype,
+                SELECT driverpayruleid, companyid, driverid, ruletype,
                        amount, effectivefrom, effectiveto, status
                 FROM payroll.driverpayrules
                 WHERE driverpayruleid = ANY(:rule_ids)
                   AND companyid = :company_id
-                  AND branchid = :branch_id
             """), {
                 "rule_ids": rule_ids,
                 "company_id": company_id,
-                "branch_id": branch_id,
             })).mappings().all()
         }
 
@@ -261,7 +259,9 @@ async def capture_snapshot_used_rate_definitions(
             }
         else:
             rule = rule_rows.get(int(rule_id))
-            if rule is None or int(rule["driverassignmentid"]) != int(line["DriverAssignmentID"]):
+            # A pay rule belongs to the permanent Driver, so it is in scope for any line of
+            # that Driver whatever assignment or Branch the line was worked under.
+            if rule is None or int(rule["driverid"]) != int(line["DriverID"]):
                 raise HTTPException(
                     status_code=422,
                     detail="Cannot submit: used DriverPayRule evidence is outside the snapshot scope.",

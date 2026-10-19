@@ -173,9 +173,11 @@ async def require_compensation_authority(
     """Require authority over a Driver-owned compensation change.
 
     ``mode="write"`` decides from the context assignment of ``start_date`` and returns it.
-    ``mode="discard"`` (a Pending row, no payroll effect) needs authority over the Driver
-    now and returns None. DRIVER/Self subjects are denied first, and permission is
-    established before any tenure state is revealed.
+    ``mode="current"`` (also spelled ``"discard"``) is for a change with no payroll effect (a
+    Pending row's discard, a pay rule's notes): it needs authority over the Driver now, a
+    current or pending tenure's Branch or company-wide, and returns None. DRIVER/Self
+    subjects are denied first, and permission is established before any tenure state is
+    revealed.
     """
     await require_non_driver_subject(company_id, user_id, db)
     await require_driver(company_id, driver_id, db)
@@ -183,7 +185,7 @@ async def require_compensation_authority(
     company_wide = await has_any_permission(company_id, user_id, None, RATE_EDIT, db)
     tenures = await load_driver_tenures(company_id, driver_id, db)
 
-    if mode == "discard":
+    if mode in ("current", "discard"):
         if company_wide:
             return None
         for branch_id in sorted({t.branch_id for t in tenures if t.is_authority(instant)}):
@@ -292,12 +294,13 @@ async def driver_compensation_read_scope(
 
 
 async def lock_driver_compensation_write(
-    company_id: int, driver_id: int, rate_definition_id: int, db: AsyncConnection,
+    company_id: int, driver_id: int, rate_definition_id: int | None, db: AsyncConnection,
     *, monetary: bool, lock_from: date | None,
 ) -> None:
     """Take steps 2-5 of the lock order (see the module docstring).
 
-    ``monetary`` takes the Company currency guard; ``lock_from`` (the change's start date)
+    ``rate_definition_id`` is None for a writer with no RateDefinition (a pay rule). ``monetary``
+    takes the Company currency guard; ``lock_from`` (the change's start date)
     additionally takes the Branch workflow locks of every tenure overlapping
     ``[lock_from, infinity)``. The caller then locks its rows FOR UPDATE, reads one decision
     instant and re-checks authority and the finalized guard before any DML.
@@ -320,4 +323,5 @@ async def lock_driver_compensation_write(
         })
         for branch_id in branches:
             await acquire_branch_workflow_lock(company_id, branch_id, db)
-    await lock_rate_definition_structure(rate_definition_id, db)
+    if rate_definition_id is not None:
+        await lock_rate_definition_structure(rate_definition_id, db)

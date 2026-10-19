@@ -23,6 +23,7 @@ Writers exercised (blocking point):
   rates.approve_rate    Branch workflow advisory lock  pg_advisory_xact_lock(cid, bid)
   rates.void_rate       Branch workflow advisory lock  pg_advisory_xact_lock(cid, bid)
   schedules.approve     prior Approved row FOR UPDATE
+  pay_rules.end/void    Branch workflow advisory lock  pg_advisory_xact_lock(cid, bid)
 
 The Values and Tiers tables are children whose writers only mutate them after a parent
 statement the same transaction already ran; they have no independent blocking point to
@@ -45,6 +46,7 @@ from app.workforce.effective import (
     DRIVER_ASSIGNMENT_ENDED_SQLSTATE,
     is_driver_assignment_ended_error,
 )
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.builders.transfer_scenarios import (
     auth,
     db_now,
@@ -61,6 +63,7 @@ from tests.test_ended_assignment_write_guard import (
     _expect,
     _pending,
     _rate,
+    _rule,
     _values,
 )
 
@@ -91,6 +94,8 @@ class Scene:
 
 async def _driver(client, admin, db):
     source_branch, target_branch = await make_branch(db), await make_branch(db)
+    for branch_id in (source_branch, target_branch):
+        await ensure_branch_pay_calendar(db, 1, branch_id)
     driver = await make_driver(client, admin, source_branch)
     return driver, source_branch, target_branch
 
@@ -171,6 +176,8 @@ async def _fingerprint(db, scene: "Scene") -> str:
          "JOIN payroll.driverrateschedules r ON r.driverratescheduleid = v.driverratescheduleid "
          "WHERE r.driverid = :a ORDER BY v.driverratescheduleid, v.ratecomponentdefinitionid",
          scene.driver_id),
+        ("SELECT to_jsonb(p) FROM payroll.driverpayrules p "
+         "WHERE p.driverid = :a ORDER BY p.driverpayruleid", scene.driver_id),
         ("SELECT to_jsonb(d) FROM payroll.driverrates d "
          "WHERE d.driverassignmentid = :a ORDER BY d.driverrateid", scene.source),
     ):
@@ -290,6 +297,43 @@ async def test_schedule_approve_blocked_on_the_prior_row_lock_is_decided_when_it
     else:
         await _expect(response, 200)
         assert states == {prior: "Superseded", successor: "Approved"}
+
+
+# ---------------------------------------------------------------------------
+# pay_rules.end / pay_rules.void (Branch workflow advisory lock)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ends_soon", [True, False], ids=["source-ends-while-blocked", "source-stays-current"])
+@pytest.mark.parametrize("action", ["end", "void"])
+async def test_pay_rule_end_and_void_blocked_on_the_branch_lock_are_decided_when_they_resume(
+    client, auth_token, direct_db, test_engine, ends_soon, action,
+):
+    driver, source_branch, target_branch = await _driver(client, auth_token, direct_db)
+    rule = await _rule(client, auth_token, driver["driver_id"], "MinimumPay", "2026-01-01")
+    scene = await _schedule(client, auth_token, direct_db, driver, source_branch, target_branch,
+                            ends_soon=ends_soon)
+    before = await _fingerprint(direct_db, scene)
+
+    def send():
+        if action == "end":
+            return client.post(f"/payroll/driver-pay-rules/{rule}/end",
+                               json={"effective_to": "2026-02-01"}, headers=auth(auth_token))
+        return client.post(f"/payroll/driver-pay-rules/{rule}/void", headers=auth(auth_token))
+
+    response = await _race(
+        test_engine, direct_db, scene, ends_soon=ends_soon,
+        hold=await _advisory(source_branch), blocked_on="pg_advisory_xact_lock", send=send)
+
+    status = (await direct_db.execute(text(
+        "SELECT status FROM payroll.driverpayrules WHERE driverpayruleid = :r"), {"r": rule})).scalar_one()
+    if ends_soon:
+        # The first date the change touches lies in the source tenure, ended by the clock.
+        _assert_refused_at_the_mutation_instant(response, HISTORICAL)
+        assert status == "Active"
+        assert await _fingerprint(direct_db, scene) == before
+    else:
+        await _expect(response, 200)
+        assert status == ("Ended" if action == "end" else "Voided")
 
 
 # ---------------------------------------------------------------------------
