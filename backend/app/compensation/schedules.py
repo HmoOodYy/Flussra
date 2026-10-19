@@ -580,7 +580,7 @@ async def driver_pay_rates(
         reference_branch = await _reference_branch_id(company_id, driver_id, db)
         reference = (
             await branch_today(company_id, reference_branch, db) if reference_branch is not None
-            else (await db.execute(text("SELECT (now() AT TIME ZONE 'UTC')::date"))).scalar_one()
+            else (await db.execute(text("SELECT core.fn_BusinessDate('UTC', now())"))).scalar_one()
         )
     context = await resolve_compensation_context(company_id, driver_id, reference, db)
     context_branch_id = context.branch_id if context is not None else None

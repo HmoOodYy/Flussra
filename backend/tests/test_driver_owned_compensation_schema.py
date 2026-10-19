@@ -1106,7 +1106,7 @@ def test_pending_and_scheduled_contexts_are_writable_and_a_missing_context_is_re
 def test_the_decision_uses_the_wall_clock_inside_a_long_transaction(cur):
     """A tenure that ends while the transaction is open refuses the later write."""
     w = _world(cur)
-    today = "(now() AT TIME ZONE 'UTC')::date"
+    today = "core.fn_BusinessDate('UTC', now())"
     cur.execute(f"SELECT {today}")
     day = cur.fetchone()[0].isoformat()
     first = _pending(cur, w, definition=0, start=day)

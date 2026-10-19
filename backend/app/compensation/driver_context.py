@@ -109,10 +109,11 @@ async def load_driver_tenures(
     rows = (await db.execute(
         text("""
             SELECT a.driverassignmentid, a.branchid, a.effectivefromat, a.effectivetoat,
-                   (a.effectivefromat AT TIME ZONE b.timezoneid)::date AS first_day,
+                   core.fn_BusinessDate(b.timezoneid, a.effectivefromat) AS first_day,
                    CASE WHEN a.effectivetoat IS NULL THEN NULL
-                        ELSE ((a.effectivetoat - INTERVAL '1 microsecond')
-                              AT TIME ZONE b.timezoneid)::date END AS last_day
+                        ELSE core.fn_BusinessDate(
+                                 b.timezoneid, a.effectivetoat - INTERVAL '1 microsecond')
+                   END AS last_day
             FROM   core.driverassignments a
             JOIN   core.branches b ON b.branchid = a.branchid AND b.companyid = a.companyid
             WHERE  a.companyid = :cid AND a.driverid = :did
