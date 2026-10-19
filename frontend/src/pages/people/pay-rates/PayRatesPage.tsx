@@ -2,13 +2,13 @@
  * PayRatesPage — /people/pay-rates
  *
  * Two-panel layout:
- *  Left : filterable driver list
+ *  Left : filterable driver list (one row per permanent Driver the user can read)
  *  Right: selected driver panel with tabs
  *         Current Rates | Pending Changes | History | Pay Rules
  *
- * Ordinary PayDefinition rates are target DriverRateAssignments. The Status pay
- * rate section below them still uses the temporary Status-only rate path until
- * Status compensation is cut over.
+ * Ordinary PayDefinition rates (Driver rate schedules) and Min/Max pay rules belong to the
+ * permanent Driver and are addressed by driver_id. Status pay rates are the one exception:
+ * they stay owned by a Branch assignment, so their pane keeps an assignment picker.
  */
 import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
@@ -19,39 +19,58 @@ import { usePayRateDriverContext } from './usePayRateDriverContext';
 import { usePayRateReads } from './usePayRateReads';
 import { useTargetRateEditing } from './useTargetRateEditing';
 import { useStatusRateEditing } from './useStatusRateEditing';
-import { useRateAssignmentActions } from './useRateAssignmentActions';
+import { useRateScheduleActions } from './useRateScheduleActions';
 import { useDriverPayRules } from './useDriverPayRules';
 import { PayRateDriverList } from './PayRateDriverList';
 import { TargetRateSection } from './TargetRateSection';
 import { StatusRateSection } from './StatusRateSection';
 import { PendingRateChanges } from './PendingRateChanges';
-import { AssignmentHistoryTab, VoidRateDialog } from './AssignmentHistoryTab';
+import { RateHistoryTab, VoidRateDialog } from './RateHistoryTab';
 import { DriverPayRulesTab } from './DriverPayRulesTab';
-import { assignmentLabel, isReadOnlyAssignment } from './payRatesAssignments';
+import {
+  PAST_BRANCH_BANNER,
+  canEditDriverCompensation,
+  canEditStatusRates,
+  driverBranchSummary,
+  visibleTabs,
+} from './payRatesDrivers';
 
 export function PayRatesPage() {
   const { user } = useAuth();
   const driver = usePayRateDriverContext(user);
-  const reads = usePayRateReads(driver.selectedDriverAssignmentId);
-  const viewedBranchId = driver.viewedAssignment?.branch_id;
-  const branchBusinessDate = driver.branches.find((b) => b.branch_id === viewedBranchId)?.business_date;
-  const referenceDate = reads.statusMatrix?.driver_assignment_id === driver.selectedDriverAssignmentId
+  const selectedDriverId = driver.selectedDriverId;
+  const selectedDriver = driver.selectedDriver;
+  const statusAssignment = driver.statusAssignment;
+  const statusAssignmentId = statusAssignment?.driver_assignment_id ?? null;
+  const reads = usePayRateReads(selectedDriverId, statusAssignmentId);
+
+  // Edit controls follow the backend's authority: the Driver's current Branch for Driver-owned
+  // data, the viewed assignment for Status rates. The backend stays authoritative.
+  const canEditAtBranch = (branchId: number) => (user ? canEditPayRates(user, branchId) : false);
+  const canEditDriver = canEditDriverCompensation(selectedDriver, canEditAtBranch);
+  const canEditStatus = canEditStatusRates(statusAssignment, canEditAtBranch);
+  const authorityBranchId = (selectedDriver?.current ?? selectedDriver?.pending ?? selectedDriver?.home)?.branch_id;
+  const businessDateOf = (branchId: number | undefined) =>
+    driver.branches.find((b) => b.branch_id === branchId)?.business_date;
+  const driverReferenceDate = businessDateOf(authorityBranchId);
+  const statusReferenceDate = reads.statusMatrix?.driver_assignment_id === statusAssignmentId
     ? reads.statusMatrix.as_of
-    : branchBusinessDate;
-  const target = useTargetRateEditing(driver.selectedDriverAssignmentId, reads.refreshTargetRows, referenceDate);
-  const status = useStatusRateEditing(driver.selectedDriverAssignmentId, reads.statusMatrix, reads.loadRates, referenceDate);
-  const actions = useRateAssignmentActions(driver.selectedDriverAssignmentId, reads.reloadAll);
-  const rules = useDriverPayRules(driver.selectedDriverAssignmentId, reads.loadPayRules, reads.setPayRulesError);
-  const { selectedDriverAssignmentId, activeTab } = driver;
-  const { rows, loadingRows, historyLoaded, loadingHistory, payRulesLoaded, loadingPayRules, setHistoryRows, setHistoryLoaded, setPayRules, setPayRulesLoaded, setPayRulesError, loadRates, loadHistory, loadPayRules } = reads;
+    : businessDateOf(statusAssignment?.branch_id);
+
+  const target = useTargetRateEditing(selectedDriverId, reads.refreshTargetRows, driverReferenceDate);
+  const status = useStatusRateEditing(statusAssignmentId, reads.statusMatrix, reads.loadStatus, statusReferenceDate);
+  const actions = useRateScheduleActions(selectedDriverId, reads.reloadAll);
+  const rules = useDriverPayRules(selectedDriverId, reads.loadPayRules, reads.setPayRulesError);
+  const { activeTab } = driver;
+  const { rows, loadingRows, historyLoaded, loadingHistory, payRulesLoaded, loadingPayRules, setHistoryRows, setHistoryLoaded, setPayRules, setPayRulesLoaded, setPayRulesError, loadRates, loadStatus, loadHistory, loadPayRules } = reads;
   const { setPendingActionError } = actions;
   const { setTargetDrafts, setTargetErrors } = target;
   const { setStatusEditMode, setStatusDrafts, setStatusOriginal, setStatusSaveError } = status;
   const { setRuleForm, setRuleFormError } = rules;
 
-  // ── When selected driver changes: reset state + load ──────────────────────
+  // ── When the selected driver changes: reset Driver-owned state + load ─────
   useEffect(() => {
-    if (selectedDriverAssignmentId == null) return;
+    if (selectedDriverId == null) return;
     let cancelled = false;
     void (async () => {
       if (cancelled) return;
@@ -60,32 +79,43 @@ export function PayRatesPage() {
       setPendingActionError('');
       setTargetDrafts({});
       setTargetErrors({});
-      setStatusEditMode(false);
-      setStatusDrafts({});
-      setStatusOriginal({});
-      setStatusSaveError('');
       setPayRules([]);
       setPayRulesLoaded(false);
       setPayRulesError('');
       setRuleForm(null);
       setRuleFormError('');
-      await loadRates(selectedDriverAssignmentId);
+      await loadRates(selectedDriverId);
     })();
     return () => { cancelled = true; };
-  }, [selectedDriverAssignmentId, loadRates, setHistoryRows, setHistoryLoaded, setPendingActionError, setTargetDrafts, setTargetErrors, setStatusEditMode, setStatusDrafts, setStatusOriginal, setStatusSaveError, setPayRules, setPayRulesLoaded, setPayRulesError, setRuleForm, setRuleFormError]);
+  }, [selectedDriverId, loadRates, setHistoryRows, setHistoryLoaded, setPendingActionError, setTargetDrafts, setTargetErrors, setPayRules, setPayRulesLoaded, setPayRulesError, setRuleForm, setRuleFormError]);
+
+  // ── When the Status assignment changes: reset Status edits + load its matrix ──
+  useEffect(() => {
+    if (statusAssignmentId == null) return;
+    let cancelled = false;
+    void (async () => {
+      if (cancelled) return;
+      setStatusEditMode(false);
+      setStatusDrafts({});
+      setStatusOriginal({});
+      setStatusSaveError('');
+      await loadStatus(statusAssignmentId);
+    })();
+    return () => { cancelled = true; };
+  }, [statusAssignmentId, loadStatus, setStatusEditMode, setStatusDrafts, setStatusOriginal, setStatusSaveError]);
 
   // ── Lazy tabs ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (activeTab !== 'history' || selectedDriverAssignmentId == null || historyLoaded || loadingHistory || loadingRows) return;
-    const driverAssignmentId = selectedDriverAssignmentId;
-    void (async () => { await loadHistory(driverAssignmentId, rows); })();
-  }, [activeTab, selectedDriverAssignmentId, historyLoaded, loadingHistory, loadingRows, rows, loadHistory]);
+    if (activeTab !== 'history' || selectedDriverId == null || historyLoaded || loadingHistory || loadingRows) return;
+    const driverId = selectedDriverId;
+    void (async () => { await loadHistory(driverId, rows); })();
+  }, [activeTab, selectedDriverId, historyLoaded, loadingHistory, loadingRows, rows, loadHistory]);
 
   useEffect(() => {
-    if (activeTab !== 'pay-rules' || selectedDriverAssignmentId == null || payRulesLoaded || loadingPayRules) return;
-    const driverAssignmentId = selectedDriverAssignmentId;
-    void (async () => { await loadPayRules(driverAssignmentId); })();
-  }, [activeTab, selectedDriverAssignmentId, payRulesLoaded, loadingPayRules, loadPayRules]);
+    if (activeTab !== 'pay-rules' || selectedDriverId == null || payRulesLoaded || loadingPayRules) return;
+    const driverId = selectedDriverId;
+    void (async () => { await loadPayRules(driverId); })();
+  }, [activeTab, selectedDriverId, payRulesLoaded, loadingPayRules, loadPayRules]);
 
   function cancelAllEdits() {
     setTargetDrafts({});
@@ -103,18 +133,21 @@ export function PayRatesPage() {
   const statusPending = (reads.statusMatrix?.groups ?? []).filter((g) => g.pending_rate !== null);
   const pendingCount = pendingRows.length + statusPending.length;
   const futureCount = reads.rows.filter((r) => r.future !== null).length;
-  // An ended assignment is history: it stays readable after a transfer but is never edited.
-  const readOnlyAssignment = isReadOnlyAssignment(driver.viewedAssignment);
-  const canEditMatrix = user && viewedBranchId != null && !readOnlyAssignment
-    ? canEditPayRates(user, viewedBranchId)
-    : false;
+  const tabs = visibleTabs(selectedDriver);
+  const tab = tabs.includes(activeTab) ? activeTab : 'current';
+  const pastOnly = selectedDriver?.pastOnly ?? false;
+
+  function openTab(next: typeof activeTab) {
+    driver.setActiveTab(next);
+    cancelAllEdits();
+  }
 
   return (
     <div className={styles.page}>
       <div className={styles.header}>
         <div>
           <p className={styles.title}>Pay Rates</p>
-          <p className={styles.sub}>Set each driver&apos;s rate for the pay items active in their branch.</p>
+          <p className={styles.sub}>Set each driver&apos;s rates and pay rules. They follow the driver if they move Branch.</p>
         </div>
       </div>
 
@@ -123,10 +156,10 @@ export function PayRatesPage() {
           search={driver.search} setSearch={driver.setSearch}
           branchFilter={driver.branchFilter} setBranchFilter={driver.setBranchFilter}
           statusFilter={driver.statusFilter} setStatusFilter={driver.setStatusFilter}
-          assignmentFilter={driver.assignmentFilter} setAssignmentFilter={driver.setAssignmentFilter}
+          tenureFilter={driver.tenureFilter} setTenureFilter={driver.setTenureFilter}
           branches={driver.branches} loadingDrivers={driver.loadingDrivers}
-          filteredRows={driver.filteredRows} selectedDriverAssignmentId={driver.selectedDriverAssignmentId}
-          selectAssignment={driver.selectAssignment}
+          filteredDrivers={driver.filteredDrivers} selectedDriverId={selectedDriverId}
+          selectDriver={driver.selectDriver}
         />
 
         <div className={styles.right}>
@@ -138,13 +171,24 @@ export function PayRatesPage() {
                 <Link to="/people" style={{ fontSize: '0.83rem', color: '#6366f1' }}>Back to People</Link>
               </div>
             </div>
-          ) : driver.selectedDriverAssignmentId == null ? (
+          ) : selectedDriverId == null ? (
             <div className={styles.emptyRight}>
               <div className={styles.emptyRightCard}>
                 <p className={styles.emptyRightTitle}>Select a driver</p>
                 <p className={styles.emptyRightMsg}>Choose a driver from the list to view and manage their pay rates.</p>
               </div>
             </div>
+          ) : selectedDriver == null ? (
+            driver.loadingDrivers ? (
+              <div className={styles.loading}>Loading driver...</div>
+            ) : (
+              <div className={styles.emptyRight}>
+                <div className={styles.emptyRightCard}>
+                  <p className={styles.emptyRightTitle}>Driver not available</p>
+                  <p className={styles.emptyRightMsg}>This driver does not exist or you cannot view their pay rates.</p>
+                </div>
+              </div>
+            )
           ) : reads.loadingRows && reads.rows.length === 0 && !reads.statusMatrix ? (
             <div className={styles.loading}>Loading rates...</div>
           ) : reads.rowsError ? (
@@ -154,28 +198,9 @@ export function PayRatesPage() {
               <div className={styles.dHeaderCard} style={{ marginBottom: '0.75rem' }}>
                 <div className={styles.dHeaderTop}>
                   <div>
-                    <p className={styles.dName}>{driver.viewedAssignment?.full_name ?? 'Driver'}</p>
-                    <p className={styles.dMeta}>{driver.viewedAssignment?.driver_number ?? 'No number'} &middot; {driver.viewedAssignment?.branch_name ?? ''}</p>
-                    {driver.assignments.length > 1 && (
-                      <label className={styles.assignmentPicker}>
-                        <span>Assignment</span>
-                        <select
-                          value={driver.selectedDriverAssignmentId ?? ''}
-                          onChange={(e) => driver.selectAssignment(Number(e.target.value))}
-                        >
-                          {driver.assignments.map((a) => (
-                            <option key={a.driver_assignment_id} value={a.driver_assignment_id}>
-                              {assignmentLabel(a)}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-                    {readOnlyAssignment && (
-                      <p className={styles.readOnlyBanner}>
-                        This assignment has ended. Its rates and pay rules are shown for reference and cannot be changed.
-                      </p>
-                    )}
+                    <p className={styles.dName}>{selectedDriver.fullName}</p>
+                    <p className={styles.dMeta}>{selectedDriver.driverNumber ?? 'No number'} &middot; {driverBranchSummary(selectedDriver)}</p>
+                    {pastOnly && <p className={styles.readOnlyBanner}>{PAST_BRANCH_BANNER}</p>}
                     <div className={styles.summaryBadges}>
                       {missingCount > 0 && <span className={styles.missingChip}>{missingCount} missing</span>}
                       {pendingCount > 0 && <span className={styles.pendingBadge}>{pendingCount} pending</span>}
@@ -187,31 +212,34 @@ export function PayRatesPage() {
               </div>
 
               <div className={styles.tabs}>
-                <button className={`${styles.tab} ${driver.activeTab === 'current' ? styles.tabActive : ''}`} onClick={() => { driver.setActiveTab('current'); cancelAllEdits(); }}>Current Rates</button>
-                <button className={`${styles.tab} ${driver.activeTab === 'pending' ? styles.tabActive : ''}`} onClick={() => { driver.setActiveTab('pending'); cancelAllEdits(); }}>
-                  Pending Changes {pendingCount > 0 && <span className={`${styles.tabCount} ${styles.tabCountWarn}`}>{pendingCount}</span>}
-                </button>
-                <button className={`${styles.tab} ${driver.activeTab === 'history' ? styles.tabActive : ''}`} onClick={() => { driver.setActiveTab('history'); cancelAllEdits(); }}>History</button>
-                <button className={`${styles.tab} ${driver.activeTab === 'pay-rules' ? styles.tabActive : ''}`} onClick={() => { driver.setActiveTab('pay-rules'); cancelAllEdits(); }}>Pay Rules</button>
+                <button className={`${styles.tab} ${tab === 'current' ? styles.tabActive : ''}`} onClick={() => openTab('current')}>Current Rates</button>
+                {tabs.includes('pending') && (
+                  <button className={`${styles.tab} ${tab === 'pending' ? styles.tabActive : ''}`} onClick={() => openTab('pending')}>
+                    Pending Changes {pendingCount > 0 && <span className={`${styles.tabCount} ${styles.tabCountWarn}`}>{pendingCount}</span>}
+                  </button>
+                )}
+                <button className={`${styles.tab} ${tab === 'history' ? styles.tabActive : ''}`} onClick={() => openTab('history')}>History</button>
+                <button className={`${styles.tab} ${tab === 'pay-rules' ? styles.tabActive : ''}`} onClick={() => openTab('pay-rules')}>Pay Rules</button>
               </div>
 
               <div className={styles.tabPanel}>
-                {driver.activeTab === 'current' && <>
-                  <TargetRateSection rows={reads.rows} canEditMatrix={!!canEditMatrix} referenceDate={referenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
+                {tab === 'current' && <>
+                  <TargetRateSection rows={reads.rows} canEditMatrix={canEditDriver} referenceDate={driverReferenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
                     targetDrafts={target.targetDrafts} targetErrors={target.targetErrors} targetSavingId={target.targetSavingId}
                     setTargetField={target.setTargetField} saveTargetRow={target.saveTargetRow} cancelTargetEdit={target.cancelTargetEdit} startTargetEdit={target.startTargetEdit} />
-                  <StatusRateSection statusMatrix={reads.statusMatrix} canEditMatrix={!!canEditMatrix} referenceDate={referenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
+                  <StatusRateSection assignments={selectedDriver.tenures} selectedAssignmentId={statusAssignmentId} selectAssignment={driver.selectStatusAssignment}
+                    statusMatrix={reads.statusMatrix} canEditMatrix={canEditStatus} referenceDate={statusReferenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
                     statusEditMode={status.statusEditMode} statusDrafts={status.statusDrafts} statusSaving={status.statusSaving} statusSaveError={status.statusSaveError}
                     dirtyStatusKeys={status.dirtyStatusKeys} statusKey={status.statusKey} startStatusEdit={status.startStatusEdit} setStatusField={status.setStatusField}
                     isStatusDirty={status.isStatusDirty} saveStatusRates={status.saveStatusRates} cancelStatusEdit={status.cancelStatusEdit} />
                 </>}
-                {driver.activeTab === 'pending' && <PendingRateChanges pendingRows={pendingRows} statusPending={statusPending} pendingCount={pendingCount}
-                  canEditMatrix={!!canEditMatrix} actioningId={actions.actioningId} pendingActionError={actions.pendingActionError}
+                {tab === 'pending' && <PendingRateChanges pendingRows={pendingRows} statusPending={statusPending} pendingCount={pendingCount}
+                  canEditDriver={canEditDriver} canEditStatus={canEditStatus} actioningId={actions.actioningId} pendingActionError={actions.pendingActionError}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} runPendingAction={actions.runPendingAction} />}
-                {driver.activeTab === 'history' && <AssignmentHistoryTab historyRows={reads.historyRows} loadingHistory={reads.loadingHistory} canEditMatrix={!!canEditMatrix}
+                {tab === 'history' && <RateHistoryTab historyRows={reads.historyRows} loadingHistory={reads.loadingHistory} canEditMatrix={canEditDriver}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} setVoidTarget={actions.setVoidTarget} setVoidReason={actions.setVoidReason} setVoidError={actions.setVoidError} />}
-                {driver.activeTab === 'pay-rules' && <DriverPayRulesTab payRules={reads.payRules} payRulesError={reads.payRulesError} loadingPayRules={reads.loadingPayRules}
-                  canEditMatrix={!!canEditMatrix} referenceDate={referenceDate} currencyCode={user?.currency_code} currencyDigits={user?.currency_minor_unit_digits}
+                {tab === 'pay-rules' && <DriverPayRulesTab payRules={reads.payRules} payRulesError={reads.payRulesError} loadingPayRules={reads.loadingPayRules}
+                  canEditMatrix={canEditDriver} referenceDate={driverReferenceDate} currencyCode={user?.currency_code} currencyDigits={user?.currency_minor_unit_digits}
                   ruleForm={rules.ruleForm} setRuleForm={rules.setRuleForm} savingRule={rules.savingRule} ruleFormError={rules.ruleFormError}
                   setRuleFormError={rules.setRuleFormError} voidPayRule={rules.voidPayRule} createPayRule={rules.createPayRule} endPayRule={rules.endPayRule} />}
               </div>

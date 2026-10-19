@@ -1,12 +1,11 @@
-import type { Branch, DriverAssignmentRosterRow } from '../../../types/core';
+import type { Branch } from '../../../types/core';
 import styles from './PayRatesPage.module.css';
 import {
-  ASSIGNMENT_FILTER_LABELS,
-  assignmentWindow,
-  rosterIdentity,
-  stateBadgeLabel,
-  type AssignmentFilter,
-} from './payRatesAssignments';
+  DRIVER_TENURE_FILTER_LABELS,
+  driverBranchSummary,
+  type DriverTenureFilter,
+  type PayRateDriver,
+} from './payRatesDrivers';
 
 type PayRateDriverListProps = {
   search: string;
@@ -15,26 +14,32 @@ type PayRateDriverListProps = {
   setBranchFilter: (value: string) => void;
   statusFilter: string;
   setStatusFilter: (value: string) => void;
-  assignmentFilter: AssignmentFilter;
-  setAssignmentFilter: (value: AssignmentFilter) => void;
+  tenureFilter: DriverTenureFilter;
+  setTenureFilter: (value: DriverTenureFilter) => void;
   branches: Branch[];
   loadingDrivers: boolean;
-  filteredRows: DriverAssignmentRosterRow[];
-  selectedDriverAssignmentId: number | null;
-  selectAssignment: (driverAssignmentId: number) => void;
+  filteredDrivers: PayRateDriver[];
+  selectedDriverId: number | null;
+  selectDriver: (driverId: number) => void;
 };
 
-export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter, assignmentFilter, setAssignmentFilter, branches, loadingDrivers, filteredRows, selectedDriverAssignmentId, selectAssignment }: PayRateDriverListProps) {
+function tenureBadge(d: PayRateDriver): { label: string; className: string } {
+  if (d.pastOnly) return { label: 'Past Branch', className: styles.statusBadge };
+  if (d.current) return { label: 'Current', className: styles.okChip };
+  return { label: 'Pending', className: styles.pendingBadge };
+}
+
+export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFilter, statusFilter, setStatusFilter, tenureFilter, setTenureFilter, branches, loadingDrivers, filteredDrivers, selectedDriverId, selectDriver }: PayRateDriverListProps) {
   return (
     <div className={styles.left}>
       <div className={styles.filters}>
         <input className={styles.search} type="text" placeholder="Search drivers..." value={search} onChange={(e) => setSearch(e.target.value)} />
         <div className={styles.filterRow}>
-          <select className={styles.sel} value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
+          <select className={styles.sel} aria-label="Branch" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
             <option value="">All branches</option>
             {branches.map((b) => <option key={b.branch_id} value={String(b.branch_id)}>{b.branch_name}</option>)}
           </select>
-          <select className={styles.sel} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <select className={styles.sel} aria-label="Driver status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
             <option value="">All statuses</option>
             <option value="Active">Active</option>
             <option value="Inactive">Inactive</option>
@@ -44,12 +49,12 @@ export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFi
         <div className={styles.filterRow}>
           <select
             className={styles.sel}
-            aria-label="Assignment state"
-            value={assignmentFilter}
-            onChange={(e) => setAssignmentFilter(e.target.value as AssignmentFilter)}
+            aria-label="Branch tenure"
+            value={tenureFilter}
+            onChange={(e) => setTenureFilter(e.target.value as DriverTenureFilter)}
           >
-            {(Object.keys(ASSIGNMENT_FILTER_LABELS) as AssignmentFilter[]).map((key) => (
-              <option key={key} value={key}>{ASSIGNMENT_FILTER_LABELS[key]}</option>
+            {(Object.keys(DRIVER_TENURE_FILTER_LABELS) as DriverTenureFilter[]).map((key) => (
+              <option key={key} value={key}>{DRIVER_TENURE_FILTER_LABELS[key]}</option>
             ))}
           </select>
         </div>
@@ -57,28 +62,28 @@ export function PayRateDriverList({ search, setSearch, branchFilter, setBranchFi
       <div className={styles.list}>
         {loadingDrivers ? (
           <div className={styles.emptyList}>Loading drivers...</div>
-        ) : filteredRows.length === 0 ? (
-          <div className={styles.emptyList}>No assignments found.</div>
+        ) : filteredDrivers.length === 0 ? (
+          <div className={styles.emptyList}>No drivers found.</div>
         ) : (
-          filteredRows.map((row) => (
-            <button
-              key={row.driver_assignment_id}
-              className={`${styles.item} ${selectedDriverAssignmentId === row.driver_assignment_id ? styles.itemActive : ''}`}
-              onClick={() => selectAssignment(row.driver_assignment_id)}
-            >
-              <div className={styles.itemBody}>
-                <div className={styles.itemName}>{row.full_name}</div>
-                <div className={styles.itemMeta}>{rosterIdentity(row)}</div>
-                <div className={styles.itemMeta}>{assignmentWindow(row)}</div>
-              </div>
-              <span className={row.state === 'ended' ? styles.statusBadge : styles.okChip}>
-                {stateBadgeLabel(row.state)}
-              </span>
-            </button>
-          ))
+          filteredDrivers.map((d) => {
+            const badge = tenureBadge(d);
+            return (
+              <button
+                key={d.driverId}
+                className={`${styles.item} ${selectedDriverId === d.driverId ? styles.itemActive : ''}`}
+                onClick={() => selectDriver(d.driverId)}
+              >
+                <div className={styles.itemBody}>
+                  <div className={styles.itemName}>{d.fullName}</div>
+                  <div className={styles.itemMeta}>{d.driverNumber ?? 'No number'} &middot; {driverBranchSummary(d)}</div>
+                </div>
+                <span className={badge.className}>{badge.label}</span>
+              </button>
+            );
+          })
         )}
       </div>
-      <div className={styles.listFoot}>{filteredRows.length} assignment{filteredRows.length !== 1 ? 's' : ''}</div>
+      <div className={styles.listFoot}>{filteredDrivers.length} driver{filteredDrivers.length !== 1 ? 's' : ''}</div>
     </div>
   );
 }

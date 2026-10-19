@@ -5,16 +5,20 @@ import type { Branch, DriverAssignmentRosterRow } from '../../../types/core';
 import type { ActiveTab } from './payRatesView';
 import { listDriverAssignmentRoster } from './driverAssignmentsApi';
 import {
-  DEFAULT_ASSIGNMENT_FILTER,
-  driverAssignmentsOf,
-  filterRoster,
-  type AssignmentFilter,
-} from './payRatesAssignments';
+  DEFAULT_DRIVER_TENURE_FILTER,
+  defaultStatusAssignment,
+  filterDrivers,
+  groupRosterByDriver,
+  type DriverTenureFilter,
+} from './payRatesDrivers';
 
 /**
- * Pay Rates context. The roster is assignment-centric: one row per DriverAssignment the
- * user may read (GET /core/driver-assignments), so a transferred Driver's ended assignment
- * stays reachable from the old Branch. The selected row IS the viewed assignment.
+ * Pay Rates context. Ordinary rates and Min/Max pay rules belong to the permanent Driver, so
+ * the list is Driver-centric: the assignment roster (GET /core/driver-assignments) is grouped
+ * by driver_id, one row per Driver the user may read. Status pay rates are still owned by a
+ * Branch tenure, so the context also tracks which of the Driver's assignments the Status
+ * pane shows. Deep links: ?driverId=, ?driverAssignmentId= (resolved to its Driver, and
+ * preselecting that assignment for Status rates) and ?driverUserId=.
  */
 export function usePayRateDriverContext(user: { company_id?: number } | null) {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -25,14 +29,17 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
   const [search, setSearch] = useState('');
   const [branchFilter, setBranchFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('Active');
-  const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>(DEFAULT_ASSIGNMENT_FILTER);
+  const [tenureFilter, setTenureFilter] = useState<DriverTenureFilter>(DEFAULT_DRIVER_TENURE_FILTER);
 
-  // Pay Rates addresses a DriverAssignment (the Branch tenure that owns the rates).
-  const initialDriverAssignmentId = searchParams.get('driverAssignmentId')
-    ? parseInt(searchParams.get('driverAssignmentId')!, 10)
-    : null;
-  const [selectedDriverAssignmentId, setSelectedDriverAssignmentId] =
-    useState<number | null>(initialDriverAssignmentId);
+  const idParam = (name: string): number | null => {
+    const raw = searchParams.get(name);
+    const parsed = raw ? parseInt(raw, 10) : NaN;
+    return Number.isNaN(parsed) ? null : parsed;
+  };
+  const [pickedDriverId, setPickedDriverId] = useState<number | null>(() => idParam('driverId'));
+  // A deep link to an assignment names its Driver; it is resolved against the roster below.
+  const [linkedAssignmentId, setLinkedAssignmentId] = useState<number | null>(() => idParam('driverAssignmentId'));
+  const [pickedStatusAssignmentId, setPickedStatusAssignmentId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('current');
   const [noProfile, setNoProfile] = useState(false);
 
@@ -43,15 +50,15 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
     void apiClient
       .get(`/admin/users/${driverUserIdParam}/driver`)
       .then((res) => {
-        const data = res.data as { has_driver: boolean; driver_assignment_id: number | null };
-        if (!data.has_driver || data.driver_assignment_id == null) {
+        const data = res.data as { has_driver: boolean; driver_id: number | null };
+        if (!data.has_driver || data.driver_id == null) {
           setNoProfile(true);
         } else {
           const newParams = new URLSearchParams(searchParams);
           newParams.delete('driverUserId');
-          newParams.set('driverAssignmentId', String(data.driver_assignment_id));
+          newParams.set('driverId', String(data.driver_id));
           navigate({ search: newParams.toString() }, { replace: true });
-          setSelectedDriverAssignmentId(data.driver_assignment_id);
+          setPickedDriverId(data.driver_id);
         }
       })
       .catch(() => setNoProfile(true));
@@ -83,30 +90,41 @@ export function usePayRateDriverContext(user: { company_id?: number } | null) {
       .catch(() => {});
   }, [user?.company_id]);
 
-  function selectAssignment(driverAssignmentId: number) {
-    setSelectedDriverAssignmentId(driverAssignmentId);
+  function selectDriver(driverId: number) {
+    setPickedDriverId(driverId);
+    setLinkedAssignmentId(null);
+    setPickedStatusAssignmentId(null);
     setActiveTab('current');
     const newParams = new URLSearchParams(searchParams);
-    newParams.set('driverAssignmentId', String(driverAssignmentId));
+    newParams.delete('driverAssignmentId');
+    newParams.set('driverId', String(driverId));
     setSearchParams(newParams, { replace: true });
     setNoProfile(false);
   }
 
-  const filteredRows = filterRoster(roster, {
-    search, branchId: branchFilter, driverStatus: statusFilter, assignment: assignmentFilter,
+  const drivers = groupRosterByDriver(roster);
+  const filteredDrivers = filterDrivers(drivers, {
+    search, branchId: branchFilter, driverStatus: statusFilter, tenure: tenureFilter,
   });
 
-  // The viewed assignment is looked up in the whole roster, so a deep link to (or a pick of)
-  // an ended assignment works whatever the list filter shows.
-  const viewedAssignment =
-    roster.find((row) => row.driver_assignment_id === selectedDriverAssignmentId) ?? null;
-  // The picker offers the same Driver's other readable assignments (same authorization).
-  const assignments = driverAssignmentsOf(roster, viewedAssignment?.driver_id ?? null);
+  // The viewed Driver is looked up in the whole roster, so a deep link to (or a pick of) a
+  // Driver whose only readable tenure ended works whatever the list filter shows.
+  const linkedAssignment = roster.find((row) => row.driver_assignment_id === linkedAssignmentId) ?? null;
+  const selectedDriverId = pickedDriverId ?? linkedAssignment?.driver_id ?? null;
+  const selectedDriver = drivers.find((d) => d.driverId === selectedDriverId) ?? null;
+
+  // Status pay rates: the picked tenure, else the linked one, else the Driver's home tenure.
+  const tenureById = (id: number | null) =>
+    selectedDriver?.tenures.find((t) => t.driver_assignment_id === id) ?? null;
+  const statusAssignment = tenureById(pickedStatusAssignmentId)
+    ?? tenureById(linkedAssignmentId)
+    ?? defaultStatusAssignment(selectedDriver);
 
   return {
     branches, loadingDrivers, search, setSearch, branchFilter, setBranchFilter,
-    statusFilter, setStatusFilter, assignmentFilter, setAssignmentFilter,
-    selectedDriverAssignmentId, assignments, viewedAssignment, selectAssignment,
-    activeTab, setActiveTab, noProfile, filteredRows,
+    statusFilter, setStatusFilter, tenureFilter, setTenureFilter,
+    selectedDriverId, selectedDriver, selectDriver,
+    statusAssignment, selectStatusAssignment: setPickedStatusAssignmentId,
+    activeTab, setActiveTab, noProfile, filteredDrivers,
   };
 }

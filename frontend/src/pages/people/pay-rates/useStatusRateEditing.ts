@@ -5,7 +5,7 @@ import { saveStatusRateBatch, type StatusRateGroup, type StatusRateMatrix } from
 export function useStatusRateEditing(
   selectedDriverAssignmentId: number | null,
   statusMatrix: StatusRateMatrix | null,
-  loadRates: (driverAssignmentId: number) => Promise<void>,
+  reloadStatus: (driverAssignmentId: number) => Promise<void>,
   referenceDate: string | undefined,
 ) {
   const [statusEditMode, setStatusEditMode] = useState(false);
@@ -67,10 +67,10 @@ export function useStatusRateEditing(
         })),
       });
       cancelStatusEdit();
-      await loadRates(driverAssignmentId);
+      await reloadStatus(driverAssignmentId);
     } catch (err) {
       setStatusSaveError(err instanceof Error ? err.message : apiError(err));
-      await loadRates(driverAssignmentId);
+      await reloadStatus(driverAssignmentId);
     } finally {
       setStatusSaving(false);
     }

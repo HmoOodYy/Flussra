@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import { formatMoney } from '../../../lib/money';
 import type { DriverPayRule } from './driverPayRulesApi';
 import type { RuleForm } from './payRatesView';
+import { describeCalendar, reconciliationWarning } from './payRulesView';
 import styles from './PayRatesPage.module.css';
 
 type DriverPayRulesTabProps = {
@@ -31,7 +32,8 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
       </div>
       <div className={styles.payRulesInfo}>
         Pay Rules set a floor (Minimum Pay) or ceiling (Maximum Pay) applied
-        during finalization. They are separate from the rate matrix.
+        during finalization. They are separate from the rate matrix. A rule follows the driver
+        across Branches and records the pay calendar of the Branch it was set in.
       </div>
       {payRulesError && <div className={styles.errBanner} style={{ margin: '0 1.25rem 0.5rem' }}>{payRulesError}</div>}
       {loadingPayRules ? <div className={styles.loading}>Loading pay rules...</div> : (
@@ -64,6 +66,8 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
                   <span className={styles.payRuleAmount}>{formatMoney(active.amount, currencyCode, currencyDigits)}<span className={styles.payRuleUnit}>/period</span></span>
                   <span className={styles.payRuleMeta}>From {active.effective_from}{active.effective_to ? ` to ${active.effective_to}` : ' (open-ended)'}</span>
                 </div>}
+                {active && !isEndForm && <div className={styles.calendarNote} style={{ padding: '0 1.25rem' }}>Pay calendar: {describeCalendar(active)}</div>}
+                {active && !isEndForm && reconciliationWarning(active) && <div className={styles.reconcileWarning} style={{ margin: '0.5rem 1.25rem' }}>{reconciliationWarning(active)}</div>}
                 {active?.notes && !isEndForm && <div className={styles.payRuleNotes}>{active.notes}</div>}
                 {isAddForm && <div className={styles.payRuleForm}>
                   <div className={styles.payRuleFormRow}>
@@ -76,6 +80,7 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
                       <input className={styles.editDateInput} type="date" value={ruleForm.effectiveFrom} onChange={e => setRuleForm(f => f ? { ...f, effectiveFrom: e.target.value } : f)} />
                     </div>
                   </div>
+                  <p className={styles.calendarNote}>The pay calendar is recorded automatically from the driver&apos;s Branch on the start date.</p>
                   <div className={styles.payRuleFormGroup}>
                     <label className={styles.formLabel}>Notes (optional)</label>
                     <input className={styles.editInput} style={{ width: '100%' }} type="text" placeholder="Optional note" value={ruleForm.notes} onChange={e => setRuleForm(f => f ? { ...f, notes: e.target.value } : f)} />
@@ -108,11 +113,12 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
                 {(ended.length > 0 || voided.length > 0) && <details className={styles.payRuleHistory}>
                   <summary style={{ cursor: 'pointer', fontSize: '0.78rem', color: '#6b7280', padding: '0.3rem 0' }}>{ended.length + voided.length} historical record{ended.length + voided.length !== 1 ? 's' : ''}</summary>
                   <table className={styles.rateTable} style={{ marginTop: '0.5rem' }}>
-                    <thead><tr><th>Amount</th><th>Period</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Amount</th><th>Period</th><th>Pay calendar</th><th>Status</th></tr></thead>
                     <tbody>{[...ended, ...voided].map(r => (
                       <tr key={r.driver_pay_rule_id}>
                         <td>{formatMoney(r.amount, currencyCode, currencyDigits)}</td>
                         <td>{r.effective_from}{r.effective_to ? ` – ${r.effective_to}` : ''}</td>
+                        <td>{describeCalendar(r)}</td>
                         <td><span className={r.status === 'Ended' ? styles.badgeSuperseded : styles.badgeVoided}>{r.status}</span></td>
                       </tr>
                     ))}</tbody>

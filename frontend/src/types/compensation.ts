@@ -187,13 +187,13 @@ export interface BulkBranchConfigResult {
   results: BulkBranchConfigBranchResult[];
 }
 
-// ─── Driver rate assignments ──────────────────────────────────────────────────
+// ─── Driver rate schedules (owned by the permanent Driver) ────────────────────
 
-export type AssignmentStatus = 'Pending' | 'Approved' | 'Superseded' | 'Voided';
+export type ScheduleStatus = 'Pending' | 'Approved' | 'Superseded' | 'Voided';
 
-export interface AssignmentBrief {
-  driver_rate_assignment_id: number;
-  status: AssignmentStatus;
+export interface ScheduleBrief {
+  driver_rate_schedule_id: number;
+  status: ScheduleStatus;
   effective_from: string;
   effective_to: string | null;
   amount: string | null;
@@ -207,12 +207,18 @@ export interface DriverPayRateRow {
   unit: string | null;
   rate_definition_id: number;
   rate_component_definition_id: number;
-  current: AssignmentBrief | null;
-  future: AssignmentBrief | null;
-  pending: AssignmentBrief | null;
+  /**
+   * False when the definition has no active Branch configuration in the Branch of the Driver's
+   * context tenure on the reference date; null when the Driver has no tenure that day.
+   * Authoring is still allowed: the flag only warns.
+   */
+  applicable_in_context_branch: boolean | null;
+  current: ScheduleBrief | null;
+  future: ScheduleBrief | null;
+  pending: ScheduleBrief | null;
 }
 
-export interface AssignmentValue {
+export interface ScheduleValue {
   rate_component_definition_id: number;
   sequence_no: number;
   ordinal_from: number | null;
@@ -220,15 +226,15 @@ export interface AssignmentValue {
   amount: string | null;
 }
 
-export interface AssignmentSummary {
-  driver_rate_assignment_id: number;
+export interface ScheduleSummary {
+  driver_rate_schedule_id: number;
   company_id: number;
-  branch_id: number;
-  driver_assignment_id: number;
+  driver_id: number;
+  pay_definition_id: number;
   rate_definition_id: number;
   effective_from: string;
   effective_to: string | null;
-  status: AssignmentStatus;
+  status: ScheduleStatus;
   created_by_user_id: number | null;
   created_at_utc: string;
   updated_by_user_id: number | null;
@@ -239,18 +245,18 @@ export interface AssignmentSummary {
   voided_at_utc: string | null;
   void_reason: string | null;
   notes: string | null;
-  values: AssignmentValue[];
+  values: ScheduleValue[];
 }
 
-export interface AssignmentCreatePayload {
-  driver_assignment_id: number;
+export interface ScheduleCreatePayload {
+  driver_id: number;
   rate_definition_id: number;
   effective_from: string;
   effective_to?: string | null;
   notes?: string | null;
 }
 
-export interface AssignmentValuePayload {
+export interface ScheduleValuePayload {
   rate_component_definition_id: number;
   amount: string | null;
 }

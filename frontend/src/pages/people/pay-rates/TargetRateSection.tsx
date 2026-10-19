@@ -1,5 +1,6 @@
 import type { DriverPayRateRow } from '../../../types/compensation';
 import { fmtAmount } from './payRatesView';
+import { applicabilityFlag } from './payRatesDrivers';
 import styles from './PayRatesPage.module.css';
 
 type TargetRateSectionProps = {
@@ -35,6 +36,7 @@ export function TargetRateSection({ rows, canEditMatrix, referenceDate, currency
                   <td>
                     <strong>{row.definition_name}</strong>
                     <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{row.definition_code}</div>
+                    {applicabilityFlag(row) && <div className={styles.notApplicableFlag}>{applicabilityFlag(row)}</div>}
                     {row.future && <div style={{ fontSize: '0.72rem', color: '#d97706', marginTop: '2px' }}>Next: {fmtAmount(row.future.amount, row.unit, currencyCode, currencyDigits)} from {row.future.effective_from}</div>}
                     {targetErrors[id] && <div className={styles.actionErr} style={{ marginTop: '0.35rem' }}>{targetErrors[id]}</div>}
                   </td>
@@ -63,8 +65,8 @@ export function TargetRateSection({ rows, canEditMatrix, referenceDate, currency
         </table>
       ) : (
         <div className={styles.emptySection}>
-          <p>This branch has no active pay items that need a rate.</p>
-          <p className={styles.emptySectionHint}>Pay items are activated per branch under <strong>Settings &gt; Pay Items</strong>.</p>
+          <p>No pay items are available to rate yet.</p>
+          <p className={styles.emptySectionHint}>Pay items are created and activated per branch under <strong>Settings &gt; Pay Items</strong>.</p>
         </div>
       )}
     </div>
