@@ -1,6 +1,6 @@
 ## Plan: Durable Driver identity, Driver-owned compensation, payable rules
 
-**Order: Stage 1 → Stage 2 → Stage 3 → P4c.** All three stages must land before P4c, because P4c freezes driver identity, rate identity and payable amounts into evidence and the hash. Stage 1 is merged (PR #57, migration `0087`); Stage 2 is the current work unit.
+**Order: Stage 1 → Stage 2 → Stage 3 → P4c.** All three stages must land before P4c, because P4c freezes driver identity, rate identity and payable amounts into evidence and the hash. Stage 1 (PR #57, migration `0087`) and Stage 2 (PR #58, migration `0088`) are merged; Stage 3 is implemented (no migration) and closes on merge.
 
 ### The model (target)
 
@@ -228,6 +228,8 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 
 ### Stage 3: Payable rules in the live calculation
 
+**Status: IMPLEMENTED** (no migration). Decisions recorded below, after "Done when".
+
 **The leader leads to:**
 
 - **Rounding**, applied in the live packet and preview:
@@ -276,6 +278,16 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 - Every official amount has valid currency precision.
 - Permanent home-calendar mismatches block instead of guessing (delivered by Stage 2); temporary host work never changes the home Min/Max calendar by itself.
 - The packet carries everything P4c needs.
+
+#### Stage 3 implementation decisions
+
+- **One rounding authority.** `payroll/calculation/payable_rounding.py` (`payable-rounding-v1`, `round_payable`) is the only function that currency-rounds money: official amounts and typed-input normalization. Min/Max proration is `minmax-proration-v1` (`calculation/minmax_proration.py`).
+- **Status pay is an official component** with the same rule as ordinary earnings: one amount per DriverAssignment × status rate column × period, summed first and rounded once. Status rates still resolve as before (legacy, assignment-keyed, until P5).
+- **Zero scheduled days** in the guarantee period: Min and Max are not applied; the packet carries a warning naming the Driver/DriverAssignment and the rule(s). Not a blocker.
+- **Zero eligible scheduled days** with scheduled days present (for example a start on a non-scheduled day): neither Min nor Max applies, so there is no top-up and no cap and the Driver is paid exactly what was earned. The 0/N fraction is recorded; no warning.
+- **Non-normalized dev amounts** (a stored Bonus or pay-rule amount with more decimals than the Company currency) are refused in the packet with the blocker `SOURCE_AMOUNT_PRECISION`, which names the record and asks for re-entry. They are never rewritten and there is no data migration.
+- **Typed-in amounts** (Bonus create, update and batch; DriverPayRule create) accept up to ten decimals and are normalized with `round_payable` under the Company currency lock; an amount that rounds to zero is a 422. The Bonus batch idempotency hash covers the normalized amounts.
+- **Packet scope.** Line `calculated_amount` values stay at internal precision; driver totals are sums of official components. The packet exposes currency, both versions, the official components with their pre-rounding amounts and the Min/Max proration record; evidence, hash and finalization are untouched (P4c).
 
 ---
 
