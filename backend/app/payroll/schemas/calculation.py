@@ -143,6 +143,48 @@ class CalculationPreviewLine(BaseModel):
 
 
 
+class CalculationPreviewComponent(BaseModel):
+    """One official payable amount of a driver (payable-rounding-v1).
+
+    ``official_amount`` is the sum of the contributing raw amounts rounded once to the
+    Company currency; ``pre_rounding_amount`` is that raw sum at internal precision.
+    """
+    __module__ = "app.payroll.schemas"
+    kind: str    # ORDINARY | STATUS | BONUS | MINIMUM_ADJUSTMENT | MAXIMUM_ADJUSTMENT
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    status_rate_column_id: int | None = None
+    driver_pay_rule_id: int | None = None
+    pre_rounding_amount: Decimal
+    official_amount: Decimal
+    line_count: int
+    unresolved_line_count: int = 0
+
+
+
+class CalculationPreviewMinMax(BaseModel):
+    """How a driver's Minimum/Maximum were evaluated for this period (minmax-proration-v1).
+
+    ``status`` is APPLIED, or why neither rule applied (NO_RULE, NO_SCHEDULED_DAYS,
+    NO_ELIGIBLE_SCHEDULED_DAYS, CALENDAR_MISMATCH, MIN_EXCEEDS_MAX,
+    SOURCE_AMOUNT_PRECISION, MINMAX_PERIOD_DAYS_MISSING). ``numerator`` / ``denominator``
+    are the eligible and the scheduled whole days of the period.
+    """
+    __module__ = "app.payroll.schemas"
+    status: str
+    proration_version: str
+    numerator: int | None = None
+    denominator: int | None = None
+    base_amount: Decimal
+    minimum_rule_id: int | None = None
+    minimum_rule_amount: Decimal | None = None
+    prorated_minimum: Decimal | None = None
+    maximum_rule_id: int | None = None
+    maximum_rule_amount: Decimal | None = None
+    prorated_maximum: Decimal | None = None
+
+
+
 class CalculationPreviewDriverTotal(BaseModel):
     """One driver's provisional expected-pay breakdown."""
     __module__ = "app.payroll.schemas"
@@ -160,6 +202,8 @@ class CalculationPreviewDriverTotal(BaseModel):
     needs_manager_review: bool
     blockers: list[str]
     lines: list[CalculationPreviewLine]
+    components: list[CalculationPreviewComponent] = []
+    minmax: CalculationPreviewMinMax | None = None
 
 
 
@@ -172,6 +216,8 @@ class CalculationPreviewResponse(BaseModel):
     __module__ = "app.payroll.schemas"
     currency_code: str | None
     currency_minor_unit_digits: int | None
+    payable_rounding_version: str | None = None
+    minmax_proration_version: str | None = None
     payroll_period_id: int
     company_id: int
     branch_id: int

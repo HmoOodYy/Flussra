@@ -276,16 +276,17 @@ async def test_stored_draft_line_money_cannot_change_any_live_result(
 
 
 # ---------------------------------------------------------------------------
-# No payable rounding in P4b
+# Line amounts keep calculation precision; the official amount is rounded once
 # ---------------------------------------------------------------------------
 
-async def test_the_day_grid_gross_is_the_exact_live_aggregate_not_a_rounded_one(
+async def test_line_amounts_keep_four_decimals_while_the_official_amount_is_rounded_once(
     p3c_client, p3c_engine, tenant,
 ):
-    """The authoritative live value keeps the calculation precision (four decimals).
+    """Internal precision stays at four decimals (Day Grid, lines); the packet's official
+    amounts are rounded once to the Company currency (payable-rounding-v1, USD here).
 
-    Payable/minor-unit rounding is decided by the evidence work unit; until then the
-    Day Grid and the Calculation Preview must agree on the exact aggregate.
+    The Day Grid gross is a live entry aid over raw line amounts and is not an official
+    amount; the Calculation Preview carries the official one.
     """
     await rated_definition(
         p3c_client, tenant, rate="0.3333", definition_code="ITEM_A", definition_name="Alpha")
@@ -299,14 +300,24 @@ async def test_the_day_grid_gross_is_the_exact_live_aggregate_not_a_rounded_one(
         str(by_code["ITEM_A"]): "3", str(by_code["ITEM_B"]): "2"})
     assert saved.status_code == 200, saved.text
     gross = Decimal((await _grid(p3c_client, tenant, period))["summary"]["gross_total"])
-    assert gross == Decimal("3.2221")            # 3 x 0.3333 + 2 x 1.1111, exactly
-    assert gross != gross.quantize(Decimal("0.01"))
+    assert gross == Decimal("3.2221")            # 3 x 0.3333 + 2 x 1.1111, exactly (entry aid)
 
     preview = (await p3c_client.get(
         f"/payroll/periods/{period['payroll_period_id']}/calculation-preview",
         headers=tenant.admin)).json()
-    assert Decimal(preview["total_expected_pay"]) == gross
-    assert Decimal(preview["drivers"][0]["daily_pay"]) == gross
+    driver = preview["drivers"][0]
+    # Each definition is rounded once: 0.9999 -> 1.00 and 2.2222 -> 2.22; the driver's pay is
+    # the exact sum of the two official components, never re-rounded.
+    assert sorted(
+        (Decimal(c["pre_rounding_amount"]), Decimal(c["official_amount"]))
+        for c in driver["components"]
+    ) == [(Decimal("0.9999"), Decimal("1.00")), (Decimal("2.2222"), Decimal("2.22"))]
+    assert Decimal(driver["daily_pay"]) == Decimal("3.22")
+    assert Decimal(driver["expected_pay"]) == Decimal("3.22")
+    assert Decimal(preview["total_expected_pay"]) == Decimal("3.22")
+    # The lines themselves keep the raw four-decimal contributions.
+    assert sorted(Decimal(line["calculated_amount"]) for line in driver["lines"]) == [
+        Decimal("0.9999"), Decimal("2.2222")]
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import type {
 } from '../../types/payroll/calculation';
 import styles from './CalculationPreviewDialog.module.css';
 import { formatMoney as formatCurrencyMoney } from '../../lib/money';
+import { minMaxNote } from './calculationPreviewView';
 
 function formatMoney(value: string | null | undefined, code: string | null, digits: number | null): string {
   if (value == null) return 'Not resolved';
@@ -70,7 +71,10 @@ function DriverTotals({ drivers, code, digits }: { drivers: CalculationPreviewDr
         <tbody>
           {drivers.map((driver) => (
             <tr key={driver.driver_assignment_id} className={driver.needs_manager_review ? styles.reviewRow : undefined}>
-              <td>{driver.driver_name ?? 'Unnamed driver'}</td>
+              <td>
+                {driver.driver_name ?? 'Unnamed driver'}
+                {minMaxNote(driver) && <div className={styles.rowNote}>{minMaxNote(driver)}</div>}
+              </td>
               <td className={styles.numeric}>{formatMoney(driver.daily_pay, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.status_pay, code, digits)}</td>
               <td className={styles.numeric}>{formatMoney(driver.minimum_adjustment, code, digits)}</td>

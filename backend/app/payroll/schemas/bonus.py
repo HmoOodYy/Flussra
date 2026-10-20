@@ -47,7 +47,7 @@ class BonusEventCreate(BaseModel):
     @field_validator("amount")
     @classmethod
     def amount_valid(cls, v: Decimal) -> Decimal:
-        return _validate_positive_numeric_18_4(v, amount_label="Bonus amount")
+        return _validate_typed_monetary_amount(v, amount_label="Bonus amount")
 
 
 
@@ -64,7 +64,7 @@ class BonusEventUpdate(BaseModel):
     def amount_valid(cls, v: Decimal | None) -> Decimal | None:
         if v is None:
             return None
-        return _validate_positive_numeric_18_4(v, amount_label="Bonus amount")
+        return _validate_typed_monetary_amount(v, amount_label="Bonus amount")
 
 
 
@@ -156,31 +156,41 @@ class BonusSummaryResponse(BaseModel):
 # NUMERIC(18,4) supports fourteen integer digits and four fractional digits.
 _NUMERIC_18_4_MAX_EXCLUSIVE = Decimal("10") ** 14
 
+# A typed-in monetary amount may carry more precision than the Company currency stores; the
+# server rounds it once, to the currency's decimals, on entry (payable-rounding-v1). The
+# scale limit only keeps absurd input out.
+TYPED_AMOUNT_MAX_FRACTION_DIGITS = 10
 
 
-def _validate_positive_numeric_18_4(v: Decimal, *, amount_label: str) -> Decimal:
-    """Validate a positive monetary amount exactly representable by NUMERIC(18,4)."""
+
+def _validate_typed_monetary_amount(v: Decimal, *, amount_label: str) -> Decimal:
+    """Validate a typed-in Bonus/Minimum/Maximum amount before its currency normalization.
+
+    The amount must be finite, positive, within NUMERIC(18,4) magnitude and carry at most
+    ``TYPED_AMOUNT_MAX_FRACTION_DIGITS`` decimals. Extra precision is accepted here and
+    rounded to the Company currency by the service; whether the rounded value is still
+    positive is decided there, where the currency is known.
+    """
     if not v.is_finite():
         raise ValueError(f"{amount_label} must be a finite number.")
     if v <= 0:
         raise ValueError(f"{amount_label} must be positive (> 0).")
     if abs(v) >= _NUMERIC_18_4_MAX_EXCLUSIVE:
         raise ValueError(f"{amount_label} exceeds the maximum allowed (NUMERIC(18,4)).")
-
     digits = list(v.as_tuple().digits)
     exponent = v.as_tuple().exponent
-    while exponent < -4 and digits and digits[-1] == 0:
+    while exponent < -TYPED_AMOUNT_MAX_FRACTION_DIGITS and digits and digits[-1] == 0:
         digits.pop()
         exponent += 1
-    if exponent < -4:
+    if exponent < -TYPED_AMOUNT_MAX_FRACTION_DIGITS:
         raise ValueError(
-            f"{amount_label} may have at most four decimal places (NUMERIC(18,4))."
+            f"{amount_label} may have at most {TYPED_AMOUNT_MAX_FRACTION_DIGITS} decimal places."
         )
     return v
 
 
 
-_validate_positive_numeric_18_4.__module__ = "app.payroll.schemas"
+_validate_typed_monetary_amount.__module__ = "app.payroll.schemas"
 
 class BonusBatchItem(BaseModel):
     """One create-only bonus row inside a batch (CP-3B2b)."""
@@ -193,7 +203,7 @@ class BonusBatchItem(BaseModel):
     @field_validator("amount")
     @classmethod
     def amount_valid(cls, v: Decimal) -> Decimal:
-        return _validate_positive_numeric_18_4(v, amount_label="Bonus amount")
+        return _validate_typed_monetary_amount(v, amount_label="Bonus amount")
 
 
 

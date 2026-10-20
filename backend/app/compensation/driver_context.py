@@ -55,7 +55,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.permissions import has_any_permission
 from app.access.policy import require_non_driver_subject
-from app.company_currency import lock_and_get_company_currency_for_monetary_write
+from app.company_currency import (
+    CompanyCurrency,
+    lock_and_get_company_currency_for_monetary_write,
+)
 from app.compensation.errors import compensation_error
 from app.compensation.guards import RATE_EDIT, RATE_READ
 from app.payroll.guards import driver_payroll_period_branches
@@ -344,7 +347,7 @@ async def driver_compensation_access(
 async def lock_driver_compensation_write(
     company_id: int, driver_id: int, rate_definition_id: int | None, db: AsyncConnection,
     *, monetary: bool, lock_from: date | None,
-) -> None:
+) -> CompanyCurrency | None:
     """Take steps 2-5 of the lock order (see the module docstring).
 
     ``rate_definition_id`` is None for a writer with no RateDefinition (a pay rule). ``monetary``
@@ -352,9 +355,13 @@ async def lock_driver_compensation_write(
     additionally takes the Branch workflow locks of every tenure overlapping
     ``[lock_from, infinity)``. The caller then locks its rows FOR UPDATE, reads one decision
     instant and re-checks authority and the finalized guard before any DML.
+
+    Returns the Company currency read under the monetary guard (None when not ``monetary``),
+    so a writer of a typed-in amount normalizes it under the same lock.
     """
+    currency = None
     if monetary:
-        await lock_and_get_company_currency_for_monetary_write(company_id, db)
+        currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await db.execute(
         text("""
             SELECT driverassignmentid FROM core.driverassignments
@@ -376,3 +383,4 @@ async def lock_driver_compensation_write(
             await acquire_branch_workflow_lock(company_id, branch_id, db)
     if rate_definition_id is not None:
         await lock_rate_definition_structure(rate_definition_id, db)
+    return currency

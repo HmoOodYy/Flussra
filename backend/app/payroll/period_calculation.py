@@ -22,9 +22,11 @@ AsyncConnection, opens no transaction, commits nothing and rolls back nothing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
+from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
@@ -33,10 +35,20 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
-from app.company_currency import get_company_currency
+from app.company_currency import CompanyCurrency, currency_error, get_company_currency
 from app.payroll import bonus as payroll_bonus
+from app.payroll.calculation import minmax_proration as minmax
+from app.payroll.calculation.minmax_proration import MINMAX_PRORATION_VERSION
+from app.payroll.calculation.payable_rounding import (
+    PAYABLE_ROUNDING_VERSION,
+    is_payable_precision,
+    round_payable,
+)
 from app.payroll.definition_calculation import CalculationStatus
-from app.payroll.eligibility import require_period_eligibility_snapshot
+from app.payroll.eligibility import (
+    _is_snapshot_row_eligible_for_workdate,
+    require_period_eligibility_snapshot,
+)
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
@@ -180,6 +192,74 @@ class _CalculationPacketLine:
 
 
 @dataclass(frozen=True)
+class _OfficialComponent:
+    """One official payable amount of a DriverAssignment in the period.
+
+    ``pre_rounding_amount`` is the exact sum of its raw contributions at internal
+    precision; ``official_amount`` is that sum rounded once with ``round_payable``.
+    Identity: ORDINARY is keyed by PayrollPeriodDefinitionID + PayDefinitionID + the frozen
+    calculation method/version, STATUS by the status rate column, BONUS by the
+    DriverAssignment alone, and MINIMUM_ADJUSTMENT / MAXIMUM_ADJUSTMENT by the DriverPayRule.
+    ``source_ids`` are the contributing line source ids; ``unresolved_line_count`` counts
+    contributing lines whose amount is missing (a blocker is raised separately).
+    """
+
+    kind: str
+    driver_assignment_id: int
+    pre_rounding_amount: Decimal
+    official_amount: Decimal
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    calculation_method: str | None = None
+    calculation_method_version: int | None = None
+    status_rate_column_id: int | None = None
+    driver_pay_rule_id: int | None = None
+    source_ids: tuple[str, ...] = ()
+    unresolved_line_count: int = 0
+
+
+@dataclass(frozen=True)
+class _MinMaxRule:
+    """A DriverPayRule as selected for the period, with the home pay calendar it recorded."""
+
+    driver_pay_rule_id: int
+    rule_type: str
+    amount: Decimal
+    status: str
+    effective_from: date
+    effective_to: date | None
+    calendar_frequency: str
+    calendar_anchor_start_date: date
+    calendar_custom_interval_days: int | None
+    calendar_source_branch_id: int
+    calendar_source_payroll_setup_version_id: int
+    prorated_amount: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class _MinMaxProration:
+    """How one DriverAssignment's Minimum/Maximum were evaluated for the Branch period.
+
+    ``status`` is APPLIED or the reason neither rule applied. ``numerator`` / ``denominator``
+    are the eligible and the scheduled whole days of the period (None when the evaluation
+    stopped before the days were counted). ``base_amount`` is the official ordinary plus
+    status pay the rules were compared with (Bonus excluded).
+    """
+
+    driver_assignment_id: int
+    driver_id: int
+    payroll_period_id: int
+    branch_id: int
+    status: str
+    base_amount: Decimal
+    numerator: int | None = None
+    denominator: int | None = None
+    minimum_rule: _MinMaxRule | None = None
+    maximum_rule: _MinMaxRule | None = None
+    version: str = MINMAX_PRORATION_VERSION
+
+
+@dataclass(frozen=True)
 class _CalculationPacketDriverTotal:
     driver_assignment_id: int
     driver_id: int
@@ -194,6 +274,8 @@ class _CalculationPacketDriverTotal:
     needs_manager_review: bool
     blockers: list[str]
     lines: list[_CalculationPacketLine]
+    components: list[_OfficialComponent] = field(default_factory=list)
+    minmax: _MinMaxProration | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +288,10 @@ class _LiveCalculationPacket:
     warnings: list[str]
     drivers: list[_CalculationPacketDriverTotal]
     total_expected_pay: Decimal
+    currency_code: str | None = None
+    currency_minor_unit_digits: int | None = None
+    payable_rounding_version: str = PAYABLE_ROUNDING_VERSION
+    minmax_proration_version: str = MINMAX_PRORATION_VERSION
 
 
 async def _validate_legacy_status_canonicalized(
@@ -276,6 +362,400 @@ async def _validate_legacy_status_canonicalized(
     ]
 
 
+
+
+@dataclass
+class _Accumulator:
+    """Raw contributions to one official component, summed before the one rounding."""
+
+    kind: str
+    driver_assignment_id: int
+    identity: dict[str, Any] = field(default_factory=dict)
+    raw: Decimal = field(default_factory=lambda: Decimal("0"))
+    source_ids: list[str] = field(default_factory=list)
+    unresolved: int = 0
+
+    def add(self, amount: Decimal | None, source_id: str | None, *, unresolved: bool = False) -> None:
+        self.raw += amount if amount is not None else Decimal("0")
+        if source_id is not None:
+            self.source_ids.append(source_id)
+        if unresolved:
+            self.unresolved += 1
+
+    def official(self, round_amount) -> _OfficialComponent:
+        return _OfficialComponent(
+            kind=self.kind,
+            driver_assignment_id=self.driver_assignment_id,
+            pre_rounding_amount=self.raw,
+            official_amount=round_amount(self.raw),
+            source_ids=tuple(self.source_ids),
+            unresolved_line_count=self.unresolved,
+            **self.identity,
+        )
+
+
+@dataclass
+class _MinMaxOutcome:
+    proration: _MinMaxProration
+    raw_minimum: Decimal = field(default_factory=lambda: Decimal("0"))
+    raw_maximum: Decimal = field(default_factory=lambda: Decimal("0"))
+    blockers: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+_MINIMUM = "MinimumPay"
+_MAXIMUM = "MaximumPay"
+
+
+def _minmax_rule_from_row(row: Any) -> _MinMaxRule:
+    return _MinMaxRule(
+        driver_pay_rule_id=int(row["driverpayruleid"]),
+        rule_type=row["ruletype"],
+        amount=Decimal(str(row["amount"])),
+        status=row["status"],
+        effective_from=row["effectivefrom"],
+        effective_to=row["effectiveto"],
+        calendar_frequency=row["calendarfrequency"],
+        calendar_anchor_start_date=row["calendaranchorstartdate"],
+        calendar_custom_interval_days=row["calendarcustomintervaldays"],
+        calendar_source_branch_id=int(row["calendarsourcebranchid"]),
+        calendar_source_payroll_setup_version_id=int(row["calendarsourcepayrollsetupversionid"]),
+    )
+
+
+async def _load_effective_rules(
+    company_id: int, driver_ids: list[int], as_of: date, db: AsyncConnection,
+) -> dict[tuple[int, str], _MinMaxRule]:
+    """The Minimum and Maximum rule of each Driver effective at ``as_of`` (v1 selection).
+
+    One set-based read for all Drivers: per (Driver, rule type) the Active or Ended rule whose
+    window contains the period start, the latest start winning. Rules are owned by the
+    permanent Driver, never by a DriverAssignment.
+    """
+    if not driver_ids:
+        return {}
+    rows = (await db.execute(
+        text("""
+            SELECT DISTINCT ON (driverid, ruletype)
+                   driverpayruleid, driverid, ruletype, amount, status,
+                   effectivefrom, effectiveto,
+                   calendarfrequency, calendaranchorstartdate, calendarcustomintervaldays,
+                   calendarsourcebranchid, calendarsourcepayrollsetupversionid
+            FROM payroll.driverpayrules
+            WHERE  companyid     = :cid
+              AND  driverid      = ANY(:driver_ids)
+              AND  ruletype      IN ('MinimumPay', 'MaximumPay')
+              AND  status        IN ('Active', 'Ended')
+              AND  effectivefrom <= :as_of
+              AND  (effectiveto IS NULL OR effectiveto >= :as_of)
+            ORDER BY driverid, ruletype, effectivefrom DESC
+        """),
+        {"cid": company_id, "driver_ids": sorted(set(driver_ids)), "as_of": as_of},
+    )).mappings().all()
+    return {(int(row["driverid"]), row["ruletype"]): _minmax_rule_from_row(row) for row in rows}
+
+
+async def _load_coverage_inputs(
+    period: PeriodSummary, company_id: int, assignment_drivers: dict[int, int],
+    db: AsyncConnection,
+) -> tuple[bool, set[date], dict[int, set[date]], dict[int, set[date]]]:
+    """(has day rows, scheduled days, per DriverAssignment the eligible work dates it owns,
+    per DriverAssignment its days with an off-reason Status).
+
+    Scheduled days are read from the frozen ``PayrollPeriodDays`` only; a period without day
+    rows reports ``has day rows`` False (the caller blocks, nothing is inferred). A date belongs to
+    exactly one DriverAssignment of a Driver: the latest-starting one whose window overlaps
+    that Branch-local day (rule D1), decided from captured eligibility where it exists, so a
+    transfer day shared by two tenures counts for one of them only. At most four reads for
+    all assignments, however many there are.
+    """
+    day_rows = (await db.execute(
+        text("""
+            SELECT workdate, (isdefaultworkday OR isaddedworkday) AS scheduled
+            FROM payroll.payrollperioddays
+            WHERE payrollperiodid = :pid AND companyid = :cid
+        """),
+        {"pid": period.payroll_period_id, "cid": company_id},
+    )).mappings().all()
+    scheduled = {row["workdate"] for row in day_rows if row["scheduled"]}
+    if not scheduled:
+        return bool(day_rows), scheduled, {}, {}
+    ids = sorted(assignment_drivers)
+    snapshot_rows = (await db.execute(
+        text("""
+            SELECT driverassignmentid, iseligibleforperiod, eligibilityreasoncode,
+                   eligibleworkdates
+            FROM   payroll.payrollperioddrivereligibility
+            WHERE  payrollperiodid = :pid AND companyid = :cid
+              AND  driverassignmentid = ANY(:ids)
+        """),
+        {"pid": period.payroll_period_id, "cid": company_id, "ids": ids},
+    )).mappings().all()
+    # Ownership by captured facts. A date of X is taken away only by a later-ranking tenure Y of
+    # the same Driver (rule D1 order: later start, then higher id) that claims it: (a) through
+    # its frozen eligibility in a live period, or (b) only when Y's Branch has no captured period
+    # covering the date, through the live D1 window. A captured roster without Y is a frozen
+    # "no claim", never a reason to fall back to the live window. A Branch timezone edit
+    # therefore never moves a date that has been captured.
+    owned_rows = (await db.execute(
+        text("""
+            SELECT x.driverassignmentid AS assignmentid, d.workdate
+            FROM   core.driverassignments x
+            CROSS JOIN unnest(CAST(:days AS DATE[])) AS d(workdate)
+            WHERE  x.companyid = :cid AND x.driverassignmentid = ANY(:ids)
+              AND  NOT EXISTS (
+                SELECT 1 FROM core.driverassignments y
+                WHERE  y.companyid = x.companyid AND y.driverid = x.driverid
+                  AND  y.driverassignmentid <> x.driverassignmentid
+                  AND  (y.effectivefromat > x.effectivefromat
+                        OR (y.effectivefromat = x.effectivefromat
+                            AND y.driverassignmentid > x.driverassignmentid))
+                  AND  (
+                    EXISTS (
+                      SELECT 1
+                      FROM   payroll.payrollperioddrivereligibility e
+                      JOIN   payroll.payrollperiods p ON p.payrollperiodid = e.payrollperiodid
+                      WHERE  e.driverassignmentid = y.driverassignmentid
+                        AND  p.status <> 'Cancelled'
+                        AND  e.iseligibleforperiod
+                        AND  e.eligibilityreasoncode IS DISTINCT FROM 'IncludedByExistingData'
+                        AND  d.workdate = ANY(e.eligibleworkdates))
+                    OR (
+                      NOT EXISTS (
+                        SELECT 1
+                        FROM   payroll.payrollperiods p
+                        JOIN   payroll.payrollperiodeligibilitysnapshots marker
+                               ON  marker.payrollperiodid = p.payrollperiodid
+                               AND marker.companyid = p.companyid
+                               AND marker.branchid = p.branchid
+                        WHERE  p.companyid = y.companyid AND p.branchid = y.branchid
+                          AND  p.status <> 'Cancelled'
+                          AND  p.startdate <= d.workdate AND d.workdate <= p.enddate)
+                      AND core.fn_DriverEffectiveRange(y.effectivefromat, y.effectivetoat)
+                          && core.fn_BranchWorkDateRange(y.companyid, y.branchid,
+                                                         d.workdate, d.workdate)))
+              )
+        """),
+        {"cid": company_id, "ids": ids, "days": sorted(scheduled)},
+    )).mappings().all()
+    owned: dict[int, set[date]] = {}
+    for row in owned_rows:
+        owned.setdefault(int(row["assignmentid"]), set()).add(row["workdate"])
+    eligible: dict[int, set[date]] = {}
+    for row in snapshot_rows:
+        snapshot = SimpleNamespace(**dict(row))
+        assignment_id = int(row["driverassignmentid"])
+        eligible[assignment_id] = {
+            day for day in owned.get(assignment_id, ())
+            if _is_snapshot_row_eligible_for_workdate(snapshot, day)
+        }
+    # The explicit IsOffReason flag, never a status name: the frozen snapshot once the entry
+    # state is finalized, otherwise the live Status key (the pattern of off_drivers).
+    off_rows = (await db.execute(
+        text("""
+            SELECT es.driverassignmentid, es.workdate
+            FROM   payroll.payrollperioddriverdayentrystate es
+            JOIN   payroll.payrollstatuskeys sk ON sk.statuskeyid = es.statuskeyid
+            WHERE  es.payrollperiodid = :pid AND es.companyid = :cid
+              AND  es.driverassignmentid = ANY(:ids)
+              AND  es.isvoided = FALSE
+              AND  es.statuskeyid IS NOT NULL
+              AND  (CASE WHEN es.finalizedatutc IS NOT NULL
+                         THEN es.statusisoffreasonsnapshot
+                         ELSE sk.isoffreason END) IS TRUE
+        """),
+        {"pid": period.payroll_period_id, "cid": company_id, "ids": ids},
+    )).mappings().all()
+    off_days: dict[int, set[date]] = {}
+    for row in off_rows:
+        off_days.setdefault(int(row["driverassignmentid"]), set()).add(row["workdate"])
+    return True, scheduled, eligible, off_days
+
+
+def _proration(
+    period: PeriodSummary, assignment_id: int, driver_id: int, base: Decimal,
+    status: str, **kwargs: Any,
+) -> _MinMaxProration:
+    return _MinMaxProration(
+        driver_assignment_id=assignment_id, driver_id=driver_id,
+        payroll_period_id=period.payroll_period_id, branch_id=period.branch_id,
+        status=status, base_amount=base, **kwargs)
+
+
+async def _evaluate_minmax(
+    period: PeriodSummary,
+    company_id: int,
+    assignment_driver: dict[int, int],
+    bases: dict[int, Decimal],
+    currency: CompanyCurrency | None,
+    db: AsyncConnection,
+) -> dict[int, _MinMaxOutcome]:
+    """Evaluate every DriverAssignment's Minimum/Maximum for this Branch period.
+
+    Selection is v1: the rule of the permanent Driver effective at the period start. A rule
+    applies only when the period is exactly one period of the calendar it recorded
+    (MINMAX_CALENDAR_MISMATCH otherwise), and, for a DriverAssignment covering only part of
+    the period, both amounts are prorated by the same whole-day fraction. When no scheduled
+    day is eligible, or the period has none, neither rule applies.
+    """
+    digits = None if currency is None else currency.minor_unit_digits
+    rules = await _load_effective_rules(
+        company_id, list(assignment_driver.values()), period.start_date, db)
+    ruled = {
+        assignment: driver for assignment, driver in sorted(assignment_driver.items())
+        if (driver, _MINIMUM) in rules or (driver, _MAXIMUM) in rules
+    }
+    has_days = False
+    scheduled: set[date] = set()
+    eligible: dict[int, set[date]] = {}
+    off_days: dict[int, set[date]] = {}
+    if ruled:
+        has_days, scheduled, eligible, off_days = await _load_coverage_inputs(
+            period, company_id, ruled, db)
+
+    outcomes: dict[int, _MinMaxOutcome] = {}
+    for assignment_id in sorted(assignment_driver):
+        driver_id = assignment_driver[assignment_id]
+        base = bases[assignment_id]
+        minimum = rules.get((driver_id, _MINIMUM))
+        maximum = rules.get((driver_id, _MAXIMUM))
+
+        proration = partial(_proration, period, assignment_id, driver_id, base)
+
+        if minimum is None and maximum is None:
+            outcomes[assignment_id] = _MinMaxOutcome(proration(minmax.NO_RULE))
+            continue
+
+        # A rule applies to a period only when the period is exactly one period of the
+        # calendar the rule recorded (the home pay calendar it was set for). Anything else is
+        # a blocker for this driver: never rescaled, never silently dropped or duplicated.
+        mismatched = [
+            (label, rule) for label, rule in (("Minimum", minimum), ("Maximum", maximum))
+            if rule is not None and not period_matches_schedule(
+                Schedule(rule.calendar_frequency, rule.calendar_anchor_start_date,
+                         rule.calendar_custom_interval_days, 0),
+                period.start_date, period.end_date)
+        ]
+        if mismatched:
+            outcomes[assignment_id] = _MinMaxOutcome(
+                proration(minmax.CALENDAR_MISMATCH, minimum_rule=minimum, maximum_rule=maximum),
+                blockers=[
+                    f"MINMAX_CALENDAR_MISMATCH: the {label} pay rule {rule.driver_pay_rule_id} "
+                    f"was set for a {rule.calendar_frequency} pay calendar that does not "
+                    f"match this period ({period.start_date} to {period.end_date}). "
+                    f"End the rule and create a new one for the Driver's current calendar."
+                    for label, rule in mismatched
+                ])
+            continue
+
+        blockers: list[str] = []
+        reason: str | None = None
+        if digits is not None:
+            for label, rule in (("Minimum", minimum), ("Maximum", maximum)):
+                if rule is not None and not is_payable_precision(rule.amount, digits):
+                    blockers.append(
+                        f"SOURCE_AMOUNT_PRECISION: the {label} pay rule {rule.driver_pay_rule_id} "
+                        f"amount {rule.amount} has more decimals than the Company currency "
+                        f"allows ({digits}). End the rule and create a new one with a "
+                        f"correctly rounded amount.")
+                    reason = minmax.SOURCE_AMOUNT_PRECISION
+        if minimum is not None and maximum is not None and minimum.amount > maximum.amount:
+            blockers.append(
+                f"Minimum pay ({minimum.amount}) exceeds maximum pay ({maximum.amount}). "
+                f"Correct the pay rules before this driver's total can be trusted.")
+            reason = reason or minmax.MIN_EXCEEDS_MAX
+        if blockers:
+            outcomes[assignment_id] = _MinMaxOutcome(
+                proration(reason or minmax.MIN_EXCEEDS_MAX,
+                          minimum_rule=minimum, maximum_rule=maximum),
+                blockers=blockers)
+            continue
+
+        if not has_days:
+            # No frozen day calendar: the days are never inferred, so nothing can be prorated.
+            outcomes[assignment_id] = _MinMaxOutcome(
+                proration(minmax.MINMAX_PERIOD_DAYS_MISSING,
+                          minimum_rule=minimum, maximum_rule=maximum),
+                blockers=[
+                    "MINMAX_PERIOD_DAYS_MISSING: this period has no frozen day calendar, so "
+                    "the Minimum/Maximum pay rule(s) "
+                    + ", ".join(
+                        str(rule.driver_pay_rule_id) for rule in (minimum, maximum)
+                        if rule is not None)
+                    + " cannot be prorated."])
+            continue
+
+        numerator, denominator = minmax.coverage(
+            scheduled, eligible.get(assignment_id, ()), off_days.get(assignment_id, ()))
+        if denominator == 0 or numerator == 0:
+            # Neither rule applies: no top-up, no cap, the Driver is paid exactly what was
+            # earned. Only a period with no scheduled day at all is worth a warning.
+            outcome = _MinMaxOutcome(proration(
+                minmax.NO_SCHEDULED_DAYS if denominator == 0 else minmax.NO_ELIGIBLE_SCHEDULED_DAYS,
+                numerator=numerator, denominator=denominator,
+                minimum_rule=minimum, maximum_rule=maximum))
+            if denominator == 0:
+                ids = ", ".join(
+                    f"{label} {rule.driver_pay_rule_id}"
+                    for label, rule in (("Minimum", minimum), ("Maximum", maximum))
+                    if rule is not None)
+                outcome.warnings.append(
+                    f"Driver {assignment_id} (DriverID {driver_id}): this period has no scheduled "
+                    f"days, so the pay rule(s) {ids} were not applied.")
+            outcomes[assignment_id] = outcome
+            continue
+
+        if minimum is not None:
+            minimum = replace(
+                minimum, prorated_amount=minmax.prorate(minimum.amount, numerator, denominator))
+        if maximum is not None:
+            maximum = replace(
+                maximum, prorated_amount=minmax.prorate(maximum.amount, numerator, denominator))
+        outcomes[assignment_id] = _MinMaxOutcome(
+            proration(minmax.APPLIED, numerator=numerator, denominator=denominator,
+                      minimum_rule=minimum, maximum_rule=maximum),
+            raw_minimum=minmax.raw_minimum_adjustment(
+                base, None if minimum is None else minimum.prorated_amount),
+            raw_maximum=minmax.raw_maximum_adjustment(
+                base, None if maximum is None else maximum.prorated_amount),
+        )
+    return outcomes
+
+
+def _minmax_line(
+    kind_line_type: str, rule: _MinMaxRule, proration: _MinMaxProration,
+    raw: Decimal, official: Decimal,
+) -> _CalculationPacketLine:
+    return _CalculationPacketLine(
+        source_type="System",
+        source_id=str(rule.driver_pay_rule_id),
+        line_type=kind_line_type,
+        line_scope="Period",
+        work_date=None,
+        driver_assignment_id=proration.driver_assignment_id,
+        quantity=Decimal("1"),
+        resolved_rate_amount=None,
+        calculated_amount=official,
+        needs_manager_review=False,
+        blocker_reason=None,
+        source_evidence={
+            "DriverPayRuleID": rule.driver_pay_rule_id,
+            "RuleType": rule.rule_type,
+            "RuleAmount": rule.amount,
+            "RuleStatus": rule.status,
+            "EffectiveFrom": rule.effective_from,
+            "EffectiveTo": rule.effective_to,
+            "NormalBase": proration.base_amount,
+            "ProrationVersion": proration.version,
+            "ProrationNumerator": proration.numerator,
+            "ProrationDenominator": proration.denominator,
+            "ProratedAmount": rule.prorated_amount,
+            "PreRoundingAdjustment": raw,
+            "OfficialAdjustment": official,
+        },
+    )
+
+
 async def _build_live_calculation_packet(
     period: PeriodSummary,
     company_id: int,
@@ -289,6 +769,13 @@ async def _build_live_calculation_packet(
     selections, never the stored compatibility projection, to avoid stale money
     and double counting. Minimum/maximum adjustments exclude Active Bonus events
     from their base; Bonus is added afterward.
+
+    Official amounts (payable-rounding-v1): raw line contributions stay at internal
+    precision and are summed per component (ordinary: DriverAssignment x period
+    definition; Status: DriverAssignment x status rate column; Bonus: DriverAssignment;
+    Min/Max: the adjustment), then rounded once with ``round_payable`` to the Company
+    currency. A driver total is the exact sum of its official components and is never
+    re-rounded.
 
     Include only Drivers with ordinary source, live Status pay, or Active Bonus
     events, not the full eligible roster. Lifecycle/read callers select when
@@ -319,17 +806,35 @@ async def _build_live_calculation_packet(
         db=db,
     ))
 
+    # The Company currency decides the one payable rounding. It is read here, once; a
+    # Company without a currency can hold no monetary state (every monetary writer fails
+    # closed), so every raw amount below is zero and nothing needs rounding.
+    currency = await get_company_currency(company_id, db)
+    digits = None if currency is None else currency.minor_unit_digits
+
+    def official(amount: Decimal) -> Decimal:
+        if digits is None:
+            if amount != 0:
+                raise currency_error(
+                    "COMPANY_CURRENCY_INVARIANT_VIOLATION",
+                    "A monetary amount exists for a Company without a configured currency.",
+                    409,
+                )
+            return Decimal("0")
+        return round_payable(amount, digits)
+
     # ── Ordinary daily lines: live, derived from the effective DriverRateSchedule
     # (never from a stored column). The persisted STATUS_PAYMENT/STATUS_PAY
     # compatibility projection is not a target ordinary line and is excluded.
     driver_names: dict[int, str | None] = {}
     driver_numbers: dict[int, str | None] = {}
     driver_permanent_ids: dict[int, int] = {}
-    driver_daily: dict[int, Decimal] = {}
-    driver_status: dict[int, Decimal] = {}
-    driver_bonus: dict[int, Decimal] = {}
     driver_line_nmr: dict[int, bool] = {}
     driver_lines: dict[int, list[_CalculationPacketLine]] = {}
+    ordinary: dict[tuple[int, int], _Accumulator] = {}
+    status_pay: dict[tuple[int, int | None], _Accumulator] = {}
+    bonus: dict[int, _Accumulator] = {}
+    driver_bonus_events: dict[int, list[tuple[int, Decimal]]] = {}
 
     for line in await load_live_source_lines(period_id, company_id, db):
         drv = line.driver_assignment_id
@@ -338,9 +843,17 @@ async def _build_live_calculation_packet(
         if calc.needs_attention:
             driver_line_nmr[drv] = True
         amount = calc.amount if calc.amount is not None else Decimal("0")
-        driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + amount
 
         definition = line.definition
+        component = ordinary.setdefault(
+            (drv, definition.payroll_period_definition_id),
+            _Accumulator("ORDINARY", drv, {
+                "payroll_period_definition_id": definition.payroll_period_definition_id,
+                "pay_definition_id": definition.pay_definition_id,
+                "calculation_method": definition.calculation_method,
+                "calculation_method_version": definition.calculation_method_version,
+            }))
+        component.add(calc.amount, str(line.draft_line_id), unresolved=calc.needs_attention)
         driver_lines[drv].append(_CalculationPacketLine(
             source_type="DraftLine",
             source_id=str(line.draft_line_id),
@@ -383,15 +896,17 @@ async def _build_live_calculation_packet(
         driver_names.setdefault(drv, None)
         driver_lines.setdefault(drv, [])
 
-        amt = sl.calculated_amount if sl.calculated_amount is not None else Decimal("0")
-        driver_status[drv] = driver_status.get(drv, Decimal("0")) + amt
-
         if sl.needs_manager_review:
             driver_line_nmr[drv] = True
 
+        source_id = f"STATUS_LIVE:{drv}:{sl.work_date}:{sl.status_key_id}"
+        status_pay.setdefault(
+            (drv, sl.status_rate_column_id),
+            _Accumulator("STATUS", drv, {"status_rate_column_id": sl.status_rate_column_id}),
+        ).add(sl.calculated_amount, source_id, unresolved=sl.needs_manager_review)
         driver_lines[drv].append(_CalculationPacketLine(
             source_type="StatusEntryState",
-            source_id=f"STATUS_LIVE:{drv}:{sl.work_date}:{sl.status_key_id}",
+            source_id=source_id,
             line_type=sl.line_type,
             line_scope="Daily",
             work_date=sl.work_date,
@@ -430,7 +945,8 @@ async def _build_live_calculation_packet(
         driver_permanent_ids.setdefault(drv, int(b["driverid"]))
         driver_lines.setdefault(drv, [])
         amt = Decimal(str(b["amount"]))
-        driver_bonus[drv] = driver_bonus.get(drv, Decimal("0")) + amt
+        bonus.setdefault(drv, _Accumulator("BONUS", drv)).add(amt, str(b["payrollbonuseventid"]))
+        driver_bonus_events.setdefault(drv, []).append((int(b["payrollbonuseventid"]), amt))
         driver_lines[drv].append(_CalculationPacketLine(
             source_type="BonusEvent",
             source_id=str(b["payrollbonuseventid"]),
@@ -456,12 +972,16 @@ async def _build_live_calculation_packet(
 
     # ── Financial-source-driven driver union (CP-4B: not a full roster).
     all_driver_assignment_ids = (
-        set(driver_daily) | set(driver_status) | set(driver_bonus)
+        {drv for drv, _ in ordinary} | {drv for drv, _ in status_pay} | set(bonus)
     )
 
     if not all_driver_assignment_ids:
         warnings.append("No current financial source lines for this period.")
     else:
+        if currency is None:
+            blockers.append(
+                "COMPANY_CURRENCY_REQUIRED: configure the Company currency before payroll "
+                "amounts can be made official.")
         driver_assignment_identity_result = await db.execute(
             text("""
                 SELECT a.driverassignmentid, a.driverid, d.drivernumber, e.fullname
@@ -478,165 +998,85 @@ async def _build_live_calculation_packet(
             driver_numbers.setdefault(int(identity["driverassignmentid"]), identity["drivernumber"])
             driver_permanent_ids.setdefault(int(identity["driverassignmentid"]), int(identity["driverid"]))
 
+    # ── Official ordinary, Status and Bonus components: each raw sum rounded once.
+    driver_components: dict[int, list[_OfficialComponent]] = {
+        drv: [] for drv in all_driver_assignment_ids}
+    driver_daily: dict[int, Decimal] = {}
+    driver_status: dict[int, Decimal] = {}
+    driver_bonus: dict[int, Decimal] = {}
+    driver_blockers: dict[int, list[str]] = {}
+    for (drv, _), accumulator in sorted(ordinary.items(), key=lambda item: item[0]):
+        component = accumulator.official(official)
+        driver_components[drv].append(component)
+        driver_daily[drv] = driver_daily.get(drv, Decimal("0")) + component.official_amount
+    for (drv, _), accumulator in sorted(
+        status_pay.items(), key=lambda item: (item[0][0], item[0][1] or 0),
+    ):
+        component = accumulator.official(official)
+        driver_components[drv].append(component)
+        driver_status[drv] = driver_status.get(drv, Decimal("0")) + component.official_amount
+    for drv, accumulator in sorted(bonus.items()):
+        component = accumulator.official(official)
+        driver_components[drv].append(component)
+        driver_bonus[drv] = component.official_amount
+        if digits is not None:
+            for event_id, amt in driver_bonus_events[drv]:
+                if not is_payable_precision(amt, digits):
+                    driver_blockers.setdefault(drv, []).append(
+                        f"SOURCE_AMOUNT_PRECISION: bonus event {event_id} amount {amt} has more "
+                        f"decimals than the Company currency allows ({digits}). Edit the "
+                        f"bonus and enter the amount again.")
+
     # ── Minimum/maximum: same as-of-period-start rule and ordering as
     # get_finalization_preview — normal base excludes bonus by construction;
     # bonus is added back in only after minimum/maximum is applied (CP-3C).
-    period_start = period.start_date
-    driver_blockers: dict[int, list[str]] = {}
-    driver_min_adj: dict[int, Decimal] = {}
-    driver_max_adj: dict[int, Decimal] = {}
-    driver_min_rule: dict[int, Any] = {}
-    driver_max_rule: dict[int, Any] = {}
-
-    for drv_id in all_driver_assignment_ids:
-        normal_base = (
-            driver_daily.get(drv_id, Decimal("0"))
-            + driver_status.get(drv_id, Decimal("0"))
-        )
-
-        min_row = (await db.execute(
-            text("""
-                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto,
-                       calendarfrequency, calendaranchorstartdate, calendarcustomintervaldays
-                FROM payroll.driverpayrules
-                WHERE  driverid = (SELECT da.driverid FROM core.driverassignments da
-                                   WHERE da.driverassignmentid = :did)
-                  AND  companyid     = :cid
-                  AND  ruletype      = 'MinimumPay'
-                  AND  status        IN ('Active', 'Ended')
-                  AND  effectivefrom <= :as_of
-                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            """),
-            {"did": drv_id, "cid": company_id, "as_of": period_start},
-        )).mappings().first()
-        max_row = (await db.execute(
-            text("""
-                SELECT driverpayruleid, amount, status, effectivefrom, effectiveto,
-                       calendarfrequency, calendaranchorstartdate, calendarcustomintervaldays
-                FROM payroll.driverpayrules
-                WHERE  driverid = (SELECT da.driverid FROM core.driverassignments da
-                                   WHERE da.driverassignmentid = :did)
-                  AND  companyid     = :cid
-                  AND  ruletype      = 'MaximumPay'
-                  AND  status        IN ('Active', 'Ended')
-                  AND  effectivefrom <= :as_of
-                  AND  (effectiveto IS NULL OR effectiveto >= :as_of)
-                ORDER BY effectivefrom DESC
-                LIMIT 1
-            """),
-            {"did": drv_id, "cid": company_id, "as_of": period_start},
-        )).mappings().first()
-
-        # A rule applies to a period only when the period is exactly one period of the
-        # calendar the rule recorded (the home pay calendar it was set for). Anything else is
-        # a blocker for this driver: never rescaled, never silently dropped or duplicated.
-        mismatched = [
-            (label, row) for label, row in (("Minimum", min_row), ("Maximum", max_row))
-            if row is not None and not period_matches_schedule(
-                Schedule(row["calendarfrequency"], row["calendaranchorstartdate"],
-                         row["calendarcustomintervaldays"], 0),
-                period.start_date, period.end_date)
-        ]
-        if mismatched:
-            for label, row in mismatched:
-                driver_blockers.setdefault(drv_id, []).append(
-                    f"MINMAX_CALENDAR_MISMATCH: the {label} pay rule {int(row['driverpayruleid'])} "
-                    f"was set for a {row['calendarfrequency']} pay calendar that does not "
-                    f"match this period ({period.start_date} to {period.end_date}). "
-                    f"End the rule and create a new one for the Driver's current calendar.")
-            driver_min_adj[drv_id] = Decimal("0")
-            driver_max_adj[drv_id] = Decimal("0")
-            continue
-
-        min_amount = Decimal(str(min_row["amount"])) if min_row else None
-        max_amount = Decimal(str(max_row["amount"])) if max_row else None
-        if min_row is not None:
-            driver_min_rule[drv_id] = min_row
-        if max_row is not None:
-            driver_max_rule[drv_id] = max_row
-
-        if min_amount is not None and max_amount is not None and min_amount > max_amount:
-            driver_blockers.setdefault(drv_id, []).append(
-                f"Minimum pay ({min_amount}) exceeds maximum pay ({max_amount}). "
-                f"Correct the pay rules before this driver's total can be trusted."
-            )
-            driver_min_adj[drv_id] = Decimal("0")
-            driver_max_adj[drv_id] = Decimal("0")
-            continue
-
-        if min_amount is not None and normal_base < min_amount:
-            driver_min_adj[drv_id] = min_amount - normal_base
-        else:
-            driver_min_adj[drv_id] = Decimal("0")
-
-        if max_amount is not None and normal_base > max_amount:
-            driver_max_adj[drv_id] = max_amount - normal_base
-        else:
-            driver_max_adj[drv_id] = Decimal("0")
+    assignment_driver = {drv: driver_permanent_ids[drv] for drv in all_driver_assignment_ids}
+    bases = {
+        drv: driver_daily.get(drv, Decimal("0")) + driver_status.get(drv, Decimal("0"))
+        for drv in all_driver_assignment_ids
+    }
+    outcomes = (
+        await _evaluate_minmax(period, company_id, assignment_driver, bases, currency, db)
+        if all_driver_assignment_ids else {}
+    )
 
     # ── Assemble driver totals.
     driver_totals: list[_CalculationPacketDriverTotal] = []
     for drv_id in sorted(all_driver_assignment_ids):
         daily = driver_daily.get(drv_id, Decimal("0"))
-        status_pay = driver_status.get(drv_id, Decimal("0"))
-        normal_base = daily + status_pay
-        min_adj = driver_min_adj.get(drv_id, Decimal("0"))
-        max_adj = driver_max_adj.get(drv_id, Decimal("0"))
-        bonus = driver_bonus.get(drv_id, Decimal("0"))
-        expected_pay = normal_base + min_adj + max_adj + bonus
+        status_total = driver_status.get(drv_id, Decimal("0"))
+        bonus_total = driver_bonus.get(drv_id, Decimal("0"))
+        outcome = outcomes[drv_id]
+        proration = outcome.proration
+        driver_blockers.setdefault(drv_id, []).extend(outcome.blockers)
+        warnings.extend(outcome.warnings)
+
+        components = driver_components[drv_id]
+        min_adj = max_adj = Decimal("0")
+        for raw, rule, component_kind, line_type in (
+            (outcome.raw_minimum, proration.minimum_rule, "MINIMUM_ADJUSTMENT", "SYS_MIN_TOPUP"),
+            (outcome.raw_maximum, proration.maximum_rule, "MAXIMUM_ADJUSTMENT", "SYS_MAX_CAP"),
+        ):
+            if raw == 0 or rule is None:
+                continue
+            adjustment = official(raw)
+            components.append(_OfficialComponent(
+                kind=component_kind,
+                driver_assignment_id=drv_id,
+                pre_rounding_amount=raw,
+                official_amount=adjustment,
+                driver_pay_rule_id=rule.driver_pay_rule_id,
+            ))
+            if component_kind == "MINIMUM_ADJUSTMENT":
+                min_adj = adjustment
+            else:
+                max_adj = adjustment
+            if adjustment != 0:
+                driver_lines[drv_id].append(_minmax_line(line_type, rule, proration, raw, adjustment))
+
+        expected_pay = sum((c.official_amount for c in components), Decimal("0"))
         drv_blockers = driver_blockers.get(drv_id, [])
         drv_nmr = driver_line_nmr.get(drv_id, False)
-
-        if min_adj != 0:
-            min_rule = driver_min_rule[drv_id]
-            driver_lines[drv_id].append(_CalculationPacketLine(
-                source_type="System",
-                source_id=str(min_rule["driverpayruleid"]),
-                line_type="SYS_MIN_TOPUP",
-                line_scope="Period",
-                work_date=None,
-                driver_assignment_id=drv_id,
-                quantity=Decimal("1"),
-                resolved_rate_amount=None,
-                calculated_amount=min_adj,
-                needs_manager_review=False,
-                blocker_reason=None,
-                source_evidence={
-                    "DriverPayRuleID": int(min_rule["driverpayruleid"]),
-                    "RuleType": "MinimumPay",
-                    "RuleAmount": Decimal(str(min_rule["amount"])),
-                    "RuleStatus": min_rule["status"],
-                    "EffectiveFrom": min_rule["effectivefrom"],
-                    "EffectiveTo": min_rule["effectiveto"],
-                    "NormalBase": normal_base,
-                },
-            ))
-        if max_adj != 0:
-            max_rule = driver_max_rule[drv_id]
-            driver_lines[drv_id].append(_CalculationPacketLine(
-                source_type="System",
-                source_id=str(max_rule["driverpayruleid"]),
-                line_type="SYS_MAX_CAP",
-                line_scope="Period",
-                work_date=None,
-                driver_assignment_id=drv_id,
-                quantity=Decimal("1"),
-                resolved_rate_amount=None,
-                calculated_amount=max_adj,
-                needs_manager_review=False,
-                blocker_reason=None,
-                source_evidence={
-                    "DriverPayRuleID": int(max_rule["driverpayruleid"]),
-                    "RuleType": "MaximumPay",
-                    "RuleAmount": Decimal(str(max_rule["amount"])),
-                    "RuleStatus": max_rule["status"],
-                    "EffectiveFrom": max_rule["effectivefrom"],
-                    "EffectiveTo": max_rule["effectiveto"],
-                    "NormalBase": normal_base,
-                },
-            ))
 
         driver_totals.append(_CalculationPacketDriverTotal(
             driver_assignment_id=drv_id,
@@ -644,14 +1084,16 @@ async def _build_live_calculation_packet(
             driver_number=driver_numbers.get(drv_id),
             driver_name=driver_names.get(drv_id),
             daily_pay=daily,
-            status_pay=status_pay,
+            status_pay=status_total,
             minimum_adjustment=min_adj,
             maximum_adjustment=max_adj,
-            bonus_total=bonus,
+            bonus_total=bonus_total,
             expected_pay=expected_pay,
             needs_manager_review=drv_nmr,
             blockers=drv_blockers,
             lines=driver_lines.get(drv_id, []),
+            components=components,
+            minmax=proration,
         ))
         if drv_blockers:
             blockers.extend(f"Driver {drv_id}: {b}" for b in drv_blockers)
@@ -672,6 +1114,45 @@ async def _build_live_calculation_packet(
         warnings=warnings,
         drivers=driver_totals,
         total_expected_pay=total_expected_pay,
+        currency_code=None if currency is None else currency.code,
+        currency_minor_unit_digits=digits,
+    )
+
+
+def _preview_component(component: _OfficialComponent):
+    from app.payroll.schemas import CalculationPreviewComponent
+
+    return CalculationPreviewComponent(
+        kind=component.kind,
+        payroll_period_definition_id=component.payroll_period_definition_id,
+        pay_definition_id=component.pay_definition_id,
+        status_rate_column_id=component.status_rate_column_id,
+        driver_pay_rule_id=component.driver_pay_rule_id,
+        pre_rounding_amount=component.pre_rounding_amount,
+        official_amount=component.official_amount,
+        line_count=len(component.source_ids),
+        unresolved_line_count=component.unresolved_line_count,
+    )
+
+
+def _preview_minmax(proration: _MinMaxProration | None):
+    from app.payroll.schemas import CalculationPreviewMinMax
+
+    if proration is None:
+        return None
+    minimum, maximum = proration.minimum_rule, proration.maximum_rule
+    return CalculationPreviewMinMax(
+        status=proration.status,
+        proration_version=proration.version,
+        numerator=proration.numerator,
+        denominator=proration.denominator,
+        base_amount=proration.base_amount,
+        minimum_rule_id=None if minimum is None else minimum.driver_pay_rule_id,
+        minimum_rule_amount=None if minimum is None else minimum.amount,
+        prorated_minimum=None if minimum is None else minimum.prorated_amount,
+        maximum_rule_id=None if maximum is None else maximum.driver_pay_rule_id,
+        maximum_rule_amount=None if maximum is None else maximum.amount,
+        prorated_maximum=None if maximum is None else maximum.prorated_amount,
     )
 
 
@@ -702,10 +1183,11 @@ async def get_calculation_preview(
         company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db,
     )
     packet = await _build_live_calculation_packet(period, company_id, db)
-    currency = await get_company_currency(company_id, db)
     return CalculationPreviewResponse(
-        currency_code=None if currency is None else currency.code,
-        currency_minor_unit_digits=None if currency is None else currency.minor_unit_digits,
+        currency_code=packet.currency_code,
+        currency_minor_unit_digits=packet.currency_minor_unit_digits,
+        payable_rounding_version=packet.payable_rounding_version,
+        minmax_proration_version=packet.minmax_proration_version,
         payroll_period_id=packet.payroll_period_id,
         company_id=packet.company_id,
         branch_id=packet.branch_id,
@@ -731,6 +1213,8 @@ async def get_calculation_preview(
                 expected_pay=driver.expected_pay,
                 needs_manager_review=driver.needs_manager_review,
                 blockers=driver.blockers,
+                components=[_preview_component(c) for c in driver.components],
+                minmax=_preview_minmax(driver.minmax),
                 lines=[
                     CalculationPreviewLine(
                         source_type=line.source_type,

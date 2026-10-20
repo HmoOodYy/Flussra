@@ -19,7 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.permissions import check_any_permission, check_permission, has_any_permission
 from app.access.policy import require_non_driver_subject
-from app.company_currency import lock_and_get_company_currency_for_monetary_write
+from app.company_currency import (
+    lock_and_get_company_currency_for_monetary_write,
+    require_company_currency,
+)
 from app.payroll.audit_evidence import capture_period_audit_evidence
 from app.payroll.eligibility import (
     _assert_driver_eligible_for_period_via_snapshot,
@@ -40,6 +43,7 @@ from app.payroll.schemas import (
     BonusSummaryEvent,
     BonusSummaryResponse,
 )
+from app.payroll.typed_amount import normalize_typed_amount
 
 
 async def _load_active_bonus_events(
@@ -293,7 +297,10 @@ async def create_bonus_event(
     # Currency lock first (global lock order), then the period row lock; the snapshot-aware
     # eligibility guard (CP-3A) runs under that lock so a concurrent boundary change
     # cannot commit between the check and the insert.
-    await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    # Typed-in precision is rounded once, here, to the Company currency; the normalized
+    # amount is what is persisted, audited and returned.
+    amount = normalize_typed_amount(data.amount, currency, label="Bonus amount")
     await _lock_period_for_mutation(period_id, company_id, db)
     await _assert_driver_eligible_for_period_via_snapshot(
         company_id, period.branch_id, period_id, data.driver_assignment_id, db
@@ -316,7 +323,7 @@ async def create_bonus_event(
             "branch_id":  period.branch_id,
             "period_id":  period_id,
             "driver_assignment_id":  data.driver_assignment_id,
-            "amount":     data.amount,
+            "amount":     amount,
             "reason":     data.reason,
             "notes":      data.notes,
             "user_id":    user_id,
@@ -337,7 +344,7 @@ async def create_bonus_event(
         line_id=new_id,
         action_code="BONUS_EVENT_ADDED",
         old_value=None,
-        new_value={"driver_assignment_id": data.driver_assignment_id, "amount": str(data.amount)},
+        new_value={"driver_assignment_id": data.driver_assignment_id, "amount": str(amount)},
         entity_name="PayrollBonusEvents",
     )
     await capture_period_audit_evidence(
@@ -345,7 +352,7 @@ async def create_bonus_event(
         domain="BONUS", action_code="BONUS_CREATED", source_entity_type="PayrollBonusEvents",
         source_entity_id=new_id, user_id=user_id, required_permission_code="payroll.entry", db=db,
         after_state={
-            "driver_assignment_id": data.driver_assignment_id, "amount": data.amount, "reason": data.reason,
+            "driver_assignment_id": data.driver_assignment_id, "amount": amount, "reason": data.reason,
             "notes": data.notes, "status": "Active", "data_revision": 1,
         }, driver_assignment_id=data.driver_assignment_id, source_revision=1,
     )
@@ -408,11 +415,16 @@ async def update_bonus_event(
     old_snap: dict = {}
     new_snap: dict = {}
 
+    amount: Decimal | None = None
     if data.amount is not None:
+        # Currency first (global lock order), then the typed-in precision is rounded once
+        # to the Company currency; the normalized amount is persisted, audited and returned.
+        currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
+        amount = normalize_typed_amount(data.amount, currency, label="Bonus amount")
         set_parts.append("amount = :amount")
-        params["amount"] = data.amount
+        params["amount"] = amount
         old_snap["amount"] = str(event.amount)
-        new_snap["amount"] = str(data.amount)
+        new_snap["amount"] = str(amount)
     if data.reason is not None:
         set_parts.append("reason = :reason")
         params["reason"] = data.reason
@@ -428,8 +440,6 @@ async def update_bonus_event(
         # No-op update — return current state unchanged.
         return event
 
-    if data.amount is not None:
-        await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await _lock_period_for_mutation(period_id, company_id, db)
 
     # CP-3B2a: atomic predicate. Always scoped by period/company/branch AND
@@ -494,7 +504,7 @@ async def update_bonus_event(
         },
         after_state={
             "driver_assignment_id": event.driver_assignment_id,
-            "amount": data.amount if data.amount is not None else event.amount,
+            "amount": amount if amount is not None else event.amount,
             "reason": data.reason if data.reason is not None else event.reason,
             "notes": data.notes if data.notes is not None else event.notes,
             "status": "Active", "data_revision": event.data_revision + 1,
@@ -688,8 +698,6 @@ async def apply_bonus_batch(
     await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
     branch_id = period.branch_id
-    payload = _bonus_batch_canonical_payload(data.expected_bonus_data_revision, data.items)
-    request_hash = _bonus_batch_request_hash(payload)
 
     # Exact replay is read-only. Detect it before taking the Company lock;
     # fresh requests recheck after acquiring Company and Period locks.
@@ -702,7 +710,20 @@ async def apply_bonus_batch(
         "key": data.idempotency_key,
     })).scalar_one_or_none()
     if preexisting is None:
-        await lock_and_get_company_currency_for_monetary_write(company_id, db)
+        currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
+    else:
+        currency = await require_company_currency(company_id, db)
+
+    # Typed-in precision is rounded once to the Company currency, item by item, before
+    # anything is hashed or stored: the request hash covers the normalized amounts
+    # (at most four decimals, so the canonical ``:.4f`` form is exact).
+    data = data.model_copy(update={"items": [
+        item.model_copy(update={"amount": normalize_typed_amount(
+            item.amount, currency, label=f"Bonus amount of items[{idx}]")})
+        for idx, item in enumerate(data.items)
+    ]})
+    payload = _bonus_batch_canonical_payload(data.expected_bonus_data_revision, data.items)
+    request_hash = _bonus_batch_request_hash(payload)
 
     # ── Lock the period row (does NOT enforce editability — replay must work on
     #    a now-locked/archived period). All idempotency and write decisions

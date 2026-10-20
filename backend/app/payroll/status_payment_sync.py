@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import CompanyCurrency
+from app.payroll.calculation.payable_rounding import INTERNAL_QUANTUM
 from app.payroll.eligibility import (
     _driver_has_existing_daily_source_on_date,
     _is_snapshot_row_eligible_for_workdate,
@@ -51,8 +52,8 @@ def _calculate_status_payment_amount(
     Status resolver (`_resolve_live_status_payment_lines`), so the two can
     never independently drift.
 
-    `HoursValue x DriverRate.Amount`, quantized once to `Decimal("0.0001")`
-    with explicit `ROUND_HALF_EVEN` -- identical to the ambient-context
+    `HoursValue x DriverRate.Amount`, quantized once to the internal precision
+    (`INTERNAL_QUANTUM`, 0.0001) with explicit `ROUND_HALF_EVEN` -- identical to the ambient-context
     behavior this replaces (Python's implicit default rounding mode is
     already `ROUND_HALF_EVEN`; making it explicit here does not change any
     result). Returns `None` under the same truthiness guard the original
@@ -64,7 +65,7 @@ def _calculate_status_payment_amount(
     """
     if resolved_rate is None or not hours_value:
         return None
-    return (hours_value * resolved_rate).quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+    return (hours_value * resolved_rate).quantize(INTERNAL_QUANTUM, rounding=ROUND_HALF_EVEN)
 
 
 async def _sync_status_payment_for_entry_state(

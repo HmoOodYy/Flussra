@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from .bonus import _validate_positive_numeric_18_4
+from .bonus import _validate_typed_monetary_amount
 
 # Compatibility metadata: Pydantic models retain the legacy app.payroll.schemas identity.
 
@@ -72,7 +72,7 @@ class DriverPayRuleCreate(BaseModel):
     @field_validator("amount")
     @classmethod
     def amount_positive(cls, v: Decimal) -> Decimal:
-        return _validate_positive_numeric_18_4(v, amount_label="Driver pay rule amount")
+        return _validate_typed_monetary_amount(v, amount_label="Driver pay rule amount")
 
     @model_validator(mode="after")
     def effective_to_after_from(self) -> "DriverPayRuleCreate":

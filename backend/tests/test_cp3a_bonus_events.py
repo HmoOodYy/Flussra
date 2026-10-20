@@ -260,14 +260,16 @@ async def test_create_bonus_event(
     )
     assert r.status_code == 201, r.text
     data = r.json()
-    assert Decimal(str(data["amount"])) == Decimal("150.1234")
+    # The Company currency is USD: typed-in precision is normalized to two decimals on entry
+    # (payable-rounding-v1) and the normalized value is what is returned and stored.
+    assert Decimal(str(data["amount"])) == Decimal("150.12")
     assert data["status"] == "Active"
     assert data["driver_assignment_id"] == cp3a_driver_assignment_id
     assert data["data_revision"] == 1
     stored_amount = (await db_conn.execute(_text("""
         SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :event_id
     """), {"event_id": data["bonus_event_id"]})).scalar_one()
-    assert Decimal(str(stored_amount)) == Decimal("150.1234")
+    assert Decimal(str(stored_amount)) == Decimal("150.12")
 
     await _cancel_period_db(db_conn, period_id)
 
@@ -327,7 +329,7 @@ async def test_update_bonus_event_amount(
     )
     assert r2.status_code == 200, r2.text
     updated = r2.json()
-    assert Decimal(str(updated["amount"])) == Decimal("250.1234")
+    assert Decimal(str(updated["amount"])) == Decimal("250.12")  # normalized to USD decimals
     assert updated["data_revision"] == 2
 
     await _cancel_period_db(db_conn, period_id)
@@ -394,7 +396,39 @@ async def test_zero_amount_rejected(
 
 
 @pytest.mark.asyncio
-async def test_single_create_rejects_more_than_four_decimals(
+async def test_single_create_normalizes_extra_precision_and_rejects_absurd_scale(
+    client: httpx.AsyncClient,
+    auth_token: str,
+    db_conn: AsyncConnection,
+    cp3a_branch_id: int,
+    cp3a_driver_assignment_id: int,
+) -> None:
+    start, end = _week()
+    period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
+    # Extra precision is accepted and rounded half-even to the USD decimals (1.23456 -> 1.23).
+    response = await client.post(
+        f"/payroll/periods/{period_id}/bonuses",
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "1.23456"},
+        headers=_auth(auth_token),
+    )
+    assert response.status_code == 201, response.text
+    assert Decimal(str(response.json()["amount"])) == Decimal("1.23")
+    # More than ten decimals is refused outright, and creates nothing.
+    absurd = await client.post(
+        f"/payroll/periods/{period_id}/bonuses",
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "1.12345678901"},
+        headers=_auth(auth_token),
+    )
+    assert absurd.status_code == 422, absurd.text
+    count = (await db_conn.execute(_text("""
+        SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid
+    """), {"pid": period_id})).scalar_one()
+    assert count == 1
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_single_create_rejects_an_amount_that_rounds_to_zero(
     client: httpx.AsyncClient,
     auth_token: str,
     db_conn: AsyncConnection,
@@ -405,10 +439,11 @@ async def test_single_create_rejects_more_than_four_decimals(
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
     response = await client.post(
         f"/payroll/periods/{period_id}/bonuses",
-        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "1.23456"},
+        json={"driver_assignment_id": cp3a_driver_assignment_id, "amount": "0.004"},
         headers=_auth(auth_token),
     )
     assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "AMOUNT_ROUNDS_TO_ZERO"
     count = (await db_conn.execute(_text("""
         SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE payrollperiodid = :pid
     """), {"pid": period_id})).scalar_one()
@@ -417,7 +452,7 @@ async def test_single_create_rejects_more_than_four_decimals(
 
 
 @pytest.mark.asyncio
-async def test_single_update_rejects_more_than_four_decimals(
+async def test_single_update_normalizes_extra_precision_and_rejects_zero_rounding(
     client: httpx.AsyncClient,
     auth_token: str,
     db_conn: AsyncConnection,
@@ -433,16 +468,26 @@ async def test_single_update_rejects_more_than_four_decimals(
     )
     assert created.status_code == 201, created.text
     event_id = created.json()["bonus_event_id"]
-    updated = await client.patch(
+    rejected = await client.patch(
         f"/payroll/periods/{period_id}/bonuses/{event_id}",
-        json={"amount": "1.23456"},
+        json={"amount": "0.004"},
         headers=_auth(auth_token),
     )
-    assert updated.status_code == 422, updated.text
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["detail"]["code"] == "AMOUNT_ROUNDS_TO_ZERO"
     stored = (await db_conn.execute(_text("""
         SELECT amount FROM payroll.payrollbonusevents WHERE payrollbonuseventid = :event_id
     """), {"event_id": event_id})).scalar_one()
     assert Decimal(str(stored)) == Decimal("1.00")
+    # 1.125 is a tie: half-even keeps the even neighbour (1.12); 1.135 goes up to 1.14.
+    for typed, saved in (("1.125", "1.12"), ("1.135", "1.14")):
+        updated = await client.patch(
+            f"/payroll/periods/{period_id}/bonuses/{event_id}",
+            json={"amount": typed},
+            headers=_auth(auth_token),
+        )
+        assert updated.status_code == 200, updated.text
+        assert Decimal(str(updated.json()["amount"])) == Decimal(saved)
     await _cancel_period_db(db_conn, period_id)
 
 

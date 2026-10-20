@@ -23,6 +23,35 @@ export interface CalculationPreviewLine {
   blocker_reason: string | null;
 }
 
+export interface CalculationPreviewComponent {
+  /** ORDINARY | STATUS | BONUS | MINIMUM_ADJUSTMENT | MAXIMUM_ADJUSTMENT */
+  kind: string;
+  payroll_period_definition_id: number | null;
+  pay_definition_id: number | null;
+  status_rate_column_id: number | null;
+  driver_pay_rule_id: number | null;
+  pre_rounding_amount: string;
+  official_amount: string;
+  line_count: number;
+  unresolved_line_count: number;
+}
+
+export interface CalculationPreviewMinMax {
+  /** APPLIED, or why neither rule applied: NO_RULE, NO_SCHEDULED_DAYS, NO_ELIGIBLE_SCHEDULED_DAYS,
+   *  CALENDAR_MISMATCH, MIN_EXCEEDS_MAX, SOURCE_AMOUNT_PRECISION, MINMAX_PERIOD_DAYS_MISSING. */
+  status: string;
+  proration_version: string;
+  numerator: number | null;
+  denominator: number | null;
+  base_amount: string;
+  minimum_rule_id: number | null;
+  minimum_rule_amount: string | null;
+  prorated_minimum: string | null;
+  maximum_rule_id: number | null;
+  maximum_rule_amount: string | null;
+  prorated_maximum: string | null;
+}
+
 export interface CalculationPreviewDriver {
   driver_assignment_id: number;
   driver_id: number;
@@ -38,11 +67,15 @@ export interface CalculationPreviewDriver {
   needs_manager_review: boolean;
   blockers: string[];
   lines: CalculationPreviewLine[];
+  components?: CalculationPreviewComponent[];
+  minmax?: CalculationPreviewMinMax | null;
 }
 
 export interface CalculationPreviewResponse {
   currency_code: string | null;
   currency_minor_unit_digits: number | null;
+  payable_rounding_version?: string | null;
+  minmax_proration_version?: string | null;
   payroll_period_id: number;
   company_id: number;
   branch_id: number;

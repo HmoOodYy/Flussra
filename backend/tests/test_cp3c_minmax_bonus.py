@@ -30,7 +30,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from tests.builders.pay_rules import ensure_branch_pay_calendar
+from tests.builders.pay_rules import ensure_branch_pay_calendar, freeze_period_days
 from tests.target_seed import seed_approved_rate, seed_period_definition, seed_target_line
 
 # ---------------------------------------------------------------------------
@@ -81,6 +81,9 @@ async def _insert_period_db(
         r["payrollperiodid"], 1, branch_id, db, snapshot_source="Generated",
         freeze=status in {"Open", "Returned"},
     )
+    await db.commit()
+    # Min/Max proration reads the frozen day calendar, which a canonical period always has.
+    await freeze_period_days(db, r["payrollperiodid"])
     await db.commit()
     return r["payrollperiodid"]
 

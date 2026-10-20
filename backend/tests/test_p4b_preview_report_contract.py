@@ -192,7 +192,8 @@ async def test_live_reports_reconcile_with_the_preview(p3c_client, p3c_engine, t
     assert [c["payroll_period_definition_id"] for c in report["columns"]] == [ppd]
     driver = report["drivers"][0]
     assert Decimal(driver["pay"]["total_pay"]) == Decimal(preview["total_expected_pay"])
-    assert Decimal(driver["pay"]["bonus_total"]) == Decimal("1.2345")
+    # The typed 1.2345 was normalized to the USD decimals on entry; reports show that value.
+    assert Decimal(driver["pay"]["bonus_total"]) == Decimal("1.23")
     if name != "period-work":      # the work report carries quantities only
         assert [Decimal(a["amount"]) for a in driver["pay"]["definition_amounts"]]             == [Decimal("75")]
     assert Decimal(driver["work"]["daily_rows"][0]["quantity"]) == 3

@@ -1,4 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
+import { amountPlaceholder, amountRoundingNote } from '../../../lib/amountEntry';
 import { formatMoney } from '../../../lib/money';
 import type { DriverPayRule } from './driverPayRulesApi';
 import type { RuleForm } from './payRatesView';
@@ -33,7 +34,8 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
       <div className={styles.payRulesInfo}>
         Pay Rules set a floor (Minimum Pay) or ceiling (Maximum Pay) applied
         during finalization. They are separate from the rate matrix. A rule follows the driver
-        across Branches and records the pay calendar of the Branch it was set in.
+        across Branches and records the pay calendar of the Branch it was set in. When a driver
+        covers only part of a period, the amount is prorated by the scheduled days covered.
       </div>
       {payRulesError && <div className={styles.errBanner} style={{ margin: '0 1.25rem 0.5rem' }}>{payRulesError}</div>}
       {loadingPayRules ? <div className={styles.loading}>Loading pay rules...</div> : (
@@ -73,13 +75,14 @@ export function DriverPayRulesTab({ payRules, payRulesError, loadingPayRules, ca
                   <div className={styles.payRuleFormRow}>
                     <div className={styles.payRuleFormGroup}>
                       <label className={styles.formLabel}>Amount per period</label>
-                      <input className={styles.editInput} type="number" step="0.0001" min="0.0001" placeholder="e.g. 150.0000" value={ruleForm.amount} onChange={e => setRuleForm(f => f ? { ...f, amount: e.target.value } : f)} />
+                      <input className={styles.editInput} type="number" step="any" min="0" placeholder={`e.g. ${amountPlaceholder(currencyDigits)}`} value={ruleForm.amount} onChange={e => setRuleForm(f => f ? { ...f, amount: e.target.value } : f)} />
                     </div>
                     <div className={styles.payRuleFormGroup}>
                       <label className={styles.formLabel}>Effective from</label>
                       <input className={styles.editDateInput} type="date" value={ruleForm.effectiveFrom} onChange={e => setRuleForm(f => f ? { ...f, effectiveFrom: e.target.value } : f)} />
                     </div>
                   </div>
+                  {amountRoundingNote(currencyCode, currencyDigits) && <p className={styles.calendarNote}>{amountRoundingNote(currencyCode, currencyDigits)}</p>}
                   <p className={styles.calendarNote}>The pay calendar is recorded automatically from the driver&apos;s Branch on the start date.</p>
                   <div className={styles.payRuleFormGroup}>
                     <label className={styles.formLabel}>Notes (optional)</label>
