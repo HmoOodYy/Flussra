@@ -99,10 +99,10 @@ _SNAPSHOT = """
 _TOTAL = """
     INSERT INTO payroll.payrollcalculationdrivertotals
         (payrollcalculationsnapshotid, companyid, branchid, driverassignmentid, driverid,
-         employeeid, dailypay, statuspay, minimumadjustment, maximumadjustment, bonustotal,
-         expectedpay)
+         employeeid, drivernumbersnapshot, drivernamesnapshot, dailypay, statuspay,
+         minimumadjustment, maximumadjustment, bonustotal, expectedpay)
     VALUES ({snapshot}, {company}, {branch}, {assignment}, {driver}, {employee},
-            0, {status_pay}, 0, 0, {bonus}, {amount})
+            'D-SEED', 'Seeded Driver', 0, {status_pay}, 0, 0, {bonus}, {amount})
     RETURNING payrollcalculationdrivertotalid
 """
 

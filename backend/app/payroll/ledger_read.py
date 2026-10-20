@@ -22,8 +22,8 @@ _FINAL_SELECT = """
         fl.driverassignmentid,
         fl.driverid,
         fl.employeeid,
-        dr.drivernumber,
-        e.fullname         AS drivername,
+        dt.drivernumbersnapshot AS drivernumber,
+        dt.drivernamesnapshot   AS drivername,
         fl.linetype,
         fl.linescope,
         fl.componentkind,
@@ -41,9 +41,9 @@ _FINAL_SELECT = """
         fl.sourcesnapshot,
         fl.currencycode, fl.currencyminorunitdigits
     FROM   payroll.payrollfinallines fl
-    JOIN   core.driverassignments    a  ON a.driverassignmentid = fl.driverassignmentid
-    JOIN   core.drivers              dr ON dr.driverid  = fl.driverid
-    JOIN   core.employees            e  ON e.employeeid = a.employeeid
+    JOIN   payroll.payrollcalculationdrivertotals dt
+           ON dt.payrollcalculationsnapshotid = fl.payrollcalculationsnapshotid
+          AND dt.driverassignmentid = fl.driverassignmentid
     JOIN   payroll.payrollcalculationsnapshotcomponents c
            ON c.payrollcalculationsnapshotcomponentid = fl.payrollcalculationsnapshotcomponentid
 """
