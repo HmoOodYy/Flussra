@@ -173,12 +173,31 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
                   "minimum_adjustment": d.minimum_adjustment,
                   "maximum_adjustment": d.maximum_adjustment, "bonus_total": d.bonus_total,
                   "total_pay": d.expected_pay, "driver_id": d.driver_id,
-                  "driver_number": d.driver_number, "driver_name": d.driver_name}
+                  "driver_number": d.driver_number, "driver_name": d.driver_name,
+                  # The official (rounded once) ordinary amount of each definition column.
+                  "official_definition_amounts": {
+                      int(c.payroll_period_definition_id): c.official_amount
+                      for c in d.components if c.kind == "ORDINARY"}}
                   for d in packet.drivers}
         return lines, totals, packet.blockers, packet.warnings, True, None, None
     # Submitted, approved and final authorities freeze calculation evidence, which target
     # payroll does not have yet. They are refused rather than rebuilt from mutable state.
     raise evidence_not_ready()
+
+
+def _official_definition_amounts(
+    financial_totals: dict[int, dict[str, Any]], column_ids: list[int],
+) -> tuple[dict[int, dict[int, Decimal]], dict[int, Decimal]]:
+    """Per-driver and total official ordinary amount of each frozen definition column."""
+    per_driver: dict[int, dict[int, Decimal]] = {}
+    totals: dict[int, Decimal] = {cid: Decimal("0") for cid in column_ids}
+    for driver_assignment_id, total in financial_totals.items():
+        amounts = dict(total.get("official_definition_amounts", {}))
+        per_driver[driver_assignment_id] = amounts
+        for definition_id, amount in amounts.items():
+            if definition_id in totals:
+                totals[definition_id] += amount
+    return per_driver, totals
 
 
 def _report_totals(
@@ -223,8 +242,11 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     # Period Work is operational (quantities/Status), not financial, and stays
     # independent of the per-definition financial integrity invariant.
     if financials_available and report_type != "period-work":
-        per_driver_definitions, definition_total_map = _definition_amounts(
-            lines, definition_column_ids)
+        # The line sums keep the definition-integrity check; the amounts shown are the
+        # official ones the live packet already rounded once per DriverAssignment x definition.
+        _definition_amounts(lines, definition_column_ids)
+        per_driver_definitions, definition_total_map = _official_definition_amounts(
+            financial_totals, definition_column_ids)
     operational_drivers, work_rows = await _operational_rows(period, db)
     drivers = {**operational_drivers}
     for driver_assignment_id, total in financial_totals.items():
@@ -259,7 +281,7 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
             item_amounts = per_driver_definitions.get(driver_assignment_id, {})
             gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
-                **total,
+                **{k: v for k, v in total.items() if k != "official_definition_amounts"},
                 "gross_pay": gross_pay,
                 # Period Work never carries per-item money: an empty list
                 # here means "not computed for this view", never a verified
