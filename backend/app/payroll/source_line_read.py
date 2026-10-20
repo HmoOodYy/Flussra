@@ -224,7 +224,7 @@ async def get_period_draft_summary(
     Live totals per driver x period definition for one period.
 
     Void lines are excluded. Ordinary amounts are derived live from the effective
-    DriverRateAssignment, never summed from a stored column.
+    DriverRateSchedule, never summed from a stored column.
     """
     period = await get_period_by_id(company_id, user_id, period_id, db)
 

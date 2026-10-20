@@ -6,7 +6,7 @@ calculation packet, Current Payroll) call ``calculate_definition_input`` and nev
 branch on the calculation method themselves.
 
 The boundary accepts the complete ``ResolvedCompensation``: the effective
-DriverRateAssignment with ALL of its component values. It never receives a single
+DriverRateSchedule with ALL of its component values. It never receives a single
 scalar rate, so a method that needs several components (OrdinalTier) attaches here
 without changing the resolver contract, the period snapshot or any consumer.
 
@@ -17,8 +17,8 @@ definition, never by the method name alone and never by live PayDefinition metad
   METHOD_NOT_READY. An unknown or future version of PerUnit never runs the V1 algorithm.
 
 Missing, zero and invalid are distinct:
-  no authoritative assignment               -> MISSING_RATE
-  assignment but a required value is absent -> INCOMPLETE_RATE
+  no authoritative schedule                 -> MISSING_RATE
+  schedule but a required value is absent -> INCOMPLETE_RATE
   amount 0                                  -> a valid rate; the result is 0
 """
 
@@ -62,14 +62,14 @@ class PeriodDefinition:
 class DefinitionCalculation:
     """The outcome of one calculation.
 
-    ``amount`` is set only when ``status`` is CALCULATED. ``driver_rate_assignment_id``
+    ``amount`` is set only when ``status`` is CALCULATED. ``driver_rate_schedule_id``
     identifies the whole schedule that was used (None when none applied).
     """
 
     status: CalculationStatus
     amount: Decimal | None = None
     calculation_version: str | None = None
-    driver_rate_assignment_id: int | None = None
+    driver_rate_schedule_id: int | None = None
 
     @property
     def is_calculated(self) -> bool:
@@ -85,20 +85,20 @@ def _calculate_per_unit(
 ) -> DefinitionCalculation:
     if resolved is None:
         return DefinitionCalculation(CalculationStatus.MISSING_RATE)
-    assignment_id = resolved.driver_rate_assignment_id
+    schedule_id = resolved.driver_rate_schedule_id
     if resolved.rate_shape != "Scalar" or len(resolved.components) != 1:
         return DefinitionCalculation(
-            CalculationStatus.INCOMPLETE_RATE, driver_rate_assignment_id=assignment_id)
+            CalculationStatus.INCOMPLETE_RATE, driver_rate_schedule_id=schedule_id)
     amount = resolved.components[0].amount
     if amount is None or amount < 0:
         return DefinitionCalculation(
-            CalculationStatus.INCOMPLETE_RATE, driver_rate_assignment_id=assignment_id)
+            CalculationStatus.INCOMPLETE_RATE, driver_rate_schedule_id=schedule_id)
     result = calculate_per_unit(PerUnitInput(quantity=quantity, rate_amount=amount))
     return DefinitionCalculation(
         CalculationStatus.CALCULATED,
         amount=result.calculated_amount,
         calculation_version=PER_UNIT_CALCULATION_VERSION,
-        driver_rate_assignment_id=assignment_id,
+        driver_rate_schedule_id=schedule_id,
     )
 
 

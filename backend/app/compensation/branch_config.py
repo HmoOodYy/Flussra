@@ -57,35 +57,6 @@ def _version(row) -> BranchConfigVersion:
     )
 
 
-async def require_definition_applicable(
-    company_id: int, branch_id: int, pay_definition_id: int, on_date: date,
-    db: AsyncConnection,
-) -> None:
-    """Require an active BranchPayItemConfig version for the Company, Branch and
-    PayDefinition on ``on_date``.
-
-    A missing version is not active, an explicitly inactive version is not active,
-    and a version that starts after ``on_date`` does not apply to it. No other
-    state (name, legacy PayItem, default flags) is consulted.
-    """
-    active = (await db.execute(
-        text("""
-            SELECT bpic.isactive
-            FROM   payroll.branchpayitemconfig bpic
-            WHERE  bpic.companyid       = :cid
-              AND  bpic.branchid        = :bid
-              AND  bpic.paydefinitionid = :pdid
-              AND  bpic.effectivefrom  <= :on_date
-              AND  (bpic.effectiveto IS NULL OR bpic.effectiveto >= :on_date)
-        """),
-        {"cid": company_id, "bid": branch_id, "pdid": pay_definition_id, "on_date": on_date},
-    )).scalar_one_or_none()
-    if not active:
-        raise compensation_error(
-            "PAY_DEFINITION_NOT_APPLICABLE",
-            f"The PayDefinition is not active for this Branch on {on_date.isoformat()}.", 422)
-
-
 # Non-terminal payroll workflow states: configuration must not take effect inside them.
 MUTABLE_PERIOD_STATUSES = ("Draft", "Open", "InReview", "Returned", "Approved")
 

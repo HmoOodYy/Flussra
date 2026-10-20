@@ -2,15 +2,17 @@
 DB-level composite FK integrity tests (Phases 2, 2.1, 2.2).
 
 Covers:
-  - Migration 0025: PayrollDraftLines, PayrollFinalLines, DriverRates,
-    DriverPayRules cannot reference a Period or Driver from a different branch.
+  - Migration 0025: PayrollDraftLines, PayrollFinalLines, DriverRates
+    cannot reference a Period or Driver from a different branch.
+  - Migration 0088: DriverPayRules belong to a Driver of their Company and record a
+    calendar source (Branch and Payroll Setup version) of that Company.
   - Migration 0026: core.Drivers and payroll.PayrollPeriods cannot reference
     a branch that belongs to a different company (parent-root integrity).
 
 Isolation principles:
-  - DriverPayRules wrong-branch test uses Status='Voided' to bypass the
+  - DriverPayRules tests use Status='Voided' to bypass the
     excl_driverpayrules_no_date_overlap exclusion constraint, isolating the
-    composite FK as the only active guard.
+    foreign key under test as the only failing guard.
   - Parent-root tests create a temp Company B + Branch B in direct_db so the
     composite FK (not the individual Company or Branch FK) is the specific
     constraint under test.  All temp rows are cleaned up in try/finally.
@@ -19,6 +21,7 @@ import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
+from tests.builders.pay_rules import insert_pay_rule, publish_version
 from tests.db_state import (
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
     allow_final_line_insert,
@@ -607,78 +610,101 @@ class TestDriverRateIntegrity:
 
 
 # ---------------------------------------------------------------------------
-# Migration 0025 — DriverPayRules: composite FK
+# Migration 0088 — DriverPayRules are owned by the permanent Driver
 #
-# Isolation: use Status='Voided' to bypass excl_driverpayrules_no_date_overlap
-# (which only covers Status IN ('Active', 'Ended')).  The composite FK
-# fk_DriverPayRules_Driver_Company_Branch is the only remaining guard.
+# Isolation: Status='Voided' bypasses excl_driverpayrules_no_date_overlap (which only covers
+# Active/Ended). Each rejected insert supplies a valid calendar so that the foreign key under
+# test is the only failing guard.
 # ---------------------------------------------------------------------------
+
+async def _draft_version(direct_db, company_id: int) -> int:
+    """A Draft Payroll Setup version (deletable, unlike a Published one) of the Company."""
+    setup_id = (await direct_db.execute(_text("""
+        INSERT INTO payroll.payrollsetups (companyid, setupcode, setupname, status)
+        VALUES (:c, 'DRAFTSRC', 'draft source', 'Active') RETURNING payrollsetupid
+    """), {"c": company_id})).scalar_one()
+    return int((await direct_db.execute(_text("""
+        INSERT INTO payroll.payrollsetupversions (companyid, payrollsetupid, lifecyclestate)
+        VALUES (:c, :s, 'Draft') RETURNING payrollsetupversionid
+    """), {"c": company_id, "s": setup_id})).scalar_one())
+
+
+async def _drop_draft_versions(direct_db, company_id: int) -> None:
+    await direct_db.execute(
+        _text("DELETE FROM payroll.payrollsetupversions WHERE companyid = :c"), {"c": company_id})
+    await direct_db.execute(
+        _text("DELETE FROM payroll.payrollsetups WHERE companyid = :c"), {"c": company_id})
+
+
+async def _driver_of(direct_db, assignment_id: int) -> int:
+    return int((await direct_db.execute(
+        _text("SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :a"),
+        {"a": assignment_id})).scalar_one())
+
 
 @pytest.mark.asyncio
 class TestDriverPayRuleIntegrity:
-    """DriverPayRule.BranchID must match its Driver's BranchID."""
+    """A DriverPayRule belongs to a Driver of its Company and records a calendar source of
+    that same Company."""
 
-    async def test_driver_pay_rule_wrong_branch_for_driver_rejected(
-        self,
-        direct_db,
-        hq_branch_id: int,
-        paytest_driver_assignment_id: int,
+    async def test_driver_of_another_company_is_rejected(
+        self, direct_db, hq_branch_id: int, paytest_driver_assignment_id: int,
     ):
-        """Insert a DriverPayRule for a PAYTEST driver but claim HQ branch.
+        company_a = await _get_company_id(direct_db, hq_branch_id)
+        driver_id = await _driver_of(direct_db, paytest_driver_assignment_id)
+        cmp_b_id, branch_b_id = await _create_temp_company_and_branch(direct_db, "PR1")
+        try:
+            version_b = await _draft_version(direct_db, cmp_b_id)
+            with pytest.raises(IntegrityError) as exc_info:
+                # Company B with a Company A Driver: only fk_driverpayrules_driver_company fails.
+                await insert_pay_rule(
+                    direct_db, company_id=cmp_b_id, driver_id=driver_id, branch_id=branch_b_id,
+                    start="2030-01-01", status="Voided", version_id=version_b)
+            assert _is_fk_violation(exc_info.value), exc_info.value
+            assert "fk_driverpayrules_driver_company" in str(exc_info.value)
+            assert company_a != cmp_b_id
+        finally:
+            await _drop_draft_versions(direct_db, cmp_b_id)
+            await _drop_temp_company_and_branch(direct_db, cmp_b_id, branch_b_id)
 
-        Uses Status='Voided' so excl_driverpayrules_no_date_overlap does NOT
-        fire (it only covers Active/Ended rows).  The composite FK
-        fk_DriverPayRules_Driver_Company_Branch is therefore the sole guard
-        and must reject the insert regardless of what date-overlapping rows
-        other tests have left behind for this driver.
-        """
-        company_id = await _get_company_id(direct_db, hq_branch_id)
-        with pytest.raises(IntegrityError) as exc_info:
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.driverpayrules
-                        (companyid, branchid, driverassignmentid,
-                         ruletype, amount, effectivefrom, status)
-                    VALUES
-                        (:cid, :hq_branch, :assignment_id,
-                         'MinimumPay', 500.00, '2030-01-01', 'Voided')
-                """),
-                {
-                    "cid": company_id,
-                    "hq_branch": hq_branch_id,
-                    "assignment_id": paytest_driver_assignment_id,
-                },
-            )
-        assert _is_fk_violation(exc_info.value), (
-            f"Expected FK violation (23503) from fk_DriverPayRules_Driver_Company_Branch, "
-            f"got: {exc_info.value}"
-        )
+    async def test_calendar_source_of_another_company_is_rejected(
+        self, direct_db, hq_branch_id: int, paytest_driver_assignment_id: int,
+    ):
+        company_a = await _get_company_id(direct_db, hq_branch_id)
+        driver_id = await _driver_of(direct_db, paytest_driver_assignment_id)
+        cmp_b_id, branch_b_id = await _create_temp_company_and_branch(direct_db, "PR2")
+        try:
+            _, version_a = await publish_version(direct_db, company_a)
+            with pytest.raises(IntegrityError) as exc_info:
+                # A Company A rule pointing at a Company B Branch: only the Branch FK fails.
+                await insert_pay_rule(
+                    direct_db, company_id=company_a, driver_id=driver_id, branch_id=branch_b_id,
+                    start="2030-01-01", status="Voided", version_id=version_a)
+            assert _is_fk_violation(exc_info.value), exc_info.value
+            assert "fk_driverpayrules_calendarsourcebranch_company" in str(exc_info.value)
+            version_b = await _draft_version(direct_db, cmp_b_id)
+            with pytest.raises(IntegrityError) as exc_info:
+                # ... or at a Company B Payroll Setup version: only the version FK fails.
+                await insert_pay_rule(
+                    direct_db, company_id=company_a, driver_id=driver_id, branch_id=hq_branch_id,
+                    start="2030-01-01", status="Voided", version_id=version_b)
+            assert _is_fk_violation(exc_info.value), exc_info.value
+            assert "fk_driverpayrules_calendarsourceversion_company" in str(exc_info.value)
+        finally:
+            await _drop_draft_versions(direct_db, cmp_b_id)
+            await _drop_temp_company_and_branch(direct_db, cmp_b_id, branch_b_id)
 
     async def test_driver_pay_rule_matching_driver_accepted(
-        self,
-        direct_db,
-        hq_branch_id: int,
-        created_driver_assignment_id: int,
+        self, direct_db, hq_branch_id: int, created_driver_assignment_id: int,
     ):
         """Regression: a consistent DriverPayRule must be accepted."""
         company_id = await _get_company_id(direct_db, hq_branch_id)
-        result = await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.driverpayrules
-                    (companyid, branchid, driverassignmentid,
-                     ruletype, amount, effectivefrom, status)
-                VALUES
-                    (:cid, :bid, :assignment_id,
-                     'MinimumPay', 500.00, '2030-06-01', 'Active')
-                RETURNING driverpayruleid
-            """),
-            {
-                "cid": company_id,
-                "bid": hq_branch_id,
-                "assignment_id": created_driver_assignment_id,
-            },
-        )
-        inserted_id = result.scalar_one()
+        driver_id = await _driver_of(direct_db, created_driver_assignment_id)
+        # The Driver's tenure and the rule's start date are not checked at the table level
+        # (the context trigger decides that); a start inside the open tenure is accepted.
+        inserted_id = await insert_pay_rule(
+            direct_db, company_id=company_id, driver_id=driver_id, branch_id=hq_branch_id,
+            amount="500.00", start="2099-06-01")
         assert inserted_id is not None
         await direct_db.execute(
             _text("DELETE FROM payroll.driverpayrules WHERE driverpayruleid = :id"),

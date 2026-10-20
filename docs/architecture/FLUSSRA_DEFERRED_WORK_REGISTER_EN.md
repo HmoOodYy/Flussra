@@ -634,11 +634,13 @@ Transfers before P6a must not silently introduce new compensation-copy semantics
 
 Update 2026-10-18: The copy design is superseded and P6a is retired. Compensation will be owned by the permanent Driver (Durable Driver Stage 2), so a permanent transfer carries rates and Min/Max automatically; the transfer copy, its Yes/No choice and the legacy copy route are retired. Durable Driver Stage 1 introduces the permanent Driver and DriverAssignments and adds no compensation-copy semantics. The underlying need (a transferred Driver keeps its compensation) is delivered by Stage 2, so this entry stays NOT YET until Stage 2 is accepted.
 
+Update 2026-10-19: Durable Driver Stage 1 is merged (PR #57, migration `0087`) and Stage 2 (DD2) is the current work unit, with its decisions recorded in the Durable Driver plan (Stage 2 implementation decisions). Stage 2 moves ordinary rate schedules and Min/Max rules to the permanent Driver (`DriverRateSchedules`, `DriverRateScheduleValues`, `DriverPayRules`, migration `0088`), so no transfer-time copy exists, and deletes the legacy copy route. The Stage 2 implementation is not yet reviewed or accepted by the Lead, so this entry stays NOT YET; it becomes YES only when Stage 2 is accepted under the rules above.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-18
+**Last Updated:** 2026-10-19
 
 \---
 
@@ -819,28 +821,30 @@ Neither structure exists after Stage 1. `import.ImportRows.MatchedDriverID` refe
 
 \---
 
-## DWR-024 — Temporary Loan / Worked-for-Branch Feature Is Not Built
+## DWR-024 — Temporary Cross-Branch Work / Worked-for-Branch Feature Is Not Built
 
 **Issue:**  
-A Driver temporarily working for another Branch has no record or eligibility path. The architecture only fixes the rule that a temporary loan is not a home DriverAssignment and never changes the Driver's home Branch or Min/Max home pay calendar.
+A Driver temporarily working for another Branch has no record or eligibility path. The architecture only fixes the rule that temporary cross-branch work is not a home DriverAssignment and never changes the Driver's home Branch or Min/Max home pay calendar.
 
 **Discovered In:**  
-Durable Driver identity plan (permanent transfer versus temporary loan semantics).
+Durable Driver identity plan (permanent transfer versus temporary cross-branch work semantics).
 
 **Deferred To:**  
 **Future explicit product definition — no authorized work unit currently exists.**
 
 **Why Deferred:**  
-A concrete loan record, eligibility path and UI need their own design. Modelling a loan as a permanent transfer would corrupt the home Branch and the Min/Max calendar.
+A concrete cross-branch work record, eligibility path and UI need their own design. Modelling temporary cross-branch work as a permanent transfer would corrupt the home Branch and the Min/Max calendar.
 
 **Current State:**  
 Documentation-only rule. Evidence design (P4c) must not make separate home-Branch and host/work-Branch provenance impossible.
+
+Update 2026-10-19: the terminology is now "temporary cross-branch work"; the meaning is unchanged. "Worked-for-Branch" remains the name of the future record. Durable Driver Stage 2 builds nothing for it: Driver-owned compensation, and the Min/Max home pay calendar, do not change because a Driver works for another Branch.
 
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-18
+**Last Updated:** 2026-10-19
 
 \---
 
@@ -861,7 +865,7 @@ Documentation-only rule. Evidence design (P4c) must not make separate home-Branc
 |**P8b**|DWR-013, DWR-014, DWR-020|
 |**P8c**|DWR-021|
 |**Unscheduled future lifecycle**|DWR-022|
-|**Unscheduled future temporary-loan feature**|DWR-024|
+|**Unscheduled future temporary cross-branch work feature**|DWR-024|
 |**C2 Import design**|DWR-023|
 
 \---

@@ -17,6 +17,7 @@ from app.settings import audit as settings_audit
 from app.settings import company
 from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
+from tests.builders.pay_rules import insert_pay_rule
 
 
 @pytest.mark.asyncio
@@ -112,13 +113,14 @@ async def test_each_durable_monetary_state_locks_company_currency(
                     RETURNING payrollbonuseventid
                 """), params)).scalar_one())
             elif state_kind == "pay_rule":
-                row_id = int((await db.execute(text("""
-                    INSERT INTO payroll.driverpayrules
-                        (companyid, branchid, driverassignmentid, ruletype, amount, effectivefrom, effectiveto, status)
-                    VALUES (:cid,:bid,:did,'MinimumPay',10,DATE '2099-01-01',
-                            CASE WHEN CAST(:state AS TEXT)='Ended' THEN DATE '2099-01-07' END,CAST(:state AS VARCHAR(30)))
-                    RETURNING driverpayruleid
-                """), params)).scalar_one())
+                # A pay rule belongs to the permanent Driver and records a calendar source.
+                pay_rule_driver_id = int((await db.execute(text(
+                    "SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did"),
+                    params)).scalar_one())
+                row_id = await insert_pay_rule(
+                    db, company_id=company_id, driver_id=pay_rule_driver_id, branch_id=branch_id,
+                    amount=10, start="2099-01-01",
+                    end="2099-01-07" if state == "Ended" else None, status=state)
             elif state_kind in {"draft_rate", "draft_calculated", "draft_voided"}:
                 amount = "rateamount" if state_kind == "draft_rate" else "calculatedamount"
                 status = "Void" if state_kind == "draft_voided" else "Active"

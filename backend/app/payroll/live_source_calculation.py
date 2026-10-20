@@ -5,12 +5,14 @@ store source facts only: a Driver, a WorkDate, a definition and a quantity. This
 module derives their money on demand and never reads a stored amount:
 
     DraftLine -> PayrollPeriodDefinition -> RateDefinition
-              -> (Driver, RateDefinition, WorkDate) -> whole DriverRateAssignment
-              -> all DriverRateValues -> method calculator
+              -> (Driver, RateDefinition, WorkDate) -> whole DriverRateSchedule
+              -> all DriverRateScheduleValues -> method calculator
 
 All lines are resolved set-wise through ``resolve_many`` (one query group for the
 whole period/date, not one per line) and calculated by the method-owned boundary
-in ``definition_calculation``. The WorkDate, not the period, selects the rate.
+in ``definition_calculation``. The WorkDate, not the period, selects the rate. A line's DriverAssignment names the
+Branch tenure the work belongs to; the schedule is the permanent Driver's, reached through
+that assignment, so it is the same schedule on both sides of a transfer.
 
 This module is read-only: no INSERT, UPDATE or DELETE.
 """
@@ -35,6 +37,8 @@ from app.payroll.period_definitions import definition_from_row
 class LiveSourceLine:
     draft_line_id: int
     driver_assignment_id: int
+    driver_id: int
+    branch_id: int
     work_date: date
     quantity: Decimal
     source_type: str
@@ -65,7 +69,8 @@ async def load_live_source_lines(
 
     rows = (await db.execute(
         text(f"""
-            SELECT dl.draftlineid, dl.driverassignmentid, dl.workdate, dl.quantity,
+            SELECT dl.draftlineid, dl.driverassignmentid, da.driverid, dl.branchid AS linebranchid,
+                   dl.workdate, dl.quantity,
                    dl.sourcetype, dl.notes,
                    ppd.payrollperioddefinitionid, ppd.payrollperiodid, ppd.companyid,
                    ppd.branchid, ppd.paydefinitionid, ppd.ratedefinitionid,
@@ -74,6 +79,8 @@ async def load_live_source_lines(
                    ppd.calculationmethodsnapshot, ppd.calculationmethodversionsnapshot,
                    ppd.rateshapesnapshot, ppd.isactiveinperiod, ppd.sortorder
             FROM   payroll.payrolldraftlines dl
+            JOIN   core.driverassignments da
+                   ON da.driverassignmentid = dl.driverassignmentid
             JOIN   payroll.payrollperioddefinitions ppd
                    ON  ppd.payrollperioddefinitionid = dl.payrollperioddefinitionid
                    AND ppd.payrollperiodid = dl.payrollperiodid
@@ -88,7 +95,7 @@ async def load_live_source_lines(
     if not rows:
         return []
 
-    keys = [ResolutionKey(r["driverassignmentid"], r["ratedefinitionid"], r["workdate"]) for r in rows]
+    keys = [ResolutionKey(r["driverid"], r["ratedefinitionid"], r["workdate"]) for r in rows]
     resolved = await resolve_many(company_id, keys, db)
 
     lines: list[LiveSourceLine] = []
@@ -98,6 +105,8 @@ async def load_live_source_lines(
         lines.append(LiveSourceLine(
             draft_line_id=int(row["draftlineid"]),
             driver_assignment_id=int(row["driverassignmentid"]),
+            driver_id=int(row["driverid"]),
+            branch_id=int(row["linebranchid"]),
             work_date=row["workdate"],
             quantity=quantity,
             source_type=row["sourcetype"],

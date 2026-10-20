@@ -22,8 +22,7 @@ from app.review.router import router as review_router
 from app.settings.router import router as settings_router
 from app.transfer.router import router as transfer_router
 from app.workforce.effective import (
-    driver_assignment_ended_detail,
-    is_driver_assignment_ended_error,
+    historical_compensation_refusal_detail,
 )
 from app.workforce.router import router as workforce_router
 
@@ -96,18 +95,18 @@ def create_app() -> FastAPI:
     async def driver_assignment_ended_handler(
         request: Request, exc: DBAPIError
     ) -> JSONResponse:
-        """Map the database's ended-assignment refusal (SQLSTATE FL001) to the API 409.
+        """Map the database's historical-compensation refusal (SQLSTATE FL001) to the API 409.
 
-        The single place that translates ``core.trg_CompensationAssignmentWritable``;
-        every other database error is re-raised unchanged.
+        The single place that translates ``core.trg_CompensationAssignmentWritable`` (a status
+        rate of an ended assignment) and ``core.trg_DriverCompensationContextWritable`` (a
+        Driver-owned change whose context tenure has ended); every other database error is
+        re-raised unchanged.
         """
         del request
-        if not is_driver_assignment_ended_error(exc):
+        detail = historical_compensation_refusal_detail(exc)
+        if detail is None:
             raise exc
-        return JSONResponse(
-            status_code=409,
-            content={"detail": driver_assignment_ended_detail()},
-        )
+        return JSONResponse(status_code=409, content={"detail": detail})
 
     app.add_middleware(
         CORSMiddleware,

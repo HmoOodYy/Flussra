@@ -1,18 +1,16 @@
 import styles from './PayRatesPage.module.css';
 import { formatRate } from '../../../lib/money';
-import type { AssignmentSummary } from '../../../types/compensation';
+import type { PayRateTab } from './payRatesDrivers';
+import { compensationErrorMessage } from './payRatesErrors';
 
 export interface EditRow {
   amount: string;
   effective_from: string;
 }
 
-export type ActiveTab = 'current' | 'pending' | 'history' | 'pay-rules';
+export type ActiveTab = PayRateTab;
 
-export interface HistoryRow extends AssignmentSummary {
-  definition_name: string;
-  unit: string | null;
-}
+export type { HistoryRow } from './payRatesHistory';
 
 export type RuleForm = {
   ruleType: 'MinimumPay' | 'MaximumPay';
@@ -23,18 +21,8 @@ export type RuleForm = {
   notes: string;
 };
 
-export function apiError(err: unknown): string {
-  const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  if (typeof d === 'string' && d.trim()) return d;
-  if (d && typeof d === 'object' && typeof (d as { message?: unknown }).message === 'string') {
-    return (d as { message: string }).message;
-  }
-  if (Array.isArray(d) && d.length > 0) {
-    const first = d[0];
-    if (first?.msg) return first.msg;
-  }
-  return 'An unexpected error occurred.';
-}
+/** Every write on this page reports through the compensation error mapping. */
+export const apiError = compensationErrorMessage;
 
 export function fmtAmount(amount: string | null, unit: string | null, code: string | null, digits: number | null): string {
   if (amount === null) return '—';

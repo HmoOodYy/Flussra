@@ -1,8 +1,14 @@
+import type { DriverAssignmentRosterRow } from '../../../types/core';
 import type { StatusRateMatrix } from './statusRatesApi';
+import { assignmentLabel } from './payRatesAssignments';
 import { fmtAmount } from './payRatesView';
 import styles from './PayRatesPage.module.css';
 
 type StatusRateSectionProps = {
+  /** The Driver's tenures: Status rates are the one thing still owned by a Branch assignment. */
+  assignments: DriverAssignmentRosterRow[];
+  selectedAssignmentId: number | null;
+  selectAssignment: (driverAssignmentId: number) => void;
   statusMatrix: StatusRateMatrix | null;
   canEditMatrix: boolean;
   referenceDate: string | undefined;
@@ -21,15 +27,39 @@ type StatusRateSectionProps = {
   cancelStatusEdit: () => void;
 };
 
-export function StatusRateSection({ statusMatrix, canEditMatrix, referenceDate, currencyCode, currencyDigits, statusEditMode, statusDrafts, statusSaving, statusSaveError, dirtyStatusKeys, statusKey, startStatusEdit, setStatusField, isStatusDirty, saveStatusRates, cancelStatusEdit }: StatusRateSectionProps) {
-  return (statusMatrix?.groups.length ?? 0) > 0 ? (
+export function StatusRateSection({ assignments, selectedAssignmentId, selectAssignment, statusMatrix, canEditMatrix, referenceDate, currencyCode, currencyDigits, statusEditMode, statusDrafts, statusSaving, statusSaveError, dirtyStatusKeys, statusKey, startStatusEdit, setStatusField, isStatusDirty, saveStatusRates, cancelStatusEdit }: StatusRateSectionProps) {
+  return (statusMatrix?.groups.length ?? 0) > 0 || assignments.length > 1 ? (
     <div className={styles.section}>
       <div className={styles.sectionHead}>
-        <span className={styles.sectionTitle}>Status Pay Rates</span>
-        {canEditMatrix && !statusEditMode && <button className={styles.btnSecondary} disabled={!referenceDate} onClick={startStatusEdit}>Edit Status Rates</button>}
+        <span className={styles.sectionTitle}>Branch Status Pay Rates</span>
+        {canEditMatrix && !statusEditMode && (statusMatrix?.groups.length ?? 0) > 0 && <button className={styles.btnSecondary} disabled={!referenceDate} onClick={startStatusEdit}>Edit Status Rates</button>}
       </div>
+      <div className={styles.statusPaneNote}>
+        Status rates belong to one Branch assignment, not to the driver. Choose the assignment to view or change.
+      </div>
+      {assignments.length > 1 && (
+        <label className={styles.assignmentPicker} style={{ margin: '0 1.25rem 0.5rem' }}>
+          <span>Branch assignment</span>
+          <select
+            value={selectedAssignmentId ?? ''}
+            disabled={statusEditMode || statusSaving}
+            onChange={(e) => selectAssignment(Number(e.target.value))}
+          >
+            {assignments.map((a) => (
+              <option key={a.driver_assignment_id} value={a.driver_assignment_id}>
+                {assignmentLabel(a)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {!canEditMatrix && statusMatrix != null && (
+        <div className={styles.statusPaneNote}>These status rates are read-only for the selected assignment.</div>
+      )}
       {statusSaveError && <div className={styles.errBanner} style={{ margin: '0.75rem 1.25rem 0' }}>{statusSaveError}</div>}
-      <table className={styles.rateTable}>
+      {(statusMatrix?.groups.length ?? 0) === 0 ? (
+        <div className={styles.emptySection}>No status rates for this assignment.</div>
+      ) : <table className={styles.rateTable}>
         <thead><tr><th>Rate</th><th>Amount</th><th>Effective From</th><th>Status</th></tr></thead>
         <tbody>
           {statusMatrix!.groups.map((g) => {
@@ -48,7 +78,7 @@ export function StatusRateSection({ statusMatrix, canEditMatrix, referenceDate, 
             );
           })}
         </tbody>
-      </table>
+      </table>}
       {statusEditMode && <div className={styles.saveBar}>
         <button className={styles.btnPrimary} onClick={() => void saveStatusRates()} disabled={statusSaving || dirtyStatusKeys.length === 0}>{statusSaving ? 'Saving...' : `Save ${dirtyStatusKeys.length} Status Rate Change${dirtyStatusKeys.length !== 1 ? 's' : ''}`}</button>
         <button className={styles.btnSecondary} onClick={cancelStatusEdit} disabled={statusSaving}>Cancel</button>

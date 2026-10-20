@@ -1,4 +1,4 @@
-"""Payroll rate, tier, lookup, matrix, batch, and copy contracts."""
+"""Payroll rate, tier, lookup, matrix, and batch contracts."""
 
 from datetime import date, datetime
 from decimal import Decimal
@@ -374,50 +374,3 @@ class DriverRatesSummary(BaseModel):
     pending_count: int          # PendingApproval rates
     future_approved_count: int  # Approved rates whose effective_from > today
     missing_required_count: int | None = None  # Required matrix slots with no current rate
-
-
-
-# ---------------------------------------------------------------------------
-# Copy Rates From Driver (Phase 2C)
-# ---------------------------------------------------------------------------
-
-class CopyRatesRequest(BaseModel):
-    """
-    Payload for POST /payroll/driver-assignments/{target_driver_assignment_id}/rates/copy-from/{source_driver_assignment_id}.
-
-    Copies current Approved rates from the source driver (as-of effective_from)
-    to the target driver, creating new rates effective from the given date.
-
-    Rules:
-    - Only Approved rates that are current as-of effective_from are copied.
-    - PendingApproval rates from source are never copied.
-    - Each copied rate becomes PendingApproval unless AllowSelfApproval=True.
-    - If AllowSelfApproval=True, copied rates auto-approve (same as batch save).
-    - Existing target rates are not deleted; the same create/supersede logic applies.
-    - All-or-nothing: if any copied rate would be invalid, the whole request fails.
-    - If include_pay_rules=True, Active MinimumPay/MaximumPay rules from the source
-      are also copied (as new Active rules on the target). Rejected with 422 if
-      the target already has an overlapping rule of the same type.
-    """
-    __module__ = "app.payroll.schemas"
-    effective_from: date
-    include_pay_rules: bool = False
-
-    @model_validator(mode="after")
-    def effective_from_not_future_only(self) -> "CopyRatesRequest":
-        # No date restriction here — backdating guard runs in the service
-        return self
-
-
-
-class CopyRatesResult(BaseModel):
-    """Response from the copy-from endpoint."""
-    __module__ = "app.payroll.schemas"
-    target_driver_assignment_id: int
-    source_driver_assignment_id: int
-    effective_from: date
-    allow_self_approval: bool
-    rates_copied: int        # number of rate rows created
-    rates_approved: int      # subset that were auto-approved
-    rates_pending: int       # subset left as PendingApproval
-    pay_rules_copied: int    # 0 if include_pay_rules=False

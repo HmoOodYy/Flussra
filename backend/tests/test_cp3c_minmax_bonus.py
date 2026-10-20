@@ -30,6 +30,7 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.target_seed import seed_approved_rate, seed_period_definition, seed_target_line
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ from tests.target_seed import seed_approved_rate, seed_period_definition, seed_t
 _d = datetime.date(2092, 6, 1)
 _BASE_MONDAY = _d + datetime.timedelta(days=(7 - _d.weekday()) % 7)
 _CTR = itertools.count(0)
+_DRIVER_OF: dict[int, int] = {}  # DriverAssignmentID -> permanent DriverID, filled by the fixtures
 _RUN_ID = uuid.uuid4().hex[:8]
 
 
@@ -147,7 +149,7 @@ async def _inject_normal_pay_line(
     definition = await seed_period_definition(
         db, period_id=period_id, branch_id=branch_id, name="Normal pay")
     await seed_approved_rate(
-        db, definition=definition, driver_assignment_id=driver_assignment_id, branch_id=branch_id, amount=amount)
+        db, definition=definition, driver_assignment_id=driver_assignment_id, amount=amount)
     start = (await db.execute(
         _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :p"),
         {"p": period_id})).scalar_one()
@@ -177,8 +179,9 @@ async def _add_pay_rule(
     r = await client.post(
         "/payroll/driver-pay-rules",
         json={
-            "driver_assignment_id": driver_assignment_id,
-            "branch_id": branch_id,
+            # A pay rule belongs to the permanent Driver; its calendar comes from the Branch
+            # Payroll Setup the fixture gave the Branch (weekly, Monday-anchored).
+            "driver_id": _DRIVER_OF[driver_assignment_id],
             "rule_type": rule_type,
             "amount": amount,
             "effective_from": start.isoformat(),
@@ -260,6 +263,8 @@ async def cp3c_branch_id(direct_db: AsyncConnection) -> int:
     )).mappings().first()
     branch_id = row["branchid"]
     await direct_db.commit()
+    await ensure_branch_pay_calendar(direct_db, 1, branch_id)
+    await direct_db.commit()
     return branch_id
 
 
@@ -284,7 +289,9 @@ async def _get_or_create_driver(
         headers=_auth(auth_token),
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["current_or_pending_assignment"]["driver_assignment_id"]
+    assignment_id = resp.json()["current_or_pending_assignment"]["driver_assignment_id"]
+    _DRIVER_OF[assignment_id] = resp.json()["driver"]["driver_id"]
+    return assignment_id
 
 
 @pytest_asyncio.fixture

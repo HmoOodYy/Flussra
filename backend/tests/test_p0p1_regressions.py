@@ -22,7 +22,9 @@ from tests.builders.owned_scope import (
     create_owned_branch,
     create_owned_driver,
 )
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.db_state import (
+    DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
     FINAL_LINE_IMMUTABLE_TRIGGER,
     allow_final_line_insert,
     suspended_test_triggers,
@@ -438,6 +440,34 @@ class TestDashboardPerBranchPermission:
 # P1: DriverPayRules Archived period protection
 # ---------------------------------------------------------------------------
 
+async def _make_pay_rule_scene(direct_db, branch_id: int, assignment_id: int) -> int:
+    """Prepare a Driver for pay rules dated in 2022: a Branch pay calendar and a first tenure
+    that began long before. Returns the permanent DriverID."""
+    company_id = (await direct_db.execute(
+        text("SELECT companyid FROM core.branches WHERE branchid = :b"), {"b": branch_id})).scalar_one()
+    await ensure_branch_pay_calendar(direct_db, company_id, branch_id)
+    async with suspended_test_triggers(direct_db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
+        await direct_db.execute(text("""
+            UPDATE core.driverassignments SET effectivefromat = TIMESTAMPTZ '2000-01-01 00:00+00'
+            WHERE driverassignmentid = :a
+        """), {"a": assignment_id})
+    return int((await direct_db.execute(text(
+        "SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :a"),
+        {"a": assignment_id})).scalar_one())
+
+
+async def _roster(direct_db, company_id, branch_id, period_id, assignment_id) -> None:
+    """The period's eligibility row for the assignment: how a finalized period names a Driver."""
+    await direct_db.execute(text("""
+        INSERT INTO payroll.payrollperioddrivereligibility
+            (companyid, branchid, payrollperiodid, driverassignmentid, eligibilityreasoncode,
+             snapshotsource, drivereffectivefromatsnapshot, branchtimezoneidsnapshot,
+             eligibleworkdates, driverstatussnapshot, endreasonsnapshot)
+        VALUES (:c, :b, :p, :a, 'Active', 'Generated', TIMESTAMPTZ '2000-01-01 00:00+00',
+                'UTC', '{}', 'Active', NULL)
+    """), {"c": company_id, "b": branch_id, "p": period_id, "a": assignment_id})
+
+
 class TestDriverPayRulesArchivedProtection:
     async def test_void_blocked_by_archived_period(
         self,
@@ -457,11 +487,14 @@ class TestDriverPayRulesArchivedProtection:
         )
         company_id = result.scalar_one()
 
+        driver_id = await _make_pay_rule_scene(
+            direct_db, paytest_branch_id, owned_driver_assignment_id)
+
         # Create an Active MinimumPay rule
         rule_resp = await client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_assignment_id":      owned_driver_assignment_id,
+                "driver_id":      driver_id,
                 "rule_type":      "MinimumPay",
                 "amount":         "100.00",
                 "effective_from": "2022-01-01",
@@ -484,6 +517,7 @@ class TestDriverPayRulesArchivedProtection:
             {"cid": company_id, "bid": paytest_branch_id},
         )
         arch_pid = p_result.scalar_one()
+        await _roster(direct_db, company_id, paytest_branch_id, arch_pid, owned_driver_assignment_id)
 
         # Phase 6: authorise this test-setup INSERT via the session-level GUC.
         # is_local=false (third arg) persists for this AUTOCOMMIT connection session.
@@ -506,14 +540,18 @@ class TestDriverPayRulesArchivedProtection:
                 headers=_auth(auth_token),
             )
             assert void_resp.status_code == 422
-            assert "finalized" in void_resp.json()["detail"].lower() or \
-                   "governed" in void_resp.json()["detail"].lower()
+            assert void_resp.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
+            assert void_resp.json()["detail"]["payroll_period_ids"] == [arch_pid]
         finally:
             async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
                 await direct_db.execute(
                     text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
                     {"pid": arch_pid},
                 )
+            await direct_db.execute(
+                text("DELETE FROM payroll.payrollperioddrivereligibility WHERE payrollperiodid = :pid"),
+                {"pid": arch_pid},
+            )
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},
@@ -539,10 +577,12 @@ class TestDriverPayRulesArchivedProtection:
         )
         company_id = result.scalar_one()
 
+        driver_id = await _make_pay_rule_scene(
+            direct_db, paytest_branch_id, owned_driver_assignment_id)
         rule_resp = await client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_assignment_id":      owned_driver_assignment_id,
+                "driver_id":      driver_id,
                 "rule_type":      "MaximumPay",
                 "amount":         "500.00",
                 "effective_from": "2022-01-01",
@@ -565,6 +605,7 @@ class TestDriverPayRulesArchivedProtection:
             {"cid": company_id, "bid": paytest_branch_id},
         )
         arch_pid = p_result.scalar_one()
+        await _roster(direct_db, company_id, paytest_branch_id, arch_pid, owned_driver_assignment_id)
 
         # Phase 6: authorise this test-setup INSERT via the session-level GUC.
         async with allow_final_line_insert(direct_db):
@@ -587,12 +628,17 @@ class TestDriverPayRulesArchivedProtection:
                 headers=_auth(auth_token),
             )
             assert end_resp.status_code == 422
+            assert end_resp.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
         finally:
             async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
                 await direct_db.execute(
                     text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
                     {"pid": arch_pid},
                 )
+            await direct_db.execute(
+                text("DELETE FROM payroll.payrollperioddrivereligibility WHERE payrollperiodid = :pid"),
+                {"pid": arch_pid},
+            )
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},

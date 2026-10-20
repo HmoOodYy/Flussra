@@ -1,14 +1,14 @@
-"""Dormant target PerUnit DriverRateAssignment authoring."""
+"""Dormant target PerUnit DriverRateSchedule authoring."""
 from __future__ import annotations
 
 import json
 
 import pytest
 
-from app.compensation import assignments as assignment_service
+from app.compensation import schedules as schedule_service
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
-    approve_assignment,
-    authored_assignment,
+    approve_schedule,
+    authored_schedule,
     build_tenant,
     create_definition,
     create_pending,
@@ -26,15 +26,15 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
 
 pytestmark = pytest.mark.asyncio
 
-BASE = "/compensation/driver-rate-assignments"
+BASE = "/compensation/driver-rate-schedules"
 
 
-def _id(assignment: dict) -> int:
-    return assignment["driver_rate_assignment_id"]
+def _id(schedule: dict) -> int:
+    return schedule["driver_rate_schedule_id"]
 
 
-async def _get(client, tenant, assignment, headers=None):
-    response = await client.get(f"{BASE}/{_id(assignment)}", headers=headers or tenant.admin)
+async def _get(client, tenant, schedule, headers=None):
+    response = await client.get(f"{BASE}/{_id(schedule)}", headers=headers or tenant.admin)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -48,12 +48,12 @@ async def _definition_and_pending(client, tenant, **kwargs):
 # Pending authoring
 # ---------------------------------------------------------------------------
 
-async def test_pending_assignment_starts_non_authoritative_with_unset_values(
+async def test_pending_schedule_starts_non_authoritative_with_unset_values(
     p3c_client, tenant,
 ):
     definition, pending = await _definition_and_pending(p3c_client, tenant)
     assert pending["status"] == "Pending"
-    assert pending["branch_id"] == tenant.branch_a
+    assert pending["driver_id"] == tenant.driver_a_id
     assert pending["approved_at_utc"] is None
     assert len(pending["values"]) == 1
     assert pending["values"][0]["amount"] is None
@@ -61,15 +61,15 @@ async def test_pending_assignment_starts_non_authoritative_with_unset_values(
         definition["components"][0]["rate_component_definition_id"]
 
 
-async def test_one_pending_assignment_per_driver_and_rate_definition(p3c_client, tenant):
+async def test_one_pending_schedule_per_driver_and_rate_definition(p3c_client, tenant):
     definition, _ = await _definition_and_pending(p3c_client, tenant)
     duplicate = await p3c_client.post(
         BASE, headers=tenant.admin,
-        json={"driver_assignment_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
+        json={"driver_id": tenant.driver_a_id, "rate_definition_id": definition["rate_definition_id"],
               "effective_from": "2027-01-01"})
     assert duplicate.status_code == 409
-    assert duplicate.json()["detail"]["code"] == "PENDING_ASSIGNMENT_EXISTS"
-    await create_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a2)
+    assert duplicate.json()["detail"]["code"] == "PENDING_SCHEDULE_EXISTS"
+    await create_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a2_id)
 
 
 async def test_pending_dates_and_notes_are_editable_in_place(p3c_client, tenant):
@@ -93,19 +93,19 @@ async def test_pending_dates_and_notes_are_editable_in_place(p3c_client, tenant)
 
 async def test_zero_is_a_configured_value_and_missing_is_not_zero(p3c_client, tenant):
     definition, pending = await _definition_and_pending(p3c_client, tenant)
-    incomplete = await approve_assignment(p3c_client, tenant, pending)
+    incomplete = await approve_schedule(p3c_client, tenant, pending)
     assert incomplete.status_code == 422
-    assert incomplete.json()["detail"]["code"] == "ASSIGNMENT_INCOMPLETE"
+    assert incomplete.json()["detail"]["code"] == "SCHEDULE_INCOMPLETE"
 
     nulled = await set_scalar_value(p3c_client, tenant, pending, definition, None)
     assert nulled.status_code == 200
     assert nulled.json()["values"][0]["amount"] is None
-    assert (await approve_assignment(p3c_client, tenant, pending)).status_code == 422
+    assert (await approve_schedule(p3c_client, tenant, pending)).status_code == 422
 
     zero = await set_scalar_value(p3c_client, tenant, pending, definition, "0")
     assert zero.status_code == 200
     assert zero.json()["values"][0]["amount"] == "0.0000"
-    approved = await approve_assignment(p3c_client, tenant, pending)
+    approved = await approve_schedule(p3c_client, tenant, pending)
     assert approved.status_code == 200, approved.text
     assert approved.json()["values"][0]["amount"] == "0.0000"
 
@@ -164,7 +164,7 @@ async def test_only_scalar_pay_definition_owned_definitions_are_authorable(
     status_definition = cur.fetchone()[0]
     response = await p3c_client.post(
         BASE, headers=tenant.admin,
-        json={"driver_assignment_id": tenant.driver_a, "rate_definition_id": status_definition,
+        json={"driver_id": tenant.driver_a_id, "rate_definition_id": status_definition,
               "effective_from": "2026-01-01"})
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "RATE_DEFINITION_NOT_AUTHORABLE"
@@ -176,7 +176,7 @@ async def test_inactive_definitions_are_not_authorable(p3c_client, tenant, cur):
                 (definition["pay_definition_id"],))
     response = await p3c_client.post(
         BASE, headers=tenant.admin,
-        json={"driver_assignment_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
+        json={"driver_id": tenant.driver_a_id, "rate_definition_id": definition["rate_definition_id"],
               "effective_from": "2026-01-01"})
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "PAY_DEFINITION_NOT_ACTIVE"
@@ -200,11 +200,11 @@ async def test_governed_definition_structure_is_locked_from_the_start(p3c_client
 # Approval, supersession and immutability
 # ---------------------------------------------------------------------------
 
-async def test_first_approval_makes_the_assignment_authoritative_and_immutable(
+async def test_first_approval_makes_the_schedule_authoritative_and_immutable(
     p3c_client, tenant,
 ):
     definition = await create_definition(p3c_client, tenant)
-    approved = await authored_assignment(p3c_client, tenant, definition, "25")
+    approved = await authored_schedule(p3c_client, tenant, definition, "25")
     assert approved["status"] == "Approved"
     assert approved["approved_by_user_id"] == tenant.owner
     assert approved["values"][0]["amount"] == "25.0000"
@@ -215,11 +215,11 @@ async def test_first_approval_makes_the_assignment_authoritative_and_immutable(
         p3c_client.patch(f"{BASE}/{_id(approved)}", headers=tenant.admin,
                          json={"notes": "x"}),
         p3c_client.delete(f"{BASE}/{_id(approved)}", headers=tenant.admin),
-        approve_assignment(p3c_client, tenant, approved),
+        approve_schedule(p3c_client, tenant, approved),
     ):
         response = await call
         assert response.status_code == 409, response.text
-        assert response.json()["detail"]["code"] == "ASSIGNMENT_NOT_PENDING"
+        assert response.json()["detail"]["code"] == "SCHEDULE_NOT_PENDING"
     assert (await _get(p3c_client, tenant, approved))["values"][0]["amount"] == "25.0000"
 
 
@@ -227,9 +227,9 @@ async def test_successor_approval_supersedes_the_current_schedule_atomically(
     p3c_client, tenant,
 ):
     definition = await create_definition(p3c_client, tenant)
-    first = await authored_assignment(p3c_client, tenant, definition, "25",
+    first = await authored_schedule(p3c_client, tenant, definition, "25",
                                       effective_from="2026-01-01")
-    second = await authored_assignment(p3c_client, tenant, definition, "30",
+    second = await authored_schedule(p3c_client, tenant, definition, "30",
                                        effective_from="2026-06-01")
     assert second["status"] == "Approved"
     superseded = await _get(p3c_client, tenant, first)
@@ -239,27 +239,27 @@ async def test_successor_approval_supersedes_the_current_schedule_atomically(
     assert superseded["approved_by_user_id"] == first["approved_by_user_id"]
 
     history = (await p3c_client.get(
-        f"/compensation/driver-assignments/{tenant.driver_a}/rate-definitions/"
-        f"{definition['rate_definition_id']}/assignments", headers=tenant.admin)).json()
+        f"/compensation/drivers/{tenant.driver_a_id}/rate-definitions/"
+        f"{definition['rate_definition_id']}/rate-schedules", headers=tenant.admin)).json()
     assert [(a["status"], a["effective_from"]) for a in history] == [
         ("Approved", "2026-06-01"), ("Superseded", "2026-01-01")]
 
 
 async def test_successor_keeps_an_earlier_bounded_end(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await authored_assignment(p3c_client, tenant, definition, "25",
+    first = await authored_schedule(p3c_client, tenant, definition, "25",
                                       effective_from="2026-01-01", effective_to="2026-03-31")
-    await authored_assignment(p3c_client, tenant, definition, "30", effective_from="2026-06-01")
+    await authored_schedule(p3c_client, tenant, definition, "30", effective_from="2026-06-01")
     assert (await _get(p3c_client, tenant, first))["effective_to"] == "2026-03-31"
 
 
 async def test_successor_must_take_effect_after_the_current_schedule(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await authored_assignment(p3c_client, tenant, definition, "25",
+    first = await authored_schedule(p3c_client, tenant, definition, "25",
                                       effective_from="2026-03-01")
     pending = await create_pending(p3c_client, tenant, definition, effective_from="2026-03-01")
     await set_scalar_value(p3c_client, tenant, pending, definition, "9")
-    response = await approve_assignment(p3c_client, tenant, pending)
+    response = await approve_schedule(p3c_client, tenant, pending)
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "SUCCESSOR_NOT_AFTER_CURRENT"
     assert (await _get(p3c_client, tenant, first))["status"] == "Approved"
@@ -268,9 +268,9 @@ async def test_successor_must_take_effect_after_the_current_schedule(p3c_client,
 
 async def test_incomplete_successor_leaves_the_current_schedule_untouched(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await authored_assignment(p3c_client, tenant, definition, "25")
+    first = await authored_schedule(p3c_client, tenant, definition, "25")
     pending = await create_pending(p3c_client, tenant, definition, effective_from="2026-09-01")
-    response = await approve_assignment(p3c_client, tenant, pending)
+    response = await approve_schedule(p3c_client, tenant, pending)
     assert response.status_code == 422
     current = await _get(p3c_client, tenant, first)
     assert (current["status"], current["effective_to"]) == ("Approved", None)
@@ -280,37 +280,37 @@ async def test_a_failed_successor_approval_rolls_back_the_supersession(
     p3c_client, tenant, cur,
 ):
     definition = await create_definition(p3c_client, tenant)
-    later = await authored_assignment(p3c_client, tenant, definition, "5",
+    later = await authored_schedule(p3c_client, tenant, definition, "5",
                                       effective_from="2026-06-01", effective_to="2026-06-30")
     cur.execute("""
-        UPDATE payroll.driverrateassignments SET status = 'Superseded'
-        WHERE driverrateassignmentid = %s
+        UPDATE payroll.driverrateschedules SET status = 'Superseded'
+        WHERE driverratescheduleid = %s
     """, (_id(later),))
-    current = await authored_assignment(p3c_client, tenant, definition, "25",
+    current = await authored_schedule(p3c_client, tenant, definition, "25",
                                         effective_from="2026-01-01", effective_to="2026-03-31")
     pending = await create_pending(p3c_client, tenant, definition, effective_from="2026-05-01")
     await set_scalar_value(p3c_client, tenant, pending, definition, "30")
 
-    response = await approve_assignment(p3c_client, tenant, pending)
+    response = await approve_schedule(p3c_client, tenant, pending)
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "ASSIGNMENT_WINDOW_OVERLAP"
+    assert response.json()["detail"]["code"] == "SCHEDULE_WINDOW_OVERLAP"
     assert (await _get(p3c_client, tenant, current))["status"] == "Approved"
     assert (await _get(p3c_client, tenant, pending))["status"] == "Pending"
 
 
-async def test_assignments_are_independent_per_driver_and_definition(p3c_client, tenant):
+async def test_schedules_are_independent_per_driver_and_definition(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     other_definition = await create_definition(p3c_client, tenant)
-    await authored_assignment(p3c_client, tenant, definition, "1")
-    await authored_assignment(p3c_client, tenant, definition, "2", driver_assignment_id=tenant.driver_a2)
-    await authored_assignment(p3c_client, tenant, other_definition, "3")
+    await authored_schedule(p3c_client, tenant, definition, "1")
+    await authored_schedule(p3c_client, tenant, definition, "2", driver_id=tenant.driver_a2_id)
+    await authored_schedule(p3c_client, tenant, other_definition, "3")
     summary = (await p3c_client.get(
-        f"/compensation/driver-assignments/{tenant.driver_a}/rate-assignments/summary",
+        f"/compensation/drivers/{tenant.driver_a_id}/rate-schedules/summary",
         headers=tenant.admin)).json()
     assert {item["rate_definition_id"] for item in summary} == {
         definition["rate_definition_id"], other_definition["rate_definition_id"]}
-    assert all(item["approved_assignment_id"] is not None for item in summary)
-    assert all(item["pending_assignment_id"] is None for item in summary)
+    assert all(item["approved_schedule_id"] is not None for item in summary)
+    assert all(item["pending_schedule_id"] is None for item in summary)
 
 
 # ---------------------------------------------------------------------------
@@ -327,17 +327,16 @@ async def test_discard_deletes_pending_with_values_and_audits_the_authenticated_
         f"{BASE}/{_id(pending)}", headers=tenant.headers(tenant.branch_user))
     assert response.status_code == 204
     assert (await p3c_client.get(f"{BASE}/{_id(pending)}", headers=tenant.admin)).status_code == 404
-    cur.execute("SELECT count(*) FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    cur.execute("SELECT count(*) FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (_id(pending),))
     assert cur.fetchone()[0] == 0
 
     cur.execute("""
         SELECT actoruserid, oldvaluejson, companyid, branchid FROM audit.auditlog
-        WHERE actioncode = 'DRIVER_RATE_ASSIGNMENT_DISCARDED' AND entityid = %s
+        WHERE actioncode = 'DRIVER_RATE_SCHEDULE_DISCARDED' AND entityid = %s
     """, (str(_id(pending)),))
     actor, payload, company_id, branch_id = cur.fetchone()
-    assert (actor, company_id, branch_id) == (tenant.branch_user, tenant.company_id,
-                                              tenant.branch_a)
+    assert (actor, company_id, branch_id) == (tenant.branch_user, tenant.company_id, None)
     values = json.loads(payload)["Values"]
     assert [(v["RateComponentDefinitionID"], float(v["Amount"])) for v in values] == [
         (definition["components"][0]["rate_component_definition_id"], 7.25)]
@@ -353,12 +352,12 @@ async def test_service_discard_sets_the_actor_only_for_its_transaction(
     from sqlalchemy.ext.asyncio import create_async_engine
 
     definition = await create_definition(p3c_client, tenant)
-    first = await create_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a)
-    second = await create_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a2)
+    first = await create_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a_id)
+    second = await create_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a2_id)
     single = create_async_engine(str(p3c_engine.url), pool_size=1, max_overflow=0)
     try:
         async with single.begin() as conn:
-            await assignment_service.discard(tenant.company_id, tenant.owner, _id(first), conn)
+            await schedule_service.discard(tenant.company_id, tenant.owner, _id(first), conn)
             assert (await conn.execute(
                 text("SELECT current_setting('flussra.actor_user_id', true)"))).scalar_one() \
                 == str(tenant.owner)
@@ -368,7 +367,7 @@ async def test_service_discard_sets_the_actor_only_for_its_transaction(
 
         with pytest.raises(RuntimeError):
             async with single.begin() as conn:
-                await assignment_service.discard(
+                await schedule_service.discard(
                     tenant.company_id, tenant.owner, _id(second), conn)
                 raise RuntimeError("roll back")
         async with single.begin() as conn:
@@ -377,24 +376,24 @@ async def test_service_discard_sets_the_actor_only_for_its_transaction(
         assert (await p3c_client.get(f"{BASE}/{_id(second)}", headers=tenant.admin)).status_code == 200
 
         async with single.begin() as conn:
-            await assignment_service.discard(
+            await schedule_service.discard(
                 tenant.company_id, tenant.branch_user, _id(second), conn)
     finally:
         await single.dispose()
     cur.execute("""
         SELECT entityid, actoruserid FROM audit.auditlog
-        WHERE actioncode = 'DRIVER_RATE_ASSIGNMENT_DISCARDED' AND entityid = ANY(%s)
+        WHERE actioncode = 'DRIVER_RATE_SCHEDULE_DISCARDED' AND entityid = ANY(%s)
         ORDER BY entityid
     """, ([str(_id(first)), str(_id(second))],))
     assert dict(cur.fetchall()) == {str(_id(first)): tenant.owner,
                                     str(_id(second)): tenant.branch_user}
 
 
-async def test_pending_cannot_be_voided_and_authoritative_assignments_can(p3c_client, tenant):
+async def test_pending_cannot_be_voided_and_authoritative_schedules_can(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await authored_assignment(p3c_client, tenant, definition, "25",
+    first = await authored_schedule(p3c_client, tenant, definition, "25",
                                       effective_from="2026-01-01")
-    second = await authored_assignment(p3c_client, tenant, definition, "30",
+    second = await authored_schedule(p3c_client, tenant, definition, "30",
                                        effective_from="2026-06-01")
     pending = await create_pending(p3c_client, tenant, definition, effective_from="2027-01-01")
 
@@ -404,9 +403,9 @@ async def test_pending_cannot_be_voided_and_authoritative_assignments_can(p3c_cl
     assert refused.json()["detail"]["code"] == "PENDING_CANNOT_BE_VOIDED"
     assert (await _get(p3c_client, tenant, pending))["status"] == "Pending"
 
-    for assignment in (first, second):
+    for schedule in (first, second):
         voided = await p3c_client.post(
-            f"{BASE}/{_id(assignment)}/void", headers=tenant.admin, json={"reason": "wrong"})
+            f"{BASE}/{_id(schedule)}/void", headers=tenant.admin, json={"reason": "wrong"})
         assert voided.status_code == 200, voided.text
         assert voided.json()["status"] == "Voided"
         assert voided.json()["voided_by_user_id"] == tenant.owner
@@ -422,11 +421,11 @@ async def test_pending_cannot_be_voided_and_authoritative_assignments_can(p3c_cl
 
 async def test_voided_window_is_reusable_by_a_new_schedule(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await authored_assignment(p3c_client, tenant, definition, "25",
+    first = await authored_schedule(p3c_client, tenant, definition, "25",
                                       effective_from="2026-01-01")
     await p3c_client.post(f"{BASE}/{_id(first)}/void", headers=tenant.admin,
                           json={"reason": "wrong"})
-    replacement = await authored_assignment(p3c_client, tenant, definition, "26",
+    replacement = await authored_schedule(p3c_client, tenant, definition, "26",
                                             effective_from="2026-01-01")
     assert replacement["status"] == "Approved"
 
@@ -445,7 +444,7 @@ async def test_unconfigured_company_can_read_but_not_write_or_approve_money(
     write = await set_scalar_value(p3c_client, tenant, pending, definition, "5")
     assert write.status_code == 422
     assert write.json()["detail"]["code"] == "COMPANY_CURRENCY_REQUIRED"
-    approval = await approve_assignment(p3c_client, tenant, pending)
+    approval = await approve_schedule(p3c_client, tenant, pending)
     assert approval.status_code == 422
     assert approval.json()["detail"]["code"] == "COMPANY_CURRENCY_REQUIRED"
     assert (await _get(p3c_client, tenant, pending))["values"][0]["amount"] is None
@@ -456,7 +455,7 @@ async def test_unconfigured_company_can_read_but_not_write_or_approve_money(
     cur.execute("UPDATE core.companies SET currencycode = 'EUR' WHERE companyid = %s",
                 (tenant.company_id,))
     assert (await set_scalar_value(p3c_client, tenant, pending, definition, "5")).status_code == 200
-    assert (await approve_assignment(p3c_client, tenant, pending)).status_code == 200
+    assert (await approve_schedule(p3c_client, tenant, pending)).status_code == 200
 
 
 async def test_authoritative_and_voided_target_state_keeps_the_currency_immutable(
@@ -473,7 +472,7 @@ async def test_authoritative_and_voided_target_state_keeps_the_currency_immutabl
     cur.execute("SELECT core.fn_company_has_durable_monetary_state(%s)", (tenant.company_id,))
     assert cur.fetchone()[0] is False
 
-    await approve_assignment(p3c_client, tenant, pending)
+    await approve_schedule(p3c_client, tenant, pending)
     for state in ("Approved", "Voided"):
         if state == "Voided":
             await p3c_client.post(f"{BASE}/{_id(pending)}/void", headers=tenant.admin,
@@ -489,7 +488,7 @@ async def test_authoritative_and_voided_target_state_keeps_the_currency_immutabl
 # Security
 # ---------------------------------------------------------------------------
 
-async def test_assignments_are_isolated_between_companies(p3c_client, tenant, p3b_dsn):
+async def test_schedules_are_isolated_between_companies(p3c_client, tenant, p3b_dsn):
     other = build_tenant(p3b_dsn)
     definition, pending = await _definition_and_pending(p3c_client, tenant)
 
@@ -508,17 +507,17 @@ async def test_assignments_are_isolated_between_companies(p3c_client, tenant, p3
 
     foreign_driver = await p3c_client.post(
         BASE, headers=other.admin,
-        json={"driver_assignment_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
+        json={"driver_id": tenant.driver_a_id, "rate_definition_id": definition["rate_definition_id"],
               "effective_from": "2026-01-01"})
     assert foreign_driver.status_code == 404
     foreign_definition = await p3c_client.post(
         BASE, headers=other.admin,
-        json={"driver_assignment_id": other.driver_a, "rate_definition_id": definition["rate_definition_id"],
+        json={"driver_id": other.driver_a_id, "rate_definition_id": definition["rate_definition_id"],
               "effective_from": "2026-01-01"})
     assert foreign_definition.status_code == 404
     assert (await p3c_client.get(
-        f"/compensation/driver-assignments/{tenant.driver_a}/rate-definitions/"
-        f"{definition['rate_definition_id']}/assignments", headers=other.admin)).status_code == 404
+        f"/compensation/drivers/{tenant.driver_a_id}/rate-definitions/"
+        f"{definition['rate_definition_id']}/rate-schedules", headers=other.admin)).status_code == 404
 
 
 async def test_branch_scoped_authors_act_only_on_their_branch_drivers(p3c_client, tenant):
@@ -527,10 +526,10 @@ async def test_branch_scoped_authors_act_only_on_their_branch_drivers(p3c_client
     own = await create_pending(p3c_client, tenant, definition, headers=branch_user)
     foreign = await p3c_client.post(
         BASE, headers=branch_user,
-        json={"driver_assignment_id": tenant.driver_b, "rate_definition_id": definition["rate_definition_id"],
+        json={"driver_id": tenant.driver_b_id, "rate_definition_id": definition["rate_definition_id"],
               "effective_from": "2026-01-01"})
     assert foreign.status_code == 403
-    admin_created = await create_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_b)
+    admin_created = await create_pending(p3c_client, tenant, definition, driver_id=tenant.driver_b_id)
     assert (await p3c_client.get(
         f"{BASE}/{_id(admin_created)}", headers=branch_user)).status_code == 403
     assert (await p3c_client.delete(
@@ -543,11 +542,11 @@ async def test_read_only_and_unpermissioned_users_cannot_mutate_or_read(p3c_clie
     viewer = tenant.headers(tenant.viewer)
     assert (await p3c_client.get(f"{BASE}/{_id(pending)}", headers=viewer)).status_code == 200
     assert (await p3c_client.get(
-        f"/compensation/driver-assignments/{tenant.driver_a}/rate-definitions/"
-        f"{definition['rate_definition_id']}/assignments", headers=viewer)).status_code == 200
+        f"/compensation/drivers/{tenant.driver_a_id}/rate-definitions/"
+        f"{definition['rate_definition_id']}/rate-schedules", headers=viewer)).status_code == 200
     for call in (
         p3c_client.post(BASE, headers=viewer,
-                        json={"driver_assignment_id": tenant.driver_a2,
+                        json={"driver_id": tenant.driver_a2_id,
                               "rate_definition_id": definition["rate_definition_id"],
                               "effective_from": "2026-01-01"}),
         p3c_client.patch(f"{BASE}/{_id(pending)}", headers=viewer, json={"notes": "x"}),
@@ -559,7 +558,7 @@ async def test_read_only_and_unpermissioned_users_cannot_mutate_or_read(p3c_clie
     nobody = tenant.headers(tenant.no_permissions)
     assert (await p3c_client.get(f"{BASE}/{_id(pending)}", headers=nobody)).status_code == 403
     assert (await p3c_client.get(
-        f"/compensation/driver-assignments/{tenant.driver_a}/rate-assignments/summary",
+        f"/compensation/drivers/{tenant.driver_a_id}/rate-schedules/summary",
         headers=nobody)).status_code == 403
 
 
@@ -572,7 +571,7 @@ async def test_unauthorized_monetary_mutations_never_disclose_currency_state(
     tenant = unconfigured_tenant
     definition = await create_definition(p3c_client, tenant)
     pending = await create_pending(
-        p3c_client, tenant, definition, driver_assignment_id=tenant.driver_b)
+        p3c_client, tenant, definition, driver_id=tenant.driver_b_id)
     user = {"viewer": tenant.viewer, "no_permissions": tenant.no_permissions,
             "foreign_branch_user": tenant.branch_user}[actor]
     headers = tenant.headers(user)
@@ -609,9 +608,9 @@ async def test_driver_self_accounts_are_denied_generic_compensation_administrati
          {"definition_name": "x", "input_type": "Decimal", "calculation_method": "PerUnit"}),
         ("get", "/compensation/pay-definition-requests", None),
         ("post", "/compensation/pay-definition-requests", {"requesting_branch_id": hq_branch_id}),
-        ("post", BASE, {"driver_assignment_id": 1, "rate_definition_id": 1, "effective_from": "2026-01-01"}),
-        ("get", "/compensation/driver-assignments/1/rate-assignments/summary", None),
-        ("get", "/compensation/driver-assignments/1/rate-definitions/1/resolution?work_date=2026-01-01", None),
+        ("post", BASE, {"driver_id": 1, "rate_definition_id": 1, "effective_from": "2026-01-01"}),
+        ("get", "/compensation/drivers/1/rate-schedules/summary", None),
+        ("get", "/compensation/drivers/1/rate-definitions/1/resolution?work_date=2026-01-01", None),
     ]
     for method, url, body in requests:
         response = await getattr(session_client, method)(url, headers=headers,

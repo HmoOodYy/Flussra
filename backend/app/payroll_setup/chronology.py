@@ -53,6 +53,15 @@ def period_end(schedule: Schedule, start: date) -> date:
     return same_day - timedelta(days=1)
 
 
+def period_matches_schedule(schedule: Schedule, start: date, end: date) -> bool:
+    """True when [start, end] is exactly one period of the schedule's own grid.
+
+    This is the compatibility test of a Driver pay rule's recorded calendar against a payroll
+    period: never a conversion, only an equality of the start and the end.
+    """
+    return is_period_start(schedule, start) and period_end(schedule, start) == end
+
+
 def is_period_start(schedule: Schedule, candidate: date, *, origin: date | None = None) -> bool:
     """Check cadence from the anchor, or from actual prior-period chronology."""
     start = origin or schedule.anchor_start_date

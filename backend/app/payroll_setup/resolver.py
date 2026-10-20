@@ -26,33 +26,38 @@ class Authority:
     next_boundary_kind: str | None
 
 
-async def resolve_payroll_setup_version(
+@dataclass(frozen=True)
+class EffectiveSetupVersion:
+    """The Payroll Setup version in force for a Branch on one date (no period legality)."""
+
+    assignment_id: int
+    setup_id: int
+    version_id: int
+    version_number: int
+    schedule: Schedule
+    config_hash: str
+
+
+async def resolve_effective_setup_version(
     company_id: int,
     branch_id: int,
-    period_start_date: date,
+    on_date: date,
     db: AsyncConnection,
-) -> Authority:
-    """Resolve only new persisted policy; never consult branch-owned legacy settings."""
-    result = await db.execute(text("""
-        SELECT b.Status AS BranchStatus, c.Status AS CompanyStatus,
-               c.IsSuspended AS CompanyIsSuspended
-        FROM core.Branches b JOIN core.Companies c ON c.CompanyID = b.CompanyID
-        WHERE b.BranchID = :bid AND b.CompanyID = :cid
-    """), {"cid": company_id, "bid": branch_id})
-    branch = result.mappings().one_or_none()
-    if branch is None:
-        raise PolicyError("BRANCH_NOT_FOUND", "Branch does not belong to Company")
-    if (branch["branchstatus"] != "Active" or branch["companystatus"] != "Active"
-            or branch["companyissuspended"]):
-        raise PolicyError("BRANCH_NOT_OPERATIONAL", "Branch is not operationally eligible")
+) -> EffectiveSetupVersion:
+    """The Branch's Setup assignment and terminal Published version effective on a date.
 
+    Read-only. It decides which persisted policy governs the date and nothing about whether
+    the date is a legal period boundary or the Branch operational: ``resolve_payroll_setup_version``
+    adds those, and Driver pay rules use this to capture the calendar of the Branch of their
+    context tenure.
+    """
     result = await db.execute(text("""
         SELECT BranchPayrollSetupAssignmentID, PayrollSetupID, EffectiveToDate
         FROM payroll.BranchPayrollSetupAssignments
         WHERE CompanyID = :cid AND BranchID = :bid AND WithdrawnAtUtc IS NULL
           AND EffectiveFromDate <= :start
           AND (EffectiveToDate IS NULL OR EffectiveToDate > :start)
-    """), {"cid": company_id, "bid": branch_id, "start": period_start_date})
+    """), {"cid": company_id, "bid": branch_id, "start": on_date})
     assignments = result.mappings().all()
     if len(assignments) != 1:
         raise PolicyError("ASSIGNMENT_NOT_FOUND", "Exactly one effective assignment is required")
@@ -84,15 +89,46 @@ async def resolve_payroll_setup_version(
               SELECT 1 FROM payroll.PayrollSetupVersions child
               WHERE child.ReplacesVersionID = v.PayrollSetupVersionID
           )
-    """), {"cid": company_id, "sid": setup_id, "start": period_start_date})
+    """), {"cid": company_id, "sid": setup_id, "start": on_date})
     versions = result.mappings().all()
     if len(versions) != 1:
         raise PolicyError("VERSION_NOT_FOUND", "Exactly one terminal Published Version is required")
     version = versions[0]
-    schedule = Schedule(
-        version["payrollfrequency"], version["anchorstartdate"],
-        version["customintervaldays"], version["normaldaysoffmask"],
+    return EffectiveSetupVersion(
+        assignment_id=assignment["branchpayrollsetupassignmentid"], setup_id=setup_id,
+        version_id=version["payrollsetupversionid"], version_number=version["versionnumber"],
+        schedule=Schedule(
+            version["payrollfrequency"], version["anchorstartdate"],
+            version["customintervaldays"], version["normaldaysoffmask"],
+        ),
+        config_hash=version["confighash"],
     )
+
+
+async def resolve_payroll_setup_version(
+    company_id: int,
+    branch_id: int,
+    period_start_date: date,
+    db: AsyncConnection,
+) -> Authority:
+    """Resolve only new persisted policy; never consult branch-owned legacy settings."""
+    result = await db.execute(text("""
+        SELECT b.Status AS BranchStatus, c.Status AS CompanyStatus,
+               c.IsSuspended AS CompanyIsSuspended
+        FROM core.Branches b JOIN core.Companies c ON c.CompanyID = b.CompanyID
+        WHERE b.BranchID = :bid AND b.CompanyID = :cid
+    """), {"bid": branch_id, "cid": company_id})
+    branch = result.mappings().one_or_none()
+    if branch is None:
+        raise PolicyError("BRANCH_NOT_FOUND", "Branch does not belong to Company")
+    if (branch["branchstatus"] != "Active" or branch["companystatus"] != "Active"
+            or branch["companyissuspended"]):
+        raise PolicyError("BRANCH_NOT_OPERATIONAL", "Branch is not operationally eligible")
+
+    effective = await resolve_effective_setup_version(
+        company_id, branch_id, period_start_date, db)
+    setup_id = effective.setup_id
+    schedule = effective.schedule
     if period_start_date < schedule.anchor_start_date:
         raise PolicyError("INVALID_SCHEDULE_BOUNDARY", "Start precedes the schedule anchor")
 
@@ -118,7 +154,7 @@ async def resolve_payroll_setup_version(
             WHERE BranchPayrollSetupAssignmentID = :aid AND EffectiveToDate IS NOT NULL
         ) assignment_boundaries
     """), {"cid": company_id, "bid": branch_id,
-           "aid": assignment["branchpayrollsetupassignmentid"],
+           "aid": effective.assignment_id,
            "start": period_start_date})
     next_assignment_boundary = result.scalar_one_or_none()
     result = await db.execute(text("""
@@ -142,8 +178,8 @@ async def resolve_payroll_setup_version(
             kind = "Version"
 
     return Authority(
-        company_id, branch_id, assignment["branchpayrollsetupassignmentid"],
-        setup_id, version["payrollsetupversionid"], version["versionnumber"],
-        schedule, version["confighash"], period_start_date, end_date,
+        company_id, branch_id, effective.assignment_id,
+        setup_id, effective.version_id, effective.version_number,
+        schedule, effective.config_hash, period_start_date, end_date,
         next_boundary, kind,
     )

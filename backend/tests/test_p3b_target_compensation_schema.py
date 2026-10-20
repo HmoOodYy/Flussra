@@ -17,7 +17,7 @@ from tests.compensation_database_fixtures import (
     connect,
     make_branch,
     make_company,
-    make_driver,
+    make_driver_pair,
     make_pay_definition,
     make_pending,
     make_rate_definition,
@@ -34,8 +34,8 @@ TARGET_TABLES = (
     "paydefinitions",
     "ratedefinitions",
     "ratecomponentdefinitions",
-    "driverrateassignments",
-    "driverratevalues",
+    "driverrateschedules",
+    "driverrateschedulevalues",
 )
 
 
@@ -74,7 +74,7 @@ def test_child_tables_have_no_effective_date_or_lifecycle_columns(cur):
     cur.execute("""
         SELECT table_name, column_name FROM information_schema.columns
         WHERE table_schema = 'payroll'
-          AND table_name IN ('driverratevalues', 'ratecomponentdefinitions')
+          AND table_name IN ('driverrateschedulevalues', 'ratecomponentdefinitions')
           AND (column_name LIKE '%%effective%%' OR column_name LIKE '%%status%%'
                OR column_name LIKE '%%approved%%' OR column_name LIKE '%%valid%%')
     """)
@@ -84,14 +84,14 @@ def test_child_tables_have_no_effective_date_or_lifecycle_columns(cur):
 def test_value_amount_uses_internal_precision_without_payable_rounding(cur):
     cur.execute("""
         SELECT numeric_precision, numeric_scale FROM information_schema.columns
-        WHERE table_schema = 'payroll' AND table_name = 'driverratevalues' AND column_name = 'amount'
+        WHERE table_schema = 'payroll' AND table_name = 'driverrateschedulevalues' AND column_name = 'amount'
     """)
     assert cur.fetchone() == (18, 4)
 
     fx = Scalar(cur)
     pending = make_pending(cur, fx)
     set_value(cur, pending, fx.rate_definition_id, fx.component_id, "12.34567")
-    cur.execute("SELECT amount FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    cur.execute("SELECT amount FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (pending,))
     assert str(cur.fetchone()[0]) == "12.3457"  # NUMERIC(18,4) storage, no payable rounding
 
@@ -113,7 +113,7 @@ def test_company_is_valid_with_zero_pay_definitions(cur):
 def test_any_code_or_name_behaves_identically_for_either_method(cur, code, method):
     company_id = make_company(cur)
     branch_id = make_branch(cur, company_id)
-    driver_assignment_id = make_driver(cur, company_id, branch_id)
+    driver_id, _ = make_driver_pair(cur, company_id, branch_id)
     pay_definition_id = make_pay_definition(cur, company_id, code=code, name=code.lower(),
                                             method=method)
     rate_definition_id = make_rate_definition(cur, pay_definition_id)
@@ -125,15 +125,15 @@ def test_any_code_or_name_behaves_identically_for_either_method(cur, code, metho
         amounts = ["3", "4", "5"]
 
     cur.execute("""
-        INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
-        VALUES (%s, %s, %s, %s, '2026-01-01') RETURNING driverrateassignmentid
-    """, (company_id, branch_id, driver_assignment_id, rate_definition_id))
-    assignment_id = cur.fetchone()[0]
+        INSERT INTO payroll.driverrateschedules
+            (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
+        VALUES (%s, %s, %s, %s, '2026-01-01') RETURNING driverratescheduleid
+    """, (company_id, driver_id, pay_definition_id, rate_definition_id))
+    schedule_id = cur.fetchone()[0]
     for component_id, amount in zip(components, amounts, strict=True):
-        set_value(cur, assignment_id, rate_definition_id, component_id, amount)
-    approve(cur, assignment_id)
-    assert status_of(cur, assignment_id) == "Approved"
+        set_value(cur, schedule_id, rate_definition_id, component_id, amount)
+    approve(cur, schedule_id)
+    assert status_of(cur, schedule_id) == "Approved"
     assert structure_locked_at(cur, rate_definition_id) is not None
 
 
@@ -185,38 +185,45 @@ def test_rate_definition_must_share_its_pay_definition_company(cur):
         """, (other_company, pay_definition_id))
 
 
-def test_assignment_rejects_driver_company_branch_mismatch(cur):
+def test_schedule_rejects_driver_company_and_pay_definition_mismatch(cur):
     fx = Scalar(cur)
     other_company = make_company(cur)
-    other_branch = make_branch(cur, fx.company_id)
-    foreign_branch = make_branch(cur, other_company)
+    other_driver_company = Scalar(cur)
+    other_pay_definition = make_pay_definition(cur, fx.company_id)
     insert = """
-        INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
+        INSERT INTO payroll.driverrateschedules
+            (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
         VALUES (%s, %s, %s, %s, '2026-01-01')
     """
-    with rejected(errors.ForeignKeyViolation):  # Driver belongs to a different Branch
-        cur.execute(insert, (fx.company_id, other_branch, fx.driver_assignment_id, fx.rate_definition_id))
-    with rejected(errors.ForeignKeyViolation):  # Branch belongs to another Company
-        cur.execute(insert, (fx.company_id, foreign_branch, fx.driver_assignment_id, fx.rate_definition_id))
+    with rejected(errors.ForeignKeyViolation):  # Driver belongs to another Company
+        cur.execute(insert, (fx.company_id, other_driver_company.driver_id, fx.pay_definition_id,
+                             fx.rate_definition_id))
     with rejected(errors.ForeignKeyViolation):  # Company differs from Driver and RateDefinition
-        cur.execute(insert, (other_company, fx.branch_id, fx.driver_assignment_id, fx.rate_definition_id))
+        cur.execute(insert, (other_company, fx.driver_id, fx.pay_definition_id, fx.rate_definition_id))
+    with rejected(errors.ForeignKeyViolation):  # PayDefinition is not the RateDefinition's own
+        cur.execute(insert, (fx.company_id, fx.driver_id, other_pay_definition, fx.rate_definition_id))
+    with rejected(errors.NotNullViolation):  # a schedule is always owned by a Driver
+        cur.execute("""
+            INSERT INTO payroll.driverrateschedules
+                (companyid, paydefinitionid, ratedefinitionid, effectivefrom)
+            VALUES (%s, %s, %s, '2026-01-01')
+        """, (fx.company_id, fx.pay_definition_id, fx.rate_definition_id))
 
 
-def test_assignment_rejects_rate_definition_from_another_company(cur):
+def test_schedule_rejects_rate_definition_from_another_company(cur):
     fx = Scalar(cur)
     other = Scalar(cur)
     with rejected(errors.ForeignKeyViolation):
         make_pending(cur, fx, rate_definition_id=other.rate_definition_id)
 
 
-def test_assignment_identity_is_immutable(cur):
+def test_schedule_identity_is_immutable(cur):
     fx = Scalar(cur)
     pending = make_pending(cur, fx)
     other_driver = add_driver(cur, fx)
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_IDENTITY_IMMUTABLE"):
-        cur.execute("UPDATE payroll.driverrateassignments SET driverassignmentid = %s "
-                    "WHERE driverrateassignmentid = %s", (other_driver, pending))
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_IDENTITY_IMMUTABLE"):
+        cur.execute("UPDATE payroll.driverrateschedules SET driverid = %s "
+                    "WHERE driverratescheduleid = %s", (other_driver, pending))
 
 
 def test_rate_definition_has_exactly_one_owner(cur):
@@ -238,10 +245,9 @@ def _status_rate_column(cur, company_id: int, branch_id: int) -> int:
     return cur.fetchone()[0]
 
 
-def test_dormant_status_owner_keeps_branch_and_scalar_integrity(cur):
+def test_dormant_status_owner_keeps_branch_and_scalar_integrity_and_is_never_scheduled(cur):
     fx = Scalar(cur)
     other_branch = make_branch(cur, fx.company_id)
-    other_branch_driver = make_driver(cur, fx.company_id, other_branch)
     column_id = _status_rate_column(cur, fx.company_id, fx.branch_id)
 
     with rejected(errors.ForeignKeyViolation):  # owner branch must match the column's branch
@@ -264,13 +270,14 @@ def test_dormant_status_owner_keeps_branch_and_scalar_integrity(cur):
     """, (fx.company_id, column_id, fx.branch_id))
     status_rate_definition = cur.fetchone()[0]
 
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_BRANCH_MISMATCH"):
-        cur.execute("""
-            INSERT INTO payroll.driverrateassignments
-                (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
-            VALUES (%s, %s, %s, %s, '2026-01-01')
-        """, (fx.company_id, other_branch, other_branch_driver, status_rate_definition))
-    make_pending(cur, fx, rate_definition_id=status_rate_definition)
+    # A status-owned definition has no PayDefinition, so it can never have a Driver schedule.
+    for pay_definition_id in (fx.pay_definition_id, None):
+        with rejected((errors.ForeignKeyViolation, errors.NotNullViolation)):
+            cur.execute("""
+                INSERT INTO payroll.driverrateschedules
+                    (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
+                VALUES (%s, %s, %s, %s, '2026-01-01')
+            """, (fx.company_id, fx.driver_id, pay_definition_id, status_rate_definition))
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +369,7 @@ def test_negative_values_are_rejected_and_zero_is_accepted(cur):
     set_value(cur, pending, fx.rate_definition_id, fx.component_id, "0")
     approve(cur, pending)
     assert status_of(cur, pending) == "Approved"
-    cur.execute("SELECT amount FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    cur.execute("SELECT amount FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (pending,))
     assert cur.fetchone()[0] == 0
 
@@ -373,7 +380,7 @@ def test_missing_value_is_not_zero_and_blocks_approval(cur, missing_as):
     pending = make_pending(cur, fx)
     if missing_as == "null":
         set_value(cur, pending, fx.rate_definition_id, fx.component_id, None)
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_INCOMPLETE"):
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_INCOMPLETE"):
         approve(cur, pending)
     assert status_of(cur, pending) == "Pending"
     assert structure_locked_at(cur, fx.rate_definition_id) is None
@@ -406,14 +413,14 @@ def test_ordinal_approval_requires_every_tier_value(cur):
     pending = make_pending(cur, fx)
     set_value(cur, pending, fx.rate_definition_id, fx.component_ids[0], "3")
     set_value(cur, pending, fx.rate_definition_id, fx.component_ids[1], "4")
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_INCOMPLETE"):
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_INCOMPLETE"):
         approve(cur, pending)
     set_value(cur, pending, fx.rate_definition_id, fx.component_ids[2], "5")
     approve(cur, pending)
     assert status_of(cur, pending) == "Approved"
 
 
-def test_one_assignment_owns_one_complete_value_set(cur):
+def test_one_schedule_owns_one_complete_value_set(cur):
     fx = Ordinal(cur)
     first = make_pending(cur, fx, effective_from="2026-01-01")
     for component_id, amount in zip(fx.component_ids, ["3", "4", "5"], strict=True):
@@ -425,9 +432,9 @@ def test_one_assignment_owns_one_complete_value_set(cur):
         set_value(cur, second, fx.rate_definition_id, component_id, amount)
     approve(cur, second)
     cur.execute("""
-        SELECT driverrateassignmentid, array_agg(amount ORDER BY ratecomponentdefinitionid)
-        FROM payroll.driverratevalues
-        WHERE driverrateassignmentid IN (%s, %s) GROUP BY 1 ORDER BY 1
+        SELECT driverratescheduleid, array_agg(amount ORDER BY ratecomponentdefinitionid)
+        FROM payroll.driverrateschedulevalues
+        WHERE driverratescheduleid IN (%s, %s) GROUP BY 1 ORDER BY 1
     """, (first, second))
     assert [[int(v) for v in row[1]] for row in cur.fetchall()] == [[3, 4, 5], [6, 7, 8]]
 
@@ -436,15 +443,15 @@ def test_one_assignment_owns_one_complete_value_set(cur):
 # Approval, lifecycle and immutability
 # ---------------------------------------------------------------------------
 
-def test_assignment_must_be_created_pending(cur):
+def test_schedule_must_be_created_pending(cur):
     fx = Scalar(cur)
     with rejected(errors.CheckViolation):
         cur.execute("""
-            INSERT INTO payroll.driverrateassignments
-                (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom, status,
+            INSERT INTO payroll.driverrateschedules
+                (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom, status,
                  approvedbyuserid, approvedatutc)
             VALUES (%s, %s, %s, %s, '2026-01-01', 'Approved', %s, NOW())
-        """, (fx.company_id, fx.branch_id, fx.driver_assignment_id, fx.rate_definition_id, user_id(cur)))
+        """, (fx.company_id, fx.driver_id, fx.pay_definition_id, fx.rate_definition_id, user_id(cur)))
 
 
 def test_approval_requires_approver_metadata(cur):
@@ -452,8 +459,8 @@ def test_approval_requires_approver_metadata(cur):
     pending = make_pending(cur, fx)
     set_value(cur, pending, fx.rate_definition_id, fx.component_id, "1")
     with rejected(errors.CheckViolation):
-        cur.execute("UPDATE payroll.driverrateassignments SET status = 'Approved' "
-                    "WHERE driverrateassignmentid = %s", (pending,))
+        cur.execute("UPDATE payroll.driverrateschedules SET status = 'Approved' "
+                    "WHERE driverratescheduleid = %s", (pending,))
     assert status_of(cur, pending) == "Pending"
 
 
@@ -463,107 +470,107 @@ def test_first_approval_sets_the_single_structure_lock(cur):
     make_pending(cur, fx)
     assert structure_locked_at(cur, fx.rate_definition_id) is None  # Pending never locks
 
-    approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])
+    approved_scalar(cur, fx, driver_id=fx.driver_ids[1])
     first_lock = structure_locked_at(cur, fx.rate_definition_id)
     assert first_lock is not None
 
     cur.execute("SELECT pg_sleep(0.05)")
     cur.execute("""
-        SELECT driverrateassignmentid FROM payroll.driverrateassignments
-        WHERE driverassignmentid = %s AND status = 'Pending'
-    """, (fx.driver_assignment_ids[0],))
-    assignment = cur.fetchone()[0]
-    set_value(cur, assignment, fx.rate_definition_id, fx.component_id, "2")
-    approve(cur, assignment)
+        SELECT driverratescheduleid FROM payroll.driverrateschedules
+        WHERE driverid = %s AND status = 'Pending'
+    """, (fx.driver_ids[0],))
+    schedule = cur.fetchone()[0]
+    set_value(cur, schedule, fx.rate_definition_id, fx.component_id, "2")
+    approve(cur, schedule)
     assert structure_locked_at(cur, fx.rate_definition_id) == first_lock
 
 
-def test_values_are_frozen_once_the_assignment_is_authoritative(cur):
+def test_values_are_frozen_once_the_schedule_is_authoritative(cur):
     fx = Scalar(cur)
-    assignment = approved_scalar(cur, fx)
+    schedule = approved_scalar(cur, fx)
     with rejected(errors.CheckViolation, "RATE_VALUES_IMMUTABLE_AFTER_APPROVAL"):
-        cur.execute("UPDATE payroll.driverratevalues SET amount = 99 "
-                    "WHERE driverrateassignmentid = %s", (assignment,))
+        cur.execute("UPDATE payroll.driverrateschedulevalues SET amount = 99 "
+                    "WHERE driverratescheduleid = %s", (schedule,))
     with rejected(errors.CheckViolation, "RATE_VALUES_IMMUTABLE_AFTER_APPROVAL"):
-        cur.execute("DELETE FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
-                    (assignment,))
+        cur.execute("DELETE FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
+                    (schedule,))
 
 
 def test_pending_values_are_editable_in_place(cur):
     fx = Scalar(cur)
     pending = make_pending(cur, fx)
     set_value(cur, pending, fx.rate_definition_id, fx.component_id, "1")
-    cur.execute("UPDATE payroll.driverratevalues SET amount = 2 WHERE driverrateassignmentid = %s",
+    cur.execute("UPDATE payroll.driverrateschedulevalues SET amount = 2 WHERE driverratescheduleid = %s",
                 (pending,))
-    cur.execute("UPDATE payroll.driverrateassignments SET effectivefrom = '2026-02-01' "
-                "WHERE driverrateassignmentid = %s", (pending,))
+    cur.execute("UPDATE payroll.driverrateschedules SET effectivefrom = '2026-02-01' "
+                "WHERE driverratescheduleid = %s", (pending,))
     approve(cur, pending)
-    cur.execute("SELECT effectivefrom, status FROM payroll.driverrateassignments "
-                "WHERE driverrateassignmentid = %s", (pending,))
+    cur.execute("SELECT effectivefrom, status FROM payroll.driverrateschedules "
+                "WHERE driverratescheduleid = %s", (pending,))
     assert cur.fetchone()[1] == "Approved"
 
 
-def test_authoritative_assignment_fields_are_immutable(cur):
+def test_authoritative_schedule_fields_are_immutable(cur):
     fx = Scalar(cur)
-    assignment = approved_scalar(cur, fx)
+    schedule = approved_scalar(cur, fx)
     for column, value in (("effectivefrom", "2026-02-01"), ("effectiveto", "2026-12-31")):
-        with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_AUTHORITATIVE_IMMUTABLE"):
-            cur.execute(f"UPDATE payroll.driverrateassignments SET {column} = %s "
-                        "WHERE driverrateassignmentid = %s", (value, assignment))
+        with rejected(errors.CheckViolation, "RATE_SCHEDULE_AUTHORITATIVE_IMMUTABLE"):
+            cur.execute(f"UPDATE payroll.driverrateschedules SET {column} = %s "
+                        "WHERE driverratescheduleid = %s", (value, schedule))
 
 
 def test_lifecycle_transitions(cur):
     fx = Scalar(cur, driver_count=3)
     pending_to_void = make_pending(cur, fx)
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_INVALID_TRANSITION"):
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_INVALID_TRANSITION"):
         cur.execute("""
-            UPDATE payroll.driverrateassignments
-               SET status = 'Voided', voidedatutc = NOW() WHERE driverrateassignmentid = %s
+            UPDATE payroll.driverrateschedules
+               SET status = 'Voided', voidedatutc = NOW() WHERE driverratescheduleid = %s
         """, (pending_to_void,))
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_INVALID_TRANSITION"):
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_INVALID_TRANSITION"):
         cur.execute("""
-            UPDATE payroll.driverrateassignments
+            UPDATE payroll.driverrateschedules
                SET status = 'Superseded', effectiveto = '2026-12-31'
-             WHERE driverrateassignmentid = %s
+             WHERE driverratescheduleid = %s
         """, (pending_to_void,))
 
-    approved = approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_INVALID_TRANSITION"):
-        cur.execute("UPDATE payroll.driverrateassignments SET status = 'Pending' "
-                    "WHERE driverrateassignmentid = %s", (approved,))
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_DELETE_BLOCKED"):
-        cur.execute("DELETE FROM payroll.driverrateassignments WHERE driverrateassignmentid = %s",
+    approved = approved_scalar(cur, fx, driver_id=fx.driver_ids[1])
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_INVALID_TRANSITION"):
+        cur.execute("UPDATE payroll.driverrateschedules SET status = 'Pending' "
+                    "WHERE driverratescheduleid = %s", (approved,))
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_DELETE_BLOCKED"):
+        cur.execute("DELETE FROM payroll.driverrateschedules WHERE driverratescheduleid = %s",
                     (approved,))
 
     cur.execute("""
-        UPDATE payroll.driverrateassignments
+        UPDATE payroll.driverrateschedules
            SET status = 'Voided', voidedbyuserid = %s, voidedatutc = NOW(), voidreason = 'test'
-         WHERE driverrateassignmentid = %s
+         WHERE driverratescheduleid = %s
     """, (user_id(cur), approved))
-    with rejected(errors.CheckViolation, "RATE_ASSIGNMENT_AUTHORITATIVE_IMMUTABLE"):
-        cur.execute("UPDATE payroll.driverrateassignments SET status = 'Approved' "
-                    "WHERE driverrateassignmentid = %s", (approved,))
+    with rejected(errors.CheckViolation, "RATE_SCHEDULE_AUTHORITATIVE_IMMUTABLE"):
+        cur.execute("UPDATE payroll.driverrateschedules SET status = 'Approved' "
+                    "WHERE driverratescheduleid = %s", (approved,))
 
 
-def test_superseded_assignment_requires_a_closed_window(cur):
+def test_superseded_schedule_requires_a_closed_window(cur):
     fx = Scalar(cur)
-    assignment = approved_scalar(cur, fx)
+    schedule = approved_scalar(cur, fx)
     with rejected(errors.CheckViolation):
-        cur.execute("UPDATE payroll.driverrateassignments SET status = 'Superseded' "
-                    "WHERE driverrateassignmentid = %s", (assignment,))
+        cur.execute("UPDATE payroll.driverrateschedules SET status = 'Superseded' "
+                    "WHERE driverratescheduleid = %s", (schedule,))
 
 
-def test_assignment_has_no_generalized_authority_flag(cur):
+def test_schedule_has_no_generalized_authority_flag(cur):
     cur.execute("""
         SELECT column_name FROM information_schema.columns
-        WHERE table_schema = 'payroll' AND table_name = 'driverrateassignments'
+        WHERE table_schema = 'payroll' AND table_name = 'driverrateschedules'
           AND column_name LIKE '%authoritative%'
     """)
     assert cur.fetchall() == []
     cur.execute("""
         SELECT conname FROM pg_constraint
-        WHERE conrelid = 'payroll.driverrateassignments'::regclass
-          AND conname = 'uq_driverrateassignments_id_authoritative'
+        WHERE conrelid = 'payroll.driverrateschedules'::regclass
+          AND conname = 'uq_driverrateschedules_id_authoritative'
     """)
     assert cur.fetchall() == []
 
@@ -582,12 +589,12 @@ def test_overlapping_authoritative_windows_are_rejected(cur):
         approve(cur, overlapping)
     assert status_of(cur, first) == "Superseded"
 
-    cur.execute("UPDATE payroll.driverrateassignments SET effectivefrom = '2026-07-01' "
-                "WHERE driverrateassignmentid = %s", (overlapping,))
+    cur.execute("UPDATE payroll.driverrateschedules SET effectivefrom = '2026-07-01' "
+                "WHERE driverratescheduleid = %s", (overlapping,))
     approve(cur, overlapping)  # adjacent, not overlapping
 
 
-def test_at_most_one_approved_assignment_per_logical_identity(cur):
+def test_at_most_one_approved_schedule_per_logical_identity(cur):
     fx = Scalar(cur)
     approved_scalar(cur, fx, effective_from="2026-01-01", effective_to="2026-06-30")
     later = make_pending(cur, fx, effective_from="2026-07-01")
@@ -596,7 +603,7 @@ def test_at_most_one_approved_assignment_per_logical_identity(cur):
         approve(cur, later)
 
 
-def test_open_ended_approved_assignment_blocks_a_later_overlapping_approval(cur):
+def test_open_ended_approved_schedule_blocks_a_later_overlapping_approval(cur):
     fx = Scalar(cur)
     approved_scalar(cur, fx, effective_from="2026-01-01")
     later = make_pending(cur, fx, effective_from="2030-01-01")
@@ -617,24 +624,24 @@ def test_supersession_closes_the_previous_window_before_the_next_approval(cur):
 
 def test_windows_are_independent_per_driver_and_per_rate_definition(cur):
     fx = Scalar(cur, driver_count=2)
-    approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[0])
-    approved_scalar(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])  # same window, other Driver
+    approved_scalar(cur, fx, driver_id=fx.driver_ids[0])
+    approved_scalar(cur, fx, driver_id=fx.driver_ids[1])  # same window, other Driver
 
     other_pay_definition = make_pay_definition(cur, fx.company_id)
     other_definition = make_rate_definition(cur, other_pay_definition)
     other_component = add_scalar_component(cur, other_definition)
-    assignment = make_pending(cur, fx, rate_definition_id=other_definition)  # same Driver, other definition
-    set_value(cur, assignment, other_definition, other_component, "1")
-    approve(cur, assignment)
+    schedule = make_pending(cur, fx, rate_definition_id=other_definition)  # same Driver, other definition
+    set_value(cur, schedule, other_definition, other_component, "1")
+    approve(cur, schedule)
 
 
-def test_voided_assignment_no_longer_occupies_its_window(cur):
+def test_voided_schedule_no_longer_occupies_its_window(cur):
     fx = Scalar(cur)
     first = approved_scalar(cur, fx, effective_from="2026-01-01")
     cur.execute("""
-        UPDATE payroll.driverrateassignments
+        UPDATE payroll.driverrateschedules
            SET status = 'Voided', voidedbyuserid = %s, voidedatutc = NOW()
-         WHERE driverrateassignmentid = %s
+         WHERE driverratescheduleid = %s
     """, (user_id(cur), first))
     replacement = make_pending(cur, fx, effective_from="2026-01-01")
     set_value(cur, replacement, fx.rate_definition_id, fx.component_id, "9")
@@ -651,12 +658,12 @@ def test_effective_window_must_be_ordered(cur):
 # Pending boundary
 # ---------------------------------------------------------------------------
 
-def test_one_pending_assignment_per_logical_identity(cur):
+def test_one_pending_schedule_per_logical_identity(cur):
     fx = Scalar(cur, driver_count=2)
-    make_pending(cur, fx, driver_assignment_id=fx.driver_assignment_ids[0])
+    make_pending(cur, fx, driver_id=fx.driver_ids[0])
     with rejected(errors.UniqueViolation):
-        make_pending(cur, fx, driver_assignment_id=fx.driver_assignment_ids[0], effective_from="2027-01-01")
-    make_pending(cur, fx, driver_assignment_id=fx.driver_assignment_ids[1])  # other Driver is a different identity
+        make_pending(cur, fx, driver_id=fx.driver_ids[0], effective_from="2027-01-01")
+    make_pending(cur, fx, driver_id=fx.driver_ids[1])  # other Driver is a different identity
 
 
 def test_discard_deletes_pending_with_values_and_audits_the_full_value_set(cur):
@@ -666,29 +673,31 @@ def test_discard_deletes_pending_with_values_and_audits_the_full_value_set(cur):
         set_value(cur, pending, fx.rate_definition_id, component_id, amount)
 
     cur.execute("SELECT set_config('flussra.actor_user_id', %s, FALSE)", (str(user_id(cur)),))
-    cur.execute("DELETE FROM payroll.driverrateassignments WHERE driverrateassignmentid = %s",
+    cur.execute("DELETE FROM payroll.driverrateschedules WHERE driverratescheduleid = %s",
                 (pending,))
-    cur.execute("SELECT count(*) FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    cur.execute("SELECT count(*) FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (pending,))
     assert cur.fetchone()[0] == 0
 
     cur.execute("""
         SELECT actoruserid, oldvaluejson, companyid, branchid FROM audit.auditlog
-        WHERE actioncode = 'DRIVER_RATE_ASSIGNMENT_DISCARDED' AND entityid = %s
+        WHERE actioncode = 'DRIVER_RATE_SCHEDULE_DISCARDED' AND entityid = %s
     """, (str(pending),))
     actor, payload, company_id, branch_id = cur.fetchone()
-    assert (actor, company_id, branch_id) == (user_id(cur), fx.company_id, fx.branch_id)
-    values = json.loads(payload)["Values"]
+    assert (actor, company_id, branch_id) == (user_id(cur), fx.company_id, None)  # Driver-owned: no Branch
+    discarded = json.loads(payload)
+    assert discarded["DriverID"] == fx.driver_id and "DriverAssignmentID" not in discarded
+    values = discarded["Values"]
     assert [float(item["Amount"]) for item in values] == [3.0, 4.5, 0.0]
 
 
 def test_structure_is_editable_again_after_discarding_pending(cur):
     fx = Ordinal(cur)
     pending = make_pending(cur, fx)
-    with rejected(errors.CheckViolation, "RATE_STRUCTURE_PENDING_ASSIGNMENT"):
+    with rejected(errors.CheckViolation, "RATE_STRUCTURE_PENDING_SCHEDULE"):
         cur.execute("DELETE FROM payroll.ratecomponentdefinitions "
                     "WHERE ratecomponentdefinitionid = %s", (fx.component_ids[2],))
-    cur.execute("DELETE FROM payroll.driverrateassignments WHERE driverrateassignmentid = %s",
+    cur.execute("DELETE FROM payroll.driverrateschedules WHERE driverratescheduleid = %s",
                 (pending,))
     cur.execute("DELETE FROM payroll.ratecomponentdefinitions WHERE ratecomponentdefinitionid = %s",
                 (fx.component_ids[2],))
@@ -733,10 +742,10 @@ MUTATIONS = {
 
 
 @pytest.mark.parametrize("mutation", sorted(MUTATIONS))
-def test_every_structural_mutation_fails_while_a_pending_assignment_exists(cur, mutation):
+def test_every_structural_mutation_fails_while_a_pending_schedule_exists(cur, mutation):
     fx = Ordinal(cur)
     make_pending(cur, fx)
-    with rejected(errors.CheckViolation, "RATE_STRUCTURE_PENDING_ASSIGNMENT"):
+    with rejected(errors.CheckViolation, "RATE_STRUCTURE_PENDING_SCHEDULE"):
         MUTATIONS[mutation](cur, fx)
 
 
@@ -858,7 +867,7 @@ def _durable(cur, company_id: int) -> bool:
     return cur.fetchone()[0]
 
 
-def test_unconfigured_company_cannot_approve_a_target_assignment(cur):
+def test_unconfigured_company_cannot_approve_a_target_schedule(cur):
     fx = Scalar(cur, currency=None)
     pending = make_pending(cur, fx)
     set_value(cur, pending, fx.rate_definition_id, fx.component_id, "1")
@@ -872,7 +881,7 @@ def test_unconfigured_company_cannot_approve_a_target_assignment(cur):
     assert status_of(cur, pending) == "Approved"
 
 
-def test_pending_does_not_count_but_authoritative_assignments_do(cur):
+def test_pending_does_not_count_but_authoritative_schedules_do(cur):
     fx = Scalar(cur, driver_count=2)
     pending = make_pending(cur, fx)
     set_value(cur, pending, fx.rate_definition_id, fx.component_id, "1")
@@ -888,17 +897,17 @@ def test_pending_does_not_count_but_authoritative_assignments_do(cur):
 
 
 @pytest.mark.parametrize("final_state", ["Superseded", "Voided"])
-def test_superseded_and_voided_assignments_remain_durable_monetary_state(cur, final_state):
+def test_superseded_and_voided_schedules_remain_durable_monetary_state(cur, final_state):
     fx = Scalar(cur)
-    assignment = approved_scalar(cur, fx)
+    schedule = approved_scalar(cur, fx)
     if final_state == "Superseded":
-        supersede(cur, assignment, "2026-12-31")
+        supersede(cur, schedule, "2026-12-31")
     else:
         cur.execute("""
-            UPDATE payroll.driverrateassignments
+            UPDATE payroll.driverrateschedules
                SET status = 'Voided', voidedbyuserid = %s, voidedatutc = NOW()
-             WHERE driverrateassignmentid = %s
-        """, (user_id(cur), assignment))
+             WHERE driverratescheduleid = %s
+        """, (user_id(cur), schedule))
     assert _durable(cur, fx.company_id) is True
     with rejected(errors.CheckViolation, "COMPANY_CURRENCY_CHANGE_BLOCKED"):
         cur.execute("UPDATE core.companies SET currencycode = 'EUR' WHERE companyid = %s",

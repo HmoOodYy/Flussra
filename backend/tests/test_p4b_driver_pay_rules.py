@@ -1,14 +1,17 @@
 """DriverPayRule (Minimum/Maximum pay) API contract.
 
 DriverPayRules are independent of the PayItem/PayDefinition runtime and stay live across
-the P4b cutover, so the CRUD, validation, overlap, audit-atomicity, access-boundary and
-finalized-period guard contracts of the retired Phase-2C suites are covered here against
-the disposable tenant.
+the P4b cutover. They are owned by the permanent Driver (Durable Driver Stage 2) and record
+the home pay calendar captured from the Branch's Payroll Setup, so the CRUD, validation,
+overlap, audit-atomicity, access-boundary and finalized-period guard contracts are covered
+here against the disposable tenant, whose Branches have a published weekly Payroll Setup.
 """
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     p3c_application,
     p3c_database_engine,
@@ -30,14 +33,18 @@ pytestmark = pytest.mark.asyncio
 RULES = "/payroll/driver-pay-rules"
 
 
-@pytest.fixture(name="tenant")
-def payroll_tenant(p3b_dsn):
-    return build_payroll_tenant(p3b_dsn)
+@pytest_asyncio.fixture(name="tenant")
+async def payroll_tenant(p3b_dsn, p3c_engine):
+    tenant = build_payroll_tenant(p3b_dsn)
+    async with p3c_engine.begin() as conn:
+        for branch_id in (tenant.branch_a, tenant.branch_b):
+            await ensure_branch_pay_calendar(conn, tenant.company_id, branch_id)
+    return tenant
 
 
 def _rule(tenant, rule_type="MinimumPay", amount="100.00", start="2200-01-01", end=None,
-          driver_assignment_id=None, **extra) -> dict:
-    return {"driver_assignment_id": driver_assignment_id or tenant.driver_a, "rule_type": rule_type,
+          driver_id=None, **extra) -> dict:
+    return {"driver_id": driver_id or tenant.driver_a_id, "rule_type": rule_type,
             "amount": amount, "effective_from": start, "effective_to": end, **extra}
 
 
@@ -68,7 +75,7 @@ async def test_minimum_and_maximum_rules_are_created_active_and_can_be_ended_and
 
 async def test_unknown_drivers_and_rules_are_not_found(p3c_client, tenant):
     unknown = await p3c_client.post(
-        RULES, json=_rule(tenant, driver_assignment_id=999999999), headers=tenant.admin)
+        RULES, json=_rule(tenant, driver_id=999999999), headers=tenant.admin)
     assert unknown.status_code == 404
     assert (await p3c_client.get(f"{RULES}/999999", headers=tenant.admin)).status_code == 404
     assert (await p3c_client.post(f"{RULES}/999999/void", headers=tenant.admin)).status_code == 404
@@ -79,7 +86,7 @@ async def test_a_rule_of_another_company_driver_cannot_be_created_or_read(
 ):
     other = build_payroll_tenant(tenant.dsn)
     response = await p3c_client.post(
-        RULES, json=_rule(tenant, driver_assignment_id=other.driver_a), headers=tenant.admin)
+        RULES, json=_rule(tenant, driver_id=other.driver_a_id), headers=tenant.admin)
     assert response.status_code == 404
     rule_id = await _create(p3c_client, tenant)
     assert (await p3c_client.get(f"{RULES}/{rule_id}", headers=other.admin)).status_code == 404
@@ -117,7 +124,7 @@ async def test_overlapping_rules_are_rejected_and_contiguous_ranges_allowed(
     await _create(p3c_client, tenant, rule_type="MaximumPay", amount="900",
                   start="2201-01-01", end="2201-01-31")
     await _create(p3c_client, tenant, amount="500", start="2201-01-01", end="2201-01-31",
-                  driver_assignment_id=tenant.driver_a2)
+                  driver_id=tenant.driver_a2_id)
 
     ended = await _create(p3c_client, tenant, amount="700", start="2201-03-01", end="2201-03-31")
     assert (await p3c_client.post(f"{RULES}/{ended}/end", json={"effective_to": "2201-03-15"},
@@ -136,11 +143,11 @@ async def test_list_filters_notes_update_and_lifecycle_guards(p3c_client, tenant
     rule_id = await _create(p3c_client, tenant, rule_type="MaximumPay", amount="2200",
                             start="2203-01-01", end="2203-01-31")
     listed = await p3c_client.get(
-        f"/payroll/driver-assignments/{tenant.driver_a}/pay-rules",
+        f"/payroll/drivers/{tenant.driver_a_id}/pay-rules",
         params={"rule_type": "MaximumPay", "status": "Active"}, headers=tenant.admin)
     assert [r["driver_pay_rule_id"] for r in listed.json()] == [rule_id]
     empty = await p3c_client.get(
-        f"/payroll/driver-assignments/{tenant.driver_a}/pay-rules", params={"rule_type": "MinimumPay"},
+        f"/payroll/drivers/{tenant.driver_a_id}/pay-rules", params={"rule_type": "MinimumPay"},
         headers=tenant.admin)
     assert empty.json() == []
 
@@ -217,25 +224,28 @@ async def test_pay_rules_need_the_rate_permissions_and_deny_driver_self_accounts
     entry_only = make_user(tenant, ["payroll.entry", "payroll.view"])
     driver = make_driver_self_user(tenant, ["payrates.view", "payrates.edit"])
 
-    assert (await p3c_client.get(f"/payroll/driver-assignments/{tenant.driver_a}/pay-rules",
+    assert (await p3c_client.get(f"/payroll/drivers/{tenant.driver_a_id}/pay-rules",
                                  headers=viewer)).status_code == 200
     assert (await p3c_client.post(RULES, json=_rule(tenant, start="2300-01-01"),
                                   headers=viewer)).status_code == 403
     assert (await p3c_client.post(
-        RULES, json=_rule(tenant, driver_assignment_id=tenant.driver_a2, start="2300-01-01"),
+        RULES, json=_rule(tenant, driver_id=tenant.driver_a2_id, start="2300-01-01"),
         headers=editor)).status_code == 201
     for headers in (nobody, entry_only, driver):
-        assert (await p3c_client.get(f"/payroll/driver-assignments/{tenant.driver_a}/pay-rules",
+        assert (await p3c_client.get(f"/payroll/drivers/{tenant.driver_a_id}/pay-rules",
                                      headers=headers)).status_code == 403
         assert (await p3c_client.get(f"{RULES}/{rule_id}", headers=headers)).status_code == 403
         assert (await p3c_client.post(RULES, json=_rule(tenant, start="2400-01-01"),
                                       headers=headers)).status_code == 403
-    for headers in (viewer, nobody, driver):
+    # Standing is decided before anything about the rule: a caller who can see it but cannot
+    # edit (viewer) and a DRIVER/Self account get 403; one who cannot see the rule at all
+    # (nobody) gets the 404 of a missing rule.
+    for headers, expected in ((viewer, 403), (nobody, 404), (driver, 403)):
         assert (await p3c_client.post(f"{RULES}/{rule_id}/end",
                                       json={"effective_to": "2200-01-10"},
-                                      headers=headers)).status_code == 403
+                                      headers=headers)).status_code == expected
         assert (await p3c_client.post(f"{RULES}/{rule_id}/void", headers=headers)
-                ).status_code == 403
+                ).status_code == expected
 
 
 async def test_a_branch_scoped_editor_cannot_manage_rules_of_another_branch(
@@ -246,7 +256,7 @@ async def test_a_branch_scoped_editor_cannot_manage_rules_of_another_branch(
     own = await p3c_client.post(RULES, json=_rule(tenant, start="2500-01-01"), headers=editor)
     assert own.status_code == 201
     foreign = await p3c_client.post(
-        RULES, json=_rule(tenant, driver_assignment_id=tenant.driver_b, start="2500-01-01"),
+        RULES, json=_rule(tenant, driver_id=tenant.driver_b_id, start="2500-01-01"),
         headers=editor)
     assert foreign.status_code in (403, 404)
 
@@ -255,28 +265,54 @@ async def test_a_branch_scoped_editor_cannot_manage_rules_of_another_branch(
 # Finalized periods
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("status", ["Locked", "Archived"])
-async def test_a_rule_cannot_take_effect_inside_a_finalized_period(
-    p3c_client, tenant, status,
-):
+def _finalized_period(tenant, code, status, start, end, assignment_id):
+    """A Locked/Archived period of the Branch that rosters the given assignment."""
     query(tenant, """
         INSERT INTO payroll.payrollperiods
             (companyid, branchid, periodcode, periodname, periodtype,
              startdate, enddate, paydate, status, createdbyuserid)
-        SELECT %s, %s, 'FINAL-1', 'Finalized', 'Month', DATE '2070-01-01', DATE '2070-01-31',
-               DATE '2070-01-31', 'Locked', %s
-    """, (tenant.company_id, tenant.branch_a, tenant.owner))
+        SELECT %s, %s, %s, 'Finalized', 'Month', DATE %s, DATE %s, DATE %s, 'Locked', %s
+    """, (tenant.company_id, tenant.branch_a, code, start, end, end, tenant.owner))
+    period_id = query(tenant, "SELECT payrollperiodid FROM payroll.payrollperiods "
+                              "WHERE periodcode = %s AND companyid = %s",
+                      (code, tenant.company_id))[0][0]
+    query(tenant, """
+        INSERT INTO payroll.payrollperioddrivereligibility
+            (companyid, branchid, payrollperiodid, driverassignmentid, eligibilityreasoncode,
+             snapshotsource, drivereffectivefromatsnapshot, branchtimezoneidsnapshot,
+             eligibleworkdates, driverstatussnapshot, endreasonsnapshot)
+        VALUES (%s, %s, %s, %s, 'Active', 'Generated', TIMESTAMPTZ '2000-01-01 00:00+00',
+                'UTC', '{}', 'Active', NULL)
+    """, (tenant.company_id, tenant.branch_a, period_id, assignment_id))
     if status == "Archived":
         query(tenant, "UPDATE payroll.payrollperiods SET status = 'Archived' "
-                      "WHERE periodcode = 'FINAL-1' AND companyid = %s", (tenant.company_id,))
+                      "WHERE periodcode = %s AND companyid = %s", (code, tenant.company_id))
+
+
+@pytest.mark.parametrize("status", ["Locked", "Archived"])
+async def test_a_rule_whose_window_contains_a_finalized_period_start_is_refused(
+    p3c_client, tenant, status,
+):
+    """A rule is selected at period start, so only a finalized period START inside the rule's
+    footprint is touched (not any period that merely overlaps the rule's first day)."""
+    _finalized_period(tenant, "FINAL-1", status, "2070-01-01", "2070-01-31", tenant.driver_a)
     for rule_type in ("MinimumPay", "MaximumPay"):
-        inside = await p3c_client.post(
-            RULES, json=_rule(tenant, rule_type=rule_type, start="2070-01-15"),
+        covers = await p3c_client.post(
+            RULES, json=_rule(tenant, rule_type=rule_type, start="2069-12-15"),
             headers=tenant.admin)
-        assert inside.status_code == 422, (rule_type, inside.text)
-    outside = await p3c_client.post(
-        RULES, json=_rule(tenant, start="2070-02-01"), headers=tenant.admin)
-    assert outside.status_code == 201
+        assert covers.status_code == 422, (rule_type, covers.text)
+        assert covers.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
+        bounded = await p3c_client.post(
+            RULES, json=_rule(tenant, rule_type=rule_type, start="2069-12-15", end="2070-01-01"),
+            headers=tenant.admin)
+        assert bounded.status_code == 422, (rule_type, bounded.text)
+    # A rule that starts after the finalized period started, or ends before it, is fine.
+    after = await p3c_client.post(RULES, json=_rule(tenant, start="2070-01-02"), headers=tenant.admin)
+    assert after.status_code == 201, after.text
+    before = await p3c_client.post(
+        RULES, json=_rule(tenant, rule_type="MaximumPay", start="2069-12-01", end="2069-12-31"),
+        headers=tenant.admin)
+    assert before.status_code == 201, before.text
     assert query(tenant, "SELECT count(*) FROM payroll.driverpayrules "
-                         "WHERE driverassignmentid = %s AND effectivefrom = DATE '2070-01-15'",
-                 (tenant.driver_a,)) == [(0,)]
+                         "WHERE driverid = %s AND effectivefrom = DATE '2069-12-15'",
+                 (tenant.driver_a_id,)) == [(0,)]

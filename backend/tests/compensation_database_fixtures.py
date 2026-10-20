@@ -2,7 +2,9 @@
 
 The target schema is dormant, so these tests work directly against a disposable
 database built from the direct SQL bootstrap. Every builder uses unique data,
-so tests never need cleanup (approved assignments are intentionally undeletable).
+so tests never need cleanup (approved schedules are intentionally undeletable).
+Rate schedules and pay rules are owned by the permanent Driver; ``make_driver`` still
+returns the home DriverAssignment id that status rates and payroll rows are keyed by.
 """
 from __future__ import annotations
 
@@ -102,7 +104,8 @@ def make_branch(cur, company_id: int, *, is_default: bool = False) -> int:
     return cur.fetchone()[0]
 
 
-def make_driver(cur, company_id: int, branch_id: int) -> int:
+def make_driver_pair(cur, company_id: int, branch_id: int) -> tuple[int, int]:
+    """A permanent Driver with one open home assignment: (DriverID, DriverAssignmentID)."""
     cur.execute("""
         INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
         VALUES (%s, %s, 'P3b Driver', 'Driver', 'Active') RETURNING employeeid
@@ -119,7 +122,12 @@ def make_driver(cur, company_id: int, branch_id: int) -> int:
         VALUES (%s, %s, %s, %s, TIMESTAMPTZ '2000-01-01 00:00:00+00')
         RETURNING driverassignmentid
     """, (company_id, branch_id, employee_id, driver_id))
-    return cur.fetchone()[0]
+    return driver_id, cur.fetchone()[0]
+
+
+def make_driver(cur, company_id: int, branch_id: int) -> int:
+    """The home DriverAssignment id of a new permanent Driver."""
+    return make_driver_pair(cur, company_id, branch_id)[1]
 
 
 def make_pay_definition(
@@ -169,13 +177,16 @@ def add_tiers(cur, rate_definition_id: int, tiers=TIERS) -> list[int]:
 
 
 class Scalar:
-    """A Company with one Branch, one Driver and a PerUnit definition."""
+    """A Company with one Branch, one or more Drivers and a PerUnit definition."""
 
     def __init__(self, cur, *, currency: str | None = "USD", driver_count: int = 1):
         self.company_id = make_company(cur, currency)
         self.branch_id = make_branch(cur, self.company_id)
-        self.driver_assignment_ids = [make_driver(cur, self.company_id, self.branch_id)
-                           for _ in range(driver_count)]
+        pairs = [make_driver_pair(cur, self.company_id, self.branch_id)
+                 for _ in range(driver_count)]
+        self.driver_ids = [pair[0] for pair in pairs]
+        self.driver_id = self.driver_ids[0]
+        self.driver_assignment_ids = [pair[1] for pair in pairs]
         self.driver_assignment_id = self.driver_assignment_ids[0]
         self.pay_definition_id = make_pay_definition(cur, self.company_id)
         self.rate_definition_id = make_rate_definition(cur, self.pay_definition_id)
@@ -188,63 +199,68 @@ class Ordinal:
     def __init__(self, cur, *, currency: str | None = "USD", tiers=TIERS):
         self.company_id = make_company(cur, currency)
         self.branch_id = make_branch(cur, self.company_id)
-        self.driver_assignment_id = make_driver(cur, self.company_id, self.branch_id)
+        self.driver_id, self.driver_assignment_id = make_driver_pair(
+            cur, self.company_id, self.branch_id)
         self.pay_definition_id = make_pay_definition(cur, self.company_id, method="OrdinalTier")
         self.rate_definition_id = make_rate_definition(cur, self.pay_definition_id)
         self.component_ids = add_tiers(cur, self.rate_definition_id, tiers)
 
 
 def add_driver(cur, fx) -> int:
-    return make_driver(cur, fx.company_id, fx.branch_id)
+    """Another permanent Driver of the fixture's Company; returns its DriverID."""
+    return make_driver_pair(cur, fx.company_id, fx.branch_id)[0]
 
 
 def make_pending(
-    cur, fx, *, driver_assignment_id: int | None = None, effective_from: str = "2026-01-01",
+    cur, fx, *, driver_id: int | None = None, effective_from: str = "2026-01-01",
     effective_to: str | None = None, rate_definition_id: int | None = None,
 ) -> int:
+    """A Pending schedule for a Driver; PayDefinitionID comes from the RateDefinition."""
     cur.execute("""
-        INSERT INTO payroll.driverrateassignments
-            (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom, effectiveto)
-        VALUES (%s, %s, %s, %s, %s, %s) RETURNING driverrateassignmentid
-    """, (fx.company_id, fx.branch_id, driver_assignment_id or fx.driver_assignment_id,
-          rate_definition_id or fx.rate_definition_id, effective_from, effective_to))
+        INSERT INTO payroll.driverrateschedules
+            (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom, effectiveto)
+        SELECT %s, %s, rd.paydefinitionid, rd.ratedefinitionid, %s, %s
+        FROM payroll.ratedefinitions rd WHERE rd.ratedefinitionid = %s
+        RETURNING driverratescheduleid
+    """, (fx.company_id, driver_id or fx.driver_id, effective_from, effective_to,
+          rate_definition_id or fx.rate_definition_id))
     return cur.fetchone()[0]
 
 
-def set_value(cur, assignment_id: int, rate_definition_id: int, component_id: int, amount) -> None:
+def set_value(cur, schedule_id: int, rate_definition_id: int, component_id: int, amount) -> None:
     cur.execute("""
-        INSERT INTO payroll.driverratevalues
-            (driverrateassignmentid, ratedefinitionid, ratecomponentdefinitionid, amount)
+        INSERT INTO payroll.driverrateschedulevalues
+            (driverratescheduleid, ratedefinitionid, ratecomponentdefinitionid, amount)
         VALUES (%s, %s, %s, %s)
-    """, (assignment_id, rate_definition_id, component_id, amount))
+    """, (schedule_id, rate_definition_id, component_id, amount))
 
 
-def approve(cur, assignment_id: int, *, approver: int | None = None) -> None:
+def approve(cur, schedule_id: int, *, approver: int | None = None) -> None:
     cur.execute("""
-        UPDATE payroll.driverrateassignments
+        UPDATE payroll.driverrateschedules
            SET status = 'Approved', approvedbyuserid = %s, approvedatutc = NOW()
-         WHERE driverrateassignmentid = %s
-    """, (approver or user_id(cur), assignment_id))
+         WHERE driverratescheduleid = %s
+    """, (approver or user_id(cur), schedule_id))
 
 
-def supersede(cur, assignment_id: int, effective_to: str) -> None:
+def supersede(cur, schedule_id: int, effective_to: str) -> None:
     cur.execute("""
-        UPDATE payroll.driverrateassignments
+        UPDATE payroll.driverrateschedules
            SET status = 'Superseded', effectiveto = %s
-         WHERE driverrateassignmentid = %s
-    """, (effective_to, assignment_id))
+         WHERE driverratescheduleid = %s
+    """, (effective_to, schedule_id))
 
 
 def approved_scalar(cur, fx, amount="25", **kwargs) -> int:
-    assignment_id = make_pending(cur, fx, **kwargs)
-    set_value(cur, assignment_id, fx.rate_definition_id, fx.component_id, amount)
-    approve(cur, assignment_id)
-    return assignment_id
+    schedule_id = make_pending(cur, fx, **kwargs)
+    set_value(cur, schedule_id, fx.rate_definition_id, fx.component_id, amount)
+    approve(cur, schedule_id)
+    return schedule_id
 
 
-def status_of(cur, assignment_id: int) -> str:
-    cur.execute("SELECT status FROM payroll.driverrateassignments WHERE driverrateassignmentid = %s",
-                (assignment_id,))
+def status_of(cur, schedule_id: int) -> str:
+    cur.execute("SELECT status FROM payroll.driverrateschedules WHERE driverratescheduleid = %s",
+                (schedule_id,))
     return cur.fetchone()[0]
 
 

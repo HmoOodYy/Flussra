@@ -86,13 +86,20 @@ def _mounted_routes(router, prefix: str = "") -> set[str]:
 
 def test_profile_addressed_routes_were_replaced_by_assignment_routes():
     mounted = _mounted_routes(create_app().router)
-    assert "GET /compensation/driver-assignments/{driver_assignment_id}/pay-rates" in mounted
+    # Ordinary compensation belongs to the permanent Driver (Durable Driver Stage 2).
+    assert "GET /compensation/drivers/{driver_id}/pay-rates" in mounted
+    assert "GET /compensation/driver-assignments/{driver_assignment_id}/pay-rates" not in mounted
     assert "GET /payroll/driver-assignments/{driver_assignment_id}/rate-matrix" in mounted
-    assert "GET /payroll/driver-assignments/{driver_assignment_id}/pay-rules" in mounted
+    # Pay rules belong to the permanent Driver; only status rates stay assignment-addressed.
+    assert "GET /payroll/drivers/{driver_id}/pay-rules" in mounted
+    assert "GET /payroll/driver-assignments/{driver_assignment_id}/pay-rules" not in mounted
     assert "GET /payroll/driver-assignments/rates-summary" in mounted
-    # No payroll or compensation route is addressed by a Driver profile id any more.
-    payroll_like = [r for r in mounted if " /payroll" in r or " /compensation" in r]
-    assert not [r for r in payroll_like if "{driver_id}" in r or "/drivers/{" in r]
+    # No compensation route is addressed by an assignment id: those are the permanent
+    # Driver's. Of the payroll routes only pay rules take a {driver_id}.
+    payroll_like = [r for r in mounted if " /payroll" in r]
+    assert [r for r in payroll_like if "{driver_id}" in r or "/drivers/{" in r] == [
+        "GET /payroll/drivers/{driver_id}/pay-rules"]
+    assert not [r for r in mounted if " /compensation" in r and "{driver_assignment_id}" in r]
 
 
 @pytest.mark.asyncio

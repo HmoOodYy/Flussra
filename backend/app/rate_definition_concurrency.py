@@ -3,12 +3,15 @@
 Every target compensation writer serializes on the RateDefinitions row, which
 is also the home of the single structural lock (StructureLockedAtUtc):
 
-- Pending DriverRateAssignment creation, edit, approval and discard;
-- DriverRateValue writes;
+- Pending DriverRateSchedule creation, edit, approval and discard;
+- DriverRateScheduleValue writes;
 - RateComponentDefinition insert, update and delete;
 - RateDefinition shape changes and PayDefinition method/input-type changes.
 
-The lock is FOR NO KEY UPDATE and is taken first, before any dependent row.
+The lock is FOR NO KEY UPDATE and is taken before any dependent row. Driver-owned
+writers take the Company currency, the Driver's assignments and the Branch workflow locks
+first (global order in app.branch_compensation_config_concurrency), then this lock, then
+the schedule rows.
 The database triggers take it themselves, so a direct SQL writer is protected
 too; this helper lets an application transaction take the same lock up front,
 in the same order, before reading state it is about to rely on.

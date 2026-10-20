@@ -1,7 +1,7 @@
 """DriverRate authoring, lifecycle, batch operations, and compatibility endpoint.
 
 Read-only catalog, matrix, and resolution queries live in rate_reads.
-Ordinary PayDefinition rates are authored through app.compensation assignments.
+Ordinary PayDefinition rates are authored through app.compensation schedules.
 The legacy rate-copy endpoint remains mounted but refuses copying.
 """
 import json
@@ -25,8 +25,6 @@ from app.payroll.guards import (
 from app.payroll.schemas import (
     BatchRateRequest,
     BatchRateSaveResult,
-    CopyRatesRequest,
-    CopyRatesResult,
     DriverRateCreate,
     DriverRateSummary,
     DriverRateUpdate,
@@ -117,7 +115,7 @@ def _ordinary_rate_authoring_retired() -> HTTPException:
             "code": "ORDINARY_RATE_AUTHORING_RETIRED",
             "message": (
                 "Ordinary PayDefinition rates are authored through "
-                "/compensation/driver-rate-assignments. The legacy rate path remains "
+                "/compensation/driver-rate-schedules. The legacy rate path remains "
                 "available only for Status pay rates."
             ),
         },
@@ -130,7 +128,7 @@ async def _require_status_owned_rate_type(
     """Legacy rate writers accept only RateTypes owned by a Status rate column.
 
     Ordinary PayDefinition compensation has a single authoring authority, the
-    target DriverRateAssignment lifecycle, so a RateType that no active Status
+    target DriverRateSchedule lifecycle, so a RateType that no active Status
     rate column of this Company uses is rejected before any write.
     """
     owned = (await db.execute(
@@ -143,17 +141,6 @@ async def _require_status_owned_rate_type(
     )).first()
     if owned is None:
         raise _ordinary_rate_authoring_retired()
-
-
-def _require_rate_copy_available() -> None:
-    """Rate copy is owned by the target transfer/copy work; the legacy copy is closed."""
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "code": "RATE_COPY_UNAVAILABLE",
-            "message": "Copying rates is not available until target rate copy is delivered.",
-        },
-    )
 
 
 async def _assert_status_rate_type_for_branch(
@@ -1456,7 +1443,7 @@ async def batch_save_rates(
             # enforced by trg_src_ratetype_owner trigger; skip redundant check here.
         else:
             # The PayItem branch of the legacy batch writer ended with the P4a cutover:
-            # ordinary rates are authored only through target DriverRateAssignments.
+            # ordinary rates are authored only through target DriverRateSchedules.
             raise _ordinary_rate_authoring_retired()
 
     # Step 7 â€” write: create or update PendingApproval rows
@@ -1609,20 +1596,3 @@ async def batch_save_rates(
         pending_count=pending_count,
         rates=rate_summaries,
     )
-
-
-# ---------------------------------------------------------------------------
-# Copy Rates From Driver (Phase 2C â€” C)
-# ---------------------------------------------------------------------------
-
-async def copy_driver_rates(
-    target_driver_assignment_id: int,
-    source_driver_assignment_id: int,
-    company_id: int,
-    user_id: int,
-    data: CopyRatesRequest,
-    db: AsyncConnection,
-) -> CopyRatesResult:
-    """Reject rate copying while retaining the existing compatibility endpoint."""
-    await _require_non_driver_rate_subject(company_id, user_id, db)
-    _require_rate_copy_available()

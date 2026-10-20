@@ -7,11 +7,12 @@ import pytest
 from sqlalchemy import text
 
 from app.payroll.schemas import DriverPayRuleCreate
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 
 
 def _create_payload(amount: str) -> dict:
     return {
-        "driver_assignment_id": 1,
+        "driver_id": 1,
         "rule_type": "MinimumPay",
         "amount": amount,
         "effective_from": "2191-01-01",
@@ -49,11 +50,12 @@ async def test_four_decimal_driver_pay_rule_persists_and_audits_canonical_amount
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert driver_response.status_code == 201, driver_response.text
-    driver_assignment_id = driver_response.json()["driver_assignment_id"]
+    driver_id = driver_response.json()["driver_id"]
+    await ensure_branch_pay_calendar(direct_db, 1, paytest_branch_id)
 
     response = await session_client.post(
         "/payroll/driver-pay-rules",
-        json={**_create_payload("1.2345"), "driver_assignment_id": driver_assignment_id},
+        json={**_create_payload("1.2345"), "driver_id": driver_id},
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert response.status_code == 201, response.text
@@ -98,23 +100,24 @@ async def test_five_decimal_driver_pay_rule_request_creates_no_row_or_audit(
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert driver_response.status_code == 201, driver_response.text
-    driver_assignment_id = driver_response.json()["driver_assignment_id"]
+    driver_id = driver_response.json()["driver_id"]
+    await ensure_branch_pay_calendar(direct_db, 1, paytest_branch_id)
     effective_from = date(2192, 1, 1)
 
     before_rows = (await direct_db.execute(text("""
         SELECT COUNT(*) FROM payroll.driverpayrules
-        WHERE driverassignmentid = :driver_assignment_id AND effectivefrom = :effective_from
-    """), {"driver_assignment_id": driver_assignment_id, "effective_from": effective_from})).scalar_one()
+        WHERE driverid = :driver_id AND effectivefrom = :effective_from
+    """), {"driver_id": driver_id, "effective_from": effective_from})).scalar_one()
     before_audits = (await direct_db.execute(text("""
         SELECT COUNT(*) FROM audit.auditlog
         WHERE actioncode = 'DRIVER_PAY_RULE_CREATED'
           AND entityname = 'DriverPayRules'
-          AND newvaluejson::jsonb->>'driver_assignment_id' = :driver_assignment_id
-    """), {"driver_assignment_id": str(driver_assignment_id)})).scalar_one()
+          AND newvaluejson::jsonb->>'driver_id' = :driver_id
+    """), {"driver_id": str(driver_id)})).scalar_one()
 
     response = await session_client.post(
         "/payroll/driver-pay-rules",
-        json={**_create_payload("1.23456"), "driver_assignment_id": driver_assignment_id,
+        json={**_create_payload("1.23456"), "driver_id": driver_id,
               "effective_from": effective_from.isoformat()},
         headers={"Authorization": f"Bearer {auth_token}"},
     )
@@ -122,13 +125,13 @@ async def test_five_decimal_driver_pay_rule_request_creates_no_row_or_audit(
 
     after_rows = (await direct_db.execute(text("""
         SELECT COUNT(*) FROM payroll.driverpayrules
-        WHERE driverassignmentid = :driver_assignment_id AND effectivefrom = :effective_from
-    """), {"driver_assignment_id": driver_assignment_id, "effective_from": effective_from})).scalar_one()
+        WHERE driverid = :driver_id AND effectivefrom = :effective_from
+    """), {"driver_id": driver_id, "effective_from": effective_from})).scalar_one()
     after_audits = (await direct_db.execute(text("""
         SELECT COUNT(*) FROM audit.auditlog
         WHERE actioncode = 'DRIVER_PAY_RULE_CREATED'
           AND entityname = 'DriverPayRules'
-          AND newvaluejson::jsonb->>'driver_assignment_id' = :driver_assignment_id
-    """), {"driver_assignment_id": str(driver_assignment_id)})).scalar_one()
+          AND newvaluejson::jsonb->>'driver_id' = :driver_id
+    """), {"driver_id": str(driver_id)})).scalar_one()
     assert after_rows == before_rows == 0
     assert after_audits == before_audits == 0

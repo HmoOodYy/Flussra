@@ -1,23 +1,29 @@
 """A compensation write is decided at the MUTATION instant, not at the guard's instant.
 
-``require_writable_driver_assignment`` refuses what is already ended, but a writer can
-still block after it (Branch advisory lock, row lock, unique-index wait) while a
-Scheduled source assignment's future ``EffectiveToAt`` passes. ``FOR SHARE`` freezes the
-value, not time. The authority is ``core.trg_CompensationAssignmentWritable``: an AFTER
-ROW trigger on every compensation table that re-decides with ``clock_timestamp()`` after
-the statement's own waits, mapped to HTTP 409 DRIVER_ASSIGNMENT_ENDED in one place.
+Two owners, one principle. A writer can block after its early check (Branch advisory lock,
+row lock, unique-index wait) while a Scheduled source assignment's future ``EffectiveToAt``
+passes; ``FOR SHARE`` freezes the value, not time.
+
+* Assignment-owned status rates: ``require_writable_driver_assignment`` refuses what is
+  already ended, and ``core.trg_CompensationAssignmentWritable`` (an AFTER ROW trigger on
+  ``driverrates`` and ``driverratetiers``) re-decides with ``clock_timestamp()`` after the
+  statement's own waits: HTTP 409 ``DRIVER_ASSIGNMENT_ENDED``.
+* Driver-owned rate schedules: the writer reads one decision instant after every lock is
+  held and re-checks the context tenure of the change's start date; the database trigger
+  ``core.trg_DriverCompensationContextWritable`` decides again at the DML instant: HTTP 409
+  ``DRIVER_COMPENSATION_HISTORICAL``. Both map through the one FL001 handler.
 
 Race tests (two connections, real writer paths): connection A holds the real lock the
-writer waits on; the writer, started through the API, passes the guard while the source is
-current and BLOCKS (asserted through ``pg_blocking_pids`` and the waiting statement);
+writer waits on; the writer, started through the API, passes its early check while the source
+is current and BLOCKS (asserted through ``pg_blocking_pids`` and the waiting statement);
 the source's boundary passes; A releases; the writer must be refused and change nothing.
 Positive twins run the identical blocked operation with the boundary far in the future.
 
 Writers exercised (blocking point):
   rates.approve_rate    Branch workflow advisory lock  pg_advisory_xact_lock(cid, bid)
   rates.void_rate       Branch workflow advisory lock  pg_advisory_xact_lock(cid, bid)
-  assignments.approve   prior Approved row FOR UPDATE
-  driver_pay_rules.create  unique-index wait on the INSERT (open-ended rule per type)
+  schedules.approve     prior Approved row FOR UPDATE
+  pay_rules.end/void    Branch workflow advisory lock  pg_advisory_xact_lock(cid, bid)
 
 The Values and Tiers tables are children whose writers only mutate them after a parent
 statement the same transaction already ran; they have no independent blocking point to
@@ -25,6 +31,7 @@ hold, so their trigger is covered by the table-level tests below.
 """
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -39,6 +46,7 @@ from app.workforce.effective import (
     DRIVER_ASSIGNMENT_ENDED_SQLSTATE,
     is_driver_assignment_ended_error,
 )
+from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.builders.transfer_scenarios import (
     auth,
     db_now,
@@ -49,10 +57,10 @@ from tests.builders.transfer_scenarios import (
 from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
 from tests.test_ended_assignment_write_guard import (
     ENDED_MESSAGE,
+    HISTORICAL_MESSAGE,
     _columns,
     _definition,
     _expect,
-    _fingerprint,
     _pending,
     _rate,
     _rule,
@@ -66,6 +74,7 @@ pytestmark = pytest.mark.asyncio
 ENDS_IN_SECONDS = 6.0
 FAR_FUTURE = timedelta(days=3)
 ENDED = {"code": "DRIVER_ASSIGNMENT_ENDED", "message": ENDED_MESSAGE}
+HISTORICAL = {"code": "DRIVER_COMPENSATION_HISTORICAL", "message": HISTORICAL_MESSAGE}
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +84,7 @@ ENDED = {"code": "DRIVER_ASSIGNMENT_ENDED", "message": ENDED_MESSAGE}
 @dataclass
 class Scene:
     admin: str
+    driver_id: int
     source: int
     destination: int
     source_branch: int
@@ -84,6 +94,8 @@ class Scene:
 
 async def _driver(client, admin, db):
     source_branch, target_branch = await make_branch(db), await make_branch(db)
+    for branch_id in (source_branch, target_branch):
+        await ensure_branch_pay_calendar(db, 1, branch_id)
     driver = await make_driver(client, admin, source_branch)
     return driver, source_branch, target_branch
 
@@ -97,7 +109,7 @@ async def _schedule(client, admin, db, driver, source_branch, target_branch, *, 
         "SELECT EffectiveToAt FROM core.DriverAssignments WHERE DriverAssignmentID = :a"
     ), {"a": transfer["source_id"]})).scalar_one()
     assert stored == boundary
-    return Scene(admin, transfer["source_id"], transfer["destination_id"],
+    return Scene(admin, driver["driver_id"], transfer["source_id"], transfer["destination_id"],
                  source_branch, target_branch, boundary)
 
 
@@ -149,9 +161,28 @@ async def _race(engine, db, scene: Scene, *, hold, send, blocked_on: str, ends_s
         await holder.close()
 
 
-def _assert_refused_at_the_mutation_instant(response):
+def _assert_refused_at_the_mutation_instant(response, refusal=ENDED):
     assert response.status_code == 409, (response.status_code, response.text)
-    assert response.json() == {"detail": ENDED}
+    assert response.json() == {"detail": refusal}
+
+
+async def _fingerprint(db, scene: "Scene") -> str:
+    """Every compensation row of the scene's Driver (schedules) and source assignment (rates)."""
+    parts = []
+    for query, key in (
+        ("SELECT to_jsonb(r) FROM payroll.driverrateschedules r "
+         "WHERE r.driverid = :a ORDER BY r.driverratescheduleid", scene.driver_id),
+        ("SELECT to_jsonb(v) FROM payroll.driverrateschedulevalues v "
+         "JOIN payroll.driverrateschedules r ON r.driverratescheduleid = v.driverratescheduleid "
+         "WHERE r.driverid = :a ORDER BY v.driverratescheduleid, v.ratecomponentdefinitionid",
+         scene.driver_id),
+        ("SELECT to_jsonb(p) FROM payroll.driverpayrules p "
+         "WHERE p.driverid = :a ORDER BY p.driverpayruleid", scene.driver_id),
+        ("SELECT to_jsonb(d) FROM payroll.driverrates d "
+         "WHERE d.driverassignmentid = :a ORDER BY d.driverrateid", scene.source),
+    ):
+        parts.append((await db.execute(text(query), {"a": key})).scalars().all())
+    return json.dumps(parts, sort_keys=True, default=str)
 
 
 async def _advisory(branch_id):
@@ -175,7 +206,7 @@ async def test_approve_rate_blocked_on_the_branch_lock_is_decided_when_it_resume
     pending = await _rate(client, auth_token, driver["assignment_id"], column, "2026-03-01")
     scene = await _schedule(client, auth_token, direct_db, driver, source_branch, target_branch,
                             ends_soon=ends_soon)
-    before = await _fingerprint(direct_db, scene.source)
+    before = await _fingerprint(direct_db, scene)
 
     response = await _race(
         test_engine, direct_db, scene, ends_soon=ends_soon,
@@ -188,7 +219,7 @@ async def test_approve_rate_blocked_on_the_branch_lock_is_decided_when_it_resume
     if ends_soon:
         _assert_refused_at_the_mutation_instant(response)
         assert states == {prior: "Approved", pending: "PendingApproval"}
-        assert await _fingerprint(direct_db, scene.source) == before
+        assert await _fingerprint(direct_db, scene) == before
     else:
         await _expect(response, 200)
         assert states == {prior: "Superseded", pending: "Approved"}
@@ -204,7 +235,7 @@ async def test_void_rate_blocked_on_the_branch_lock_is_decided_when_it_resumes(
     await _expect(await client.post(f"/payroll/rates/{approved}/approve", headers=auth(auth_token)), 200)
     scene = await _schedule(client, auth_token, direct_db, driver, source_branch, target_branch,
                             ends_soon=ends_soon)
-    before = await _fingerprint(direct_db, scene.source)
+    before = await _fingerprint(direct_db, scene)
 
     response = await _race(
         test_engine, direct_db, scene, ends_soon=ends_soon,
@@ -216,121 +247,105 @@ async def test_void_rate_blocked_on_the_branch_lock_is_decided_when_it_resumes(
     if ends_soon:
         _assert_refused_at_the_mutation_instant(response)
         assert status == "Approved"
-        assert await _fingerprint(direct_db, scene.source) == before
+        assert await _fingerprint(direct_db, scene) == before
     else:
         await _expect(response, 204)
         assert status == "Voided"
 
 
 # ---------------------------------------------------------------------------
-# assignments.approve (row lock on the prior Approved assignment)
+# schedules.approve (row lock on the prior Approved schedule)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("ends_soon", [True, False], ids=["source-ends-while-blocked", "source-stays-current"])
-async def test_assignment_approve_blocked_on_the_prior_row_lock_is_decided_when_it_resumes(
+async def test_schedule_approve_blocked_on_the_prior_row_lock_is_decided_when_it_resumes(
     client, auth_token, direct_db, test_engine, ends_soon,
 ):
     driver, source_branch, target_branch = await _driver(client, auth_token, direct_db)
-    definition = await _definition(client, auth_token, direct_db, (source_branch, target_branch))
-    source = driver["assignment_id"]
-    prior = await _pending(client, auth_token, source, definition, "2026-01-01")
+    definition = await _definition(client, auth_token)
+    driver_id = driver["driver_id"]
+    prior = await _pending(client, auth_token, driver_id, definition, "2026-01-01")
     await _expect(await _values(client, auth_token, prior, definition, "20"), 200)
     await _expect(await client.post(
-        f"/compensation/driver-rate-assignments/{prior}/approve", headers=auth(auth_token)), 200)
-    successor = await _pending(client, auth_token, source, definition, "2026-03-01")
+        f"/compensation/driver-rate-schedules/{prior}/approve", headers=auth(auth_token)), 200)
+    successor = await _pending(client, auth_token, driver_id, definition, "2026-03-01")
     await _expect(await _values(client, auth_token, successor, definition, "30"), 200)
     scene = await _schedule(client, auth_token, direct_db, driver, source_branch, target_branch,
                             ends_soon=ends_soon)
-    before = await _fingerprint(direct_db, scene.source)
+    before = await _fingerprint(direct_db, scene)
 
     async def hold(conn):
         await conn.execute(text("""
-            SELECT 1 FROM payroll.driverrateassignments
-            WHERE driverrateassignmentid = :prior FOR UPDATE
+            SELECT 1 FROM payroll.driverrateschedules
+            WHERE driverratescheduleid = :prior FOR UPDATE
         """), {"prior": prior})
 
     response = await _race(
         test_engine, direct_db, scene, ends_soon=ends_soon, hold=hold, blocked_on="FOR UPDATE",
         send=lambda: client.post(
-            f"/compensation/driver-rate-assignments/{successor}/approve", headers=auth(auth_token)))
+            f"/compensation/driver-rate-schedules/{successor}/approve", headers=auth(auth_token)))
 
     states = dict((await direct_db.execute(text("""
-        SELECT driverrateassignmentid, status FROM payroll.driverrateassignments
-        WHERE driverrateassignmentid IN (:p, :s)
+        SELECT driverratescheduleid, status FROM payroll.driverrateschedules
+        WHERE driverratescheduleid IN (:p, :s)
     """), {"p": prior, "s": successor})).all())
     if ends_soon:
-        _assert_refused_at_the_mutation_instant(response)
+        # The start date 2026-03-01 is inside the source tenure, which has ended by the clock.
+        _assert_refused_at_the_mutation_instant(response, HISTORICAL)
         assert states == {prior: "Approved", successor: "Pending"}
-        assert await _fingerprint(direct_db, scene.source) == before
+        assert await _fingerprint(direct_db, scene) == before
     else:
         await _expect(response, 200)
         assert states == {prior: "Superseded", successor: "Approved"}
 
 
 # ---------------------------------------------------------------------------
-# driver_pay_rules.create (unique-index wait on the INSERT)
+# pay_rules.end / pay_rules.void (Branch workflow advisory lock)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("ends_soon", [True, False], ids=["source-ends-while-blocked", "source-stays-current"])
-async def test_pay_rule_create_blocked_on_a_unique_index_wait_is_decided_when_it_resumes(
-    client, auth_token, direct_db, test_engine, ends_soon,
+@pytest.mark.parametrize("action", ["end", "void"])
+async def test_pay_rule_end_and_void_blocked_on_the_branch_lock_are_decided_when_they_resume(
+    client, auth_token, direct_db, test_engine, ends_soon, action,
 ):
     driver, source_branch, target_branch = await _driver(client, auth_token, direct_db)
-    source = driver["assignment_id"]
+    rule = await _rule(client, auth_token, driver["driver_id"], "MinimumPay", "2026-01-01")
     scene = await _schedule(client, auth_token, direct_db, driver, source_branch, target_branch,
                             ends_soon=ends_soon)
-    admin_id = (await direct_db.execute(text(
-        "SELECT UserID FROM sec.Users WHERE Username = 'admin'"))).scalar_one()
-    before = await _fingerprint(direct_db, scene.source)
+    before = await _fingerprint(direct_db, scene)
 
-    async def hold(conn):
-        # An uncommitted open-ended Active MinimumPay rule on the same assignment: the
-        # writer's own INSERT waits on it in ux_DriverPayRules_Assignment_Type_OpenEnded.
-        await conn.execute(text("""
-            INSERT INTO payroll.driverpayrules
-                (companyid, branchid, driverassignmentid, ruletype, amount, effectivefrom,
-                 effectiveto, status, createdbyuserid)
-            VALUES (1, :b, :a, 'MinimumPay', 10, DATE '2026-01-01', NULL, 'Active', :u)
-        """), {"b": source_branch, "a": source, "u": admin_id})
+    def send():
+        if action == "end":
+            return client.post(f"/payroll/driver-pay-rules/{rule}/end",
+                               json={"effective_to": "2026-02-01"}, headers=auth(auth_token))
+        return client.post(f"/payroll/driver-pay-rules/{rule}/void", headers=auth(auth_token))
 
     response = await _race(
-        test_engine, direct_db, scene, ends_soon=ends_soon, hold=hold,
-        blocked_on="INSERT INTO payroll.driverpayrules",
-        send=lambda: client.post("/payroll/driver-pay-rules", json={
-            "driver_assignment_id": source, "rule_type": "MinimumPay", "amount": "50",
-            "effective_from": "2026-01-01", "effective_to": None}, headers=auth(auth_token)))
+        test_engine, direct_db, scene, ends_soon=ends_soon,
+        hold=await _advisory(source_branch), blocked_on="pg_advisory_xact_lock", send=send)
 
-    count = (await direct_db.execute(text(
-        "SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverassignmentid = :a"
-    ), {"a": source})).scalar_one()
+    status = (await direct_db.execute(text(
+        "SELECT status FROM payroll.driverpayrules WHERE driverpayruleid = :r"), {"r": rule})).scalar_one()
     if ends_soon:
-        _assert_refused_at_the_mutation_instant(response)
-        assert count == 0  # the holder rolled back; the refused writer left nothing
-        assert await _fingerprint(direct_db, scene.source) == before
+        # The first date the change touches lies in the source tenure, ended by the clock.
+        _assert_refused_at_the_mutation_instant(response, HISTORICAL)
+        assert status == "Active"
+        assert await _fingerprint(direct_db, scene) == before
     else:
-        await _expect(response, 201)
-        assert count == 1
+        await _expect(response, 200)
+        assert status == ("Ended" if action == "end" else "Voided")
 
 
 # ---------------------------------------------------------------------------
 # The trigger itself: every covered table, every operation, three assignment states
 # ---------------------------------------------------------------------------
 
-COVERED_TABLES = (
-    "driverrateassignments", "driverratevalues", "driverpayrules", "driverrates",
-    "driverratetiers",
-)
+COVERED_TABLES = ("driverrates", "driverratetiers")
 
 
 async def _rows(client, admin, db, assignment_id, branch_id, definitions, columns) -> dict:
-    """Pending compensation of every kind on one assignment (written while writable)."""
-    rows = {
-        "ca": await _pending(client, admin, assignment_id, definitions[0]),
-        "ca2": await _pending(client, admin, assignment_id, definitions[1]),
-        "pr": await _rule(client, admin, assignment_id, "MinimumPay", "2026-01-01", "2026-03-31"),
-        "dr": await _rate(client, admin, assignment_id, columns[0]),
-    }
-    await _expect(await _values(client, admin, rows["ca"], definitions[0]), 200)
+    """A status rate with one tier on one assignment (written while writable)."""
+    rows = {"dr": await _rate(client, admin, assignment_id, columns[0])}
     await db.execute(text("""
         INSERT INTO payroll.driverratetiers (driverrateid, tiersequence, fromunit, tounit, tieramount)
         VALUES (:dr, 1, 0, 10, 1)
@@ -340,25 +355,8 @@ async def _rows(client, admin, db, assignment_id, branch_id, definitions, column
 
 def _operations(rows, assignment_id, branch_id, definitions, columns, admin_id):
     """(table, operation, sql, params): inserts, then updates, then deletes children first."""
-    d_new, d_second = definitions[2], definitions[1]
     p = {"a": assignment_id, "b": branch_id, "u": admin_id, **rows}
     return [
-        ("driverrateassignments", "INSERT", """
-            INSERT INTO payroll.driverrateassignments
-                (companyid, branchid, driverassignmentid, ratedefinitionid, effectivefrom)
-            VALUES (1, :b, :a, :d_new, DATE '2026-01-01')""",
-         {**p, "d_new": d_new["rate_definition_id"]}),
-        ("driverratevalues", "INSERT", """
-            INSERT INTO payroll.driverratevalues
-                (driverrateassignmentid, ratedefinitionid, ratecomponentdefinitionid, amount)
-            VALUES (:ca2, :d2, :c2, 5)""",
-         {**p, "d2": d_second["rate_definition_id"],
-          "c2": d_second["components"][0]["rate_component_definition_id"]}),
-        ("driverpayrules", "INSERT", """
-            INSERT INTO payroll.driverpayrules
-                (companyid, branchid, driverassignmentid, ruletype, amount, effectivefrom,
-                 effectiveto, status, createdbyuserid)
-            VALUES (1, :b, :a, 'MaximumPay', 70, DATE '2026-04-01', DATE '2026-04-30', 'Active', :u)""", p),
         ("driverrates", "INSERT", """
             INSERT INTO payroll.driverrates
                 (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom,
@@ -368,22 +366,12 @@ def _operations(rows, assignment_id, branch_id, definitions, columns, admin_id):
         ("driverratetiers", "INSERT", """
             INSERT INTO payroll.driverratetiers (driverrateid, tiersequence, fromunit, tounit, tieramount)
             VALUES (:dr, 2, 11, 20, 2)""", p),
-        ("driverrateassignments", "UPDATE", """
-            UPDATE payroll.driverrateassignments SET notes = 'probe'
-            WHERE driverrateassignmentid = :ca""", p),
-        ("driverratevalues", "UPDATE", """
-            UPDATE payroll.driverratevalues SET amount = 7
-            WHERE driverrateassignmentid = :ca""", p),
-        ("driverpayrules", "UPDATE", "UPDATE payroll.driverpayrules SET notes = 'probe' WHERE driverpayruleid = :pr", p),
         ("driverrates", "UPDATE", "UPDATE payroll.driverrates SET notes = 'probe' WHERE driverrateid = :dr", p),
         ("driverratetiers", "UPDATE", """
             UPDATE payroll.driverratetiers SET tieramount = 2
             WHERE driverrateid = :dr AND tiersequence = 1""", p),
         ("driverratetiers", "DELETE", "DELETE FROM payroll.driverratetiers WHERE driverrateid = :dr", p),
-        ("driverratevalues", "DELETE", "DELETE FROM payroll.driverratevalues WHERE driverrateassignmentid = :ca", p),
         ("driverrates", "DELETE", "DELETE FROM payroll.driverrates WHERE driverrateid = :dr", p),
-        ("driverpayrules", "DELETE", "DELETE FROM payroll.driverpayrules WHERE driverpayruleid = :pr", p),
-        ("driverrateassignments", "DELETE", "DELETE FROM payroll.driverrateassignments WHERE driverrateassignmentid = :ca", p),
     ]
 
 
@@ -408,8 +396,7 @@ async def _run_operations(db, operations) -> dict[tuple[str, str], str]:
 
 async def _world_for_the_trigger(client, admin, db):
     source_branch, target_branch = await make_branch(db), await make_branch(db)
-    definitions = [await _definition(client, admin, db, (source_branch, target_branch))
-                   for _ in range(3)]
+    definitions = [await _definition(client, admin) for _ in range(3)]
     columns = {source_branch: await _columns(client, admin, source_branch, 2),
                target_branch: await _columns(client, admin, target_branch, 2)}
     admin_id = (await db.execute(text(
@@ -435,7 +422,7 @@ async def test_the_trigger_allows_every_operation_on_current_and_pending_assignm
         outcomes = await _run_operations(direct_db, _operations(
             rows, assignment_id, branch_id, definitions, columns[branch_id], admin_id))
         assert set(outcomes.values()) == {"ok"}, outcomes
-        assert len(outcomes) == 15
+        assert len(outcomes) == 6
 
 
 async def test_the_trigger_refuses_every_operation_on_every_table_for_an_ended_assignment(
@@ -453,7 +440,8 @@ async def test_the_trigger_refuses_every_operation_on_every_table_for_an_ended_a
             SET EffectiveToAt = clock_timestamp() - INTERVAL '1 minute', EndReason = 'Terminated'
             WHERE DriverAssignmentID = :a
         """), {"a": assignment_id})
-    before, tiers = await _fingerprint(direct_db, assignment_id), await _tier_count(direct_db, rows["dr"])
+    scene = Scene(auth_token, driver["driver_id"], assignment_id, 0, source_branch, 0, await db_now(direct_db))
+    before, tiers = await _fingerprint(direct_db, scene), await _tier_count(direct_db, rows["dr"])
     assert tiers == 1
 
     outcomes = await _run_operations(direct_db, _operations(
@@ -462,7 +450,7 @@ async def test_the_trigger_refuses_every_operation_on_every_table_for_an_ended_a
     assert set(outcomes.values()) == {"ended"}, outcomes
     assert {table for table, _ in outcomes} == set(COVERED_TABLES)
     assert {operation for _, operation in outcomes} == {"INSERT", "UPDATE", "DELETE"}
-    assert await _fingerprint(direct_db, assignment_id) == before
+    assert await _fingerprint(direct_db, scene) == before
     assert await _tier_count(direct_db, rows["dr"]) == tiers
 
 
@@ -480,11 +468,12 @@ async def test_the_refusal_carries_the_dedicated_sqlstate_and_message(
         """), {"a": driver["assignment_id"]})
     with pytest.raises(DBAPIError) as refused:
         await direct_db.execute(text("""
-            INSERT INTO payroll.driverpayrules
-                (companyid, branchid, driverassignmentid, ruletype, amount, effectivefrom,
+            INSERT INTO payroll.driverrates
+                (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom,
                  status, createdbyuserid)
-            VALUES (1, :b, :a, 'MinimumPay', 1, DATE '2026-01-01', 'Active', :u)
-        """), {"b": source_branch, "a": driver["assignment_id"], "u": admin_id})
+            VALUES (1, :b, :a, :rt, 1, DATE '2026-01-01', 'PendingApproval', :u)
+        """), {"b": source_branch, "a": driver["assignment_id"], "u": admin_id,
+               "rt": columns[source_branch][0]["rate_type_id"]})
     original = refused.value.orig
     assert (getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)) \
         == DRIVER_ASSIGNMENT_ENDED_SQLSTATE == "FL001"
@@ -539,17 +528,22 @@ async def test_the_trigger_decides_at_clock_time_inside_a_long_transaction(
 # ---------------------------------------------------------------------------
 
 class _FakeDriverError(Exception):
-    def __init__(self, sqlstate: str) -> None:
-        super().__init__(f"fake driver error {sqlstate}")
+    def __init__(self, sqlstate: str, message: str | None = None) -> None:
+        super().__init__(message or f"fake driver error {sqlstate}")
         self.sqlstate = sqlstate
 
 
-async def test_only_the_ended_assignment_sqlstate_is_mapped_and_everything_else_is_reraised():
+async def test_only_the_historical_compensation_sqlstate_is_mapped_by_its_message_prefix():
     app: FastAPI = create_app()
 
     @app.get("/__ended")
     async def ended():
         raise DBAPIError("UPDATE x", {}, _FakeDriverError("FL001"))
+
+    @app.get("/__historical")
+    async def historical():
+        raise DBAPIError("UPDATE x", {}, _FakeDriverError(
+            "FL001", "DRIVER_COMPENSATION_HISTORICAL: Driver-owned compensation ..."))
 
     @app.get("/__other")
     async def other():
@@ -560,6 +554,9 @@ async def test_only_the_ended_assignment_sqlstate_is_mapped_and_everything_else_
         mapped = await client.get("/__ended")
         assert mapped.status_code == 409
         assert mapped.json() == {"detail": ENDED}
+        historical = await client.get("/__historical")
+        assert historical.status_code == 409
+        assert historical.json() == {"detail": HISTORICAL}
         with pytest.raises(DBAPIError) as unchanged:
             await client.get("/__other")
     assert unchanged.value.orig.sqlstate == "23505"

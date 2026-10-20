@@ -2,8 +2,11 @@
 
 The tests run against the disposable database built by compensation_database_fixtures, with their
 own Company tenants, roles, users and Drivers, so they never touch the shared
-application test data. Approved assignments and request history are
+application test data. Approved schedules and request history are
 intentionally undeletable, so nothing is cleaned up.
+
+Rate schedules belong to the permanent Driver: ``driver_a`` etc. are home DriverAssignment ids
+(what payroll and status rates are keyed by) and ``driver_a_id`` etc. are the permanent DriverIDs.
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ import pytest_asyncio
 from httpx import ASGITransport
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from tests.compensation_database_fixtures import make_branch, make_company, make_driver
+from tests.compensation_database_fixtures import make_branch, make_company, make_driver_pair
 
 PERMISSIONS = ["payitems.view", "payitems.edit", "payrates.view", "payrates.edit"]
 
@@ -70,6 +73,9 @@ class Tenant:
     driver_a: int
     driver_a2: int
     driver_b: int
+    driver_a_id: int
+    driver_a2_id: int
+    driver_b_id: int
     owner: int
     branch_user: int
     viewer: int
@@ -129,13 +135,19 @@ def build_tenant(
             full = _role(cur, company_id, "P3C_FULL", permissions or PERMISSIONS)
             read = _role(cur, company_id, "P3C_READ", ["payitems.view", "payrates.view"])
             none = _role(cur, company_id, "P3C_NONE", [])
+            driver_a_id, driver_a = make_driver_pair(cur, company_id, branch_a)
+            driver_a2_id, driver_a2 = make_driver_pair(cur, company_id, branch_a)
+            driver_b_id, driver_b = make_driver_pair(cur, company_id, branch_b)
             return Tenant(
                 company_id=company_id,
                 branch_a=branch_a,
                 branch_b=branch_b,
-                driver_a=make_driver(cur, company_id, branch_a),
-                driver_a2=make_driver(cur, company_id, branch_a),
-                driver_b=make_driver(cur, company_id, branch_b),
+                driver_a=driver_a,
+                driver_a2=driver_a2,
+                driver_b=driver_b,
+                driver_a_id=driver_a_id,
+                driver_a2_id=driver_a2_id,
+                driver_b_id=driver_b_id,
                 owner=_user(cur, company_id, full, "AllCompanyBranches", None),
                 branch_user=_user(cur, company_id, full, "SpecificBranch", branch_a),
                 viewer=_user(cur, company_id, read, "AllCompanyBranches", None),
@@ -192,35 +204,14 @@ def grant_applicability(
         conn.close()
 
 
-def _ensure_applicable(tenant: Tenant, definition: dict, driver_assignment_id: int) -> None:
-    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
-    conn.autocommit = True
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = %s", (driver_assignment_id,))
-            branch_id = cur.fetchone()[0]
-            cur.execute("""
-                SELECT 1 FROM payroll.branchpayitemconfig
-                WHERE companyid = %s AND branchid = %s AND paydefinitionid = %s
-            """, (tenant.company_id, branch_id, definition["pay_definition_id"]))
-            exists = cur.fetchone() is not None
-    finally:
-        conn.close()
-    if not exists:
-        grant_applicability(tenant, definition, branch_id)
-
-
 async def create_pending(
     client: httpx.AsyncClient, tenant: Tenant, definition: dict, *,
-    driver_assignment_id: int | None = None, effective_from: str = "2026-01-01",
+    driver_id: int | None = None, effective_from: str = "2026-01-01",
     effective_to: str | None = None, headers: dict | None = None,
-    applicable: bool = True,
 ) -> dict:
-    if applicable:
-        _ensure_applicable(tenant, definition, driver_assignment_id or tenant.driver_a)
     response = await client.post(
-        "/compensation/driver-rate-assignments",
-        json={"driver_assignment_id": driver_assignment_id or tenant.driver_a,
+        "/compensation/driver-rate-schedules",
+        json={"driver_id": driver_id or tenant.driver_a_id,
               "rate_definition_id": definition["rate_definition_id"],
               "effective_from": effective_from, "effective_to": effective_to},
         headers=headers or tenant.admin,
@@ -230,11 +221,11 @@ async def create_pending(
 
 
 async def set_scalar_value(
-    client: httpx.AsyncClient, tenant: Tenant, assignment: dict, definition: dict, amount,
+    client: httpx.AsyncClient, tenant: Tenant, schedule: dict, definition: dict, amount,
     headers: dict | None = None,
 ) -> httpx.Response:
     return await client.put(
-        f"/compensation/driver-rate-assignments/{assignment['driver_rate_assignment_id']}/values",
+        f"/compensation/driver-rate-schedules/{schedule['driver_rate_schedule_id']}/values",
         json={"values": [{
             "rate_component_definition_id":
                 definition["components"][0]["rate_component_definition_id"],
@@ -244,22 +235,22 @@ async def set_scalar_value(
     )
 
 
-async def approve_assignment(
-    client: httpx.AsyncClient, tenant: Tenant, assignment: dict, headers: dict | None = None,
+async def approve_schedule(
+    client: httpx.AsyncClient, tenant: Tenant, schedule: dict, headers: dict | None = None,
 ) -> httpx.Response:
     return await client.post(
-        f"/compensation/driver-rate-assignments/{assignment['driver_rate_assignment_id']}/approve",
+        f"/compensation/driver-rate-schedules/{schedule['driver_rate_schedule_id']}/approve",
         headers=headers or tenant.admin,
     )
 
 
-async def authored_assignment(
+async def authored_schedule(
     client: httpx.AsyncClient, tenant: Tenant, definition: dict, amount="25", **kwargs,
 ) -> dict:
-    """Create, fill and approve one scalar assignment through the API."""
+    """Create, fill and approve one scalar schedule through the API."""
     pending = await create_pending(client, tenant, definition, **kwargs)
     filled = await set_scalar_value(client, tenant, pending, definition, amount)
     assert filled.status_code == 200, filled.text
-    approved = await approve_assignment(client, tenant, pending)
+    approved = await approve_schedule(client, tenant, pending)
     assert approved.status_code == 200, approved.text
     return approved.json()

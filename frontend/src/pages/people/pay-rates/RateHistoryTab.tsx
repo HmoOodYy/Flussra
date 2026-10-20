@@ -1,9 +1,10 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { HistoryRow } from './payRatesView';
 import { fmtAmount, statusBadgeClass } from './payRatesView';
+import { RETIRED_LABEL, canVoidHistoryRow } from './payRatesHistory';
 import styles from './PayRatesPage.module.css';
 
-type AssignmentHistoryTabProps = {
+type RateHistoryTabProps = {
   historyRows: HistoryRow[];
   loadingHistory: boolean;
   canEditMatrix: boolean;
@@ -14,7 +15,7 @@ type AssignmentHistoryTabProps = {
   setVoidError: (error: string) => void;
 };
 
-export function AssignmentHistoryTab({ historyRows, loadingHistory, canEditMatrix, currencyCode, currencyDigits, setVoidTarget, setVoidReason, setVoidError }: AssignmentHistoryTabProps) {
+export function RateHistoryTab({ historyRows, loadingHistory, canEditMatrix, currencyCode, currencyDigits, setVoidTarget, setVoidReason, setVoidError }: RateHistoryTabProps) {
   return (
     <div className={styles.section}>
       <div className={styles.sectionHead}><span className={styles.sectionTitle}>Rate History</span></div>
@@ -27,12 +28,12 @@ export function AssignmentHistoryTab({ historyRows, loadingHistory, canEditMatri
           <thead><tr><th>Pay Item</th><th>Amount</th><th>Effective</th><th>Status</th>{canEditMatrix && <th>Actions</th>}</tr></thead>
           <tbody>
             {historyRows.map((r) => (
-              <tr key={r.driver_rate_assignment_id}>
-                <td><strong>{r.definition_name}</strong>{r.void_reason && <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.void_reason}</div>}</td>
+              <tr key={r.driver_rate_schedule_id}>
+                <td><strong>{r.definition_name}</strong>{r.retired && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>{RETIRED_LABEL}</span>}{r.void_reason && <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.void_reason}</div>}</td>
                 <td>{fmtAmount(r.values[0]?.amount ?? null, r.unit, currencyCode, currencyDigits)}</td>
                 <td>{r.effective_from}{r.effective_to ? ` – ${r.effective_to}` : ''}</td>
                 <td><span className={statusBadgeClass(r.status)}>{r.status}</span></td>
-                {canEditMatrix && <td>{(r.status === 'Approved' || r.status === 'Superseded') && <button className={styles.btnVoid} onClick={() => { setVoidTarget(r); setVoidReason(''); setVoidError(''); }}>Void</button>}</td>}
+                {canEditMatrix && <td>{canVoidHistoryRow(r, canEditMatrix) && <button className={styles.btnVoid} onClick={() => { setVoidTarget(r); setVoidReason(''); setVoidError(''); }}>Void</button>}</td>}
               </tr>
             ))}
           </tbody>

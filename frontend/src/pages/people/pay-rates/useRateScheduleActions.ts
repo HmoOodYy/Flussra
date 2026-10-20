@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { voidAssignment } from '../../../lib/compensationApi';
+import { voidSchedule } from '../../../lib/compensationApi';
 import { apiError, type HistoryRow } from './payRatesView';
 
-export function useRateAssignmentActions(
-  selectedDriverAssignmentId: number | null,
-  reloadAll: (driverAssignmentId: number) => Promise<void>,
+export function useRateScheduleActions(
+  selectedDriverId: number | null,
+  reloadAll: (driverId: number) => Promise<void>,
 ) {
   const [actioningId, setActioningId] = useState<number | null>(null);
   const [pendingActionError, setPendingActionError] = useState('');
@@ -14,12 +14,12 @@ export function useRateAssignmentActions(
   const [voiding, setVoiding] = useState(false);
 
   async function runPendingAction(id: number, action: () => Promise<unknown>) {
-    if (!selectedDriverAssignmentId) return;
+    if (!selectedDriverId) return;
     setActioningId(id);
     setPendingActionError('');
     try {
       await action();
-      await reloadAll(selectedDriverAssignmentId);
+      await reloadAll(selectedDriverId);
     } catch (err) {
       setPendingActionError(apiError(err));
     } finally {
@@ -28,7 +28,7 @@ export function useRateAssignmentActions(
   }
 
   async function executeVoid() {
-    if (!voidTarget || !selectedDriverAssignmentId) return;
+    if (!voidTarget || !selectedDriverId) return;
     if (!voidReason.trim()) {
       setVoidError('A reason is required.');
       return;
@@ -36,10 +36,10 @@ export function useRateAssignmentActions(
     setVoiding(true);
     setVoidError('');
     try {
-      await voidAssignment(voidTarget.driver_rate_assignment_id, voidReason.trim());
+      await voidSchedule(voidTarget.driver_rate_schedule_id, voidReason.trim());
       setVoidTarget(null);
       setVoidReason('');
-      await reloadAll(selectedDriverAssignmentId);
+      await reloadAll(selectedDriverId);
     } catch (err) {
       setVoidError(apiError(err));
     } finally {

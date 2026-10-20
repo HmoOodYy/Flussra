@@ -31,14 +31,17 @@ const payRatesFeatureFiles = [
   'src/pages/people/pay-rates/usePayRateReads.ts',
   'src/pages/people/pay-rates/useTargetRateEditing.ts',
   'src/pages/people/pay-rates/useStatusRateEditing.ts',
-  'src/pages/people/pay-rates/useRateAssignmentActions.ts',
+  'src/pages/people/pay-rates/useRateScheduleActions.ts',
   'src/pages/people/pay-rates/useDriverPayRules.ts',
   'src/pages/people/pay-rates/PayRateDriverList.tsx',
   'src/pages/people/pay-rates/TargetRateSection.tsx',
   'src/pages/people/pay-rates/StatusRateSection.tsx',
   'src/pages/people/pay-rates/PendingRateChanges.tsx',
-  'src/pages/people/pay-rates/AssignmentHistoryTab.tsx',
+  'src/pages/people/pay-rates/RateHistoryTab.tsx',
   'src/pages/people/pay-rates/DriverPayRulesTab.tsx',
+  'src/pages/people/pay-rates/payRatesDrivers.ts',
+  'src/pages/people/pay-rates/payRatesErrors.ts',
+  'src/pages/people/pay-rates/payRulesView.ts',
 ];
 const payRatesSources = payRatesFeatureFiles.map(read);
 const payRatesFeatureSource = payRatesSources.join('\n');
@@ -78,9 +81,9 @@ test('Pay Items feature modules expose no legacy display-order or PayItem identi
   assert.doesNotMatch(payItemsFeatureSource, /pay_item_id|sort_order|PayItemOrder|dragHandle/);
 });
 
-test('Pay Rates authors ordinary rates through target assignments and exposes no copy flow', () => {
-  assert.match(payRatesTargetHook, /createAssignment/);
-  assert.match(payRatesTargetHook, /replaceAssignmentValues/);
+test('Pay Rates authors ordinary rates through Driver rate schedules and exposes no copy flow', () => {
+  assert.match(payRatesTargetHook, /createSchedule/);
+  assert.match(payRatesTargetHook, /replaceScheduleValues/);
   assert.ok(payRatesTargetHook.includes("from '../../../lib/compensationApi'"));
   assert.doesNotMatch(payRatesFeatureSource, /copy-from/);
   assert.doesNotMatch(payRatesFeatureSource, /pay_item_id/);
@@ -122,7 +125,7 @@ test('Pay Rates saves target rates one PayDefinition row at a time with no multi
   assert.doesNotMatch(payRatesFeatureSource, /dirtyCount|saveRates\(|enterEditMode|dirtyKeys/);
   const body = functionBody(payRatesTargetHook, /async function saveTargetRow\(/);
   assert.doesNotMatch(body, /\bfor\s*\(|\.forEach\(|\.map\(|Promise\.all/);
-  assert.equal((body.match(/createAssignment\(/g) ?? []).length, 1);
+  assert.equal((body.match(/createSchedule\(/g) ?? []).length, 1);
   assert.doesNotMatch(body, /rates\/batch/);
   const targetUI = payRatesSource('TargetRateSection.tsx');
   assert.match(targetUI, /Save as Pending/);
@@ -133,19 +136,19 @@ test('Pay Rates saves target rates one PayDefinition row at a time with no multi
 test('A failed approval keeps the saved Pending change visible and recoverable', () => {
   const body = functionBody(payRatesTargetHook, /async function saveTargetRow\(/);
   assert.match(body, /saved as Pending, but approval failed/);
-  assert.match(body, /refreshTargetRows\(driverAssignmentId\)/);
+  assert.match(body, /refreshTargetRows\(driverId\)/);
   assert.match(body, /Pending Changes/);
 });
 
 test('Status rates keep an independent temporary batch action and never touch target assignments', () => {
   const body = functionBody(payRatesStatusHook, /async function saveStatusRates\(/);
   assert.match(body, /saveStatusRateBatch\(driverAssignmentId/);
-  assert.doesNotMatch(body, /createAssignment|replaceAssignmentValues|approveAssignment/);
+  assert.doesNotMatch(body, /createSchedule|replaceScheduleValues|approveSchedule/);
   assert.ok(payRatesStatusApi.includes("/payroll/driver-assignments/${driverAssignmentId}/rates/batch"));
   assert.match(payRatesSource('StatusRateSection.tsx'), /Edit Status Rates/);
   assert.ok(payRatesSource('usePayRateReads.ts').includes("import { getStatusRateMatrix"));
   assert.ok(payRatesSource('usePayRateReads.ts').includes("import { getDriverPayRules"));
   assert.ok(payRatesSource('useDriverPayRules.ts').includes("from './driverPayRulesApi'"));
-  assert.ok(payRatesSource('driverPayRulesApi.ts').includes("/payroll/driver-assignments/${driverAssignmentId}/pay-rules"));
+  assert.ok(payRatesSource('driverPayRulesApi.ts').includes("/payroll/drivers/${driverId}/pay-rules"));
   assert.ok(payRatesSource('driverPayRulesApi.ts').includes("'/payroll/driver-pay-rules'"));
 });

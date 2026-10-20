@@ -724,9 +724,9 @@ async def _compute_setup_warnings(
                   {_and(bf_d)}
                   AND  NOT EXISTS (
                       SELECT 1
-                      FROM   payroll.driverrateassignments a
-                      WHERE  a.driverassignmentid = asg.driverassignmentid
-                        AND  a.status   = 'Approved'
+                      FROM   payroll.driverrateschedules s
+                      WHERE  s.driverid = asg.driverid
+                        AND  s.status   = 'Approved'
                   )
                 GROUP  BY asg.branchid, b.branchname
             """),

@@ -3,7 +3,7 @@
 Built on the disposable database and tenant helpers of the target Compensation tests:
 each test owns a Company with Branches, Drivers, a Payroll Setup assignment and the
 payroll permissions it needs, so nothing touches the shared application test data.
-Periods and approved assignments are intentionally undeletable, so nothing is cleaned.
+Periods and approved schedules are intentionally undeletable, so nothing is cleaned.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from sqlalchemy import text
 from tests.compensation_api_fixtures import (
     PERMISSIONS,
     Tenant,
-    approve_assignment,
+    approve_schedule,
     build_tenant,
     create_definition,
     create_pending,
@@ -113,16 +113,31 @@ async def rated_definition(
     return definition
 
 
+def driver_id_of(tenant: Tenant, driver_assignment_id: int) -> int:
+    """The permanent Driver of a home assignment (rate schedules belong to the Driver)."""
+    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT driverid FROM core.driverassignments WHERE driverassignmentid = %s",
+                        (driver_assignment_id,))
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
 async def approve_rate(
     client: httpx.AsyncClient, tenant: Tenant, definition: dict, amount: str, *,
     effective_from: str, effective_to: str | None = None, driver_assignment_id: int | None = None,
 ) -> dict:
+    """Approve a scalar schedule for the Driver of ``driver_assignment_id`` (default driver_a)."""
+    driver_id = (driver_id_of(tenant, driver_assignment_id)
+                 if driver_assignment_id is not None else None)
     pending = await create_pending(
-        client, tenant, definition, driver_assignment_id=driver_assignment_id,
+        client, tenant, definition, driver_id=driver_id,
         effective_from=effective_from, effective_to=effective_to)
     filled = await set_scalar_value(client, tenant, pending, definition, amount)
     assert filled.status_code == 200, filled.text
-    approved = await approve_assignment(client, tenant, pending)
+    approved = await approve_schedule(client, tenant, pending)
     assert approved.status_code == 200, approved.text
     return approved.json()
 

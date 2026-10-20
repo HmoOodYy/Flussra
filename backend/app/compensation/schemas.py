@@ -204,30 +204,30 @@ class PayDefinitionSummary(BaseModel):
     provenance: PayDefinitionProvenance | None = None
 
 
-class AssignmentCreate(BaseModel):
-    driver_assignment_id: int
+class ScheduleCreate(BaseModel):
+    driver_id: int
     rate_definition_id: int
     effective_from: date
     effective_to: date | None = None
     notes: str | None = None
 
 
-class AssignmentUpdate(BaseModel):
+class ScheduleUpdate(BaseModel):
     effective_from: date | None = None
     effective_to: date | None = None
     notes: str | None = None
 
 
-class AssignmentValueInput(BaseModel):
+class ScheduleValueInput(BaseModel):
     rate_component_definition_id: int
     amount: RateAmount | None = None
 
 
-class AssignmentValuesReplace(BaseModel):
-    values: list[AssignmentValueInput]
+class ScheduleValuesReplace(BaseModel):
+    values: list[ScheduleValueInput]
 
 
-class AssignmentVoid(BaseModel):
+class ScheduleVoid(BaseModel):
     reason: str
 
     @field_validator("reason")
@@ -238,7 +238,7 @@ class AssignmentVoid(BaseModel):
         return value
 
 
-class AssignmentValue(BaseModel):
+class ScheduleValue(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     rate_component_definition_id: int
@@ -248,13 +248,13 @@ class AssignmentValue(BaseModel):
     amount: Decimal | None = None
 
 
-class AssignmentSummary(BaseModel):
+class ScheduleSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    driver_rate_assignment_id: int
+    driver_rate_schedule_id: int
     company_id: int
-    branch_id: int
-    driver_assignment_id: int
+    driver_id: int
+    pay_definition_id: int
     rate_definition_id: int
     effective_from: date
     effective_to: date | None = None
@@ -269,16 +269,34 @@ class AssignmentSummary(BaseModel):
     voided_at_utc: datetime | None = None
     void_reason: str | None = None
     notes: str | None = None
-    values: list[AssignmentValue] = []
+    values: list[ScheduleValue] = []
 
 
 class DriverRateSummaryItem(BaseModel):
+    """One rate definition the Driver has schedules for, whatever its PayDefinition's status.
+
+    History is discovered from the Driver's actual schedules (read-scope filtered), not from
+    the authoring matrix, so a retired PayDefinition's schedules stay discoverable; only
+    ``pay_definition_status == 'Active'`` definitions are authorable.
+    """
+
     rate_definition_id: int
     pay_definition_id: int | None = None
     definition_code: str | None = None
-    approved_assignment_id: int | None = None
+    definition_name: str | None = None
+    unit: str | None = None
+    pay_definition_status: str | None = None
+    approved_schedule_id: int | None = None
     approved_effective_from: date | None = None
-    pending_assignment_id: int | None = None
+    pending_schedule_id: int | None = None
+
+
+class CompensationAccess(BaseModel):
+    """What the caller may do with one Driver's compensation, as the backend decided it."""
+
+    full_history: bool
+    can_discard_pending: bool
+    has_current_or_pending_tenure: bool
 
 
 class ResolvedComponent(BaseModel):
@@ -292,14 +310,13 @@ class ResolvedComponent(BaseModel):
 
 class ResolvedCompensation(BaseModel):
     company_id: int
-    driver_assignment_id: int
-    branch_id: int
+    driver_id: int
     pay_definition_id: int | None = None
     rate_definition_id: int
     rate_shape: str
     calculation_method: str | None = None
-    driver_rate_assignment_id: int
-    assignment_status: str
+    driver_rate_schedule_id: int
+    schedule_status: str
     effective_from: date
     effective_to: date | None = None
     components: list[ResolvedComponent]
@@ -389,8 +406,8 @@ class BulkBranchConfigResult(BaseModel):
     results: list[BulkBranchConfigBranchResult]
 
 
-class AssignmentBrief(BaseModel):
-    driver_rate_assignment_id: int
+class ScheduleBrief(BaseModel):
+    driver_rate_schedule_id: int
     status: str
     effective_from: date
     effective_to: date | None = None
@@ -407,6 +424,10 @@ class DriverPayRateRow(BaseModel):
     unit: str | None = None
     rate_definition_id: int
     rate_component_definition_id: int
-    current: AssignmentBrief | None = None
-    future: AssignmentBrief | None = None
-    pending: AssignmentBrief | None = None
+    # False when the definition has no active Branch configuration in the Branch of the
+    # Driver's context tenure on the reference date (None when the Driver has no tenure
+    # that day). Authoring is still allowed; the flag only warns.
+    applicable_in_context_branch: bool | None = None
+    current: ScheduleBrief | None = None
+    future: ScheduleBrief | None = None
+    pending: ScheduleBrief | None = None

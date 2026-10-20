@@ -1,19 +1,21 @@
 /**
  * Typed wrappers for the target Compensation API, mounted at /compensation:
  * Company PayDefinition governance, Branch applicability and Driver rate
- * assignments.
+ * schedules.
  */
 import apiClient from './apiClient';
 import type {
-  AssignmentCreatePayload,
-  AssignmentSummary,
-  AssignmentValuePayload,
+  ScheduleCreatePayload,
+  ScheduleSummary,
+  ScheduleValuePayload,
   BranchConfigUpdatePayload,
   BranchConfigVersion,
   BranchPayDefinitionState,
   BulkBranchConfigResult,
   BulkBranchConfigUpdatePayload,
+  CompensationAccess,
   DriverPayRateRow,
+  DriverRateSummaryItem,
   PayDefinitionDirectCreatePayload,
   PayDefinitionRequestCreatePayload,
   PayDefinitionRequestDecisionPayload,
@@ -147,68 +149,80 @@ export async function listBranchPayDefinitionHistory(
   return resp.data;
 }
 
-// ── Driver rate assignments ───────────────────────────────────────────────────
+// ── Driver rate schedules (addressed by the permanent Driver) ─────────────────
 
 export async function listDriverPayRates(
-  driverAssignmentId: number,
+  driverId: number,
   asOf?: string,
 ): Promise<DriverPayRateRow[]> {
   const resp = await apiClient.get<DriverPayRateRow[]>(
-    `/compensation/driver-assignments/${driverAssignmentId}/pay-rates`,
+    `/compensation/drivers/${driverId}/pay-rates`,
     { params: asOf ? { as_of: asOf } : {} });
   return resp.data;
 }
 
-export async function listAssignmentHistory(
-  driverAssignmentId: number,
+export async function listDriverRateSummary(driverId: number): Promise<DriverRateSummaryItem[]> {
+  const resp = await apiClient.get<DriverRateSummaryItem[]>(
+    `/compensation/drivers/${driverId}/rate-schedules/summary`);
+  return resp.data;
+}
+
+export async function getCompensationAccess(driverId: number): Promise<CompensationAccess> {
+  const resp = await apiClient.get<CompensationAccess>(
+    `/compensation/drivers/${driverId}/compensation-access`);
+  return resp.data;
+}
+
+export async function listScheduleHistory(
+  driverId: number,
   rateDefinitionId: number,
-): Promise<AssignmentSummary[]> {
-  const resp = await apiClient.get<AssignmentSummary[]>(
-    `/compensation/driver-assignments/${driverAssignmentId}/rate-definitions/${rateDefinitionId}/assignments`);
+): Promise<ScheduleSummary[]> {
+  const resp = await apiClient.get<ScheduleSummary[]>(
+    `/compensation/drivers/${driverId}/rate-definitions/${rateDefinitionId}/rate-schedules`);
   return resp.data;
 }
 
-export async function createAssignment(
-  payload: AssignmentCreatePayload,
-): Promise<AssignmentSummary> {
-  const resp = await apiClient.post<AssignmentSummary>(
-    '/compensation/driver-rate-assignments', payload);
+export async function createSchedule(
+  payload: ScheduleCreatePayload,
+): Promise<ScheduleSummary> {
+  const resp = await apiClient.post<ScheduleSummary>(
+    '/compensation/driver-rate-schedules', payload);
   return resp.data;
 }
 
-export async function replaceAssignmentValues(
-  assignmentId: number,
-  values: AssignmentValuePayload[],
-): Promise<AssignmentSummary> {
-  const resp = await apiClient.put<AssignmentSummary>(
-    `/compensation/driver-rate-assignments/${assignmentId}/values`, { values });
+export async function replaceScheduleValues(
+  scheduleId: number,
+  values: ScheduleValuePayload[],
+): Promise<ScheduleSummary> {
+  const resp = await apiClient.put<ScheduleSummary>(
+    `/compensation/driver-rate-schedules/${scheduleId}/values`, { values });
   return resp.data;
 }
 
-export async function approveAssignment(assignmentId: number): Promise<AssignmentSummary> {
-  const resp = await apiClient.post<AssignmentSummary>(
-    `/compensation/driver-rate-assignments/${assignmentId}/approve`);
+export async function approveSchedule(scheduleId: number): Promise<ScheduleSummary> {
+  const resp = await apiClient.post<ScheduleSummary>(
+    `/compensation/driver-rate-schedules/${scheduleId}/approve`);
   return resp.data;
 }
 
-export async function discardAssignment(assignmentId: number): Promise<void> {
-  await apiClient.delete(`/compensation/driver-rate-assignments/${assignmentId}`);
+export async function discardSchedule(scheduleId: number): Promise<void> {
+  await apiClient.delete(`/compensation/driver-rate-schedules/${scheduleId}`);
 }
 
-export async function voidAssignment(
-  assignmentId: number,
+export async function voidSchedule(
+  scheduleId: number,
   reason: string,
-): Promise<AssignmentSummary> {
-  const resp = await apiClient.post<AssignmentSummary>(
-    `/compensation/driver-rate-assignments/${assignmentId}/void`, { reason });
+): Promise<ScheduleSummary> {
+  const resp = await apiClient.post<ScheduleSummary>(
+    `/compensation/driver-rate-schedules/${scheduleId}/void`, { reason });
   return resp.data;
 }
 
-export async function updateAssignment(
-  assignmentId: number,
+export async function updateSchedule(
+  scheduleId: number,
   payload: { effective_from?: string; effective_to?: string | null; notes?: string | null },
-): Promise<AssignmentSummary> {
-  const resp = await apiClient.patch<AssignmentSummary>(
-    `/compensation/driver-rate-assignments/${assignmentId}`, payload);
+): Promise<ScheduleSummary> {
+  const resp = await apiClient.patch<ScheduleSummary>(
+    `/compensation/driver-rate-schedules/${scheduleId}`, payload);
   return resp.data;
 }

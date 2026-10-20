@@ -82,9 +82,25 @@ async def resolve_effective_employee_assignment(
 DRIVER_ASSIGNMENT_ENDED_MESSAGE = (
     "This Driver assignment has ended; its compensation is historical and read-only."
 )
-# Raised by core.trg_CompensationAssignmentWritable (migration 0087) when a compensation
-# row of an ended DriverAssignment is inserted, updated or deleted.
+# The one SQLSTATE for a database refusal of historical compensation. Raised with the
+# message prefix DRIVER_ASSIGNMENT_ENDED by core.trg_CompensationAssignmentWritable
+# (migration 0087; a status rate of an ended DriverAssignment) and with the prefix
+# DRIVER_COMPENSATION_HISTORICAL by core.trg_DriverCompensationContextWritable (migration
+# 0088; a Driver-owned change whose context tenure has ended).
 DRIVER_ASSIGNMENT_ENDED_SQLSTATE = "FL001"
+
+DRIVER_COMPENSATION_HISTORICAL_MESSAGE = (
+    "This compensation change starts in a Driver tenure that has ended; "
+    "historical compensation is read-only."
+)
+
+
+def driver_compensation_historical_detail() -> dict[str, str]:
+    """The one API error body for a refused change whose context tenure has ended."""
+    return {
+        "code": "DRIVER_COMPENSATION_HISTORICAL",
+        "message": DRIVER_COMPENSATION_HISTORICAL_MESSAGE,
+    }
 
 
 def driver_assignment_ended_detail() -> dict[str, str]:
@@ -99,12 +115,31 @@ def is_driver_assignment_ended_error(exc: DBAPIError) -> bool:
     return sqlstate == DRIVER_ASSIGNMENT_ENDED_SQLSTATE
 
 
+def historical_compensation_refusal_detail(exc: DBAPIError) -> dict[str, str] | None:
+    """The API error body for a database refusal of historical compensation (FL001), or None.
+
+    The single mapping point for both triggers: the message prefix tells a status rate of an
+    ended assignment (DRIVER_ASSIGNMENT_ENDED) from a Driver-owned change in an ended tenure
+    (DRIVER_COMPENSATION_HISTORICAL).
+    """
+    if not is_driver_assignment_ended_error(exc):
+        return None
+    if "DRIVER_COMPENSATION_HISTORICAL" in str(exc.orig):
+        return driver_compensation_historical_detail()
+    return driver_assignment_ended_detail()
+
+
 async def require_writable_driver_assignment(
     company_id: int,
     driver_assignment_id: int,
     db: AsyncConnection,
 ) -> None:
-    """Refuse EARLY a compensation write against an already-ENDED DriverAssignment (409).
+    """Refuse EARLY a status-rate write against an already-ENDED DriverAssignment (409).
+
+    Only the legacy status rates (``payroll.DriverRates`` / ``DriverRateTiers``, in
+    ``payroll/rates.py``) are assignment-owned and call this. Ordinary rate schedules and
+    Min/Max pay rules belong to the permanent Driver and are judged by the context tenure of
+    the change's start date instead (``app.compensation.driver_context``).
 
     Ended means ``EffectiveToAt IS NOT NULL AND EffectiveToAt <= now`` at one wall-clock
     decision instant, which includes the empty never-effective window of a terminated
@@ -114,7 +149,7 @@ async def require_writable_driver_assignment(
     Acceptance here is never final. The writer can still block afterwards (advisory
     lock, row lock, unique-index wait) while a Scheduled source's future end passes, and
     ``FOR SHARE`` freezes the ``EffectiveToAt`` value, not time. The authority is the
-    database trigger ``core.trg_CompensationAssignmentWritable``: it re-decides at each
+    database trigger ``core.trg_CompensationAssignmentWritable`` (on the status-rate tables only): it re-decides at each
     mutation's own wall-clock instant, after that statement's waits, and its refusal
     reaches the client as the same 409 through the application's DBAPIError handler. This
     call refuses only what is already ended, so such a request does not wait for the

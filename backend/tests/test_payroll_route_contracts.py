@@ -23,8 +23,14 @@ def _first_full_match(path: str, method: str) -> APIRoute:
 
 
 def test_public_payroll_router_is_flat_and_handlers_live_in_owner_modules():
-    assert len(router.routes) == 61
+    assert len(router.routes) == 60  # 61 before the transfer-copy route was retired
     assert all(isinstance(route, APIRoute) for route in router.routes)
+    paths = {route.path for route in router.routes}
+    # Rate copy between assignments is retired: a transfer continues the Driver's rates.
+    assert not any("/copy-from/" in path for path in paths)
+    # Pay rules belong to the permanent Driver, not to an assignment.
+    assert "/drivers/{driver_id}/pay-rules" in paths
+    assert "/driver-assignments/{driver_assignment_id}/pay-rules" not in paths
     assert router.routes[0].path == "/finalized"
     assert router.routes[0].name == "list_finalized_periods"
 

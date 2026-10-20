@@ -7,16 +7,16 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from app.compensation import assignments
+from app.compensation import schedules
 from app.compensation.schemas import (
-    AssignmentCreate,
-    AssignmentValueInput,
-    AssignmentValuesReplace,
-    AssignmentVoid,
+    ScheduleCreate,
+    ScheduleValueInput,
+    ScheduleValuesReplace,
+    ScheduleVoid,
 )
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
-    approve_assignment,
-    authored_assignment,
+    approve_schedule,
+    authored_schedule,
     create_definition,
     create_pending,
     grant_applicability,
@@ -33,11 +33,11 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
 
 pytestmark = pytest.mark.asyncio
 
-BASE = "/compensation/driver-rate-assignments"
+BASE = "/compensation/driver-rate-schedules"
 
 
-def _id(assignment: dict) -> int:
-    return assignment["driver_rate_assignment_id"]
+def _id(schedule: dict) -> int:
+    return schedule["driver_rate_schedule_id"]
 
 
 async def _run(engine, operation, pids):
@@ -74,7 +74,7 @@ async def _blocked_with_pid(engine, operation) -> tuple[asyncio.Task, int]:
 
 
 def _values(definition, amount):
-    return AssignmentValuesReplace(values=[AssignmentValueInput(
+    return ScheduleValuesReplace(values=[ScheduleValueInput(
         rate_component_definition_id=definition["components"][0]["rate_component_definition_id"],
         amount=amount)])
 
@@ -92,11 +92,11 @@ async def _currency(engine, tenant) -> str:
             {"cid": tenant.company_id})).scalar_one()
 
 
-async def _status(engine, assignment) -> str:
+async def _status(engine, schedule) -> str:
     async with engine.connect() as conn:
         return (await conn.execute(
-            text("SELECT status FROM payroll.driverrateassignments "
-                 "WHERE driverrateassignmentid = :aid"), {"aid": _id(assignment)})).scalar_one()
+            text("SELECT status FROM payroll.driverrateschedules "
+                 "WHERE driverratescheduleid = :aid"), {"aid": _id(schedule)})).scalar_one()
 
 
 def _change_currency(tenant, code):
@@ -119,34 +119,34 @@ def _code(result) -> str:
 async def test_concurrent_pending_creation_for_one_identity_admits_one(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a)
-    body = {"driver_assignment_id": tenant.driver_a, "rate_definition_id": definition["rate_definition_id"],
+    body = {"driver_id": tenant.driver_a_id, "rate_definition_id": definition["rate_definition_id"],
             "effective_from": "2026-01-01"}
     results = await asyncio.gather(
         p3c_client.post(BASE, json=body, headers=tenant.admin),
         p3c_client.post(BASE, json=body, headers=tenant.admin))
     assert sorted(r.status_code for r in results) == [201, 409]
     loser = next(r for r in results if r.status_code == 409)
-    assert loser.json()["detail"]["code"] == "PENDING_ASSIGNMENT_EXISTS"
+    assert loser.json()["detail"]["code"] == "PENDING_SCHEDULE_EXISTS"
 
 
-async def test_concurrent_approval_of_one_assignment_admits_one(p3c_client, tenant):
+async def test_concurrent_approval_of_one_schedule_admits_one(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     pending = await _filled_pending(p3c_client, tenant, definition)
     results = await asyncio.gather(
-        approve_assignment(p3c_client, tenant, pending),
-        approve_assignment(p3c_client, tenant, pending))
+        approve_schedule(p3c_client, tenant, pending),
+        approve_schedule(p3c_client, tenant, pending))
     assert sorted(r.status_code for r in results) == [200, 409]
     assert next(r for r in results if r.status_code == 409).json()["detail"]["code"] \
-        == "ASSIGNMENT_NOT_PENDING"
+        == "SCHEDULE_NOT_PENDING"
 
 
 async def test_concurrent_approvals_for_different_drivers_both_commit(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    first = await _filled_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a)
-    second = await _filled_pending(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_a2)
+    first = await _filled_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a_id)
+    second = await _filled_pending(p3c_client, tenant, definition, driver_id=tenant.driver_a2_id)
     results = await asyncio.gather(
-        approve_assignment(p3c_client, tenant, first),
-        approve_assignment(p3c_client, tenant, second))
+        approve_schedule(p3c_client, tenant, first),
+        approve_schedule(p3c_client, tenant, second))
     assert [r.status_code for r in results] == [200, 200]
 
 
@@ -157,14 +157,14 @@ async def test_value_write_after_a_concurrent_approval_is_refused(
     pending = await _filled_pending(p3c_client, tenant, definition, "10")
 
     async def edit(conn):
-        return await assignments.replace_values(
+        return await schedules.replace_values(
             tenant.company_id, tenant.owner, _id(pending), _values(definition, "99"), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.approve(tenant.company_id, tenant.owner, _id(pending), holder)
+            await schedules.approve(tenant.company_id, tenant.owner, _id(pending), holder)
             edit_task = await _blocked(p3c_engine, edit)
-    assert _code(await edit_task) == "ASSIGNMENT_NOT_PENDING"
+    assert _code(await edit_task) == "SCHEDULE_NOT_PENDING"
     final = await p3c_client.get(f"{BASE}/{_id(pending)}", headers=tenant.admin)
     assert final.json()["values"][0]["amount"] == "10.0000"
 
@@ -176,15 +176,15 @@ async def test_discard_racing_a_value_write_never_leaves_orphaned_values(
     pending = await _filled_pending(p3c_client, tenant, definition)
 
     async def edit(conn):
-        return await assignments.replace_values(
+        return await schedules.replace_values(
             tenant.company_id, tenant.owner, _id(pending), _values(definition, "2"), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.discard(tenant.company_id, tenant.owner, _id(pending), holder)
+            await schedules.discard(tenant.company_id, tenant.owner, _id(pending), holder)
             edit_task = await _blocked(p3c_engine, edit)
-    assert _code(await edit_task) == "ASSIGNMENT_NOT_FOUND"
-    cur.execute("SELECT count(*) FROM payroll.driverratevalues WHERE driverrateassignmentid = %s",
+    assert _code(await edit_task) == "SCHEDULE_NOT_FOUND"
+    cur.execute("SELECT count(*) FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = %s",
                 (_id(pending),))
     assert cur.fetchone()[0] == 0
 
@@ -193,18 +193,18 @@ async def test_successor_approval_serializes_with_voiding_the_current_schedule(
     p3c_client, p3c_engine, tenant,
 ):
     definition = await create_definition(p3c_client, tenant)
-    current = await authored_assignment(p3c_client, tenant, definition, "25",
+    current = await authored_schedule(p3c_client, tenant, definition, "25",
                                         effective_from="2026-01-01")
     successor = await _filled_pending(p3c_client, tenant, definition, "30",
                                       effective_from="2026-06-01")
 
     async def void(conn):
-        return await assignments.void(
-            tenant.company_id, tenant.owner, _id(current), AssignmentVoid(reason="wrong"), conn)
+        return await schedules.void(
+            tenant.company_id, tenant.owner, _id(current), ScheduleVoid(reason="wrong"), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.approve(tenant.company_id, tenant.owner, _id(successor), holder)
+            await schedules.approve(tenant.company_id, tenant.owner, _id(successor), holder)
             void_task = await _blocked(p3c_engine, void)
     voided = await void_task
     assert not isinstance(voided, Exception), voided
@@ -220,17 +220,17 @@ async def test_unrelated_rate_definitions_do_not_contend(p3c_client, p3c_engine,
     grant_applicability(tenant, second, tenant.branch_a)
 
     async def create_other(conn):
-        return await assignments.create_pending(
+        return await schedules.create_pending(
             tenant.company_id, tenant.owner,
-            AssignmentCreate(driver_assignment_id=tenant.driver_a,
+            ScheduleCreate(driver_id=tenant.driver_a_id,
                              rate_definition_id=second["rate_definition_id"],
                              effective_from="2026-01-01"), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.create_pending(
+            await schedules.create_pending(
                 tenant.company_id, tenant.owner,
-                AssignmentCreate(driver_assignment_id=tenant.driver_a,
+                ScheduleCreate(driver_id=tenant.driver_a_id,
                                  rate_definition_id=first["rate_definition_id"],
                                  effective_from="2026-01-01"), holder)
             pids: list[int] = []
@@ -244,17 +244,17 @@ async def test_same_definition_drivers_serialize_without_failing(p3c_client, p3c
     grant_applicability(tenant, definition, tenant.branch_a)
 
     async def create_second(conn):
-        return await assignments.create_pending(
+        return await schedules.create_pending(
             tenant.company_id, tenant.owner,
-            AssignmentCreate(driver_assignment_id=tenant.driver_a2,
+            ScheduleCreate(driver_id=tenant.driver_a2_id,
                              rate_definition_id=definition["rate_definition_id"],
                              effective_from="2026-01-01"), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.create_pending(
+            await schedules.create_pending(
                 tenant.company_id, tenant.owner,
-                AssignmentCreate(driver_assignment_id=tenant.driver_a,
+                ScheduleCreate(driver_id=tenant.driver_a_id,
                                  rate_definition_id=definition["rate_definition_id"],
                                  effective_from="2026-01-01"), holder)
             second_task = await _blocked(p3c_engine, create_second)
@@ -273,7 +273,7 @@ async def test_value_write_holds_the_currency_until_it_commits(p3c_client, p3c_e
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.replace_values(
+            await schedules.replace_values(
                 tenant.company_id, tenant.owner, _id(pending), _values(definition, "5"), holder)
             change = await _blocked(p3c_engine, _change_currency(tenant, "EUR"))
             assert await _currency(p3c_engine, tenant) == "USD"
@@ -287,7 +287,7 @@ async def test_currency_change_in_flight_holds_back_a_value_write(p3c_client, p3
     pending = await create_pending(p3c_client, tenant, definition)
 
     async def write(conn):
-        return await assignments.replace_values(
+        return await schedules.replace_values(
             tenant.company_id, tenant.owner, _id(pending), _values(definition, "5"), conn)
 
     async with p3c_engine.connect() as holder:
@@ -306,7 +306,7 @@ async def test_approval_blocks_a_concurrent_currency_change_for_good(
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
-            await assignments.approve(tenant.company_id, tenant.owner, _id(pending), holder)
+            await schedules.approve(tenant.company_id, tenant.owner, _id(pending), holder)
             change = await _blocked(p3c_engine, _change_currency(tenant, "EUR"))
     error = await change
     assert isinstance(error, Exception) and "COMPANY_CURRENCY_CHANGE_BLOCKED" in str(error)
@@ -321,7 +321,7 @@ async def test_currency_change_in_flight_holds_back_an_approval_then_approves_un
     pending = await _filled_pending(p3c_client, tenant, definition)
 
     async def approve(conn):
-        return await assignments.approve(tenant.company_id, tenant.owner, _id(pending), conn)
+        return await schedules.approve(tenant.company_id, tenant.owner, _id(pending), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
@@ -341,18 +341,18 @@ async def test_currency_change_in_flight_holds_back_an_approval_then_approves_un
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("operation_name", ["replace_values", "approve"])
-async def test_monetary_mutations_lock_rate_definition_then_company_then_assignment(
+async def test_monetary_mutations_lock_company_first_and_the_rate_definition_and_schedule_after(
     p3c_client, p3c_engine, tenant, operation_name,
 ):
-    """B takes the RateDefinition lock, waits on the Company guard, and has not locked
-    the assignment row yet."""
+    """The Company currency guard comes first: a writer waiting on it holds neither the
+    RateDefinition structural lock nor the schedule row (lock order in driver_context)."""
     definition = await create_definition(p3c_client, tenant)
     pending = await _filled_pending(p3c_client, tenant, definition, "10")
 
     async def operation(conn):
         if operation_name == "approve":
-            return await assignments.approve(tenant.company_id, tenant.owner, _id(pending), conn)
-        return await assignments.replace_values(
+            return await schedules.approve(tenant.company_id, tenant.owner, _id(pending), conn)
+        return await schedules.replace_values(
             tenant.company_id, tenant.owner, _id(pending), _values(definition, "11"), conn)
 
     async with p3c_engine.connect() as company_holder:
@@ -369,20 +369,19 @@ async def test_monetary_mutations_lock_rate_definition_then_company_then_assignm
                     text("SELECT pg_blocking_pids(:pid)"), {"pid": waiter_pid})).scalar_one()
             assert blockers == [holder_pid]
 
-            # The assignment row is still free: the operation has not locked it.
+            # The schedule row is still free: the operation has not locked it.
             async with p3c_engine.begin() as probe:
                 await probe.execute(
-                    text("SELECT 1 FROM payroll.driverrateassignments "
-                         "WHERE driverrateassignmentid = :aid FOR UPDATE NOWAIT"),
+                    text("SELECT 1 FROM payroll.driverrateschedules "
+                         "WHERE driverratescheduleid = :aid FOR UPDATE NOWAIT"),
                     {"aid": _id(pending)})
 
-            # The RateDefinition structural lock is already held by the operation.
-            with pytest.raises(Exception, match="could not obtain lock"):
-                async with p3c_engine.begin() as probe:
-                    await probe.execute(
-                        text("SELECT 1 FROM payroll.ratedefinitions "
-                             "WHERE ratedefinitionid = :rid FOR NO KEY UPDATE NOWAIT"),
-                        {"rid": definition["rate_definition_id"]})
+            # Nor has it taken the RateDefinition structural lock: that comes after the Company.
+            async with p3c_engine.begin() as probe:
+                await probe.execute(
+                    text("SELECT 1 FROM payroll.ratedefinitions "
+                         "WHERE ratedefinitionid = :rid FOR NO KEY UPDATE NOWAIT"),
+                    {"rid": definition["rate_definition_id"]})
     result = await task
     assert not isinstance(result, Exception), result
     expected = "Approved" if operation_name == "approve" else "Pending"

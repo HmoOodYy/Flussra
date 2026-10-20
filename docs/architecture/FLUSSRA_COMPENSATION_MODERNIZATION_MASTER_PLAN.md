@@ -8,6 +8,8 @@
 
 > This document records the approved target architecture. P4a is closed; P4b is the current implementation unit; P4c and later units have not started.
 
+> **Stage 2 naming amendment (2026-10-19):** Durable Driver Stage 2 (Driver-owned compensation) renames the target rate tables: `DriverRateAssignment` becomes `DriverRateSchedule` (`payroll.DriverRateSchedules`, key `DriverRateScheduleID`) and `DriverRateValue` becomes `DriverRateScheduleValue` (`payroll.DriverRateScheduleValues`). A schedule is keyed by `DriverID` and carries no `BranchID` and no `DriverAssignmentID`. The sections before §13 below use the new names; the phase details and history text from §13 on keep the names of the time, and `DriverRateAssignment` there means `DriverRateSchedule`. Legacy status rates remain assignment-owned. The decisions are recorded in the [Durable Driver plan](DURABLE_DRIVER_IDENTITY_DRIVER_OWNED_COMPENSATION_PLAN.md).
+
 > **Naming note:** The Unified Refoundation Execution Plan controls work-unit boundaries and order. The internal phase labels in §12–§13 below (for example "P3A Core target schema" and "P3B Evidence-v2 schema foundation") are not Unified work-unit identifiers. The core target schema described under §13 "P3A" is delivered by the Unified P3b work unit; evidence structures are sequenced by the Unified plan's later units.
 
 ---
@@ -64,13 +66,13 @@ Company
         -> CalculationMethod
         -> RateDefinition
             -> RateComponentDefinition(s)
-                -> DriverRateAssignment
-                    -> DriverRateValue(s)
+                -> DriverRateSchedule
+                    -> DriverRateScheduleValue(s)
 
 Branch-owned StatusRateColumn
     -> RateDefinition
-        -> DriverRateAssignment
-            -> DriverRateValue(s)
+        -> DriverRateSchedule
+            -> DriverRateScheduleValue(s)
 ```
 
 Core rule:
@@ -78,10 +80,10 @@ Core rule:
 ```text
 CalculationMethod defines the required compensation shape.
 Definition structure owns that shape.
-DriverRateAssignment supplies one complete effective-dated value set.
+DriverRateSchedule supplies one complete effective-dated value set.
 ```
 
-The effective-dated parent assignment is atomic. Child values never have independent effective dates.
+The effective-dated parent schedule is atomic. Child values never have independent effective dates.
 
 ## First-production calculation methods
 
@@ -186,9 +188,9 @@ Rules:
 - negative values forbidden;
 - zero is valid;
 - missing/unconfigured is NULL/unset and is **not** zero;
-- Approved assignment requires every required value.
+- Approved schedule requires every required value.
 
-## 2.5 Method owns shape; assignment fills values
+## 2.5 Method owns shape; schedule fills values
 
 For OrdinalTier:
 
@@ -198,7 +200,7 @@ Definition structure:
     ordinal 2
     ordinal 3+
 
-John's assignment values:
+John's schedule values:
     3
     4
     5
@@ -208,11 +210,11 @@ John does not redefine the ordinal topology.
 
 ## 2.6 Effective dating
 
-One complete compensation schedule is one `DriverRateAssignment` version.
+One complete compensation schedule is one `DriverRateSchedule` version, owned by the permanent Driver.
 
 Child values do not carry their own effective dates.
 
-The resolver must never combine values from different assignment versions.
+The resolver must never combine values from different schedule versions.
 
 ## 2.7 RateType
 
@@ -258,8 +260,8 @@ DayEntryState
         HoursValue
         StatusRateColumn
             -> scalar RateDefinition
-                -> DriverRateAssignment
-                    -> DriverRateValue
+                -> DriverRateSchedule
+                    -> DriverRateScheduleValue
 
 amount = HoursValue * rate
 ```
@@ -310,7 +312,7 @@ Full definition-versioning is deliberately deferred until a real future requirem
 
 ### Permanent domain invariants
 
-The target preserves finalized-payroll immutability; Employee identity remains distinct from User identity; Status, BonusEvent, and DriverPayRule remain separate from PayDefinition; missing values are not zero; one effective DriverRateAssignment supplies one complete value set; historical evidence is not reconstructed from mutable current configuration; and finalization reads approved immutable evidence rather than live compensation state.
+The target preserves finalized-payroll immutability; Employee identity remains distinct from User identity; Status, BonusEvent, and DriverPayRule remain separate from PayDefinition; missing values are not zero; one effective DriverRateSchedule supplies one complete value set; historical evidence is not reconstructed from mutable current configuration; and finalization reads approved immutable evidence rather than live compensation state.
 
 ### Current-product / V1 boundaries
 
@@ -425,16 +427,16 @@ component 2: ordinal 2..2
 component 3: ordinal 3..infinity
 ```
 
-## DriverRateAssignment
+## DriverRateSchedule
 
 Atomic effective-dated parent:
 
 ```text
-AssignmentID
+DriverRateScheduleID
 CompanyID
-BranchID (scope/integrity, not independent compensation dimension)
 DriverID
 RateDefinitionID
+PayDefinitionID
 EffectiveFrom
 EffectiveTo
 Status
@@ -447,12 +449,12 @@ Logical compensation identity:
 DriverID + RateDefinitionID
 ```
 
-`BranchID` may remain denormalized/enforced for permissions, filtering, and composite integrity because Driver already belongs to one branch incarnation.
+A schedule is owned by the permanent Driver (Durable Driver Stage 2). It carries no `BranchID` and no `DriverAssignmentID`: a permanent transfer changes the Driver's home Branch but never the schedule, and there is no foreign key from a schedule to any DriverAssignment. `PayDefinitionID` is required and `(RateDefinitionID, PayDefinitionID)` must reference the RateDefinition, so only PayDefinition-owned RateDefinitions can have a schedule. Authority comes from the Driver's home tenure on the change's start date (People contract §9.1); Branch applicability is decided at calculation, not stored on the schedule.
 
-## DriverRateValue
+## DriverRateScheduleValue
 
 ```text
-AssignmentID
+DriverRateScheduleID
 RateComponentDefinitionID
 Amount
 ```
@@ -482,15 +484,15 @@ After creation, the result has no privileged identity. Templates are not core ar
 
 If payroll readiness later needs configured definitions for a particular workflow, its requirement must be generic and based on the workflow's configured capabilities. Do not invent a readiness requirement here or test for a named definition.
 
-Human examples may use arbitrary business names/codes such as `ITEM_ALPHA`, `ITEM_BETA`, Custom Units, Stops, or Trips. Tests must demonstrate that assignment and calculation behavior is independent of predefined business names.
+Human examples may use arbitrary business names/codes such as `ITEM_ALPHA`, `ITEM_BETA`, Custom Units, Stops, or Trips. Tests must demonstrate that schedule and calculation behavior is independent of predefined business names.
 
 ---
 
 # 5. Approved Special Invariants
 
-## 5.1 Pending assignments and structure edits
+## 5.1 Pending schedules and structure edits
 
-Structure change is fail-closed while any Pending DriverRateAssignment exists for the RateDefinition.
+Structure change is fail-closed while any Pending DriverRateSchedule exists for the RateDefinition.
 
 Blocked changes include:
 
@@ -499,20 +501,20 @@ Blocked changes include:
 - RateDefinition Shape;
 - inserting/updating/deleting components or tiers.
 
-Pending assignments must be explicitly **discarded** first.
+Pending schedules must be explicitly **discarded** first.
 
 ### Pending lifecycle
 
 - Pending is editable in place.
-- At most one Pending assignment per logical identity.
+- At most one Pending schedule per logical identity.
 - Pending never transitions to Voided.
-- Explicit discard physically deletes the Pending assignment and its values.
+- Explicit discard physically deletes the Pending schedule and its values.
 - Discard writes the full discarded value set to audit history.
-- Nothing authoritative may reference a Pending assignment.
+- Nothing authoritative may reference a Pending schedule.
 
-`Voided` is reserved for previously authoritative Approved/Superseded assignments.
+`Voided` is reserved for previously authoritative Approved/Superseded schedules.
 
-Concurrency must prevent structure changes racing with creation/approval of Pending assignments.
+Concurrency must prevent structure changes racing with creation/approval of Pending schedules.
 
 ## 5.2 One canonical structure lock
 
@@ -526,7 +528,7 @@ Do **not** create an authoritative PayDefinition lock column in parallel.
 
 The lock is set by whichever occurs first:
 
-- first Approved DriverRateAssignment;
+- first Approved DriverRateSchedule;
 - first payroll-period reference/snapshot containing the RateDefinition;
 - later authoritative evidence reference if somehow not already set.
 
@@ -545,14 +547,14 @@ At minimum currency is required before:
 - creating or approving legacy DriverRates while they still exist;
 - legacy Period Pay writes while they still exist;
 - submitting/resubmitting/finalizing payroll;
-- target DriverRateAssignment approval once target assignments exist;
+- target DriverRateSchedule approval once target schedules exist;
 - any other durable monetary writer discovered in the phase audit.
 
 Changing one configured currency to another becomes blocked after durable company monetary state exists.
 
 At minimum durable state includes:
 
-- approved/superseded rate assignments;
+- approved/superseded rate schedules;
 - legacy approved/superseded DriverRates while present;
 - BonusEvents;
 - active/ended DriverPayRules;
@@ -586,8 +588,8 @@ Company-owned PayDefinition ITEM_ALPHA
             -> RateComponentDefinition: per_unit_rate
 
 John
-    -> DriverRateAssignment
-        -> DriverRateValue = 25
+    -> DriverRateSchedule
+        -> DriverRateScheduleValue = 25
 
 8 hours -> 8 * 25 = 200 USD
 ```
@@ -618,7 +620,7 @@ Company PayDefinition ITEM_BETA
             component 2: ordinal 2
             component 3: ordinal 3+
 
-John Assignment V1
+John Schedule V1
     component 1 = 3
     component 2 = 4
     component 3 = 5
@@ -634,7 +636,7 @@ DayEntryState
         HoursValue = 8
         -> branch-owned StatusRateColumn
             -> scalar RateDefinition
-                -> John's DriverRateAssignment
+                -> John's DriverRateSchedule
                     value = 25
 
 8 * 25 = 200
@@ -685,7 +687,7 @@ Approval requires a non-NULL value.
 Calculation:
 
 ```text
-amount = quantity * resolved assignment value
+amount = quantity * resolved schedule value
 ```
 
 WholeNumber input definitions reject fractional quantities even under PerUnit.
@@ -698,7 +700,7 @@ Historical evidence preserves:
 - CalculationMethod;
 - algorithm version;
 - RateDefinition identity;
-- DriverRateAssignment identity;
+- DriverRateSchedule identity;
 - resolved value;
 - CurrencyCode;
 - result.
@@ -728,7 +730,7 @@ Validation:
 - open-ended tier is final;
 - WholeNumber input required.
 
-## Assignment values
+## Schedule values
 
 The definition owns:
 
@@ -738,7 +740,7 @@ The definition owns:
 3+
 ```
 
-The driver assignment owns:
+The Driver's schedule owns:
 
 ```text
 3
@@ -759,9 +761,9 @@ result = 3 + 4 + 5 + 5 = 17
 
 ## Atomicity
 
-Resolve exactly one DriverRateAssignment first.
+Resolve exactly one DriverRateSchedule first.
 
-Then load all values by that AssignmentID.
+Then load all values by that DriverRateScheduleID.
 
 Never resolve the latest value independently per component.
 
@@ -777,8 +779,8 @@ canonical DayEntryState
     -> HoursValue
     -> StatusRateColumn
     -> RateDefinition
-    -> DriverRateAssignment
-    -> DriverRateValue
+    -> DriverRateSchedule
+    -> DriverRateScheduleValue
     -> status-pay calculation
     -> snapshot/final evidence
 ```

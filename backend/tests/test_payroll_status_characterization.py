@@ -55,6 +55,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as _text
 
+from tests.builders.pay_rules import ensure_branch_pay_calendar
+
 # ---------------------------------------------------------------------------
 # Module-level constants (2098 dates — isolated from other test modules)
 # ---------------------------------------------------------------------------
@@ -868,7 +870,7 @@ async def _owned_driver_pay_rule(
     committed the row must still be cleaned up. Two independent, schema-real
     ownership signals are snapshotted BEFORE the create request is sent, and
     the `try` begins before that request too:
-      1. The exact (DriverAssignmentID, RuleType) row-ID set for this test's own driver
+      1. The exact (DriverID, RuleType) row-ID set for this test's own driver
          (each test uses a freshly-created driver, so this set is inherently
          test-scoped -- no other test/process can add a row to it).
       2. A unique `P4S2-DPR-<hex>` marker written into `DriverPayRules.Notes`
@@ -891,14 +893,19 @@ async def _owned_driver_pay_rule(
     """
     headers = auth(auth_token)
     marker = f"P4S2-DPR-{uuid.uuid4().hex[:8]}"
+    # A pay rule belongs to the permanent Driver and records the Branch's pay calendar.
+    driver_id = int((await direct_db.execute(
+        _text("SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did"),
+        {"did": driver_assignment_id})).scalar_one())
+    await ensure_branch_pay_calendar(direct_db, 1, branch_id)
 
     pre_rule_ids = {
         r["driverpayruleid"] for r in (await direct_db.execute(
             _text(
                 "SELECT driverpayruleid FROM payroll.driverpayrules "
-                "WHERE driverassignmentid = :did AND ruletype = :rtype"
+                "WHERE driverid = :did AND ruletype = :rtype"
             ),
-            {"did": driver_assignment_id, "rtype": rule_type},
+            {"did": driver_id, "rtype": rule_type},
         )).mappings().all()
     }
     audit_watermark = (await direct_db.execute(
@@ -910,7 +917,7 @@ async def _owned_driver_pay_rule(
         resp = await session_client.post(
             "/payroll/driver-pay-rules",
             json={
-                "driver_assignment_id": driver_assignment_id, "branch_id": branch_id,
+                "driver_id": driver_id,
                 "rule_type": rule_type, "amount": amount,
                 "effective_from": effective_from, "effective_to": effective_to,
                 "notes": marker,
@@ -926,9 +933,9 @@ async def _owned_driver_pay_rule(
         post_rows = (await direct_db.execute(
             _text(
                 "SELECT driverpayruleid FROM payroll.driverpayrules "
-                "WHERE driverassignmentid = :did AND ruletype = :rtype"
+                "WHERE driverid = :did AND ruletype = :rtype"
             ),
-            {"did": driver_assignment_id, "rtype": rule_type},
+            {"did": driver_id, "rtype": rule_type},
         )).mappings().all()
         owned_ids = {r["driverpayruleid"] for r in post_rows} - pre_rule_ids
         marker_rows = (await direct_db.execute(
@@ -990,13 +997,13 @@ async def _owned_driver_pay_rule(
             r["driverpayruleid"] for r in (await direct_db.execute(
                 _text(
                     "SELECT driverpayruleid FROM payroll.driverpayrules "
-                    "WHERE driverassignmentid = :did AND ruletype = :rtype"
+                    "WHERE driverid = :did AND ruletype = :rtype"
                 ),
-                {"did": driver_assignment_id, "rtype": rule_type},
+                {"did": driver_id, "rtype": rule_type},
             )).mappings().all()
         }
         assert final_rule_ids == pre_rule_ids | retained_ids, (
-            f"DriverPayRule scope residue for driver={driver_assignment_id} rule_type={rule_type}: "
+            f"DriverPayRule scope residue for driver={driver_id} rule_type={rule_type}: "
             f"expected {pre_rule_ids | retained_ids}, got {final_rule_ids} -- "
             "only immutable-evidence-referenced test rows may remain"
         )

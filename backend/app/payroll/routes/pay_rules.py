@@ -18,16 +18,16 @@ router = APIRouter()
 
 
 @router.get(
-    "/driver-assignments/{driver_assignment_id}/pay-rules",
+    "/drivers/{driver_id}/pay-rules",
     response_model=list[DriverPayRuleSummary],
-    summary="List pay rules (min/max) for a driver",
+    summary="List pay rules (min/max) of a permanent Driver",
     responses={
-        403: {"description": "No access to this driver's branch"},
+        403: {"description": "No access to this Driver's compensation"},
         404: {"description": "Driver not found"},
     },
 )
 async def list_driver_pay_rules(
-    driver_assignment_id: int,
+    driver_id: int,
     token: TokenDep,
     db: DbDep,
     rule_type: str | None = Query(None, description="MinimumPay | MaximumPay"),
@@ -36,7 +36,7 @@ async def list_driver_pay_rules(
     return await driver_pay_rules.get_driver_pay_rules(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
-        driver_assignment_id=driver_assignment_id,
+        driver_id=driver_id,
         db=db,
         rule_type=rule_type,
         rule_status=rule_status,

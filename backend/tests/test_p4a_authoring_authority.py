@@ -1,13 +1,16 @@
-"""Branch applicability and PayDefinition status govern target rate authoring."""
+"""Context authority and PayDefinition status govern Driver rate schedule authoring.
+
+Branch applicability is not an authoring rule (D5): it is decided at calculation.
+"""
 from __future__ import annotations
 
 import pytest
 from sqlalchemy import text
 
-from app.compensation import assignments, definitions
-from app.compensation.schemas import AssignmentCreate
+from app.compensation import definitions, schedules
+from app.compensation.schemas import ScheduleCreate
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
-    approve_assignment,
+    approve_schedule,
     create_definition,
     create_pending,
     grant_applicability,
@@ -25,17 +28,17 @@ from tests.test_p3c_compensation_concurrency import _blocked_with_pid, _status
 
 pytestmark = pytest.mark.asyncio
 
-BASE = "/compensation/driver-rate-assignments"
+BASE = "/compensation/driver-rate-schedules"
 
 
-def _body(tenant, definition, effective_from="2026-01-01", driver_assignment_id=None):
-    return {"driver_assignment_id": driver_assignment_id or tenant.driver_a,
+def _body(tenant, definition, effective_from="2026-01-01", driver_id=None):
+    return {"driver_id": driver_id or tenant.driver_a_id,
             "rate_definition_id": definition["rate_definition_id"],
             "effective_from": effective_from}
 
 
-def _id(assignment) -> int:
-    return assignment["driver_rate_assignment_id"]
+def _id(schedule) -> int:
+    return schedule["driver_rate_schedule_id"]
 
 
 async def _post(client, tenant, definition, **kwargs):
@@ -53,85 +56,79 @@ def _code(response) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Creation
+# Creation: any company-Active scalar definition is authorable (D5)
 # ---------------------------------------------------------------------------
 
-async def test_missing_branch_configuration_blocks_creation(p3c_client, tenant):
-    definition = await create_definition(p3c_client, tenant)
-    response = await _post(p3c_client, tenant, definition)
-    assert response.status_code == 422
-    assert _code(response) == "PAY_DEFINITION_NOT_APPLICABLE"
+async def test_branch_applicability_is_not_checked_at_authoring(p3c_client, tenant):
+    """Missing, inactive and other-Branch configuration all permit creation: whether a
+    definition applies is decided at calculation, where a missing value still blocks."""
+    missing = await create_definition(p3c_client, tenant)
+    assert (await _post(p3c_client, tenant, missing)).status_code == 201
+
+    inactive = await create_definition(p3c_client, tenant)
+    grant_applicability(tenant, inactive, tenant.branch_a, active=False)
+    assert (await _post(p3c_client, tenant, inactive)).status_code == 201
+
+    elsewhere = await create_definition(p3c_client, tenant)
+    grant_applicability(tenant, elsewhere, tenant.branch_a)
+    assert (await _post(p3c_client, tenant, elsewhere, driver_id=tenant.driver_b_id)).status_code == 201
 
 
-async def test_inactive_branch_configuration_blocks_creation(p3c_client, tenant):
-    definition = await create_definition(p3c_client, tenant)
-    grant_applicability(tenant, definition, tenant.branch_a, active=False)
-    response = await _post(p3c_client, tenant, definition)
-    assert response.status_code == 422
-    assert _code(response) == "PAY_DEFINITION_NOT_APPLICABLE"
-
-
-async def test_active_branch_configuration_permits_creation(p3c_client, tenant):
-    definition = await create_definition(p3c_client, tenant)
-    grant_applicability(tenant, definition, tenant.branch_a)
-    assert (await _post(p3c_client, tenant, definition)).status_code == 201
-
-
-async def test_applicability_is_per_driver_branch(p3c_client, tenant):
-    definition = await create_definition(p3c_client, tenant)
-    grant_applicability(tenant, definition, tenant.branch_a)
-    response = await _post(p3c_client, tenant, definition, driver_assignment_id=tenant.driver_b)
-    assert response.status_code == 422
-    assert _code(response) == "PAY_DEFINITION_NOT_APPLICABLE"
-
-
-async def test_future_activation_blocks_earlier_dates_but_not_its_own_start(p3c_client, tenant):
+async def test_future_activation_does_not_restrict_earlier_dates(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a, effective_from="2030-01-01")
-    before = await _post(p3c_client, tenant, definition, effective_from="2029-12-31")
-    assert before.status_code == 422
-    assert _code(before) == "PAY_DEFINITION_NOT_APPLICABLE"
     assert (await _post(
-        p3c_client, tenant, definition, effective_from="2030-01-01")).status_code == 201
+        p3c_client, tenant, definition, effective_from="2029-12-31")).status_code == 201
 
 
-async def test_applicability_ending_later_does_not_block_a_window_that_starts_inside_it(
-    p3c_client, tenant, p3b_dsn,
-):
+# ---------------------------------------------------------------------------
+# Authority: the context tenure's Branch, or company-wide
+# ---------------------------------------------------------------------------
+
+async def test_branch_scoped_authority_follows_the_drivers_context_branch(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
-    grant_applicability(tenant, definition, tenant.branch_a, effective_from="2000-01-01")
-    import psycopg2
-    conn = psycopg2.connect(client_encoding="utf-8", **p3b_dsn)
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE payroll.branchpayitemconfig SET effectiveto = '2026-06-30'
-            WHERE companyid = %s AND paydefinitionid = %s
-        """, (tenant.company_id, definition["pay_definition_id"]))
-    conn.close()
-    body = _body(tenant, definition, "2026-01-01") | {"effective_to": "2027-12-31"}
-    assert (await p3c_client.post(BASE, json=body, headers=tenant.admin)).status_code == 201
+    branch_user = tenant.headers(tenant.branch_user)  # SpecificBranch on branch_a
+    own = await p3c_client.post(
+        BASE, json=_body(tenant, definition), headers=branch_user)
+    assert own.status_code == 201
+    other = await p3c_client.post(
+        BASE, json=_body(tenant, definition, driver_id=tenant.driver_b_id), headers=branch_user)
+    assert other.status_code == 403
+
+
+async def test_a_start_date_without_any_tenure_is_refused_for_everyone(p3c_client, tenant):
+    definition = await create_definition(p3c_client, tenant)
+    before_tenure = "1999-12-31"  # the fixture assignments start 2000-01-01
+    admin = await _post(p3c_client, tenant, definition, effective_from=before_tenure)
+    assert admin.status_code == 409
+    assert _code(admin) == "DRIVER_COMPENSATION_HISTORICAL"
+    branch_user = await p3c_client.post(
+        BASE, json=_body(tenant, definition, effective_from=before_tenure),
+        headers=tenant.headers(tenant.branch_user))
+    assert branch_user.status_code == 403
 
 
 # ---------------------------------------------------------------------------
 # Pending edit
 # ---------------------------------------------------------------------------
 
-async def test_editing_effective_from_into_a_non_applicable_date_is_blocked(p3c_client, tenant):
+async def test_editing_effective_from_does_not_revalidate_applicability(p3c_client, tenant):
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a, effective_from="2025-01-01")
-    pending = await create_pending(
-        p3c_client, tenant, definition, effective_from="2026-01-01", applicable=False)
-
-    blocked = await p3c_client.patch(
-        f"{BASE}/{_id(pending)}", json={"effective_from": "2024-12-31"}, headers=tenant.admin)
-    assert blocked.status_code == 422
-    assert _code(blocked) == "PAY_DEFINITION_NOT_APPLICABLE"
-
+    pending = await create_pending(p3c_client, tenant, definition, effective_from="2026-01-01")
     moved = await p3c_client.patch(
-        f"{BASE}/{_id(pending)}", json={"effective_from": "2025-06-01"}, headers=tenant.admin)
+        f"{BASE}/{_id(pending)}", json={"effective_from": "2024-12-31"}, headers=tenant.admin)
     assert moved.status_code == 200
-    assert moved.json()["effective_from"] == "2025-06-01"
+    assert moved.json()["effective_from"] == "2024-12-31"
+
+
+async def test_editing_effective_from_into_no_tenure_is_refused(p3c_client, tenant):
+    definition = await create_definition(p3c_client, tenant)
+    pending = await create_pending(p3c_client, tenant, definition, effective_from="2026-01-01")
+    refused = await p3c_client.patch(
+        f"{BASE}/{_id(pending)}", json={"effective_from": "1999-12-31"}, headers=tenant.admin)
+    assert refused.status_code == 409
+    assert _code(refused) == "DRIVER_COMPENSATION_HISTORICAL"
 
 
 async def test_editing_notes_does_not_revalidate_applicability(p3c_client, tenant):
@@ -147,20 +144,16 @@ async def test_editing_notes_does_not_revalidate_applicability(p3c_client, tenan
 # Approval
 # ---------------------------------------------------------------------------
 
-async def test_approval_after_the_branch_deactivates_the_definition_is_blocked(
+async def test_approval_after_the_branch_deactivates_the_definition_still_succeeds(
     p3c_client, tenant, p3c_engine,
 ):
     definition = await create_definition(p3c_client, tenant)
     pending = await _filled(p3c_client, tenant, definition)
     grant_applicability(tenant, definition, tenant.branch_a, active=False)
 
-    response = await approve_assignment(p3c_client, tenant, pending)
-    assert response.status_code == 422
-    assert _code(response) == "PAY_DEFINITION_NOT_APPLICABLE"
-    assert await _status(p3c_engine, pending) == "Pending"
-
-    discarded = await p3c_client.delete(f"{BASE}/{_id(pending)}", headers=tenant.admin)
-    assert discarded.status_code in (200, 204)
+    response = await approve_schedule(p3c_client, tenant, pending)
+    assert response.status_code == 200, response.text
+    assert await _status(p3c_engine, pending) == "Approved"
 
 
 async def test_approval_after_retirement_is_blocked_but_discard_is_not(
@@ -173,7 +166,7 @@ async def test_approval_after_retirement_is_blocked_but_discard_is_not(
         headers=tenant.admin)
     assert retired.status_code == 200
 
-    response = await approve_assignment(p3c_client, tenant, pending)
+    response = await approve_schedule(p3c_client, tenant, pending)
     assert response.status_code == 422
     assert _code(response) == "PAY_DEFINITION_NOT_ACTIVE"
     assert await _status(p3c_engine, pending) == "Pending"
@@ -204,10 +197,10 @@ async def _definition_status(engine, definition) -> str:
             {"pid": definition["pay_definition_id"]})).scalar_one()
 
 
-async def _assignment_count(engine, definition) -> int:
+async def _schedule_count(engine, definition) -> int:
     async with engine.connect() as conn:
         return (await conn.execute(
-            text("SELECT count(*) FROM payroll.driverrateassignments WHERE ratedefinitionid = :r"),
+            text("SELECT count(*) FROM payroll.driverrateschedules WHERE ratedefinitionid = :r"),
             {"r": definition["rate_definition_id"]})).scalar_one()
 
 
@@ -215,14 +208,14 @@ async def test_creation_waits_for_an_in_flight_retirement_and_then_fails(
     p3c_client, p3c_engine, tenant,
 ):
     """Retirement holds the RateDefinition lock: authoring queues behind it, and once
-    Retired commits no assignment is created."""
+    Retired commits no schedule is created."""
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a)
 
     async def create(conn):
-        return await assignments.create_pending(
+        return await schedules.create_pending(
             tenant.company_id, tenant.owner,
-            AssignmentCreate(driver_assignment_id=tenant.driver_a,
+            ScheduleCreate(driver_id=tenant.driver_a_id,
                              rate_definition_id=definition["rate_definition_id"],
                              effective_from="2026-01-01"), conn)
 
@@ -239,14 +232,14 @@ async def test_creation_waits_for_an_in_flight_retirement_and_then_fails(
     result = await task
     assert getattr(result, "detail", {}).get("code") == "PAY_DEFINITION_NOT_ACTIVE", result
     assert await _definition_status(p3c_engine, definition) == "Retired"
-    assert await _assignment_count(p3c_engine, definition) == 0
+    assert await _schedule_count(p3c_engine, definition) == 0
 
 
 async def test_retirement_waits_for_in_flight_authoring_and_takes_the_definition_second(
     p3c_client, p3c_engine, tenant,
 ):
     """Authoring holds the RateDefinition lock: retirement queues behind it without
-    having locked the PayDefinition, then retires after the assignment committed."""
+    having locked the PayDefinition, then retires after the schedule committed."""
     definition = await create_definition(p3c_client, tenant)
     grant_applicability(tenant, definition, tenant.branch_a)
 
@@ -257,9 +250,9 @@ async def test_retirement_waits_for_in_flight_authoring_and_takes_the_definition
     async with p3c_engine.connect() as holder:
         async with holder.begin():
             holder_pid = (await holder.execute(text("SELECT pg_backend_pid()"))).scalar_one()
-            created = await assignments.create_pending(
+            created = await schedules.create_pending(
                 tenant.company_id, tenant.owner,
-                AssignmentCreate(driver_assignment_id=tenant.driver_a,
+                ScheduleCreate(driver_id=tenant.driver_a_id,
                                  rate_definition_id=definition["rate_definition_id"],
                                  effective_from="2026-01-01"), holder)
             task, waiter_pid = await _blocked_with_pid(p3c_engine, retire)
@@ -286,7 +279,7 @@ async def test_approval_waits_for_an_in_flight_retirement_and_then_fails(
     pending = await _filled(p3c_client, tenant, definition)
 
     async def approve(conn):
-        return await assignments.approve(tenant.company_id, tenant.owner, _id(pending), conn)
+        return await schedules.approve(tenant.company_id, tenant.owner, _id(pending), conn)
 
     async with p3c_engine.connect() as holder:
         async with holder.begin():
