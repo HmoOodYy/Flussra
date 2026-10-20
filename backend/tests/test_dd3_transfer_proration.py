@@ -215,3 +215,37 @@ async def test_before_the_destination_period_exists_the_live_window_keeps_the_da
     old_row = await _preview_of(client, auth_token, old_period, w.source)
     assert (old_row["minmax"]["numerator"], new_row["minmax"]["numerator"]) == (3, 4)
     assert D(old_row["minimum_adjustment"]) + D(new_row["minimum_adjustment"]) == D(700)
+
+
+async def test_a_captured_roster_without_the_later_tenure_is_a_frozen_non_claim(
+    client, auth_token, direct_db,
+):
+    """The transfer takes effect on the Monday after the period, so the destination's captured
+    roster for the period has no row for it. A Branch timezone edit must not let the live D1
+    window hand the period's last day to the destination: the source keeps all 7 days."""
+    w = await _world(client, auth_token, direct_db)
+    await _calendars(direct_db, w)
+    await _make(client, w.old_manager, w, "2026-01-01", amount="700")
+    today = await branch_today(direct_db, w.old_branch)
+    cut_day = today + timedelta(days=(7 - today.weekday()) % 7 or 7)       # a future Monday
+    destination = await _scheduled(client, auth_token, direct_db, w, cut_day)
+    start, end = cut_day - timedelta(days=7), cut_day - timedelta(days=1)
+    old_period = await open_period(direct_db, w.old_branch, start, end, days=True)
+    new_period = await open_period(direct_db, w.new_branch, start, end, days=True)
+    await _bonus(direct_db, old_period, w.old_branch, w.source)
+    assert (await direct_db.execute(text("""
+        SELECT count(*) FROM payroll.payrollperioddrivereligibility
+        WHERE payrollperiodid = :p AND driverassignmentid = :a
+    """), {"p": new_period, "a": destination})).scalar_one() == 0
+
+    async def source():
+        row = await _preview_of(client, auth_token, old_period, w.source)
+        assert row["blockers"] == [], row["blockers"]
+        return row["minmax"]["numerator"], D(row["minimum_adjustment"])
+
+    assert await source() == (7, D(700))
+    changed = await client.patch(
+        f"/settings/branches/{w.new_branch}", json={"time_zone_id": "America/Los_Angeles"},
+        headers=auth(auth_token))
+    assert changed.status_code == 200, changed.text
+    assert await source() == (7, D(700))

@@ -493,9 +493,10 @@ async def _load_coverage_inputs(
     )).mappings().all()
     # Ownership by captured facts. A date of X is taken away only by a later-ranking tenure Y of
     # the same Driver (rule D1 order: later start, then higher id) that claims it: (a) through
-    # its frozen eligibility in a live period, or (b) only when nothing of Y is frozen for that
-    # date, through the live D1 window. A Branch timezone edit therefore never moves a date
-    # that has been captured.
+    # its frozen eligibility in a live period, or (b) only when Y's Branch has no captured period
+    # covering the date, through the live D1 window. A captured roster without Y is a frozen
+    # "no claim", never a reason to fall back to the live window. A Branch timezone edit
+    # therefore never moves a date that has been captured.
     owned_rows = (await db.execute(
         text("""
             SELECT x.driverassignmentid AS assignmentid, d.workdate
@@ -522,9 +523,12 @@ async def _load_coverage_inputs(
                     OR (
                       NOT EXISTS (
                         SELECT 1
-                        FROM   payroll.payrollperioddrivereligibility e
-                        JOIN   payroll.payrollperiods p ON p.payrollperiodid = e.payrollperiodid
-                        WHERE  e.driverassignmentid = y.driverassignmentid
+                        FROM   payroll.payrollperiods p
+                        JOIN   payroll.payrollperiodeligibilitysnapshots marker
+                               ON  marker.payrollperiodid = p.payrollperiodid
+                               AND marker.companyid = p.companyid
+                               AND marker.branchid = p.branchid
+                        WHERE  p.companyid = y.companyid AND p.branchid = y.branchid
                           AND  p.status <> 'Cancelled'
                           AND  p.startdate <= d.workdate AND d.workdate <= p.enddate)
                       AND core.fn_DriverEffectiveRange(y.effectivefromat, y.effectivetoat)
