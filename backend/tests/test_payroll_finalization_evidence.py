@@ -290,9 +290,11 @@ async def test_concurrent_finalizations_have_exactly_one_winner(p3c_client, p3c_
 
 _LIVE_COMPENSATION = re.compile(
     r"\bpayroll\.(driverrateschedulevalues|driverrateschedules|ratedefinitions|"
-    r"ratecomponentdefinitions|paydefinitions|driverpayrules|bonusevents|payrolldraftlines|"
-    r"payrollperioddefinitions|statusentries)\b", re.IGNORECASE)
-_RETIRED_PAY_ITEM_MODEL = re.compile(r"payroll\.(payitems|payitemratetypemap)", re.IGNORECASE)
+    r"ratecomponentdefinitions|paydefinitions|driverpayrules|payrollbonusevents|"
+    r"payrolldraftlines|payrollperioddefinitions|payrollperioddriverdayentrystate)\b",
+    re.IGNORECASE)
+_RETIRED_PAY_ITEM_MODEL = re.compile(
+    r"\bpayroll\.(payitems|payitemratetypemap)\b", re.IGNORECASE)
 _LEGACY_COMPENSATION = re.compile(
     r"\bpayroll\.(payitems|payitemratetypemap|ratetypes|driverrates|driverratetiers)\b",
     re.IGNORECASE)
@@ -342,3 +344,15 @@ async def test_the_whole_lifecycle_never_touches_the_retired_pay_item_model(
 
     assert [s for s in statements if _RETIRED_PAY_ITEM_MODEL.search(s)] == []
     assert len(snapshot_ids(tenant, period)) == 1
+
+
+async def test_the_statement_matchers_detect_what_they_guard_against():
+    for pattern in (_RETIRED_PAY_ITEM_MODEL, _LEGACY_COMPENSATION):
+        assert pattern.search("SELECT * FROM payroll.payitems")
+        assert pattern.search("select pi.* from PAYROLL.PayItems pi")
+        assert not pattern.search("SELECT * FROM payroll.payrollperiods")
+        assert not pattern.search("SELECT payitemsx FROM payroll.payrollcalculationsnapshots")
+    assert _RETIRED_PAY_ITEM_MODEL.search("JOIN payroll.payitemratetypemap m ON TRUE")
+    assert _LIVE_COMPENSATION.search("SELECT 1 FROM payroll.driverrateschedulevalues")
+    assert _LIVE_COMPENSATION.search("SELECT 1 FROM payroll.payrollbonusevents")
+    assert not _LIVE_COMPENSATION.search("SELECT 1 FROM payroll.payrollcalculationsnapshotlines")
